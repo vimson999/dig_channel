@@ -695,6 +695,49 @@ function syncAllChannels() {
     }
 }
 
+// 页面切换功能
+function switchPage(pageName) {
+    // 隐藏所有页面
+    const pages = ['dashboard-page', 'channels-page'];
+    pages.forEach(pageId => {
+        const page = document.getElementById(pageId);
+        if (page) {
+            page.classList.add('hidden');
+        }
+    });
+    
+    // 显示目标页面
+    const targetPage = document.getElementById(pageName + '-page');
+    if (targetPage) {
+        targetPage.classList.remove('hidden');
+    }
+    
+    // 更新导航状态
+    const navLinks = document.querySelectorAll('.nav-link');
+    navLinks.forEach(link => {
+        link.className = 'nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors';
+    });
+    
+    const activeNav = document.getElementById('nav-' + pageName);
+    if (activeNav) {
+        activeNav.className = 'nav-link text-primary-600 font-medium px-3 py-2 rounded-lg bg-primary-50 border border-primary-200';
+    }
+    
+    // 更新面包屑
+    const breadcrumb = document.querySelector('nav.flex .text-gray-700');
+    if (breadcrumb) {
+        breadcrumb.textContent = pageName === 'dashboard' ? '首页' : '频道管理';
+    }
+    
+    // 如果切换到频道管理页面，初始化频道管理
+    if (pageName === 'channels') {
+        initChannelManagement();
+    }
+    
+    // 防止默认链接行为
+    return false;
+}
+
 // 应用启动
 document.addEventListener('DOMContentLoaded', function() {
     window.app = new YouTubeDataApp();
