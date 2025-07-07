@@ -1,0 +1,631 @@
+// 高保真设计的主应用文件
+class YouTubeDataApp {
+    constructor() {
+        this.chart = null;
+        this.currentChartType = 'line';
+        this.currentTimeRange = 30;
+        this.channels = [];
+        this.chartData = {};
+        
+        this.init();
+    }
+
+    async init() {
+        console.log('🚀 YouTube数据追踪工具启动中...');
+        
+        // 初始化图表
+        this.initChart();
+        
+        // 绑定事件
+        this.bindEvents();
+        
+        // 加载初始数据
+        await this.loadInitialData();
+        
+        console.log('✅ 应用初始化完成');
+    }
+
+    bindEvents() {
+        // 时间范围选择
+        document.getElementById('time-range').addEventListener('change', async (e) => {
+            this.currentTimeRange = parseInt(e.target.value);
+            
+            // 显示加载状态
+            this.showLoading('正在切换时间范围...');
+            
+            try {
+                // 同时重新加载图表和表格数据
+                await Promise.all([
+                    this.loadChartData(),
+                    this.loadTableData()
+                ]);
+                
+                this.hideLoading();
+            } catch (error) {
+                console.error('切换时间范围失败:', error);
+                this.hideLoading();
+                this.showToast('切换时间范围失败', 'error');
+            }
+        });
+
+        // 默认CPM修改
+        document.getElementById('default-cpm').addEventListener('change', (e) => {
+            this.updateDefaultCPM(parseFloat(e.target.value));
+        });
+
+        // 点击模态框外部关闭
+        document.getElementById('addChannelModal').addEventListener('click', (e) => {
+            if (e.target.id === 'addChannelModal') {
+                this.closeAddChannelModal();
+            }
+        });
+    }
+
+    initChart() {
+        const chartDom = document.getElementById('main-chart');
+        this.chart = echarts.init(chartDom);
+        
+        // 设置默认图表
+        this.updateChart({
+            title: { text: '频道数据趋势' },
+            tooltip: { trigger: 'axis' },
+            legend: { data: [] },
+            grid: {
+                left: '3%',
+                right: '4%',
+                bottom: '3%',
+                containLabel: true
+            },
+            xAxis: {
+                type: 'category',
+                boundaryGap: false,
+                data: []
+            },
+            yAxis: { type: 'value' },
+            series: []
+        });
+    }
+
+    async loadInitialData() {
+        try {
+            this.showLoading('正在加载数据...');
+            
+            // 并行加载所有数据
+            const [channelsResult, rankingsResult] = await Promise.all([
+                this.loadChannels(),
+                this.loadRankings()
+            ]);
+
+            if (channelsResult) {
+                await this.loadTableData();
+                await this.loadChartData();
+            }
+
+            this.hideLoading();
+        } catch (error) {
+            console.error('加载初始数据失败:', error);
+            this.hideLoading();
+            this.showToast('加载数据失败: ' + error.message, 'error');
+        }
+    }
+
+    async loadChannels() {
+        try {
+            const response = await api.getChannels();
+            if (response.success) {
+                this.channels = response.data.channels;
+                return true;
+            }
+            return false;
+        } catch (error) {
+            console.error('加载频道列表失败:', error);
+            return false;
+        }
+    }
+
+    async loadRankings() {
+        try {
+            const response = await api.getAllRankings(10);
+            if (response.success) {
+                this.updateRankings(response.data);
+                return true;
+            }
+            return false;
+        } catch (error) {
+            console.error('加载排行榜失败:', error);
+            return false;
+        }
+    }
+
+    updateRankings(data) {
+        // 更新日收入排行
+        this.renderRanking('daily-revenue-ranking', data.daily_revenue?.rankings || [], 'revenue');
+        
+        // 更新月收入排行
+        this.renderRanking('monthly-revenue-ranking', data.monthly_revenue?.rankings || [], 'revenue');
+        
+        // 更新日订阅排行
+        this.renderRanking('daily-subscriber-ranking', data.daily_subscriber?.rankings || [], 'subscriber');
+        
+        // 更新月订阅排行
+        this.renderRanking('monthly-subscriber-ranking', data.monthly_subscriber?.rankings || [], 'subscriber');
+    }
+
+    renderRanking(containerId, rankings, type) {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+
+        if (!rankings || rankings.length === 0) {
+            container.innerHTML = '<div class="text-center text-gray-500 py-4">暂无数据</div>';
+            return;
+        }
+
+        const html = rankings.map((item, index) => {
+            const value = type === 'revenue' 
+                ? Utils.formatCurrency(item.revenue || item.total_revenue)
+                : Utils.formatChange(item.subscriber_change || item.total_subscriber_change, true);
+
+            const rankClass = index === 0 ? 'bg-primary text-white' : 'bg-gray-100 text-gray-600';
+            const valueClass = index === 0 ? 'text-primary' : 'text-gray-900';
+
+            return `
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-3">
+                        <div class="w-6 h-6 ${rankClass} rounded-full flex items-center justify-center text-sm">
+                            ${index + 1}
+                        </div>
+                        <span class="text-gray-900">${item.channel_name}</span>
+                    </div>
+                    <span class="${valueClass} font-medium">${value}</span>
+                </div>
+            `;
+        }).join('');
+
+        container.innerHTML = `<div class="space-y-4">${html}</div>`;
+    }
+
+    async loadTableData() {
+        try {
+            const response = await api.getTableData({
+                active_only: true,
+                days: this.currentTimeRange
+            });
+
+            if (response.success) {
+                this.renderTable(response.data);
+            }
+        } catch (error) {
+            console.error('加载表格数据失败:', error);
+        }
+    }
+
+    renderTable(data) {
+        const table = document.getElementById('data-table');
+        if (!table) return;
+
+        const thead = table.querySelector('thead');
+        const tbody = table.querySelector('tbody');
+
+        // 生成表头
+        let headerHtml = `
+            <tr class="bg-gray-50">
+                <th class="sticky left-0 bg-gray-50 px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-left" rowspan="2">日期</th>
+        `;
+
+        data.channels.forEach((channel, index) => {
+            const channelClass = index % 2 === 0 ? 'channel-group-even' : 'channel-group-odd';
+            headerHtml += `
+                <th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-700 text-center ${channelClass} channel-divider" colspan="7">
+                    ${channel.channel_name} (CPM: ${channel.cpm})
+                </th>
+            `;
+        });
+
+        headerHtml += '</tr><tr class="bg-gray-50">';
+
+        data.channels.forEach((channel, index) => {
+            const channelClass = index % 2 === 0 ? 'channel-group-even' : 'channel-group-odd';
+            headerHtml += `
+                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} channel-divider whitespace-nowrap min-w-[100px]">订阅数</th>
+                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[110px]">总浏览量</th>
+                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[100px]">视频总量</th>
+                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[100px]">新增订阅</th>
+                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[100px]">新增浏览</th>
+                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[100px]">新增视频</th>
+                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[100px]">预估收入</th>
+            `;
+        });
+
+        headerHtml += '</tr>';
+        thead.innerHTML = headerHtml;
+
+        // 生成数据行
+        let bodyHtml = '';
+        data.rows.forEach(row => {
+            bodyHtml += `
+                <tr>
+                    <td class="sticky left-0 bg-white px-6 py-4 border-b border-gray-200 text-gray-900">
+                        ${Utils.formatDate(row.date)}
+                    </td>
+            `;
+
+            row.channels_data.forEach((channelData, channelIndex) => {
+                const subsciberChange = channelData.subscriber_change || 0;
+                const viewChange = channelData.view_change || 0;
+                const videoChange = channelData.video_change || 0;
+                
+                // 使用API返回的预估收入
+                const estimatedRevenue = channelData.estimated_revenue || 0;
+                
+                // 频道区分样式
+                const channelClass = channelIndex % 2 === 0 ? 'channel-group-even' : 'channel-group-odd';
+
+                bodyHtml += `
+                    <td class="px-3 py-4 border-b border-gray-200 text-gray-900 text-right ${channelClass} channel-divider whitespace-nowrap min-w-[100px]">
+                        ${Utils.formatNumber(channelData.subscribers)}
+                    </td>
+                    <td class="px-3 py-4 border-b border-gray-200 text-gray-900 text-right ${channelClass} whitespace-nowrap min-w-[110px]">
+                        ${Utils.formatNumber(channelData.total_views)}
+                    </td>
+                    <td class="px-3 py-4 border-b border-gray-200 text-gray-900 text-right ${channelClass} whitespace-nowrap min-w-[100px]">
+                        ${channelData.video_count || 0}
+                    </td>
+                    <td class="px-3 py-4 border-b border-gray-200 ${subsciberChange > 0 ? 'text-green-600' : 'text-gray-900'} text-right ${channelClass} whitespace-nowrap min-w-[100px]">
+                        ${Utils.formatChange(subsciberChange, true)}
+                    </td>
+                    <td class="px-3 py-4 border-b border-gray-200 ${viewChange > 0 ? 'text-green-600' : 'text-gray-900'} text-right ${channelClass} whitespace-nowrap min-w-[100px]">
+                        ${Utils.formatChange(viewChange, true)}
+                    </td>
+                    <td class="px-3 py-4 border-b border-gray-200 ${videoChange > 0 ? 'text-green-600' : 'text-gray-900'} text-right ${channelClass} whitespace-nowrap min-w-[100px]">
+                        ${Utils.formatChange(videoChange, true)}
+                    </td>
+                    <td class="px-3 py-4 border-b border-gray-200 ${estimatedRevenue > 0 ? 'text-blue-600 font-medium' : 'text-gray-900'} text-right ${channelClass} whitespace-nowrap min-w-[100px]">
+                        ${estimatedRevenue > 0 ? Utils.formatCurrency(estimatedRevenue) : '-'}
+                    </td>
+                `;
+            });
+
+            bodyHtml += '</tr>';
+        });
+
+        tbody.innerHTML = bodyHtml;
+    }
+
+    async loadChartData() {
+        try {
+            const response = await api.getChartData('revenue', {
+                time_range: this.currentTimeRange
+            });
+
+            if (response.success) {
+                this.chartData = response.data.chart_data;
+                this.refreshChart();
+            }
+        } catch (error) {
+            console.error('加载图表数据失败:', error);
+        }
+    }
+
+    refreshChart() {
+        if (!this.chartData || !this.chartData.dates) return;
+
+        const option = {
+            animation: false,
+            title: { text: '频道数据趋势' },
+            tooltip: { trigger: 'axis' },
+            legend: {
+                data: this.chartData.series?.map(s => s.name) || []
+            },
+            grid: {
+                left: '3%',
+                right: '4%',
+                bottom: '3%',
+                containLabel: true
+            },
+            xAxis: {
+                type: 'category',
+                boundaryGap: false,
+                data: this.chartData.dates.map(date => Utils.formatDate(date, 'MM-DD'))
+            },
+            yAxis: { type: 'value' },
+            series: this.chartData.series?.map(series => ({
+                name: series.name,
+                type: this.currentChartType,
+                data: series.data
+            })) || []
+        };
+
+        this.chart.setOption(option);
+    }
+
+    // 图表类型切换
+    switchChartType(type) {
+        this.currentChartType = type;
+        
+        // 更新按钮状态
+        document.querySelectorAll('[id^="chart-type-"]').forEach(btn => {
+            btn.className = btn.className.replace('text-primary border border-primary', 'text-gray-600');
+            btn.className = btn.className.replace('bg-primary text-white', '');
+        });
+        
+        const activeBtn = document.getElementById(`chart-type-${type}`);
+        if (activeBtn) {
+            activeBtn.className = activeBtn.className.replace('text-gray-600', 'text-primary border border-primary');
+        }
+        
+        this.refreshChart();
+    }
+
+    // 模态框控制
+    openAddChannelModal() {
+        document.getElementById('addChannelModal').classList.remove('hidden');
+        document.body.style.overflow = 'hidden';
+    }
+
+    closeAddChannelModal() {
+        document.getElementById('addChannelModal').classList.add('hidden');
+        document.body.style.overflow = 'auto';
+        document.getElementById('addChannelForm').reset();
+        document.getElementById('channel-preview').classList.add('hidden');
+    }
+
+    // 预览频道
+    async previewChannel() {
+        const url = document.getElementById('channel-url').value.trim();
+        if (!url) {
+            this.showToast('请输入频道URL', 'warning');
+            return;
+        }
+
+        if (!Utils.isYouTubeURL(url)) {
+            this.showToast('请输入有效的YouTube频道URL', 'warning');
+            return;
+        }
+
+        try {
+            this.showLoading('正在预览频道...');
+            const response = await api.previewChannel(url);
+            
+            if (response.success) {
+                const preview = document.getElementById('channel-preview');
+                const content = document.getElementById('preview-content');
+                
+                content.innerHTML = `
+                    <div class="text-sm">
+                        <div><strong>频道名称:</strong> ${response.data.name}</div>
+                        <div><strong>频道ID:</strong> ${response.data.channel_id}</div>
+                        <div><strong>订阅数:</strong> ${Utils.formatNumber(response.data.subscriber_count)}</div>
+                        <div><strong>视频数:</strong> ${Utils.formatNumber(response.data.video_count)}</div>
+                    </div>
+                `;
+                
+                preview.classList.remove('hidden');
+                
+                // 自动填充表单
+                document.getElementById('channel-name').value = response.data.name;
+            } else {
+                this.showToast('预览失败: ' + response.message, 'error');
+            }
+            
+            this.hideLoading();
+        } catch (error) {
+            this.hideLoading();
+            this.showToast('预览失败: ' + error.message, 'error');
+        }
+    }
+
+    // 添加频道
+    async addChannel() {
+        const form = document.getElementById('addChannelForm');
+        const formData = new FormData(form);
+        
+        const channelData = {
+            url: document.getElementById('channel-url').value.trim(),
+            name: document.getElementById('channel-name').value.trim(),
+            cpm: parseFloat(document.getElementById('channel-cpm').value) || 2.5,
+            category: document.getElementById('channel-category').value.trim()
+        };
+
+        if (!channelData.url) {
+            this.showToast('请输入频道URL', 'warning');
+            return;
+        }
+
+        try {
+            this.showLoading('正在添加频道...');
+            const response = await api.createChannel(channelData);
+            
+            if (response.success) {
+                this.showToast('频道添加成功', 'success');
+                this.closeAddChannelModal();
+                await this.loadInitialData(); // 重新加载数据
+            } else {
+                this.showToast('添加失败: ' + response.message, 'error');
+            }
+            
+            this.hideLoading();
+        } catch (error) {
+            this.hideLoading();
+            this.showToast('添加失败: ' + error.message, 'error');
+        }
+    }
+
+    // 刷新数据
+    async refreshData() {
+        await this.loadInitialData();
+        this.showToast('数据已刷新', 'success');
+    }
+
+    // 导出数据
+    async exportData() {
+        try {
+            this.showLoading('正在准备导出数据...');
+            await api.exportData({
+                format: 'csv',
+                days: this.currentTimeRange
+            });
+            this.showToast('数据导出成功', 'success');
+            this.hideLoading();
+        } catch (error) {
+            this.hideLoading();
+            this.showToast('导出失败: ' + error.message, 'error');
+        }
+    }
+
+    // 同步所有频道数据
+    async syncAllChannels() {
+        if (!confirm('确定要立即同步所有频道的数据吗？这将从YouTube获取最新数据。')) {
+            return;
+        }
+
+        try {
+            this.showLoading('正在同步所有频道数据...');
+            const response = await api.syncAllChannels();
+            
+            if (response.success) {
+                this.showToast(
+                    `同步完成！成功: ${response.data.success_count}, 失败: ${response.data.failed_count}`, 
+                    response.data.failed_count > 0 ? 'warning' : 'success'
+                );
+                
+                // 自动刷新页面数据
+                await this.loadInitialData();
+            } else {
+                this.showToast('同步失败: ' + response.message, 'error');
+            }
+            
+            this.hideLoading();
+        } catch (error) {
+            this.hideLoading();
+            this.showToast('同步失败: ' + error.message, 'error');
+        }
+    }
+
+    // 工具方法
+    updateChart(option) {
+        if (this.chart) {
+            this.chart.setOption(option);
+        }
+    }
+
+    showLoading(message = '正在加载...') {
+        const statusBar = document.getElementById('status-bar');
+        const statusText = document.getElementById('status-text');
+        
+        if (statusBar && statusText) {
+            statusText.textContent = message;
+            statusBar.classList.remove('hidden');
+        }
+    }
+
+    hideLoading() {
+        const statusBar = document.getElementById('status-bar');
+        if (statusBar) {
+            statusBar.classList.add('hidden');
+        }
+    }
+
+    showToast(message, type = 'info', duration = 3000) {
+        const container = document.getElementById('toast-container');
+        if (!container) return;
+
+        const toastId = 'toast-' + Date.now();
+        const typeClasses = {
+            'success': 'bg-green-500',
+            'error': 'bg-red-500',
+            'warning': 'bg-yellow-500',
+            'info': 'bg-blue-500'
+        };
+
+        const bgClass = typeClasses[type] || typeClasses.info;
+
+        const toast = document.createElement('div');
+        toast.id = toastId;
+        toast.className = `${bgClass} text-white px-4 py-3 rounded-lg shadow-lg transform transition-transform duration-300 translate-x-full`;
+        toast.innerHTML = `
+            <div class="flex items-center justify-between">
+                <span>${message}</span>
+                <button onclick="this.parentElement.parentElement.remove()" class="ml-3 text-white hover:text-gray-200">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+        `;
+
+        container.appendChild(toast);
+
+        // 动画显示
+        setTimeout(() => {
+            toast.classList.remove('translate-x-full');
+        }, 10);
+
+        // 自动隐藏
+        setTimeout(() => {
+            toast.classList.add('translate-x-full');
+            setTimeout(() => {
+                if (toast.parentElement) {
+                    toast.remove();
+                }
+            }, 300);
+        }, duration);
+    }
+
+    async updateDefaultCPM(cpm) {
+        // 这里可以实现保存默认CPM到后端的逻辑
+        console.log('默认CPM已更新为:', cpm);
+    }
+}
+
+// 全局函数
+function openAddChannelModal() {
+    if (window.app) {
+        window.app.openAddChannelModal();
+    }
+}
+
+function closeAddChannelModal() {
+    if (window.app) {
+        window.app.closeAddChannelModal();
+    }
+}
+
+function previewChannel() {
+    if (window.app) {
+        window.app.previewChannel();
+    }
+}
+
+function addChannel() {
+    if (window.app) {
+        window.app.addChannel();
+    }
+}
+
+function switchChartType(type) {
+    if (window.app) {
+        window.app.switchChartType(type);
+    }
+}
+
+function refreshData() {
+    if (window.app) {
+        window.app.refreshData();
+    }
+}
+
+function exportData() {
+    if (window.app) {
+        window.app.exportData();
+    }
+}
+
+function syncAllChannels() {
+    if (window.app) {
+        window.app.syncAllChannels();
+    }
+}
+
+// 应用启动
+document.addEventListener('DOMContentLoaded', function() {
+    window.app = new YouTubeDataApp();
+    console.log('🎉 YouTube数据追踪工具已启动');
+});

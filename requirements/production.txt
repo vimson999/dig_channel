@@ -1,0 +1,12 @@
+# 生产环境依赖 - 仅包含基础依赖
+-r base.txt
+
+# 生产HTTP服务器
+uWSGI==2.0.23
+
+# 监控和性能分析
+sentry-sdk[flask]==1.38.0
+newrelic==9.2.0
+
+# 生产级日志
+python-json-logger==2.0.7

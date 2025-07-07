@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YouTube 频道数据分析</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+theme: {
+extend: {
+colors: {
+primary: '#2563eb',
+secondary: '#64748b'
+},
+borderRadius: {
+'none': '0px',
+'sm': '2px',
+DEFAULT: '4px',
+'md': '8px',
+'lg': '12px',
+'xl': '16px',
+'2xl': '20px',
+'3xl': '24px',
+'full': '9999px',
+'button': '4px'
+}
+}
+}
+}
+</script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+<style>
+body {
+min-height: 1024px;
+}
+.table-container::-webkit-scrollbar {
+height: 8px;
+}
+.table-container::-webkit-scrollbar-track {
+background: #f1f1f1;
+}
+.table-container::-webkit-scrollbar-thumb {
+background: #888;
+border-radius: 4px;
+}
+.table-container::-webkit-scrollbar-thumb:hover {
+background: #555;
+}
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+-webkit-appearance: none;
+margin: 0;
+}
+</style>
+</head>
+<body class="bg-gray-50">
+<div class="max-w-[1440px] mx-auto px-6 py-8">
+<div class="grid grid-cols-4 gap-6 mb-8">
+<div class="bg-white rounded-lg shadow-sm p-6">
+<h3 class="text-lg font-medium text-gray-900 mb-4">日收入排行</h3>
+<div class="space-y-4">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-primary text-white rounded-full flex items-center justify-center text-sm">1</div>
+<span class="text-gray-900">科技探索频道</span>
+</div>
+<span class="text-primary font-medium">¥3,808.64</span>
+</div>
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-gray-100 text-gray-600 rounded-full flex items-center justify-center text-sm">2</div>
+<span class="text-gray-900">游戏直播频道</span>
+</div>
+<span class="text-gray-900 font-medium">¥2,856.12</span>
+</div>
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-gray-100 text-gray-600 rounded-full flex items-center justify-center text-sm">3</div>
+<span class="text-gray-900">生活分享频道</span>
+</div>
+<span class="text-gray-900 font-medium">¥1,434.35</span>
+</div>
+</div>
+</div>
+
+<div class="bg-white rounded-lg shadow-sm p-6">
+<h3 class="text-lg font-medium text-gray-900 mb-4">月收入排行</h3>
+<div class="space-y-4">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-primary text-white rounded-full flex items-center justify-center text-sm">1</div>
+<span class="text-gray-900">科技探索频道</span>
+</div>
+<span class="text-primary font-medium">¥95,216.00</span>
+</div>
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-gray-100 text-gray-600 rounded-full flex items-center justify-center text-sm">2</div>
+<span class="text-gray-900">游戏直播频道</span>
+</div>
+<span class="text-gray-900 font-medium">¥71,403.08</span>
+</div>
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-gray-100 text-gray-600 rounded-full flex items-center justify-center text-sm">3</div>
+<span class="text-gray-900">生活分享频道</span>
+</div>
+<span class="text-gray-900 font-medium">¥35,858.78</span>
+</div>
+</div>
+</div>
+
+<div class="bg-white rounded-lg shadow-sm p-6">
+<h3 class="text-lg font-medium text-gray-900 mb-4">日新增订阅排行</h3>
+<div class="space-y-4">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-primary text-white rounded-full flex items-center justify-center text-sm">1</div>
+<span class="text-gray-900">游戏直播频道</span>
+</div>
+<span class="text-primary font-medium">+256</span>
+</div>
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-gray-100 text-gray-600 rounded-full flex items-center justify-center text-sm">2</div>
+<span class="text-gray-900">科技探索频道</span>
+</div>
+<span class="text-gray-900 font-medium">+168</span>
+</div>
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-gray-100 text-gray-600 rounded-full flex items-center justify-center text-sm">3</div>
+<span class="text-gray-900">生活分享频道</span>
+</div>
+<span class="text-gray-900 font-medium">+95</span>
+</div>
+</div>
+</div>
+
+<div class="bg-white rounded-lg shadow-sm p-6">
+<h3 class="text-lg font-medium text-gray-900 mb-4">月新增订阅排行</h3>
+<div class="space-y-4">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-primary text-white rounded-full flex items-center justify-center text-sm">1</div>
+<span class="text-gray-900">游戏直播频道</span>
+</div>
+<span class="text-primary font-medium">+6,425</span>
+</div>
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-gray-100 text-gray-600 rounded-full flex items-center justify-center text-sm">2</div>
+<span class="text-gray-900">科技探索频道</span>
+</div>
+<span class="text-gray-900 font-medium">+4,256</span>
+</div>
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3">
+<div class="w-6 h-6 bg-gray-100 text-gray-600 rounded-full flex items-center justify-center text-sm">3</div>
+<span class="text-gray-900">生活分享频道</span>
+</div>
+<span class="text-gray-900 font-medium">+2,856</span>
+</div>
+</div>
+</div>
+</div>
+
+<div class="flex items-center justify-between mb-8">
+<div class="flex items-center gap-4">
+<button class="flex items-center gap-2 bg-primary text-white px-4 py-2 !rounded-button whitespace-nowrap">
+<i class="fas fa-plus w-4 h-4 flex items-center justify-center"></i>
+添加频道
+</button>
+<div class="flex items-center gap-2">
+<span class="text-gray-600">默认 CPM：</span>
+<input type="number" class="w-24 px-3 py-2 border border-gray-300 !rounded-button focus:border-primary focus:outline-none" value="2.5">
+</div>
+</div>
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2">
+<button class="px-4 py-2 text-gray-600 hover:text-primary !rounded-button whitespace-nowrap">
+<i class="fas fa-chart-line w-5 h-5 flex items-center justify-center"></i>
+</button>
+<button class="px-4 py-2 text-gray-600 hover:text-primary !rounded-button whitespace-nowrap">
+<i class="fas fa-chart-bar w-5 h-5 flex items-center justify-center"></i>
+</button>
+<button class="px-4 py-2 text-gray-600 hover:text-primary !rounded-button whitespace-nowrap">
+<i class="fas fa-chart-pie w-5 h-5 flex items-center justify-center"></i>
+</button>
+</div>
+<select class="px-4 py-2 border border-gray-300 !rounded-button focus:border-primary focus:outline-none">
+<option>最近 7 天</option>
+<option>最近 30 天</option>
+<option>最近 90 天</option>
+<option>自定义</option>
+</select>
+</div>
+</div>
+<div class="bg-white rounded-lg shadow-sm mb-8">
+<div id="chart" class="w-full h-[400px]"></div>
+</div>
+<div class="bg-white rounded-lg shadow-sm overflow-hidden">
+<div class="table-container overflow-x-auto">
+<table class="w-full border-collapse">
+<thead>
+<tr class="bg-gray-50">
+<th class="sticky left-0 bg-gray-50 px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-left" rowspan="2">日期</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-center" colspan="6">科技探索频道 (CPM: 2.5)</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-center" colspan="6">生活分享频道 (CPM: 3.0)</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-center" colspan="6">游戏直播频道 (CPM: 2.0)</th>
+</tr>
+<tr class="bg-gray-50">
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">订阅数</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">总浏览量</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">视频总量</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">新增订阅</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">新增浏览</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">新增视频</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">订阅数</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">总浏览量</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">视频总量</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">新增订阅</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">新增浏览</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">新增视频</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">订阅数</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">总浏览量</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">视频总量</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">新增订阅</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">新增浏览</th>
+<th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-right">新增视频</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="sticky left-0 bg-white px-6 py-4 border-b border-gray-200 text-gray-900">2024-01-20</td>
+<td class="px-6 py-4 border-b border-gray-200 text-gray-900 text-right">125,632</td>
+<td class="px-6 py-4 border-b border-gray-200 text-gray-900 text-right">1,523,456</td>
+<td class="px-6 py-4 border-b border-gray-200 text-gray-900 text-right">245</td>
+<td class="px-6 py-4 border-b border-gray-200 text-green-600 text-right">+168</td>
+<td class="px-6 py-4 border-b border-gray-200 text-green-600 text-right">+15,234</td>
+<td class="px-6 py-4 border-b border-gray-200 text-green-600 text-right">+2</td>
+<td class="px-6 py-4 border-b border-gray-200 text-gray-900 text-right">85,421</td>
+<td class="px-6 py-4 border-b border-gray-200 text-gray-900 text-right">956,234</td>
+<td class="px-6 py-4 border-b border-gray-200 text-gray-900 text-right">156</td>
+<td class="px-6 py-4 border-b border-gray-200 text-green-600 text-right">+95</td>
+<td class="px-6 py-4 border-b border-gray-200 text-green-600 text-right">+8,562</td>
+<td class="px-6 py-4 border-b border-gray-200 text-green-600 text-right">+1</td>
+<td class="px-6 py-4 border-b border-gray-200 text-gray-900 text-right">256,895</td>
+<td class="px-6 py-4 border-b border-gray-200 text-gray-900 text-right">2,856,123</td>
+<td class="px-6 py-4 border-b border-gray-200 text-gray-900 text-right">389</td>
+<td class="px-6 py-4 border-b border-gray-200 text-green-600 text-right">+256</td>
+<td class="px-6 py-4 border-b border-gray-200 text-green-600 text-right">+25,632</td>
+<td class="px-6 py-4 border-b border-gray-200 text-green-600 text-right">+3</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+<script>
+const chart = echarts.init(document.getElementById('chart'));
+const option = {
+animation: false,
+title: {
+text: '频道数据趋势'
+},
+tooltip: {
+trigger: 'axis'
+},
+legend: {
+data: ['科技探索频道', '生活分享频道', '游戏直播频道']
+},
+grid: {
+left: '3%',
+right: '4%',
+bottom: '3%',
+containLabel: true
+},
+xAxis: {
+type: 'category',
+boundaryGap: false,
+data: ['1-14', '1-15', '1-16', '1-17', '1-18', '1-19', '1-20']
+},
+yAxis: {
+type: 'value'
+},
+series: [
+{
+name: '科技探索频道',
+type: 'line',
+data: [12000, 13200, 14100, 14800, 15200, 15800, 16500]
+},
+{
+name: '生活分享频道',
+type: 'line',
+data: [8200, 8900, 9300, 9800, 10200, 10800, 11200]
+},
+{
+name: '游戏直播频道',
+type: 'line',
+data: [22000, 23100, 24200, 24800, 25200, 25900, 26500]
+}
+]
+};
+chart.setOption(option);
+</script>
+</body>
+</html>

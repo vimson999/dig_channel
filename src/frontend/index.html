@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YouTube 频道数据分析</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+theme: {
+extend: {
+colors: {
+primary: '#2563eb',
+secondary: '#64748b'
+},
+borderRadius: {
+'none': '0px',
+'sm': '2px',
+DEFAULT: '4px',
+'md': '8px',
+'lg': '12px',
+'xl': '16px',
+'2xl': '20px',
+'3xl': '24px',
+'full': '9999px',
+'button': '4px'
+}
+}
+}
+}
+</script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+<style>
+body {
+min-height: 1024px;
+}
+.table-container::-webkit-scrollbar {
+height: 8px;
+}
+.table-container::-webkit-scrollbar-track {
+background: #f1f1f1;
+}
+.table-container::-webkit-scrollbar-thumb {
+background: #888;
+border-radius: 4px;
+}
+.table-container::-webkit-scrollbar-thumb:hover {
+background: #555;
+}
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+-webkit-appearance: none;
+margin: 0;
+}
+</style>
+    <!-- 状态提示栏 -->
+    <style>
+        .toast-container { position: fixed; top: 1rem; right: 1rem; z-index: 9999; }
+        .status-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 50; }
+        
+        /* 表格频道分组样式 */
+        .channel-group-even {
+            background-color: rgba(59, 130, 246, 0.05) !important; /* 淡蓝色 */
+        }
+        .channel-group-odd {
+            background-color: rgba(16, 185, 129, 0.05) !important; /* 淡绿色 */
+        }
+        .channel-divider {
+            border-left: 3px solid #e5e7eb !important;
+            box-shadow: -2px 0 4px rgba(0,0,0,0.1);
+        }
+        
+        /* 表格行鼠标悬停效果 */
+        #data-table tbody tr:hover .channel-group-even {
+            background-color: rgba(59, 130, 246, 0.1) !important;
+        }
+        #data-table tbody tr:hover .channel-group-odd {
+            background-color: rgba(16, 185, 129, 0.1) !important;
+        }
+        
+        /* 防止表头文字折行 */
+        #data-table th {
+            white-space: nowrap !important;
+            font-size: 0.875rem; /* 14px，稍微小一点确保单行显示 */
+        }
+        #data-table td {
+            white-space: nowrap !important;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <!-- 状态提示栏 -->
+    <div id="status-bar" class="hidden status-bar bg-blue-500 text-white p-3 text-center">
+        <div class="flex items-center justify-center">
+            <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+            <span id="status-text">正在加载...</span>
+        </div>
+    </div>
+
+    <!-- Toast 容器 -->
+    <div id="toast-container" class="toast-container space-y-2"></div>
+<div class="max-w-[1440px] mx-auto px-6 py-8">
+<div class="grid grid-cols-4 gap-6 mb-8">
+<div class="bg-white rounded-lg shadow-sm p-6">
+<h3 class="text-lg font-medium text-gray-900 mb-4">日收入排行</h3>
+<div id="daily-revenue-ranking" class="space-y-4">
+<div class="text-center text-gray-500 py-4">正在加载...</div>
+</div>
+</div>
+
+<div class="bg-white rounded-lg shadow-sm p-6">
+<h3 class="text-lg font-medium text-gray-900 mb-4">月收入排行</h3>
+<div id="monthly-revenue-ranking" class="space-y-4">
+<div class="text-center text-gray-500 py-4">正在加载...</div>
+</div>
+</div>
+
+<div class="bg-white rounded-lg shadow-sm p-6">
+<h3 class="text-lg font-medium text-gray-900 mb-4">日新增订阅排行</h3>
+<div id="daily-subscriber-ranking" class="space-y-4">
+<div class="text-center text-gray-500 py-4">正在加载...</div>
+</div>
+</div>
+
+<div class="bg-white rounded-lg shadow-sm p-6">
+<h3 class="text-lg font-medium text-gray-900 mb-4">月新增订阅排行</h3>
+<div id="monthly-subscriber-ranking" class="space-y-4">
+<div class="text-center text-gray-500 py-4">正在加载...</div>
+</div>
+</div>
+</div>
+
+<div class="flex items-center justify-between mb-8">
+<div class="flex items-center gap-4">
+<button onclick="openAddChannelModal()" class="flex items-center gap-2 bg-primary text-white px-4 py-2 !rounded-button whitespace-nowrap hover:bg-blue-600 transition-colors">
+<i class="fas fa-plus w-4 h-4 flex items-center justify-center"></i>
+添加频道
+</button>
+<div class="flex items-center gap-2">
+<span class="text-gray-600">默认 CPM：</span>
+<input type="number" id="default-cpm" class="w-24 px-3 py-2 border border-gray-300 !rounded-button focus:border-primary focus:outline-none" value="2.5" step="0.1">
+</div>
+</div>
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2">
+<button id="chart-type-line" class="px-4 py-2 text-primary border border-primary !rounded-button whitespace-nowrap hover:bg-primary hover:text-white transition-colors" onclick="switchChartType('line')">
+<i class="fas fa-chart-line w-5 h-5 flex items-center justify-center"></i>
+</button>
+<button id="chart-type-bar" class="px-4 py-2 text-gray-600 hover:text-primary !rounded-button whitespace-nowrap" onclick="switchChartType('bar')">
+<i class="fas fa-chart-bar w-5 h-5 flex items-center justify-center"></i>
+</button>
+<button id="chart-type-pie" class="px-4 py-2 text-gray-600 hover:text-primary !rounded-button whitespace-nowrap" onclick="switchChartType('pie')">
+<i class="fas fa-chart-pie w-5 h-5 flex items-center justify-center"></i>
+</button>
+</div>
+<select id="time-range" class="px-4 py-2 border border-gray-300 !rounded-button focus:border-primary focus:outline-none">
+<option value="7">最近 7 天</option>
+<option value="30" selected>最近 30 天</option>
+<option value="90">最近 90 天</option>
+</select>
+</div>
+</div>
+<div class="bg-white rounded-lg shadow-sm mb-8">
+<div id="main-chart" class="w-full h-[400px]"></div>
+</div>
+<div class="bg-white rounded-lg shadow-sm overflow-hidden">
+<div class="p-4 border-b border-gray-200">
+<div class="flex items-center justify-between">
+<h3 class="text-lg font-medium text-gray-900">频道数据明细</h3>
+<div class="flex items-center gap-2">
+<button onclick="refreshData()" class="px-3 py-2 text-gray-600 hover:text-primary !rounded-button" title="刷新数据">
+<i class="fas fa-sync-alt"></i>
+</button>
+<button onclick="syncAllChannels()" class="px-3 py-2 text-blue-600 hover:text-blue-800 !rounded-button" title="立即同步所有频道">
+<i class="fas fa-cloud-download-alt"></i>
+</button>
+<button onclick="exportData()" class="px-3 py-2 text-gray-600 hover:text-primary !rounded-button" title="导出数据">
+<i class="fas fa-download"></i>
+</button>
+</div>
+</div>
+</div>
+<div class="table-container overflow-x-auto">
+<table id="data-table" class="w-full border-collapse">
+<thead>
+<tr class="bg-gray-50">
+<th class="sticky left-0 bg-gray-50 px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-left">日期</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="text-center text-gray-500 py-8" colspan="100%">正在加载数据...</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+<script>
+const chart = echarts.init(document.getElementById('main-chart'));
+const option = {
+animation: false,
+title: {
+text: '频道数据趋势'
+},
+tooltip: {
+trigger: 'axis'
+},
+legend: {
+data: ['科技探索频道', '生活分享频道', '游戏直播频道']
+},
+grid: {
+left: '3%',
+right: '4%',
+bottom: '3%',
+containLabel: true
+},
+xAxis: {
+type: 'category',
+boundaryGap: false,
+data: ['1-14', '1-15', '1-16', '1-17', '1-18', '1-19', '1-20']
+},
+yAxis: {
+type: 'value'
+},
+series: [
+{
+name: '科技探索频道',
+type: 'line',
+data: [12000, 13200, 14100, 14800, 15200, 15800, 16500]
+},
+{
+name: '生活分享频道',
+type: 'line',
+data: [8200, 8900, 9300, 9800, 10200, 10800, 11200]
+},
+{
+name: '游戏直播频道',
+type: 'line',
+data: [22000, 23100, 24200, 24800, 25200, 25900, 26500]
+}
+]
+};
+chart.setOption(option);
+</script>
+
+<!-- 添加频道模态框 -->
+<div id="addChannelModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+    <div class="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
+        <div class="p-6 border-b border-gray-200">
+            <h3 class="text-lg font-medium text-gray-900">添加新频道</h3>
+        </div>
+        <div class="p-6">
+            <form id="addChannelForm">
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">YouTube频道URL <span class="text-red-500">*</span></label>
+                    <input type="url" id="channel-url" class="w-full px-3 py-2 border border-gray-300 !rounded-button focus:border-primary focus:outline-none" 
+                           placeholder="https://www.youtube.com/channel/..." required>
+                    <p class="text-sm text-gray-500 mt-1">支持频道URL、用户名URL、@句柄等格式</p>
+                </div>
+                
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">频道名称</label>
+                    <input type="text" id="channel-name" class="w-full px-3 py-2 border border-gray-300 !rounded-button focus:border-primary focus:outline-none" 
+                           placeholder="留空将自动从YouTube获取">
+                </div>
+                
+                <div class="grid grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">CPM值</label>
+                        <input type="number" id="channel-cpm" class="w-full px-3 py-2 border border-gray-300 !rounded-button focus:border-primary focus:outline-none" 
+                               value="2.5" step="0.1" min="0">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">分类</label>
+                        <input type="text" id="channel-category" class="w-full px-3 py-2 border border-gray-300 !rounded-button focus:border-primary focus:outline-none" 
+                               placeholder="如：科技、生活、娱乐">
+                    </div>
+                </div>
+                
+                <div id="channel-preview" class="hidden mb-4 p-4 bg-blue-50 !rounded-button">
+                    <h6 class="text-sm font-medium text-blue-900 mb-2">频道预览：</h6>
+                    <div id="preview-content"></div>
+                </div>
+            </form>
+        </div>
+        <div class="p-6 border-t border-gray-200 flex justify-end gap-3">
+            <button onclick="closeAddChannelModal()" class="px-4 py-2 text-gray-600 hover:text-gray-800 !rounded-button">取消</button>
+            <button onclick="previewChannel()" class="px-4 py-2 bg-gray-100 text-gray-700 hover:bg-gray-200 !rounded-button">预览</button>
+            <button onclick="addChannel()" class="px-4 py-2 bg-primary text-white hover:bg-blue-600 !rounded-button">添加</button>
+        </div>
+    </div>
+</div>
+
+<!-- JavaScript -->
+<script src="js/config.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/api.js"></script>
+<script src="js/new-main.js"></script>
+</body>
+</html>

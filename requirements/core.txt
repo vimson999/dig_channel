@@ -1,0 +1,7 @@
+# 核心最小依赖 - 用于初始开发
+Flask==3.0.0
+SQLAlchemy==2.0.23
+Flask-SQLAlchemy==3.1.1
+requests==2.31.0
+python-dotenv==1.0.0
+google-api-python-client==2.108.0
