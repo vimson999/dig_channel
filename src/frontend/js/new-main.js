@@ -48,10 +48,17 @@ class YouTubeDataApp {
             }
         });
 
-        // 默认CPM修改
-        document.getElementById('default-cpm').addEventListener('change', (e) => {
-            this.updateDefaultCPM(parseFloat(e.target.value));
-        });
+        // 默认CPM修改（如果元素存在）
+        const defaultCpmElement = document.getElementById('default-cpm');
+        console.log('🔍 检查 default-cpm 元素:', defaultCpmElement);
+        if (defaultCpmElement) {
+            console.log('✅ default-cpm 元素存在，绑定事件');
+            defaultCpmElement.addEventListener('change', (e) => {
+                this.updateDefaultCPM(parseFloat(e.target.value));
+            });
+        } else {
+            console.log('❌ default-cpm 元素不存在，跳过绑定');
+        }
 
         // 点击模态框外部关闭
         document.getElementById('addChannelModal').addEventListener('click', (e) => {
@@ -156,32 +163,73 @@ class YouTubeDataApp {
         if (!container) return;
 
         if (!rankings || rankings.length === 0) {
-            container.innerHTML = '<div class="text-center text-gray-500 py-4">暂无数据</div>';
+            container.innerHTML = `
+                <div class="text-center text-gray-400 py-8">
+                    <i class="fas fa-chart-line text-2xl mb-2 opacity-50"></i>
+                    <div>暂无数据</div>
+                </div>
+            `;
             return;
         }
 
+        const getRankIcon = (rank) => {
+            switch(rank) {
+                case 1: return '<i class="fas fa-trophy text-yellow-500"></i>';
+                case 2: return '<i class="fas fa-medal text-gray-400"></i>';
+                case 3: return '<i class="fas fa-award text-orange-400"></i>';
+                default: return `<span class="text-gray-600 font-medium">${rank}</span>`;
+            }
+        };
+
+        const getTrendIcon = (value, type) => {
+            if (type === 'subscriber') {
+                const numValue = parseInt(value.toString().replace(/[,+]/g, ''));
+                if (numValue > 0) return '<i class="fas fa-arrow-trend-up text-green-500 text-xs ml-1"></i>';
+                if (numValue < 0) return '<i class="fas fa-arrow-trend-down text-red-500 text-xs ml-1"></i>';
+            }
+            return '';
+        };
+
         const html = rankings.map((item, index) => {
+            const rank = index + 1;
             const value = type === 'revenue' 
                 ? Utils.formatCurrency(item.revenue || item.total_revenue)
                 : Utils.formatChange(item.subscriber_change || item.total_subscriber_change, true);
 
-            const rankClass = index === 0 ? 'bg-primary text-white' : 'bg-gray-100 text-gray-600';
-            const valueClass = index === 0 ? 'text-primary' : 'text-gray-900';
+            const isTop3 = rank <= 3;
+            const cardClass = isTop3 
+                ? 'bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 hover:from-blue-100 hover:to-indigo-100' 
+                : 'bg-white hover:bg-gray-50 border border-gray-100';
+            
+            const valueClass = rank === 1 
+                ? 'text-blue-600 font-bold' 
+                : rank <= 3 
+                    ? 'text-gray-700 font-semibold' 
+                    : 'text-gray-600 font-medium';
+
+            const channelClass = rank === 1 ? 'text-gray-800 font-medium' : 'text-gray-700';
 
             return `
-                <div class="flex items-center justify-between">
-                    <div class="flex items-center gap-3">
-                        <div class="w-6 h-6 ${rankClass} rounded-full flex items-center justify-center text-sm">
-                            ${index + 1}
+                <div class="ranking-item ${cardClass} rounded-lg p-3 transition-all duration-200 cursor-pointer hover:shadow-md transform hover:-translate-y-0.5">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="w-8 h-8 flex items-center justify-center">
+                                ${getRankIcon(rank)}
+                            </div>
+                            <span class="${channelClass} truncate max-w-[120px]" title="${item.channel_name}">
+                                ${item.channel_name}
+                            </span>
                         </div>
-                        <span class="text-gray-900">${item.channel_name}</span>
+                        <div class="flex items-center">
+                            <span class="${valueClass}">${value}</span>
+                            ${getTrendIcon(value, type)}
+                        </div>
                     </div>
-                    <span class="${valueClass} font-medium">${value}</span>
                 </div>
             `;
         }).join('');
 
-        container.innerHTML = `<div class="space-y-4">${html}</div>`;
+        container.innerHTML = `<div class="space-y-3">${html}</div>`;
     }
 
     async loadTableData() {
@@ -358,15 +406,33 @@ class YouTubeDataApp {
 
     // 模态框控制
     openAddChannelModal() {
-        document.getElementById('addChannelModal').classList.remove('hidden');
+        const modal = document.getElementById('addChannelModal');
+        const content = document.getElementById('modalContent');
+        
+        modal.classList.remove('hidden');
         document.body.style.overflow = 'hidden';
+        
+        // 动画效果
+        setTimeout(() => {
+            content.classList.remove('scale-95', 'opacity-0');
+            content.classList.add('scale-100', 'opacity-100');
+        }, 10);
     }
 
     closeAddChannelModal() {
-        document.getElementById('addChannelModal').classList.add('hidden');
-        document.body.style.overflow = 'auto';
-        document.getElementById('addChannelForm').reset();
-        document.getElementById('channel-preview').classList.add('hidden');
+        const modal = document.getElementById('addChannelModal');
+        const content = document.getElementById('modalContent');
+        
+        // 动画效果
+        content.classList.remove('scale-100', 'opacity-100');
+        content.classList.add('scale-95', 'opacity-0');
+        
+        setTimeout(() => {
+            modal.classList.add('hidden');
+            document.body.style.overflow = 'auto';
+            document.getElementById('addChannelForm').reset();
+            document.getElementById('channel-preview').classList.add('hidden');
+        }, 300);
     }
 
     // 预览频道
@@ -423,7 +489,7 @@ class YouTubeDataApp {
             url: document.getElementById('channel-url').value.trim(),
             name: document.getElementById('channel-name').value.trim(),
             cpm: parseFloat(document.getElementById('channel-cpm').value) || 2.5,
-            category: document.getElementById('channel-category').value.trim()
+            category: document.getElementById('channel-category').value || ''
         };
 
         if (!channelData.url) {
@@ -569,9 +635,14 @@ class YouTubeDataApp {
         }, duration);
     }
 
-    async updateDefaultCPM(cpm) {
-        // 这里可以实现保存默认CPM到后端的逻辑
+    updateDefaultCPM(cpm) {
+        // 更新弹层中的CPM默认值
+        const channelCpmElement = document.getElementById('channel-cpm');
+        if (channelCpmElement) {
+            channelCpmElement.value = cpm;
+        }
         console.log('默认CPM已更新为:', cpm);
+        this.showToast(`默认CPM已设置为 $${cpm}`, 'success');
     }
 }
 

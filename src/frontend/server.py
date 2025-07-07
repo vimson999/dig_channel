@@ -28,7 +28,7 @@ if __name__ == "__main__":
     with socketserver.TCPServer(("", PORT), MyHTTPRequestHandler) as httpd:
         print(f"🌐 前端服务器启动在: http://localhost:{PORT}")
         print(f"📁 服务目录: {frontend_dir}")
-        print("🔗 可以打开浏览器访问 http://localhost:8000")
+        print("🔗 可以打开浏览器访问 http://localhost:8080")
         print("按 Ctrl+C 停止服务器")
         try:
             httpd.serve_forever()
