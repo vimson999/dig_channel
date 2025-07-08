@@ -372,6 +372,79 @@ class Utils {
     }
 }
 
+// 状态栏管理
+function showStatusBar(message) {
+    const statusBar = document.getElementById('status-bar');
+    const statusText = document.getElementById('status-text');
+    
+    if (statusBar && statusText) {
+        statusText.textContent = message;
+        statusBar.classList.remove('hidden');
+    }
+}
+
+function hideStatusBar() {
+    const statusBar = document.getElementById('status-bar');
+    if (statusBar) {
+        statusBar.classList.add('hidden');
+    }
+}
+
+// Toast 提示管理
+function showToast(message, type = 'info', duration = 3000) {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+    
+    const toast = document.createElement('div');
+    toast.className = `toast bg-white border-l-4 rounded-lg shadow-lg p-4 mb-2 transform transition-all duration-300 translate-x-full`;
+    
+    // 根据类型设置颜色
+    const colors = {
+        'success': 'border-green-500 bg-green-50',
+        'error': 'border-red-500 bg-red-50',
+        'warning': 'border-yellow-500 bg-yellow-50',
+        'info': 'border-blue-500 bg-blue-50'
+    };
+    
+    const icons = {
+        'success': 'fas fa-check-circle text-green-500',
+        'error': 'fas fa-times-circle text-red-500',
+        'warning': 'fas fa-exclamation-triangle text-yellow-500',
+        'info': 'fas fa-info-circle text-blue-500'
+    };
+    
+    toast.className += ` ${colors[type] || colors.info}`;
+    
+    toast.innerHTML = `
+        <div class="flex items-center">
+            <i class="${icons[type] || icons.info} mr-3"></i>
+            <span class="flex-1 text-sm font-medium text-gray-800">${message}</span>
+            <button onclick="this.parentElement.parentElement.remove()" class="ml-2 text-gray-400 hover:text-gray-600">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    `;
+    
+    container.appendChild(toast);
+    
+    // 动画显示
+    setTimeout(() => {
+        toast.classList.remove('translate-x-full');
+        toast.classList.add('translate-x-0');
+    }, 10);
+    
+    // 自动移除
+    setTimeout(() => {
+        toast.classList.remove('translate-x-0');
+        toast.classList.add('translate-x-full');
+        setTimeout(() => {
+            if (toast.parentElement) {
+                toast.parentElement.removeChild(toast);
+            }
+        }, 300);
+    }, duration);
+}
+
 // 导出
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = Utils;

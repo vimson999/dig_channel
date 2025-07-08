@@ -14,6 +14,10 @@ def register_blueprints(app):
     app.register_blueprint(rankings_bp)
     app.register_blueprint(data_bp)
     app.register_blueprint(scheduler_bp)
+    
+    # 注册视频API
+    from api.videos import videos_bp
+    app.register_blueprint(videos_bp)
 
 __all__ = [
     'channels_bp',

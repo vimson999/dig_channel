@@ -106,6 +106,8 @@ class YouTubeAPI:
             cost = 1
         elif endpoint == 'videos':
             cost = 1
+        elif endpoint == 'playlistItems':
+            cost = 1
         elif endpoint == 'search':
             cost = 100
         else:
@@ -402,6 +404,266 @@ class YouTubeAPI:
             'request_count': self.request_count,
             'last_reset': self.last_reset.isoformat()
         }
+    
+    def get_channel_videos(self, channel_id: str, published_after: datetime = None,
+                          published_before: datetime = None, max_results: int = 50) -> Dict[str, Any]:
+        """获取频道的视频列表
+        
+        Args:
+            channel_id: 频道ID
+            published_after: 开始时间
+            published_before: 结束时间
+            max_results: 最大结果数（默认50，最大50）
+            
+        Returns:
+            Dict: 包含视频列表的结果
+        """
+        try:
+            # 首先获取频道的上传播放列表ID
+            channel_info = self._get_channel_uploads_playlist(channel_id)
+            if not channel_info:
+                return {
+                    'success': False,
+                    'message': '无法获取频道上传播放列表',
+                    'data': {}
+                }
+            
+            uploads_playlist_id = channel_info['uploads_playlist_id']
+            
+            # 获取播放列表中的视频
+            playlist_items = self._get_playlist_videos(
+                uploads_playlist_id, 
+                max_results=max_results
+            )
+            
+            if not playlist_items:
+                return {
+                    'success': True,
+                    'message': '频道暂无视频',
+                    'data': {'videos': []}
+                }
+            
+            # 提取视频ID列表
+            video_ids = [item['video_id'] for item in playlist_items]
+            
+            # 批量获取视频详细信息
+            videos_data = self._get_videos_details(video_ids)
+            
+            # 过滤时间范围
+            filtered_videos = []
+            for video in videos_data:
+                video_date = datetime.fromisoformat(video['published_at'].replace('Z', '+00:00'))
+                
+                # 时间过滤
+                if published_after and video_date < published_after:
+                    continue
+                if published_before and video_date > published_before:
+                    continue
+                
+                filtered_videos.append(video)
+            
+            return {
+                'success': True,
+                'message': f'获取到 {len(filtered_videos)} 个视频',
+                'data': {
+                    'videos': filtered_videos,
+                    'total': len(filtered_videos)
+                }
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'获取频道视频失败: {str(e)}',
+                'data': {}
+            }
+    
+    def _get_channel_uploads_playlist(self, channel_id: str) -> Optional[Dict[str, Any]]:
+        """获取频道的上传播放列表ID
+        
+        Args:
+            channel_id: 频道ID
+            
+        Returns:
+            Optional[Dict]: 包含上传播放列表ID的信息
+        """
+        try:
+            params = {
+                'part': 'contentDetails',
+                'id': channel_id
+            }
+            
+            data = self._make_request('channels', params)
+            
+            if not data.get('items'):
+                return None
+            
+            content_details = data['items'][0]['contentDetails']
+            related_playlists = content_details.get('relatedPlaylists', {})
+            uploads_playlist_id = related_playlists.get('uploads')
+            
+            if not uploads_playlist_id:
+                return None
+            
+            return {
+                'channel_id': channel_id,
+                'uploads_playlist_id': uploads_playlist_id
+            }
+            
+        except Exception as e:
+            print(f"获取频道上传播放列表失败: {e}")
+            return None
+    
+    def _get_playlist_videos(self, playlist_id: str, max_results: int = 50) -> List[Dict[str, Any]]:
+        """获取播放列表中的视频
+        
+        Args:
+            playlist_id: 播放列表ID
+            max_results: 最大结果数
+            
+        Returns:
+            List[Dict]: 视频列表
+        """
+        try:
+            videos = []
+            next_page_token = None
+            
+            while len(videos) < max_results:
+                params = {
+                    'part': 'snippet',
+                    'playlistId': playlist_id,
+                    'maxResults': min(50, max_results - len(videos))
+                }
+                
+                if next_page_token:
+                    params['pageToken'] = next_page_token
+                
+                data = self._make_request('playlistItems', params)
+                
+                for item in data.get('items', []):
+                    snippet = item['snippet']
+                    video_id = snippet['resourceId']['videoId']
+                    
+                    videos.append({
+                        'video_id': video_id,
+                        'title': snippet['title'],
+                        'published_at': snippet['publishedAt'],
+                        'playlist_position': snippet['position']
+                    })
+                
+                next_page_token = data.get('nextPageToken')
+                if not next_page_token:
+                    break
+            
+            return videos
+            
+        except Exception as e:
+            print(f"获取播放列表视频失败: {e}")
+            return []
+    
+    def _get_videos_details(self, video_ids: List[str]) -> List[Dict[str, Any]]:
+        """批量获取视频详细信息
+        
+        Args:
+            video_ids: 视频ID列表
+            
+        Returns:
+            List[Dict]: 视频详细信息列表
+        """
+        try:
+            videos = []
+            
+            # API限制每次最多50个视频ID
+            for i in range(0, len(video_ids), 50):
+                batch_ids = video_ids[i:i+50]
+                
+                params = {
+                    'part': 'snippet,statistics,contentDetails',
+                    'id': ','.join(batch_ids)
+                }
+                
+                data = self._make_request('videos', params)
+                
+                for item in data.get('items', []):
+                    snippet = item['snippet']
+                    statistics = item['statistics']
+                    content_details = item['contentDetails']
+                    
+                    video_info = {
+                        'video_id': item['id'],
+                        'title': snippet['title'],
+                        'description': snippet.get('description', ''),
+                        'published_at': snippet['publishedAt'],
+                        'channel_id': snippet['channelId'],
+                        'channel_title': snippet['channelTitle'],
+                        'category_id': snippet.get('categoryId'),
+                        'tags': snippet.get('tags', []),
+                        'duration': content_details.get('duration'),
+                        'language': snippet.get('defaultLanguage'),
+                        'view_count': int(statistics.get('viewCount', 0)),
+                        'like_count': int(statistics.get('likeCount', 0)),
+                        'comment_count': int(statistics.get('commentCount', 0)),
+                        'thumbnail_url': snippet['thumbnails'].get('high', {}).get('url', ''),
+                        'category_name': self._get_category_name(snippet.get('categoryId'))
+                    }
+                    
+                    videos.append(video_info)
+            
+            return videos
+            
+        except Exception as e:
+            print(f"获取视频详细信息失败: {e}")
+            return []
+    
+    def _get_category_name(self, category_id: str) -> Optional[str]:
+        """获取分类名称
+        
+        Args:
+            category_id: 分类ID
+            
+        Returns:
+            Optional[str]: 分类名称
+        """
+        if not category_id:
+            return None
+        
+        # YouTube视频分类映射
+        categories = {
+            '1': 'Film & Animation',
+            '2': 'Autos & Vehicles', 
+            '10': 'Music',
+            '15': 'Pets & Animals',
+            '17': 'Sports',
+            '19': 'Travel & Events',
+            '20': 'Gaming',
+            '22': 'People & Blogs',
+            '23': 'Comedy',
+            '24': 'Entertainment',
+            '25': 'News & Politics',
+            '26': 'Howto & Style',
+            '27': 'Education',
+            '28': 'Science & Technology',
+            '29': 'Nonprofits & Activism'
+        }
+        
+        return categories.get(category_id, f'Category {category_id}')
+    
+    def get_video_details(self, video_id: str) -> Optional[Dict[str, Any]]:
+        """获取单个视频的详细信息
+        
+        Args:
+            video_id: 视频ID
+            
+        Returns:
+            Optional[Dict]: 视频信息
+        """
+        try:
+            videos = self._get_videos_details([video_id])
+            return videos[0] if videos else None
+            
+        except Exception as e:
+            print(f"获取视频详细信息失败: {e}")
+            return None
 
 # 工具函数
 def validate_youtube_url(url: str) -> bool:

@@ -17,7 +17,7 @@ from datetime import datetime, date, timedelta
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from app import create_app
-from models import db, Channel, ChannelData
+from models import db, Channel, ChannelData, Video, VideoData
 
 def create_database_views(app):
     """创建排行榜视图"""
