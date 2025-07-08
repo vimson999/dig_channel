@@ -12,6 +12,7 @@ from flask import Flask
 from flask_cors import CORS
 from config import Config
 from middleware.error_handler import error_handler
+from utils.colored_logger import log_startup_banner, setup_colored_logger
 
 # 初始化扩展
 cors = CORS()
@@ -56,5 +57,17 @@ def create_app(config_class=Config):
     return app
 
 if __name__ == '__main__':
+    # 显示启动横幅
+    log_startup_banner()
+    
+    # 设置应用日志
+    logger = setup_colored_logger("FLASK_APP")
+    logger.info("创建Flask应用...")
+    
     app = create_app()
+    
+    logger.info("启动Flask开发服务器...")
+    logger.info("访问地址: http://localhost:5001")
+    logger.info("按 Ctrl+C 停止服务器")
+    
     app.run(debug=True, host='0.0.0.0', port=5001)

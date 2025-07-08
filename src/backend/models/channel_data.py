@@ -55,13 +55,20 @@ class ChannelData(db.Model):
         return data
     
     def calculate_changes(self, previous_data=None):
+        from .channel import Channel
+        
         if previous_data:
             self.subscriber_change = self.subscribers - previous_data.subscribers
             self.view_change = self.total_views - previous_data.total_views
             self.video_change = self.video_count - previous_data.video_count
             
-            if self.view_change > 0 and self.channel.cpm:
-                self.estimated_revenue = (self.view_change * float(self.channel.cpm)) / 1000
+            # 获取频道信息计算收入
+            if self.view_change > 0:
+                channel = Channel.query.get(self.channel_id)
+                if channel and channel.cpm:
+                    self.estimated_revenue = (self.view_change * float(channel.cpm)) / 1000
+                else:
+                    self.estimated_revenue = 0.00
             else:
                 self.estimated_revenue = 0.00
         else:

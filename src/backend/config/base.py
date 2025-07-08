@@ -18,7 +18,8 @@ class BaseConfig:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
     
     # 数据库配置
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or 'sqlite:///youtube_tracker.db'
+    basedir = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))  # 回到项目根目录
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or f'sqlite:///{os.path.join(basedir, "instance", "youtube_tracker.db")}'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ECHO = False
     
@@ -40,6 +41,10 @@ class BaseConfig:
     
     # 日志配置
     LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
+    LOG_DIR = os.path.join(basedir, 'logs')
+    
+    # 确保日志目录存在
+    os.makedirs(LOG_DIR, exist_ok=True)
     
     # API限流配置
     RATELIMIT_STORAGE_URL = REDIS_URL

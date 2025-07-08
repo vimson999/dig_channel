@@ -423,7 +423,7 @@ class DataService:
                 # 获取该频道的数据
                 channel_data = {}
                 for record in data_records:
-                    if record.channel_id == channel.channel_id:
+                    if record.channel_id == channel.id:
                         channel_data[record.date] = record
                 
                 # 生成时间序列数据
