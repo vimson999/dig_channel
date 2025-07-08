@@ -1,0 +1,43 @@
+# YouTube Analytics - robots.txt
+
+User-agent: *
+Allow: /
+
+# 允许抓取主要页面
+Allow: /index.html
+Allow: /#dashboard
+Allow: /#channels
+Allow: /js/
+Allow: /css/
+Allow: /images/
+
+# 不允许抓取的路径
+Disallow: /api/
+Disallow: /logs/
+Disallow: /instance/
+Disallow: /config/
+Disallow: /private/
+Disallow: /.env*
+Disallow: /node_modules/
+Disallow: /venv/
+Disallow: /__pycache__/
+
+# 网站地图位置
+Sitemap: https://youtube-analytics.example.com/sitemap.xml
+
+# 特定搜索引擎设置
+User-agent: Googlebot
+Allow: /
+Crawl-delay: 1
+
+User-agent: Bingbot
+Allow: /
+Crawl-delay: 1
+
+User-agent: Baiduspider
+Allow: /
+Crawl-delay: 2
+
+# 限制抓取频率
+User-agent: *
+Crawl-delay: 1

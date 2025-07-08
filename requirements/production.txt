@@ -1,12 +1,46 @@
-# 生产环境依赖 - 仅包含基础依赖
--r base.txt
+# YouTube Analytics 生产环境依赖
 
-# 生产HTTP服务器
-uWSGI==2.0.23
+# Web框架
+Flask==3.0.0
+Flask-CORS==4.0.0
+Flask-SQLAlchemy==3.1.1
 
-# 监控和性能分析
-sentry-sdk[flask]==1.38.0
-newrelic==9.2.0
+# WSGI服务器
+gunicorn==21.2.0
 
-# 生产级日志
-python-json-logger==2.0.7
+# 数据库
+SQLAlchemy==2.0.23
+
+# HTTP客户端
+requests==2.31.0
+urllib3==2.1.0
+
+# 环境变量管理
+python-dotenv==1.0.0
+
+# 数据处理
+python-dateutil==2.8.2
+
+# 安全
+cryptography==41.0.8
+
+# 监控和日志
+psutil==5.9.6
+
+# 缓存 (可选)
+redis==5.0.1
+
+# API限流 (可选)
+Flask-Limiter==3.5.0
+
+# 数据验证
+marshmallow==3.20.1
+
+# 时区处理
+pytz==2023.3
+
+# JSON处理
+ujson==5.8.0
+
+# 性能监控 (可选)
+py-spy==0.3.14

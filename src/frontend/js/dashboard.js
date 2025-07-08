@@ -145,7 +145,7 @@ class Dashboard {
     async loadTrendChart() {
         try {
             const chartData = await api.getChartData(this.currentChartType, {
-                time_range: 30
+                time_range: 7
             });
 
             this.renderTrendChart(chartData.data.chart_data);

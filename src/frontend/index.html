@@ -1,9 +1,79 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>YouTube 频道数据分析</title>
+
+<!-- SEO Meta Tags -->
+<title>YouTube频道数据分析工具 - 实时监控频道收入与订阅增长 | YouTube Analytics</title>
+<meta name="description" content="专业的YouTube频道数据分析平台，实时追踪频道收入、订阅增长、播放量趋势。支持多频道对比、数据导出、收入预测。帮助内容创作者优化策略，提升YouTube频道表现。">
+<meta name="keywords" content="YouTube数据分析,YouTube频道分析,YouTube收入分析,订阅增长分析,YouTube Analytics,频道监控,内容创作者工具,YouTube统计,视频数据分析">
+<meta name="author" content="YouTube Analytics Team">
+<meta name="robots" content="index, follow">
+<meta name="language" content="Chinese">
+
+<!-- Open Graph Meta Tags -->
+<meta property="og:title" content="YouTube频道数据分析工具 | YouTube Analytics">
+<meta property="og:description" content="专业的YouTube频道数据分析平台，实时追踪频道收入、订阅增长、播放量趋势。帮助内容创作者优化策略，提升频道表现。">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://youtube-analytics.example.com">
+<meta property="og:image" content="https://youtube-analytics.example.com/images/og-image.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="YouTube Analytics">
+<meta property="og:locale" content="zh_CN">
+
+<!-- Twitter Card Meta Tags -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="YouTube频道数据分析工具 | YouTube Analytics">
+<meta name="twitter:description" content="专业的YouTube频道数据分析平台，实时追踪频道收入、订阅增长、播放量趋势。">
+<meta name="twitter:image" content="https://youtube-analytics.example.com/images/twitter-card.jpg">
+<meta name="twitter:site" content="@youtube_analytics">
+<meta name="twitter:creator" content="@youtube_analytics">
+
+<!-- Canonical URL -->
+<link rel="canonical" href="https://youtube-analytics.example.com">
+
+<!-- Favicons -->
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+
+<!-- Theme Color -->
+<meta name="theme-color" content="#3b82f6">
+<meta name="msapplication-TileColor" content="#3b82f6">
+
+<!-- Structured Data -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "YouTube Analytics - 频道数据分析工具",
+  "description": "专业的YouTube频道数据分析平台，实时追踪频道收入、订阅增长、播放量趋势",
+  "url": "https://youtube-analytics.example.com",
+  "applicationCategory": "BusinessApplication",
+  "operatingSystem": "All",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "CNY"
+  },
+  "creator": {
+    "@type": "Organization",
+    "name": "YouTube Analytics Team"
+  },
+  "featureList": [
+    "实时频道数据监控",
+    "收入趋势分析",
+    "订阅增长追踪",
+    "多频道对比",
+    "数据可视化图表",
+    "数据导出功能"
+  ]
+}
+</script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
 tailwind.config = {
@@ -136,7 +206,7 @@ margin: 0;
     <div id="toast-container" class="toast-container space-y-2"></div>
 
     <!-- 主导航栏 -->
-    <header class="bg-white/80 backdrop-blur-lg border-b border-gray-200/50 sticky top-0 z-40">
+    <header class="bg-white/80 backdrop-blur-lg border-b border-gray-200/50 sticky top-0 z-40" role="banner">
         <div class="max-w-[1440px] mx-auto px-6 py-4">
             <div class="flex items-center justify-between">
                 <!-- Logo 和标题 -->
@@ -151,12 +221,12 @@ margin: 0;
                 </div>
                 
                 <!-- 导航菜单 -->
-                <nav class="hidden md:flex items-center gap-6">
-                    <a href="#dashboard" id="nav-dashboard" onclick="switchPage('dashboard')" class="nav-link text-primary-600 font-medium px-3 py-2 rounded-lg bg-primary-50 border border-primary-200">
-                        <i class="fas fa-chart-line mr-2"></i>首页
+                <nav class="hidden md:flex items-center gap-6" role="navigation" aria-label="主导航">
+                    <a href="#dashboard" id="nav-dashboard" onclick="switchPage('dashboard')" class="nav-link text-primary-600 font-medium px-3 py-2 rounded-lg bg-primary-50 border border-primary-200" aria-current="page">
+                        <i class="fas fa-chart-line mr-2" aria-hidden="true"></i>首页
                     </a>
                     <a href="#channels" id="nav-channels" onclick="switchPage('channels')" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-tv mr-2"></i>频道管理
+                        <i class="fas fa-tv mr-2" aria-hidden="true"></i>频道管理
                     </a>
                 </nav>
                 
@@ -178,10 +248,12 @@ margin: 0;
 
     <!-- 面包屑导航 -->
     <div class="max-w-[1440px] mx-auto px-6 py-4">
-        <nav class="flex items-center gap-2 text-sm text-gray-500">
-            <i class="fas fa-home"></i>
-            <span class="mx-2">/</span>
-            <span class="text-gray-700">首页</span>
+        <nav class="flex items-center gap-2 text-sm text-gray-500" aria-label="面包屑导航" role="navigation">
+            <a href="/" class="hover:text-primary-600 transition-colors" aria-label="返回首页">
+                <i class="fas fa-home" aria-hidden="true"></i>
+            </a>
+            <span class="mx-2" aria-hidden="true">/</span>
+            <span class="text-gray-700" aria-current="page">首页</span>
         </nav>
     </div>
 
@@ -196,7 +268,15 @@ margin: 0;
     </div> -->
 
 <!-- 主页面内容 -->
-<div id="dashboard-page" class="max-w-[1440px] mx-auto px-6 pb-8">
+<main id="dashboard-page" class="max-w-[1440px] mx-auto px-6 pb-8" role="main">
+    <!-- 页面标题 -->
+    <section class="mb-8" aria-labelledby="dashboard-title">
+        <h1 id="dashboard-title" class="sr-only">YouTube频道数据分析仪表板</h1>
+        <div class="hidden">
+            <h2>实时监控YouTube频道表现数据</h2>
+            <p>追踪频道收入、订阅增长、播放量趋势，优化内容策略</p>
+        </div>
+    </section>
 <div class="grid grid-cols-4 gap-6 mb-8">
 <div class="bg-white rounded-xl shadow-lg border border-gray-100 p-6 hover:shadow-xl transition-shadow duration-300">
 <div class="flex items-center gap-3 mb-5">
@@ -361,7 +441,7 @@ margin: 0;
 </table>
 </div>
 </div>
-</div>
+</main>
 
 <!-- 频道管理页面 -->
 <div id="channels-page" class="max-w-[1440px] mx-auto px-6 pb-8 hidden">
