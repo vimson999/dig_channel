@@ -450,25 +450,6 @@ margin: 0;
 
 <!-- 频道管理页面 -->
 <div id="channels-page" class="max-w-[1440px] mx-auto px-6 pb-8 hidden">
-    <!-- 页面标题 -->
-    <div class="mb-8">
-        <div class="flex items-center justify-between">
-            <div>
-                <h2 class="text-3xl font-bold text-gray-800 mb-2">频道管理</h2>
-                <p class="text-gray-600">管理您的YouTube频道，查看详细数据和设置</p>
-            </div>
-            <div class="flex items-center gap-3">
-                <button onclick="openAddChannelModal()" class="flex items-center gap-2 bg-gradient-to-r from-primary-500 to-primary-600 text-white px-5 py-3 rounded-button font-medium shadow-lg hover:from-primary-600 hover:to-primary-700 hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200">
-                    <i class="fas fa-plus text-sm"></i>
-                    添加频道
-                </button>
-                <button onclick="syncAllChannelsFromManagement()" class="flex items-center gap-2 bg-gradient-to-r from-info to-blue-600 text-white px-5 py-3 rounded-button font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200">
-                    <i class="fas fa-sync-alt text-sm"></i>
-                    同步所有
-                </button>
-            </div>
-        </div>
-    </div>
 
     <!-- 频道列表 -->
     <div class="bg-white rounded-xl shadow-medium border border-gray-100 overflow-hidden">
@@ -528,6 +509,16 @@ margin: 0;
                     
                     <button id="batch-actions-btn" onclick="toggleBatchActions()" disabled class="px-3 py-2.5 bg-gray-100 text-gray-400 rounded-button font-medium cursor-not-allowed">
                         <i class="fas fa-cog mr-2"></i>批量操作
+                    </button>
+                    
+                    <button onclick="openAddChannelModal()" class="flex items-center gap-2 bg-gradient-to-r from-primary-500 to-primary-600 text-white px-4 py-2.5 rounded-button font-medium shadow-lg hover:from-primary-600 hover:to-primary-700 hover:shadow-xl transition-all duration-200">
+                        <i class="fas fa-plus text-sm"></i>
+                        添加频道
+                    </button>
+                    
+                    <button onclick="syncAllChannelsFromManagement()" class="flex items-center gap-2 bg-gradient-to-r from-info to-blue-600 text-white px-4 py-2.5 rounded-button font-medium shadow-lg hover:shadow-xl transition-all duration-200">
+                        <i class="fas fa-sync-alt text-sm"></i>
+                        同步所有
                     </button>
                 </div>
             </div>

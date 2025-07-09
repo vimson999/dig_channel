@@ -380,7 +380,11 @@ class ChannelManagement {
             end,
             total,
             currentPage: this.currentPage,
-            totalPages: this.totalPages
+            totalPages: this.totalPages,
+            pageSize: this.pageSize,
+            prevBtnDisabled: this.currentPage <= 1,
+            nextBtnDisabled: this.currentPage >= this.totalPages,
+            shouldHideButtons: this.totalPages <= 1
         });
         
         this.renderPageNumbers();

@@ -158,6 +158,11 @@ class VideoSyncService:
             
             for video_info in videos:
                 try:
+                    # 过滤短视频（时长小于60秒）
+                    if self._is_short_video(video_info.get('duration')):
+                        logger.debug(f"跳过短视频: {video_info.get('title', 'unknown')}")
+                        continue
+                    
                     # 检查视频是否已存在
                     existing_video = Video.query.filter_by(video_id=video_info['video_id']).first()
                     
@@ -284,6 +289,34 @@ class VideoSyncService:
             logger.debug(f"更新视频: {video.title}")
         
         return updated
+    
+    def _is_short_video(self, duration: str) -> bool:
+        """检查是否为短视频（时长小于60秒）
+        
+        Args:
+            duration: ISO 8601格式的时长字符串，如 PT4M13S 或 PT45S
+            
+        Returns:
+            bool: 是否为短视频
+        """
+        if not duration:
+            return False
+            
+        # 解析ISO 8601格式的时长 (PT4M13S)
+        import re
+        match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration)
+        if not match:
+            return False
+        
+        hours = int(match.group(1) or 0)
+        minutes = int(match.group(2) or 0)
+        seconds = int(match.group(3) or 0)
+        
+        # 计算总秒数
+        total_seconds = hours * 3600 + minutes * 60 + seconds
+        
+        # 小于60秒认为是短视频
+        return total_seconds < 60
     
     def _create_video_data_records(self, channel_id: int, record_date: date) -> None:
         """为频道的所有视频创建数据记录"""

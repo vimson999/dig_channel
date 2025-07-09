@@ -270,28 +270,28 @@ class VideoManager {
     }
     
     renderVideos(videos) {
-        const tbody = document.getElementById('videos-table-body');
-        if (!tbody) return;
+        const container = document.getElementById('videos-grid');
+        if (!container) return;
         
         if (videos.length === 0) {
-            tbody.innerHTML = `
-                <tr>
-                    <td colspan="8" class="px-6 py-12 text-center">
-                        <div class="flex flex-col items-center justify-center">
-                            <i class="fas fa-video-slash text-4xl text-gray-300 mb-4"></i>
-                            <p class="text-gray-500 text-lg mb-2">暂无视频数据</p>
-                            <p class="text-gray-400 text-sm">请先同步频道视频数据</p>
-                        </div>
-                    </td>
-                </tr>
+            container.innerHTML = `
+                <div class="flex flex-col items-center justify-center py-12">
+                    <i class="fas fa-video-slash text-4xl text-gray-300 mb-4"></i>
+                    <p class="text-gray-500 text-lg mb-2">暂无视频数据</p>
+                    <p class="text-gray-400 text-sm">请先同步频道视频数据</p>
+                </div>
             `;
             return;
         }
         
-        tbody.innerHTML = videos.map(video => this.renderVideoRow(video)).join('');
+        container.innerHTML = `
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                ${videos.map(video => this.renderVideoCard(video)).join('')}
+            </div>
+        `;
     }
     
-    renderVideoRow(video) {
+    renderVideoCard(video) {
         const publishedDate = new Date(video.published_at);
         const formattedDate = publishedDate.toLocaleDateString('zh-CN', {
             year: 'numeric',
@@ -300,90 +300,95 @@ class VideoManager {
         });
         
         return `
-            <tr class="hover:bg-gray-50 transition-colors">
-                <td class="px-6 py-4">
-                    <div class="flex items-center gap-3">
-                        <div class="relative">
-                            <img src="${video.thumbnail_url || '/images/video-placeholder.jpg'}" 
-                                 alt="${video.title}" 
-                                 class="video-thumbnail rounded-lg border border-gray-200">
-                            <span class="video-duration">${this.formatDuration(video.duration)}</span>
-                        </div>
-                        <div class="min-w-0 flex-1">
-                            <h4 class="text-sm font-medium text-gray-900 truncate" title="${video.title}">
-                                ${video.title}
-                            </h4>
-                            <p class="text-xs text-gray-500 mt-1">
-                                ${video.description ? video.description.substring(0, 100) + '...' : '无描述'}
-                            </p>
-                            ${video.tags && video.tags.length > 0 ? `
-                                <div class="flex flex-wrap gap-1 mt-2">
-                                    ${video.tags.slice(0, 3).map(tag => `
-                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
-                                            ${tag}
-                                        </span>
-                                    `).join('')}
-                                    ${video.tags.length > 3 ? `<span class="text-xs text-gray-400">+${video.tags.length - 3}</span>` : ''}
-                                </div>
-                            ` : ''}
-                        </div>
+            <div class="bg-white rounded-xl shadow-soft border border-gray-100 overflow-hidden hover:shadow-medium transition-all duration-300 hover:-translate-y-1 group">
+                <!-- 视频缩略图 -->
+                <div class="relative">
+                    <img src="${video.thumbnail_url || '/images/video-placeholder.jpg'}" 
+                         alt="${video.title}" 
+                         class="w-full h-48 object-cover">
+                    <div class="absolute bottom-2 right-2 bg-black/80 text-white px-2 py-1 rounded text-xs font-medium">
+                        ${this.formatDuration(video.duration)}
                     </div>
-                </td>
-                <td class="px-6 py-4">
-                    <div class="text-sm text-gray-900">${video.channel_name || '未知频道'}</div>
-                </td>
-                <td class="px-6 py-4">
-                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
-                        ${video.category_name || '未分类'}
-                    </span>
-                </td>
-                <td class="px-6 py-4">
-                    <div class="text-sm font-medium text-gray-900">${this.formatNumber(video.view_count)}</div>
-                </td>
-                <td class="px-6 py-4">
-                    <div class="text-sm text-gray-900">${this.formatNumber(video.like_count)}</div>
-                </td>
-                <td class="px-6 py-4">
-                    <div class="text-sm text-gray-900">${this.formatNumber(video.comment_count)}</div>
-                </td>
-                <td class="px-6 py-4">
-                    <div class="text-sm text-gray-900">${formattedDate}</div>
-                </td>
-                <td class="px-6 py-4 text-center">
-                    <div class="flex items-center justify-center gap-2">
+                    <div class="absolute top-2 left-2">
+                        <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-white/90 text-gray-800">
+                            ${video.category_name || '未分类'}
+                        </span>
+                    </div>
+                    <!-- 悬停时显示操作按钮 -->
+                    <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center gap-4">
                         <button onclick="videoManager.showVideoDetail(${video.id})" 
-                                class="text-blue-600 hover:text-blue-800 transition-colors" 
+                                class="bg-white/90 hover:bg-white text-gray-800 p-3 rounded-full transition-colors" 
                                 title="查看详情">
                             <i class="fas fa-eye"></i>
                         </button>
                         <a href="${video.url}" target="_blank" 
-                           class="text-red-600 hover:text-red-800 transition-colors" 
+                           class="bg-red-600/90 hover:bg-red-600 text-white p-3 rounded-full transition-colors" 
                            title="在YouTube查看">
                             <i class="fab fa-youtube"></i>
                         </a>
                     </div>
-                </td>
-            </tr>
+                </div>
+                
+                <!-- 视频信息 -->
+                <div class="p-4">
+                    <h3 class="text-sm font-semibold text-gray-900 line-clamp-2 mb-2" title="${video.title}">
+                        ${video.title}
+                    </h3>
+                    
+                    <div class="text-xs text-gray-600 mb-3">
+                        ${video.channel_name || '未知频道'}
+                    </div>
+                    
+                    <!-- 数据统计 -->
+                    <div class="grid grid-cols-3 gap-3 mb-3 text-xs">
+                        <div class="text-center">
+                            <div class="font-semibold text-blue-600">${this.formatNumber(video.view_count)}</div>
+                            <div class="text-gray-500">播放</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="font-semibold text-green-600">${this.formatNumber(video.like_count)}</div>
+                            <div class="text-gray-500">点赞</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="font-semibold text-purple-600">${this.formatNumber(video.comment_count)}</div>
+                            <div class="text-gray-500">评论</div>
+                        </div>
+                    </div>
+                    
+                    <!-- 标签 -->
+                    ${video.tags && video.tags.length > 0 ? `
+                        <div class="flex flex-wrap gap-1 mb-3">
+                            ${video.tags.slice(0, 2).map(tag => `
+                                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                    ${tag}
+                                </span>
+                            `).join('')}
+                            ${video.tags.length > 2 ? `<span class="text-xs text-gray-400">+${video.tags.length - 2}</span>` : ''}
+                        </div>
+                    ` : ''}
+                    
+                    <!-- 发布时间 -->
+                    <div class="text-xs text-gray-500 border-t border-gray-100 pt-3">
+                        发布于 ${formattedDate}
+                    </div>
+                </div>
+            </div>
         `;
     }
     
     renderErrorState() {
-        const tbody = document.getElementById('videos-table-body');
-        if (!tbody) return;
+        const container = document.getElementById('videos-grid');
+        if (!container) return;
         
-        tbody.innerHTML = `
-            <tr>
-                <td colspan="8" class="px-6 py-12 text-center">
-                    <div class="flex flex-col items-center justify-center">
-                        <i class="fas fa-exclamation-triangle text-4xl text-red-300 mb-4"></i>
-                        <p class="text-red-500 text-lg mb-2">加载失败</p>
-                        <button onclick="videoManager.loadVideos()" 
-                                class="px-4 py-2 bg-primary-600 text-white rounded-button hover:bg-primary-700 transition-colors">
-                            重试
-                        </button>
-                    </div>
-                </td>
-            </tr>
+        container.innerHTML = `
+            <div class="flex flex-col items-center justify-center py-12">
+                <i class="fas fa-exclamation-triangle text-4xl text-red-300 mb-4"></i>
+                <p class="text-red-500 text-lg mb-2">加载失败</p>
+                <button onclick="videoManager.loadVideos()" 
+                        class="px-4 py-2 bg-primary-600 text-white rounded-button hover:bg-primary-700 transition-colors">
+                    重试
+                </button>
+            </div>
         `;
     }
     
