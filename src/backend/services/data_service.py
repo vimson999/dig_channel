@@ -450,20 +450,8 @@ class DataService:
                     'data': series_data
                 })
             
-            # 计算聚合数据（所有频道合计）
-            if len(channels) > 1:
-                aggregate_data = []
-                for i, d in enumerate(dates):
-                    total_value = 0
-                    for series in chart_data['series']:
-                        total_value += series['data'][i]
-                    aggregate_data.append(total_value)
-                
-                chart_data['series'].insert(0, {
-                    'name': '总计',
-                    'channel_id': 'total',
-                    'data': aggregate_data
-                })
+            # 移除总计数据 - 只显示各个频道的独立数据
+            # 不再计算和显示聚合数据（总计），让图表更清晰地展示各频道表现
             
             return {
                 'success': True,
