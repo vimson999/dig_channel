@@ -11,6 +11,7 @@ class Channel(db.Model):
     url = db.Column(db.String(255), nullable=False)
     cpm = db.Column(db.Numeric(5, 2), nullable=False, default=1.00)
     category = db.Column(db.String(50), nullable=True)
+    sort = db.Column(db.Integer, nullable=False, default=0)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -28,19 +29,21 @@ class Channel(db.Model):
             'url': self.url,
             'cpm': float(self.cpm),
             'category': self.category,
+            'sort': self.sort,
             'is_active': self.is_active,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
     
     @classmethod
-    def create_channel(cls, name, channel_id, url, cpm=1.00, category=None):
+    def create_channel(cls, name, channel_id, url, cpm=1.00, category=None, sort=0):
         channel = cls(
             name=name,
             channel_id=channel_id,
             url=url,
             cpm=cpm,
-            category=category
+            category=category,
+            sort=sort
         )
         db.session.add(channel)
         db.session.commit()

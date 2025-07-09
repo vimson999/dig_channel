@@ -40,11 +40,11 @@ def get_channels():
         
         # 根据不同条件获取频道
         if search:
-            channels = ChannelService.search_channels(search, active_only)
+            channels = ChannelService.search_channels(search, active_only, order_by_sort=True)
         elif category:
-            channels = ChannelService.get_channels_by_category(category, active_only)
+            channels = ChannelService.get_channels_by_category(category, active_only, order_by_sort=True)
         else:
-            channels = ChannelService.get_all_channels(active_only)
+            channels = ChannelService.get_all_channels(active_only, order_by_sort=True)
         
         # 分页处理
         total_count = len(channels)
@@ -428,7 +428,7 @@ def search_channels():
         limit = min(int(request.args.get('limit', 10)), 50)  # 限制最大50
         
         # 搜索频道
-        channels = ChannelService.search_channels(keyword, active_only)
+        channels = ChannelService.search_channels(keyword, active_only, order_by_sort=True)
         
         # 应用限制
         if limit > 0:
@@ -447,6 +447,54 @@ def search_channels():
         return handle_api_error(400, f"参数错误: {str(e)}")
     except Exception as e:
         return handle_api_error(500, f"搜索失败: {str(e)}")
+
+@bp.route('/bulk-update-sort', methods=['PUT'])
+@validate_request(['channels'])
+def bulk_update_sort():
+    """批量更新频道排序
+    
+    Request Body:
+        channels (list): 频道列表，每个元素包含id和sort字段
+        
+    Returns:
+        JSON: 更新结果
+    """
+    try:
+        data = request.get_json()
+        channels_data = data.get('channels', [])
+        
+        if not channels_data:
+            return handle_api_error(400, "频道列表不能为空")
+        
+        # 验证数据格式
+        updated_count = 0
+        for channel_data in channels_data:
+            if 'id' not in channel_data or 'sort' not in channel_data:
+                return handle_api_error(400, "每个频道必须包含id和sort字段")
+            
+            channel_id = int(channel_data['id'])
+            sort_value = int(channel_data['sort'])
+            
+            # 更新频道排序
+            result = ChannelService.update_channel(channel_id, sort=sort_value)
+            if result['success']:
+                updated_count += 1
+            else:
+                return handle_api_error(400, f"更新频道 {channel_id} 失败: {result['message']}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'成功更新 {updated_count} 个频道的排序',
+            'data': {
+                'updated_count': updated_count,
+                'total_count': len(channels_data)
+            }
+        })
+        
+    except ValueError as e:
+        return handle_api_error(400, f"参数错误: {str(e)}")
+    except Exception as e:
+        return handle_api_error(500, f"批量更新排序失败: {str(e)}")
 
 # 错误处理
 @bp.errorhandler(404)

@@ -15,7 +15,7 @@ class ChannelService:
     
     @staticmethod
     def create_channel(name: str, channel_id: str, url: str, 
-                      cpm: float = 1.00, category: str = None) -> Dict[str, Any]:
+                      cpm: float = 1.00, category: str = None, sort: int = 0) -> Dict[str, Any]:
         """创建新频道
         
         Args:
@@ -24,6 +24,7 @@ class ChannelService:
             url: 频道URL
             cpm: CPM值，默认1.00
             category: 频道分类，可选
+            sort: 排序值，默认0
             
         Returns:
             Dict: 包含结果状态和数据的字典
@@ -44,7 +45,8 @@ class ChannelService:
                 channel_id=channel_id,
                 url=url,
                 cpm=cpm,
-                category=category
+                category=category,
+                sort=sort
             )
             
             db.session.add(channel)
@@ -72,11 +74,12 @@ class ChannelService:
             }
     
     @staticmethod
-    def get_all_channels(active_only: bool = True) -> List[Dict[str, Any]]:
+    def get_all_channels(active_only: bool = True, order_by_sort: bool = False) -> List[Dict[str, Any]]:
         """获取所有频道
         
         Args:
             active_only: 是否只返回活跃频道，默认True
+            order_by_sort: 是否按sort字段排序，默认False
             
         Returns:
             List[Dict]: 频道列表
@@ -86,7 +89,12 @@ class ChannelService:
             if active_only:
                 query = query.filter_by(is_active=True)
             
-            channels = query.order_by(Channel.created_at.desc()).all()
+            # 选择排序方式
+            if order_by_sort:
+                channels = query.order_by(Channel.sort.asc(), Channel.id.asc()).all()
+            else:
+                channels = query.order_by(Channel.created_at.desc()).all()
+                
             return [channel.to_dict() for channel in channels]
             
         except Exception as e:
@@ -148,7 +156,7 @@ class ChannelService:
                 }
             
             # 更新允许的字段
-            allowed_fields = ['name', 'url', 'cpm', 'category', 'is_active']
+            allowed_fields = ['name', 'url', 'cpm', 'category', 'sort', 'is_active']
             for key, value in kwargs.items():
                 if key in allowed_fields and hasattr(channel, key):
                     setattr(channel, key, value)
@@ -209,12 +217,13 @@ class ChannelService:
             }
     
     @staticmethod
-    def search_channels(keyword: str, active_only: bool = True) -> List[Dict[str, Any]]:
+    def search_channels(keyword: str, active_only: bool = True, order_by_sort: bool = False) -> List[Dict[str, Any]]:
         """搜索频道
         
         Args:
             keyword: 搜索关键词
             active_only: 是否只搜索活跃频道
+            order_by_sort: 是否按sort字段排序，默认False
             
         Returns:
             List[Dict]: 匹配的频道列表
@@ -227,7 +236,12 @@ class ChannelService:
             if active_only:
                 query = query.filter_by(is_active=True)
             
-            channels = query.order_by(Channel.created_at.desc()).all()
+            # 选择排序方式
+            if order_by_sort:
+                channels = query.order_by(Channel.sort.asc(), Channel.id.asc()).all()
+            else:
+                channels = query.order_by(Channel.created_at.desc()).all()
+                
             return [channel.to_dict() for channel in channels]
             
         except Exception as e:
@@ -235,12 +249,13 @@ class ChannelService:
             return []
     
     @staticmethod
-    def get_channels_by_category(category: str, active_only: bool = True) -> List[Dict[str, Any]]:
+    def get_channels_by_category(category: str, active_only: bool = True, order_by_sort: bool = False) -> List[Dict[str, Any]]:
         """根据分类获取频道
         
         Args:
             category: 频道分类
             active_only: 是否只返回活跃频道
+            order_by_sort: 是否按sort字段排序，默认False
             
         Returns:
             List[Dict]: 频道列表
@@ -251,7 +266,12 @@ class ChannelService:
             if active_only:
                 query = query.filter_by(is_active=True)
             
-            channels = query.order_by(Channel.created_at.desc()).all()
+            # 选择排序方式
+            if order_by_sort:
+                channels = query.order_by(Channel.sort.asc(), Channel.id.asc()).all()
+            else:
+                channels = query.order_by(Channel.created_at.desc()).all()
+                
             return [channel.to_dict() for channel in channels]
             
         except Exception as e:
