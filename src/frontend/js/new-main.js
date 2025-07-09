@@ -3,7 +3,7 @@ class YouTubeDataApp {
     constructor() {
         this.chart = null;
         this.currentChartType = 'line';
-        this.currentTimeRange = 30;
+        this.currentTimeRange = 7;
         this.channels = [];
         this.chartData = {};
         
@@ -234,9 +234,15 @@ class YouTubeDataApp {
 
     async loadTableData() {
         try {
+            // 计算日期范围
+            const endDate = new Date();
+            const startDate = new Date();
+            startDate.setDate(endDate.getDate() - this.currentTimeRange);
+            
             const response = await api.getTableData({
                 active_only: true,
-                days: this.currentTimeRange
+                start_date: this.formatDate(startDate),
+                end_date: this.formatDate(endDate)
             });
 
             if (response.success) {
@@ -245,6 +251,10 @@ class YouTubeDataApp {
         } catch (error) {
             console.error('加载表格数据失败:', error);
         }
+    }
+    
+    formatDate(date) {
+        return date.toISOString().split('T')[0];
     }
 
     renderTable(data) {
