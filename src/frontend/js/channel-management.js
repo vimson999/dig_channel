@@ -66,54 +66,54 @@ class ChannelManagement {
         try {
             this.showLoading();
             
-            // 简化API调用，先不使用分页参数，让前端处理分页
+            // 使用后端分页参数
             const response = await api.getChannels({
+                page: this.currentPage,
+                per_page: this.pageSize,
                 search: document.getElementById('search-channels')?.value || '',
                 category: document.getElementById('filter-category')?.value || '',
-                status: document.getElementById('filter-status')?.value || ''
+                active_only: document.getElementById('filter-status')?.value === 'active' ? true : 
+                            document.getElementById('filter-status')?.value === 'inactive' ? false : undefined
             });
 
             if (response.success) {
-                // 处理不同的API响应格式
-                let allChannels, total;
+                // 处理后端分页响应格式
+                let channels, pagination;
                 
-                if (response.data.channels) {
-                    // 标准格式：{channels: [], total: number}
-                    allChannels = response.data.channels;
-                    total = response.data.total || allChannels.length;
+                if (response.data.channels && response.data.pagination) {
+                    // 标准分页格式：{channels: [], pagination: {}}
+                    channels = response.data.channels;
+                    pagination = response.data.pagination;
                 } else if (Array.isArray(response.data)) {
-                    // 简单格式：直接返回数组
-                    allChannels = response.data;
-                    total = allChannels.length;
+                    // 简单格式：直接返回数组（无分页）
+                    channels = response.data;
+                    pagination = {
+                        page: 1,
+                        total: channels.length,
+                        pages: 1,
+                        per_page: channels.length
+                    };
                 } else {
-                    // 其他格式，尝试适配
-                    allChannels = response.data || [];
-                    total = allChannels.length;
+                    // 其他格式
+                    channels = response.data || [];
+                    pagination = {
+                        page: 1,
+                        total: channels.length,
+                        pages: 1,
+                        per_page: channels.length
+                    };
                 }
                 
-                // 存储所有频道数据
-                this.allChannels = allChannels;
+                // 存储当前页频道数据
+                this.channels = channels;
                 
-                // 前端分页处理
-                this.totalPages = Math.ceil(total / this.pageSize);
-                if (this.totalPages === 0 && total > 0) {
-                    this.totalPages = 1;
-                }
-                
-                // 如果当前页超出总页数，重置到第一页
-                if (this.currentPage > this.totalPages && this.totalPages > 0) {
-                    this.currentPage = 1;
-                }
-                
-                // 计算当前页的数据
-                const startIndex = (this.currentPage - 1) * this.pageSize;
-                const endIndex = startIndex + this.pageSize;
-                this.channels = allChannels.slice(startIndex, endIndex);
+                // 更新分页信息
+                this.totalPages = pagination.pages || 1;
+                this.currentPage = pagination.page || 1;
                 
                 console.log('频道数据加载:', {
-                    allChannels: allChannels.length,
                     currentPageChannels: this.channels.length,
-                    total: total,
+                    total: pagination.total,
                     totalPages: this.totalPages,
                     currentPage: this.currentPage,
                     pageSize: this.pageSize
@@ -121,7 +121,7 @@ class ChannelManagement {
                 
                 this.updateStatistics(response.data.statistics);
                 this.renderChannelTable();
-                this.updatePagination(total);
+                this.updatePagination(pagination.total);
             } else {
                 this.showError('加载频道数据失败: ' + response.message);
             }
@@ -431,7 +431,7 @@ class ChannelManagement {
     // 频道操作方法
     async editChannel(channelId) {
         try {
-            const channel = this.allChannels.find(c => c.id === channelId);
+            const channel = this.channels.find(c => c.id === channelId);
             if (!channel) return;
             
             // 这里应该打开编辑模态框
@@ -463,7 +463,7 @@ class ChannelManagement {
 
     async toggleChannelStatus(channelId) {
         try {
-            const channel = this.allChannels.find(c => c.id === channelId);
+            const channel = this.channels.find(c => c.id === channelId);
             if (!channel) return;
             
             const newStatus = !channel.is_active;
@@ -486,7 +486,7 @@ class ChannelManagement {
 
     async deleteChannel(channelId) {
         try {
-            const channel = this.allChannels.find(c => c.id === channelId);
+            const channel = this.channels.find(c => c.id === channelId);
             if (!channel) return;
             
             if (!confirm(`确定要删除频道"${channel.name}"吗？\n\n删除后该频道的所有历史数据都将被清除，此操作不可恢复！`)) return;

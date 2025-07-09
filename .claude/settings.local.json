@@ -30,7 +30,8 @@
       "Bash(git push:*)",
       "Bash(awk:*)",
       "Bash(git checkout:*)",
-      "Bash(true)"
+      "Bash(true)",
+      "Bash(rg:*)"
     ],
     "deny": []
   }
