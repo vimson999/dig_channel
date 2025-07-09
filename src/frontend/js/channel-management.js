@@ -119,6 +119,12 @@ class ChannelManagement {
                     pageSize: this.pageSize
                 });
                 
+                // 强制调试输出
+                console.log('=== 频道管理调试信息 ===');
+                console.log('API响应:', response);
+                console.log('分页信息:', pagination);
+                console.log('频道数据:', channels);
+                
                 this.updateStatistics(response.data.statistics);
                 this.renderChannelTable();
                 this.updatePagination(pagination.total);

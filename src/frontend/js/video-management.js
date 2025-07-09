@@ -257,6 +257,12 @@ class VideoManager {
                 : await api.getVideos(params);
             
             if (response.success) {
+                // 调试输出
+                console.log('=== 视频管理调试信息 ===');
+                console.log('API响应:', response);
+                console.log('视频数据:', response.data.videos);
+                console.log('分页信息:', response.data.pagination);
+                
                 this.renderVideos(response.data.videos);
                 this.updatePagination(response.data.pagination);
                 this.updateVideosCount(response.data.pagination.total);

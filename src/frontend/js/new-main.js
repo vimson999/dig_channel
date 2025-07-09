@@ -246,6 +246,12 @@ class YouTubeDataApp {
             });
 
             if (response.success) {
+                // 调试输出
+                console.log('=== 首页数据表格调试信息 ===');
+                console.log('当前时间范围:', this.currentTimeRange);
+                console.log('API响应:', response);
+                console.log('表格数据:', response.data);
+                
                 this.renderTable(response.data);
             }
         } catch (error) {
