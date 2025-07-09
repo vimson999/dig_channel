@@ -454,11 +454,22 @@ class YouTubeAPI:
             for video in videos_data:
                 video_date = datetime.fromisoformat(video['published_at'].replace('Z', '+00:00'))
                 
-                # 时间过滤
-                if published_after and video_date < published_after:
-                    continue
-                if published_before and video_date > published_before:
-                    continue
+                # 确保时间对象具有相同的时区状态以便比较
+                if published_after:
+                    # 如果published_after是naive时间，转换为UTC
+                    if published_after.tzinfo is None:
+                        from datetime import timezone
+                        published_after = published_after.replace(tzinfo=timezone.utc)
+                    if video_date < published_after:
+                        continue
+                
+                if published_before:
+                    # 如果published_before是naive时间，转换为UTC  
+                    if published_before.tzinfo is None:
+                        from datetime import timezone
+                        published_before = published_before.replace(tzinfo=timezone.utc)
+                    if video_date > published_before:
+                        continue
                 
                 filtered_videos.append(video)
             
