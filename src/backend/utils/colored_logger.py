@@ -7,6 +7,7 @@
 
 import logging
 import sys
+import os
 from datetime import datetime
 
 class ColoredFormatter(logging.Formatter):
@@ -141,6 +142,67 @@ def log_youtube_sync(channel_name: str, success: bool = True, details: str = Non
         message += f" ({details})"
     
     getattr(logger, level)(message)
+
+def log_detailed_error(logger_name: str, context: str, error: Exception, **kwargs):
+    """记录详细错误信息到文件和控制台
+    
+    Args:
+        logger_name: 日志器名称
+        context: 错误上下文描述
+        error: 异常对象
+        **kwargs: 额外的上下文信息
+    """
+    import traceback
+    
+    logger = setup_colored_logger(logger_name)
+    
+    # 创建logs目录
+    logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    
+    # 生成错误日志文件名
+    timestamp = datetime.now().strftime("%Y%m%d")
+    error_log_file = os.path.join(logs_dir, f"errors_{timestamp}.log")
+    
+    # 错误详情
+    error_details = {
+        'timestamp': datetime.now().isoformat(),
+        'context': context,
+        'error_type': type(error).__name__,
+        'error_message': str(error),
+        'traceback': traceback.format_exc(),
+        'additional_info': kwargs
+    }
+    
+    # 格式化错误消息
+    error_msg = f"""
+{'='*80}
+时间: {error_details['timestamp']}
+上下文: {error_details['context']}
+错误类型: {error_details['error_type']}
+错误信息: {error_details['error_message']}
+额外信息: {error_details['additional_info']}
+堆栈跟踪:
+{error_details['traceback']}
+{'='*80}
+"""
+    
+    # 写入文件
+    try:
+        with open(error_log_file, 'a', encoding='utf-8') as f:
+            f.write(error_msg)
+    except Exception as e:
+        print(f"无法写入错误日志文件: {e}")
+    
+    # 控制台输出
+    logger.error(f"❌ {context}")
+    logger.error(f"   错误类型: {type(error).__name__}")
+    logger.error(f"   错误信息: {str(error)}")
+    for key, value in kwargs.items():
+        logger.error(f"   {key}: {value}")
+    logger.error(f"   详细日志已写入: {error_log_file}")
+    
+    return error_details
 
 # 预配置的日志器
 app_logger = setup_colored_logger("APP")

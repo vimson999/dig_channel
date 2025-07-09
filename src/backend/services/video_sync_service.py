@@ -66,13 +66,28 @@ class VideoSyncService:
                         })
                         
                 except Exception as e:
-                    logger.error(f"同步频道 {channel.name} 失败: {str(e)}")
+                    from utils.colored_logger import log_detailed_error
+                    
+                    # 记录详细错误信息
+                    log_detailed_error(
+                        logger_name="VIDEO_SYNC",
+                        context=f"同步频道失败: {channel.name}",
+                        error=e,
+                        频道ID=channel.id,
+                        频道名称=channel.name,
+                        频道URL=channel.url,
+                        YouTube频道ID=channel.channel_id,
+                        回溯天数=days_back,
+                        是否首次同步="未知"
+                    )
+                    
                     results['errors'] += 1
                     results['details'].append({
                         'channel_id': channel.id,
                         'channel_name': channel.name,
                         'status': 'error',
-                        'message': str(e)
+                        'message': str(e),
+                        'error_type': type(e).__name__
                     })
             
             logger.info(f"同步完成: 处理 {results['processed']} 个频道, 新增 {results['new_videos']} 个视频, 更新 {results['updated_videos']} 个视频")
@@ -157,7 +172,21 @@ class VideoSyncService:
                         new_videos += 1
                         
                 except Exception as e:
-                    logger.error(f"处理视频 {video_info.get('video_id', 'unknown')} 失败: {str(e)}")
+                    from utils.colored_logger import log_detailed_error
+                    
+                    video_id = video_info.get('video_id', 'unknown')
+                    video_title = video_info.get('title', 'unknown')
+                    
+                    # 记录详细错误信息
+                    log_detailed_error(
+                        logger_name="VIDEO_SYNC",
+                        context=f"处理视频失败: {video_title[:50]}...",
+                        error=e,
+                        视频ID=video_id,
+                        视频标题=video_title,
+                        频道ID=channel_id,
+                        视频信息=str(video_info)[:500] + "..." if len(str(video_info)) > 500 else str(video_info)
+                    )
                     continue
             
             # 创建视频数据记录
@@ -174,11 +203,29 @@ class VideoSyncService:
             }
             
         except Exception as e:
-            logger.error(f"同步频道 {channel_id} 视频失败: {str(e)}")
+            from utils.colored_logger import log_detailed_error
+            
+            # 记录详细错误信息
+            log_detailed_error(
+                logger_name="VIDEO_SYNC",
+                context=f"单频道同步失败",
+                error=e,
+                频道ID=channel_id,
+                频道信息=channel.name if 'channel' in locals() and channel else '未获取到频道信息',
+                回溯天数=days_back,
+                开始时间=start_date.isoformat() if 'start_date' in locals() else '未设置',
+                结束时间=end_date.isoformat() if 'end_date' in locals() else '未设置'
+            )
+            
             return {
                 'success': False,
                 'message': f'同步失败: {str(e)}',
-                'data': {}
+                'data': {},
+                'error_details': {
+                    'error_type': type(e).__name__,
+                    'channel_id': channel_id,
+                    'days_back': days_back
+                }
             }
     
     def _create_video(self, channel_id: int, video_info: Dict) -> Video:

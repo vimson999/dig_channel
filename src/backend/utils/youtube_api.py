@@ -483,10 +483,30 @@ class YouTubeAPI:
             }
             
         except Exception as e:
+            from utils.colored_logger import log_detailed_error
+            
+            # 记录详细错误信息
+            log_detailed_error(
+                logger_name="YOUTUBE_API",
+                context=f"获取频道视频失败",
+                error=e,
+                频道ID=channel_id,
+                开始时间=published_after.isoformat() if published_after else None,
+                结束时间=published_before.isoformat() if published_before else None,
+                最大结果数=max_results
+            )
+            
             return {
                 'success': False,
                 'message': f'获取频道视频失败: {str(e)}',
-                'data': {}
+                'data': {},
+                'error_details': {
+                    'error_type': type(e).__name__,
+                    'channel_id': channel_id,
+                    'published_after': published_after.isoformat() if published_after else None,
+                    'published_before': published_before.isoformat() if published_before else None,
+                    'max_results': max_results
+                }
             }
     
     def _get_channel_uploads_playlist(self, channel_id: str) -> Optional[Dict[str, Any]]:
