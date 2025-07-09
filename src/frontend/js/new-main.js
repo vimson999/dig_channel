@@ -75,7 +75,14 @@ class YouTubeDataApp {
         // 设置默认图表
         this.updateChart({
             title: { text: '频道数据趋势' },
-            tooltip: { trigger: 'axis' },
+            tooltip: { 
+                trigger: 'item',
+                formatter: function(params) {
+                    return `${params.seriesName}<br/>
+                            日期: ${params.name}<br/>
+                            数值: ${params.value}`;
+                }
+            },
             legend: { data: [] },
             grid: {
                 left: '3%',
@@ -376,7 +383,14 @@ class YouTubeDataApp {
         const option = {
             animation: false,
             title: { text: '频道数据趋势' },
-            tooltip: { trigger: 'axis' },
+            tooltip: { 
+                trigger: 'item',
+                formatter: function(params) {
+                    return `${params.seriesName}<br/>
+                            日期: ${params.name}<br/>
+                            数值: ${params.value}`;
+                }
+            },
             legend: {
                 data: this.chartData.series?.map(s => s.name) || []
             },

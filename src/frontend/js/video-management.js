@@ -709,6 +709,35 @@ function syncAllVideos() {
     showSyncVideoModal();
 }
 
+async function cleanShortVideos() {
+    if (!confirm('确定要清理所有短视频吗？\n\n这将删除所有时长小于60秒的视频记录，此操作不可恢复！')) {
+        return;
+    }
+    
+    try {
+        showStatusBar('正在清理短视频...');
+        
+        const response = await api.cleanShortVideos();
+        
+        if (response.success) {
+            showToast(response.message, 'success');
+            // 刷新视频列表
+            setTimeout(() => {
+                videoManager.loadVideos();
+                videoManager.loadVideoStats();
+            }, 1000);
+        } else {
+            showToast('清理失败: ' + response.message, 'error');
+        }
+        
+    } catch (error) {
+        console.error('清理短视频失败:', error);
+        showToast('清理短视频失败: ' + error.message, 'error');
+    } finally {
+        hideStatusBar();
+    }
+}
+
 function exportVideos() {
     // 导出视频数据功能
     showToast('导出功能开发中...', 'info');

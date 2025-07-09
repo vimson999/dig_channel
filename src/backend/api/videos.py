@@ -312,6 +312,31 @@ def get_videos_stats():
         logger.error(f"获取视频统计失败: {str(e)}")
         return handle_api_error(e)
 
+@videos_bp.route('/clean-shorts', methods=['POST'])
+@cross_origin()
+def clean_short_videos():
+    """清理数据库中的短视频记录"""
+    try:
+        video_service = VideoSyncService()
+        result = video_service.clean_short_videos()
+        
+        if result['success']:
+            return jsonify({
+                'success': True,
+                'data': result['data'],
+                'message': result['message']
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': result['message'],
+                'data': result['data']
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"清理短视频失败: {str(e)}")
+        return handle_api_error(e)
+
 @videos_bp.route('/channels', methods=['GET'])
 @cross_origin()
 def get_channels_with_video_count():

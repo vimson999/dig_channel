@@ -178,6 +178,10 @@ class APIClient {
         return this.post(CONFIG.ENDPOINTS.VIDEO_SYNC, data);
     }
 
+    async cleanShortVideos() {
+        return this.post(CONFIG.ENDPOINTS.VIDEO_CLEAN_SHORTS);
+    }
+
     // 排行榜相关API
     async getAllRankings(limit = 3) {
         return this.get(CONFIG.ENDPOINTS.RANKINGS_ALL, { limit });

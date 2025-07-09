@@ -163,7 +163,7 @@ class VideoSyncService:
                         logger.debug(f"跳过短视频: {video_info.get('title', 'unknown')}")
                         continue
                     
-                    # 检查视频是否已存在
+                    # 检查视频是否已存在（避免重复抓取）
                     existing_video = Video.query.filter_by(video_id=video_info['video_id']).first()
                     
                     if existing_video:
@@ -317,6 +317,53 @@ class VideoSyncService:
         
         # 小于60秒认为是短视频
         return total_seconds < 60
+    
+    def clean_short_videos(self) -> Dict:
+        """清理数据库中的短视频记录"""
+        try:
+            # 找到所有短视频
+            videos = Video.query.filter_by(is_active=True).all()
+            short_videos = []
+            
+            for video in videos:
+                if video.duration and self._is_short_video(video.duration):
+                    short_videos.append(video)
+            
+            if not short_videos:
+                return {
+                    'success': True,
+                    'message': '没有找到需要清理的短视频',
+                    'data': {'cleaned_count': 0}
+                }
+            
+            # 删除短视频及其相关数据
+            cleaned_count = 0
+            for video in short_videos:
+                # 删除相关的VideoData记录
+                VideoData.query.filter_by(video_id=video.id).delete()
+                
+                # 软删除视频
+                video.is_active = False
+                cleaned_count += 1
+            
+            db.session.commit()
+            
+            logger.info(f"清理短视频完成: {cleaned_count} 个")
+            
+            return {
+                'success': True,
+                'message': f'成功清理 {cleaned_count} 个短视频',
+                'data': {'cleaned_count': cleaned_count}
+            }
+            
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"清理短视频失败: {str(e)}")
+            return {
+                'success': False,
+                'message': f'清理短视频失败: {str(e)}',
+                'data': {'cleaned_count': 0}
+            }
     
     def _create_video_data_records(self, channel_id: int, record_date: date) -> None:
         """为频道的所有视频创建数据记录"""

@@ -19,6 +19,7 @@ const CONFIG = {
         VIDEO_CATEGORIES: '/videos/categories',
         VIDEO_SEARCH: '/videos/search',
         VIDEO_CHANNELS: '/videos/channels',
+        VIDEO_CLEAN_SHORTS: '/videos/clean-shorts',
         
         // 排行榜相关
         RANKINGS_ALL: '/rankings/all',
