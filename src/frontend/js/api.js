@@ -149,6 +149,35 @@ class APIClient {
         return this.get(`${CONFIG.ENDPOINTS.CHANNELS}/${channelId}/statistics`);
     }
 
+    // 视频相关API
+    async getVideos(params = {}) {
+        return this.get(CONFIG.ENDPOINTS.VIDEOS, params);
+    }
+
+    async getVideo(videoId) {
+        return this.get(`${CONFIG.ENDPOINTS.VIDEOS}/${videoId}`);
+    }
+
+    async getVideoStats() {
+        return this.get(CONFIG.ENDPOINTS.VIDEO_STATS);
+    }
+
+    async getVideoCategories() {
+        return this.get(CONFIG.ENDPOINTS.VIDEO_CATEGORIES);
+    }
+
+    async getVideoChannels() {
+        return this.get(CONFIG.ENDPOINTS.VIDEO_CHANNELS);
+    }
+
+    async searchVideos(params = {}) {
+        return this.get(CONFIG.ENDPOINTS.VIDEO_SEARCH, params);
+    }
+
+    async syncVideos(data = {}) {
+        return this.post(CONFIG.ENDPOINTS.VIDEO_SYNC, data);
+    }
+
     // 排行榜相关API
     async getAllRankings(limit = 3) {
         return this.get(CONFIG.ENDPOINTS.RANKINGS_ALL, { limit });

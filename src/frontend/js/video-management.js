@@ -161,7 +161,7 @@ class VideoManager {
     
     async loadVideoStats() {
         try {
-            const response = await api.get('/videos/stats');
+            const response = await api.getVideoStats();
             if (response.success) {
                 const stats = response.data;
                 
@@ -185,7 +185,7 @@ class VideoManager {
     
     async loadChannels() {
         try {
-            const response = await api.get('/videos/channels');
+            const response = await api.getVideoChannels();
             if (response.success) {
                 const channels = response.data.channels;
                 const select = document.getElementById('filter-channel');
@@ -209,7 +209,7 @@ class VideoManager {
     
     async loadCategories() {
         try {
-            const response = await api.get('/videos/categories');
+            const response = await api.getVideoCategories();
             if (response.success) {
                 const categories = response.data.categories;
                 const select = document.getElementById('filter-category');
@@ -251,9 +251,10 @@ class VideoManager {
                 params.category = this.currentFilters.category;
             }
             
-            // 根据是否有搜索条件选择API端点
-            const endpoint = this.currentFilters.search ? '/videos/search' : '/videos';
-            const response = await api.get(endpoint, params);
+            // 根据是否有搜索条件选择API方法
+            const response = this.currentFilters.search 
+                ? await api.searchVideos(params)
+                : await api.getVideos(params);
             
             if (response.success) {
                 this.renderVideos(response.data.videos);
@@ -476,7 +477,7 @@ class VideoManager {
         try {
             showStatusBar('正在加载视频详情...');
             
-            const response = await api.get(`/videos/${videoId}`);
+            const response = await api.getVideo(videoId);
             if (response.success) {
                 this.renderVideoDetail(response.data.video);
                 this.showVideoDetailModal();
@@ -749,7 +750,7 @@ async function startVideoSync() {
     startBtn.disabled = true;
     
     try {
-        const response = await api.post('/videos/sync', {
+        const response = await api.syncVideos({
             days_back: parseInt(daysBack)
         });
         

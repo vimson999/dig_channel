@@ -12,6 +12,14 @@ const CONFIG = {
         CHANNEL_CATEGORIES: '/channels/categories',
         CHANNEL_SEARCH: '/channels/search',
         
+        // 视频相关
+        VIDEOS: '/videos',
+        VIDEO_STATS: '/videos/stats',
+        VIDEO_SYNC: '/videos/sync',
+        VIDEO_CATEGORIES: '/videos/categories',
+        VIDEO_SEARCH: '/videos/search',
+        VIDEO_CHANNELS: '/videos/channels',
+        
         // 排行榜相关
         RANKINGS_ALL: '/rankings/all',
         RANKINGS_DAILY_REVENUE: '/rankings/daily-revenue',

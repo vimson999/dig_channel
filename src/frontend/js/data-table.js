@@ -35,11 +35,11 @@ class DataTable {
         }
     }
 
-    // 设置默认日期（最近30天）
+    // 设置默认日期（最近7天）
     setDefaultDates() {
         const endDate = new Date();
         const startDate = new Date();
-        startDate.setDate(endDate.getDate() - 30);
+        startDate.setDate(endDate.getDate() - 7);
         
         this.endDate = Utils.formatDate(endDate);
         this.startDate = Utils.formatDate(startDate);

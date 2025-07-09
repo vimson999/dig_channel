@@ -2,7 +2,7 @@
 class ChannelManagement {
     constructor() {
         this.currentPage = 1;
-        this.pageSize = 10;
+        this.pageSize = 20;
         this.totalPages = 0;
         this.channels = []; // 当前页显示的频道
         this.allChannels = []; // 所有频道数据（用于前端分页）
