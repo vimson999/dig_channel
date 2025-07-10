@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>注册 - YouTube频道数据分析</title>
+    <link rel="icon" type="image/x-icon" href="assets/images/favicon.ico">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .auth-card {
+            backdrop-filter: blur(10px);
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .form-input {
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+        .form-input:focus {
+            background: rgba(255, 255, 255, 1);
+            border-color: #667eea;
+        }
+        .password-strength {
+            height: 4px;
+            background: #e5e7eb;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .password-strength-bar {
+            height: 100%;
+            transition: width 0.3s ease, background-color 0.3s ease;
+        }
+    </style>
+</head>
+<body class="font-sans">
+    <div class="min-h-screen flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-md w-full space-y-8">
+            <div class="auth-card rounded-lg shadow-2xl p-8">
+                <!-- Logo区域 -->
+                <div class="text-center">
+                    <h1 class="text-3xl font-bold text-white mb-2">YouTube数据分析</h1>
+                    <p class="text-lg text-white opacity-80 mb-8">创建您的账户</p>
+                </div>
+                
+                <!-- 注册表单 -->
+                <form id="registerForm" class="space-y-6">
+                    <div id="errorMessage" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded"></div>
+                    <div id="successMessage" class="hidden bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded"></div>
+                    
+                    <div>
+                        <label for="username" class="block text-white text-sm font-medium mb-2">用户名</label>
+                        <input 
+                            type="text" 
+                            id="username" 
+                            name="username" 
+                            required 
+                            class="form-input appearance-none rounded-md relative block w-full px-3 py-2 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:z-10 sm:text-sm"
+                            placeholder="请输入用户名（3-20个字符）"
+                            minlength="3"
+                            maxlength="20"
+                        >
+                        <p class="text-white opacity-70 text-xs mt-1">用户名只能包含字母、数字和下划线</p>
+                    </div>
+                    
+                    <div>
+                        <label for="email" class="block text-white text-sm font-medium mb-2">邮箱</label>
+                        <input 
+                            type="email" 
+                            id="email" 
+                            name="email" 
+                            required 
+                            class="form-input appearance-none rounded-md relative block w-full px-3 py-2 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:z-10 sm:text-sm"
+                            placeholder="请输入邮箱地址"
+                        >
+                    </div>
+                    
+                    <div>
+                        <label for="password" class="block text-white text-sm font-medium mb-2">密码</label>
+                        <input 
+                            type="password" 
+                            id="password" 
+                            name="password" 
+                            required 
+                            class="form-input appearance-none rounded-md relative block w-full px-3 py-2 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:z-10 sm:text-sm"
+                            placeholder="请输入密码（至少8个字符）"
+                            minlength="8"
+                        >
+                        <div class="password-strength mt-2">
+                            <div id="passwordStrengthBar" class="password-strength-bar" style="width: 0%; background-color: #e5e7eb;"></div>
+                        </div>
+                        <p id="passwordStrengthText" class="text-white opacity-70 text-xs mt-1">密码强度：无</p>
+                    </div>
+                    
+                    <div>
+                        <label for="confirmPassword" class="block text-white text-sm font-medium mb-2">确认密码</label>
+                        <input 
+                            type="password" 
+                            id="confirmPassword" 
+                            name="confirmPassword" 
+                            required 
+                            class="form-input appearance-none rounded-md relative block w-full px-3 py-2 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:z-10 sm:text-sm"
+                            placeholder="请再次输入密码"
+                        >
+                        <p id="passwordMatchText" class="text-white opacity-70 text-xs mt-1"></p>
+                    </div>
+                    
+                    <div class="flex items-center">
+                        <input 
+                            id="agree-terms" 
+                            name="agree-terms" 
+                            type="checkbox" 
+                            required
+                            class="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
+                        >
+                        <label for="agree-terms" class="ml-2 block text-sm text-white">
+                            我已阅读并同意用户协议和隐私政策
+                        </label>
+                    </div>
+                    
+                    <div>
+                        <button 
+                            type="submit" 
+                            id="registerBtn"
+                            class="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition duration-150 ease-in-out"
+                        >
+                            <span id="registerBtnText">注册账户</span>
+                            <span id="registerBtnLoading" class="hidden">注册中...</span>
+                        </button>
+                    </div>
+                    
+                    <div class="text-center">
+                        <p class="text-white opacity-80">
+                            已有账户？
+                            <a href="login.html" class="font-medium text-yellow-300 hover:text-yellow-200 transition duration-150 ease-in-out">
+                                立即登录
+                            </a>
+                        </p>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // API配置
+        const API_BASE_URL = 'http://localhost:5001/api/v1';
+        
+        // DOM元素
+        const registerForm = document.getElementById('registerForm');
+        const errorMessage = document.getElementById('errorMessage');
+        const successMessage = document.getElementById('successMessage');
+        const registerBtn = document.getElementById('registerBtn');
+        const registerBtnText = document.getElementById('registerBtnText');
+        const registerBtnLoading = document.getElementById('registerBtnLoading');
+        const passwordInput = document.getElementById('password');
+        const confirmPasswordInput = document.getElementById('confirmPassword');
+        const passwordStrengthBar = document.getElementById('passwordStrengthBar');
+        const passwordStrengthText = document.getElementById('passwordStrengthText');
+        const passwordMatchText = document.getElementById('passwordMatchText');
+
+        // 显示错误信息
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorMessage.classList.remove('hidden');
+            successMessage.classList.add('hidden');
+        }
+
+        // 显示成功信息
+        function showSuccess(message) {
+            successMessage.textContent = message;
+            successMessage.classList.remove('hidden');
+            errorMessage.classList.add('hidden');
+        }
+
+        // 隐藏消息
+        function hideMessages() {
+            errorMessage.classList.add('hidden');
+            successMessage.classList.add('hidden');
+        }
+
+        // 设置加载状态
+        function setLoading(isLoading) {
+            if (isLoading) {
+                registerBtn.disabled = true;
+                registerBtnText.classList.add('hidden');
+                registerBtnLoading.classList.remove('hidden');
+                registerBtn.classList.add('opacity-50');
+            } else {
+                registerBtn.disabled = false;
+                registerBtnText.classList.remove('hidden');
+                registerBtnLoading.classList.add('hidden');
+                registerBtn.classList.remove('opacity-50');
+            }
+        }
+
+        // 检查密码强度
+        function checkPasswordStrength(password) {
+            let strength = 0;
+            let text = '无';
+            let color = '#e5e7eb';
+            let width = '0%';
+
+            if (password.length >= 8) strength += 1;
+            if (/[a-z]/.test(password)) strength += 1;
+            if (/[A-Z]/.test(password)) strength += 1;
+            if (/[0-9]/.test(password)) strength += 1;
+            if (/[^a-zA-Z0-9]/.test(password)) strength += 1;
+
+            switch (strength) {
+                case 0:
+                case 1:
+                    text = '弱';
+                    color = '#ef4444';
+                    width = '20%';
+                    break;
+                case 2:
+                    text = '较弱';
+                    color = '#f97316';
+                    width = '40%';
+                    break;
+                case 3:
+                    text = '中等';
+                    color = '#eab308';
+                    width = '60%';
+                    break;
+                case 4:
+                    text = '较强';
+                    color = '#22c55e';
+                    width = '80%';
+                    break;
+                case 5:
+                    text = '强';
+                    color = '#16a34a';
+                    width = '100%';
+                    break;
+            }
+
+            passwordStrengthBar.style.width = width;
+            passwordStrengthBar.style.backgroundColor = color;
+            passwordStrengthText.textContent = `密码强度：${text}`;
+
+            return strength;
+        }
+
+        // 检查密码匹配
+        function checkPasswordMatch() {
+            const password = passwordInput.value;
+            const confirmPassword = confirmPasswordInput.value;
+
+            if (confirmPassword === '') {
+                passwordMatchText.textContent = '';
+                return true;
+            }
+
+            if (password === confirmPassword) {
+                passwordMatchText.textContent = '✓ 密码匹配';
+                passwordMatchText.className = 'text-green-400 text-xs mt-1';
+                return true;
+            } else {
+                passwordMatchText.textContent = '✗ 密码不匹配';
+                passwordMatchText.className = 'text-red-400 text-xs mt-1';
+                return false;
+            }
+        }
+
+        // 验证用户名格式
+        function validateUsername(username) {
+            const regex = /^[a-zA-Z0-9_]{3,20}$/;
+            return regex.test(username);
+        }
+
+        // 注册函数
+        async function register(username, email, password) {
+            try {
+                const response = await fetch(`${API_BASE_URL}/auth/register`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        username: username,
+                        email: email,
+                        password: password
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    console.log('✅ [Register] 注册成功，响应数据:', data);
+                    // 保存token和用户信息
+                    localStorage.setItem('access_token', data.data.token);
+                    localStorage.setItem('user_info', JSON.stringify(data.data.user));
+                    console.log('✅ [Register] Token已保存，自动登录成功');
+                    
+                    showSuccess('注册成功！正在跳转到主页...');
+                    setTimeout(() => {
+                        window.location.href = '/';
+                    }, 1500);
+                } else {
+                    showError(data.message || '注册失败，请重试');
+                }
+            } catch (error) {
+                console.error('注册错误:', error);
+                showError('网络错误，请检查连接后重试');
+            }
+        }
+
+        // 事件监听器
+        passwordInput.addEventListener('input', () => {
+            checkPasswordStrength(passwordInput.value);
+            checkPasswordMatch();
+        });
+
+        confirmPasswordInput.addEventListener('input', checkPasswordMatch);
+
+        // 表单提交处理
+        registerForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            hideMessages();
+            setLoading(true);
+
+            const formData = new FormData(registerForm);
+            const username = formData.get('username').trim();
+            const email = formData.get('email').trim();
+            const password = formData.get('password');
+            const confirmPassword = formData.get('confirmPassword');
+            const agreeTerms = formData.get('agree-terms') === 'on';
+
+            // 基本验证
+            if (!username || !email || !password || !confirmPassword) {
+                showError('请填写所有必填字段');
+                setLoading(false);
+                return;
+            }
+
+            if (!validateUsername(username)) {
+                showError('用户名格式不正确，只能包含字母、数字和下划线，长度3-20个字符');
+                setLoading(false);
+                return;
+            }
+
+            if (password !== confirmPassword) {
+                showError('两次输入的密码不一致');
+                setLoading(false);
+                return;
+            }
+
+            if (checkPasswordStrength(password) < 2) {
+                showError('密码强度太弱，请使用更复杂的密码');
+                setLoading(false);
+                return;
+            }
+
+            if (!agreeTerms) {
+                showError('请先同意用户协议和隐私政策');
+                setLoading(false);
+                return;
+            }
+
+            try {
+                await register(username, email, password);
+            } catch (error) {
+                showError('注册失败，请重试');
+            } finally {
+                setLoading(false);
+            }
+        });
+
+        // 检查是否已登录
+        document.addEventListener('DOMContentLoaded', () => {
+            const token = localStorage.getItem('access_token');
+            if (token) {
+                // 验证token是否有效
+                fetch(`${API_BASE_URL}/auth/verify`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // 已登录，跳转到主页
+                        window.location.href = '/';
+                    }
+                })
+                .catch(() => {
+                    // token无效，清除
+                    localStorage.removeItem('access_token');
+                    localStorage.removeItem('user_info');
+                });
+            }
+        });
+    </script>
+</body>
+</html>

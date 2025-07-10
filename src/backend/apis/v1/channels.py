@@ -9,6 +9,7 @@ from flask import Blueprint, request, jsonify
 from services import ChannelService, YouTubeSyncService
 from utils.api_utils import validate_json, handle_api_error
 from utils.decorators import validate_request
+from utils.auth_utils import require_login, require_resource_permission, get_current_user
 
 # 创建蓝图
 bp = Blueprint('channels', __name__, url_prefix='/api/v1/channels')
@@ -17,8 +18,9 @@ bp = Blueprint('channels', __name__, url_prefix='/api/v1/channels')
 youtube_sync = YouTubeSyncService()
 
 @bp.route('', methods=['GET'])
-def get_channels():
-    """获取频道列表
+@require_login
+def get_channels(current_user):
+    """获取当前用户的频道列表
     
     Query Parameters:
         active_only (bool): 是否只返回活跃频道，默认True
@@ -38,13 +40,13 @@ def get_channels():
         page = int(request.args.get('page', 1))
         per_page = min(int(request.args.get('per_page', 10)), 100)  # 限制最大100
         
-        # 根据不同条件获取频道
+        # 根据不同条件获取当前用户的频道
         if search:
-            channels = ChannelService.search_channels(search, active_only, order_by_sort=True)
+            channels = ChannelService.search_user_channels(current_user.id, search, active_only, order_by_sort=True)
         elif category:
-            channels = ChannelService.get_channels_by_category(category, active_only, order_by_sort=True)
+            channels = ChannelService.get_user_channels_by_category(current_user.id, category, active_only, order_by_sort=True)
         else:
-            channels = ChannelService.get_all_channels(active_only, order_by_sort=True)
+            channels = ChannelService.get_user_channels(current_user.id, active_only, order_by_sort=True)
         
         # 分页处理
         total_count = len(channels)
@@ -96,8 +98,9 @@ def get_channel(channel_id):
         return handle_api_error(500, f"获取频道详情失败: {str(e)}")
 
 @bp.route('', methods=['POST'])
+@require_login
 @validate_request(['url'])
-def create_channel():
+def create_channel(current_user):
     """创建新频道
     
     Request Body:
@@ -126,12 +129,13 @@ def create_channel():
         if cpm < 0:
             return handle_api_error(400, "CPM值不能为负数")
         
-        # 添加频道
+        # 添加频道（传入当前用户ID）
         result = youtube_sync.add_channel_from_url(
             url=url,
             name=name,
             cpm=cpm,
-            category=category
+            category=category,
+            user_id=current_user.id
         )
         
         if result['success']:
@@ -146,7 +150,7 @@ def create_channel():
     except ValueError as e:
         return handle_api_error(400, f"参数错误: {str(e)}")
     except Exception as e:
-        return handle_api_error(500, f"创建频道失败: {str(e)}")
+        return handle_api_error(500, f"创建频道失赅: {str(e)}")
 
 @bp.route('/<int:channel_id>', methods=['PUT'])
 @validate_request()

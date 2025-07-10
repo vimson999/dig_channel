@@ -1,4 +1,5 @@
 // API调用模块
+console.log('🌐 [API] API模块已加载');
 class APIClient {
     constructor(baseURL = CONFIG.API_BASE_URL) {
         this.baseURL = baseURL;
@@ -29,7 +30,10 @@ class APIClient {
             
             const options = {
                 method: method.toUpperCase(),
-                headers: { ...this.defaultHeaders },
+                headers: { 
+                    ...this.defaultHeaders,
+                    ...this.getAuthHeaders()
+                },
                 mode: 'cors'
             };
 
@@ -250,6 +254,62 @@ class APIClient {
             throw new APIError(0, '导出失败', { originalError: error.message });
         }
     }
+
+    // 认证相关方法
+    getAuthToken() {
+        return localStorage.getItem('access_token');
+    }
+
+    getAuthHeaders() {
+        const token = this.getAuthToken();
+        return token ? { 'Authorization': `Bearer ${token}` } : {};
+    }
+
+    setAuthToken(token) {
+        localStorage.setItem('access_token', token);
+    }
+
+    clearAuth() {
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('user_info');
+    }
+
+    // 验证token
+    async verifyToken() {
+        return this.get('/auth/verify');
+    }
+
+    // 登录
+    async login(credentials) {
+        const response = await this.post('/auth/login', credentials);
+        if (response.access_token) {
+            this.setAuthToken(response.access_token);
+            if (response.user) {
+                localStorage.setItem('user_info', JSON.stringify(response.user));
+            }
+        }
+        return response;
+    }
+
+    // 注册
+    async register(userData) {
+        return this.post('/auth/register', userData);
+    }
+
+    // 登出
+    async logout() {
+        try {
+            await this.post('/auth/logout');
+        } finally {
+            this.clearAuth();
+        }
+    }
+
+    // 获取当前用户信息
+    getCurrentUser() {
+        const userInfo = localStorage.getItem('user_info');
+        return userInfo ? JSON.parse(userInfo) : null;
+    }
 }
 
 // API错误类
@@ -325,6 +385,63 @@ class APIError extends Error {
 // 创建全局API客户端实例
 const api = new APIClient();
 
+// 初始化认证检查
+api.initAuth = async function() {
+    console.log('🔍 [Auth] 开始认证检查');
+    const token = this.getAuthToken();
+    console.log('🔍 [Auth] Token存在:', !!token, token ? `${token.substring(0, 20)}...` : 'null');
+    
+    if (token) {
+        try {
+            console.log('🔍 [Auth] 开始验证Token...');
+            const result = await this.verifyToken();
+            console.log('✅ [Auth] Token验证成功:', result);
+            
+            // 检查响应格式
+            if (result && result.success) {
+                console.log('✅ [Auth] 验证响应格式正确');
+                return true;
+            } else {
+                console.error('❌ [Auth] 验证响应格式错误:', result);
+                this.clearAuth();
+                return false;
+            }
+        } catch (error) {
+            console.error('❌ [Auth] Token验证失败:', error.message, error);
+            console.error('❌ [Auth] 错误详情:', error);
+            this.clearAuth();
+            return false;
+        }
+    }
+    console.log('❌ [Auth] 没有Token');
+    return false;
+};
+
+// 检查是否已认证
+api.isAuthenticated = function() {
+    return !!this.getAuthToken();
+};
+
+// 检查页面访问权限
+api.checkPageAccess = function() {
+    const isAuthPage = window.location.pathname.includes('login.html') || 
+                      window.location.pathname.includes('register.html');
+    
+    if (!isAuthPage && !this.isAuthenticated()) {
+        console.log('未登录用户访问受保护页面，重定向到登录页');
+        window.location.href = '/login.html';
+        return false;
+    }
+    
+    if (isAuthPage && this.isAuthenticated()) {
+        console.log('已登录用户访问认证页面，重定向到主页');
+        window.location.href = '/';
+        return false;
+    }
+    
+    return true;
+};
+
 // 响应拦截器 - 处理通用错误
 const originalRequest = api.request.bind(api);
 api.request = async function(...args) {
@@ -333,6 +450,17 @@ api.request = async function(...args) {
     } catch (error) {
         // 记录错误
         console.error('API错误:', error);
+        
+        // 处理401未授权错误
+        if (error.status === 401) {
+            // 如果不在登录页面，跳转到登录页面
+            if (!window.location.pathname.includes('login.html') && 
+                !window.location.pathname.includes('register.html')) {
+                console.log('检测到未授权访问，跳转到登录页面');
+                window.location.href = '/login.html';
+                return;
+            }
+        }
         
         // 显示错误提示
         if (typeof showToast === 'function') {

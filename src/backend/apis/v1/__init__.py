@@ -1,4 +1,5 @@
 # API v1 模块
+from .auth import bp as auth_bp
 from .channels import bp as channels_bp
 from .rankings import bp as rankings_bp  
 from .data import bp as data_bp
@@ -10,6 +11,7 @@ def register_blueprints(app):
     Args:
         app: Flask应用实例
     """
+    app.register_blueprint(auth_bp)
     app.register_blueprint(channels_bp)
     app.register_blueprint(rankings_bp)
     app.register_blueprint(data_bp)
@@ -20,6 +22,7 @@ def register_blueprints(app):
     app.register_blueprint(videos_bp)
 
 __all__ = [
+    'auth_bp',
     'channels_bp',
     'rankings_bp',
     'data_bp',

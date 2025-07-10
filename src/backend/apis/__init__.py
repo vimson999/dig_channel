@@ -23,6 +23,7 @@ def register_all_apis(app):
                 'endpoints': {
                     'v1': {
                         'base_url': '/api/v1',
+                        'auth': '/api/v1/auth',
                         'channels': '/api/v1/channels',
                         'rankings': '/api/v1/rankings', 
                         'data': '/api/v1/data',

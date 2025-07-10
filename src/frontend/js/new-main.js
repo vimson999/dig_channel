@@ -1,4 +1,5 @@
 // 高保真设计的主应用文件
+console.log('🎯 [Main] 主应用模块已加载');
 class YouTubeDataApp {
     constructor() {
         this.chart = null;
@@ -12,6 +13,18 @@ class YouTubeDataApp {
 
     async init() {
         console.log('🚀 YouTube数据追踪工具启动中...');
+        
+        // 检查认证状态
+        console.log('🔍 [Main] 开始认证检查...');
+        const isAuthenticated = await this.checkAuthStatus();
+        
+        if (!isAuthenticated) {
+            console.log('❌ [Main] 用户未认证，重定向到登录页');
+            window.location.href = '/login.html';
+            return;
+        }
+        
+        console.log('✅ [Main] 用户已认证，继续初始化应用');
         
         // 初始化图表
         this.initChart();
@@ -674,6 +687,105 @@ class YouTubeDataApp {
         console.log('默认CPM已更新为:', cpm);
         this.showToast(`默认CPM已设置为 $${cpm}`, 'success');
     }
+
+    // 显示用户信息
+    displayUserInfo() {
+        const user = api.getCurrentUser();
+        if (!user) return;
+
+        // 更新页面中的用户名显示
+        const userNameElements = document.querySelectorAll('.user-name');
+        userNameElements.forEach(element => {
+            element.textContent = user.display_name || user.username;
+        });
+
+        // 更新用户头像
+        const userAvatarElements = document.querySelectorAll('.user-avatar');
+        userAvatarElements.forEach(element => {
+            const firstLetter = (user.display_name || user.username).charAt(0).toUpperCase();
+            element.textContent = firstLetter;
+        });
+
+        // 添加登出按钮事件监听
+        const logoutBtn = document.getElementById('logout-btn');
+        if (logoutBtn) {
+            logoutBtn.addEventListener('click', () => this.handleLogout());
+        }
+
+        console.log('当前用户:', user.username);
+    }
+
+    // 处理登出
+    async handleLogout() {
+        try {
+            // 显示确认对话框
+            if (!confirm('确定要退出登录吗？')) {
+                return;
+            }
+
+            // 显示加载状态
+            this.showLoading('正在退出登录...');
+
+            // 调用登出API
+            await api.logout();
+
+            // 清除本地数据
+            api.clearAuth();
+
+            this.hideLoading();
+            this.showToast('已成功退出登录', 'success');
+
+            // 短暂延迟后跳转到登录页
+            setTimeout(() => {
+                window.location.href = '/login.html';
+            }, 1000);
+
+        } catch (error) {
+            console.error('登出失败:', error);
+            this.hideLoading();
+            
+            // 即使API失败也清除本地认证信息
+            api.clearAuth();
+            this.showToast('退出登录', 'info');
+            
+            setTimeout(() => {
+                window.location.href = '/login.html';
+            }, 1000);
+        }
+    }
+
+    // 检查认证状态
+    async checkAuthStatus() {
+        try {
+            console.log('🔐 [Auth] 开始验证认证状态...');
+            const token = localStorage.getItem('access_token');
+            if (!token) {
+                console.log('❌ [Auth] 没有找到token');
+                return false;
+            }
+            
+            console.log('🔐 [Auth] 找到token，验证有效性...');
+            const response = await api.verifyToken();
+            
+            console.log('🔐 [Auth] 验证响应:', response);
+            
+            if (response && response.success && response.data && response.data.user) {
+                console.log('✅ [Auth] Token验证成功，用户:', response.data.user.username);
+                // 更新本地用户信息
+                localStorage.setItem('user_info', JSON.stringify(response.data.user));
+                this.displayUserInfo();
+                return true;
+            } else {
+                console.log('❌ [Auth] Token验证失败，清除认证信息');
+                api.clearAuth();
+                return false;
+            }
+        } catch (error) {
+            console.error('❌ [Auth] 认证验证异常:', error);
+            api.clearAuth();
+            return false;
+        }
+    }
 }
 
 // 全局函数
@@ -722,6 +834,12 @@ function exportData() {
 function syncAllChannels() {
     if (window.app) {
         window.app.syncAllChannels();
+    }
+}
+
+function logout() {
+    if (window.app) {
+        window.app.handleLogout();
     }
 }
 

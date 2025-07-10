@@ -16,13 +16,15 @@ class DataService:
     @staticmethod
     def get_table_data(start_date: Optional[date] = None, 
                       end_date: Optional[date] = None,
-                      active_only: bool = True) -> Dict[str, Any]:
+                      active_only: bool = True,
+                      user_id: Optional[int] = None) -> Dict[str, Any]:
         """获取表格显示数据
         
         Args:
             start_date: 开始日期，默认最近30天
             end_date: 结束日期，默认今天
             active_only: 是否只包含活跃频道
+            user_id: 用户ID，用于数据过滤
             
         Returns:
             Dict: 表格数据
@@ -34,8 +36,10 @@ class DataService:
             if not start_date:
                 start_date = end_date - timedelta(days=30)
             
-            # 获取活跃频道
+            # 获取频道（按用户过滤）
             channels_query = Channel.query
+            if user_id is not None:
+                channels_query = channels_query.filter_by(user_id=user_id)
             if active_only:
                 channels_query = channels_query.filter_by(is_active=True)
             channels = channels_query.order_by(Channel.created_at.asc()).all()
@@ -46,6 +50,8 @@ class DataService:
                 ChannelData.date <= end_date
             )
             
+            if user_id is not None:
+                data_query = data_query.filter(Channel.user_id == user_id)
             if active_only:
                 data_query = data_query.filter(Channel.is_active == True)
             
@@ -227,22 +233,28 @@ class DataService:
             }
     
     @staticmethod
-    def get_channel_trend(channel_id: int, days: int = 30) -> Dict[str, Any]:
+    def get_channel_trend(channel_id: int, days: int = 30, user_id: Optional[int] = None) -> Dict[str, Any]:
         """获取单个频道的趋势数据
         
         Args:
             channel_id: 频道ID
             days: 天数
+            user_id: 用户ID，用于权限检查
             
         Returns:
             Dict: 趋势数据
         """
         try:
-            channel = Channel.query.get(channel_id)
+            # 检查频道存在和权限
+            query = Channel.query
+            if user_id is not None:
+                query = query.filter_by(user_id=user_id)
+            
+            channel = query.filter_by(id=channel_id).first()
             if not channel:
                 return {
                     'success': False,
-                    'message': '频道不存在'
+                    'message': '频道不存在或无权限访问'
                 }
             
             # 获取趋势数据
@@ -303,19 +315,30 @@ class DataService:
             }
     
     @staticmethod
-    def get_summary_statistics() -> Dict[str, Any]:
-        """获取总体统计信息
+    def get_summary_statistics(user_id: Optional[int] = None) -> Dict[str, Any]:
+        """获取统计信息
         
+        Args:
+            user_id: 用户ID，用于获取用户专属统计
+            
         Returns:
             Dict: 统计信息
         """
         try:
+            # 构建频道查询
+            channel_query = Channel.query
+            if user_id is not None:
+                channel_query = channel_query.filter_by(user_id=user_id)
+            
             # 活跃频道数
-            active_channels = Channel.query.filter_by(is_active=True).count()
+            active_channels = channel_query.filter_by(is_active=True).count()
             
             # 今日数据
             today = date.today()
-            today_data = ChannelData.query.filter_by(date=today).all()
+            today_query = ChannelData.query.filter_by(date=today)
+            if user_id is not None:
+                today_query = today_query.join(Channel).filter(Channel.user_id == user_id)
+            today_data = today_query.all()
             
             today_revenue = sum(float(d.estimated_revenue) for d in today_data)
             today_subscriber_growth = sum(d.subscriber_change for d in today_data)
@@ -323,10 +346,13 @@ class DataService:
             
             # 本月数据
             month_start = date(today.year, today.month, 1)
-            month_data = ChannelData.query.filter(
+            month_query = ChannelData.query.filter(
                 ChannelData.date >= month_start,
                 ChannelData.date <= today
-            ).all()
+            )
+            if user_id is not None:
+                month_query = month_query.join(Channel).filter(Channel.user_id == user_id)
+            month_data = month_query.all()
             
             month_revenue = sum(float(d.estimated_revenue) for d in month_data)
             month_subscriber_growth = sum(d.subscriber_change for d in month_data)
@@ -363,13 +389,14 @@ class DataService:
     
     @staticmethod
     def get_chart_data(chart_type: str, time_range: int = 30, 
-                      channel_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+                      channel_ids: Optional[List[str]] = None, user_id: int = None) -> Dict[str, Any]:
         """获取图表数据
         
         Args:
             chart_type: 图表类型 ('revenue', 'subscribers', 'views')
             time_range: 时间范围（天数）
             channel_ids: 指定频道ID列表，为空则包含所有活跃频道
+            user_id: 用户ID，用于数据过滤
             
         Returns:
             Dict: 图表数据
@@ -381,6 +408,8 @@ class DataService:
             
             # 获取频道列表
             channels_query = Channel.query.filter_by(is_active=True)
+            if user_id is not None:
+                channels_query = channels_query.filter(Channel.user_id == user_id)
             if channel_ids:
                 channels_query = channels_query.filter(Channel.channel_id.in_(channel_ids))
             channels = channels_query.order_by(Channel.name.asc()).all()
@@ -398,6 +427,8 @@ class DataService:
                 Channel.is_active == True
             )
             
+            if user_id is not None:
+                data_query = data_query.filter(Channel.user_id == user_id)
             if channel_ids:
                 data_query = data_query.filter(Channel.channel_id.in_(channel_ids))
             

@@ -14,12 +14,13 @@ class RankingService:
     """排行榜服务类"""
     
     @staticmethod
-    def get_daily_revenue_ranking(limit: int = 10, target_date: date = None) -> Dict[str, Any]:
+    def get_daily_revenue_ranking(limit: int = 10, target_date: date = None, user_id: int = None) -> Dict[str, Any]:
         """获取日收入排行榜
         
         Args:
             limit: 返回条数，默认10条
             target_date: 目标日期，默认今天
+            user_id: 用户ID，用于数据过滤
             
         Returns:
             Dict: 排行榜数据
@@ -29,7 +30,7 @@ class RankingService:
                 target_date = date.today()
             
             # 查询指定日期收入排行
-            ranking_data = db.session.query(
+            query = db.session.query(
                 Channel.id,
                 Channel.name,
                 Channel.channel_id,
@@ -37,7 +38,13 @@ class RankingService:
             ).join(ChannelData).filter(
                 ChannelData.date == target_date,
                 Channel.is_active == True
-            ).order_by(desc(ChannelData.estimated_revenue)).limit(limit).all()
+            )
+            
+            # 按用户过滤
+            if user_id is not None:
+                query = query.filter(Channel.user_id == user_id)
+                
+            ranking_data = query.order_by(desc(ChannelData.estimated_revenue)).limit(limit).all()
             
             # 格式化结果
             rankings = []
@@ -69,12 +76,13 @@ class RankingService:
             }
     
     @staticmethod
-    def get_monthly_revenue_ranking(limit: int = 10, target_date: date = None) -> Dict[str, Any]:
+    def get_monthly_revenue_ranking(limit: int = 10, target_date: date = None, user_id: int = None) -> Dict[str, Any]:
         """获取月收入排行榜
         
         Args:
             limit: 返回条数，默认10条
             target_date: 目标日期，默认今天所在月
+            user_id: 用户ID，用于数据过滤
             
         Returns:
             Dict: 排行榜数据
@@ -95,7 +103,7 @@ class RankingService:
             if target_date.year == date.today().year and target_date.month == date.today().month:
                 month_end = min(month_end, date.today())
             
-            ranking_data = db.session.query(
+            query = db.session.query(
                 Channel.id,
                 Channel.name,
                 Channel.channel_id,
@@ -104,7 +112,13 @@ class RankingService:
                 ChannelData.date >= month_start,
                 ChannelData.date <= month_end,
                 Channel.is_active == True
-            ).group_by(
+            )
+            
+            # 按用户过滤
+            if user_id is not None:
+                query = query.filter(Channel.user_id == user_id)
+                
+            ranking_data = query.group_by(
                 Channel.id, Channel.name, Channel.channel_id
             ).order_by(desc('total_revenue')).limit(limit).all()
             
@@ -141,12 +155,13 @@ class RankingService:
             }
     
     @staticmethod
-    def get_daily_subscriber_ranking(limit: int = 10, target_date: date = None) -> Dict[str, Any]:
+    def get_daily_subscriber_ranking(limit: int = 10, target_date: date = None, user_id: int = None) -> Dict[str, Any]:
         """获取日新增订阅排行榜
         
         Args:
             limit: 返回条数，默认10条
             target_date: 目标日期，默认今天
+            user_id: 用户ID，用于数据过滤
             
         Returns:
             Dict: 排行榜数据
@@ -156,7 +171,7 @@ class RankingService:
                 target_date = date.today()
             
             # 查询指定日期订阅增长排行
-            ranking_data = db.session.query(
+            query = db.session.query(
                 Channel.id,
                 Channel.name,
                 Channel.channel_id,
@@ -164,7 +179,13 @@ class RankingService:
             ).join(ChannelData).filter(
                 ChannelData.date == target_date,
                 Channel.is_active == True
-            ).order_by(desc(ChannelData.subscriber_change)).limit(limit).all()
+            )
+            
+            # 按用户过滤
+            if user_id is not None:
+                query = query.filter(Channel.user_id == user_id)
+                
+            ranking_data = query.order_by(desc(ChannelData.subscriber_change)).limit(limit).all()
             
             # 格式化结果
             rankings = []
@@ -196,12 +217,13 @@ class RankingService:
             }
     
     @staticmethod
-    def get_monthly_subscriber_ranking(limit: int = 10, target_date: date = None) -> Dict[str, Any]:
+    def get_monthly_subscriber_ranking(limit: int = 10, target_date: date = None, user_id: int = None) -> Dict[str, Any]:
         """获取月新增订阅排行榜
         
         Args:
             limit: 返回条数，默认10条
             target_date: 目标日期，默认今天所在月
+            user_id: 用户ID，用于数据过滤
             
         Returns:
             Dict: 排行榜数据
@@ -222,7 +244,7 @@ class RankingService:
             if target_date.year == date.today().year and target_date.month == date.today().month:
                 month_end = min(month_end, date.today())
             
-            ranking_data = db.session.query(
+            query = db.session.query(
                 Channel.id,
                 Channel.name,
                 Channel.channel_id,
@@ -231,7 +253,13 @@ class RankingService:
                 ChannelData.date >= month_start,
                 ChannelData.date <= month_end,
                 Channel.is_active == True
-            ).group_by(
+            )
+            
+            # 按用户过滤
+            if user_id is not None:
+                query = query.filter(Channel.user_id == user_id)
+                
+            ranking_data = query.group_by(
                 Channel.id, Channel.name, Channel.channel_id
             ).order_by(desc('total_subscriber_change')).limit(limit).all()
             
@@ -268,21 +296,22 @@ class RankingService:
             }
     
     @staticmethod
-    def get_all_rankings(limit: int = 3) -> Dict[str, Any]:
+    def get_all_rankings(limit: int = 3, user_id: int = None) -> Dict[str, Any]:
         """获取所有4个排行榜数据
         
         Args:
             limit: 每个排行榜返回的条数，默认3条
+            user_id: 用户ID，用于数据过滤
             
         Returns:
             Dict: 所有排行榜数据
         """
         try:
             # 获取所有排行榜
-            daily_revenue = RankingService.get_daily_revenue_ranking(limit)
-            monthly_revenue = RankingService.get_monthly_revenue_ranking(limit)
-            daily_subscriber = RankingService.get_daily_subscriber_ranking(limit)
-            monthly_subscriber = RankingService.get_monthly_subscriber_ranking(limit)
+            daily_revenue = RankingService.get_daily_revenue_ranking(limit, None, user_id)
+            monthly_revenue = RankingService.get_monthly_revenue_ranking(limit, None, user_id)
+            daily_subscriber = RankingService.get_daily_subscriber_ranking(limit, None, user_id)
+            monthly_subscriber = RankingService.get_monthly_subscriber_ranking(limit, None, user_id)
             
             return {
                 'success': True,

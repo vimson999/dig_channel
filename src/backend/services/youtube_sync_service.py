@@ -27,7 +27,7 @@ class YouTubeSyncService:
             self.youtube_api = None
     
     def add_channel_from_url(self, url: str, name: str = None, 
-                           cpm: float = 1.00, category: str = None) -> Dict[str, Any]:
+                           cpm: float = 1.00, category: str = None, user_id: int = None) -> Dict[str, Any]:
         """从YouTube URL添加频道
         
         Args:
@@ -35,6 +35,7 @@ class YouTubeSyncService:
             name: 频道名称（可选，将从API获取）
             cpm: CPM值
             category: 分类
+            user_id: 用户ID
             
         Returns:
             Dict: 添加结果
@@ -46,6 +47,12 @@ class YouTubeSyncService:
                     'message': 'YouTube API未初始化'
                 }
             
+            if not user_id:
+                return {
+                    'success': False,
+                    'message': '用户ID不能为空'
+                }
+            
             # 解析频道ID
             channel_id = self.youtube_api.parse_channel_url(url)
             if not channel_id:
@@ -54,12 +61,12 @@ class YouTubeSyncService:
                     'message': '无法解析YouTube频道URL'
                 }
             
-            # 检查频道是否已存在
-            existing = ChannelService.get_channel_by_youtube_id(channel_id)
+            # 检查用户是否已添加过该频道
+            existing = ChannelService.get_channel_by_youtube_id(channel_id, user_id)
             if existing:
                 return {
                     'success': False,
-                    'message': f'频道 {existing["name"]} 已存在'
+                    'message': f'您已添加过频道 {existing["name"]}'
                 }
             
             # 获取频道信息
@@ -76,6 +83,7 @@ class YouTubeSyncService:
             
             # 创建频道记录
             result = ChannelService.create_channel(
+                user_id=user_id,
                 name=name,
                 channel_id=channel_id,
                 url=url,
@@ -364,6 +372,176 @@ class YouTubeSyncService:
             return {
                 'success': False,
                 'message': f'批量同步失败: {str(e)}'
+            }
+    
+    def sync_user_channels(self, user_id: int, target_date: date = None) -> Dict[str, Any]:
+        """同步用户的所有活跃频道数据
+        
+        Args:
+            user_id: 用户ID
+            target_date: 目标日期，默认今天
+            
+        Returns:
+            Dict: 同步结果汇总
+        """
+        try:
+            if not self.youtube_api:
+                return {
+                    'success': False,
+                    'message': 'YouTube API未初始化'
+                }
+            
+            if not target_date:
+                target_date = date.today()
+            
+            # 获取用户的所有活跃频道
+            channels = ChannelService.get_user_channels(user_id, active_only=True)
+            if not channels:
+                return {
+                    'success': True,
+                    'message': '没有活跃频道需要同步',
+                    'data': {
+                        'total_channels': 0,
+                        'success_count': 0,
+                        'failed_count': 0,
+                        'results': []
+                    }
+                }
+            
+            results = []
+            success_count = 0
+            failed_count = 0
+            
+            # 批量获取YouTube数据（提高效率）
+            channel_ids = [ch['channel_id'] for ch in channels]
+            
+            # 分批处理（每批最多50个）
+            batch_size = 50
+            for i in range(0, len(channel_ids), batch_size):
+                batch_ids = channel_ids[i:i + batch_size]
+                
+                try:
+                    # 批量获取统计数据
+                    stats_list = self.youtube_api.get_multiple_channels_statistics(batch_ids)
+                    stats_dict = {stat['channel_id']: stat for stat in stats_list}
+                    
+                    # 处理这批频道
+                    for channel in channels[i:i + batch_size]:
+                        db_channel_id = channel['id']
+                        youtube_channel_id = channel['channel_id']
+                        
+                        try:
+                            stats = stats_dict.get(youtube_channel_id)
+                            if not stats:
+                                results.append({
+                                    'channel_id': db_channel_id,
+                                    'channel_name': channel['name'],
+                                    'success': False,
+                                    'message': '未获取到统计数据'
+                                })
+                                failed_count += 1
+                                continue
+                            
+                            # 检查当日数据是否已存在
+                            existing_data = ChannelData.query.filter_by(
+                                channel_id=db_channel_id,
+                                date=target_date
+                            ).first()
+                            
+                            # 获取前一天数据
+                            previous_date = target_date - timedelta(days=1)
+                            previous_data = ChannelData.query.filter_by(
+                                channel_id=db_channel_id,
+                                date=previous_date
+                            ).first()
+                            
+                            if existing_data:
+                                # 更新现有数据
+                                existing_data.subscribers = stats['subscriber_count']
+                                existing_data.total_views = stats['view_count']
+                                existing_data.video_count = stats['video_count']
+                                existing_data.calculate_changes(previous_data)
+                                
+                                results.append({
+                                    'channel_id': db_channel_id,
+                                    'channel_name': channel['name'],
+                                    'success': True,
+                                    'message': '数据更新成功',
+                                    'data': existing_data.to_dict()
+                                })
+                            else:
+                                # 创建新数据
+                                new_data = ChannelData(
+                                    channel_id=db_channel_id,
+                                    date=target_date,
+                                    subscribers=stats['subscriber_count'],
+                                    total_views=stats['view_count'],
+                                    video_count=stats['video_count']
+                                )
+                                
+                                new_data.calculate_changes(previous_data)
+                                db.session.add(new_data)
+                                
+                                results.append({
+                                    'channel_id': db_channel_id,
+                                    'channel_name': channel['name'],
+                                    'success': True,
+                                    'message': '数据同步成功',
+                                    'data': new_data.to_dict()
+                                })
+                            
+                            success_count += 1
+                            
+                        except Exception as e:
+                            results.append({
+                                'channel_id': db_channel_id,
+                                'channel_name': channel['name'],
+                                'success': False,
+                                'message': f'同步失败: {str(e)}'
+                            })
+                            failed_count += 1
+                    
+                    # 提交这批的数据库更改
+                    db.session.commit()
+                    
+                except Exception as e:
+                    # 批量获取失败，回退到单个获取
+                    db.session.rollback()
+                    
+                    for channel in channels[i:i + batch_size]:
+                        sync_result = self.sync_channel_data(channel['id'], target_date)
+                        results.append({
+                            'channel_id': channel['id'],
+                            'channel_name': channel['name'],
+                            'success': sync_result['success'],
+                            'message': sync_result['message'],
+                            'data': sync_result.get('data')
+                        })
+                        
+                        if sync_result['success']:
+                            success_count += 1
+                        else:
+                            failed_count += 1
+            
+            return {
+                'success': True,
+                'message': f'用户频道同步完成: 成功 {success_count}，失败 {failed_count}',
+                'data': {
+                    'user_id': user_id,
+                    'total_channels': len(channels),
+                    'success_count': success_count,
+                    'failed_count': failed_count,
+                    'date': target_date.isoformat(),
+                    'results': results,
+                    'quota_info': self.youtube_api.get_quota_info()
+                }
+            }
+            
+        except Exception as e:
+            db.session.rollback()
+            return {
+                'success': False,
+                'message': f'用户频道同步失败: {str(e)}'
             }
     
     def get_api_status(self) -> Dict[str, Any]:

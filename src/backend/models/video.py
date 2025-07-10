@@ -6,7 +6,8 @@ class Video(db.Model):
     __tablename__ = 'videos'
     
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    video_id = db.Column(db.String(100), nullable=False, unique=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    video_id = db.Column(db.String(100), nullable=False)
     channel_id = db.Column(db.Integer, db.ForeignKey('channels.id'), nullable=False)
     title = db.Column(db.String(500), nullable=False)
     description = db.Column(db.Text, nullable=True)
@@ -23,6 +24,13 @@ class Video(db.Model):
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # 添加复合唯一索引：同一用户下视频ID唯一
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'video_id', name='unique_user_video'),
+        db.Index('idx_video_user_id', 'user_id'),
+        db.Index('idx_video_channel_id', 'channel_id'),
+    )
     
     # 关联关系
     channel = db.relationship('Channel', backref='videos')
@@ -44,6 +52,7 @@ class Video(db.Model):
         
         return {
             'id': self.id,
+            'user_id': self.user_id,
             'video_id': self.video_id,
             'channel_id': self.channel_id,
             'channel_name': self.channel.name if self.channel else None,
@@ -109,7 +118,20 @@ class Video(db.Model):
         """创建视频记录"""
         import json
         
+        # 确保user_id存在
+        if 'user_id' not in video_data:
+            raise ValueError('user_id is required')
+        
+        # 检查用户下是否已存在相同的视频ID
+        existing = cls.query.filter_by(
+            user_id=video_data['user_id'], 
+            video_id=video_data['video_id']
+        ).first()
+        if existing:
+            return existing  # 返回已存在的视频，避免重复创建
+        
         video = cls(
+            user_id=video_data['user_id'],
             video_id=video_data['video_id'],
             channel_id=video_data['channel_id'],
             title=video_data['title'],
@@ -129,6 +151,31 @@ class Video(db.Model):
         db.session.add(video)
         db.session.commit()
         return video
+    
+    @classmethod
+    def get_user_videos(cls, user_id, channel_id=None, active_only=True, limit=None, offset=None):
+        """获取用户的视频列表"""
+        query = cls.query.filter_by(user_id=user_id)
+        
+        if channel_id:
+            query = query.filter_by(channel_id=channel_id)
+        
+        if active_only:
+            query = query.filter_by(is_active=True)
+        
+        query = query.order_by(cls.published_at.desc())
+        
+        if offset:
+            query = query.offset(offset)
+        
+        if limit:
+            query = query.limit(limit)
+        
+        return query.all()
+    
+    def belongs_to_user(self, user_id):
+        """检查视频是否属于指定用户"""
+        return self.user_id == user_id
 
 class VideoData(db.Model):
     __tablename__ = 'video_data'
@@ -192,9 +239,14 @@ class VideoData(db.Model):
         # 计算预估收入(需要频道的CPM数据)
         if self.view_change > 0:
             from .channel import Channel
-            channel = Channel.query.get(self.video.channel_id)
-            if channel and channel.cpm:
-                self.estimated_revenue = (self.view_change * float(channel.cpm)) / 1000
+            # 直接通过video_id查询Video，避免依赖self.video关联
+            video = Video.query.get(self.video_id)
+            if video:
+                channel = Channel.query.get(video.channel_id)
+                if channel and channel.cpm:
+                    self.estimated_revenue = (self.view_change * float(channel.cpm)) / 1000
+                else:
+                    self.estimated_revenue = 0.00
             else:
                 self.estimated_revenue = 0.00
         else:

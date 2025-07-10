@@ -8,13 +8,15 @@
 from flask import Blueprint, request, jsonify
 from services import DataService
 from utils.api_utils import handle_api_error
+from utils.auth_utils import require_login
 from datetime import datetime, date, timedelta
 
 # 创建蓝图
 bp = Blueprint('data', __name__, url_prefix='/api/v1/data')
 
 @bp.route('/table', methods=['GET'])
-def get_table_data():
+@require_login
+def get_table_data(current_user):
     """获取表格显示数据
     
     Query Parameters:
@@ -49,8 +51,8 @@ def get_table_data():
         
         active_only = request.args.get('active_only', 'true').lower() == 'true'
         
-        # 获取表格数据
-        result = DataService.get_table_data(start_date, end_date, active_only)
+        # 获取表格数据（只获取当前用户的数据）
+        result = DataService.get_table_data(start_date, end_date, active_only, current_user.id)
         
         if result['success']:
             data = result['data']
@@ -90,7 +92,8 @@ def get_table_data():
 
 
 @bp.route('/trend/<int:channel_id>', methods=['GET'])
-def get_channel_trend(channel_id):
+@require_login
+def get_channel_trend(current_user, channel_id):
     """获取单个频道的趋势数据
     
     Args:
@@ -105,7 +108,9 @@ def get_channel_trend(channel_id):
     try:
         days = min(int(request.args.get('days', 30)), 90)
         
-        result = DataService.get_channel_trend(channel_id, days)
+        # 检查频道所有权
+        user_filter = None if current_user.is_admin else current_user.id
+        result = DataService.get_channel_trend(channel_id, days, user_filter)
         
         if result['success']:
             return jsonify({
@@ -121,14 +126,16 @@ def get_channel_trend(channel_id):
         return handle_api_error(500, f"获取趋势数据失败: {str(e)}")
 
 @bp.route('/summary', methods=['GET'])
-def get_summary_statistics():
+@require_login
+def get_summary_statistics(current_user):
     """获取总体统计信息
     
     Returns:
         JSON: 统计信息
     """
     try:
-        result = DataService.get_summary_statistics()
+        # 获取用户的统计信息
+        result = DataService.get_summary_statistics(current_user.id)
         
         if result['success']:
             return jsonify({
@@ -142,7 +149,8 @@ def get_summary_statistics():
         return handle_api_error(500, f"获取统计信息失败: {str(e)}")
 
 @bp.route('/export', methods=['GET'])
-def export_data():
+@require_login
+def export_data(current_user):
     """导出数据
     
     Query Parameters:
@@ -279,7 +287,8 @@ def export_to_excel(data):
     return handle_api_error(501, "Excel导出功能尚未实现")
 
 @bp.route('/chart-data', methods=['GET'])
-def get_chart_data():
+@require_login
+def get_chart_data(current_user):
     """获取图表数据
     
     Query Parameters:
@@ -300,8 +309,8 @@ def get_chart_data():
         if channel_ids_str:
             channel_ids = [cid.strip() for cid in channel_ids_str.split(',') if cid.strip()]
         
-        # 获取图表数据
-        result = DataService.get_chart_data(chart_type, time_range, channel_ids)
+        # 获取图表数据（只获取当前用户的数据）
+        result = DataService.get_chart_data(chart_type, time_range, channel_ids, current_user.id)
         
         if result['success']:
             return jsonify({

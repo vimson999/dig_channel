@@ -8,13 +8,15 @@
 from flask import Blueprint, request, jsonify
 from services import RankingService
 from utils.api_utils import handle_api_error
+from utils.auth_utils import require_login
 from datetime import datetime, date
 
 # 创建蓝图
 bp = Blueprint('rankings', __name__, url_prefix='/api/v1/rankings')
 
 @bp.route('/daily-revenue', methods=['GET'])
-def get_daily_revenue_ranking():
+@require_login
+def get_daily_revenue_ranking(current_user):
     """获取日收入排行榜
     
     Query Parameters:
@@ -34,7 +36,7 @@ def get_daily_revenue_ranking():
             # 验证日期格式
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         
-        result = RankingService.get_daily_revenue_ranking(limit, target_date)
+        result = RankingService.get_daily_revenue_ranking(limit, target_date, current_user.id)
         
         if result['success']:
             return jsonify({
@@ -50,7 +52,8 @@ def get_daily_revenue_ranking():
         return handle_api_error(500, f"获取日收入排行榜失败: {str(e)}")
 
 @bp.route('/monthly-revenue', methods=['GET'])
-def get_monthly_revenue_ranking():
+@require_login
+def get_monthly_revenue_ranking(current_user):
     """获取月收入排行榜
     
     Query Parameters:
@@ -77,7 +80,7 @@ def get_monthly_revenue_ranking():
                 return handle_api_error(400, "年份范围无效")
             target_date = date(year, month, 1)
         
-        result = RankingService.get_monthly_revenue_ranking(limit, target_date)
+        result = RankingService.get_monthly_revenue_ranking(limit, target_date, current_user.id)
         
         if result['success']:
             return jsonify({
@@ -93,7 +96,8 @@ def get_monthly_revenue_ranking():
         return handle_api_error(500, f"获取月收入排行榜失败: {str(e)}")
 
 @bp.route('/daily-subscriber', methods=['GET'])
-def get_daily_subscriber_ranking():
+@require_login
+def get_daily_subscriber_ranking(current_user):
     """获取日新增订阅排行榜
     
     Query Parameters:
@@ -112,7 +116,7 @@ def get_daily_subscriber_ranking():
         if date_str:
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         
-        result = RankingService.get_daily_subscriber_ranking(limit, target_date)
+        result = RankingService.get_daily_subscriber_ranking(limit, target_date, current_user.id)
         
         if result['success']:
             return jsonify({
@@ -128,7 +132,8 @@ def get_daily_subscriber_ranking():
         return handle_api_error(500, f"获取日订阅增长排行榜失败: {str(e)}")
 
 @bp.route('/monthly-subscriber', methods=['GET'])
-def get_monthly_subscriber_ranking():
+@require_login
+def get_monthly_subscriber_ranking(current_user):
     """获取月新增订阅排行榜
     
     Query Parameters:
@@ -155,7 +160,7 @@ def get_monthly_subscriber_ranking():
                 return handle_api_error(400, "年份范围无效")
             target_date = date(year, month, 1)
         
-        result = RankingService.get_monthly_subscriber_ranking(limit, target_date)
+        result = RankingService.get_monthly_subscriber_ranking(limit, target_date, current_user.id)
         
         if result['success']:
             return jsonify({
@@ -171,7 +176,8 @@ def get_monthly_subscriber_ranking():
         return handle_api_error(500, f"获取月订阅增长排行榜失败: {str(e)}")
 
 @bp.route('/all', methods=['GET'])
-def get_all_rankings():
+@require_login
+def get_all_rankings(current_user):
     """获取所有4个排行榜数据
     
     Query Parameters:
@@ -183,7 +189,7 @@ def get_all_rankings():
     try:
         limit = min(int(request.args.get('limit', 3)), 10)
         
-        result = RankingService.get_all_rankings(limit)
+        result = RankingService.get_all_rankings(limit, current_user.id)
         
         if result['success']:
             return jsonify({

@@ -14,13 +14,16 @@ class VideoSyncService:
     def __init__(self):
         self.youtube_api = YouTubeAPI()
         
-    def sync_all_channels_videos(self, days_back: int = 10) -> Dict:
+    def sync_all_channels_videos(self, days_back: int = 10, user_id: int = None) -> Dict:
         """同步所有活跃频道的视频"""
         logger.info("开始同步所有频道的视频...")
         
         try:
-            # 获取所有活跃频道
-            channels = Channel.query.filter_by(is_active=True).all()
+            # 获取活跃频道（按用户过滤）
+            query = Channel.query.filter_by(is_active=True)
+            if user_id is not None:
+                query = query.filter_by(user_id=user_id)
+            channels = query.all()
             
             if not channels:
                 return {
@@ -235,9 +238,15 @@ class VideoSyncService:
     
     def _create_video(self, channel_id: int, video_info: Dict) -> Video:
         """创建新视频记录"""
+        # 获取频道的user_id
+        channel = Channel.query.get(channel_id)
+        if not channel:
+            raise ValueError(f"频道ID {channel_id} 不存在")
+        
         video_data = {
             'video_id': video_info['video_id'],
             'channel_id': channel_id,
+            'user_id': channel.user_id,  # 添加user_id
             'title': video_info.get('title', ''),
             'description': video_info.get('description', ''),
             'published_at': datetime.fromisoformat(video_info['published_at'].replace('Z', '+00:00')),
@@ -390,10 +399,19 @@ class VideoSyncService:
     
     def get_channel_videos(self, channel_id: int, page: int = 1, per_page: int = 20, 
                           search: str = None, category: str = None, 
-                          sort_by: str = 'published_at', order: str = 'desc') -> Dict:
+                          sort_by: str = 'published_at', order: str = 'desc', user_id: int = None) -> Dict:
         """获取频道视频列表"""
         try:
-            # 构建查询
+            # 构建查询 - 先验证频道权限
+            if user_id is not None:
+                channel = Channel.query.filter_by(id=channel_id, user_id=user_id).first()
+                if not channel:
+                    return {
+                        'success': False,
+                        'message': '频道不存在或无权限访问',
+                        'data': {}
+                    }
+            
             query = Video.query.filter_by(channel_id=channel_id, is_active=True)
             
             # 搜索条件
@@ -455,15 +473,19 @@ class VideoSyncService:
     
     def search_videos(self, search: str, page: int = 1, per_page: int = 20, 
                      channel_id: int = None, category: str = None,
-                     sort_by: str = 'published_at', order: str = 'desc') -> Dict:
+                     sort_by: str = 'published_at', order: str = 'desc', user_id: int = None) -> Dict:
         """搜索视频"""
         try:
             # 构建查询
-            query = Video.query.filter_by(is_active=True)
+            query = Video.query.join(Channel).filter(Video.is_active == True)
+            
+            # 用户数据隔离
+            if user_id is not None:
+                query = query.filter(Channel.user_id == user_id)
             
             # 频道筛选
             if channel_id:
-                query = query.filter_by(channel_id=channel_id)
+                query = query.filter(Video.channel_id == channel_id)
             
             # 搜索条件
             if search:

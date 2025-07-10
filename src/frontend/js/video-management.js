@@ -1,3 +1,62 @@
+// 全局函数定义 - 确保在页面加载时立即可用
+window.logout = async function() {
+    try {
+        // 显示确认对话框
+        if (!confirm('确定要退出登录吗？')) {
+            return;
+        }
+
+        // 显示加载状态
+        showStatusBar('正在退出登录...');
+
+        // 调用登出API
+        await api.logout();
+
+        // 清除本地数据
+        api.clearAuth();
+
+        hideStatusBar();
+        showToast('已成功退出登录', 'success');
+
+        // 短暂延迟后跳转到登录页
+        setTimeout(() => {
+            window.location.href = '/login.html';
+        }, 1000);
+
+    } catch (error) {
+        console.error('登出失败:', error);
+        hideStatusBar();
+        
+        // 即使API失败也清除本地认证信息
+        api.clearAuth();
+        showToast('退出登录', 'info');
+        
+        setTimeout(() => {
+            window.location.href = '/login.html';
+        }, 1000);
+    }
+};
+
+window.displayUserInfo = function() {
+    const user = api.getCurrentUser();
+    if (!user) return;
+
+    // 更新页面中的用户名显示
+    const userNameElements = document.querySelectorAll('.user-name');
+    userNameElements.forEach(element => {
+        element.textContent = user.display_name || user.username;
+    });
+
+    // 更新用户头像
+    const userAvatarElements = document.querySelectorAll('.user-avatar');
+    userAvatarElements.forEach(element => {
+        const firstLetter = (user.display_name || user.username).charAt(0).toUpperCase();
+        element.textContent = firstLetter;
+    });
+
+    console.log('当前用户:', user.username);
+};
+
 // 状态栏和Toast函数
 function showStatusBar(message) {
     const statusBar = document.getElementById('status-bar');
@@ -837,10 +896,40 @@ function closeVideoDetailModal() {
     videoManager.closeVideoDetailModal();
 }
 
+
 // 初始化视频管理器
 let videoManager;
-document.addEventListener('DOMContentLoaded', () => {
-    videoManager = new VideoManager();
+document.addEventListener('DOMContentLoaded', async () => {
+    // 检查认证状态
+    console.log('🔍 [Videos] 开始认证检查...');
+    const token = localStorage.getItem('access_token');
+    if (!token) {
+        console.log('❌ [Videos] 没有Token，重定向到登录页');
+        window.location.href = '/login.html';
+        return;
+    }
+    
+    try {
+        // 验证token
+        const response = await api.verifyToken();
+        if (response && response.success && response.data && response.data.user) {
+            console.log('✅ [Videos] Token验证成功，用户:', response.data.user.username);
+            // 更新本地用户信息
+            localStorage.setItem('user_info', JSON.stringify(response.data.user));
+            window.displayUserInfo();
+            
+            // 初始化视频管理器
+            videoManager = new VideoManager();
+        } else {
+            console.log('❌ [Videos] Token验证失败，重定向到登录页');
+            api.clearAuth();
+            window.location.href = '/login.html';
+        }
+    } catch (error) {
+        console.error('❌ [Videos] 认证验证异常:', error);
+        api.clearAuth();
+        window.location.href = '/login.html';
+    }
 });
 
 // 移动端菜单切换

@@ -1,4 +1,5 @@
 // 配置文件
+console.log('📄 [Config] 配置文件已加载');
 const CONFIG = {
     // API基础URL
     API_BASE_URL: 'http://localhost:5001/api/v1',

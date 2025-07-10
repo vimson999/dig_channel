@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - YouTube频道数据分析</title>
+    <link rel="icon" type="image/x-icon" href="assets/images/favicon.ico">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .auth-card {
+            backdrop-filter: blur(10px);
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .form-input {
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+        .form-input:focus {
+            background: rgba(255, 255, 255, 1);
+            border-color: #667eea;
+        }
+    </style>
+</head>
+<body class="font-sans">
+    <div class="min-h-screen flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
+        <div class="max-w-md w-full space-y-8">
+            <div class="auth-card rounded-lg shadow-2xl p-8">
+                <!-- Logo区域 -->
+                <div class="text-center">
+                    <h1 class="text-3xl font-bold text-white mb-2">YouTube数据分析</h1>
+                    <p class="text-lg text-white opacity-80 mb-8">登录您的账户</p>
+                </div>
+                
+                <!-- 登录表单 -->
+                <form id="loginForm" class="space-y-6">
+                    <div id="errorMessage" class="hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded"></div>
+                    
+                    <div>
+                        <label for="username" class="block text-white text-sm font-medium mb-2">用户名或邮箱</label>
+                        <input 
+                            type="text" 
+                            id="username" 
+                            name="username" 
+                            required 
+                            class="form-input appearance-none rounded-md relative block w-full px-3 py-2 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:z-10 sm:text-sm"
+                            placeholder="请输入用户名或邮箱"
+                        >
+                    </div>
+                    
+                    <div>
+                        <label for="password" class="block text-white text-sm font-medium mb-2">密码</label>
+                        <input 
+                            type="password" 
+                            id="password" 
+                            name="password" 
+                            required 
+                            class="form-input appearance-none rounded-md relative block w-full px-3 py-2 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:z-10 sm:text-sm"
+                            placeholder="请输入密码"
+                        >
+                    </div>
+                    
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center">
+                            <input 
+                                id="remember-me" 
+                                name="remember-me" 
+                                type="checkbox" 
+                                class="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
+                            >
+                            <label for="remember-me" class="ml-2 block text-sm text-white">
+                                记住我
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div>
+                        <button 
+                            type="submit" 
+                            id="loginBtn"
+                            class="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition duration-150 ease-in-out"
+                        >
+                            <span id="loginBtnText">登录</span>
+                            <span id="loginBtnLoading" class="hidden">登录中...</span>
+                        </button>
+                    </div>
+                    
+                    <div class="text-center">
+                        <p class="text-white opacity-80">
+                            还没有账户？
+                            <a href="register.html" class="font-medium text-yellow-300 hover:text-yellow-200 transition duration-150 ease-in-out">
+                                立即注册
+                            </a>
+                        </p>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // API配置
+        const API_BASE_URL = 'http://localhost:5001/api/v1';
+        
+        // DOM元素
+        const loginForm = document.getElementById('loginForm');
+        const errorMessage = document.getElementById('errorMessage');
+        const loginBtn = document.getElementById('loginBtn');
+        const loginBtnText = document.getElementById('loginBtnText');
+        const loginBtnLoading = document.getElementById('loginBtnLoading');
+
+        // 显示错误信息
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorMessage.classList.remove('hidden');
+        }
+
+        // 隐藏错误信息
+        function hideError() {
+            errorMessage.classList.add('hidden');
+        }
+
+        // 设置加载状态
+        function setLoading(isLoading) {
+            if (isLoading) {
+                loginBtn.disabled = true;
+                loginBtnText.classList.add('hidden');
+                loginBtnLoading.classList.remove('hidden');
+                loginBtn.classList.add('opacity-50');
+            } else {
+                loginBtn.disabled = false;
+                loginBtnText.classList.remove('hidden');
+                loginBtnLoading.classList.add('hidden');
+                loginBtn.classList.remove('opacity-50');
+            }
+        }
+
+        // 登录函数
+        async function login(username, password, rememberMe) {
+            try {
+                const response = await fetch(`${API_BASE_URL}/auth/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        username: username,
+                        password: password,
+                        remember_me: rememberMe
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    console.log('✅ [Login] 登录成功，响应数据:', data);
+                    // 保存token
+                    localStorage.setItem('access_token', data.access_token);
+                    localStorage.setItem('user_info', JSON.stringify(data.user));
+                    console.log('✅ [Login] Token已保存:', data.access_token?.substring(0, 20) + '...');
+                    console.log('✅ [Login] 用户信息已保存:', data.user);
+                    
+                    // 跳转到主页
+                    console.log('🔄 [Login] 重定向到主页...');
+                    // 延迟一下让日志能显示
+                    setTimeout(() => {
+                        window.location.href = '/';
+                    }, 1000);
+                } else {
+                    showError(data.message || '登录失败，请重试');
+                }
+            } catch (error) {
+                console.error('登录错误:', error);
+                showError('网络错误，请检查连接后重试');
+            }
+        }
+
+        // 表单提交处理
+        loginForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            hideError();
+            setLoading(true);
+
+            const formData = new FormData(loginForm);
+            const username = formData.get('username').trim();
+            const password = formData.get('password');
+            const rememberMe = formData.get('remember-me') === 'on';
+
+            // 基本验证
+            if (!username || !password) {
+                showError('请填写所有必填字段');
+                setLoading(false);
+                return;
+            }
+
+            try {
+                await login(username, password, rememberMe);
+            } catch (error) {
+                showError('登录失败，请重试');
+            } finally {
+                setLoading(false);
+            }
+        });
+
+        // 检查是否已登录
+        document.addEventListener('DOMContentLoaded', () => {
+            const token = localStorage.getItem('access_token');
+            if (token) {
+                // 验证token是否有效
+                fetch(`${API_BASE_URL}/auth/verify`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // 已登录，跳转到主页
+                        window.location.href = '/';
+                    }
+                })
+                .catch(() => {
+                    // token无效，清除
+                    localStorage.removeItem('access_token');
+                    localStorage.removeItem('user_info');
+                });
+            }
+        });
+    </script>
+</body>
+</html>

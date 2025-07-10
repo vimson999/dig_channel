@@ -17,7 +17,7 @@ from datetime import datetime, date, timedelta
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from app import create_app
-from models import db, Channel, ChannelData, Video, VideoData
+from models import db, User, Channel, ChannelData, Video, VideoData
 
 def create_database_views(app):
     """创建排行榜视图"""
@@ -36,62 +36,66 @@ def create_database_views(app):
             except Exception as e:
                 print(f"删除视图 {view_name} 时出错: {e}")
         
-        # 创建日收入排行榜视图
+        # 创建日收入排行榜视图（支持多用户）
         daily_revenue_view = """
         CREATE VIEW daily_revenue_ranking AS
         SELECT 
+            c.user_id,
             c.name,
             c.channel_id,
             cd.estimated_revenue,
-            ROW_NUMBER() OVER (ORDER BY cd.estimated_revenue DESC) as rank
+            ROW_NUMBER() OVER (PARTITION BY c.user_id ORDER BY cd.estimated_revenue DESC) as rank
         FROM channels c
         JOIN channel_data cd ON c.id = cd.channel_id
         WHERE cd.date = date('now') AND c.is_active = 1
-        ORDER BY cd.estimated_revenue DESC
+        ORDER BY c.user_id, cd.estimated_revenue DESC
         """
         
-        # 创建月收入排行榜视图
+        # 创建月收入排行榜视图（支持多用户）
         monthly_revenue_view = """
         CREATE VIEW monthly_revenue_ranking AS
         SELECT 
+            c.user_id,
             c.name,
             c.channel_id,
             SUM(cd.estimated_revenue) as total_revenue,
-            ROW_NUMBER() OVER (ORDER BY SUM(cd.estimated_revenue) DESC) as rank
+            ROW_NUMBER() OVER (PARTITION BY c.user_id ORDER BY SUM(cd.estimated_revenue) DESC) as rank
         FROM channels c
         JOIN channel_data cd ON c.id = cd.channel_id
         WHERE cd.date >= date('now', '-30 days') AND c.is_active = 1
-        GROUP BY c.id, c.name, c.channel_id
-        ORDER BY total_revenue DESC
+        GROUP BY c.user_id, c.id, c.name, c.channel_id
+        ORDER BY c.user_id, total_revenue DESC
         """
         
-        # 创建日订阅增长排行榜视图
+        # 创建日订阅增长排行榜视图（支持多用户）
         daily_subscriber_view = """
         CREATE VIEW daily_subscriber_ranking AS
         SELECT 
+            c.user_id,
             c.name,
             c.channel_id,
             cd.subscriber_change,
-            ROW_NUMBER() OVER (ORDER BY cd.subscriber_change DESC) as rank
+            ROW_NUMBER() OVER (PARTITION BY c.user_id ORDER BY cd.subscriber_change DESC) as rank
         FROM channels c
         JOIN channel_data cd ON c.id = cd.channel_id
         WHERE cd.date = date('now') AND c.is_active = 1
-        ORDER BY cd.subscriber_change DESC
+        ORDER BY c.user_id, cd.subscriber_change DESC
         """
         
-        # 创建月订阅增长排行榜视图
+        # 创建月订阅增长排行榜视图（支持多用户）
         monthly_subscriber_view = """
         CREATE VIEW monthly_subscriber_ranking AS
         SELECT 
+            c.user_id,
             c.name,
             c.channel_id,
             SUM(cd.subscriber_change) as total_subscriber_change,
-            ROW_NUMBER() OVER (ORDER BY SUM(cd.subscriber_change) DESC) as rank
+            ROW_NUMBER() OVER (PARTITION BY c.user_id ORDER BY SUM(cd.subscriber_change) DESC) as rank
         FROM channels c
         JOIN channel_data cd ON c.id = cd.channel_id
         WHERE cd.date >= date('now', '-30 days') AND c.is_active = 1
-        GROUP BY c.id, c.name, c.channel_id
-        ORDER BY total_subscriber_change DESC
+        GROUP BY c.user_id, c.id, c.name, c.channel_id
+        ORDER BY c.user_id, total_subscriber_change DESC
         """
         
         try:
@@ -105,17 +109,48 @@ def create_database_views(app):
             print(f"创建视图时出错: {e}")
             db.session.rollback()
 
-def insert_sample_data(app):
+def create_default_user(app):
+    """创建默认用户"""
+    with app.app_context():
+        # 检查是否已有用户
+        if User.query.first():
+            print("用户已存在，跳过用户创建")
+            return User.query.first()
+        
+        # 创建默认管理员用户
+        from werkzeug.security import generate_password_hash
+        
+        try:
+            default_user = User(
+                username='admin',
+                email='admin@example.com',
+                password_hash=generate_password_hash('admin123'),
+                display_name='系统管理员',
+                is_admin=True,
+                is_active=True,
+                is_verified=True
+            )
+            db.session.add(default_user)
+            db.session.commit()
+            print(f"创建默认管理员用户: {default_user.username}")
+            return default_user
+        except Exception as e:
+            print(f"创建默认用户失败: {e}")
+            db.session.rollback()
+            return None
+
+def insert_sample_data(app, user):
     """插入示例数据"""
     with app.app_context():
         # 检查是否已有数据
-        if Channel.query.first():
+        if Channel.query.filter_by(user_id=user.id).first():
             print("数据库中已有数据，跳过示例数据插入")
             return
         
         # 创建示例频道
         sample_channels = [
             {
+                'user_id': user.id,
                 'name': '李子柒 Liziqi',
                 'channel_id': 'UCoC47do520os_4DBMEFGg4A',
                 'url': 'https://www.youtube.com/channel/UCoC47do520os_4DBMEFGg4A',
@@ -123,6 +158,7 @@ def insert_sample_data(app):
                 'category': '生活方式'
             },
             {
+                'user_id': user.id,
                 'name': '回形针PaperClip',
                 'channel_id': 'UCBdZW-fzDEOaqglOVoRjXLA',
                 'url': 'https://www.youtube.com/channel/UCBdZW-fzDEOaqglOVoRjXLA',
@@ -130,6 +166,7 @@ def insert_sample_data(app):
                 'category': '科技教育'
             },
             {
+                'user_id': user.id,
                 'name': 'Tech Test Channel',
                 'channel_id': 'UC_TEST_CHANNEL_ID_123',
                 'url': 'https://www.youtube.com/channel/UC_TEST_CHANNEL_ID_123',
@@ -141,11 +178,14 @@ def insert_sample_data(app):
         created_channels = []
         for channel_data in sample_channels:
             try:
-                channel = Channel.create_channel(**channel_data)
+                channel = Channel(**channel_data)
+                db.session.add(channel)
+                db.session.commit()
                 created_channels.append(channel)
-                print(f"创建频道: {channel.name}")
+                print(f"创建频道: {channel.name} (用户: {user.username})")
             except Exception as e:
                 print(f"创建频道 {channel_data['name']} 时出错: {e}")
+                db.session.rollback()
         
         # 为每个频道创建最近几天的示例数据
         for channel in created_channels:
@@ -196,7 +236,7 @@ def insert_sample_data(app):
 
 def main():
     """主函数"""
-    print("开始初始化数据库...")
+    print("开始初始化多用户数据库...")
     
     # 创建Flask应用
     app = create_app()
@@ -207,13 +247,26 @@ def main():
             db.create_all()
             print("数据库表创建成功！")
             
+            # 创建默认用户
+            default_user = create_default_user(app)
+            if not default_user:
+                print("创建默认用户失败，停止初始化")
+                return
+            
             # 创建视图
             create_database_views(app)
             
             # 插入示例数据
-            insert_sample_data(app)
+            insert_sample_data(app, default_user)
             
-            print("数据库初始化完成！")
+            print("=" * 50)
+            print("🎉 多用户数据库初始化完成！")
+            print("=" * 50)
+            print("默认管理员账户信息:")
+            print(f"用户名: {default_user.username}")
+            print("密码: admin123")
+            print("请登录后立即修改密码！")
+            print("=" * 50)
             
         except Exception as e:
             print(f"数据库初始化失败: {e}")

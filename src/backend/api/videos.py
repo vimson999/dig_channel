@@ -8,6 +8,7 @@ from services.video_sync_service import VideoSyncService
 from models import Video, VideoData, Channel
 from middleware.error_handler import handle_api_error
 from utils.colored_logger import setup_colored_logger
+from utils.auth_utils import require_login
 
 logger = setup_colored_logger("VIDEO_API")
 
@@ -15,7 +16,8 @@ videos_bp = Blueprint('videos', __name__, url_prefix='/api/v1/videos')
 
 @videos_bp.route('', methods=['GET'])
 @cross_origin()
-def get_videos():
+@require_login
+def get_videos(current_user):
     """获取视频列表"""
     try:
         # 获取查询参数
@@ -47,7 +49,8 @@ def get_videos():
                 channel_id=channel_id,
                 category=category if category else None,
                 sort_by=sort_by,
-                order=order
+                order=order,
+                user_id=current_user.id
             )
         elif channel_id:
             # 获取特定频道的视频
@@ -58,7 +61,8 @@ def get_videos():
                 search=None,
                 category=category if category else None,
                 sort_by=sort_by,
-                order=order
+                order=order,
+                user_id=current_user.id
             )
         else:
             # 获取所有视频
@@ -69,7 +73,8 @@ def get_videos():
                 channel_id=None,
                 category=category if category else None,
                 sort_by=sort_by,
-                order=order
+                order=order,
+                user_id=current_user.id
             )
         
         if result['success']:
@@ -91,7 +96,8 @@ def get_videos():
 
 @videos_bp.route('/search', methods=['GET'])
 @cross_origin()
-def search_videos():
+@require_login
+def search_videos(current_user):
     """搜索视频"""
     try:
         # 获取查询参数
@@ -126,7 +132,8 @@ def search_videos():
             channel_id=channel_id,
             category=category if category else None,
             sort_by=sort_by,
-            order=order
+            order=order,
+            user_id=current_user.id
         )
         
         if result['success']:
@@ -181,7 +188,8 @@ def get_video_detail(video_id):
 
 @videos_bp.route('/sync', methods=['POST'])
 @cross_origin()
-def sync_videos():
+@require_login
+def sync_videos(current_user):
     """同步所有频道的视频"""
     try:
         # 获取参数
@@ -197,7 +205,7 @@ def sync_videos():
             }), 400
         
         video_service = VideoSyncService()
-        result = video_service.sync_all_channels_videos(days_back=days_back)
+        result = video_service.sync_all_channels_videos(days_back=days_back, user_id=current_user.id)
         
         if result['success']:
             return jsonify({

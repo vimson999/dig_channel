@@ -2,7 +2,27 @@
 
 ## 🚀 部署概览
 
-YouTube Analytics 是一个专业的YouTube频道数据分析平台，支持Docker部署和传统部署方式。
+YouTube Analytics 是一个专业的**多用户**YouTube频道数据分析平台，支持用户注册、数据隔离和权限管理。支持Docker部署和传统部署方式。
+
+## 🎯 多用户系统特性
+
+✅ **用户管理**
+- 用户注册和登录
+- JWT Token认证
+- 密码安全存储
+- 会话管理
+
+✅ **数据隔离**
+- 每个用户独立的数据空间
+- 频道数据按用户隔离
+- 安全的权限控制
+- 管理员和普通用户权限区分
+
+✅ **安全防护**
+- API级别的认证验证
+- XSS和CSRF防护
+- 数据访问权限控制
+- 自动Token过期处理
 
 ## 📋 系统要求
 
@@ -18,6 +38,17 @@ YouTube Analytics 是一个专业的YouTube频道数据分析平台，支持Dock
 - Python 3.11+ (如果使用传统部署)
 - Nginx (推荐用于生产环境)
 
+### Python依赖包
+```
+Flask>=2.0.0
+Flask-SQLAlchemy>=2.5.0
+PyJWT>=2.0.0
+Werkzeug>=2.0.0
+python-dotenv>=0.19.0
+requests>=2.25.0
+google-api-python-client>=2.0.0
+```
+
 ## 🔑 环境配置
 
 ### 必需的环境变量
@@ -31,6 +62,9 @@ export SECRET_KEY="your_secret_key_here"
 
 # JWT密钥 (可选，默认使用SECRET_KEY)
 export JWT_SECRET_KEY="your_jwt_secret_key_here"
+
+# 数据库URL (可选，默认使用SQLite)
+export DATABASE_URL="sqlite:///instance/youtube_tracker.db"
 
 # 允许的跨域来源 (可选)
 export CORS_ORIGINS="https://yourdomain.com"
@@ -71,9 +105,47 @@ cp deployment/production.env.example deployment/production.env
 # 2. 构建和启动
 docker-compose -f deployment/docker/docker-compose.yml up -d
 
-# 3. 初始化数据库
+# 3. 运行数据库迁移（设置多用户系统）
+docker-compose -f deployment/docker/docker-compose.yml exec youtube-analytics python scripts/migrate_to_multiuser.py
+
+# 或者初始化全新数据库
 docker-compose -f deployment/docker/docker-compose.yml exec youtube-analytics python backend/init_db.py
 ```
+
+## 👥 多用户系统配置
+
+### 默认管理员账户
+
+首次部署后，系统会自动创建默认管理员账户：
+- 用户名: `admin`
+- 密码: `admin123`
+- 角色: 管理员
+
+**⚠️ 重要**: 请在首次登录后立即修改默认密码！
+
+### 用户访问流程
+
+1. **首次访问** → 自动重定向到登录页面
+2. **新用户注册** → 创建个人账户
+3. **用户登录** → 进入个人数据空间
+4. **数据隔离** → 每个用户只能访问自己的频道数据
+
+### 数据库迁移
+
+如果从单用户版本升级到多用户版本：
+
+```bash
+# 备份现有数据
+cp instance/youtube_tracker.db instance/youtube_tracker.db.backup
+
+# 运行迁移脚本
+python scripts/migrate_to_multiuser.py
+```
+
+### 用户权限说明
+
+- **普通用户**: 只能查看和管理自己的频道数据
+- **管理员用户**: 可以查看所有用户的数据（用于系统管理）
 
 ## 📊 SEO优化特性
 

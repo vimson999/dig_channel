@@ -14,11 +14,12 @@ class ChannelService:
     """频道管理服务类"""
     
     @staticmethod
-    def create_channel(name: str, channel_id: str, url: str, 
+    def create_channel(user_id: int, name: str, channel_id: str, url: str, 
                       cpm: float = 1.00, category: str = None, sort: int = 0) -> Dict[str, Any]:
         """创建新频道
         
         Args:
+            user_id: 用户ID
             name: 频道名称
             channel_id: YouTube频道ID
             url: 频道URL
@@ -30,17 +31,18 @@ class ChannelService:
             Dict: 包含结果状态和数据的字典
         """
         try:
-            # 检查频道是否已存在
-            existing = Channel.query.filter_by(channel_id=channel_id).first()
+            # 检查用户下是否已存在相同频道
+            existing = Channel.query.filter_by(user_id=user_id, channel_id=channel_id).first()
             if existing:
                 return {
                     'success': False,
-                    'message': f'频道 {channel_id} 已存在',
+                    'message': f'您已添加过频道 {channel_id}',
                     'data': None
                 }
             
             # 创建新频道
             channel = Channel(
+                user_id=user_id,
                 name=name,
                 channel_id=channel_id,
                 url=url,
@@ -74,8 +76,37 @@ class ChannelService:
             }
     
     @staticmethod
+    def get_user_channels(user_id: int, active_only: bool = True, order_by_sort: bool = False) -> List[Dict[str, Any]]:
+        """获取用户的频道列表
+        
+        Args:
+            user_id: 用户ID
+            active_only: 是否只返回活跃频道，默认True
+            order_by_sort: 是否按sort字段排序，默认False
+            
+        Returns:
+            List[Dict]: 频道列表
+        """
+        try:
+            query = Channel.query.filter_by(user_id=user_id)
+            if active_only:
+                query = query.filter_by(is_active=True)
+            
+            # 选择排序方式
+            if order_by_sort:
+                channels = query.order_by(Channel.sort.asc(), Channel.id.asc()).all()
+            else:
+                channels = query.order_by(Channel.created_at.desc()).all()
+                
+            return [channel.to_dict() for channel in channels]
+            
+        except Exception as e:
+            print(f"获取用户频道列表失败: {e}")
+            return []
+    
+    @staticmethod
     def get_all_channels(active_only: bool = True, order_by_sort: bool = False) -> List[Dict[str, Any]]:
-        """获取所有频道
+        """获取所有频道（管理员用）
         
         Args:
             active_only: 是否只返回活跃频道，默认True
@@ -102,56 +133,71 @@ class ChannelService:
             return []
     
     @staticmethod
-    def get_channel_by_id(channel_id: int) -> Optional[Dict[str, Any]]:
+    def get_channel_by_id(channel_id: int, user_id: int = None) -> Optional[Dict[str, Any]]:
         """根据ID获取频道
         
         Args:
             channel_id: 频道数据库ID
+            user_id: 用户ID，如果提供则检查权限
             
         Returns:
             Optional[Dict]: 频道信息或None
         """
         try:
-            channel = Channel.query.get(channel_id)
+            query = Channel.query
+            if user_id is not None:
+                query = query.filter_by(user_id=user_id)
+            
+            channel = query.filter_by(id=channel_id).first()
             return channel.to_dict() if channel else None
         except Exception as e:
             print(f"获取频道失败: {e}")
             return None
     
     @staticmethod
-    def get_channel_by_youtube_id(youtube_id: str) -> Optional[Dict[str, Any]]:
+    def get_channel_by_youtube_id(youtube_id: str, user_id: int = None) -> Optional[Dict[str, Any]]:
         """根据YouTube频道ID获取频道
         
         Args:
             youtube_id: YouTube频道ID
+            user_id: 用户ID，如果提供则检查权限
             
         Returns:
             Optional[Dict]: 频道信息或None
         """
         try:
-            channel = Channel.query.filter_by(channel_id=youtube_id).first()
+            query = Channel.query.filter_by(channel_id=youtube_id)
+            if user_id is not None:
+                query = query.filter_by(user_id=user_id)
+            
+            channel = query.first()
             return channel.to_dict() if channel else None
         except Exception as e:
             print(f"获取频道失败: {e}")
             return None
     
     @staticmethod
-    def update_channel(channel_id: int, **kwargs) -> Dict[str, Any]:
+    def update_channel(channel_id: int, user_id: int = None, **kwargs) -> Dict[str, Any]:
         """更新频道信息
         
         Args:
             channel_id: 频道数据库ID
+            user_id: 用户ID，如果提供则检查权限
             **kwargs: 要更新的字段
             
         Returns:
             Dict: 更新结果
         """
         try:
-            channel = Channel.query.get(channel_id)
+            query = Channel.query
+            if user_id is not None:
+                query = query.filter_by(user_id=user_id)
+            
+            channel = query.filter_by(id=channel_id).first()
             if not channel:
                 return {
                     'success': False,
-                    'message': '频道不存在',
+                    'message': '频道不存在或无权限访问',
                     'data': None
                 }
             
@@ -179,21 +225,26 @@ class ChannelService:
             }
     
     @staticmethod
-    def delete_channel(channel_id: int) -> Dict[str, Any]:
+    def delete_channel(channel_id: int, user_id: int = None) -> Dict[str, Any]:
         """删除频道（软删除 - 设为非活跃）
         
         Args:
             channel_id: 频道数据库ID
+            user_id: 用户ID，如果提供则检查权限
             
         Returns:
             Dict: 删除结果
         """
         try:
-            channel = Channel.query.get(channel_id)
+            query = Channel.query
+            if user_id is not None:
+                query = query.filter_by(user_id=user_id)
+            
+            channel = query.filter_by(id=channel_id).first()
             if not channel:
                 return {
                     'success': False,
-                    'message': '频道不存在',
+                    'message': '频道不存在或无权限访问',
                     'data': None
                 }
             
@@ -217,8 +268,42 @@ class ChannelService:
             }
     
     @staticmethod
+    def search_user_channels(user_id: int, keyword: str, active_only: bool = True, order_by_sort: bool = False) -> List[Dict[str, Any]]:
+        """搜索用户的频道
+        
+        Args:
+            user_id: 用户ID
+            keyword: 搜索关键词
+            active_only: 是否只搜索活跃频道
+            order_by_sort: 是否按sort字段排序，默认False
+            
+        Returns:
+            List[Dict]: 匹配的频道列表
+        """
+        try:
+            query = Channel.query.filter(
+                Channel.user_id == user_id,
+                Channel.name.ilike(f'%{keyword}%')
+            )
+            
+            if active_only:
+                query = query.filter_by(is_active=True)
+            
+            # 选择排序方式
+            if order_by_sort:
+                channels = query.order_by(Channel.sort.asc(), Channel.id.asc()).all()
+            else:
+                channels = query.order_by(Channel.created_at.desc()).all()
+                
+            return [channel.to_dict() for channel in channels]
+            
+        except Exception as e:
+            print(f"搜索用户频道失败: {e}")
+            return []
+    
+    @staticmethod
     def search_channels(keyword: str, active_only: bool = True, order_by_sort: bool = False) -> List[Dict[str, Any]]:
-        """搜索频道
+        """搜索所有频道（管理员用）
         
         Args:
             keyword: 搜索关键词
@@ -249,8 +334,39 @@ class ChannelService:
             return []
     
     @staticmethod
+    def get_user_channels_by_category(user_id: int, category: str, active_only: bool = True, order_by_sort: bool = False) -> List[Dict[str, Any]]:
+        """根据分类获取用户的频道
+        
+        Args:
+            user_id: 用户ID
+            category: 频道分类
+            active_only: 是否只返回活跃频道
+            order_by_sort: 是否按sort字段排序，默认False
+            
+        Returns:
+            List[Dict]: 频道列表
+        """
+        try:
+            query = Channel.query.filter_by(user_id=user_id, category=category)
+            
+            if active_only:
+                query = query.filter_by(is_active=True)
+            
+            # 选择排序方式
+            if order_by_sort:
+                channels = query.order_by(Channel.sort.asc(), Channel.id.asc()).all()
+            else:
+                channels = query.order_by(Channel.created_at.desc()).all()
+                
+            return [channel.to_dict() for channel in channels]
+            
+        except Exception as e:
+            print(f"获取用户分类频道失败: {e}")
+            return []
+    
+    @staticmethod
     def get_channels_by_category(category: str, active_only: bool = True, order_by_sort: bool = False) -> List[Dict[str, Any]]:
-        """根据分类获取频道
+        """根据分类获取所有频道（管理员用）
         
         Args:
             category: 频道分类
@@ -279,19 +395,24 @@ class ChannelService:
             return []
     
     @staticmethod
-    def get_channel_statistics(channel_id: int) -> Dict[str, Any]:
+    def get_channel_statistics(channel_id: int, user_id: int = None) -> Dict[str, Any]:
         """获取频道统计信息
         
         Args:
             channel_id: 频道数据库ID
+            user_id: 用户ID，如果提供则检查权限
             
         Returns:
             Dict: 统计信息
         """
         try:
-            channel = Channel.query.get(channel_id)
+            query = Channel.query
+            if user_id is not None:
+                query = query.filter_by(user_id=user_id)
+            
+            channel = query.filter_by(id=channel_id).first()
             if not channel:
-                return {'success': False, 'message': '频道不存在'}
+                return {'success': False, 'message': '频道不存在或无权限访问'}
             
             # 获取最新数据
             latest_data = ChannelData.query.filter_by(
