@@ -40,7 +40,7 @@ class DevServer:
     def __init__(self):
         self.process = None
         self.observer = None
-        self.project_root = Path(__file__).parent
+        self.project_root = Path(__file__).parent.parent
         self.backend_dir = self.project_root / "src" / "backend"
         
     def start_flask(self):
@@ -161,7 +161,7 @@ class DevServer:
 def main():
     """主函数"""
     # 确保在正确的目录运行
-    script_dir = Path(__file__).parent
+    script_dir = Path(__file__).parent.parent
     os.chdir(script_dir)
     
     # 检查Python路径

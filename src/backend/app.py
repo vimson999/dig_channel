@@ -12,10 +12,17 @@ from flask import Flask
 from flask_cors import CORS
 from config import Config
 from middleware.error_handler import error_handler
+from middleware.request_logger import RequestLoggerMiddleware
+from middleware.database_logger import DatabaseLoggerMiddleware
+from middleware.performance_monitor import PerformanceMonitor
 from utils.colored_logger import log_startup_banner, setup_colored_logger
+from utils.log_manager import setup_application_logging, schedule_log_maintenance
 
 # 初始化扩展
 cors = CORS()
+request_logger = RequestLoggerMiddleware()
+database_logger = DatabaseLoggerMiddleware()
+performance_monitor = PerformanceMonitor()
 
 def create_app(config_class=Config):
     """应用工厂函数
@@ -38,12 +45,21 @@ def create_app(config_class=Config):
     # 初始化CORS
     cors.init_app(app)
     
+    # 初始化日志中间件
+    request_logger.init_app(app)
+    database_logger.init_app(app)
+    performance_monitor.init_app(app)
+    
     # 注册API蓝图
     from apis import register_all_apis
     register_all_apis(app)
     
     # 初始化错误处理器
     error_handler.init_app(app)
+    
+    # 设置应用程序日志
+    setup_application_logging()
+    schedule_log_maintenance()
     
     # 基础路由
     @app.route('/')
