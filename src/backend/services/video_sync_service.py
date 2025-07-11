@@ -27,9 +27,16 @@ class VideoSyncService:
             
             if not channels:
                 return {
-                    'success': False,
-                    'message': '没有找到活跃的频道',
-                    'data': {'processed': 0, 'errors': 0}
+                    'success': True,
+                    'message': '您还没有添加任何频道，请先添加频道后再同步视频',
+                    'data': {
+                        'processed': 0, 
+                        'errors': 0,
+                        'new_videos': 0,
+                        'updated_videos': 0,
+                        'details': [],
+                        'no_channels': True
+                    }
                 }
             
             results = {

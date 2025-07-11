@@ -208,11 +208,19 @@ def sync_videos(current_user):
         result = video_service.sync_all_channels_videos(days_back=days_back, user_id=current_user.id)
         
         if result['success']:
-            return jsonify({
-                'success': True,
-                'data': result['data'],
-                'message': result['message']
-            })
+            # 检查是否是因为没有频道
+            if result['data'].get('no_channels'):
+                return jsonify({
+                    'success': True,
+                    'data': result['data'],
+                    'message': result['message']
+                }), 200
+            else:
+                return jsonify({
+                    'success': True,
+                    'data': result['data'],
+                    'message': result['message']
+                })
         else:
             return jsonify({
                 'success': False,
