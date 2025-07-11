@@ -434,7 +434,7 @@ class VideoSyncService:
             
             # 分类筛选
             if category:
-                query = query.filter_by(category_name=category)
+                query = query.filter(Video.category_name == category)
             
             # 排序
             if sort_by == 'view_count':
@@ -507,7 +507,7 @@ class VideoSyncService:
             
             # 分类筛选
             if category:
-                query = query.filter_by(category_name=category)
+                query = query.filter(Video.category_name == category)
             
             # 排序
             if sort_by == 'view_count':

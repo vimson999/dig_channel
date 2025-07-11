@@ -7,6 +7,8 @@ from flask import Flask
 from flask_cors import CORS
 import sys
 import os
+import logging
+from pathlib import Path
 
 # 添加项目路径到sys.path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -48,11 +50,29 @@ def health():
     return {'status': 'healthy', 'database': 'connected'}
 
 if __name__ == '__main__':
+    # 配置日志输出到统一的logs目录
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    logs_dir = os.path.join(project_root, 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    
+    # 设置日志处理器，输出到统一的logs/test_server.log
+    log_file = os.path.join(logs_dir, 'test_server.log')
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
     with app.app_context():
         db.create_all()
     
-    print("🚀 启动测试服务器...")
-    print("📡 访问地址: http://localhost:5001")
-    print("🔍 测试视频同步: POST http://localhost:5001/api/v1/videos/sync")
+    logger = logging.getLogger(__name__)
+    logger.info("🚀 启动测试服务器...")
+    logger.info("📡 访问地址: http://localhost:5001") 
+    logger.info("🔍 测试视频同步: POST http://localhost:5001/api/v1/videos/sync")
+    logger.info(f"📝 日志文件: {log_file}")
     
     app.run(host='0.0.0.0', port=5001, debug=True)
