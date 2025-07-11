@@ -7,9 +7,9 @@ import logging
 from flask import g
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
-from ..utils.colored_logger import get_logger, log_database_operation
+from utils.colored_logger import setup_colored_logger, log_database_operation
 
-logger = get_logger(__name__)
+logger = setup_colored_logger(__name__)
 
 class DatabaseLoggerMiddleware:
     def __init__(self, app=None):

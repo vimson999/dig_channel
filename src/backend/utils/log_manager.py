@@ -9,14 +9,14 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
-from ..config.base import Config
-from .colored_logger import get_logger
+from config.base import BaseConfig
+from .colored_logger import setup_colored_logger
 
-logger = get_logger(__name__)
+logger = setup_colored_logger(__name__)
 
 class LogManager:
     def __init__(self, log_dir=None):
-        self.log_dir = Path(log_dir) if log_dir else Path(Config.LOG_DIR)
+        self.log_dir = Path(log_dir) if log_dir else Path(BaseConfig.LOG_DIR)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
         # 日志保留策略

@@ -7,9 +7,9 @@ import psutil
 import threading
 from flask import g, request
 from functools import wraps
-from ..utils.colored_logger import get_logger
+from utils.colored_logger import setup_colored_logger
 
-logger = get_logger(__name__)
+logger = setup_colored_logger(__name__)
 
 class PerformanceMonitor:
     def __init__(self, app=None):
