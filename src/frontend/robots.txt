@@ -23,7 +23,7 @@ Disallow: /venv/
 Disallow: /__pycache__/
 
 # 网站地图位置
-Sitemap: https://youtube-analytics.example.com/sitemap.xml
+Sitemap: https://ytb.xiaoshanqing.tech/sitemap.xml
 
 # 特定搜索引擎设置
 User-agent: Googlebot
