@@ -1,0 +1,64 @@
+server:
+  http_listen_port: 9081
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions_youtube_analytics.yaml
+
+clients:
+  - url: http://10.0.16.19:3100/loki/api/v1/push
+
+scrape_configs:
+  # YouTube Analytics API 日志
+  - job_name: youtube_analytics_api
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: youtube_analytics_api
+          service: youtube_analytics
+          __path__: /var/log/supervisor/youtube_analytics_api_*.log
+
+  # YouTube Analytics Scheduler 日志
+  - job_name: youtube_analytics_scheduler
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: youtube_analytics_scheduler
+          service: youtube_analytics
+          __path__: /var/log/supervisor/youtube_scheduler_*.log
+
+  # 统一日志目录
+  - job_name: youtube_analytics_unified
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: youtube_analytics_unified
+          service: youtube_analytics
+          __path__: /logs/youtube_analytics/*.log
+
+  # SystemD 同步任务日志
+  - job_name: youtube_sync_tasks
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: youtube_sync_tasks
+          service: youtube_analytics
+          __path__: /logs/youtube_analytics/*_sync*.log
+
+pipeline_stages:
+  # 解析日志级别
+  - regex:
+      expression: '(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - (?P<level>\w+) - (?P<message>.*)'
+  
+  # 添加日志级别标签
+  - labels:
+      level:
+
+  # 过滤敏感信息
+  - replace:
+      expression: '(password|token|key)=[^\s]+'
+      replace: '${1}=***'

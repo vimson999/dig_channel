@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  youtube-scheduler:
+    build: 
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.scheduler
+    container_name: youtube-scheduler
+    restart: unless-stopped
+    environment:
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
+      - DATABASE_URL=sqlite:///data/youtube_tracker.db
+      - LOG_LEVEL=INFO
+    volumes:
+      - ../../logs:/app/logs
+      - ../../instance:/app/data
+    networks:
+      - youtube-analytics
+    depends_on:
+      - youtube-app
+    command: ["python", "src/backend/scheduler/production_scheduler.py"]
+
+  # 使用官方cron容器作为备选方案
+  youtube-cron:
+    image: alpine:latest
+    container_name: youtube-cron
+    restart: unless-stopped
+    volumes:
+      - ../../:/app
+      - ./crontab:/etc/crontabs/root
+    environment:
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
+    command: ["crond", "-f"]
+    profiles:
+      - cron  # 使用 --profile cron 启动
+
+networks:
+  youtube-analytics:
+    external: true

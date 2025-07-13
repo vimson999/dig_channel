@@ -1,0 +1,14 @@
+[Unit]
+Description=YouTube Analytics Video Sync Timer - Every 3 hours (8 times daily)
+Requires=youtube-video-sync.service
+
+[Timer]
+# 每天8次：0:00, 3:00, 6:00, 9:00, 12:00, 15:00, 18:00, 21:00
+OnCalendar=*-*-* 00,03,06,09,12,15,18,21:00:00
+# 允许随机延迟0-180秒，避免集中执行
+RandomizedDelaySec=180
+# 如果系统关机错过了执行时间，启动后补执行
+Persistent=true
+
+[Install]
+WantedBy=timers.target

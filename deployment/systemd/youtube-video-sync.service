@@ -1,0 +1,23 @@
+[Unit]
+Description=YouTube Analytics Video Sync Service
+After=network.target postgresql.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/code/bot_app/youtube-analytics/src/backend
+Environment=PYTHONPATH=/code/bot_app/youtube-analytics/src/backend
+Environment=DATABASE_URL=sqlite:////code/bot_app/youtube-analytics/instance/youtube_tracker.db
+Environment=YOUTUBE_API_KEY=your_youtube_api_key_here
+Environment=SECRET_KEY=your_secret_key_here
+Environment=LOG_LEVEL=INFO
+Environment=ENVIRONMENT=production
+ExecStart=/code/bot_app/youtube-analytics/venv/bin/python -c "from services.video_sync_service import VideoSyncService; import asyncio; asyncio.run(VideoSyncService().sync_all_videos())"
+StandardOutput=append:/logs/youtube_analytics/video_sync.log
+StandardError=append:/logs/youtube_analytics/video_sync_error.log
+
+# 资源限制
+MemoryMax=2G
+CPUQuota=75%
+TimeoutStartSec=3600

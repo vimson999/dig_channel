@@ -1,0 +1,31 @@
+{
+  "Description": "YouTube Analytics 调度规则",
+  "Rules": [
+    {
+      "Name": "youtube-channel-sync",
+      "Description": "每天同步频道信息",
+      "ScheduleExpression": "cron(0 2 * * ? *)",
+      "State": "ENABLED",
+      "Targets": [
+        {
+          "Id": "1",
+          "Arn": "arn:aws:lambda:region:account:function:youtube-channel-sync",
+          "Input": "{\"action\": \"sync_channels\"}"
+        }
+      ]
+    },
+    {
+      "Name": "youtube-video-sync",
+      "Description": "每3小时同步视频数据",
+      "ScheduleExpression": "cron(0 0,3,6,9,12,15,18,21 * * ? *)",
+      "State": "ENABLED", 
+      "Targets": [
+        {
+          "Id": "1",
+          "Arn": "arn:aws:lambda:region:account:function:youtube-video-sync",
+          "Input": "{\"action\": \"sync_videos\"}"
+        }
+      ]
+    }
+  ]
+}

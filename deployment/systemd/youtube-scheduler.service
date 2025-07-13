@@ -1,0 +1,23 @@
+[Unit]
+Description=YouTube Analytics Scheduler Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/var/www/youtube-analytics
+Environment=PYTHONPATH=/var/www/youtube-analytics/src/backend
+Environment=YOUTUBE_API_KEY=your_youtube_api_key_here
+ExecStart=/var/www/youtube-analytics/venv/bin/python /var/www/youtube-analytics/src/backend/scheduler/production_scheduler.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/www/youtube-analytics/logs/scheduler.log
+StandardError=append:/var/www/youtube-analytics/logs/scheduler_error.log
+
+# 资源限制
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

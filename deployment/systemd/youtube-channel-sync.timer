@@ -1,0 +1,14 @@
+[Unit]
+Description=YouTube Analytics Channel Sync Timer - Daily at 2:00 AM
+Requires=youtube-channel-sync.service
+
+[Timer]
+# 每天凌晨2点执行
+OnCalendar=*-*-* 02:00:00
+# 允许随机延迟0-300秒，避免集中执行
+RandomizedDelaySec=300
+# 如果系统关机错过了执行时间，启动后补执行
+Persistent=true
+
+[Install]
+WantedBy=timers.target
