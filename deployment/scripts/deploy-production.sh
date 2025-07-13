@@ -5,25 +5,23 @@
 set -e
 
 # 配置变量
-APP_DIR="/code/bot_app/youtube-analytics"
+APP_DIR="$(pwd)"
 SERVICE_USER="ubuntu"
 LOGS_DIR="/logs/youtube_analytics"
 VENV_PATH="$APP_DIR/venv"
 
 echo "🚀 开始部署 YouTube Analytics 到生产环境..."
 echo "📍 目标服务器: 10.0.12.13"
+echo "📍 应用目录: $APP_DIR"
 
-# 1. 创建应用目录结构
-echo "📁 创建应用目录结构..."
-sudo mkdir -p $APP_DIR
+# 1. 创建日志目录结构
+echo "📁 创建日志目录结构..."
 sudo mkdir -p $LOGS_DIR
 sudo chown -R $SERVICE_USER:$SERVICE_USER $APP_DIR
 sudo chown -R $SERVICE_USER:$SERVICE_USER $LOGS_DIR
 
-# 2. 复制应用文件
-echo "📦 复制应用文件..."
-sudo cp -r . $APP_DIR/
-sudo chown -R $SERVICE_USER:$SERVICE_USER $APP_DIR
+# 2. 应用文件已就位
+echo "📦 应用文件已就位..."
 
 # 3. 设置Python虚拟环境和清华镜像
 echo "🐍 设置Python虚拟环境和清华镜像..."
