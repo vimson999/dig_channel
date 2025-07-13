@@ -22,7 +22,7 @@ python-dotenv==1.0.0
 python-dateutil==2.8.2
 
 # 安全
-cryptography==41.0.8
+cryptography==41.0.7
 
 # 监控和日志
 psutil==5.9.6
