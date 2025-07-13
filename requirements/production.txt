@@ -23,6 +23,7 @@ python-dateutil==2.8.2
 
 # 安全
 cryptography==41.0.7
+PyJWT==2.8.0
 
 # 监控和日志
 psutil==5.9.6
