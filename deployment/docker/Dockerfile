@@ -12,8 +12,9 @@ RUN apt-get update && apt-get install -y \
 # 复制需求文件
 COPY requirements/production.txt requirements.txt
 
-# 安装Python依赖
-RUN pip install --no-cache-dir -r requirements.txt
+# 配置清华镜像并安装Python依赖
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip install --no-cache-dir -r requirements.txt
 
 # 复制应用代码
 COPY src/ .
