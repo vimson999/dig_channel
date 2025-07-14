@@ -1,8 +1,8 @@
-// 配置文件 - 版本 2.0
-console.log('📄 [Config] 配置文件已加载 - 新版本');
+// 配置文件
+console.log('📄 [Config] 配置文件已加载');
 const CONFIG = {
-    // API基础URL
-    API_BASE_URL: '/api/v1',
+    // API基础URL - 从环境配置获取
+    API_BASE_URL: window.API_BASE_URL || '/api/v1',
     
     // API端点
     ENDPOINTS: {
