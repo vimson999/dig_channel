@@ -1,5 +1,5 @@
-// 高保真设计的主应用文件
-console.log('🎯 [Main] 主应用模块已加载');
+// 高保真设计的主应用文件 - 强制更新版本
+console.log('🎯 [Main] 主应用模块已加载 - 版本', new Date().toISOString());
 class YouTubeDataApp {
     constructor() {
         this.chart = null;
@@ -14,19 +14,8 @@ class YouTubeDataApp {
     async init() {
         console.log('🚀 YouTube数据追踪工具启动中...');
         
-        // 延迟检查认证状态，确保localStorage完全可用
-        console.log('⏰ [Main] 等待2秒后开始认证检查...');
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
         // 检查认证状态
         console.log('🔍 [Main] 开始认证检查...');
-        console.log('🔍 [Main] 当前URL:', window.location.href);
-        console.log('🔍 [Main] localStorage状态:', {
-            token: localStorage.getItem('access_token') ? '存在' : '不存在',
-            tokenLength: localStorage.getItem('access_token')?.length,
-            userInfo: localStorage.getItem('user_info') ? '存在' : '不存在'
-        });
-        
         const isAuthenticated = await this.checkAuthStatus();
         
         if (!isAuthenticated) {

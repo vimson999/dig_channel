@@ -1,5 +1,5 @@
-// API调用模块
-console.log('🌐 [API] API模块已加载');
+// API调用模块 - 强制更新版本
+console.log('🌐 [API] API模块已加载 - 版本', new Date().toISOString());
 class APIClient {
     constructor(baseURL = CONFIG.API_BASE_URL) {
         this.baseURL = baseURL;
