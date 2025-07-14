@@ -785,8 +785,11 @@ class YouTubeDataApp {
             console.error('❌ [Auth] 认证验证异常:', error);
             if (error.status === 401) {
                 console.log('❌ [Auth] Token已过期，清除认证信息');
+                api.clearAuth();
+            } else {
+                console.log('❌ [Auth] 网络错误，保留token，稍后重试');
+                // 网络错误不清除token，让用户可以刷新重试
             }
-            api.clearAuth();
             return false;
         }
     }
