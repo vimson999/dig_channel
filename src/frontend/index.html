@@ -974,10 +974,16 @@ chart.setOption(option);
 </footer>
 
 <!-- JavaScript -->
-<script src="js/config.js?v=2025071401"></script>
-<script src="js/utils.js?v=2025071401"></script>
-<script src="js/api.js?v=2025071401"></script>
-<script src="js/new-main.js?v=2025071401"></script>
-<script src="js/channel-management.js?v=2025071401"></script>
+<script>
+// 生成随机版本号防止缓存
+const v = Date.now() + Math.random().toString(36).substr(2, 9);
+document.write(`
+<script src="js/config.js?v=${v}"><\/script>
+<script src="js/utils.js?v=${v}"><\/script>
+<script src="js/api.js?v=${v}"><\/script>
+<script src="js/new-main.js?v=${v}"><\/script>
+<script src="js/channel-management.js?v=${v}"><\/script>
+`);
+</script>
 </body>
 </html>
