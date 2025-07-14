@@ -921,12 +921,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             // 初始化视频管理器
             videoManager = new VideoManager();
         } else {
-            console.log('❌ [Videos] Token验证失败，重定向到登录页');
+            console.log('❌ [Videos] Token验证失败，响应格式:', response);
             api.clearAuth();
             window.location.href = '/login.html';
         }
     } catch (error) {
         console.error('❌ [Videos] 认证验证异常:', error);
+        // 如果是401错误，说明token无效
+        if (error.status === 401) {
+            console.log('❌ [Videos] Token已过期，清除认证信息');
+        }
         api.clearAuth();
         window.location.href = '/login.html';
     }
