@@ -786,11 +786,12 @@ class YouTubeDataApp {
             if (error.status === 401) {
                 console.log('❌ [Auth] Token已过期，清除认证信息');
                 api.clearAuth();
+                return false;
             } else {
-                console.log('❌ [Auth] 网络错误，保留token，稍后重试');
-                // 网络错误不清除token，让用户可以刷新重试
+                console.log('❌ [Auth] 网络错误，跳过认证检查，直接进入应用');
+                // 网络错误时假设用户已认证，让应用正常运行
+                return true;
             }
-            return false;
         }
     }
 }
