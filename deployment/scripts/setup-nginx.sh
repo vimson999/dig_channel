@@ -51,7 +51,7 @@ cat > /etc/nginx/sites-available/youtube-analytics << EOF
 
 # 上游后端服务
 upstream youtube_analytics_backend {
-    server 127.0.0.1:5000;
+    server 127.0.0.1:8084;
     keepalive 32;
 }
 

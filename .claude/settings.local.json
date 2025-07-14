@@ -36,7 +36,10 @@
       "Bash(#!/bin/bash\n\n# 1. Context7（官方文档查询）\nclaude mcp add context7 -s user -- npx -y @upstash/context7-mcp\n\n# 2. Sequential Thinking（多步骤逻辑推理）\nclaude mcp add sequential-thinking -s user -- npx -y @modelcontextprotocol/server-sequential-thinking\n\n# 3. Magic（UI 组件生成）\nclaude mcp add magic -s user -- npx -y @21st-dev/magic-mcp\n\n# 4. Puppeteer（网页自动化 / E2E 测试）\nclaude mcp add puppeteer -s user -- npx -y @modelcontextprotocol/server-puppeteer\n\n# 列出已安装的 MCP 工具以确认安装成功\nclaude mcp list)",
       "Bash(git pull:*)",
       "Bash(git stash:*)",
-      "Bash(PYTHONPATH=. python app.py)"
+      "Bash(PYTHONPATH=. python app.py)",
+      "mcp__sequential-thinking__sequentialthinking",
+      "Bash(sudo supervisorctl:*)",
+      "Bash(supervisorctl status:*)"
     ],
     "deny": []
   }
