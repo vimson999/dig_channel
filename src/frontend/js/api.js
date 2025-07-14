@@ -397,9 +397,11 @@ api.initAuth = async function() {
             const result = await this.verifyToken();
             console.log('✅ [Auth] Token验证成功:', result);
             
-            // 检查响应格式
-            if (result && result.success) {
-                console.log('✅ [Auth] 验证响应格式正确');
+            // 检查响应格式 - 修复：验证data.user存在
+            if (result && result.success && result.data && result.data.user) {
+                console.log('✅ [Auth] 验证响应格式正确，用户:', result.data.user.username);
+                // 更新本地用户信息
+                localStorage.setItem('user_info', JSON.stringify(result.data.user));
                 return true;
             } else {
                 console.error('❌ [Auth] 验证响应格式错误:', result);

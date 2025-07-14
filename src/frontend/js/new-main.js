@@ -776,12 +776,16 @@ class YouTubeDataApp {
                 this.displayUserInfo();
                 return true;
             } else {
-                console.log('❌ [Auth] Token验证失败，清除认证信息');
+                console.log('❌ [Auth] Token验证失败，响应格式:', response);
+                console.log('❌ [Auth] 清除认证信息');
                 api.clearAuth();
                 return false;
             }
         } catch (error) {
             console.error('❌ [Auth] 认证验证异常:', error);
+            if (error.status === 401) {
+                console.log('❌ [Auth] Token已过期，清除认证信息');
+            }
             api.clearAuth();
             return false;
         }
