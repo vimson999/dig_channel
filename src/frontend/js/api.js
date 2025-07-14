@@ -11,7 +11,17 @@ class APIClient {
 
     // 构建完整URL
     buildURL(endpoint, params = {}) {
-        const url = new URL(this.baseURL + endpoint);
+        // 处理相对路径的baseURL
+        let fullUrl;
+        if (this.baseURL.startsWith('http')) {
+            // 绝对URL
+            fullUrl = this.baseURL + endpoint;
+        } else {
+            // 相对路径，基于当前页面
+            fullUrl = window.location.origin + this.baseURL + endpoint;
+        }
+        
+        const url = new URL(fullUrl);
         
         // 添加查询参数
         Object.keys(params).forEach(key => {
