@@ -455,6 +455,14 @@ api.request = async function(...args) {
         
         // 处理401未授权错误
         if (error.status === 401) {
+            const endpoint = args[1]; // 获取请求的endpoint
+            
+            // 如果是认证验证请求，不要自动跳转，让调用方处理
+            if (endpoint === '/auth/verify') {
+                console.log('认证验证失败，由调用方处理');
+                throw error;
+            }
+            
             // 如果不在登录页面，跳转到登录页面
             if (!window.location.pathname.includes('login.html') && 
                 !window.location.pathname.includes('register.html')) {
