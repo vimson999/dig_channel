@@ -39,7 +39,13 @@
       "Bash(PYTHONPATH=. python app.py)",
       "mcp__sequential-thinking__sequentialthinking",
       "Bash(sudo supervisorctl:*)",
-      "Bash(supervisorctl status:*)"
+      "Bash(supervisorctl status:*)",
+      "mcp__puppeteer__puppeteer_navigate",
+      "mcp__puppeteer__puppeteer_screenshot",
+      "mcp__puppeteer__puppeteer_evaluate",
+      "mcp__puppeteer__puppeteer_fill",
+      "mcp__puppeteer__puppeteer_click",
+      "Bash(git rev-list:*)"
     ],
     "deny": []
   }
