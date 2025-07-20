@@ -21,6 +21,16 @@ const CONFIG = {
         VIDEO_SEARCH: '/videos/search',
         VIDEO_CHANNELS: '/videos/channels',
         VIDEO_CLEAN_SHORTS: '/videos/clean-shorts',
+
+        // 爆款视频搜索
+        TRENDING_SEARCH: '/trending/search',
+        
+        // 收藏相关
+        FAVORITES: '/favorites',
+        FAVORITES_CHECK: '/favorites/check',
+        FAVORITES_BATCH_CHECK: '/favorites/batch-check',
+        FAVORITES_STATS: '/favorites/stats',
+        FAVORITES_CLEAR: '/favorites/clear',
         
         // 排行榜相关
         RANKINGS_ALL: '/rankings/all',

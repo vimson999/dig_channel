@@ -35,11 +35,12 @@ class DataTable {
         }
     }
 
-    // 设置默认日期（最近7天）
+    // 设置默认日期（本月1日到今天）
     setDefaultDates() {
         const endDate = new Date();
         const startDate = new Date();
-        startDate.setDate(endDate.getDate() - 7);
+        // 设置为本月1日
+        startDate.setDate(1);
         
         this.endDate = Utils.formatDate(endDate);
         this.startDate = Utils.formatDate(startDate);

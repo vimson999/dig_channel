@@ -355,6 +355,44 @@ class YouTubeAPI:
         except Exception as e:
             print(f"批量获取频道统计数据失败: {e}")
             return []
+
+    def get_channels_info(self, channel_ids: List[str]) -> List[Dict[str, Any]]:
+        """批量获取多个频道的基本信息
+        
+        Args:
+            channel_ids: 频道ID列表（最多50个）
+            
+        Returns:
+            List[Dict]: 频道信息列表
+        """
+        try:
+            if not channel_ids:
+                return []
+            if len(channel_ids) > 50:
+                raise YouTubeAPIError("单次查询频道数量不能超过50个")
+            
+            params = {
+                'part': 'snippet',
+                'id': ','.join(channel_ids)
+            }
+            
+            data = self._make_request('channels', params)
+            
+            results = []
+            for item in data.get('items', []):
+                snippet = item['snippet']
+                results.append({
+                    'channel_id': item['id'],
+                    'title': snippet['title'],
+                    'thumbnail_url': snippet.get('thumbnails', {}).get('default', {}).get('url'),
+                    'published_at': snippet.get('publishedAt')  # 频道创建时间
+                })
+            
+            return results
+            
+        except Exception as e:
+            print(f"批量获取频道信息失败: {e}")
+            return []
     
     def test_api_connection(self) -> Dict[str, Any]:
         """测试API连接
@@ -695,6 +733,33 @@ class YouTubeAPI:
         except Exception as e:
             print(f"获取视频详细信息失败: {e}")
             return None
+
+    def search(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """执行YouTube搜索
+        
+        Args:
+            params: 搜索参数, 例如:
+                {
+                    'part': 'snippet',
+                    'q': '关键词',
+                    'type': 'video',
+                    'order': 'viewCount',
+                    'maxResults': 25
+                }
+            
+        Returns:
+            Dict: 搜索结果
+            
+        Raises:
+            YouTubeAPIError: API请求失败
+        """
+        try:
+            return self._make_request('search', params)
+        except YouTubeAPIError as e:
+            # 记录或处理错误
+            print(f"YouTube搜索API调用失败: {e}")
+            # 重新抛出异常，让调用方处理
+            raise e
 
 # 工具函数
 def validate_youtube_url(url: str) -> bool:

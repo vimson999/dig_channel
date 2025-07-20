@@ -249,6 +249,107 @@ class Utils {
         return prefix ? `${prefix}-${random}` : random;
     }
 
+    // 计算频道年龄（从创建到现在）
+    static calculateChannelAge(publishedAt) {
+        if (!publishedAt) return null;
+        
+        const published = new Date(publishedAt);
+        const now = new Date();
+        const diffTime = Math.abs(now - published);
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        
+        if (diffDays < 30) {
+            return `${diffDays}天`;
+        } else if (diffDays < 365) {
+            const months = Math.floor(diffDays / 30);
+            return `${months}个月`;
+        } else {
+            const years = Math.floor(diffDays / 365);
+            const remainingMonths = Math.floor((diffDays % 365) / 30);
+            if (remainingMonths > 0) {
+                return `${years}年${remainingMonths}个月`;
+            } else {
+                return `${years}年`;
+            }
+        }
+    }
+
+    // 格式化频道创建时间
+    static formatChannelCreatedDate(publishedAt) {
+        if (!publishedAt) return '未知';
+        
+        const date = new Date(publishedAt);
+        return date.toLocaleDateString('zh-CN', { 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric' 
+        });
+    }
+
+    // 计算视频热度评分
+    static calculateHotScore(viewCount = 0, likeCount = 0, commentCount = 0) {
+        // 归一化权重：播放量(50%) + 点赞(30%) + 评论(20%)
+        // 使用对数函数平滑大数值差异
+        const normalizedViews = Math.log10(Math.max(viewCount, 1));
+        const normalizedLikes = Math.log10(Math.max(likeCount, 1));
+        const normalizedComments = Math.log10(Math.max(commentCount, 1));
+        
+        // 加权计算，最高分100
+        const score = (normalizedViews * 0.5 + normalizedLikes * 0.3 + normalizedComments * 0.2) * 10;
+        
+        // 限制在0-100范围内
+        return Math.min(Math.max(score, 0), 100);
+    }
+
+    // 获取热度等级和颜色
+    static getHotScoreLevel(score) {
+        if (score >= 80) return { level: '🔥 超火', color: 'text-red-500', bgColor: 'bg-red-50' };
+        if (score >= 60) return { level: '🌟 很火', color: 'text-orange-500', bgColor: 'bg-orange-50' };
+        if (score >= 40) return { level: '📈 中等', color: 'text-yellow-500', bgColor: 'bg-yellow-50' };
+        if (score >= 20) return { level: '📊 一般', color: 'text-blue-500', bgColor: 'bg-blue-50' };
+        return { level: '💭 冷门', color: 'text-gray-500', bgColor: 'bg-gray-50' };
+    }
+
+    // 收藏管理功能
+    static getFavorites() {
+        const favorites = localStorage.getItem('trending_favorites');
+        return favorites ? JSON.parse(favorites) : [];
+    }
+
+    static addToFavorites(video) {
+        const favorites = this.getFavorites();
+        const exists = favorites.find(fav => fav.video_id === video.video_id);
+        
+        if (!exists) {
+            const favoriteItem = {
+                ...video,
+                favorited_at: new Date().toISOString(),
+                id: this.generateId('fav')
+            };
+            favorites.unshift(favoriteItem); // 添加到开头
+            localStorage.setItem('trending_favorites', JSON.stringify(favorites));
+            return true;
+        }
+        return false;
+    }
+
+    static removeFromFavorites(videoId) {
+        const favorites = this.getFavorites();
+        const filtered = favorites.filter(fav => fav.video_id !== videoId);
+        localStorage.setItem('trending_favorites', JSON.stringify(filtered));
+        return true;
+    }
+
+    static isFavorited(videoId) {
+        const favorites = this.getFavorites();
+        return favorites.some(fav => fav.video_id === videoId);
+    }
+
+    static clearAllFavorites() {
+        localStorage.removeItem('trending_favorites');
+        return true;
+    }
+
     // 获取查询参数
     static getQueryParams() {
         const params = {};

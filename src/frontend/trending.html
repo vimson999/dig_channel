@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>爆款视频搜索 - YouTube Analytics</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+    theme: {
+        extend: {
+            colors: {
+                primary: {
+                    50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd', 400: '#60a5fa',
+                    500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8', 800: '#1e40af', 900: '#1e3a8a'
+                },
+                secondary: '#64748b',
+                accent: { green: '#10b981', purple: '#8b5cf6', orange: '#f59e0b', red: '#ef4444', blue: '#06b6d4' },
+                success: '#10b981', warning: '#f59e0b', danger: '#ef4444', info: '#06b6d4'
+            },
+            borderRadius: { 'button': '8px' },
+            fontFamily: { 'sans': ['Inter', 'ui-sans-serif', 'system-ui'] },
+            boxShadow: {
+                'soft': '0 2px 15px -3px rgba(0, 0, 0, 0.07), 0 10px 20px -2px rgba(0, 0, 0, 0.04)',
+                'medium': '0 4px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 20px -5px rgba(0, 0, 0, 0.04)',
+                'strong': '0 10px 40px -10px rgba(0, 0, 0, 0.1), 0 2px 10px -2px rgba(0, 0, 0, 0.04)'
+            }
+        }
+    }
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+    body { font-family: 'Inter', sans-serif; }
+    .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    
+    /* 自定义复选框样式 */
+    input[type="checkbox"].checkbox-custom {
+        -webkit-appearance: none !important;
+        -moz-appearance: none !important;
+        appearance: none !important;
+        width: 16px !important;
+        height: 16px !important;
+        border: 2px solid #d1d5db !important;
+        border-radius: 4px !important;
+        background-color: white !important;
+        position: relative !important;
+        cursor: pointer !important;
+        transition: all 0.2s ease !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        display: inline-block !important;
+        vertical-align: middle !important;
+        flex-shrink: 0 !important;
+    }
+    
+    input[type="checkbox"].checkbox-custom:checked {
+        background-color: #3b82f6 !important;
+        border-color: #3b82f6 !important;
+    }
+    
+    input[type="checkbox"].checkbox-custom:checked::after {
+        content: '✓' !important;
+        position: absolute !important;
+        top: 50% !important;
+        left: 50% !important;
+        transform: translate(-50%, -50%) !important;
+        color: white !important;
+        font-size: 11px !important;
+        font-weight: bold !important;
+        line-height: 1 !important;
+        display: block !important;
+    }
+    
+    input[type="checkbox"].checkbox-custom:hover {
+        border-color: #3b82f6 !important;
+        box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.1) !important;
+    }
+    
+    input[type="checkbox"].checkbox-custom:focus {
+        outline: none !important;
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2) !important;
+    }
+    
+    /* 确保选中状态的勾号显示 */
+    input[type="checkbox"].checkbox-custom:checked::before {
+        content: none !important;
+    }
+</style>
+</head>
+<body class="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen font-sans">
+
+    <!-- 主导航栏 -->
+    <header class="bg-white/80 backdrop-blur-lg border-b border-gray-200/50 sticky top-0 z-40">
+        <div class="max-w-[1440px] mx-auto px-6 py-4">
+            <div class="flex items-center justify-between">
+                <!-- Logo 和标题 -->
+                <div class="flex items-center gap-4">
+                    <div class="w-10 h-10 bg-gradient-to-br from-red-500 to-red-600 rounded-xl flex items-center justify-center shadow-lg">
+                        <i class="fab fa-youtube text-white text-xl"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-xl font-bold text-gray-800">YouTube Analytics</h1>
+                        <p class="text-sm text-gray-500">爆款视频搜索</p>
+                    </div>
+                </div>
+                
+                <!-- 导航菜单 -->
+                <nav class="hidden md:flex items-center gap-6">
+                    <a href="index.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-chart-line mr-2"></i>首页
+                    </a>
+                    <a href="#channels" onclick="window.location.href='index.html#channels'" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-tv mr-2"></i>频道管理
+                    </a>
+                    <a href="videos.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-play mr-2"></i>视频管理
+                    </a>
+                    <a href="trending.html" class="nav-link text-primary-600 font-medium px-3 py-2 rounded-lg bg-primary-50 border border-primary-200">
+                        <i class="fas fa-fire mr-2"></i>爆款视频
+                    </a>
+                    <button onclick="showFavorites()" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-heart mr-2"></i>我的收藏 (<span id="favorites-count">0</span>)
+                    </button>
+                </nav>
+                
+                <!-- 用户操作区 -->
+                <div class="flex items-center gap-3">
+                    <button class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors" title="设置">
+                        <i class="fas fa-cog"></i>
+                    </button>
+                    <button class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors" title="帮助">
+                        <i class="fas fa-question-circle"></i>
+                    </button>
+                    
+                    <!-- 用户下拉菜单 -->
+                    <div class="relative group">
+                        <button class="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors">
+                            <div class="w-8 h-8 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center">
+                                <i class="fas fa-user text-white text-sm"></i>
+                            </div>
+                            <span class="hidden md:block">用户</span>
+                            <i class="fas fa-chevron-down text-xs"></i>
+                        </button>
+                        
+                        <!-- 下拉菜单 -->
+                        <div class="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-strong border border-gray-100 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+                            <div class="py-2">
+                                <a href="#" class="flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors">
+                                    <i class="fas fa-user-circle mr-3 text-gray-400"></i>个人资料
+                                </a>
+                                <a href="#" class="flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors">
+                                    <i class="fas fa-cog mr-3 text-gray-400"></i>设置
+                                </a>
+                                <hr class="my-1">
+                                <button onclick="logout()" class="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors">
+                                    <i class="fas fa-sign-out-alt mr-2"></i>退出登录
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- 面包屑导航 -->
+    <div class="max-w-[1440px] mx-auto px-6 py-4">
+        <nav class="flex items-center gap-2 text-sm text-gray-500">
+            <a href="index.html" class="hover:text-primary-600 transition-colors"><i class="fas fa-home"></i></a>
+            <span class="mx-2">/</span>
+            <span class="text-gray-700">爆款视频搜索</span>
+        </nav>
+    </div>
+
+    <!-- 主内容区域 -->
+    <main class="max-w-[1440px] mx-auto px-6 pb-8">
+        <!-- 搜索表单 -->
+        <div class="bg-white rounded-xl shadow-medium border border-gray-100 overflow-hidden">
+            <div class="p-6 border-b border-gray-100">
+                <form id="search-form" class="flex flex-col lg:flex-row items-center gap-4">
+                    <!-- 搜索框 -->
+                    <div class="flex-1 min-w-0">
+                        <div class="relative">
+                            <input type="text" name="keywords" id="keywords" placeholder="搜索关键词, 如: AI, a new era" 
+                                   class="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all">
+                            <i class="fas fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
+                        </div>
+                    </div>
+                    
+                    <!-- 筛选和操作区域 -->
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="time_range" name="time_range" class="px-3 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none text-sm">
+                            <option value="week">本周</option>
+                            <option value="today">今天</option>
+                            <option value="month">本月</option>
+                            <option value="year">今年</option>
+                            <option value="all">全部</option>
+                        </select>
+                        
+                        <select id="video_type" name="video_type" class="px-3 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none text-sm">
+                            <option value="all">所有类型</option>
+                            <option value="short">短视频 (<4分钟)</option>
+                            <option value="long">长视频 (>20分钟)</option>
+                        </select>
+
+                        <!-- 博主级别多选 -->
+                        <div class="relative">
+                            <button type="button" id="subscriber-range-toggle" class="px-3 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none text-sm bg-white min-w-[160px] flex items-center justify-between">
+                                <span id="subscriber-range-label">博主级别</span>
+                                <i class="fas fa-chevron-down text-xs"></i>
+                            </button>
+                            <div id="subscriber-range-dropdown" class="absolute top-full left-0 mt-1 bg-white border border-gray-300 rounded-button shadow-lg z-10 hidden min-w-[200px]">
+                                <div class="p-3 space-y-2">
+                                    <div class="flex items-center justify-between pb-2 border-b border-gray-200">
+                                        <span class="text-xs font-medium text-gray-700">博主级别</span>
+                                        <button type="button" id="clear-subscriber-selection" class="text-xs text-primary-600 hover:text-primary-800">清除选择</button>
+                                    </div>
+                                    <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-50 px-2 py-1 rounded transition-colors">
+                                        <input type="checkbox" name="subscriber_ranges" value="all" class="checkbox-custom" checked>
+                                        <span class="text-sm">所有博主</span>
+                                    </label>
+                                    <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-50 px-2 py-1 rounded transition-colors">
+                                        <input type="checkbox" name="subscriber_ranges" value="mega" class="checkbox-custom">
+                                        <span class="text-sm">大V (>100万)</span>
+                                    </label>
+                                    <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-50 px-2 py-1 rounded transition-colors">
+                                        <input type="checkbox" name="subscriber_ranges" value="macro" class="checkbox-custom">
+                                        <span class="text-sm">中V (10万-100万)</span>
+                                    </label>
+                                    <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-50 px-2 py-1 rounded transition-colors">
+                                        <input type="checkbox" name="subscriber_ranges" value="mid" class="checkbox-custom">
+                                        <span class="text-sm">小V (1万-10万)</span>
+                                    </label>
+                                    <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-50 px-2 py-1 rounded transition-colors">
+                                        <input type="checkbox" name="subscriber_ranges" value="micro" class="checkbox-custom">
+                                        <span class="text-sm">新人 (2K-1万)</span>
+                                    </label>
+                                    <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-50 px-2 py-1 rounded transition-colors">
+                                        <input type="checkbox" name="subscriber_ranges" value="newbie" class="checkbox-custom">
+                                        <span class="text-sm">菜鸟 (<2K)</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <select id="max_results" name="max_results" class="px-3 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none text-sm">
+                            <option value="12">12条</option>
+                            <option value="24" selected>24条</option>
+                            <option value="48">48条</option>
+                        </select>
+                        
+                        <button type="submit" class="flex items-center gap-2 bg-gradient-to-r from-primary-500 to-primary-600 text-white px-4 py-3 rounded-button font-medium shadow-lg hover:from-primary-600 hover:to-primary-700 hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 text-sm">
+                            <i class="fas fa-search text-xs"></i>
+                            搜索
+                        </button>
+                    </div>
+                </form>
+            </div>
+            
+            <!-- 搜索结果 -->
+            <div id="results-container" class="p-6">
+                <!-- 初始提示 -->
+                <div id="initial-state" class="flex flex-col items-center justify-center py-12">
+                    <i class="fas fa-search-plus text-4xl text-gray-300 mb-4"></i>
+                    <p class="text-gray-500 text-lg mb-2">发现下一个爆款视频</p>
+                    <p class="text-gray-400 text-sm">输入关键词开始搜索</p>
+                </div>
+                <!-- 加载提示 -->
+                <div id="loading-indicator" class="hidden flex-col items-center justify-center py-12">
+                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 mb-4"></div>
+                    <p class="text-gray-500">正在搜索, 请稍候...</p>
+                </div>
+                <!-- 结果列表 -->
+                <div id="videos-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <!-- 视频卡片将在这里动态插入 -->
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- JavaScript -->
+    <script src="js/env.js"></script>
+    <script>
+    // 设置全局API配置
+    window.API_BASE_URL = API_BASE_URL;
+    </script>
+    <script src="js/config.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/trending.js"></script>
+</body>
+</html>

@@ -196,6 +196,43 @@ class APIClient {
         return this.post(CONFIG.ENDPOINTS.VIDEO_CLEAN_SHORTS);
     }
 
+    async searchTrending(params = {}) {
+        return this.post(CONFIG.ENDPOINTS.TRENDING_SEARCH, params);
+    }
+
+    // 收藏相关API
+    async getFavorites(params = {}) {
+        return this.get(CONFIG.ENDPOINTS.FAVORITES, params);
+    }
+
+    async addFavorite(videoData) {
+        return this.post(CONFIG.ENDPOINTS.FAVORITES, { video_data: videoData });
+    }
+
+    async removeFavorite(videoId) {
+        return this.delete(`${CONFIG.ENDPOINTS.FAVORITES}/${videoId}`);
+    }
+
+    async checkFavorite(videoId) {
+        return this.get(`${CONFIG.ENDPOINTS.FAVORITES_CHECK}/${videoId}`);
+    }
+
+    async batchCheckFavorites(videoIds) {
+        return this.post(CONFIG.ENDPOINTS.FAVORITES_BATCH_CHECK, { video_ids: videoIds });
+    }
+
+    async getFavoriteStats() {
+        return this.get(CONFIG.ENDPOINTS.FAVORITES_STATS);
+    }
+
+    async clearAllFavorites() {
+        return this.delete(CONFIG.ENDPOINTS.FAVORITES_CLEAR);
+    }
+
+    async updateFavoriteNote(favoriteId, note) {
+        return this.put(`${CONFIG.ENDPOINTS.FAVORITES}/${favoriteId}/note`, { note });
+    }
+
     // 排行榜相关API
     async getAllRankings(limit = 3) {
         return this.get(CONFIG.ENDPOINTS.RANKINGS_ALL, { limit });

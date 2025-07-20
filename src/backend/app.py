@@ -43,7 +43,11 @@ def create_app(config_class=Config):
     db.init_app(app)
     
     # 初始化CORS
-    cors.init_app(app)
+    cors.init_app(app, 
+                 origins=["*"], 
+                 allow_headers=["Content-Type", "Authorization"], 
+                 methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+                 supports_credentials=True)
     
     # 初始化日志中间件
     request_logger.init_app(app)
@@ -69,6 +73,19 @@ def create_app(config_class=Config):
     @app.route('/health')
     def health():
         return {'status': 'healthy', 'version': '1.0.0'}
+    
+    # 处理所有OPTIONS请求
+    @app.before_request
+    def handle_options():
+        from flask import request
+        if request.method == 'OPTIONS':
+            from flask import make_response
+            response = make_response()
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+            response.headers['Access-Control-Max-Age'] = '86400'
+            return response
     
     return app
 

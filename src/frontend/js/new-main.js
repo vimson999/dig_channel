@@ -254,15 +254,22 @@ class YouTubeDataApp {
 
     async loadTableData() {
         try {
-            // 计算日期范围
+            // 计算日期范围 - 默认从本月1日开始
             const endDate = new Date();
             const startDate = new Date();
-            startDate.setDate(endDate.getDate() - this.currentTimeRange);
+            
+            // 如果是默认的7天，改为本月1日到今天
+            if (this.currentTimeRange === 7) {
+                startDate.setDate(1); // 本月1日
+            } else {
+                startDate.setDate(endDate.getDate() - this.currentTimeRange);
+            }
             
             const response = await api.getTableData({
                 active_only: true,
                 start_date: this.formatDate(startDate),
-                end_date: this.formatDate(endDate)
+                end_date: this.formatDate(endDate),
+                per_page: 100  // 增加每页返回数量
             });
 
             if (response.success) {

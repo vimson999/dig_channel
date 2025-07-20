@@ -7,5 +7,6 @@ from .user import User
 from .channel import Channel
 from .channel_data import ChannelData
 from .video import Video, VideoData
+from .favorite import FavoriteVideo
 
-__all__ = ['db', 'User', 'Channel', 'ChannelData', 'Video', 'VideoData']
+__all__ = ['db', 'User', 'Channel', 'ChannelData', 'Video', 'VideoData', 'FavoriteVideo']
