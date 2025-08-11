@@ -280,11 +280,20 @@ class YouTubeSyncService:
                             ).first()
                             
                             # 获取前一天数据
-                            previous_date = target_date - timedelta(days=1)
-                            previous_data = ChannelData.query.filter_by(
-                                channel_id=db_channel_id,
-                                date=previous_date
-                            ).first()
+                            # previous_date = target_date - timedelta(days=1)
+                            # previous_data = ChannelData.query.filter_by(
+                            #     channel_id=db_channel_id,
+                            #     date=previous_date
+                            # ).first()
+
+                            # 获取最近一天数据
+                            previous_data = ChannelData.query.filter(
+                                ChannelData.channel_id == db_channel_id,
+                                ChannelData.date < target_date  # 条件1：只找 target_date 之前的数据
+                            ).order_by(
+                                ChannelData.date.desc()  # 条件2：按日期降序排列（最新的在最前面）
+                            ).first()  # 条件3：取排序后的第一条记录
+                            
                             
                             if existing_data:
                                 # 更新现有数据

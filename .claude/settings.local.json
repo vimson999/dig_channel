@@ -45,7 +45,8 @@
       "mcp__puppeteer__puppeteer_evaluate",
       "mcp__puppeteer__puppeteer_fill",
       "mcp__puppeteer__puppeteer_click",
-      "Bash(git rev-list:*)"
+      "Bash(git rev-list:*)",
+      "Bash(git check-ignore:*)"
     ],
     "deny": []
   }
