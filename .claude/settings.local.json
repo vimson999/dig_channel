@@ -46,7 +46,10 @@
       "mcp__puppeteer__puppeteer_fill",
       "mcp__puppeteer__puppeteer_click",
       "Bash(git rev-list:*)",
-      "Bash(git check-ignore:*)"
+      "Bash(git check-ignore:*)",
+      "mcp__context7__resolve-library-id",
+      "WebSearch",
+      "Bash(./scripts/start-dev.sh:*)"
     ],
     "deny": []
   }

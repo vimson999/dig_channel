@@ -407,6 +407,29 @@ class TrendingRadarManager {
         return 'normal';
     }
     
+    getRankEmoji(rank) {
+        const emojis = {
+            1: '👑',  // 王冠
+            2: '🥈',  // 银牌
+            3: '🥉'   // 铜牌
+        };
+        return emojis[rank] || rank;
+    }
+    
+    getHotLevel(hotScore) {
+        if (!hotScore) return 0;
+        
+        // 尝试从热度分数中提取数字
+        const scoreNum = parseInt(hotScore.toString().replace(/[^\d]/g, '')) || 0;
+        
+        if (scoreNum > 100000) return 5;      // 超热
+        if (scoreNum > 50000) return 4;       // 很热
+        if (scoreNum > 10000) return 3;       // 热门
+        if (scoreNum > 1000) return 2;        // 温热
+        if (scoreNum > 0) return 1;           // 微热
+        return 0;                             // 无热度
+    }
+    
     formatHotScore(score) {
         if (!score) return '';
         
