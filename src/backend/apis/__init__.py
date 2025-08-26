@@ -27,7 +27,8 @@ def register_all_apis(app):
                         'channels': '/api/v1/channels',
                         'rankings': '/api/v1/rankings', 
                         'data': '/api/v1/data',
-                        'videos': '/api/v1/videos'
+                        'videos': '/api/v1/videos',
+                        'documents': '/api/v1/documents'
                     }
                 },
                 'documentation': '/api/docs'  # TODO: 添加API文档

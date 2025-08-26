@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文档转换工具 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            50: '#eff6ff',
+                            100: '#dbeafe', 
+                            200: '#bfdbfe',
+                            300: '#93c5fd',
+                            400: '#60a5fa',
+                            500: '#3b82f6',
+                            600: '#2563eb',
+                            700: '#1d4ed8',
+                            800: '#1e40af',
+                            900: '#1e3a8a'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .converter-container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .upload-section {
+            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+            border-radius: 16px;
+            padding: 40px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.08), 0 2px 8px rgba(0,0,0,0.04);
+            border: 1px solid rgba(226, 232, 240, 0.5);
+            backdrop-filter: blur(10px);
+        }
+        
+        .upload-area {
+            border: 2px dashed #cbd5e1;
+            border-radius: 16px;
+            padding: 60px 40px;
+            text-align: center;
+            margin-bottom: 25px;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background: linear-gradient(135deg, #fefefe 0%, #f1f5f9 100%);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .upload-area::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(99, 102, 241, 0.1) 100%);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        
+        .upload-area.dragover {
+            border-color: #3b82f6;
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.05) 0%, rgba(99, 102, 241, 0.05) 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 20px 40px rgba(59, 130, 246, 0.15);
+        }
+        
+        .upload-area.dragover::before {
+            opacity: 1;
+        }
+        
+        .upload-icon {
+            font-size: 3.5rem;
+            color: #6366f1;
+            margin-bottom: 1rem;
+            display: block;
+            transition: transform 0.3s ease;
+        }
+        
+        .upload-area:hover .upload-icon {
+            transform: scale(1.1);
+        }
+        
+        .file-input {
+            display: none;
+        }
+        
+        .upload-btn {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: white;
+            padding: 14px 32px;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .upload-btn:hover {
+            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(99, 102, 241, 0.4);
+        }
+        
+        .upload-btn:active {
+            transform: translateY(0);
+        }
+        
+        .conversion-options {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .option-group {
+            flex: 1;
+            min-width: 200px;
+        }
+        
+        .option-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .option-group select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .convert-btn {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            padding: 16px 32px;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 18px;
+            font-weight: 600;
+            width: 100%;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.3);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .convert-btn:hover:not(:disabled) {
+            background: linear-gradient(135deg, #059669 0%, #047857 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(16, 185, 129, 0.4);
+        }
+        
+        .convert-btn:active:not(:disabled) {
+            transform: translateY(0);
+        }
+        
+        .convert-btn:disabled {
+            background: linear-gradient(135deg, #9ca3af 0%, #6b7280 100%);
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+        
+        .convert-btn .btn-text {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .convert-btn .loading-spinner {
+            display: none;
+            width: 18px;
+            height: 18px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s ease-in-out infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .convert-btn.loading .btn-text { display: none; }
+        .convert-btn.loading .loading-spinner { display: inline-block; }
+        
+        .file-info {
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            display: none;
+            border: 1px solid #bae6fd;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .file-info::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+            background: linear-gradient(to bottom, #0ea5e9, #0284c7);
+        }
+        
+        .file-info.show {
+            display: block;
+            animation: slideInUp 0.3s ease-out;
+        }
+        
+        @keyframes slideInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .file-info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        
+        .file-info-row:last-child {
+            margin-bottom: 0;
+        }
+        
+        .file-info-label {
+            font-weight: 600;
+            color: #0f172a;
+            font-size: 14px;
+        }
+        
+        .file-info-value {
+            color: #475569;
+            font-size: 14px;
+            font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #f1f5f9;
+            border-radius: 12px;
+            overflow: hidden;
+            margin-bottom: 20px;
+            display: none;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.05);
+        }
+        
+        .progress-bar.show {
+            display: block;
+            animation: fadeIn 0.3s ease;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #6366f1 0%, #8b5cf6 50%, #10b981 100%);
+            background-size: 200% 100%;
+            width: 0%;
+            transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            border-radius: 12px;
+            animation: gradientShift 2s ease-in-out infinite;
+            position: relative;
+        }
+        
+        .progress-fill::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 20px;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4));
+            animation: shimmer 1.5s ease-in-out infinite;
+        }
+        
+        @keyframes gradientShift {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+        
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+        
+        .result-section {
+            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.08), 0 2px 8px rgba(0,0,0,0.04);
+            border: 1px solid rgba(226, 232, 240, 0.5);
+            backdrop-filter: blur(10px);
+            display: none;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .result-section::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, #10b981 0%, #059669 100%);
+        }
+        
+        .result-section.show {
+            display: block;
+            animation: zoomIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        @keyframes zoomIn {
+            from {
+                opacity: 0;
+                transform: scale(0.95);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+        
+        .download-btn {
+            background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);
+            color: white;
+            padding: 16px 32px;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 18px;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 6px 20px rgba(14, 165, 233, 0.3);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .download-btn:hover {
+            background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(14, 165, 233, 0.4);
+            text-decoration: none;
+            color: white;
+        }
+        
+        .download-btn:active {
+            transform: translateY(0);
+        }
+        
+        .error-message {
+            background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+            color: #991b1b;
+            padding: 16px 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            display: none;
+            border: 1px solid #fecaca;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .error-message::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+            background: linear-gradient(to bottom, #ef4444, #dc2626);
+        }
+        
+        .error-message.show {
+            display: block;
+            animation: slideInDown 0.3s ease-out;
+        }
+        
+        @keyframes slideInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .success-message {
+            background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+            color: #166534;
+            padding: 16px 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            display: none;
+            border: 1px solid #bbf7d0;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .success-message::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+            background: linear-gradient(to bottom, #22c55e, #16a34a);
+        }
+        
+        .success-message.show {
+            display: block;
+            animation: slideInDown 0.3s ease-out;
+        }
+        \n        /* 页面标题优化 */\n        .page-title {\n            text-align: center;\n            margin-bottom: 40px;\n        }\n        \n        .page-title h2 {\n            font-size: 2.5rem;\n            font-weight: 800;\n            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #10b981 100%);\n            background-clip: text;\n            -webkit-background-clip: text;\n            -webkit-text-fill-color: transparent;\n            margin: 0 0 12px 0;\n            line-height: 1.2;\n        }\n        \n        .page-title p {\n            color: #64748b;\n            font-size: 1.125rem;\n            margin: 0;\n            max-width: 500px;\n            margin-left: auto;\n            margin-right: auto;\n            line-height: 1.6;\n        }\n        \n        /* 响应式设计 */\n        @media (max-width: 768px) {\n            .converter-container { padding: 16px; }\n            .upload-section { padding: 24px; margin-bottom: 20px; }\n            .upload-area { padding: 40px 20px; }\n            .conversion-options { flex-direction: column; gap: 16px; }\n            .option-group { min-width: auto; }\n        }\n        \n        @media (max-width: 480px) {\n            .upload-area { padding: 32px 16px; }\n            .file-info { padding: 16px; }\n        }\n    </style>
+</head>
+<body class="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen font-sans">
+    <!-- 主导航栏 -->
+    <header class="bg-white/80 backdrop-blur-lg border-b border-gray-200/50 sticky top-0 z-40" role="banner">
+        <div class="max-w-[1440px] mx-auto px-6 py-4">
+            <div class="flex items-center justify-between">
+                <!-- Logo 和标题 -->
+                <div class="flex items-center gap-4">
+                    <div class="w-10 h-10 bg-gradient-to-br from-red-500 to-red-600 rounded-xl flex items-center justify-center shadow-lg">
+                        <i class="fab fa-youtube text-white text-xl"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-xl font-bold text-gray-800">Shioa</h1>
+                        <p class="text-sm text-gray-500">文档转换工具</p>
+                    </div>
+                </div>
+                
+                <!-- 导航菜单 -->
+                <nav class="hidden md:flex items-center gap-6" role="navigation" aria-label="主导航">
+                    <a href="index.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-chart-line mr-2" aria-hidden="true"></i>首页
+                    </a>
+                    <a href="index.html#channels" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-tv mr-2" aria-hidden="true"></i>频道管理
+                    </a>
+                    <a href="videos.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-play mr-2" aria-hidden="true"></i>视频管理
+                    </a>
+                    <a href="trending-radar.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-radar-line mr-2" aria-hidden="true"></i>趋势雷达
+                    </a>
+                    <a href="trending.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-fire mr-2" aria-hidden="true"></i>爆款视频
+                    </a>
+                    <a href="document-converter.html" class="nav-link text-primary-600 font-medium px-3 py-2 rounded-lg bg-primary-50 border border-primary-200" aria-current="page">
+                        <i class="fas fa-file-exchange mr-2" aria-hidden="true"></i>文档转换
+                    </a>
+                </nav>
+                
+                <!-- 用户操作区 -->
+                <div class="flex items-center gap-3">
+                    <button class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors" title="设置">
+                        <i class="fas fa-cog"></i>
+                    </button>
+                    <button class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors" title="帮助">
+                        <i class="fas fa-question-circle"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- 面包屑导航 -->
+    <div class="max-w-[1440px] mx-auto px-6 py-4">
+        <nav class="flex items-center gap-2 text-sm text-gray-500" aria-label="面包屑导航" role="navigation">
+            <a href="index.html" class="hover:text-primary-600 transition-colors" aria-label="返回首页">
+                <i class="fas fa-home" aria-hidden="true"></i>
+            </a>
+            <span class="mx-2" aria-hidden="true">/</span>
+            <span class="text-gray-700" aria-current="page">文档转换</span>
+        </nav>
+    </div>
+
+    <!-- 主内容区域 -->
+    <main class="max-w-[1440px] mx-auto px-6 pb-8">
+        <div class="converter-container">
+            <div class="text-center mb-8">
+                <h2 class="text-3xl font-bold text-gray-800 mb-2">📄 文档转换工具</h2>
+                <p class="text-gray-600">支持 Markdown 和 Word 文档之间的相互转换</p>
+            </div>
+        
+        <div class="upload-section">
+            <div class="upload-area" id="uploadArea">
+                <div>
+                    <i class="upload-icon">📁</i>
+                    <h3 style="margin: 0 0 8px 0; font-size: 1.5rem; color: #1e293b; font-weight: 600;">拖拽文件到此处</h3>
+                    <p style="margin: 0 0 20px 0; color: #64748b; font-size: 1rem;">或点击按钮选择文件</p>
+                    <p style="margin: 0 0 24px 0; color: #94a3b8; font-size: 0.875rem;">支持 .md, .docx, .doc 格式 • 最大 10MB</p>
+                </div>
+                <input type="file" id="fileInput" class="file-input" accept=".md,.docx,.doc">
+                <button type="button" class="upload-btn" onclick="document.getElementById('fileInput').click()">
+                    <i class="fas fa-cloud-upload-alt" style="margin-right: 8px;"></i>
+                    选择文件
+                </button>
+            </div>
+            
+            <div class="error-message" id="errorMessage"></div>
+            
+            <div class="file-info" id="fileInfo">
+                <div class="file-info-row">
+                    <span class="file-info-label">📄 已选择文件：</span>
+                    <span class="file-info-value" id="fileName"></span>
+                </div>
+                <div class="file-info-row">
+                    <span class="file-info-label">📊 文件大小：</span>
+                    <span class="file-info-value" id="fileSize"></span>
+                </div>
+                <div class="file-info-row">
+                    <span class="file-info-label">🏷️ 文件类型：</span>
+                    <span class="file-info-value" id="fileType"></span>
+                </div>
+            </div>
+            
+            <div class="conversion-options">
+                <div class="option-group">
+                    <label for="sourceFormat">源格式</label>
+                    <select id="sourceFormat">
+                        <option value="markdown">Markdown (.md)</option>
+                        <option value="docx">Word Document (.docx)</option>
+                    </select>
+                </div>
+                
+                <div class="option-group">
+                    <label for="targetFormat">目标格式</label>
+                    <select id="targetFormat">
+                        <option value="docx">Word Document (.docx)</option>
+                        <option value="markdown">Markdown (.md)</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="progress-bar" id="progressBar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            
+            <button type="button" class="convert-btn" id="convertBtn" disabled>
+                <span class="btn-text">
+                    <i class="fas fa-magic" style="margin-right: 8px;"></i>
+                    开始转换
+                </span>
+                <div class="loading-spinner"></div>
+            </button>
+        </div>
+        
+        <div class="result-section" id="resultSection">
+            <div style="text-align: center; padding: 40px 20px;">
+                <div style="font-size: 4rem; margin-bottom: 20px;">🎉</div>
+                <h3 style="margin: 0 0 12px 0; font-size: 1.75rem; color: #059669; font-weight: 700;">转换完成！</h3>
+                <p style="margin: 0 0 32px 0; color: #6b7280; font-size: 1.1rem;">文档已成功转换，点击下载按钮获取文件</p>
+                <a href="#" class="download-btn" id="downloadLink" download>
+                    <i class="fas fa-download" style="margin-right: 10px;"></i>
+                    下载转换后的文件
+                </a>
+            </div>
+        </div>
+        </div>
+    </main>
+
+    <!-- JavaScript -->
+    <script src="js/env.js"></script>
+    <script>
+    // 设置全局API配置
+    window.API_BASE_URL = API_BASE_URL;
+    </script>
+    <script src="js/config.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/navigation.js"></script>
+    <script src="js/document-converter.js"></script>
+</body>
+</html>

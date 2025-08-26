@@ -28,6 +28,8 @@ class NavigationComponent {
             return 'trending-radar';
         } else if (filename === 'trending.html') {
             return 'trending';
+        } else if (filename === 'document-converter.html') {
+            return 'document-converter';
         }
         return 'dashboard'; // 默认
     }
@@ -175,7 +177,8 @@ class NavigationComponent {
             'dashboard': '智能数据分析平台',
             'videos': '视频管理中心',
             'trending-radar': '全网热榜实时监控',
-            'trending': '爆款视频搜索'
+            'trending': '爆款视频搜索',
+            'document-converter': '文档转换工具'
         };
         return subtitles[this.currentPage] || '数据分析平台';
     }
@@ -213,6 +216,12 @@ class NavigationComponent {
                 name: '爆款视频',
                 icon: 'fas fa-fire',
                 href: 'trending.html'
+            },
+            {
+                id: 'document-converter',
+                name: '文档转换',
+                icon: 'fas fa-file-exchange',
+                href: 'document-converter.html'
             }
         ];
         
@@ -309,7 +318,8 @@ class NavigationComponent {
             'dashboard': 'a[href="index.html"]',
             'videos': 'a[href="videos.html"]',
             'trending-radar': 'a[href="trending-radar.html"]',
-            'trending': 'a[href="trending.html"]'
+            'trending': 'a[href="trending.html"]',
+            'document-converter': 'a[href="document-converter.html"]'
         };
         
         const selector = navSelectors[this.currentPage];

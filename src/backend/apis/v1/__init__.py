@@ -6,6 +6,7 @@ from .data import bp as data_bp
 from .scheduler import bp as scheduler_bp
 from .trending import bp as trending_bp
 from .favorites import bp as favorites_bp
+from .documents import bp as documents_bp
 
 def register_blueprints(app):
     """注册所有API蓝图
@@ -20,6 +21,7 @@ def register_blueprints(app):
     app.register_blueprint(scheduler_bp)
     app.register_blueprint(trending_bp)
     app.register_blueprint(favorites_bp)
+    app.register_blueprint(documents_bp)
     
     # 注册视频API
     from api.videos import videos_bp
@@ -33,5 +35,6 @@ __all__ = [
     'scheduler_bp',
     'trending_bp',
     'favorites_bp',
+    'documents_bp',
     'register_blueprints'
 ]
