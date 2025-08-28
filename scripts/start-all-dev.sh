@@ -20,6 +20,13 @@ sleep 2
 echo "🔧 激活虚拟环境..."
 source venv/bin/activate
 
+# 设置PostgreSQL数据库连接
+export DATABASE_TYPE=postgresql
+export DATABASE_URL=postgresql://cappa_rw:RWcappaDb!!!2025@101.35.56.140:5432/show_ytb_data
+
+echo "💾 数据库类型: PostgreSQL"
+echo "🔗 数据库连接: show_ytb_data"
+
 # 启动后端服务器
 echo "🌐 启动后端服务器 (Flask)..."
 cd src/backend

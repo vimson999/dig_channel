@@ -49,7 +49,24 @@
       "Bash(git check-ignore:*)",
       "mcp__context7__resolve-library-id",
       "WebSearch",
-      "Bash(./scripts/start-dev.sh:*)"
+      "Bash(./scripts/start-dev.sh:*)",
+      "Bash(psql:*)",
+      "Bash(PGPASSWORD:*)",
+      "Bash(sqlite3:*)",
+      "Bash(timeout:*)",
+      "Bash(venv/bin/python test/sync_missing_data.py:*)",
+      "Bash(echo:*)",
+      "Bash(venv/bin/python3:*)",
+      "Bash(venv/bin/python test/check_data_completeness.py:*)",
+      "Bash(venv/bin/python test/sync_missing_channel_data.py:*)",
+      "Bash(venv/bin/python test/detailed_date_check.py:*)",
+      "Bash(venv/bin/python:*)",
+      "Bash(export DATABASE_TYPE=postgresql)",
+      "Bash(./venv/bin/python:*)",
+      "Bash(venv-main/bin/python test/check_data_completeness.py:*)",
+      "Bash(brew install:*)",
+      "Bash(pandoc:*)",
+      "Bash(venv-main/bin/python:*)"
     ],
     "deny": []
   }
