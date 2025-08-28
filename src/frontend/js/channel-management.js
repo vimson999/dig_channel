@@ -10,8 +10,10 @@ class ChannelManagement {
         this.selectedChannels = new Set();
         this.sortField = 'name';
         this.sortDirection = 'asc';
+        this.categories = []; // 存储分类数据
         
         this.bindEvents();
+        this.loadCategories(); // 加载分类数据
     }
 
     bindEvents() {
@@ -142,6 +144,83 @@ class ChannelManagement {
     // 更新统计信息 (已移除统计卡片，这个方法现在为空)
     updateStatistics(stats) {
         // 统计卡片已移除，不需要更新
+    }
+
+    // 加载频道分类
+    async loadCategories() {
+        try {
+            const response = await api.getChannelCategories();
+            if (response.success && response.data.categories) {
+                this.categories = response.data.categories;
+                console.log('加载到的分类:', this.categories);
+                
+                // 更新筛选器下拉框
+                this.updateFilterCategoryDropdown();
+                
+                // 更新编辑模态框的分类下拉框
+                this.updateEditCategoryDropdown();
+            }
+        } catch (error) {
+            console.error('加载分类失败:', error);
+            // 使用默认分类作为回退
+            this.categories = [
+                { name: '科技', count: 0 },
+                { name: '教育', count: 0 },
+                { name: '娱乐', count: 0 },
+                { name: '生活', count: 0 },
+                { name: '游戏', count: 0 },
+                { name: '音乐', count: 0 },
+                { name: '其他', count: 0 }
+            ];
+            this.updateFilterCategoryDropdown();
+            this.updateEditCategoryDropdown();
+        }
+    }
+
+    // 更新筛选器的分类下拉框
+    updateFilterCategoryDropdown() {
+        const filterCategory = document.getElementById('filter-category');
+        if (!filterCategory) return;
+
+        // 保存当前选中的值
+        const currentValue = filterCategory.value;
+
+        // 构建选项HTML
+        let options = '<option value="">所有分类</option>';
+        this.categories.forEach(category => {
+            options += `<option value="${category.name}">${category.name} (${category.count})</option>`;
+        });
+
+        // 更新下拉框
+        filterCategory.innerHTML = options;
+        
+        // 恢复之前选中的值
+        if (currentValue) {
+            filterCategory.value = currentValue;
+        }
+    }
+
+    // 更新编辑模态框的分类下拉框
+    updateEditCategoryDropdown() {
+        const editCategory = document.getElementById('edit-channel-category');
+        if (!editCategory) return;
+
+        // 保存当前选中的值
+        const currentValue = editCategory.value;
+
+        // 构建选项HTML
+        let options = '<option value="">选择分类</option>';
+        this.categories.forEach(category => {
+            options += `<option value="${category.name}">${category.name}</option>`;
+        });
+
+        // 更新下拉框
+        editCategory.innerHTML = options;
+        
+        // 恢复之前选中的值
+        if (currentValue) {
+            editCategory.value = currentValue;
+        }
     }
 
     // 渲染频道表格
@@ -545,6 +624,9 @@ class ChannelManagement {
     openEditChannelModal(channel) {
         const modal = document.getElementById('editChannelModal');
         const content = document.getElementById('editModalContent');
+        
+        // 确保分类下拉框是最新的
+        this.updateEditCategoryDropdown();
         
         // 填充表单数据
         document.getElementById('edit-channel-id').value = channel.id;

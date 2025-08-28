@@ -268,25 +268,25 @@ class VideoManager {
     
     async loadCategories() {
         try {
-            const response = await api.getVideoCategories();
+            const response = await api.getChannelCategories();
             if (response.success) {
                 const categories = response.data.categories;
                 const select = document.getElementById('filter-category');
                 
                 if (select) {
                     // 清空现有选项（保留第一个"所有分类"）
-                    select.innerHTML = '<option value="">所有分类</option>';
+                    select.innerHTML = '<option value="">所有频道分类</option>';
                     
                     categories.forEach(category => {
                         const option = document.createElement('option');
                         option.value = category.name;
-                        option.textContent = `${category.name} (${category.count}个视频)`;
+                        option.textContent = `${category.name} (${category.count}个频道)`;
                         select.appendChild(option);
                     });
                 }
             }
         } catch (error) {
-            console.error('加载分类列表失败:', error);
+            console.error('加载频道分类列表失败:', error);
         }
     }
     
