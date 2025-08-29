@@ -478,7 +478,7 @@ api.checkPageAccess = function() {
     
     if (!isAuthPage && !this.isAuthenticated()) {
         console.log('未登录用户访问受保护页面，重定向到登录页');
-        window.location.href = '/login.html';
+        window.location.href = 'login.html';
         return false;
     }
     
@@ -514,7 +514,7 @@ api.request = async function(...args) {
             if (!window.location.pathname.includes('login.html') && 
                 !window.location.pathname.includes('register.html')) {
                 console.log('检测到未授权访问，跳转到登录页面');
-                window.location.href = '/login.html';
+                window.location.href = 'login.html';
                 return;
             }
         }

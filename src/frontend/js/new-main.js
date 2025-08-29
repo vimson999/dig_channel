@@ -20,7 +20,7 @@ class YouTubeDataApp {
         
         if (!isAuthenticated) {
             console.log('❌ [Main] 用户未认证，重定向到登录页');
-            window.location.href = '/login.html';
+            window.location.href = 'login.html';
             return;
         }
         
@@ -744,7 +744,7 @@ class YouTubeDataApp {
 
             // 短暂延迟后跳转到登录页
             setTimeout(() => {
-                window.location.href = '/login.html';
+                window.location.href = 'login.html';
             }, 1000);
 
         } catch (error) {
@@ -756,7 +756,7 @@ class YouTubeDataApp {
             this.showToast('退出登录', 'info');
             
             setTimeout(() => {
-                window.location.href = '/login.html';
+                window.location.href = 'login.html';
             }, 1000);
         }
     }

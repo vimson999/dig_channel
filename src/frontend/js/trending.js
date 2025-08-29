@@ -2,7 +2,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 认证检查
     const token = localStorage.getItem('access_token');
     if (!token) {
-        window.location.href = '/login.html';
+        window.location.href = 'login.html';
         return;
     }
 
@@ -12,11 +12,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             window.trendingSearchInstance = new TrendingSearch();
         } else {
             api.clearAuth();
-            window.location.href = '/login.html';
+            window.location.href = 'login.html';
         }
     } catch (error) {
         api.clearAuth();
-        window.location.href = '/login.html';
+        window.location.href = 'login.html';
     }
 });
 

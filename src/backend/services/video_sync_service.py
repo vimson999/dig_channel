@@ -505,9 +505,14 @@ class VideoSyncService:
                     )
                 )
             
-            # 分类筛选 - 按频道分类而不是视频分类
+            # 分类筛选 - 根据是否指定频道来决定筛选方式
             if category:
-                query = query.filter(Channel.category == category)
+                if channel_id:
+                    # 如果指定了频道，按视频分类筛选
+                    query = query.filter(Video.category_name == category)
+                else:
+                    # 如果没有指定频道，按频道分类筛选
+                    query = query.filter(Channel.category == category)
             
             # 排序
             if sort_by == 'view_count':

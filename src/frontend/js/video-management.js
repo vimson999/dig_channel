@@ -20,7 +20,7 @@ window.logout = async function() {
 
         // 短暂延迟后跳转到登录页
         setTimeout(() => {
-            window.location.href = '/login.html';
+            window.location.href = 'login.html';
         }, 1000);
 
     } catch (error) {
@@ -32,7 +32,7 @@ window.logout = async function() {
         showToast('退出登录', 'info');
         
         setTimeout(() => {
-            window.location.href = '/login.html';
+            window.location.href = 'login.html';
         }, 1000);
     }
 };
@@ -171,7 +171,14 @@ class VideoManager {
         if (filterChannel) {
             filterChannel.addEventListener('change', (e) => {
                 this.currentFilters.channel = e.target.value;
+                // 清空分类筛选，因为频道改变了
+                this.currentFilters.category = '';
+                const categoryFilter = document.getElementById('filter-category');
+                if (categoryFilter) categoryFilter.value = '';
+                
                 this.currentPage = 1;
+                // 重新加载分类和视频
+                this.loadCategories();
                 this.loadVideos();
             });
         }
@@ -268,25 +275,42 @@ class VideoManager {
     
     async loadCategories() {
         try {
-            const response = await api.getChannelCategories();
+            // 根据当前筛选状态决定加载哪种分类
+            const channelFilter = document.getElementById('filter-channel');
+            const hasChannelSelected = channelFilter && channelFilter.value;
+            
+            let response;
+            if (hasChannelSelected) {
+                // 如果选择了特定频道，加载视频分类
+                response = await api.getVideoCategories();
+            } else {
+                // 如果没有选择频道，加载频道分类
+                response = await api.getChannelCategories();
+            }
+            
             if (response.success) {
                 const categories = response.data.categories;
                 const select = document.getElementById('filter-category');
                 
                 if (select) {
-                    // 清空现有选项（保留第一个"所有分类"）
-                    select.innerHTML = '<option value="">所有频道分类</option>';
+                    // 清空现有选项并设置正确的默认选项
+                    const defaultLabel = hasChannelSelected ? '所有视频分类' : '所有频道分类';
+                    select.innerHTML = `<option value="">${defaultLabel}</option>`;
                     
                     categories.forEach(category => {
                         const option = document.createElement('option');
                         option.value = category.name;
-                        option.textContent = `${category.name} (${category.count}个频道)`;
+                        if (hasChannelSelected) {
+                            option.textContent = `${category.name} (${category.count}个视频)`;
+                        } else {
+                            option.textContent = `${category.name} (${category.count}个频道)`;
+                        }
                         select.appendChild(option);
                     });
                 }
             }
         } catch (error) {
-            console.error('加载频道分类列表失败:', error);
+            console.error('加载分类列表失败:', error);
         }
     }
     
@@ -923,7 +947,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         } else {
             console.log('❌ [Videos] Token验证失败，响应格式:', response);
             api.clearAuth();
-            window.location.href = '/login.html';
+            window.location.href = 'login.html';
         }
     } catch (error) {
         console.error('❌ [Videos] 认证验证异常:', error);

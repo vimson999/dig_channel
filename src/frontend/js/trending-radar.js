@@ -466,7 +466,7 @@ window.logout = async function() {
         showToast('已成功退出登录', 'success');
 
         setTimeout(() => {
-            window.location.href = '/login.html';
+            window.location.href = 'login.html';
         }, 1000);
 
     } catch (error) {
@@ -476,7 +476,7 @@ window.logout = async function() {
         showToast('退出登录', 'info');
         
         setTimeout(() => {
-            window.location.href = '/login.html';
+            window.location.href = 'login.html';
         }, 1000);
     }
 };
@@ -586,7 +586,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const token = localStorage.getItem('access_token');
     if (!token) {
         console.log('❌ [TrendingRadar] 没有Token，重定向到登录页');
-        window.location.href = '/login.html';
+        window.location.href = 'login.html';
         return;
     }
     
@@ -603,7 +603,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         } else {
             console.log('❌ [TrendingRadar] Token验证失败');
             api.clearAuth();
-            window.location.href = '/login.html';
+            window.location.href = 'login.html';
         }
     } catch (error) {
         console.error('❌ [TrendingRadar] 认证验证异常:', error);
@@ -611,6 +611,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.log('❌ [TrendingRadar] Token已过期');
         }
         api.clearAuth();
-        window.location.href = '/login.html';
+        window.location.href = 'login.html';
     }
 });
