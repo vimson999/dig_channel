@@ -26,6 +26,14 @@ def register_blueprints(app):
     # 注册视频API
     from api.videos import videos_bp
     app.register_blueprint(videos_bp)
+    
+    # 注册TTS API
+    from api.tts import tts_bp
+    app.register_blueprint(tts_bp)
+    
+    # 注册MHTML转PDF API
+    from api.mhtml_pdf import mhtml_pdf_bp
+    app.register_blueprint(mhtml_pdf_bp)
 
 __all__ = [
     'auth_bp',

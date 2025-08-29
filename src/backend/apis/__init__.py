@@ -28,7 +28,9 @@ def register_all_apis(app):
                         'rankings': '/api/v1/rankings', 
                         'data': '/api/v1/data',
                         'videos': '/api/v1/videos',
-                        'documents': '/api/v1/documents'
+                        'documents': '/api/v1/documents',
+                        'tts': '/api/v1/tts',
+                        'mhtml_pdf': '/api/v1/mhtml-pdf'
                     }
                 },
                 'documentation': '/api/docs'  # TODO: 添加API文档

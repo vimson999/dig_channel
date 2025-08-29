@@ -30,6 +30,10 @@ class NavigationComponent {
             return 'trending';
         } else if (filename === 'document-converter.html') {
             return 'document-converter';
+        } else if (filename === 'tts.html') {
+            return 'tts';
+        } else if (filename === 'mhtml-pdf.html') {
+            return 'mhtml-pdf';
         }
         return 'dashboard'; // 默认
     }
@@ -178,7 +182,9 @@ class NavigationComponent {
             'videos': '视频管理中心',
             'trending-radar': '全网热榜实时监控',
             'trending': '爆款视频搜索',
-            'document-converter': '文档转换工具'
+            'document-converter': '文档转换工具',
+            'tts': 'AI语音合成服务',
+            'mhtml-pdf': 'MHTML转PDF工具'
         };
         return subtitles[this.currentPage] || '数据分析平台';
     }
@@ -222,6 +228,18 @@ class NavigationComponent {
                 name: '文档转换',
                 icon: 'fas fa-file-exchange',
                 href: 'document-converter.html'
+            },
+            {
+                id: 'tts',
+                name: '文本转语音',
+                icon: 'fas fa-microphone',
+                href: 'tts.html'
+            },
+            {
+                id: 'mhtml-pdf',
+                name: 'MHTML转PDF',
+                icon: 'fas fa-file-pdf',
+                href: 'mhtml-pdf.html'
             }
         ];
         
@@ -239,6 +257,74 @@ class NavigationComponent {
             return `
                 <a ${linkAttrs} class="nav-link ${activeClass} px-3 py-2 rounded-lg transition-colors">
                     <i class="${item.icon} mr-2"></i>${item.name}
+                </a>
+            `;
+        }).join('');
+    }
+    
+    getMobileMenuItems() {
+        const menuItems = [
+            {
+                id: 'dashboard',
+                name: '首页',
+                icon: 'fas fa-chart-line',
+                href: 'index.html'
+            },
+            {
+                id: 'channels',
+                name: '频道管理',
+                icon: 'fas fa-tv',
+                href: 'index.html#channels'
+            },
+            {
+                id: 'videos',
+                name: '视频管理',
+                icon: 'fas fa-play',
+                href: 'videos.html'
+            },
+            {
+                id: 'trending-radar',
+                name: '趋势雷达',
+                icon: 'fas fa-radar-line',
+                href: 'trending-radar.html'
+            },
+            {
+                id: 'trending',
+                name: '爆款视频',
+                icon: 'fas fa-fire',
+                href: 'trending.html'
+            },
+            {
+                id: 'document-converter',
+                name: '文档转换',
+                icon: 'fas fa-file-exchange',
+                href: 'document-converter.html'
+            },
+            {
+                id: 'tts',
+                name: '文本转语音',
+                icon: 'fas fa-microphone',
+                href: 'tts.html'
+            },
+            {
+                id: 'mhtml-pdf',
+                name: 'MHTML转PDF',
+                icon: 'fas fa-file-pdf',
+                href: 'mhtml-pdf.html'
+            }
+        ];
+        
+        return menuItems.map(item => {
+            const isActive = this.isActiveMenuItem(item.id);
+            const activeClass = isActive 
+                ? 'bg-primary-50 text-primary-600 border-r-2 border-primary-600' 
+                : 'text-gray-700 hover:bg-gray-50';
+            
+            return `
+                <a href="${item.href}" onclick="toggleMobileMenu()" 
+                   class="flex items-center gap-3 px-3 py-3 rounded-lg transition-colors ${activeClass}">
+                    <i class="${item.icon} w-5"></i>
+                    <span class="font-medium">${item.name}</span>
                 </a>
             `;
         }).join('');
@@ -319,7 +405,9 @@ class NavigationComponent {
             'videos': 'a[href="videos.html"]',
             'trending-radar': 'a[href="trending-radar.html"]',
             'trending': 'a[href="trending.html"]',
-            'document-converter': 'a[href="document-converter.html"]'
+            'document-converter': 'a[href="document-converter.html"]',
+            'tts': 'a[href="tts.html"]',
+            'mhtml-pdf': 'a[href="mhtml-pdf.html"]'
         };
         
         const selector = navSelectors[this.currentPage];
@@ -391,8 +479,57 @@ window.refreshCurrentPage = function() {
 
 window.toggleMobileMenu = function() {
     // 移动端菜单切换逻辑
-    console.log('移动端菜单切换');
-    // TODO: 实现移动端菜单
+    let mobileMenu = document.getElementById('mobile-menu');
+    
+    if (!mobileMenu) {
+        // 创建移动端菜单
+        mobileMenu = document.createElement('div');
+        mobileMenu.id = 'mobile-menu';
+        mobileMenu.className = 'fixed inset-0 z-50 bg-black/60 backdrop-blur-sm md:hidden';
+        mobileMenu.style.display = 'none';
+        
+        mobileMenu.innerHTML = `
+            <div class="fixed inset-y-0 left-0 w-64 bg-white shadow-xl">
+                <div class="flex items-center justify-between p-4 border-b border-gray-200">
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 bg-gradient-to-br from-red-500 to-red-600 rounded-lg flex items-center justify-center">
+                            <i class="fab fa-youtube text-white"></i>
+                        </div>
+                        <span class="font-semibold text-gray-800">Shioa</span>
+                    </div>
+                    <button onclick="toggleMobileMenu()" class="p-2 text-gray-500 hover:text-gray-700">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <nav class="p-4">
+                    <div class="space-y-2" id="mobile-menu-items">
+                        ${window.navigationComponent ? window.navigationComponent.getMobileMenuItems() : ''}
+                    </div>
+                </nav>
+            </div>
+        `;
+        
+        // 点击背景关闭菜单
+        mobileMenu.addEventListener('click', (e) => {
+            if (e.target === mobileMenu) {
+                toggleMobileMenu();
+            }
+        });
+        
+        document.body.appendChild(mobileMenu);
+    }
+    
+    // 切换显示状态
+    if (mobileMenu.style.display === 'none') {
+        mobileMenu.style.display = 'block';
+        // 添加动画
+        setTimeout(() => {
+            mobileMenu.classList.add('animate-in');
+        }, 10);
+    } else {
+        mobileMenu.style.display = 'none';
+        mobileMenu.classList.remove('animate-in');
+    }
 };
 
 // 在DOM加载完成后自动初始化导航

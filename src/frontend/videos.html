@@ -130,6 +130,12 @@ min-height: 1024px;
                     <a href="document-converter.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
                         <i class="fas fa-file-exchange mr-2"></i>文档转换
                     </a>
+                    <a href="tts.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-microphone mr-2"></i>文本转语音
+                    </a>
+                    <a href="mhtml-pdf.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-file-pdf mr-2"></i>MHTML转PDF
+                    </a>
                 </nav>
                 
                 <!-- 移动端菜单按钮 -->
@@ -329,9 +335,10 @@ min-height: 1024px;
                 <div class="mb-4">
                     <label class="block text-sm font-medium text-gray-700 mb-2">回溯天数</label>
                     <select id="sync-days-back" class="w-full px-3 py-2 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none">
-                        <option value="3">最近 3 天</option>
+                        <option value="1">最近 1 天</option>
+                        <option value="3" selected>最近 3 天</option>
                         <option value="7">最近 7 天</option>
-                        <option value="10" selected>最近 10 天</option>
+                        <option value="10">最近 10 天</option>
                         <option value="15">最近 15 天</option>
                         <option value="30">最近 30 天</option>
                     </select>

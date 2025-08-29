@@ -45,7 +45,14 @@ const CONFIG = {
         DATA_CHART: '/data/chart-data',
         DATA_SUMMARY: '/data/summary',
         DATA_EXPORT: '/data/export',
-        DATA_CHART_TYPES: '/data/chart-types'
+        DATA_CHART_TYPES: '/data/chart-types',
+        
+        // TTS相关
+        TTS_MODELS: '/tts/models',
+        TTS_SYNTHESIZE: '/tts/synthesize', 
+        TTS_DOWNLOAD: '/tts/download',
+        TTS_STATUS: '/tts/status',
+        TTS_CLEANUP: '/tts/cleanup'
     },
     
     // 分页配置

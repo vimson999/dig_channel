@@ -66,7 +66,15 @@
       "Bash(venv-main/bin/python test/check_data_completeness.py:*)",
       "Bash(brew install:*)",
       "Bash(pandoc:*)",
-      "Bash(venv-main/bin/python:*)"
+      "Bash(venv-main/bin/python:*)",
+      "Bash(venv-3.11/bin/python:*)",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"from src.backend.app import create_app; app = create_app(); print(''✅ 应用导入成功'')\")",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"from app import create_app; app = create_app(); print(''✅ 应用启动成功'')\")",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"from src.backend.api.tts import tts_bp; print(''✅ TTS导入成功'')\")",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"from src.backend.api.tts import tts_bp; print(''✅ TTS导入成功'')\")",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"from src.backend.app import create_app; app = create_app(); print(''✅ 应用导入成功'')\")",
+      "Bash(PYTHONPATH=. ../../venv-3.11/bin/python -c \"from app import create_app; app = create_app(); print(''✅ 应用启动成功'')\")",
+      "Read(/private/var/folders/w9/s06r112x67g2zrgjgywpjjkw0000gn/T/**)"
     ],
     "deny": []
   }
