@@ -207,9 +207,23 @@ class NavigationComponent {
             },
             {
                 id: 'videos',
-                name: '视频管理',
-                icon: 'fas fa-play',
-                href: 'videos.html'
+                name: '视频中心',
+                icon: 'fas fa-video',
+                isDropdown: true,
+                children: [
+                    {
+                        id: 'videos-manage',
+                        name: '视频管理',
+                        icon: 'fas fa-play',
+                        href: 'videos.html'
+                    },
+                    {
+                        id: 'trending',
+                        name: '爆款视频',
+                        icon: 'fas fa-fire',
+                        href: 'trending.html'
+                    }
+                ]
             },
             {
                 id: 'trending-radar',
@@ -217,49 +231,83 @@ class NavigationComponent {
                 icon: 'fas fa-radar-line',
                 href: 'trending-radar.html'
             },
+            // 工具类菜单整合为下拉菜单
             {
-                id: 'trending',
-                name: '爆款视频',
-                icon: 'fas fa-fire',
-                href: 'trending.html'
-            },
-            {
-                id: 'document-converter',
-                name: '文档转换',
-                icon: 'fas fa-file-exchange',
-                href: 'document-converter.html'
-            },
-            {
-                id: 'tts',
-                name: '文本转语音',
-                icon: 'fas fa-microphone',
-                href: 'tts.html'
-            },
-            {
-                id: 'mhtml-pdf',
-                name: 'MHTML转PDF',
-                icon: 'fas fa-file-pdf',
-                href: 'mhtml-pdf.html'
+                id: 'tools',
+                name: '工具箱',
+                icon: 'fas fa-tools',
+                isDropdown: true,
+                children: [
+                    {
+                        id: 'document-converter',
+                        name: 'MD转DOCX',
+                        icon: 'fab fa-markdown',
+                        href: 'document-converter.html'
+                    },
+                    {
+                        id: 'tts',
+                        name: 'AI语音合成',
+                        icon: 'fas fa-microphone',
+                        href: 'tts.html'
+                    },
+                    {
+                        id: 'mhtml-pdf',
+                        name: 'MHTML转PDF',
+                        icon: 'fas fa-file-pdf',
+                        href: 'mhtml-pdf.html'
+                    }
+                ]
             }
         ];
         
         return menuItems.map(item => {
-            const isActive = this.isActiveMenuItem(item.id);
-            const activeClass = isActive 
-                ? 'text-primary-600 font-medium bg-primary-50 border border-primary-200' 
-                : 'text-gray-600 hover:text-primary-600 hover:bg-gray-50';
-            
-            // 对于主页，使用onclick而不是href
-            const linkAttrs = this.isIndexPage && item.onClick
-                ? `href="#${item.id}" onclick="${item.onClick}"`
-                : `href="${item.href}"`;
-            
-            return `
-                <a ${linkAttrs} class="nav-link ${activeClass} px-3 py-2 rounded-lg transition-colors">
-                    <i class="${item.icon} mr-2"></i>${item.name}
-                </a>
-            `;
+            if (item.isDropdown) {
+                return this.renderDropdownMenuItem(item);
+            } else {
+                return this.renderRegularMenuItem(item);
+            }
         }).join('');
+    }
+    
+    renderRegularMenuItem(item) {
+        const isActive = this.isActiveMenuItem(item.id);
+        const activeClass = isActive 
+            ? 'text-primary-600 font-medium bg-primary-50 border border-primary-200' 
+            : 'text-gray-600 hover:text-primary-600 hover:bg-gray-50';
+        
+        // 对于主页，使用onclick而不是href
+        const linkAttrs = this.isIndexPage && item.onClick
+            ? `href="#${item.id}" onclick="${item.onClick}"`
+            : `href="${item.href}"`;
+        
+        return `
+            <a ${linkAttrs} class="nav-link ${activeClass} px-3 py-2 rounded-lg transition-colors">
+                <i class="${item.icon} mr-2"></i>${item.name}
+            </a>
+        `;
+    }
+    
+    renderDropdownMenuItem(item) {
+        const hasActiveChild = item.children.some(child => this.isActiveMenuItem(child.id));
+        const activeClass = hasActiveChild
+            ? 'text-primary-600 font-medium bg-primary-50 border border-primary-200' 
+            : 'text-gray-600 hover:text-primary-600 hover:bg-gray-50';
+        
+        return `
+            <div class="relative group">
+                <button class="nav-dropdown-toggle ${activeClass} px-3 py-2 rounded-lg transition-colors flex items-center">
+                    <i class="${item.icon} mr-2"></i>${item.name}
+                    <i class="fas fa-chevron-down ml-1 text-xs transform group-hover:rotate-180 transition-transform"></i>
+                </button>
+                <div class="nav-dropdown-menu absolute left-0 mt-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+                    ${item.children.map(child => `
+                        <a href="${child.href}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 hover:text-primary-600 transition-colors first:rounded-t-lg last:rounded-b-lg">
+                            <i class="${child.icon} mr-2"></i>${child.name}
+                        </a>
+                    `).join('')}
+                </div>
+            </div>
+        `;
     }
     
     getMobileMenuItems() {
@@ -334,6 +382,16 @@ class NavigationComponent {
         // 特殊处理频道管理（在首页中）
         if (itemId === 'channels' && this.currentPage === 'dashboard') {
             return window.location.hash === '#channels';
+        }
+        // 检查工具类页面
+        const toolsPages = ['document-converter', 'tts', 'mhtml-pdf'];
+        if (itemId === 'tools' && toolsPages.includes(this.currentPage)) {
+            return true;
+        }
+        // 检查视频中心页面
+        const videosPages = ['videos', 'trending'];
+        if (itemId === 'videos' && videosPages.includes(this.currentPage)) {
+            return true;
         }
         return itemId === this.currentPage;
     }

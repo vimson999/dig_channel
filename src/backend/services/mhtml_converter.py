@@ -168,10 +168,13 @@ class MHTMLToPDFConverter:
                 f'--print-to-pdf={output_pdf_path}',
                 '--print-to-pdf-no-header',  # 不打印页眉
                 '--print-to-pdf-no-footer',  # 不打印页脚
-                f'--virtual-time-budget=30000',  # 30秒等待页面渲染完成
+                '--print-to-pdf-display-header-footer=false',  # 确保不显示页眉页脚
+                f'--virtual-time-budget=45000',  # 45秒等待页面渲染完成，给足够时间
                 '--run-all-compositor-stages-before-draw',
                 '--disable-partial-raster',  # 禁用部分光栅化，确保完整渲染
                 '--disable-features=LazyImageLoading',  # 禁用懒加载，确保所有图片都加载
+                '--force-device-scale-factor=1',  # 设置设备缩放比例为1
+                '--disable-background-media-suspend',  # 禁用后台媒体暂停
             ]
             
             # 添加页面格式选项
@@ -212,12 +215,12 @@ class MHTMLToPDFConverter:
                 'TMPDIR': tempfile.gettempdir(),  # 确保临时目录正确设置
             }
             
-            # 给Chrome足够时间等待渲染完成，但不要太长避免卡死
+            # 给Chrome足够时间等待渲染完成
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=60,  # 60秒超时，配合30秒virtual-time-budget
+                timeout=75,  # 75秒超时，配合45秒virtual-time-budget
                 env=env,
                 # 设置进程优先级和资源限制
                 preexec_fn=lambda: (

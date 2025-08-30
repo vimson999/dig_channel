@@ -3,9 +3,14 @@ console.log('🎤 [TTS] TTS模块已加载');
 
 class TextToSpeechManager {
     constructor() {
-        this.selectedModel = 'tacotron2';
+        this.selectedModel = 'auto';  // 改为智能选择
         this.currentAudioFilename = null;
         this.models = [];
+        this.speakers = [];
+        this.selectedSpeaker = null;
+        this.selectedEmotion = '中性';
+        this.referenceAudioPath = null;
+        this.isDialogueMode = false;
         this.isGenerating = false;
         
         this.init();
@@ -77,6 +82,31 @@ class TextToSpeechManager {
         
         speedSlider.addEventListener('input', (e) => {
             speedValue.textContent = `${e.target.value}x`;
+        });
+        
+        // 模型选择器变化
+        const modelSelector = document.getElementById('model-selector');
+        modelSelector.addEventListener('change', (e) => {
+            this.selectModel(e.target.value);
+        });
+        
+        // 说话人选择器变化
+        const speakerSelector = document.getElementById('speaker-selector');
+        speakerSelector.addEventListener('change', (e) => {
+            this.selectedSpeaker = e.target.value;
+        });
+        
+        // 情感选择器变化
+        const emotionSelector = document.getElementById('emotion-selector');
+        emotionSelector.addEventListener('change', (e) => {
+            this.selectedEmotion = e.target.value;
+        });
+        
+        // 多人对话模式切换
+        const dialogueMode = document.getElementById('dialogue-mode');
+        dialogueMode.addEventListener('change', (e) => {
+            this.isDialogueMode = e.target.checked;
+            this.toggleDialogueMode();
         });
         
         // 音频播放事件
@@ -169,70 +199,176 @@ class TextToSpeechManager {
     }
     
     renderModelSelection() {
-        const container = document.getElementById('model-selection');
+        const modelSelector = document.getElementById('model-selector');
+        const modelStatus = document.getElementById('model-status');
         
         if (this.models.length === 0) {
-            container.innerHTML = `
-                <div class="col-span-full text-center py-8 text-gray-500">
-                    <i class="fas fa-robot text-2xl mb-2 opacity-50"></i>
-                    <div>暂无可用模型</div>
-                </div>
-            `;
+            modelSelector.innerHTML = '<option value="">暂无可用模型</option>';
+            modelStatus.className = 'w-2 h-2 rounded-full bg-red-400';
             return;
         }
         
-        const modelsHtml = this.models.map(model => {
-            const isSelected = model.key === this.selectedModel;
-            const selectedClass = isSelected ? 'selected' : '';
-            
-            // 根据语言设置图标和颜色
-            let iconClass = 'fas fa-robot';
-            let colorClass = 'text-blue-600';
-            
-            if (model.language === 'zh-CN') {
-                iconClass = 'fas fa-language';
-                colorClass = 'text-red-600';
-            } else if (model.language === 'en') {
-                iconClass = 'fas fa-microphone';
-                colorClass = 'text-green-600';
-            }
-            
-            return `
-                <div class="model-card bg-white rounded-lg p-4 border ${selectedClass}" 
-                     onclick="ttsManager.selectModel('${model.key}')">
-                    <div class="flex items-start gap-3">
-                        <div class="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
-                            <i class="${iconClass} ${colorClass}"></i>
-                        </div>
-                        <div class="flex-1 min-w-0">
-                            <h4 class="font-semibold text-gray-800 text-sm">${model.name}</h4>
-                            <p class="text-xs text-gray-500 mt-1 line-clamp-2">${model.description}</p>
-                            <div class="flex items-center gap-2 mt-2">
-                                <span class="px-2 py-1 text-xs font-medium rounded-full ${
-                                    model.language === 'zh-CN' 
-                                        ? 'bg-red-100 text-red-700' 
-                                        : 'bg-blue-100 text-blue-700'
-                                }">
-                                    ${model.language === 'zh-CN' ? '中文' : 'English'}
-                                </span>
-                                ${isSelected ? '<i class="fas fa-check text-primary-600 text-sm"></i>' : ''}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }).join('');
+        // 清空并添加模型选项
+        modelSelector.innerHTML = '';
+        this.models.forEach(model => {
+            const option = document.createElement('option');
+            option.value = model.key;
+            option.textContent = `${model.name} (${model.language === 'zh-CN' ? '中文' : 'English'})`;
+            option.selected = model.key === this.selectedModel;
+            modelSelector.appendChild(option);
+        });
         
-        container.innerHTML = modelsHtml;
+        // 更新状态指示器
+        modelStatus.className = 'w-2 h-2 rounded-full bg-green-400';
+        modelStatus.nextElementSibling.textContent = '模型已加载';
+        
+        // 初始化高级选项
+        this.updateAdvancedOptions();
     }
     
     selectModel(modelKey) {
         this.selectedModel = modelKey;
-        this.renderModelSelection();
         console.log('🎯 [TTS] 选择模型:', modelKey);
+        
+        // 更新高级选项
+        this.updateAdvancedOptions();
         
         // 更新按钮状态
         this.updateButtonStates();
+    }
+    
+    async updateAdvancedOptions() {
+        const selectedModel = this.models.find(m => m.key === this.selectedModel);
+        if (!selectedModel) return;
+        
+        const speakerSection = document.getElementById('speaker-section');
+        const emotionSection = document.getElementById('emotion-section');
+        const cloneSection = document.getElementById('clone-section');
+        const dialogueSection = document.getElementById('dialogue-section');
+        
+        // 隐藏所有高级选项
+        speakerSection.classList.add('hidden');
+        emotionSection.classList.add('hidden');
+        cloneSection.classList.add('hidden');
+        dialogueSection.classList.add('hidden');
+        
+        // 根据模型类型显示相应选项
+        if (selectedModel.type === 'multi_speaker') {
+            // 显示说话人选择和对话模式
+            speakerSection.classList.remove('hidden');
+            if (selectedModel.supports_dialogue) {
+                dialogueSection.classList.remove('hidden');
+            }
+            await this.loadSpeakers(this.selectedModel);
+        } else if (selectedModel.type === 'voice_cloning') {
+            // 显示声音克隆上传和对话模式
+            cloneSection.classList.remove('hidden');
+            if (selectedModel.supports_dialogue) {
+                dialogueSection.classList.remove('hidden');
+            }
+        } else {
+            // 单说话人模型
+            if (selectedModel.supports_emotions) {
+                // 显示情感选择
+                emotionSection.classList.remove('hidden');
+                this.renderEmotions(selectedModel.emotion_options);
+            }
+        }
+    }
+    
+    renderEmotions(emotions) {
+        const emotionSelector = document.getElementById('emotion-selector');
+        
+        // 清空选项
+        emotionSelector.innerHTML = '';
+        
+        if (!emotions || emotions.length === 0) {
+            emotions = ['中性', '高兴', '悲伤', '愤怒', '惊讶'];
+        }
+        
+        emotions.forEach(emotion => {
+            const option = document.createElement('option');
+            option.value = emotion;
+            option.textContent = emotion;
+            if (emotion === this.selectedEmotion) {
+                option.selected = true;
+            }
+            emotionSelector.appendChild(option);
+        });
+    }
+    
+    toggleDialogueMode() {
+        const normalTip = document.getElementById('normal-tip');
+        const dialogueTip = document.getElementById('dialogue-tip');
+        const dialogueHelp = document.getElementById('dialogue-help');
+        
+        if (this.isDialogueMode) {
+            normalTip.classList.add('hidden');
+            dialogueTip.classList.remove('hidden');
+            dialogueHelp.classList.remove('hidden');
+        } else {
+            normalTip.classList.remove('hidden');
+            dialogueTip.classList.add('hidden');
+            dialogueHelp.classList.add('hidden');
+        }
+    }
+    
+    async loadSpeakers(modelKey) {
+        try {
+            const response = await fetch(`${API_BASE_URL}/tts/speakers/${modelKey}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+                }
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                this.speakers = result.data.speakers || [];
+                this.renderSpeakers();
+                console.log('✅ [TTS] 加载说话人列表:', this.speakers.length, '个说话人');
+            } else {
+                console.warn('⚠️ [TTS] 加载说话人失败:', result.message);
+                this.speakers = [];
+                this.renderSpeakers();
+            }
+        } catch (error) {
+            console.error('加载说话人列表失败:', error);
+            this.speakers = [];
+            this.renderSpeakers();
+        }
+    }
+    
+    renderSpeakers() {
+        const speakerSelector = document.getElementById('speaker-selector');
+        
+        // 清空选项
+        speakerSelector.innerHTML = '<option value="">选择说话人...</option>';
+        
+        if (this.speakers.length === 0) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = '暂无可用说话人';
+            option.disabled = true;
+            speakerSelector.appendChild(option);
+            return;
+        }
+        
+        // 添加说话人选项
+        this.speakers.forEach((speaker, index) => {
+            const option = document.createElement('option');
+            option.value = speaker;
+            option.textContent = `说话人 ${index + 1}: ${speaker}`;
+            speakerSelector.appendChild(option);
+        });
+        
+        // 默认选择第一个说话人
+        if (this.speakers.length > 0) {
+            this.selectedSpeaker = this.speakers[0];
+            speakerSelector.value = this.selectedSpeaker;
+        }
     }
     
     updateButtonStates() {
@@ -302,17 +438,36 @@ class TextToSpeechManager {
                 }
             }, 200);
             
+            // 准备请求数据
+            const requestData = {
+                text: text,
+                model: this.selectedModel,
+                speed: speed,
+                is_dialogue: this.isDialogueMode
+            };
+            
+            // 添加说话人参数（多说话人模型）
+            if (this.selectedSpeaker) {
+                requestData.speaker = this.selectedSpeaker;
+            }
+            
+            // 添加情感参数（支持情感的模型）
+            if (this.selectedEmotion) {
+                requestData.emotion = this.selectedEmotion;
+            }
+            
+            // 添加参考音频参数（声音克隆模型）
+            if (this.referenceAudioPath) {
+                requestData.reference_audio_path = this.referenceAudioPath;
+            }
+            
             const response = await fetch(`${API_BASE_URL}/tts/synthesize`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${localStorage.getItem('access_token')}`
                 },
-                body: JSON.stringify({
-                    text: text,
-                    model: this.selectedModel,
-                    speed: speed
-                })
+                body: JSON.stringify(requestData)
             });
             
             clearInterval(progressInterval);
@@ -328,7 +483,11 @@ class TextToSpeechManager {
                 }, 500);
                 
                 showToast('语音生成成功!', 'success');
-                console.log('✅ [TTS] 语音生成成功:', result.data.audio_filename);
+                if (result.data.dialogue_segments) {
+                    console.log('✅ [TTS] 多人对话生成成功:', result.data.audio_filename, `(${result.data.dialogue_segments}段对话)`);
+                } else {
+                    console.log('✅ [TTS] 语音生成成功:', result.data.audio_filename);
+                }
                 
             } else {
                 throw new Error(result.message || '生成失败');
@@ -376,14 +535,59 @@ class TextToSpeechManager {
         const audioInfo = document.getElementById('audio-info');
         const generationTime = document.getElementById('generation-time');
         
-        // 设置音频源
-        const audioUrl = `${API_BASE_URL}/tts/download/${data.audio_filename}`;
-        audioPlayer.src = audioUrl;
+        // 设置音频源（使用流式播放端点）
+        const streamUrl = `${API_BASE_URL}/tts/stream/${data.audio_filename}`;
+        audioPlayer.src = streamUrl;
+        
+        // 添加错误处理
+        audioPlayer.addEventListener('error', (e) => {
+            console.error('音频播放错误:', e);
+            console.error('音频URL:', streamUrl);
+            console.error('错误详情:', e.target.error);
+            
+            // 尝试使用下载端点作为备用
+            const fallbackUrl = `${API_BASE_URL}/tts/download/${data.audio_filename}`;
+            console.log('🔄 [TTS] 尝试备用播放URL:', fallbackUrl);
+            
+            if (audioPlayer.src !== fallbackUrl) {
+                audioPlayer.src = fallbackUrl;
+                showToast('正在尝试备用播放方式...', 'info');
+            } else {
+                showToast('音频播放失败，请检查文件是否存在', 'error');
+            }
+        }, { once: true });
+        
+        // 添加加载成功事件
+        audioPlayer.addEventListener('loadeddata', () => {
+            console.log('✅ [TTS] 音频加载成功:', streamUrl);
+        }, { once: true });
+        
+        // 添加网络状态监听
+        audioPlayer.addEventListener('loadstart', () => {
+            console.log('🔄 [TTS] 开始加载音频:', streamUrl);
+        }, { once: true });
         
         // 显示文件信息
         const fileSizeMB = (data.file_size / 1024 / 1024).toFixed(2);
         const durationText = data.duration_estimate ? `约${data.duration_estimate.toFixed(1)}秒` : '未知';
-        audioInfo.textContent = `文件大小: ${fileSizeMB}MB | 预计时长: ${durationText} | 模型: ${data.model_name}`;
+        let infoText = `文件大小: ${fileSizeMB}MB | 预计时长: ${durationText} | 模型: ${data.model_name}`;
+        
+        // 只在智能选择模式时显示语言检测信息
+        if (data.auto_selected && data.detected_language) {
+            const langText = data.detected_language === 'zh-CN' ? '中文' : '英文';
+            infoText += ` | 智能检测: ${langText}`;
+        }
+        
+        if (data.dialogue_segments) {
+            infoText += ` | 对话段数: ${data.dialogue_segments}`;
+        }
+        
+        if (data.speaker_mapping) {
+            const speakerCount = Object.keys(data.speaker_mapping).length;
+            infoText += ` | 说话人: ${speakerCount}人`;
+        }
+        
+        audioInfo.textContent = infoText;
         
         // 显示生成时间
         generationTime.textContent = `刚刚生成`;
@@ -407,19 +611,12 @@ class TextToSpeechManager {
         try {
             showStatusBar('准备下载...');
             
+            // 直接创建下载链接，不需要认证（后端已移除认证要求）
             const downloadUrl = `${API_BASE_URL}/tts/download/${this.currentAudioFilename}`;
-            
-            // 创建隐藏的下载链接
             const link = document.createElement('a');
             link.href = downloadUrl;
             link.download = this.currentAudioFilename;
-            link.target = '_blank';
-            
-            // 添加认证头（通过URL参数，因为a标签无法设置headers）
-            const token = localStorage.getItem('access_token');
-            if (token) {
-                link.href += `?token=${token}`;
-            }
+            link.target = '_blank'; // 在新窗口打开，避免页面跳转
             
             document.body.appendChild(link);
             link.click();
@@ -493,11 +690,95 @@ class TextToSpeechManager {
         // 复制下载链接到剪贴板
         const shareUrl = `${window.location.origin}${API_BASE_URL}/tts/download/${this.currentAudioFilename}`;
         
-        navigator.clipboard.writeText(shareUrl).then(() => {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(shareUrl).then(() => {
+                showToast('音频链接已复制到剪贴板', 'success');
+            }).catch(() => {
+                // 备用方案
+                this.fallbackCopyToClipboard(shareUrl);
+            });
+        } else {
+            // 备用方案
+            this.fallbackCopyToClipboard(shareUrl);
+        }
+    }
+    
+    fallbackCopyToClipboard(text) {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        textArea.style.top = '-999999px';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        
+        try {
+            document.execCommand('copy');
             showToast('音频链接已复制到剪贴板', 'success');
-        }).catch(() => {
-            showToast('复制链接失败', 'error');
-        });
+        } catch (err) {
+            showToast('复制链接失败，请手动复制: ' + text, 'error');
+        } finally {
+            document.body.removeChild(textArea);
+        }
+    }
+    
+    async uploadReferenceAudio() {
+        const fileInput = document.getElementById('reference-audio');
+        const uploadBtn = document.getElementById('upload-btn');
+        const uploadStatus = document.getElementById('upload-status');
+        
+        if (!fileInput.files[0]) {
+            showToast('请选择音频文件', 'warning');
+            return;
+        }
+        
+        const file = fileInput.files[0];
+        const allowedTypes = ['audio/wav', 'audio/mpeg', 'audio/flac', 'audio/m4a'];
+        
+        if (!allowedTypes.includes(file.type)) {
+            showToast('不支持的文件格式，请使用 WAV, MP3, FLAC 或 M4A 格式', 'error');
+            return;
+        }
+        
+        try {
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = '上传中...';
+            uploadStatus.textContent = '正在上传参考音频...';
+            uploadStatus.className = 'text-xs text-blue-500 mt-1';
+            
+            const formData = new FormData();
+            formData.append('audio', file);
+            
+            const response = await fetch(`${API_BASE_URL}/tts/upload-reference`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+                },
+                body: formData
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                this.referenceAudioPath = result.data.reference_path;
+                uploadStatus.textContent = `上传成功: ${result.data.original_filename} (${(result.data.file_size / 1024).toFixed(1)}KB)`;
+                uploadStatus.className = 'text-xs text-green-600 mt-1';
+                showToast('参考音频上传成功', 'success');
+                console.log('✅ [TTS] 参考音频上传成功:', result.data.reference_filename);
+            } else {
+                throw new Error(result.message || '上传失败');
+            }
+            
+        } catch (error) {
+            console.error('上传参考音频失败:', error);
+            uploadStatus.textContent = '上传失败: ' + error.message;
+            uploadStatus.className = 'text-xs text-red-600 mt-1';
+            showToast('上传失败: ' + error.message, 'error');
+        } finally {
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = '上传';
+        }
     }
     
     generateAgain() {
@@ -507,6 +788,12 @@ class TextToSpeechManager {
         
         // 重置状态
         this.currentAudioFilename = null;
+        this.isDialogueMode = false;
+        const dialogueMode = document.getElementById('dialogue-mode');
+        if (dialogueMode) {
+            dialogueMode.checked = false;
+            this.toggleDialogueMode();
+        }
         
         // 聚焦到文本输入框
         const textInput = document.getElementById('text-input');
@@ -556,6 +843,12 @@ function shareAudio() {
 function generateAgain() {
     if (window.ttsManager) {
         window.ttsManager.generateAgain();
+    }
+}
+
+function uploadReferenceAudio() {
+    if (window.ttsManager) {
+        window.ttsManager.uploadReferenceAudio();
     }
 }
 
