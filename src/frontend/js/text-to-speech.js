@@ -76,13 +76,6 @@ class TextToSpeechManager {
             this.updateButtonStates();
         });
         
-        // 语速滑块
-        const speedSlider = document.getElementById('speed-slider');
-        const speedValue = document.getElementById('speed-value');
-        
-        speedSlider.addEventListener('input', (e) => {
-            speedValue.textContent = `${e.target.value}x`;
-        });
         
         // 模型选择器变化
         const modelSelector = document.getElementById('model-selector');
@@ -124,6 +117,61 @@ class TextToSpeechManager {
         audioPlayer.addEventListener('ended', () => {
             waveAnimation.classList.add('hidden');
         });
+        
+        // 添加播放速度控制
+        this.setupPlaybackSpeedControls();
+    }
+    
+    setupPlaybackSpeedControls() {
+        // 在播放器旁边添加倍速控制
+        const audioPlayer = document.getElementById('audio-player');
+        if (!audioPlayer) return;
+        
+        // 创建速度控制容器
+        const speedControlsId = 'playback-speed-controls';
+        let speedControls = document.getElementById(speedControlsId);
+        
+        if (!speedControls) {
+            speedControls = document.createElement('div');
+            speedControls.id = speedControlsId;
+            speedControls.className = 'flex items-center gap-2 mt-2';
+            speedControls.innerHTML = `
+                <span class="text-sm text-gray-600">播放速度:</span>
+                <div class="flex gap-1">
+                    <button class="speed-btn px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition-colors" data-speed="0.5">0.5x</button>
+                    <button class="speed-btn px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition-colors" data-speed="0.75">0.75x</button>
+                    <button class="speed-btn px-2 py-1 text-xs bg-primary-600 text-white rounded" data-speed="1">1x</button>
+                    <button class="speed-btn px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition-colors" data-speed="1.25">1.25x</button>
+                    <button class="speed-btn px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition-colors" data-speed="1.5">1.5x</button>
+                    <button class="speed-btn px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition-colors" data-speed="2">2x</button>
+                </div>
+            `;
+            
+            // 插入到音频播放器后面
+            audioPlayer.parentNode.insertBefore(speedControls, audioPlayer.nextSibling);
+        }
+        
+        // 添加点击事件监听器
+        speedControls.addEventListener('click', (e) => {
+            if (e.target.classList.contains('speed-btn')) {
+                const speed = parseFloat(e.target.dataset.speed);
+                this.setPlaybackSpeed(speed);
+                
+                // 更新按钮状态
+                speedControls.querySelectorAll('.speed-btn').forEach(btn => {
+                    btn.className = 'speed-btn px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition-colors';
+                });
+                e.target.className = 'speed-btn px-2 py-1 text-xs bg-primary-600 text-white rounded';
+            }
+        });
+    }
+    
+    setPlaybackSpeed(speed) {
+        const audioPlayer = document.getElementById('audio-player');
+        if (audioPlayer) {
+            audioPlayer.playbackRate = speed;
+            console.log(`🎵 [TTS] 设置播放速度: ${speed}x`);
+        }
     }
     
     async checkTTSStatus() {
@@ -424,10 +472,7 @@ class TextToSpeechManager {
             // 显示进度区域
             this.showProgress('准备中...', 0);
             
-            const speedSlider = document.getElementById('speed-slider');
-            const speed = parseFloat(speedSlider.value);
-            
-            console.log(`🎤 [TTS] 开始生成语音: 模型=${this.selectedModel}, 长度=${text.length}, 语速=${speed}`);
+            console.log(`🎤 [TTS] 开始生成语音: 模型=${this.selectedModel}, 长度=${text.length}`);
             
             // 模拟进度更新
             let progress = 0;
@@ -442,7 +487,6 @@ class TextToSpeechManager {
             const requestData = {
                 text: text,
                 model: this.selectedModel,
-                speed: speed,
                 is_dialogue: this.isDialogueMode
             };
             
@@ -572,6 +616,7 @@ class TextToSpeechManager {
         const durationText = data.duration_estimate ? `约${data.duration_estimate.toFixed(1)}秒` : '未知';
         let infoText = `文件大小: ${fileSizeMB}MB | 预计时长: ${durationText} | 模型: ${data.model_name}`;
         
+        
         // 只在智能选择模式时显示语言检测信息
         if (data.auto_selected && data.detected_language) {
             const langText = data.detected_language === 'zh-CN' ? '中文' : '英文';
@@ -594,6 +639,11 @@ class TextToSpeechManager {
         
         // 显示结果区域
         resultSection.classList.remove('hidden');
+        
+        // 确保播放速度控制已初始化
+        setTimeout(() => {
+            this.setupPlaybackSpeedControls();
+        }, 100);
         
         // 滚动到结果区域
         resultSection.scrollIntoView({ 
@@ -646,13 +696,18 @@ class TextToSpeechManager {
         // 显示文本预览模态框
         const modal = document.createElement('div');
         modal.className = 'fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4';
+        
+        // 计算准确的时长预估
+        const chineseChars = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+        const otherChars = text.length - chineseChars;
+        const estimatedDuration = chineseChars * 0.25 + otherChars * 0.05;
+        
         modal.innerHTML = `
             <div class="bg-white rounded-2xl shadow-strong max-w-2xl w-full max-h-[80vh] overflow-y-auto">
                 <div class="p-6 border-b border-gray-100">
                     <div class="flex items-center justify-between">
                         <h3 class="text-xl font-bold text-gray-800">文本预览</h3>
-                        <button onclick="this.parentElement.parentElement.parentElement.remove()" 
-                                class="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                        <button id="modal-close-btn" class="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
                             <i class="fas fa-times text-lg"></i>
                         </button>
                     </div>
@@ -672,13 +727,38 @@ class TextToSpeechManager {
                     </div>
                     <div class="mt-4 text-sm text-gray-500">
                         <i class="fas fa-info-circle mr-1"></i>
-                        预计语音时长：约 ${(text.length * 0.1).toFixed(1)} 秒
+                        预计语音时长：约 ${Math.max(estimatedDuration, 0.5).toFixed(1)} 秒
+                        ${chineseChars > 0 ? ` | 中文: ${chineseChars}字` : ''}
                     </div>
                 </div>
             </div>
         `;
         
         document.body.appendChild(modal);
+        
+        // 添加关闭事件监听器
+        const closeBtn = modal.querySelector('#modal-close-btn');
+        const closeModal = () => {
+            modal.remove();
+        };
+        
+        closeBtn.addEventListener('click', closeModal);
+        
+        // 点击背景关闭
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                closeModal();
+            }
+        });
+        
+        // ESC键关闭
+        const handleKeyDown = (e) => {
+            if (e.key === 'Escape') {
+                closeModal();
+                document.removeEventListener('keydown', handleKeyDown);
+            }
+        };
+        document.addEventListener('keydown', handleKeyDown);
     }
     
     shareAudio() {

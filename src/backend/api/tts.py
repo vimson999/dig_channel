@@ -14,7 +14,7 @@ import logging
 
 from utils.colored_logger import setup_colored_logger
 from utils.auth_utils import require_login
-from utils.api_utils import handle_api_error
+from middleware.error_handler import handle_api_error
 
 logger = setup_colored_logger("TTS_API")
 
@@ -36,143 +36,55 @@ TTS_MODELS = {
         'name': 'Tacotron2',
         'model_name': 'tts_models/en/ljspeech/tacotron2-DDC',
         'language': 'en',
-        'description': '英语语音合成，自然度较高',
-        'type': 'single_speaker'
+        'description': '英语语音合成，自然度较高'
     },
     'glow_tts': {
         'name': 'Glow-TTS',
         'model_name': 'tts_models/en/ljspeech/glow-tts',
         'language': 'en',
-        'description': '英语语音合成，速度较快',
-        'type': 'single_speaker'
+        'description': '英语语音合成，速度较快'
     },
     'chinese': {
         'name': 'Chinese TTS',
         'model_name': 'tts_models/zh-CN/baker/tacotron2-DDC-GST',
         'language': 'zh-CN',
-        'description': '中文语音合成，质量稳定',
-        'type': 'single_speaker'
+        'description': '中文语音合成'
     },
-    'chinese_alt': {
-        'name': 'Chinese TTS (快速)',
-        'model_name': 'tts_models/multilingual/multi-dataset/your_tts',
+    'dialogue_mode': {
+        'name': '多人对话模式',
+        'model_name': 'tts_models/zh-CN/baker/tacotron2-DDC-GST',
         'language': 'zh-CN',
-        'description': '多语言TTS模型，支持中文',
-        'type': 'single_speaker'
-    },
-    'multi_speaker': {
-        'name': 'Multi-Speaker VITS',
-        'model_name': 'tts_models/en/vctk/vits',
-        'language': 'en',
-        'description': '多说话人英语合成，支持不同声音风格',
-        'type': 'multi_speaker'
-    },
-    'voice_clone': {
-        'name': 'YourTTS Clone',
-        'model_name': 'tts_models/multilingual/multi-dataset/your_tts',
-        'language': 'multilingual',
-        'description': '声音克隆模型，支持多语言',
-        'type': 'voice_cloning'
+        'description': '支持多人对话的中文语音合成',
+        'is_dialogue': True
     }
 }
 
 # 全局TTS实例缓存
 tts_instances = {}
 
-def detect_language(text):
-    """检测文本语言"""
+def parse_dialogue_text(text):
+    """解析多人对话文本"""
     import re
     
-    # 检测中文字符
-    chinese_chars = re.findall(r'[\u4e00-\u9fff]+', text)
-    chinese_ratio = sum(len(chars) for chars in chinese_chars) / len(text) if text else 0
+    # 对话格式：[说话人名]对话内容
+    dialogue_pattern = r'\[([^\]]+)\]([^[]+?)(?=\[|$)'
+    matches = re.findall(dialogue_pattern, text)
     
-    # 检测英文字符
-    english_chars = re.findall(r'[a-zA-Z]+', text)
-    english_ratio = sum(len(chars) for chars in english_chars) / len(text) if text else 0
+    if not matches:
+        return [{'speaker': 'default', 'text': text.strip()}]
     
-    logger.debug(f"语言检测: 中文比例={chinese_ratio:.2f}, 英文比例={english_ratio:.2f}")
+    dialogue_segments = []
+    for speaker, content in matches:
+        speaker_name = speaker.strip()
+        speech_content = content.strip()
+        
+        if speech_content:
+            dialogue_segments.append({
+                'speaker': speaker_name,
+                'text': speech_content
+            })
     
-    # 根据比例判断语言
-    if chinese_ratio > 0.3:  # 中文字符超过30%认为是中文
-        return 'zh-CN'
-    elif english_ratio > 0.5:  # 英文字符超过50%认为是英文
-        return 'en'
-    else:
-        # 默认根据字符类型判断
-        if chinese_ratio > english_ratio:
-            return 'zh-CN'
-        else:
-            return 'en'
-
-def get_suitable_model(text, requested_model='auto'):
-    """根据文本内容获取合适的模型"""
-    # 如果用户明确选择了某个模型（不是auto），直接使用用户的选择
-    if requested_model != 'auto' and requested_model in TTS_MODELS:
-        logger.info(f"🎯 用户选择模型: {requested_model} ({TTS_MODELS[requested_model]['name']})")
-        return requested_model
-    
-    # 只有在用户选择 'auto' 时才进行智能选择
-    detected_lang = detect_language(text)
-    logger.info(f"📝 智能选择模式 - 检测到文本语言: {detected_lang}")
-    
-    # 根据检测到的语言选择最佳模型
-    if detected_lang == 'zh-CN':
-        selected_model = 'chinese'  # 使用中文模型
-    else:
-        selected_model = 'tacotron2'  # 使用英文模型
-    
-    logger.info(f"🤖 智能选择结果: {selected_model} ({TTS_MODELS[selected_model]['name']})")
-    return selected_model
-
-def clean_text_for_tts(text):
-    """清理文本，避免TTS问题"""
-    import re
-    
-    if not text:
-        return ""
-    
-    # 移除多余的空白字符
-    text = re.sub(r'\s+', ' ', text.strip())
-    
-    # 移除特殊字符，但保留基本标点
-    # 保留中文字符、英文字符、数字、基本标点
-    text = re.sub(r'[^\u4e00-\u9fff\w\s.,!?;:"\'()（）、。，！？；：""''—-]', '', text)
-    
-    # 确保句子以标点符号结尾，有助于TTS正确断句
-    if text and not re.search(r'[.!?。！？]$', text.strip()):
-        # 根据语言添加合适的结尾标点
-        if detect_language(text) == 'zh-CN':
-            text = text.strip() + '。'
-        else:
-            text = text.strip() + '.'
-    
-    # 移除可能导致重复的字符序列
-    text = re.sub(r'(.)\1{3,}', r'\1', text)  # 移除连续4个以上相同字符
-    
-    return text.strip()
-
-def estimate_duration(text, model_key):
-    """估计语音时长"""
-    if not text:
-        return 0
-    
-    model_config = TTS_MODELS.get(model_key, {})
-    language = model_config.get('language', 'en')
-    
-    # 根据语言使用不同的估算方式
-    if language == 'zh-CN':
-        # 中文：平均每个字符约0.4-0.6秒
-        chinese_chars = len([c for c in text if '\u4e00' <= c <= '\u9fff'])
-        other_chars = len(text) - chinese_chars
-        duration = chinese_chars * 0.5 + other_chars * 0.1
-    else:
-        # 英文：平均每个字符约0.08-0.12秒，每个单词约0.5秒
-        words = len(text.split())
-        chars = len(text)
-        duration = words * 0.6 + chars * 0.05
-    
-    return max(duration, 0.5)  # 最少0.5秒
+    return dialogue_segments
 
 def get_tts_instance(model_key='tacotron2'):
     """获取TTS实例（带缓存）"""
@@ -185,41 +97,12 @@ def get_tts_instance(model_key='tacotron2'):
     if model_key not in tts_instances:
         model_config = TTS_MODELS[model_key]
         logger.info(f"🔄 初始化TTS模型: {model_config['name']}")
-        
-        # 尝试多个可能的模型名称
-        possible_models = [model_config['model_name']]
-        
-        # 如果是中文模型，添加备用选项
-        if model_key == 'chinese':
-            possible_models.extend([
-                'tts_models/zh-CN/baker/tacotron2-DDC-GST',
-                'tts_models/zh-CN/baker/tacotron2-DDC',
-                'tts_models/multilingual/multi-dataset/your_tts'
-            ])
-        elif model_key == 'chinese_alt':
-            possible_models.extend([
-                'tts_models/multilingual/multi-dataset/your_tts',
-                'tts_models/zh-CN/baker/tacotron2-DDC-GST'
-            ])
-        
-        success = False
-        last_error = None
-        
-        for model_name in possible_models:
-            try:
-                logger.info(f"🔄 尝试模型: {model_name}")
-                tts_instances[model_key] = TTS(model_name)
-                logger.info(f"✅ TTS模型初始化成功: {model_config['name']} ({model_name})")
-                success = True
-                break
-            except Exception as e:
-                logger.warning(f"⚠️ 模型 {model_name} 初始化失败: {str(e)}")
-                last_error = e
-                continue
-        
-        if not success:
-            logger.error(f"❌ 所有备选模型都初始化失败")
-            raise last_error or Exception(f"无法初始化模型 {model_key}")
+        try:
+            tts_instances[model_key] = TTS(model_config['model_name'])
+            logger.info(f"✅ TTS模型初始化成功: {model_config['name']}")
+        except Exception as e:
+            logger.error(f"❌ TTS模型初始化失败: {str(e)}")
+            raise
     
     return tts_instances[model_key]
 
@@ -236,30 +119,12 @@ def get_models():
             }), 503
         
         models = []
-        # 添加自动选择选项
-        models.append({
-            'key': 'auto',
-            'name': '智能选择 (推荐)',
-            'language': 'auto',
-            'description': '根据文本内容自动选择最合适的语音模型',
-            'type': 'auto',
-            'voice_options': [],
-            'supports_emotions': False,
-            'emotion_options': [],
-            'supports_dialogue': False
-        })
-        
         for key, config in TTS_MODELS.items():
             models.append({
                 'key': key,
                 'name': config['name'],
                 'language': config['language'],
-                'description': config['description'],
-                'type': config['type'],
-                'voice_options': config.get('voice_options', []),
-                'supports_emotions': config.get('supports_emotions', False),
-                'emotion_options': config.get('emotion_options', []),
-                'supports_dialogue': config.get('supports_dialogue', False)
+                'description': config['description']
             })
         
         return jsonify({
@@ -267,125 +132,13 @@ def get_models():
             'message': '获取模型列表成功',
             'data': {
                 'models': models,
-                'default_model': 'auto'
+                'default_model': 'tacotron2'
             }
         })
         
     except Exception as e:
         logger.error(f"获取TTS模型列表失败: {str(e)}")
-        return handle_api_error(500, '获取模型列表失败', {'error_details': str(e)})
-
-@tts_bp.route('/speakers/<model_key>', methods=['GET'])
-@cross_origin()
-def get_speakers(model_key):
-    """获取指定模型的说话人列表"""
-    try:
-        if not TTS_AVAILABLE:
-            return jsonify({
-                'success': False,
-                'message': 'TTS功能不可用',
-                'data': {}
-            }), 503
-        
-        if model_key not in TTS_MODELS:
-            return jsonify({
-                'success': False,
-                'message': '不支持的模型',
-                'data': {}
-            }), 400
-        
-        model_config = TTS_MODELS[model_key]
-        if model_config['type'] != 'multi_speaker':
-            return jsonify({
-                'success': True,
-                'message': '单说话人模型，无说话人列表',
-                'data': {'speakers': []}
-            })
-        
-        # 获取TTS实例和说话人列表
-        tts = get_tts_instance(model_key)
-        speakers = []
-        
-        if hasattr(tts, 'speakers') and tts.speakers:
-            speakers = list(tts.speakers)
-        
-        return jsonify({
-            'success': True,
-            'message': '获取说话人列表成功',
-            'data': {
-                'speakers': speakers,
-                'model': model_key,
-                'model_name': model_config['name']
-            }
-        })
-        
-    except Exception as e:
-        logger.error(f"获取说话人列表失败: {str(e)}")
-        return handle_api_error(500, '获取说话人列表失败', {'error_details': str(e)})
-
-@tts_bp.route('/upload-reference', methods=['POST'])
-@cross_origin()
-@require_login
-def upload_reference_audio(current_user):
-    """上传参考音频文件用于声音克隆"""
-    try:
-        if not TTS_AVAILABLE:
-            return jsonify({
-                'success': False,
-                'message': 'TTS功能不可用',
-                'data': {}
-            }), 503
-        
-        # 检查文件是否存在
-        if 'audio' not in request.files:
-            return jsonify({
-                'success': False,
-                'message': '没有上传音频文件',
-                'data': {}
-            }), 400
-        
-        file = request.files['audio']
-        if file.filename == '':
-            return jsonify({
-                'success': False,
-                'message': '没有选择文件',
-                'data': {}
-            }), 400
-        
-        # 检查文件类型
-        allowed_extensions = {'wav', 'mp3', 'flac', 'm4a'}
-        if not ('.' in file.filename and file.filename.rsplit('.', 1)[1].lower() in allowed_extensions):
-            return jsonify({
-                'success': False,
-                'message': '只支持 WAV, MP3, FLAC, M4A 格式的音频文件',
-                'data': {}
-            }), 400
-        
-        # 保存参考音频文件
-        filename = secure_filename(file.filename)
-        temp_dir = tempfile.gettempdir()
-        reference_filename = f"ref_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{filename}"
-        reference_path = os.path.join(temp_dir, reference_filename)
-        
-        file.save(reference_path)
-        
-        file_size = os.path.getsize(reference_path)
-        logger.info(f"📁 保存参考音频: {reference_filename}, 大小: {file_size} bytes")
-        
-        return jsonify({
-            'success': True,
-            'message': '参考音频上传成功',
-            'data': {
-                'reference_filename': reference_filename,
-                'reference_path': reference_path,
-                'file_size': file_size,
-                'original_filename': filename
-            }
-        })
-        
-    except Exception as e:
-        logger.error(f"上传参考音频失败: {str(e)}")
-        return handle_api_error(500, '上传参考音频失败', {'error_details': str(e)})
+        return handle_api_error(e)
 
 @tts_bp.route('/synthesize', methods=['POST'])
 @cross_origin()
@@ -409,18 +162,28 @@ def synthesize_speech(current_user):
                 'data': {}
             }), 400
         
-        original_text = data.get('text', '').strip()
-        requested_model = data.get('model', 'auto')  # 默认为auto
+        text = data.get('text', '').strip()
+        model_key = data.get('model', 'tacotron2')
         voice_speed = data.get('speed', 1.0)
         
-        # 清理文本，避免TTS问题
-        text = clean_text_for_tts(original_text)
+        # 调试：记录接收到的原始文本
+        logger.info(f"🔍 [DEBUG] 接收到的原始文本: '{text}'")
         
-        if text != original_text:
-            logger.info(f"📝 文本已清理: '{original_text}' -> '{text}'")
+        # 文本清理：移除可能导致TTS异常的字符
+        import re
+        # 移除多余的空白字符和换行符
+        text = re.sub(r'\s+', ' ', text).strip()
+        # 移除特殊的Unicode字符（如零宽字符）
+        text = re.sub(r'[\u200b-\u200d\ufeff]', '', text)
+        # 确保文本不为空且合理
+        if len(text.replace(' ', '')) == 0:
+            return jsonify({
+                'success': False,
+                'message': '文本内容无效或为空',
+                'data': {}
+            }), 400
         
-        # 智能选择模型
-        model_key = get_suitable_model(text, requested_model)
+        logger.info(f"🔍 [DEBUG] 清理后的文本: '{text}'")
         
         # 验证输入
         if not text:
@@ -447,67 +210,20 @@ def synthesize_speech(current_user):
         audio_filename = f"tts_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
         audio_path = os.path.join(temp_dir, audio_filename)
         
-        # 根据模型类型进行不同的语音合成
-        model_config = TTS_MODELS[model_key]
-        
-        # 准备TTS参数，添加质量控制参数
-        tts_kwargs = {
-            'text': text,
-            'file_path': audio_path
-        }
-        
-        # 根据模型类型添加特定参数
+        # 语音合成
         try:
-            logger.info(f"🎯 使用模型: {model_config['name']}, 文本: '{text}'")
+            logger.info(f"🔍 [DEBUG] 开始合成文本: '{text}' (长度: {len(text)})")
             
-            if model_config['type'] == 'multi_speaker':
-                # 多说话人模式，可以指定说话人
-                speaker = data.get('speaker', None)
-                if speaker:
-                    tts_kwargs['speaker'] = speaker
-                    logger.info(f"👤 使用指定说话人: {speaker}")
-                else:
-                    # 获取可用说话人列表的第一个
-                    speakers = tts.speakers if hasattr(tts, 'speakers') and tts.speakers else None
-                    if speakers:
-                        tts_kwargs['speaker'] = speakers[0]
-                        logger.info(f"👤 使用默认说话人: {speakers[0]}")
-                        
-            elif model_config['type'] == 'voice_cloning':
-                # 声音克隆模式，需要参考音频
-                reference_audio = data.get('reference_audio_path')
-                if reference_audio and os.path.exists(reference_audio):
-                    tts_kwargs['speaker_wav'] = reference_audio
-                    logger.info(f"🎤 使用参考音频: {reference_audio}")
-            
-            # 执行TTS合成 - 只调用一次避免重复
-            logger.info("🔄 开始语音合成...")
-            
-            # 尝试合成，如果失败且是中文，尝试备用模型
-            max_attempts = 2 if model_key == 'chinese' else 1
-            success = False
-            
-            for attempt in range(max_attempts):
-                try:
-                    if attempt > 0:
-                        # 第二次尝试使用备用中文模型
-                        logger.info("🔄 尝试使用备用中文模型...")
-                        backup_tts = get_tts_instance('chinese_alt')
-                        backup_tts.tts_to_file(**tts_kwargs)
-                    else:
-                        tts.tts_to_file(**tts_kwargs)
-                    
-                    success = True
-                    break
-                except Exception as attempt_error:
-                    logger.warning(f"⚠️ 合成尝试 {attempt + 1} 失败: {str(attempt_error)}")
-                    if attempt == max_attempts - 1:
-                        raise attempt_error
-            
-            if success:
-                logger.info(f"✅ 语音合成成功: {audio_path}")
+            # 尝试强制单句处理，避免TTS分句异常
+            if len(text) > 0:
+                # 移除可能导致分句的标点符号，然后在末尾加一个句号
+                clean_text = text.strip().rstrip('。！？.!?') + '。'
+                logger.info(f"🔍 [DEBUG] 最终合成文本: '{clean_text}'")
+                tts.tts_to_file(text=clean_text, file_path=audio_path)
             else:
-                raise Exception("所有合成尝试都失败")
+                tts.tts_to_file(text=text, file_path=audio_path)
+                
+            logger.info(f"✅ 语音合成成功: {audio_path}")
         except Exception as e:
             logger.error(f"❌ 语音合成失败: {str(e)}")
             raise Exception(f"语音合成失败: {str(e)}")
@@ -517,20 +233,7 @@ def synthesize_speech(current_user):
             raise Exception("语音文件生成失败")
         
         file_size = os.path.getsize(audio_path)
-        
-        # 检查文件大小是否合理（避免过长的音频文件）
-        expected_min_size = len(text) * 1000  # 每字符预期至少1KB
-        expected_max_size = len(text) * 5000  # 每字符预期最多5KB
-        
-        if file_size < expected_min_size:
-            logger.warning(f"⚠️ 音频文件可能过小: {file_size} bytes (预期最少: {expected_min_size} bytes)")
-        elif file_size > expected_max_size:
-            logger.warning(f"⚠️ 音频文件可能过大: {file_size} bytes (预期最多: {expected_max_size} bytes)")
-        
         logger.info(f"📁 生成音频文件: {audio_filename}, 大小: {file_size} bytes")
-        
-        # 计算准确的时长估算
-        duration_estimate = estimate_duration(text, model_key)
         
         return jsonify({
             'success': True,
@@ -541,16 +244,52 @@ def synthesize_speech(current_user):
                 'text': text,
                 'model': model_key,
                 'model_name': TTS_MODELS[model_key]['name'],
-                'duration_estimate': duration_estimate,
-                'detected_language': detect_language(text) if requested_model == 'auto' else None,
-                'original_model_request': requested_model,
-                'auto_selected': requested_model == 'auto'
+                'duration_estimate': len(text) * 0.1  # 粗略估计时长
             }
         })
         
     except Exception as e:
         logger.error(f"语音合成失败: {str(e)}")
-        return handle_api_error(500, '语音合成失败', {'error_details': str(e)})
+        return handle_api_error(e)
+
+@tts_bp.route('/stream/<filename>', methods=['GET'])
+@cross_origin()
+def stream_audio(filename):
+    """流媒体播放音频文件（无需登录）"""
+    try:
+        # 安全检查文件名
+        safe_filename = secure_filename(filename)
+        if not safe_filename or not safe_filename.endswith('.wav'):
+            return jsonify({
+                'success': False,
+                'message': '无效的文件名',
+                'data': {}
+            }), 400
+        
+        # 检查文件是否存在
+        temp_dir = tempfile.gettempdir()
+        file_path = os.path.join(temp_dir, safe_filename)
+        
+        if not os.path.exists(file_path):
+            return jsonify({
+                'success': False,
+                'message': '文件不存在或已过期',
+                'data': {}
+            }), 404
+        
+        logger.info(f"🎵 流媒体播放音频文件: {safe_filename}")
+        
+        # 流媒体方式发送文件
+        return send_file(
+            file_path,
+            as_attachment=False,  # 不作为下载，而是流媒体
+            download_name=safe_filename,
+            mimetype='audio/wav'
+        )
+        
+    except Exception as e:
+        logger.error(f"流媒体播放失败: {str(e)}")
+        return handle_api_error(500, f"流媒体播放失败: {str(e)}")
 
 @tts_bp.route('/download/<filename>', methods=['GET'])
 @cross_origin()
@@ -589,37 +328,7 @@ def download_audio(filename):
         
     except Exception as e:
         logger.error(f"下载音频文件失败: {str(e)}")
-        return handle_api_error(e, 500, '下载失败', {'error_details': str(e)})
-
-@tts_bp.route('/stream/<filename>', methods=['GET'])
-@cross_origin()
-def stream_audio(filename):
-    """流式播放音频文件（不需要认证）"""
-    try:
-        # 安全检查文件名
-        safe_filename = secure_filename(filename)
-        if not safe_filename or not safe_filename.endswith('.wav'):
-            return 'Invalid filename', 400
-        
-        # 检查文件是否存在
-        temp_dir = tempfile.gettempdir()
-        file_path = os.path.join(temp_dir, safe_filename)
-        
-        if not os.path.exists(file_path):
-            return 'File not found', 404
-        
-        logger.info(f"🎧 流式播放音频: {safe_filename}")
-        
-        # 流式发送文件，用于播放器
-        return send_file(
-            file_path,
-            as_attachment=False,  # 不作为附件下载
-            mimetype='audio/wav'
-        )
-        
-    except Exception as e:
-        logger.error(f"流式播放音频失败: {str(e)}")
-        return 'Stream error', 500
+        return handle_api_error(500, f"下载音频文件失败: {str(e)}")
 
 @tts_bp.route('/cleanup', methods=['POST'])
 @cross_origin()
@@ -658,7 +367,116 @@ def cleanup_temp_files(current_user):
         
     except Exception as e:
         logger.error(f"清理临时文件失败: {str(e)}")
-        return handle_api_error(500, '清理临时文件失败', {'error_details': str(e)})
+        return handle_api_error(e)
+
+@tts_bp.route('/dialogue', methods=['POST'])
+@cross_origin()
+@require_login
+def synthesize_dialogue(current_user):
+    """多人对话语音合成"""
+    try:
+        if not TTS_AVAILABLE:
+            return jsonify({
+                'success': False,
+                'message': 'TTS功能不可用，请检查TTS库安装',
+                'data': {}
+            }), 503
+        
+        # 获取请求数据
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': '请求数据格式错误',
+                'data': {}
+            }), 400
+        
+        text = data.get('text', '').strip()
+        model_key = data.get('model', 'dialogue_mode')
+        
+        # 验证输入
+        if not text:
+            return jsonify({
+                'success': False,
+                'message': '文本内容不能为空',
+                'data': {}
+            }), 400
+        
+        if len(text) > 2000:
+            return jsonify({
+                'success': False,
+                'message': '对话文本长度不能超过2000字符',
+                'data': {}
+            }), 400
+        
+        logger.info(f"🎭 开始多人对话合成: 用户={current_user.username}, 文本长度={len(text)}")
+        
+        # 解析对话
+        dialogue_segments = parse_dialogue_text(text)
+        logger.info(f"🎭 解析到 {len(dialogue_segments)} 段对话")
+        
+        for i, segment in enumerate(dialogue_segments):
+            logger.debug(f"  段落 {i+1}: [{segment['speaker']}] {segment['text']}")
+        
+        # 获取TTS实例
+        tts = get_tts_instance(model_key)
+        
+        # 处理多人对话
+        if len(dialogue_segments) > 1:
+            # 多人对话：为每个说话人添加标识
+            combined_parts = []
+            for segment in dialogue_segments:
+                # 清理文本，移除多余标点
+                clean_text = segment['text'].strip().rstrip('。！？.!?')
+                combined_parts.append(f"{segment['speaker']}说{clean_text}")
+            
+            # 使用逗号分隔，避免过多的句号导致TTS分句异常
+            combined_text = "，".join(combined_parts) + "。"
+        else:
+            # 单人对话，直接使用原文本
+            combined_text = dialogue_segments[0]['text'].strip()
+        
+        logger.info(f"🔄 合成文本: {combined_text}")
+        
+        # 生成临时文件名
+        temp_dir = tempfile.gettempdir()
+        audio_filename = f"dialogue_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+        audio_path = os.path.join(temp_dir, audio_filename)
+        
+        # 语音合成
+        try:
+            tts.tts_to_file(text=combined_text, file_path=audio_path)
+            logger.info(f"✅ 多人对话合成成功: {audio_path}")
+        except Exception as e:
+            logger.error(f"❌ 多人对话合成失败: {str(e)}")
+            raise Exception(f"多人对话合成失败: {str(e)}")
+        
+        # 检查文件是否生成
+        if not os.path.exists(audio_path):
+            raise Exception("对话音频文件生成失败")
+        
+        file_size = os.path.getsize(audio_path)
+        logger.info(f"📁 生成对话音频文件: {audio_filename}, 大小: {file_size} bytes")
+        
+        return jsonify({
+            'success': True,
+            'message': '多人对话语音合成成功',
+            'data': {
+                'audio_filename': audio_filename,
+                'file_size': file_size,
+                'text': text,
+                'combined_text': combined_text,
+                'dialogue_segments': len(dialogue_segments),
+                'speakers': list(set([seg['speaker'] for seg in dialogue_segments])),
+                'model': model_key,
+                'model_name': TTS_MODELS[model_key]['name'],
+                'duration_estimate': len(combined_text) * 0.1
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"多人对话合成失败: {str(e)}")
+        return handle_api_error(e)
 
 @tts_bp.route('/status', methods=['GET'])
 @cross_origin()
@@ -689,4 +507,4 @@ def get_tts_status():
         
     except Exception as e:
         logger.error(f"获取TTS状态失败: {str(e)}")
-        return handle_api_error(500, '获取TTS状态失败', {'error_details': str(e)})
+        return handle_api_error(e)
