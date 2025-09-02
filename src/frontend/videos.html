@@ -127,6 +127,9 @@ min-height: 1024px;
                     <a href="trending.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
                         <i class="fas fa-fire mr-2"></i>爆款视频
                     </a>
+                    <a href="favorites.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-heart mr-2"></i>我的收藏
+                    </a>
                     <a href="document-converter.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
                         <i class="fas fa-file-exchange mr-2"></i>文档转换
                     </a>
@@ -207,9 +210,9 @@ min-height: 1024px;
         <div class="bg-white rounded-xl shadow-medium border border-gray-100 overflow-hidden">
             <div class="p-6 border-b border-gray-100">
                 <!-- 搜索和功能区域 -->
-                <div class="flex flex-col lg:flex-row items-center gap-4">
-                    <!-- 搜索框 -->
-                    <div class="flex-1 min-w-0">
+                <div class="flex flex-col gap-4">
+                    <!-- 第一行：搜索框 -->
+                    <div class="w-full">
                         <div class="relative">
                             <input type="text" id="search-videos" placeholder="搜索视频标题、描述或标签..." 
                                    class="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all">
@@ -217,45 +220,73 @@ min-height: 1024px;
                         </div>
                     </div>
                     
-                    <!-- 筛选和操作区域 -->
-                    <div class="flex items-center gap-2">
-                        <select id="filter-channel" class="px-3 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none text-sm">
-                            <option value="">所有频道</option>
-                        </select>
+                    <!-- 第二行：筛选和操作区域 -->
+                    <div class="flex flex-col xl:flex-row items-start xl:items-center gap-3">
+                        <!-- 基础筛选 -->
+                        <div class="flex flex-col sm:flex-row items-start sm:items-center gap-2">
+                            <select id="filter-channel" class="px-3 py-2 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none text-sm min-w-[120px]">
+                                <option value="">所有频道</option>
+                            </select>
+                            
+                            <select id="filter-category" class="px-3 py-2 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none text-sm min-w-[120px]">
+                                <option value="">所有分类</option>
+                            </select>
+                        </div>
                         
-                        <select id="filter-category" class="px-3 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none text-sm">
-                            <option value="">所有分类</option>
-                        </select>
+                        <!-- 时间段和排序控件 -->
+                        <div class="flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-button border border-gray-300">
+                            <label class="text-xs text-gray-600 whitespace-nowrap">时间段:</label>
+                            
+                            <!-- 时间段选择 -->
+                            <select id="time-period" class="px-2 py-1 border border-gray-200 rounded text-xs focus:border-primary-500 focus:ring-1 focus:ring-primary-200 focus:outline-none min-w-[80px]">
+                                <option value="all">全部时间</option>
+                                <option value="1">最近1天</option>
+                                <option value="3">最近3天</option>
+                                <option value="7" selected>最近7天</option>
+                                <option value="30">最近30天</option>
+                                <option value="90">最近90天</option>
+                                <option value="365">最近1年</option>
+                            </select>
+                            
+                            <span class="text-xs text-gray-400">|</span>
+                            <label class="text-xs text-gray-600 whitespace-nowrap">排序:</label>
+                            
+                            <!-- 排序规则 -->
+                            <select id="sort-rule" class="px-2 py-1 border border-gray-200 rounded text-xs focus:border-primary-500 focus:ring-1 focus:ring-primary-200 focus:outline-none min-w-[80px]">
+                                <option value="published_at:desc" selected>最新发布</option>
+                                <option value="published_at:asc">最早发布</option>
+                                <option value="view_count:desc">播放量最高</option>
+                                <option value="view_count:asc">播放量最低</option>
+                                <option value="like_count:desc">点赞最多</option>
+                                <option value="like_count:asc">点赞最少</option>
+                                <option value="comment_count:desc">评论最多</option>
+                                <option value="comment_count:asc">评论最少</option>
+                            </select>
+                        </div>
                         
-                        <select id="sort-by" class="px-3 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none text-sm">
-                            <option value="published_at:desc">最新发布</option>
-                            <option value="published_at:asc">最早发布</option>
-                            <option value="view_count:desc">播放量最高</option>
-                            <option value="view_count:asc">播放量最低</option>
-                            <option value="like_count:desc">点赞最多</option>
-                            <option value="comment_count:desc">评论最多</option>
-                        </select>
-                        
-                        <button onclick="clearFilters()" class="px-3 py-3 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-button hover:bg-gray-50 transition-colors" title="清除筛选">
-                            <i class="fas fa-times"></i>
-                        </button>
-                        
-                        <button onclick="refreshVideos()" class="px-3 py-3 text-gray-600 hover:text-primary-600 hover:bg-primary-50 rounded-button transition-colors" title="刷新列表">
-                            <i class="fas fa-sync-alt"></i>
-                        </button>
-                        
-                        <button onclick="syncAllVideos()" class="flex items-center gap-2 bg-gradient-to-r from-green-500 to-green-600 text-white px-3 py-3 rounded-button font-medium shadow-lg hover:from-green-600 hover:to-green-700 hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 text-sm">
-                            <i class="fas fa-sync-alt text-xs"></i>
-                            同步
-                        </button>
-                        
-                        <button onclick="cleanShortVideos()" class="flex items-center gap-2 bg-gradient-to-r from-red-500 to-red-600 text-white px-3 py-3 rounded-button font-medium shadow-lg hover:from-red-600 hover:to-red-700 hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 text-sm">
-                            <i class="fas fa-trash text-xs"></i>
-                            清理短视频
-                        </button>
-                        
-                        <div class="text-sm text-gray-500 ml-2">
-                            共 <span id="videos-count">0</span> 个
+                        <!-- 操作按钮组 -->
+                        <div class="flex items-center gap-2 ml-auto">
+                            <button onclick="clearFilters()" class="px-3 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-button hover:bg-gray-50 transition-colors" title="清除筛选">
+                                <i class="fas fa-times"></i>
+                            </button>
+                            
+                            <button onclick="refreshVideos()" class="px-3 py-2 text-gray-600 hover:text-primary-600 hover:bg-primary-50 rounded-button transition-colors" title="刷新列表">
+                                <i class="fas fa-sync-alt"></i>
+                            </button>
+                            
+                            <button onclick="syncAllVideos()" class="flex items-center gap-2 bg-gradient-to-r from-green-500 to-green-600 text-white px-3 py-2 rounded-button font-medium shadow-lg hover:from-green-600 hover:to-green-700 hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 text-sm">
+                                <i class="fas fa-sync-alt text-xs"></i>
+                                同步
+                            </button>
+                            
+                            <button onclick="cleanShortVideos()" class="flex items-center gap-2 bg-gradient-to-r from-red-500 to-red-600 text-white px-3 py-2 rounded-button font-medium shadow-lg hover:from-red-600 hover:to-red-700 hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 text-sm">
+                                <i class="fas fa-trash text-xs"></i>
+                                清理短视频
+                            </button>
+                            
+                            <div class="text-sm text-gray-500 ml-2">
+                                共 <span id="videos-count">0</span> 个
+                            </div>
                         </div>
                     </div>
                 </div>
