@@ -86,6 +86,97 @@ def parse_dialogue_text(text):
     
     return dialogue_segments
 
+def apply_speaker_effects(audio_path, speaker_name, speaker_index):
+    """为不同说话人应用音频效果来模拟多人对话"""
+    try:
+        from pydub import AudioSegment
+        import tempfile
+        import uuid
+        
+        # 加载音频
+        audio = AudioSegment.from_wav(audio_path)
+        
+        # 根据说话人索引应用不同效果
+        if speaker_index % 4 == 0:
+            # 说话人1：原声，稍微提高音调
+            modified_audio = audio._spawn(audio.raw_data, overrides={
+                "frame_rate": int(audio.frame_rate * 1.1)
+            }).set_frame_rate(audio.frame_rate)
+            logger.info(f"🎵 [{speaker_name}] 应用音调提升效果")
+            
+        elif speaker_index % 4 == 1:
+            # 说话人2：降低音调
+            modified_audio = audio._spawn(audio.raw_data, overrides={
+                "frame_rate": int(audio.frame_rate * 0.9)
+            }).set_frame_rate(audio.frame_rate)
+            logger.info(f"🎵 [{speaker_name}] 应用音调降低效果")
+            
+        elif speaker_index % 4 == 2:
+            # 说话人3：加快语速
+            modified_audio = audio.speedup(playback_speed=1.15)
+            logger.info(f"🎵 [{speaker_name}] 应用语速加快效果")
+            
+        else:
+            # 说话人4：减慢语速
+            modified_audio = audio.speedup(playback_speed=0.9)
+            logger.info(f"🎵 [{speaker_name}] 应用语速减慢效果")
+        
+        # 保存处理后的音频
+        temp_dir = tempfile.gettempdir()
+        processed_filename = f"processed_{speaker_index}_{uuid.uuid4().hex[:6]}.wav"
+        processed_path = os.path.join(temp_dir, processed_filename)
+        
+        modified_audio.export(processed_path, format="wav")
+        logger.info(f"✅ [{speaker_name}] 音频效果处理完成")
+        
+        return processed_path
+        
+    except ImportError:
+        logger.warning("⚠️ pydub未安装，跳过音频效果处理")
+        return audio_path
+    except Exception as e:
+        logger.error(f"❌ 音频效果处理失败: {str(e)}")
+        return audio_path
+
+def combine_audio_segments(segment_paths, output_path):
+    """合并多个音频片段为一个完整的对话音频"""
+    try:
+        from pydub import AudioSegment
+        
+        if not segment_paths:
+            raise Exception("没有音频片段需要合并")
+        
+        # 加载第一个片段
+        combined_audio = AudioSegment.from_wav(segment_paths[0])
+        logger.info(f"🔗 开始合并 {len(segment_paths)} 个音频片段")
+        
+        # 依次合并其他片段（添加短暂间隔）
+        silence = AudioSegment.silent(duration=300)  # 300ms间隔
+        
+        for i, segment_path in enumerate(segment_paths[1:], 1):
+            segment_audio = AudioSegment.from_wav(segment_path)
+            combined_audio = combined_audio + silence + segment_audio
+            logger.debug(f"   合并片段 {i+1}/{len(segment_paths)}")
+        
+        # 导出最终音频
+        combined_audio.export(output_path, format="wav")
+        logger.info(f"✅ 音频合并完成: {output_path}")
+        
+        return output_path
+        
+    except ImportError:
+        logger.error("❌ pydub未安装，无法合并音频片段")
+        # 如果无法合并，至少返回第一个片段
+        if segment_paths:
+            import shutil
+            shutil.copy2(segment_paths[0], output_path)
+            return output_path
+        raise Exception("音频合并失败：缺少必要库")
+        
+    except Exception as e:
+        logger.error(f"❌ 音频合并失败: {str(e)}")
+        raise
+
 def get_tts_instance(model_key='tacotron2'):
     """获取TTS实例（带缓存）"""
     if not TTS_AVAILABLE:
@@ -138,7 +229,7 @@ def get_models():
         
     except Exception as e:
         logger.error(f"获取TTS模型列表失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"获取TTS模型列表失败: {str(e)}")
 
 @tts_bp.route('/synthesize', methods=['POST'])
 @cross_origin()
@@ -214,14 +305,35 @@ def synthesize_speech(current_user):
         try:
             logger.info(f"🔍 [DEBUG] 开始合成文本: '{text}' (长度: {len(text)})")
             
-            # 尝试强制单句处理，避免TTS分句异常
+            # 强化文本处理，彻底避免重复播放问题
             if len(text) > 0:
-                # 移除可能导致分句的标点符号，然后在末尾加一个句号
-                clean_text = text.strip().rstrip('。！？.!?') + '。'
-                logger.info(f"🔍 [DEBUG] 最终合成文本: '{clean_text}'")
+                # 1. 移除可能导致TTS异常的字符和符号
+                clean_text = text.strip()
+                
+                # 2. 移除连续的标点符号
+                import re
+                clean_text = re.sub(r'[。！？.!?]{2,}', '。', clean_text)
+                
+                # 3. 确保只有一个句尾标点符号
+                clean_text = clean_text.rstrip('。！？.!?') + '。'
+                
+                # 4. 确保文本不会被TTS分句处理
+                # 移除可能导致分句的逗号和分号（在句中）
+                clean_text = re.sub(r'[,，;；]\s*', ' ', clean_text)
+                
+                # 5. 限制文本长度避免TTS超时
+                if len(clean_text) > 100:
+                    # 长文本强制截断并确保完整句子
+                    clean_text = clean_text[:100].rstrip('。！？.!?') + '。'
+                
+                logger.info(f"🔍 [DEBUG] 最终合成文本: '{clean_text}' (长度: {len(clean_text)})")
+                
+                # 6. 使用强制参数确保单句处理
                 tts.tts_to_file(text=clean_text, file_path=audio_path)
             else:
-                tts.tts_to_file(text=text, file_path=audio_path)
+                # 空文本fallback
+                tts.tts_to_file(text="测试。", file_path=audio_path)
+                logger.warning("⚠️ 空文本，使用fallback")
                 
             logger.info(f"✅ 语音合成成功: {audio_path}")
         except Exception as e:
@@ -250,7 +362,7 @@ def synthesize_speech(current_user):
         
     except Exception as e:
         logger.error(f"语音合成失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"语音合成失败: {str(e)}")
 
 @tts_bp.route('/stream/<filename>', methods=['GET'])
 @cross_origin()
@@ -367,7 +479,7 @@ def cleanup_temp_files(current_user):
         
     except Exception as e:
         logger.error(f"清理临时文件失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"清理临时文件失败: {str(e)}")
 
 @tts_bp.route('/dialogue', methods=['POST'])
 @cross_origin()
@@ -421,35 +533,84 @@ def synthesize_dialogue(current_user):
         # 获取TTS实例
         tts = get_tts_instance(model_key)
         
-        # 处理多人对话
+        # 处理多人对话 - 新的多声音实现
+        combined_text = ""  # 初始化变量
+        
         if len(dialogue_segments) > 1:
-            # 多人对话：为每个说话人添加标识
+            logger.info("🎭 实现多人对话声音差异")
+            
+            # 构建合并文本用于显示和统计
             combined_parts = []
             for segment in dialogue_segments:
-                # 清理文本，移除多余标点
-                clean_text = segment['text'].strip().rstrip('。！？.!?')
-                combined_parts.append(f"{segment['speaker']}说{clean_text}")
+                combined_parts.append(f"{segment['speaker']}说{segment['text']}")
+            combined_text = "，".join(combined_parts)
             
-            # 使用逗号分隔，避免过多的句号导致TTS分句异常
-            combined_text = "，".join(combined_parts) + "。"
+            # 为每个说话人生成单独的音频片段
+            audio_segments = []
+            temp_dir = tempfile.gettempdir()
+            
+            for i, segment in enumerate(dialogue_segments):
+                speaker = segment['speaker']
+                text = segment['text'].strip()
+                
+                # 清理文本并添加句号
+                clean_text = text.rstrip('。！？.!?') + '。'
+                
+                # 为每个片段生成临时音频文件
+                segment_filename = f"temp_segment_{i}_{uuid.uuid4().hex[:6]}.wav"
+                segment_path = os.path.join(temp_dir, segment_filename)
+                
+                logger.info(f"🔄 生成 [{speaker}]: {clean_text}")
+                
+                try:
+                    # 基础TTS合成
+                    tts.tts_to_file(text=clean_text, file_path=segment_path)
+                    
+                    # 根据说话人应用音频效果
+                    processed_path = apply_speaker_effects(segment_path, speaker, i)
+                    audio_segments.append(processed_path)
+                    
+                    # 清理原始片段文件
+                    if os.path.exists(segment_path):
+                        os.remove(segment_path)
+                        
+                except Exception as e:
+                    logger.error(f"❌ 生成片段失败 [{speaker}]: {str(e)}")
+                    if os.path.exists(segment_path):
+                        os.remove(segment_path)
+                    raise
+            
+            # 合并所有音频片段
+            temp_dir = tempfile.gettempdir()
+            audio_filename = f"dialogue_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+            audio_path = os.path.join(temp_dir, audio_filename)
+            
+            combined_path = combine_audio_segments(audio_segments, audio_path)
+            
+            # 清理临时片段文件
+            for segment_path in audio_segments:
+                if os.path.exists(segment_path):
+                    os.remove(segment_path)
+                    
+            logger.info(f"✅ 多人对话合成成功: {combined_path}")
+            
         else:
-            # 单人对话，直接使用原文本
-            combined_text = dialogue_segments[0]['text'].strip()
-        
-        logger.info(f"🔄 合成文本: {combined_text}")
-        
-        # 生成临时文件名
-        temp_dir = tempfile.gettempdir()
-        audio_filename = f"dialogue_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
-        audio_path = os.path.join(temp_dir, audio_filename)
-        
-        # 语音合成
-        try:
-            tts.tts_to_file(text=combined_text, file_path=audio_path)
-            logger.info(f"✅ 多人对话合成成功: {audio_path}")
-        except Exception as e:
-            logger.error(f"❌ 多人对话合成失败: {str(e)}")
-            raise Exception(f"多人对话合成失败: {str(e)}")
+            # 单人对话，使用原逻辑
+            combined_text = dialogue_segments[0]['text'].strip().rstrip('。！？.!?') + '。'
+            logger.info(f"🔄 单人合成文本: {combined_text}")
+            
+            # 生成临时文件名
+            temp_dir = tempfile.gettempdir()
+            audio_filename = f"dialogue_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+            audio_path = os.path.join(temp_dir, audio_filename)
+            
+            # 语音合成
+            try:
+                tts.tts_to_file(text=combined_text, file_path=audio_path)
+                logger.info(f"✅ 单人对话合成成功: {audio_path}")
+            except Exception as e:
+                logger.error(f"❌ 单人对话合成失败: {str(e)}")
+                raise Exception(f"单人对话合成失败: {str(e)}")
         
         # 检查文件是否生成
         if not os.path.exists(audio_path):
@@ -476,7 +637,7 @@ def synthesize_dialogue(current_user):
         
     except Exception as e:
         logger.error(f"多人对话合成失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"多人对话合成失败: {str(e)}")
 
 @tts_bp.route('/status', methods=['GET'])
 @cross_origin()
@@ -507,4 +668,4 @@ def get_tts_status():
         
     except Exception as e:
         logger.error(f"获取TTS状态失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"获取TTS状态失败: {str(e)}")

@@ -32,6 +32,12 @@ class YouTubeDataApp {
         // 绑定事件
         this.bindEvents();
         
+        // 初始化Dashboard（排行榜功能）
+        if (typeof Dashboard !== 'undefined') {
+            this.dashboard = new Dashboard();
+            console.log('✅ [Main] Dashboard已初始化');
+        }
+        
         // 加载初始数据
         await this.loadInitialData();
         

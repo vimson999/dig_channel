@@ -97,11 +97,17 @@ def add_favorite(current_user):
     """
     try:
         data = request.get_json()
+        print(f"收到收藏请求数据: {data}")
+        
         if not data or 'video_data' not in data:
+            print("错误: 缺少video_data字段")
             return handle_api_error(400, "视频数据不能为空")
         
         video_data = data['video_data']
+        print(f"视频数据: {video_data}")
+        
         if not video_data.get('video_id'):
+            print("错误: 缺少video_id字段")
             return handle_api_error(400, "视频ID不能为空")
         
         # 创建收藏

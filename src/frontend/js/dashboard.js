@@ -44,7 +44,7 @@ class Dashboard {
             // 并行加载所有数据
             const [summaryData, rankingsData] = await Promise.all([
                 api.getSummaryStatistics(),
-                api.getAllRankings(3)
+                api.getAllRankings(10)
             ]);
 
             // 更新统计卡片
@@ -113,7 +113,7 @@ class Dashboard {
         if (!container) return;
 
         if (!rankings || rankings.length === 0) {
-            container.innerHTML = '<div class="text-muted">暂无数据</div>';
+            container.innerHTML = '<div class="text-center text-gray-400 py-4">暂无数据</div>';
             return;
         }
 
@@ -123,22 +123,37 @@ class Dashboard {
                 Utils.formatCurrency(item.revenue || item.total_revenue) :
                 Utils.formatChange(item.subscriber_change || item.total_subscriber_change, true);
 
+            // 构建跳转链接，将频道信息作为参数传递
+            const videoPageUrl = `videos.html?channel_id=${item.channel_id}&channel_name=${encodeURIComponent(item.channel_name)}`;
+
             return `
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                    <div class="d-flex align-items-center">
-                        <span class="ranking-number rank-${index + 1} me-2">${index + 1}</span>
+                <a href="${videoPageUrl}" class="flex items-center justify-between p-3 rounded-lg hover:bg-gray-50 transition-colors group cursor-pointer border border-transparent hover:border-gray-200">
+                    <div class="flex items-center gap-3">
+                        <div class="flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${this.getRankingBadgeClass(index + 1)}">
+                            ${index + 1}
+                        </div>
                         <div>
-                            <div class="small fw-bold">${item.channel_name}</div>
+                            <div class="text-sm font-medium text-gray-800 group-hover:text-primary-600 transition-colors">${item.channel_name}</div>
                         </div>
                     </div>
-                    <div class="text-end">
-                        <div class="fw-bold ${isRevenue ? 'text-success' : 'text-info'}">${value}</div>
+                    <div class="text-right">
+                        <div class="text-sm font-bold ${isRevenue ? 'text-green-600' : 'text-blue-600'}">${value}</div>
                     </div>
-                </div>
+                </a>
             `;
         }).join('');
 
         container.innerHTML = html;
+    }
+
+    // 获取排名徽章样式类
+    getRankingBadgeClass(rank) {
+        switch(rank) {
+            case 1: return 'bg-gradient-to-r from-yellow-400 to-yellow-500 text-white';
+            case 2: return 'bg-gradient-to-r from-gray-300 to-gray-400 text-white';
+            case 3: return 'bg-gradient-to-r from-orange-400 to-orange-500 text-white';
+            default: return 'bg-gray-100 text-gray-600';
+        }
     }
 
     // 加载趋势图表

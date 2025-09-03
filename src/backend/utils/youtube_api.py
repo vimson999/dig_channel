@@ -596,8 +596,10 @@ class YouTubeAPI:
         try:
             videos = []
             next_page_token = None
+            max_pages = 10  # 最大分页数限制，防止无限循环
+            page_count = 0
             
-            while len(videos) < max_results:
+            while len(videos) < max_results and page_count < max_pages:
                 params = {
                     'part': 'snippet',
                     'playlistId': playlist_id,
@@ -608,6 +610,10 @@ class YouTubeAPI:
                     params['pageToken'] = next_page_token
                 
                 data = self._make_request('playlistItems', params)
+                page_count += 1
+                
+                # 记录当前页的视频数量，用于检测空响应
+                current_page_videos = 0
                 
                 for item in data.get('items', []):
                     snippet = item['snippet']
@@ -619,9 +625,17 @@ class YouTubeAPI:
                         'published_at': snippet['publishedAt'],
                         'playlist_position': snippet['position']
                     })
+                    current_page_videos += 1
                 
                 next_page_token = data.get('nextPageToken')
-                if not next_page_token:
+                
+                # 如果没有更多页面或当前页没有视频，停止循环
+                if not next_page_token or current_page_videos == 0:
+                    break
+                
+                # 安全检查：如果连续获取了空页面，停止循环
+                if current_page_videos == 0:
+                    print(f"警告：播放列表 {playlist_id} 第 {page_count} 页返回0个视频，停止获取")
                     break
             
             return videos

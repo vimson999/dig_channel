@@ -2,6 +2,22 @@
 from datetime import datetime
 from . import db
 
+def calculate_hot_score(view_count=0, like_count=0, comment_count=0):
+    """计算热度评分"""
+    import math
+    
+    # 归一化权重：播放量(50%) + 点赞(30%) + 评论(20%)
+    # 使用对数函数平滑大数值差异
+    normalized_views = math.log10(max(view_count, 1))
+    normalized_likes = math.log10(max(like_count, 1))
+    normalized_comments = math.log10(max(comment_count, 1))
+    
+    # 加权计算，最高分100
+    score = (normalized_views * 0.5 + normalized_likes * 0.3 + normalized_comments * 0.2) * 10
+    
+    # 限制在0-100范围内
+    return min(max(score, 0), 100)
+
 class FavoriteVideo(db.Model):
     """用户收藏的视频模型"""
     __tablename__ = 'favorite_videos'
@@ -95,7 +111,6 @@ class FavoriteVideo(db.Model):
             return existing, False  # 已存在
         
         # 计算热度评分
-        from ..utils.youtube_api import calculate_hot_score  # 假设有这个函数
         hot_score = calculate_hot_score(
             video_data.get('view_count', 0),
             video_data.get('like_count', 0),
@@ -181,20 +196,3 @@ class FavoriteVideo(db.Model):
             db.session.commit()
             return True
         return False
-
-
-def calculate_hot_score(view_count=0, like_count=0, comment_count=0):
-    """计算热度评分"""
-    import math
-    
-    # 归一化权重：播放量(50%) + 点赞(30%) + 评论(20%)
-    # 使用对数函数平滑大数值差异
-    normalized_views = math.log10(max(view_count, 1))
-    normalized_likes = math.log10(max(like_count, 1))
-    normalized_comments = math.log10(max(comment_count, 1))
-    
-    # 加权计算，最高分100
-    score = (normalized_views * 0.5 + normalized_likes * 0.3 + normalized_comments * 0.2) * 10
-    
-    # 限制在0-100范围内
-    return min(max(score, 0), 100)

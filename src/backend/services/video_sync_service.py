@@ -13,12 +13,26 @@ logger = setup_colored_logger("VIDEO_SYNC")
 class VideoSyncService:
     def __init__(self):
         self.youtube_api = YouTubeAPI()
+        self._sync_in_progress = {}  # 跟踪正在进行的同步操作
         
     def sync_all_channels_videos(self, days_back: int = 10, user_id: int = None) -> Dict:
         """同步所有活跃频道的视频"""
+        sync_key = f"all_channels_{user_id}"
+        
+        # 检查是否已经有同步任务在进行
+        if sync_key in self._sync_in_progress:
+            logger.warning(f"用户 {user_id} 的同步任务已在进行中，跳过重复请求")
+            return {
+                'success': False,
+                'message': '同步任务已在进行中，请稍后再试',
+                'data': {'processed': 0, 'errors': 1}
+            }
+        
         logger.info("开始同步所有频道的视频...")
         
         try:
+            # 标记同步开始
+            self._sync_in_progress[sync_key] = True
             # 获取活跃频道（按用户过滤）
             query = Channel.query.filter_by(is_active=True)
             if user_id is not None:
@@ -76,6 +90,12 @@ class VideoSyncService:
                         })
                         
                 except Exception as e:
+                    # 回滚当前事务以避免PendingRollbackError
+                    try:
+                        db.session.rollback()
+                    except:
+                        pass
+                        
                     from utils.colored_logger import log_detailed_error
                     
                     # 记录详细错误信息
@@ -109,12 +129,23 @@ class VideoSyncService:
             }
             
         except Exception as e:
+            # 确保数据库事务被回滚
+            try:
+                db.session.rollback()
+            except:
+                pass
+                
             logger.error(f"同步所有频道视频失败: {str(e)}")
             return {
                 'success': False,
                 'message': f'同步失败: {str(e)}',
                 'data': {'processed': 0, 'errors': 1}
             }
+        finally:
+            # 清理同步状态
+            if sync_key in self._sync_in_progress:
+                del self._sync_in_progress[sync_key]
+                logger.info(f"清理同步状态: {sync_key}")
     
     def sync_channel_videos(self, channel_id: int, days_back: int = 10) -> Dict:
         """同步单个频道的视频"""
@@ -187,6 +218,11 @@ class VideoSyncService:
                         new_videos += 1
                         
                 except Exception as e:
+                    # 回滚当前事务以避免PendingRollbackError
+                    try:
+                        db.session.rollback()
+                    except:
+                        pass
                     from utils.colored_logger import log_detailed_error
                     
                     video_id = video_info.get('video_id', 'unknown')
@@ -218,6 +254,12 @@ class VideoSyncService:
             }
             
         except Exception as e:
+            # 确保数据库事务被回滚
+            try:
+                db.session.rollback()
+            except:
+                pass
+                
             from utils.colored_logger import log_detailed_error
             
             # 记录详细错误信息
@@ -403,10 +445,25 @@ class VideoSyncService:
                         'comment_count': video.comment_count
                     }
                 )
+
+    def _apply_sorting(self, query, sort_by: str, order: str):
+        """应用排序"""
+        # 根据排序字段应用排序
+        if sort_by == 'view_count':
+            query = query.order_by(Video.view_count.desc() if order == 'desc' else Video.view_count.asc())
+        elif sort_by == 'like_count':
+            query = query.order_by(Video.like_count.desc() if order == 'desc' else Video.like_count.asc())
+        elif sort_by == 'comment_count':
+            query = query.order_by(Video.comment_count.desc() if order == 'desc' else Video.comment_count.asc())
+        else:  # published_at
+            query = query.order_by(Video.published_at.desc() if order == 'desc' else Video.published_at.asc())
+        
+        return query
     
     def get_channel_videos(self, channel_id: int, page: int = 1, per_page: int = 20, 
                           search: str = None, category: str = None, 
-                          sort_by: str = 'published_at', order: str = 'desc', user_id: int = None) -> Dict:
+                          sort_by: str = 'published_at', order: str = 'desc',
+                          time_period_days: int = None, user_id: int = None) -> Dict:
         """获取频道视频列表"""
         try:
             # 构建查询 - 先验证频道权限
@@ -436,15 +493,14 @@ class VideoSyncService:
             if category:
                 query = query.filter(Video.category_name == category)
             
-            # 排序
-            if sort_by == 'view_count':
-                query = query.order_by(Video.view_count.desc() if order == 'desc' else Video.view_count.asc())
-            elif sort_by == 'like_count':
-                query = query.order_by(Video.like_count.desc() if order == 'desc' else Video.like_count.asc())
-            elif sort_by == 'comment_count':
-                query = query.order_by(Video.comment_count.desc() if order == 'desc' else Video.comment_count.asc())
-            else:  # published_at
-                query = query.order_by(Video.published_at.desc() if order == 'desc' else Video.published_at.asc())
+            # 时间段筛选
+            if time_period_days:
+                from datetime import datetime, timedelta
+                cutoff_date = datetime.now() - timedelta(days=time_period_days)
+                query = query.filter(Video.published_at >= cutoff_date)
+            
+            # 应用排序
+            query = self._apply_sorting(query, sort_by, order)
             
             # 分页
             pagination = query.paginate(
@@ -480,7 +536,8 @@ class VideoSyncService:
     
     def search_videos(self, search: str, page: int = 1, per_page: int = 20, 
                      channel_id: int = None, category: str = None,
-                     sort_by: str = 'published_at', order: str = 'desc', user_id: int = None) -> Dict:
+                     sort_by: str = 'published_at', order: str = 'desc',
+                     time_period_days: int = None, user_id: int = None) -> Dict:
         """搜索视频"""
         try:
             # 构建查询
@@ -514,15 +571,14 @@ class VideoSyncService:
                     # 如果没有指定频道，按频道分类筛选
                     query = query.filter(Channel.category == category)
             
-            # 排序
-            if sort_by == 'view_count':
-                query = query.order_by(Video.view_count.desc() if order == 'desc' else Video.view_count.asc())
-            elif sort_by == 'like_count':
-                query = query.order_by(Video.like_count.desc() if order == 'desc' else Video.like_count.asc())
-            elif sort_by == 'comment_count':
-                query = query.order_by(Video.comment_count.desc() if order == 'desc' else Video.comment_count.asc())
-            else:  # published_at
-                query = query.order_by(Video.published_at.desc() if order == 'desc' else Video.published_at.asc())
+            # 时间段筛选
+            if time_period_days:
+                from datetime import datetime, timedelta
+                cutoff_date = datetime.now() - timedelta(days=time_period_days)
+                query = query.filter(Video.published_at >= cutoff_date)
+            
+            # 应用排序
+            query = self._apply_sorting(query, sort_by, order)
             
             # 分页
             pagination = query.paginate(

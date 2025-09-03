@@ -483,9 +483,19 @@ class TextToSpeechManager {
                 }
             }, 200);
             
-            // 准备请求数据
+            // 前端文本预处理 - 额外保护措施
+            let processedText = text.trim();
+            // 移除可能导致问题的特殊字符
+            processedText = processedText.replace(/[\u200b-\u200d\ufeff]/g, '');
+            // 规范化空白字符  
+            processedText = processedText.replace(/\s+/g, ' ');
+            
+            console.log('🔍 [前端] 原始文本:', text);
+            console.log('🔍 [前端] 处理后文本:', processedText);
+
+        // 准备请求数据
             const requestData = {
-                text: text,
+                text: processedText,
                 model: this.selectedModel,
                 is_dialogue: this.isDialogueMode
             };

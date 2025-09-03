@@ -74,7 +74,18 @@
       "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"from src.backend.api.tts import tts_bp; print(''✅ TTS导入成功'')\")",
       "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"from src.backend.app import create_app; app = create_app(); print(''✅ 应用导入成功'')\")",
       "Bash(PYTHONPATH=. ../../venv-3.11/bin/python -c \"from app import create_app; app = create_app(); print(''✅ 应用启动成功'')\")",
-      "Read(/private/var/folders/w9/s06r112x67g2zrgjgywpjjkw0000gn/T/**)"
+      "Read(/private/var/folders/w9/s06r112x67g2zrgjgywpjjkw0000gn/T/**)",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"from src.backend.app import create_app; app = create_app(); print(''✅ 应用导入成功'')\")",
+      "Bash(espeak-ng:*)",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"\ntry:\n    from TTS.api import TTS\n    print(''✅ TTS库导入成功'')\n    \n    # 测试最简单的英语模型\n    tts = TTS(''tts_models/en/ljspeech/tacotron2-DDC'')\n    print(''✅ Tacotron2模型加载成功'')\n    \n    # 生成测试音频\n    tts.tts_to_file(text=''Hello, this is a test.'', file_path=''/tmp/test_tts.wav'')\n    print(''✅ 音频生成成功'')\n    \nexcept Exception as e:\n    print(f''❌ 错误: {str(e)}'')\n\")",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"\ntry:\n    from TTS.api import TTS\n    print(''✅ TTS库导入成功'')\n    \n    # 测试中文模型\n    tts = TTS(''tts_models/zh-CN/baker/tacotron2-DDC-GST'')\n    print(''✅ 中文模型加载成功'')\n    \n    # 生成测试音频\n    tts.tts_to_file(text=''你好，这是一个测试。'', file_path=''/tmp/test_chinese_tts.wav'')\n    print(''✅ 中文音频生成成功'')\n    \nexcept Exception as e:\n    print(f''❌ 错误: {str(e)}'')\n\")",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"from src.backend.app import create_app; app = create_app(); print(''✅ Flask应用导入成功'')\")",
+      "Bash(PYTHONPATH=../../ python -c \"from app import create_app; app = create_app(); print(''✅ Flask应用导入成功'')\")",
+      "Bash(PYTHONPATH=../../ ../../venv-3.11/bin/python -c \"from app import create_app; app = create_app(); print(''✅ Flask应用导入成功'')\")",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"from src.backend.app import create_app; app = create_app(); print(''✅ Flask应用导入成功'')\")",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python src/frontend/server.py)",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python -c \"\nimport sys\nsys.path.insert(0, ''src/backend'')\nfrom api.tts import app\napp.run(host=''0.0.0.0'', port=5000, debug=True)\n\")",
+      "Bash(PYTHONPATH=. venv-3.11/bin/python test_tts_server.py)"
     ],
     "deny": []
   }

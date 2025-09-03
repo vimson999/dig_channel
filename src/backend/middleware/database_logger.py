@@ -152,7 +152,7 @@ class DatabaseLoggerMiddleware:
         logger.warning(f"🐌 [{request_id}] 慢查询警告: {duration_ms}ms")
         
         # 记录到专门的慢查询日志
-        slow_query_logger = get_logger('slow_query')
+        slow_query_logger = setup_colored_logger('slow_query')
         slow_query_logger.warning(f"慢查询 [{request_id}] {duration_ms}ms: {statement}")
 
 def log_model_operation(operation_type, model_name, record_id=None, changes=None):

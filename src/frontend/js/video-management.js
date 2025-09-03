@@ -139,9 +139,13 @@ class VideoManager {
             search: '',
             channel: '',
             category: '',
+            timePeriod: '7',  // 默认最近7天
             sortBy: 'published_at',
             order: 'desc'
         };
+        
+        // 收藏状态缓存
+        this.favoriteStatus = new Map();
         
         this.init();
     }
@@ -192,10 +196,22 @@ class VideoManager {
             });
         }
         
-        // 排序功能
-        const sortBy = document.getElementById('sort-by');
-        if (sortBy) {
-            sortBy.addEventListener('change', (e) => {
+        // 时间段和排序功能
+        const timePeriod = document.getElementById('time-period');
+        const sortRule = document.getElementById('sort-rule');
+        
+        if (timePeriod) {
+            timePeriod.addEventListener('change', (e) => {
+                console.log('🔄 [VideoManager] 时间段变更:', e.target.value);
+                this.currentFilters.timePeriod = e.target.value;
+                this.currentPage = 1;
+                this.loadVideos();
+            });
+        }
+        
+        if (sortRule) {
+            sortRule.addEventListener('change', (e) => {
+                console.log('🔄 [VideoManager] 排序规则变更:', e.target.value);
                 const [field, order] = e.target.value.split(':');
                 this.currentFilters.sortBy = field;
                 this.currentFilters.order = order;
@@ -209,6 +225,9 @@ class VideoManager {
         showStatusBar('正在加载视频数据...');
         
         try {
+            // 先解析URL参数，设置初始筛选条件
+            this.parseUrlParams();
+            
             // 并行加载数据
             await Promise.all([
                 this.loadVideoStats(),
@@ -217,11 +236,80 @@ class VideoManager {
                 this.loadVideos()
             ]);
             
+            // 如果有URL参数指定的频道，设置相应的UI状态
+            this.applyUrlParams();
+            
             hideStatusBar();
         } catch (error) {
             console.error('加载初始数据失败:', error);
             hideStatusBar();
             showToast('加载数据失败：' + error.message, 'error');
+        }
+    }
+
+    // 解析URL参数
+    parseUrlParams() {
+        const urlParams = new URLSearchParams(window.location.search);
+        
+        // 从URL获取频道信息
+        const channelId = urlParams.get('channel_id');
+        const channelName = urlParams.get('channel_name');
+        
+        if (channelId) {
+            this.currentFilters.channel = parseInt(channelId);
+            
+            // 如果有频道名称，显示提示信息
+            if (channelName) {
+                showToast(`已筛选频道：${decodeURIComponent(channelName)}`, 'info', 4000);
+            }
+        }
+    }
+
+    // 应用URL参数到UI
+    applyUrlParams() {
+        // 设置频道筛选下拉框的值
+        if (this.currentFilters.channel) {
+            const filterChannel = document.getElementById('filter-channel');
+            if (filterChannel) {
+                filterChannel.value = this.currentFilters.channel;
+                
+                // 触发change事件以更新相关UI
+                filterChannel.dispatchEvent(new Event('change'));
+            }
+        }
+    }
+
+    // 更新次排序选项，避免与主排序重复
+    updateSecondarySortOptions() {
+        const secondarySort = document.getElementById('secondary-sort');
+        if (!secondarySort) return;
+        
+        const primarySortValue = this.currentFilters.primarySort;
+        const options = secondarySort.querySelectorAll('option');
+        
+        // 重置所有选项
+        options.forEach(option => {
+            option.disabled = false;
+            option.style.display = 'block';
+        });
+        
+        // 禁用与主排序相同的选项
+        options.forEach(option => {
+            if (option.value === primarySortValue && option.value !== '') {
+                option.disabled = true;
+                option.style.display = 'none';
+            }
+        });
+        
+        // 如果当前次排序与主排序冲突，重置为无
+        if (this.currentFilters.secondarySort === primarySortValue) {
+            this.currentFilters.secondarySort = '';
+            secondarySort.value = '';
+            
+            const secondaryOrder = document.getElementById('secondary-order');
+            if (secondaryOrder) {
+                secondaryOrder.disabled = true;
+            }
         }
     }
     
@@ -316,12 +404,21 @@ class VideoManager {
     
     async loadVideos() {
         try {
+            console.log('🔍 [VideoManager] 当前筛选条件:', this.currentFilters);
+            
             const params = {
                 page: this.currentPage,
                 per_page: this.pageSize,
                 sort_by: this.currentFilters.sortBy,
                 order: this.currentFilters.order
             };
+            
+            // 添加时间段筛选
+            if (this.currentFilters.timePeriod && this.currentFilters.timePeriod !== 'all') {
+                params.time_period = this.currentFilters.timePeriod;
+            }
+            
+            console.log('📝 [VideoManager] API请求参数:', params);
             
             // 添加筛选条件
             if (this.currentFilters.search) {
@@ -359,9 +456,127 @@ class VideoManager {
         }
     }
     
+    async loadFavoriteStatus(videoIds) {
+        try {
+            const response = await api.batchCheckFavorites(videoIds);
+            if (response.success) {
+                const statusMap = response.data.favorites_status;
+                for (const [videoId, isFavorited] of Object.entries(statusMap)) {
+                    this.favoriteStatus.set(videoId, isFavorited);
+                }
+                
+                // 更新UI中的收藏按钮状态
+                this.updateFavoriteButtons();
+            }
+        } catch (error) {
+            console.error('加载收藏状态失败:', error);
+        }
+    }
+    
+    updateFavoriteButtons() {
+        const favoriteButtons = document.querySelectorAll('.favorite-btn');
+        favoriteButtons.forEach(button => {
+            const videoId = button.getAttribute('data-video-id');
+            const isFavorited = this.favoriteStatus.get(videoId);
+            
+            if (isFavorited) {
+                button.classList.remove('bg-pink-500/90', 'hover:bg-pink-600');
+                button.classList.add('bg-red-500/90', 'hover:bg-red-600');
+                button.querySelector('i').classList.remove('far');
+                button.querySelector('i').classList.add('fas');
+                button.title = '取消收藏';
+            } else {
+                button.classList.remove('bg-red-500/90', 'hover:bg-red-600');
+                button.classList.add('bg-pink-500/90', 'hover:bg-pink-600');
+                button.querySelector('i').classList.remove('fas');
+                button.querySelector('i').classList.add('far');
+                button.title = '收藏视频';
+            }
+        });
+    }
+    
+    async toggleFavorite(videoId, videoTitle, buttonElement) {
+        try {
+            const isFavorited = this.favoriteStatus.get(videoId);
+            
+            if (isFavorited) {
+                // 移除收藏
+                const response = await api.removeFavorite(videoId);
+                if (response.success) {
+                    this.favoriteStatus.set(videoId, false);
+                    showToast('已取消收藏', 'success');
+                    this.updateButtonState(buttonElement, false);
+                } else {
+                    showToast('取消收藏失败：' + response.message, 'error');
+                }
+            } else {
+                // 添加收藏 - 从当前视频列表中找到完整的视频数据
+                const videoData = this.findVideoDataById(videoId);
+                console.log('找到的视频数据:', videoData);
+                if (videoData) {
+                    // 适配字段名称以匹配收藏模型
+                    const favoriteData = {
+                        ...videoData,
+                        channel_title: videoData.channel_name || videoData.channel_title || '',
+                        channel_id: videoData.channel_id || '',
+                        channel_subscriber_count: videoData.channel_subscriber_count || 0,
+                        channel_video_count: videoData.channel_video_count || 0,
+                        channel_view_count: videoData.channel_view_count || 0,
+                        channel_thumbnail_url: videoData.channel_thumbnail_url || '',
+                        channel_published_at: videoData.channel_published_at || null
+                    };
+                    
+                    console.log('发送收藏数据:', favoriteData);
+                    const response = await api.addFavorite(favoriteData);
+                    console.log('收藏API响应:', response);
+                    
+                    if (response.success) {
+                        this.favoriteStatus.set(videoId, true);
+                        showToast(`已收藏视频: ${videoTitle}`, 'success');
+                        this.updateButtonState(buttonElement, true);
+                    } else {
+                        showToast('收藏失败：' + response.message, 'error');
+                    }
+                } else {
+                    showToast('无法找到视频数据', 'error');
+                }
+            }
+        } catch (error) {
+            console.error('切换收藏状态失败:', error);
+            showToast('操作失败：' + error.message, 'error');
+        }
+    }
+    
+    updateButtonState(buttonElement, isFavorited) {
+        if (isFavorited) {
+            buttonElement.classList.remove('bg-pink-500/90', 'hover:bg-pink-600');
+            buttonElement.classList.add('bg-red-500/90', 'hover:bg-red-600');
+            buttonElement.querySelector('i').classList.remove('far');
+            buttonElement.querySelector('i').classList.add('fas');
+            buttonElement.title = '取消收藏';
+        } else {
+            buttonElement.classList.remove('bg-red-500/90', 'hover:bg-red-600');
+            buttonElement.classList.add('bg-pink-500/90', 'hover:bg-pink-600');
+            buttonElement.querySelector('i').classList.remove('fas');
+            buttonElement.querySelector('i').classList.add('far');
+            buttonElement.title = '收藏视频';
+        }
+    }
+    
+    findVideoDataById(videoId) {
+        // 从当前缓存的视频数据中查找
+        if (this.currentVideos && this.currentVideos.length > 0) {
+            return this.currentVideos.find(video => video.video_id === videoId);
+        }
+        return null;
+    }
+    
     renderVideos(videos) {
         const container = document.getElementById('videos-grid');
         if (!container) return;
+        
+        // 缓存当前视频数据
+        this.currentVideos = videos;
         
         if (videos.length === 0) {
             container.innerHTML = `
@@ -379,6 +594,10 @@ class VideoManager {
                 ${videos.map(video => this.renderVideoCard(video)).join('')}
             </div>
         `;
+        
+        // 加载收藏状态
+        const videoIds = videos.map(video => video.video_id);
+        this.loadFavoriteStatus(videoIds);
     }
     
     renderVideoCard(video) {
@@ -405,14 +624,20 @@ class VideoManager {
                         </span>
                     </div>
                     <!-- 悬停时显示操作按钮 -->
-                    <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center gap-4">
+                    <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center gap-3">
                         <button onclick="videoManager.showVideoDetail(${video.id})" 
-                                class="bg-white/90 hover:bg-white text-gray-800 p-3 rounded-full transition-colors" 
+                                class="bg-white/90 hover:bg-white text-gray-800 p-2.5 rounded-full transition-colors" 
                                 title="查看详情">
                             <i class="fas fa-eye"></i>
                         </button>
+                        <button onclick="videoManager.toggleFavorite('${video.video_id}', '${video.title.replace(/'/g, "\\'")}', this)"
+                                class="bg-pink-500/90 hover:bg-pink-600 text-white p-2.5 rounded-full transition-colors favorite-btn"
+                                data-video-id="${video.video_id}"
+                                title="收藏视频">
+                            <i class="far fa-heart"></i>
+                        </button>
                         <a href="${video.url}" target="_blank" 
-                           class="bg-red-600/90 hover:bg-red-600 text-white p-3 rounded-full transition-colors" 
+                           class="bg-red-600/90 hover:bg-red-600 text-white p-2.5 rounded-full transition-colors" 
                            title="在YouTube查看">
                             <i class="fab fa-youtube"></i>
                         </a>
@@ -758,18 +983,21 @@ function clearFilters() {
     const searchInput = document.getElementById('search-videos');
     const channelFilter = document.getElementById('filter-channel');
     const categoryFilter = document.getElementById('filter-category');
-    const sortBy = document.getElementById('sort-by');
+    const timePeriod = document.getElementById('time-period');
+    const sortRule = document.getElementById('sort-rule');
     
     if (searchInput) searchInput.value = '';
     if (channelFilter) channelFilter.value = '';
     if (categoryFilter) categoryFilter.value = '';
-    if (sortBy) sortBy.value = 'published_at:desc';
+    if (timePeriod) timePeriod.value = '7';  // 默认最近7天
+    if (sortRule) sortRule.value = 'published_at:desc';  // 默认最新发布
     
     // 重置过滤器并重新加载
     videoManager.currentFilters = {
         search: '',
         channel: '',
         category: '',
+        timePeriod: '7',
         sortBy: 'published_at',
         order: 'desc'
     };

@@ -29,6 +29,9 @@ def get_videos(current_user):
         sort_by = request.args.get('sort_by', 'published_at')
         order = request.args.get('order', 'desc')
         
+        # 时间段参数（天数）
+        time_period = request.args.get('time_period', type=int)
+        
         # 验证排序字段
         valid_sort_fields = ['published_at', 'view_count', 'like_count', 'comment_count']
         if sort_by not in valid_sort_fields:
@@ -37,6 +40,10 @@ def get_videos(current_user):
         # 验证排序顺序
         if order not in ['asc', 'desc']:
             order = 'desc'
+        
+        # 验证时间段
+        if time_period and (time_period < 1 or time_period > 3650):  # 最多10年
+            time_period = None
         
         video_service = VideoSyncService()
         
@@ -50,6 +57,7 @@ def get_videos(current_user):
                 category=category if category else None,
                 sort_by=sort_by,
                 order=order,
+                time_period_days=time_period,
                 user_id=current_user.id
             )
         elif channel_id:
@@ -62,6 +70,7 @@ def get_videos(current_user):
                 category=category if category else None,
                 sort_by=sort_by,
                 order=order,
+                time_period_days=time_period,
                 user_id=current_user.id
             )
         else:
@@ -74,6 +83,7 @@ def get_videos(current_user):
                 category=category if category else None,
                 sort_by=sort_by,
                 order=order,
+                time_period_days=time_period,
                 user_id=current_user.id
             )
         
@@ -109,6 +119,10 @@ def search_videos(current_user):
         sort_by = request.args.get('sort_by', 'published_at')
         order = request.args.get('order', 'desc')
         
+        # 多条件排序参数
+        secondary_sort_by = request.args.get('secondary_sort_by', '').strip()
+        secondary_order = request.args.get('secondary_order', 'desc')
+        
         if not search:
             return jsonify({
                 'success': False,
@@ -121,8 +135,13 @@ def search_videos(current_user):
         if sort_by not in valid_sort_fields:
             sort_by = 'published_at'
         
+        if secondary_sort_by and secondary_sort_by not in valid_sort_fields:
+            secondary_sort_by = ''
+        
         if order not in ['asc', 'desc']:
             order = 'desc'
+        if secondary_order not in ['asc', 'desc']:
+            secondary_order = 'desc'
         
         video_service = VideoSyncService()
         result = video_service.search_videos(
@@ -133,6 +152,8 @@ def search_videos(current_user):
             category=category if category else None,
             sort_by=sort_by,
             order=order,
+            secondary_sort_by=secondary_sort_by if secondary_sort_by else None,
+            secondary_order=secondary_order,
             user_id=current_user.id
         )
         
