@@ -17,7 +17,8 @@ class DataService:
     def get_table_data(start_date: Optional[date] = None, 
                       end_date: Optional[date] = None,
                       active_only: bool = True,
-                      user_id: Optional[int] = None) -> Dict[str, Any]:
+                      user_id: Optional[int] = None,
+                      channel_ids: Optional[List[int]] = None) -> Dict[str, Any]:
         """获取表格显示数据
         
         Args:
@@ -25,6 +26,7 @@ class DataService:
             end_date: 结束日期，默认今天
             active_only: 是否只包含活跃频道
             user_id: 用户ID，用于数据过滤
+            channel_ids: 指定的频道ID列表，可选
             
         Returns:
             Dict: 表格数据
@@ -42,6 +44,8 @@ class DataService:
                 channels_query = channels_query.filter_by(user_id=user_id)
             if active_only:
                 channels_query = channels_query.filter_by(is_active=True)
+            if channel_ids:
+                channels_query = channels_query.filter(Channel.id.in_(channel_ids))
             channels = channels_query.order_by(Channel.created_at.asc()).all()
             
             # 获取指定日期范围的所有数据
@@ -54,6 +58,8 @@ class DataService:
                 data_query = data_query.filter(Channel.user_id == user_id)
             if active_only:
                 data_query = data_query.filter(Channel.is_active == True)
+            if channel_ids:
+                data_query = data_query.filter(Channel.id.in_(channel_ids))
             
             all_data = data_query.order_by(
                 desc(ChannelData.date),

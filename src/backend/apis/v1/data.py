@@ -23,6 +23,7 @@ def get_table_data(current_user):
         start_date (str): 开始日期，格式YYYY-MM-DD，默认30天前
         end_date (str): 结束日期，格式YYYY-MM-DD，默认今天
         active_only (bool): 是否只包含活跃频道，默认true
+        channel_ids (str): 频道ID列表，逗号分隔，可选
         page (int): 页码，默认1
         per_page (int): 每页数量，默认10
     
@@ -51,8 +52,16 @@ def get_table_data(current_user):
         
         active_only = request.args.get('active_only', 'true').lower() == 'true'
         
+        # 解析频道ID列表
+        channel_ids = None
+        if request.args.get('channel_ids'):
+            try:
+                channel_ids = [int(cid.strip()) for cid in request.args.get('channel_ids').split(',') if cid.strip()]
+            except ValueError:
+                return handle_api_error(400, "频道ID格式错误")
+        
         # 获取表格数据（只获取当前用户的数据）
-        result = DataService.get_table_data(start_date, end_date, active_only, current_user.id)
+        result = DataService.get_table_data(start_date, end_date, active_only, current_user.id, channel_ids)
         
         if result['success']:
             data = result['data']
@@ -197,7 +206,7 @@ def export_data(current_user):
                 return handle_api_error(400, "频道ID格式错误")
         
         # 获取数据
-        result = DataService.get_table_data(start_date, end_date, active_only)
+        result = DataService.get_table_data(start_date, end_date, active_only, current_user.id)
         
         if not result['success']:
             return handle_api_error(500, result['message'])

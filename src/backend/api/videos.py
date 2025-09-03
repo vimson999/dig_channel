@@ -381,9 +381,16 @@ def get_channels_with_video_count():
     try:
         from sqlalchemy import func
         
+        # 获取参数
+        include_inactive = request.args.get('include_inactive', 'false').lower() == 'true'
+        
+        # 构建查询
+        query = Channel.query
+        if not include_inactive:
+            query = query.filter_by(is_active=True)
+        
         # 查询频道及其视频数量
-        channels = Channel.query.filter_by(is_active=True)\
-            .outerjoin(Video)\
+        channels = query.outerjoin(Video)\
             .add_columns(func.count(Video.id).label('video_count'))\
             .group_by(Channel.id)\
             .all()
