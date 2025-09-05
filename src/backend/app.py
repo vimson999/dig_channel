@@ -35,7 +35,9 @@ def create_app(config_class=Config):
     Returns:
         Flask: 配置好的Flask应用实例
     """
-    app = Flask(__name__)
+    import os
+    frontend_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'frontend')
+    app = Flask(__name__, static_folder=frontend_path, static_url_path='')
     app.config.from_object(config_class)
     
     # 初始化数据库
@@ -73,6 +75,17 @@ def create_app(config_class=Config):
     @app.route('/health')
     def health():
         return {'status': 'healthy', 'version': '1.0.0'}
+    
+    # 静态页面路由
+    @app.route('/tasks.html')
+    def tasks_page():
+        from flask import send_from_directory
+        return send_from_directory(app.static_folder, 'tasks.html')
+    
+    @app.route('/tasks')
+    def tasks_redirect():
+        from flask import redirect
+        return redirect('/tasks.html')
     
     # 处理所有OPTIONS请求
     @app.before_request
