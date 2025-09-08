@@ -210,10 +210,13 @@ class OptimizedVideoSyncService:
             }
             
             # 使用线程池并行处理
+            from flask import current_app
+            app = current_app._get_current_object()  # 获取应用实例
+            
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # 提交所有任务
                 future_to_channel = {
-                    executor.submit(self._sync_single_channel_safe, channel.id, days_back): channel
+                    executor.submit(self._sync_single_channel_with_context, app, channel.id, days_back): channel
                     for channel in channels
                 }
                 
@@ -284,17 +287,19 @@ class OptimizedVideoSyncService:
                     del self._sync_in_progress[sync_key]
                     logger.info(f"清理同步状态: {sync_key}")
     
-    def _sync_single_channel_safe(self, channel_id: int, days_back: int) -> Dict:
-        """线程安全的单频道同步"""
-        try:
-            return self.sync_channel_videos_optimized(channel_id, days_back)
-        except Exception as e:
-            logger.error(f"频道 {channel_id} 同步失败: {str(e)}")
-            return {
-                'success': False,
-                'message': str(e),
-                'data': {}
-            }
+    def _sync_single_channel_with_context(self, app, channel_id: int, days_back: int) -> Dict:
+        """带上下文的单频道同步"""
+        # 在线程中创建新的应用上下文
+        with app.app_context():
+            try:
+                return self.sync_channel_videos_optimized(channel_id, days_back)
+            except Exception as e:
+                logger.error(f"频道 {channel_id} 同步失败: {str(e)}")
+                return {
+                    'success': False,
+                    'message': str(e),
+                    'data': {}
+                }
     
     def sync_channel_videos_optimized(self, channel_id: int, days_back: int = 10) -> Dict:
         """优化的频道视频同步"""
