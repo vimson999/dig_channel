@@ -38,6 +38,14 @@ def register_blueprints(app):
     # 注册学生证生成器API
     from api.student_id_generator import student_id_bp
     app.register_blueprint(student_id_bp)
+    
+    # 注册独立开发者领航员API
+    from api.indie_navigator import indie_navigator_bp
+    app.register_blueprint(indie_navigator_bp)
+    
+    # 注册数据采集API
+    from api.data_collection import data_collection_bp
+    app.register_blueprint(data_collection_bp)
 
 __all__ = [
     'auth_bp',

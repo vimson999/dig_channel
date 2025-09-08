@@ -1,0 +1,295 @@
+"""
+统一数据采集服务
+支持多平台数据源的扩展架构
+"""
+
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass
+from datetime import datetime
+import requests
+import json
+import logging
+from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+class PlatformType(Enum):
+    """支持的平台类型"""
+    TWITTER = "twitter"
+    YOUTUBE = "youtube"
+    REDDIT = "reddit"
+    HACKER_NEWS = "hacker_news"
+    INDIE_HACKERS = "indie_hackers"
+    PRODUCT_HUNT = "product_hunt"
+
+@dataclass
+class OpportunitySignal:
+    """商机信号数据结构"""
+    id: str
+    platform: PlatformType
+    title: str
+    description: str
+    author: str
+    author_followers: Optional[int]
+    engagement_metrics: Dict[str, int]  # likes, shares, comments etc.
+    keywords: List[str]
+    revenue_mention: Optional[str]
+    user_count_mention: Optional[str]
+    urls: List[str]
+    created_at: datetime
+    collected_at: datetime
+    confidence_score: float  # 0-1, 商机可信度
+    category: str  # SaaS, AI Tool, Mobile App etc.
+    raw_data: Dict[str, Any]
+
+class BasePlatformCollector(ABC):
+    """平台数据采集器基类"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.platform = None
+        
+    @abstractmethod
+    def collect_signals(self, keywords: List[str], limit: int = 50) -> List[OpportunitySignal]:
+        """采集商机信号"""
+        pass
+    
+    @abstractmethod
+    def validate_signal(self, signal: OpportunitySignal) -> bool:
+        """验证信号质量"""
+        pass
+    
+    def extract_metrics(self, raw_data: Dict[str, Any]) -> Dict[str, int]:
+        """提取互动指标"""
+        return {}
+    
+    def calculate_confidence_score(self, signal: OpportunitySignal) -> float:
+        """计算可信度分数"""
+        score = 0.5  # 基础分数
+        
+        # 作者影响力权重
+        if signal.author_followers:
+            if signal.author_followers > 10000:
+                score += 0.2
+            elif signal.author_followers > 1000:
+                score += 0.1
+        
+        # 互动指标权重
+        engagement_sum = sum(signal.engagement_metrics.values())
+        if engagement_sum > 100:
+            score += 0.2
+        elif engagement_sum > 10:
+            score += 0.1
+        
+        # 收入提及权重
+        if signal.revenue_mention:
+            score += 0.15
+            
+        # 用户数量提及权重
+        if signal.user_count_mention:
+            score += 0.1
+        
+        return min(score, 1.0)
+
+class TwitterCollector(BasePlatformCollector):
+    """Twitter/X 平台采集器"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.platform = PlatformType.TWITTER
+        self.api_key = config.get('twitter_api_key')
+        self.bearer_token = config.get('twitter_bearer_token')
+        
+    def collect_signals(self, keywords: List[str], limit: int = 50) -> List[OpportunitySignal]:
+        """采集 Twitter 商机信号"""
+        signals = []
+        
+        try:
+            for keyword in keywords:
+                tweets = self._search_tweets(keyword, limit//len(keywords))
+                for tweet in tweets:
+                    signal = self._parse_tweet_to_signal(tweet)
+                    if signal and self.validate_signal(signal):
+                        signals.append(signal)
+                        
+        except Exception as e:
+            logger.error(f"Twitter 采集失败: {e}")
+            
+        return signals
+    
+    def _search_tweets(self, keyword: str, limit: int) -> List[Dict]:
+        """搜索推文"""
+        # 模拟 Twitter API 调用
+        # 实际实现需要使用 Twitter API v2
+        mock_tweets = [
+            {
+                'id': f'tweet_{keyword}_{i}',
+                'text': f'Just launched my {keyword} app and got first $1000 MRR! 🚀',
+                'author': f'indie_dev_{i}',
+                'author_followers': 1500 + i * 100,
+                'likes': 25 + i * 5,
+                'retweets': 8 + i * 2,
+                'replies': 3 + i,
+                'created_at': datetime.now(),
+                'urls': [f'https://myapp{i}.com']
+            }
+            for i in range(min(limit, 5))  # 限制mock数据数量
+        ]
+        
+        return mock_tweets
+    
+    def _parse_tweet_to_signal(self, tweet: Dict) -> OpportunitySignal:
+        """将推文解析为商机信号"""
+        return OpportunitySignal(
+            id=tweet['id'],
+            platform=self.platform,
+            title=tweet['text'][:100] + '...' if len(tweet['text']) > 100 else tweet['text'],
+            description=tweet['text'],
+            author=tweet['author'],
+            author_followers=tweet['author_followers'],
+            engagement_metrics={
+                'likes': tweet['likes'],
+                'retweets': tweet['retweets'],
+                'replies': tweet['replies']
+            },
+            keywords=self._extract_keywords(tweet['text']),
+            revenue_mention=self._extract_revenue(tweet['text']),
+            user_count_mention=self._extract_user_count(tweet['text']),
+            urls=tweet['urls'],
+            created_at=tweet['created_at'],
+            collected_at=datetime.now(),
+            confidence_score=0,  # 稍后计算
+            category=self._classify_category(tweet['text']),
+            raw_data=tweet
+        )
+    
+    def _extract_keywords(self, text: str) -> List[str]:
+        """提取关键词"""
+        keywords = []
+        tech_keywords = ['SaaS', 'AI', 'app', 'tool', 'startup', 'MRR', 'ARR', 'users']
+        for keyword in tech_keywords:
+            if keyword.lower() in text.lower():
+                keywords.append(keyword)
+        return keywords
+    
+    def _extract_revenue(self, text: str) -> Optional[str]:
+        """提取收入信息"""
+        import re
+        revenue_patterns = [
+            r'\$(\d+(?:,\d{3})*)\s*(?:MRR|ARR|revenue|sales)',
+            r'(\d+(?:k|K))\s*(?:MRR|ARR|revenue)',
+            r'made\s*\$(\d+(?:,\d{3})*)'
+        ]
+        
+        for pattern in revenue_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+    
+    def _extract_user_count(self, text: str) -> Optional[str]:
+        """提取用户数量信息"""
+        import re
+        user_patterns = [
+            r'(\d+(?:,\d{3})*)\s*(?:users|customers|subscribers)',
+            r'(\d+(?:k|K|m|M))\s*(?:users|customers|subscribers)'
+        ]
+        
+        for pattern in user_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+    
+    def _classify_category(self, text: str) -> str:
+        """分类项目类型"""
+        text_lower = text.lower()
+        
+        if any(word in text_lower for word in ['ai', 'ml', 'gpt', 'chatbot']):
+            return 'AI工具'
+        elif any(word in text_lower for word in ['saas', 'software', 'platform']):
+            return 'SaaS应用'
+        elif any(word in text_lower for word in ['app', 'mobile', 'ios', 'android']):
+            return '移动应用'
+        elif any(word in text_lower for word in ['extension', 'chrome', 'browser']):
+            return '浏览器扩展'
+        else:
+            return '其他'
+    
+    def validate_signal(self, signal: OpportunitySignal) -> bool:
+        """验证信号质量"""
+        # 基本验证规则
+        if not signal.title or len(signal.title) < 10:
+            return False
+            
+        # 必须包含商业相关关键词
+        business_keywords = ['mrr', 'revenue', 'users', 'customers', 'launch', 'startup', 'saas']
+        if not any(keyword in signal.description.lower() for keyword in business_keywords):
+            return False
+            
+        # 互动量过滤
+        if sum(signal.engagement_metrics.values()) < 5:
+            return False
+            
+        return True
+
+class DataCollectorService:
+    """统一数据采集服务"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.collectors = {}
+        self._initialize_collectors()
+        
+    def _initialize_collectors(self):
+        """初始化各平台采集器"""
+        if self.config.get('twitter_enabled', False):
+            self.collectors[PlatformType.TWITTER] = TwitterCollector(self.config)
+            
+        # 未来可扩展其他平台
+        # if self.config.get('reddit_enabled', False):
+        #     self.collectors[PlatformType.REDDIT] = RedditCollector(self.config)
+    
+    def collect_all_platforms(self, keywords: List[str], limit_per_platform: int = 50) -> List[OpportunitySignal]:
+        """从所有平台采集数据"""
+        all_signals = []
+        
+        for platform, collector in self.collectors.items():
+            try:
+                logger.info(f"开始采集 {platform.value} 平台数据")
+                signals = collector.collect_signals(keywords, limit_per_platform)
+                
+                # 计算可信度分数
+                for signal in signals:
+                    signal.confidence_score = collector.calculate_confidence_score(signal)
+                
+                all_signals.extend(signals)
+                logger.info(f"{platform.value} 平台采集到 {len(signals)} 个信号")
+                
+            except Exception as e:
+                logger.error(f"{platform.value} 平台采集失败: {e}")
+        
+        # 按可信度排序
+        all_signals.sort(key=lambda x: x.confidence_score, reverse=True)
+        
+        return all_signals
+    
+    def get_platform_stats(self) -> Dict[str, Any]:
+        """获取平台统计信息"""
+        return {
+            'enabled_platforms': list(self.collectors.keys()),
+            'total_platforms': len(self.collectors),
+            'last_update': datetime.now().isoformat()
+        }
+
+# 配置示例
+DEFAULT_CONFIG = {
+    'twitter_enabled': True,
+    'twitter_api_key': 'your_api_key',
+    'twitter_bearer_token': 'your_bearer_token',
+    'reddit_enabled': False,
+    'collection_interval': 3600,  # 1小时
+    'max_signals_per_run': 200,
+    'min_confidence_threshold': 0.3
+}

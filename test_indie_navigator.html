@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>商机发现测试</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .status { margin: 10px 0; padding: 10px; border-radius: 5px; }
+        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+    </style>
+</head>
+<body>
+    <h1>商机发现API测试</h1>
+    
+    <div id="test-results">
+        <div class="status info">正在测试API连接...</div>
+    </div>
+    
+    <button onclick="testAPI()">重新测试</button>
+    
+    <script>
+        async function testAPI() {
+            const resultsDiv = document.getElementById('test-results');
+            resultsDiv.innerHTML = '<div class="status info">正在测试API连接...</div>';
+            
+            try {
+                // 测试商机列表API
+                console.log('测试商机列表API...');
+                const oppResponse = await fetch('http://localhost:5001/api/indie-navigator/opportunities');
+                const oppResult = await oppResponse.json();
+                
+                if (oppResult.success) {
+                    resultsDiv.innerHTML += '<div class="status success">✅ 商机列表API正常 - 返回 ' + oppResult.data.opportunities.length + ' 个商机</div>';
+                } else {
+                    throw new Error('商机列表API返回失败');
+                }
+                
+                // 测试统计API
+                console.log('测试统计API...');
+                const statsResponse = await fetch('http://localhost:5001/api/indie-navigator/stats');
+                const statsResult = await statsResponse.json();
+                
+                if (statsResult.success) {
+                    resultsDiv.innerHTML += '<div class="status success">✅ 统计API正常 - 总计 ' + statsResult.data.total_opportunities + ' 个商机</div>';
+                } else {
+                    throw new Error('统计API返回失败');
+                }
+                
+                // 测试数据采集API
+                console.log('测试数据采集API...');
+                const healthResponse = await fetch('http://localhost:5001/api/data-collection/health');
+                const healthResult = await healthResponse.json();
+                
+                if (healthResult.success) {
+                    resultsDiv.innerHTML += '<div class="status success">✅ 数据采集API正常 - 服务状态: ' + healthResult.data.service + '</div>';
+                } else {
+                    throw new Error('数据采集API返回失败');
+                }
+                
+                resultsDiv.innerHTML += '<div class="status success">🎉 所有API测试通过！</div>';
+                
+            } catch (error) {
+                console.error('API测试失败:', error);
+                resultsDiv.innerHTML += '<div class="status error">❌ API测试失败: ' + error.message + '</div>';
+            }
+        }
+        
+        // 页面加载时自动测试
+        window.addEventListener('DOMContentLoaded', testAPI);
+    </script>
+</body>
+</html>

@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<!-- SEO Meta Tags -->
+<title>商机发现 - 独立开发者领航员 | Shioa</title>
+<meta name="description" content="发现和验证独立开发者的商业机会，通过数据驱动的方式找到下一个成功项目。自动收集和分析成功项目信息，系统化商机验证。">
+<meta name="keywords" content="商机发现,独立开发者,创业项目,商业验证,项目灵感,MRR,SaaS项目,YouTube数据分析">
+<meta name="author" content="Shioa Team">
+<meta name="robots" content="index, follow">
+<meta name="language" content="Chinese">
+
+<!-- Open Graph Meta Tags -->
+<meta property="og:title" content="商机发现 - 独立开发者领航员 | Shioa">
+<meta property="og:description" content="发现和验证独立开发者的商业机会，通过数据驱动的方式找到下一个成功项目。">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://ytb.xiaoshanqing.tech/indie-navigator.html">
+<meta property="og:site_name" content="Shioa">
+<meta property="og:locale" content="zh_CN">
+
+<!-- Twitter Card Meta Tags -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="商机发现 - 独立开发者领航员">
+<meta name="twitter:description" content="发现和验证独立开发者的商业机会，通过数据驱动的方式找到下一个成功项目。">
+
+<!-- Canonical URL -->
+<link rel="canonical" href="https://ytb.xiaoshanqing.tech/indie-navigator.html">
+
+<!-- Favicons -->
+<link rel="icon" type="image/x-icon" href="/assets/images/favicon.ico">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/images/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/images/favicon-32x32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/assets/images/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+
+<!-- Theme Color -->
+<meta name="theme-color" content="#3b82f6">
+<meta name="msapplication-TileColor" content="#3b82f6">
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+theme: {
+extend: {
+colors: {
+primary: {
+50: '#eff6ff',
+100: '#dbeafe', 
+200: '#bfdbfe',
+300: '#93c5fd',
+400: '#60a5fa',
+500: '#3b82f6',
+600: '#2563eb',
+700: '#1d4ed8',
+800: '#1e40af',
+900: '#1e3a8a'
+},
+secondary: '#64748b',
+accent: {
+green: '#10b981',
+purple: '#8b5cf6',
+orange: '#f59e0b',
+red: '#ef4444',
+blue: '#06b6d4'
+},
+success: '#10b981',
+warning: '#f59e0b',
+danger: '#ef4444',
+info: '#06b6d4'
+},
+borderRadius: {
+'none': '0px',
+'sm': '2px',
+DEFAULT: '4px',
+'md': '8px',
+'lg': '12px',
+'xl': '16px',
+'2xl': '20px',
+'3xl': '24px',
+'full': '9999px',
+'button': '8px'
+},
+fontFamily: {
+'sans': ['Inter', 'ui-sans-serif', 'system-ui'],
+'display': ['Inter', 'ui-sans-serif', 'system-ui']
+},
+boxShadow: {
+'soft': '0 2px 15px -3px rgba(0, 0, 0, 0.07), 0 10px 20px -2px rgba(0, 0, 0, 0.04)',
+'medium': '0 4px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 20px -5px rgba(0, 0, 0, 0.04)',
+'strong': '0 10px 40px -10px rgba(0, 0, 0, 0.1), 0 2px 10px -2px rgba(0, 0, 0, 0.04)'
+}
+}
+},
+future: {
+hoverOnlyWhenSupported: true
+}
+}
+</script>
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+body {
+font-family: 'Inter', 'system-ui', sans-serif;
+line-height: 1.6;
+-webkit-font-smoothing: antialiased;
+-moz-osx-font-smoothing: grayscale;
+min-height: 1024px;
+}
+.table-container::-webkit-scrollbar {
+height: 8px;
+}
+.table-container::-webkit-scrollbar-track {
+background: #f1f1f1;
+}
+.table-container::-webkit-scrollbar-thumb {
+background: #888;
+border-radius: 4px;
+}
+.table-container::-webkit-scrollbar-thumb:hover {
+background: #555;
+}
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+-webkit-appearance: none;
+margin: 0;
+}
+
+/* 商机发现页面特定样式 */
+.opportunity-card {
+transition: all 0.3s ease;
+border-left: 4px solid transparent;
+}
+
+.opportunity-card:hover {
+transform: translateY(-2px);
+box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+border-left-color: #3b82f6;
+}
+
+.metric-badge {
+background: linear-gradient(135deg, #10b981, #059669);
+color: white;
+font-weight: 600;
+padding: 0.25rem 0.75rem;
+border-radius: 0.5rem;
+font-size: 0.875rem;
+}
+
+.filter-tag {
+transition: all 0.2s ease;
+}
+
+.filter-tag:hover {
+background-color: #f3f4f6;
+transform: scale(1.05);
+}
+
+.filter-tag.active {
+background-color: #3b82f6 !important;
+color: white !important;
+border-color: #3b82f6 !important;
+}
+
+.loading-skeleton {
+animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+</style>
+    <!-- 状态提示栏 -->
+    <style>
+        .toast-container { position: fixed; top: 1rem; right: 1rem; z-index: 9999; }
+        .status-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 50; }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen font-sans">
+    <!-- 导航由 shared-navigation.js 统一管理，实现真正的组件复用 -->
+
+    <!-- Main Content -->
+    <main class="min-h-screen">
+        <div class="max-w-[1440px] mx-auto px-6 py-8">
+            
+            <!-- Hero Section -->
+            <section class="text-center mb-12">
+                <div class="bg-white/90 backdrop-blur-sm rounded-2xl p-8 mb-8 shadow-soft border border-white/20">
+                    <h1 class="text-4xl font-bold text-gray-800 mb-4">
+                        不再凭灵感编码
+                        <span class="bg-gradient-to-r from-accent-green to-primary-600 bg-clip-text text-transparent">
+                            用数据驱动你的下一个成功项目
+                        </span>
+                    </h1>
+                    <p class="text-xl text-gray-600 mb-6 max-w-3xl mx-auto">
+                        自动收集和分析其他独立开发者公开分享的成功项目信息，帮助你找到已经被市场验证的商业机会
+                    </p>
+                    
+                    <!-- Stats Overview -->
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mt-8">
+                        <div class="bg-gradient-to-br from-primary-50 to-primary-100 rounded-lg p-4 border border-primary-200">
+                            <div class="text-2xl font-bold text-primary-600" id="total-opportunities">-</div>
+                            <div class="text-gray-600 text-sm">发现的商机</div>
+                        </div>
+                        <div class="bg-gradient-to-br from-green-50 to-green-100 rounded-lg p-4 border border-green-200">
+                            <div class="text-2xl font-bold text-accent-green" id="high-potential">-</div>
+                            <div class="text-gray-600 text-sm">高潜力项目</div>
+                        </div>
+                        <div class="bg-gradient-to-br from-orange-50 to-orange-100 rounded-lg p-4 border border-orange-200">
+                            <div class="text-2xl font-bold text-accent-orange" id="trending-signals">-</div>
+                            <div class="text-gray-600 text-sm">趋势信号</div>
+                        </div>
+                        <div class="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-4 border border-purple-200">
+                            <div class="text-2xl font-bold text-accent-purple" id="my-saved">-</div>
+                            <div class="text-gray-600 text-sm">我的收藏</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Filter and Search Section -->
+            <section class="mb-8">
+                <div class="bg-white/90 backdrop-blur-sm rounded-xl p-6 shadow-soft border border-white/20">
+                    <div class="flex flex-col lg:flex-row gap-6 items-center justify-between">
+                        
+                        <!-- Search Bar -->
+                        <div class="flex-1 w-full lg:w-auto">
+                            <div class="relative">
+                                <i class="fas fa-search absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
+                                <input 
+                                    type="text" 
+                                    placeholder="搜索项目名称、关键词..." 
+                                    class="w-full pl-12 pr-4 py-3 bg-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
+                                    id="search-input"
+                                >
+                            </div>
+                        </div>
+                        
+                        <!-- Filter Tags -->
+                        <div class="flex flex-wrap gap-2">
+                            <button class="filter-tag active px-4 py-2 bg-primary-500 text-white rounded-full text-sm font-medium border border-primary-500" data-filter="all">
+                                全部
+                            </button>
+                            <button class="filter-tag px-4 py-2 bg-white text-gray-700 rounded-full text-sm font-medium border border-gray-300 hover:bg-gray-50" data-filter="saas">
+                                SaaS应用
+                            </button>
+                            <button class="filter-tag px-4 py-2 bg-white text-gray-700 rounded-full text-sm font-medium border border-gray-300 hover:bg-gray-50" data-filter="ai">
+                                AI工具
+                            </button>
+                            <button class="filter-tag px-4 py-2 bg-white text-gray-700 rounded-full text-sm font-medium border border-gray-300 hover:bg-gray-50" data-filter="mobile">
+                                移动应用
+                            </button>
+                            <button class="filter-tag px-4 py-2 bg-white text-gray-700 rounded-full text-sm font-medium border border-gray-300 hover:bg-gray-50" data-filter="extension">
+                                浏览器扩展
+                            </button>
+                        </div>
+                        
+                        <!-- Sort Options -->
+                        <div class="flex items-center gap-4">
+                            <label class="text-gray-600 text-sm font-medium">排序:</label>
+                            <select 
+                                class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all"
+                                id="sort-select"
+                            >
+                                <option value="newest">最新发布</option>
+                                <option value="revenue">收入最高</option>
+                                <option value="users">用户最多</option>
+                                <option value="engagement">互动最多</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Opportunities Grid -->
+            <section id="opportunities-section">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold text-gray-800">
+                        <i class="fas fa-lightbulb mr-2 text-accent-orange"></i>
+                        发现的商机
+                    </h2>
+                    <button class="bg-white/80 backdrop-blur-sm px-4 py-2 text-gray-600 hover:text-gray-800 rounded-lg transition-all border border-gray-200 hover:bg-white shadow-sm">
+                        <i class="fas fa-sync-alt mr-2"></i>刷新数据
+                    </button>
+                </div>
+                
+                <!-- Loading State -->
+                <div id="loading-state" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <!-- Loading skeletons will be populated by JS -->
+                </div>
+                
+                <!-- Opportunities Grid -->
+                <div id="opportunities-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 hidden">
+                    <!-- Opportunity cards will be populated by JavaScript -->
+                </div>
+                
+                <!-- Empty State -->
+                <div id="empty-state" class="hidden text-center py-16">
+                    <div class="bg-white/90 backdrop-blur-sm rounded-xl p-8 max-w-md mx-auto shadow-soft border border-white/20">
+                        <i class="fas fa-search text-4xl text-gray-400 mb-4"></i>
+                        <h3 class="text-xl font-semibold text-gray-800 mb-2">暂无匹配的商机</h3>
+                        <p class="text-gray-600 text-sm">尝试调整搜索条件或等待新数据更新</p>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Opportunity Detail Modal -->
+    <div id="opportunity-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden">
+        <div class="flex items-center justify-center min-h-screen p-6">
+            <div class="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden">
+                <div class="p-6 border-b border-gray-200">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-2xl font-bold text-gray-800" id="modal-title">项目详情</h2>
+                        <button 
+                            class="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                            onclick="closeOpportunityModal()"
+                        >
+                            <i class="fas fa-times text-gray-500"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="p-6 overflow-y-auto max-h-[70vh]" id="modal-content">
+                    <!-- Modal content will be populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script>
+        // 配置独立开发者领航员API基础URL
+        window.INDIE_NAVIGATOR_API_BASE = 'http://localhost:5001';
+    </script>
+    <script src="js/config.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/shared-navigation.js"></script>
+    <script src="js/indie-navigator.js"></script>
+</body>
+</html>

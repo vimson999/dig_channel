@@ -34,14 +34,20 @@ class NavigationComponent {
             return 'tts';
         } else if (filename === 'mhtml-pdf.html') {
             return 'mhtml-pdf';
+        } else if (filename === 'student-id-generator.html') {
+            return 'student-id-generator';
+        } else if (filename === 'indie-navigator.html') {
+            return 'indie-navigator';
+        } else if (filename === 'favorites.html') {
+            return 'favorites';
         }
         return 'dashboard'; // 默认
     }
     
     updateNavigationContent() {
-        // 更安全的方式：只更新导航菜单内容，不替换整个header
-        this.updateNavigationMenu();
+        // 只更新页面标题和设置激活状态，不修改导航结构
         this.updatePageTitle();
+        this.setActiveNavigation();
         this.injectCommonComponents();
     }
     
@@ -184,7 +190,10 @@ class NavigationComponent {
             'trending': '爆款视频搜索',
             'document-converter': '文档转换工具',
             'tts': 'AI语音合成服务',
-            'mhtml-pdf': 'MHTML转PDF工具'
+            'mhtml-pdf': 'MHTML转PDF工具',
+            'student-id-generator': '学生证生成器',
+            'indie-navigator': '商机发现平台',
+            'favorites': '我的收藏'
         };
         return subtitles[this.currentPage] || '数据分析平台';
     }
@@ -231,6 +240,12 @@ class NavigationComponent {
                 icon: 'fas fa-radar-line',
                 href: 'trending-radar.html'
             },
+            {
+                id: 'favorites',
+                name: '我的收藏',
+                icon: 'fas fa-heart',
+                href: 'favorites.html'
+            },
             // 工具类菜单整合为下拉菜单
             {
                 id: 'tools',
@@ -255,8 +270,20 @@ class NavigationComponent {
                         name: 'MHTML转PDF',
                         icon: 'fas fa-file-pdf',
                         href: 'mhtml-pdf.html'
+                    },
+                    {
+                        id: 'student-id-generator',
+                        name: '学生证生成器',
+                        icon: 'fas fa-id-card',
+                        href: 'student-id-generator.html'
                     }
                 ]
+            },
+            {
+                id: 'indie-navigator',
+                name: '商机发现',
+                icon: 'fas fa-compass',
+                href: 'indie-navigator.html'
             }
         ];
         
@@ -359,6 +386,24 @@ class NavigationComponent {
                 name: 'MHTML转PDF',
                 icon: 'fas fa-file-pdf',
                 href: 'mhtml-pdf.html'
+            },
+            {
+                id: 'student-id-generator',
+                name: '学生证生成器',
+                icon: 'fas fa-id-card',
+                href: 'student-id-generator.html'
+            },
+            {
+                id: 'indie-navigator',
+                name: '商机发现',
+                icon: 'fas fa-compass',
+                href: 'indie-navigator.html'
+            },
+            {
+                id: 'favorites',
+                name: '我的收藏',
+                icon: 'fas fa-heart',
+                href: 'favorites.html'
             }
         ];
         
@@ -465,7 +510,10 @@ class NavigationComponent {
             'trending': 'a[href="trending.html"]',
             'document-converter': 'a[href="document-converter.html"]',
             'tts': 'a[href="tts.html"]',
-            'mhtml-pdf': 'a[href="mhtml-pdf.html"]'
+            'mhtml-pdf': 'a[href="mhtml-pdf.html"]',
+            'student-id-generator': 'a[href="student-id-generator.html"]',
+            'indie-navigator': 'a[href="indie-navigator.html"]',
+            'favorites': 'a[href="favorites.html"]'
         };
         
         const selector = navSelectors[this.currentPage];
@@ -595,5 +643,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // 延迟一点初始化，确保其他脚本先加载
     setTimeout(() => {
         window.navigationComponent = new NavigationComponent();
+        
+        // 通知其他组件导航已就绪
+        window.dispatchEvent(new CustomEvent('navigationReady'));
     }, 100);
 });
