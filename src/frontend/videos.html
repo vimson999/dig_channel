@@ -376,6 +376,42 @@ min-height: 1024px;
                     <p class="text-sm text-gray-500 mt-1">选择同步多少天内发布的视频</p>
                 </div>
                 
+                <!-- 优化选项 -->
+                <div class="mb-4 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                    <div class="flex items-center justify-between mb-3">
+                        <label class="flex items-center">
+                            <input type="checkbox" id="use-optimization" checked class="mr-2 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                            <span class="text-sm font-medium text-gray-700">启用性能优化 🚀</span>
+                        </label>
+                        <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                            推荐
+                        </span>
+                    </div>
+                    
+                    <div id="optimization-settings" class="space-y-3">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">并行线程数</label>
+                            <select id="max-workers" class="w-full px-2 py-1 border border-blue-300 rounded text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 focus:outline-none">
+                                <option value="3">3 线程（保守）</option>
+                                <option value="5" selected>5 线程（推荐）</option>
+                                <option value="7">7 线程（积极）</option>
+                                <option value="10">10 线程（最大）</option>
+                            </select>
+                        </div>
+                        
+                        <div class="text-xs text-blue-600">
+                            <div class="flex items-center mb-1">
+                                <i class="fas fa-lightning-bolt mr-1"></i>
+                                <span>优化特性：并行处理、智能缓存、批量操作</span>
+                            </div>
+                            <div class="flex items-center">
+                                <i class="fas fa-clock mr-1"></i>
+                                <span>预计提升：5-50倍同步速度</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
                 <div id="sync-progress" class="hidden mb-4">
                     <div class="flex items-center gap-3 mb-2">
                         <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-green-600"></div>

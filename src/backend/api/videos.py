@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import logging
 
 from services.video_sync_service import VideoSyncService
+from services.optimized_video_sync_service import OptimizedVideoSyncService
 from models import Video, VideoData, Channel
 from middleware.error_handler import handle_api_error
 from utils.colored_logger import setup_colored_logger
@@ -208,11 +209,13 @@ def get_video_detail(video_id):
 @cross_origin()
 @require_login
 def sync_videos(current_user):
-    """同步所有频道的视频"""
+    """同步所有频道的视频（优化版本）"""
     try:
         # 获取参数
         data = request.get_json() or {}
         days_back = data.get('days_back', 10)
+        use_optimization = data.get('use_optimization', True)  # 默认使用优化版本
+        max_workers = data.get('max_workers', 5)  # 并行线程数
         
         # 验证参数
         if not isinstance(days_back, int) or days_back < 1 or days_back > 30:
@@ -222,8 +225,22 @@ def sync_videos(current_user):
                 'data': {}
             }), 400
         
-        video_service = VideoSyncService()
-        result = video_service.sync_all_channels_videos(days_back=days_back, user_id=current_user.id)
+        if not isinstance(max_workers, int) or max_workers < 1 or max_workers > 10:
+            max_workers = 5  # 默认值
+        
+        # 选择使用优化版本还是原版本
+        if use_optimization:
+            logger.info(f"使用优化同步服务，并行线程数: {max_workers}")
+            video_service = OptimizedVideoSyncService()
+            result = video_service.sync_all_channels_videos_parallel(
+                days_back=days_back, 
+                user_id=current_user.id,
+                max_workers=max_workers
+            )
+        else:
+            logger.info("使用传统同步服务")
+            video_service = VideoSyncService()
+            result = video_service.sync_all_channels_videos(days_back=days_back, user_id=current_user.id)
         
         if result['success']:
             # 检查是否是因为没有频道

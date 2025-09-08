@@ -1086,6 +1086,8 @@ function closeSyncVideoModal() {
 
 async function startVideoSync() {
     const daysBack = document.getElementById('sync-days-back').value;
+    const useOptimization = document.getElementById('use-optimization').checked;
+    const maxWorkers = document.getElementById('max-workers').value;
     const progressDiv = document.getElementById('sync-progress');
     const resultDiv = document.getElementById('sync-result');
     const startBtn = document.getElementById('start-sync-btn');
@@ -1095,27 +1097,82 @@ async function startVideoSync() {
     resultDiv.classList.add('hidden');
     startBtn.disabled = true;
     
+    // 更新进度文本
+    const progressText = progressDiv.querySelector('.text-sm');
+    if (progressText) {
+        progressText.textContent = useOptimization ? 
+            `正在使用优化同步（${maxWorkers}线程）...` : 
+            '正在使用传统同步...';
+    }
+    
+    const startTime = Date.now();
+    
     try {
-        const response = await api.syncVideos({
-            days_back: parseInt(daysBack)
-        });
+        const syncData = {
+            days_back: parseInt(daysBack),
+            use_optimization: useOptimization
+        };
+        
+        if (useOptimization) {
+            syncData.max_workers = parseInt(maxWorkers);
+        }
+        
+        const response = await api.syncVideos(syncData);
         
         if (response.success) {
+            const endTime = Date.now();
+            const duration = (endTime - startTime) / 1000;
+            
             // 显示成功结果
-            resultDiv.innerHTML = `
+            let resultHtml = `
                 <div class="bg-green-50 border border-green-200 rounded-lg p-4">
-                    <div class="flex items-center gap-2 text-green-800 mb-2">
+                    <div class="flex items-center gap-2 text-green-800 mb-3">
                         <i class="fas fa-check-circle"></i>
                         <span class="font-medium">同步完成！</span>
+                        ${response.from_cache ? '<span class="ml-2 inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800"><i class="fas fa-bolt mr-1"></i>缓存加速</span>' : ''}
                     </div>
-                    <div class="text-sm text-green-700 space-y-1">
-                        <div>处理频道: ${response.data.processed} 个</div>
-                        <div>新增视频: ${response.data.new_videos} 个</div>
-                        <div>更新视频: ${response.data.updated_videos} 个</div>
-                        ${response.data.errors > 0 ? `<div class="text-red-600">错误: ${response.data.errors} 个</div>` : ''}
-                    </div>
-                </div>
-            `;
+                    <div class="grid grid-cols-2 gap-4 mb-3">
+                        <div class="text-sm">
+                            <div class="text-gray-600">处理频道</div>
+                            <div class="font-semibold text-green-700">${response.data.processed} 个</div>
+                        </div>
+                        <div class="text-sm">
+                            <div class="text-gray-600">新增视频</div>
+                            <div class="font-semibold text-blue-700">${response.data.new_videos} 个</div>
+                        </div>
+                        <div class="text-sm">
+                            <div class="text-gray-600">更新视频</div>
+                            <div class="font-semibold text-orange-700">${response.data.updated_videos} 个</div>
+                        </div>
+                        <div class="text-sm">
+                            <div class="text-gray-600">用时</div>
+                            <div class="font-semibold text-purple-700">${duration.toFixed(1)}s</div>
+                        </div>
+                    </div>`;
+            
+            // 显示优化信息
+            if (useOptimization && response.data.cache_hits > 0) {
+                resultHtml += `
+                    <div class="border-t border-green-200 pt-2 mt-2">
+                        <div class="text-xs text-green-600 flex items-center gap-2">
+                            <i class="fas fa-rocket"></i>
+                            <span>优化效果：缓存命中 ${response.data.cache_hits} 次，并行处理 ${maxWorkers} 线程</span>
+                        </div>
+                    </div>`;
+            }
+            
+            if (response.data.errors > 0) {
+                resultHtml += `
+                    <div class="border-t border-green-200 pt-2 mt-2">
+                        <div class="text-sm text-red-600">
+                            <i class="fas fa-exclamation-triangle mr-1"></i>
+                            错误: ${response.data.errors} 个
+                        </div>
+                    </div>`;
+            }
+            
+            resultHtml += '</div>';
+            resultDiv.innerHTML = resultHtml;
             
             // 刷新视频列表
             setTimeout(() => {
@@ -1148,6 +1205,32 @@ function closeVideoDetailModal() {
     videoManager.closeVideoDetailModal();
 }
 
+
+// 优化选项控制
+function toggleOptimizationSettings() {
+    const checkbox = document.getElementById('use-optimization');
+    const settings = document.getElementById('optimization-settings');
+    
+    if (checkbox && settings) {
+        if (checkbox.checked) {
+            settings.style.opacity = '1';
+            settings.style.pointerEvents = 'auto';
+        } else {
+            settings.style.opacity = '0.5';
+            settings.style.pointerEvents = 'none';
+        }
+    }
+}
+
+// 监听优化选项变化
+document.addEventListener('DOMContentLoaded', () => {
+    const optimizationCheckbox = document.getElementById('use-optimization');
+    if (optimizationCheckbox) {
+        optimizationCheckbox.addEventListener('change', toggleOptimizationSettings);
+        // 初始化状态
+        toggleOptimizationSettings();
+    }
+});
 
 // 初始化视频管理器
 let videoManager;
