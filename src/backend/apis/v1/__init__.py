@@ -34,6 +34,10 @@ def register_blueprints(app):
     # 注册MHTML转PDF API
     from api.mhtml_pdf import mhtml_pdf_bp
     app.register_blueprint(mhtml_pdf_bp)
+    
+    # 注册学生证生成器API
+    from api.student_id_generator import student_id_bp
+    app.register_blueprint(student_id_bp)
 
 __all__ = [
     'auth_bp',

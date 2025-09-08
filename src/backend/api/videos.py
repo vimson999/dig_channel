@@ -102,7 +102,7 @@ def get_videos(current_user):
             
     except Exception as e:
         logger.error(f"获取视频列表失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/search', methods=['GET'])
 @cross_origin()
@@ -119,9 +119,8 @@ def search_videos(current_user):
         sort_by = request.args.get('sort_by', 'published_at')
         order = request.args.get('order', 'desc')
         
-        # 多条件排序参数
-        secondary_sort_by = request.args.get('secondary_sort_by', '').strip()
-        secondary_order = request.args.get('secondary_order', 'desc')
+        # 时间段参数（天数）
+        time_period_days = request.args.get('time_period', type=int)
         
         if not search:
             return jsonify({
@@ -135,13 +134,12 @@ def search_videos(current_user):
         if sort_by not in valid_sort_fields:
             sort_by = 'published_at'
         
-        if secondary_sort_by and secondary_sort_by not in valid_sort_fields:
-            secondary_sort_by = ''
-        
         if order not in ['asc', 'desc']:
             order = 'desc'
-        if secondary_order not in ['asc', 'desc']:
-            secondary_order = 'desc'
+            
+        # 验证时间段
+        if time_period_days and (time_period_days < 1 or time_period_days > 3650):  # 最多10年
+            time_period_days = None
         
         video_service = VideoSyncService()
         result = video_service.search_videos(
@@ -152,8 +150,7 @@ def search_videos(current_user):
             category=category if category else None,
             sort_by=sort_by,
             order=order,
-            secondary_sort_by=secondary_sort_by if secondary_sort_by else None,
-            secondary_order=secondary_order,
+            time_period_days=time_period_days if time_period_days else None,
             user_id=current_user.id
         )
         
@@ -172,7 +169,7 @@ def search_videos(current_user):
             
     except Exception as e:
         logger.error(f"搜索视频失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"搜索视频失败: {str(e)}")
 
 @videos_bp.route('/<int:video_id>', methods=['GET'])
 @cross_origin()
@@ -205,7 +202,7 @@ def get_video_detail(video_id):
         
     except Exception as e:
         logger.error(f"获取视频详情失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/sync', methods=['POST'])
 @cross_origin()
@@ -251,7 +248,7 @@ def sync_videos(current_user):
             
     except Exception as e:
         logger.error(f"同步视频失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/sync/<int:channel_id>', methods=['POST'])
 @cross_origin()
@@ -297,7 +294,7 @@ def sync_channel_videos(channel_id):
             
     except Exception as e:
         logger.error(f"同步频道 {channel_id} 视频失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/categories', methods=['GET'])
 @cross_origin()
@@ -322,7 +319,7 @@ def get_video_categories():
             
     except Exception as e:
         logger.error(f"获取视频分类失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/stats', methods=['GET'])
 @cross_origin()
@@ -347,7 +344,7 @@ def get_videos_stats():
             
     except Exception as e:
         logger.error(f"获取视频统计失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/clean-shorts', methods=['POST'])
 @cross_origin()
@@ -372,7 +369,7 @@ def clean_short_videos():
             
     except Exception as e:
         logger.error(f"清理短视频失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/channels', methods=['GET'])
 @cross_origin()
@@ -412,7 +409,7 @@ def get_channels_with_video_count():
         
     except Exception as e:
         logger.error(f"获取频道列表失败: {str(e)}")
-        return handle_api_error(e)
+        return handle_api_error(500, f"操作失败: {str(e)}")
 
 # 错误处理
 @videos_bp.errorhandler(404)

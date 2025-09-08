@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>日本学生证生成器 - Shioa</title>
+<meta name="description" content="生成日式风格学生证，支持自定义学校名称、学生姓名、有效期和照片上传">
+
+<!-- Favicons -->
+<link rel="icon" type="image/x-icon" href="/assets/images/favicon.ico">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/images/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/images/favicon-32x32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/assets/images/apple-touch-icon.png">
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+theme: {
+extend: {
+colors: {
+primary: {
+50: '#eff6ff',
+100: '#dbeafe', 
+200: '#bfdbfe',
+300: '#93c5fd',
+400: '#60a5fa',
+500: '#3b82f6',
+600: '#2563eb',
+700: '#1d4ed8',
+800: '#1e40af',
+900: '#1e3a8a'
+},
+japanese: {
+red: '#dc143c',
+gold: '#ffd700',
+navy: '#003366',
+cream: '#faf7f0'
+}
+},
+borderRadius: {
+'button': '8px'
+}
+}
+}
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+JP:wght@300;400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+body {
+font-family: 'Noto Sans JP', 'Inter', sans-serif;
+}
+.japanese-text {
+font-family: 'Noto Sans JP', sans-serif;
+}
+.student-id-card {
+width: 340px;
+height: 215px;
+background: linear-gradient(135deg, #faf7f0 0%, #ffffff 100%);
+border: 2px solid #003366;
+border-radius: 12px;
+position: relative;
+box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+}
+.photo-placeholder {
+width: 90px;
+height: 120px;
+background: #f3f4f6;
+border: 2px solid #d1d5db;
+border-radius: 4px;
+display: flex;
+align-items: center;
+justify-content: center;
+overflow: hidden;
+}
+.photo-placeholder img {
+width: 100%;
+height: 100%;
+object-fit: cover;
+}
+.form-section {
+background: white;
+border-radius: 16px;
+box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+border: 1px solid #e5e7eb;
+}
+.japanese-pattern {
+background-image: radial-gradient(circle at 1px 1px, rgba(220, 20, 60, 0.1) 1px, transparent 0);
+background-size: 20px 20px;
+}
+</style>
+</head>
+<body class="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen">
+    <!-- 主导航栏 -->
+    <header class="bg-white/80 backdrop-blur-lg border-b border-gray-200/50 sticky top-0 z-40">
+        <div class="max-w-[1440px] mx-auto px-6 py-4">
+            <div class="flex items-center justify-between">
+                <!-- Logo 和标题 -->
+                <div class="flex items-center gap-4">
+                    <div class="w-10 h-10 bg-gradient-to-br from-red-500 to-red-600 rounded-xl flex items-center justify-center shadow-lg">
+                        <i class="fab fa-youtube text-white text-xl"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-xl font-bold text-gray-800">Shioa</h1>
+                        <p class="text-sm text-gray-500">智能数据分析平台</p>
+                    </div>
+                </div>
+                
+                <!-- 导航菜单 -->
+                <nav class="hidden md:flex items-center gap-6">
+                    <a href="index.html" class="text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-chart-line mr-2"></i>首页
+                    </a>
+                    <a href="#" class="nav-link text-primary-600 font-medium px-3 py-2 rounded-lg bg-primary-50 border border-primary-200">
+                        <i class="fas fa-id-card mr-2"></i>学生证生成器
+                    </a>
+                    <a href="tts.html" class="text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-microphone mr-2"></i>文本转语音
+                    </a>
+                    <a href="document-converter.html" class="text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <i class="fas fa-file-exchange mr-2"></i>文档转换
+                    </a>
+                </nav>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主内容区域 -->
+    <main class="max-w-6xl mx-auto px-6 py-8">
+        <!-- 页面标题 -->
+        <div class="text-center mb-12">
+            <div class="flex items-center justify-center gap-3 mb-4">
+                <div class="w-12 h-12 bg-gradient-to-br from-japanese-red to-red-600 rounded-xl flex items-center justify-center shadow-lg">
+                    <i class="fas fa-id-card text-white text-xl"></i>
+                </div>
+                <h1 class="text-3xl font-bold text-gray-800 japanese-text">日本学生証生成器</h1>
+            </div>
+            <p class="text-gray-600 max-w-2xl mx-auto">
+                制作专业的日式风格学生证，支持自定义学校信息、学生资料和照片上传
+            </p>
+        </div>
+
+        <div class="grid lg:grid-cols-2 gap-12 items-start">
+            <!-- 左侧：表单区域 -->
+            <div class="space-y-8">
+                <!-- 基本信息表单 -->
+                <div class="form-section p-6">
+                    <div class="flex items-center gap-3 mb-6">
+                        <div class="w-8 h-8 bg-gradient-to-br from-japanese-navy to-blue-800 rounded-lg flex items-center justify-center">
+                            <i class="fas fa-user text-white text-sm"></i>
+                        </div>
+                        <h2 class="text-lg font-bold text-gray-800 japanese-text">学生基本情報</h2>
+                    </div>
+                    
+                    <!-- 快速操作按钮 -->
+                    <div class="mb-6 flex items-center gap-3 flex-wrap">
+                        <button type="button" onclick="fillTestData()" class="px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-button font-medium shadow-lg hover:from-green-600 hover:to-green-700 hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 japanese-text">
+                            <i class="fas fa-user-nurse mr-2"></i>石川県立看護大学
+                        </button>
+                        <button type="button" onclick="randomFillForm()" class="px-4 py-2 bg-gradient-to-r from-purple-500 to-purple-600 text-white rounded-button font-medium shadow-lg hover:from-purple-600 hover:to-purple-700 hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 japanese-text">
+                            <i class="fas fa-dice mr-2"></i>ランダム入力
+                        </button>
+                        <button type="button" onclick="clearForm()" class="px-4 py-2 bg-gray-500 text-white rounded-button font-medium hover:bg-gray-600 transition-colors japanese-text">
+                            <i class="fas fa-eraser mr-2"></i>クリア
+                        </button>
+                    </div>
+                    
+                    <form id="studentForm" class="space-y-6">
+                        <!-- 学校名称 -->
+                        <div>
+                            <label for="schoolName" class="block text-sm font-medium text-gray-700 mb-2 japanese-text">学校名 <span class="text-red-500">*</span></label>
+                            <input type="text" id="schoolName" name="schoolName" required
+                                   class="w-full px-4 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all japanese-text"
+                                   placeholder="例：東京大学 / 早稲田大学">
+                        </div>
+
+                        <!-- 学生姓名 -->
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label for="studentNameKana" class="block text-sm font-medium text-gray-700 mb-2 japanese-text">氏名（かな） <span class="text-red-500">*</span></label>
+                                <input type="text" id="studentNameKana" name="studentNameKana" required
+                                       class="w-full px-4 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all japanese-text"
+                                       placeholder="やまだ たろう">
+                            </div>
+                            <div>
+                                <label for="studentName" class="block text-sm font-medium text-gray-700 mb-2 japanese-text">氏名（漢字） <span class="text-red-500">*</span></label>
+                                <input type="text" id="studentName" name="studentName" required
+                                       class="w-full px-4 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all japanese-text"
+                                       placeholder="山田 太郎">
+                            </div>
+                        </div>
+
+                        <!-- 学号 -->
+                        <div>
+                            <label for="studentId" class="block text-sm font-medium text-gray-700 mb-2 japanese-text">学籍番号</label>
+                            <input type="text" id="studentId" name="studentId"
+                                   class="w-full px-4 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all"
+                                   placeholder="例：202400123">
+                        </div>
+
+                        <!-- 年级和专业 -->
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label for="grade" class="block text-sm font-medium text-gray-700 mb-2 japanese-text">学年</label>
+                                <select id="grade" name="grade" 
+                                        class="w-full px-4 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all japanese-text">
+                                    <option value="">選択してください</option>
+                                    <option value="1年生">1年生</option>
+                                    <option value="2年生">2年生</option>
+                                    <option value="3年生">3年生</option>
+                                    <option value="4年生">4年生</option>
+                                    <option value="大学院生">大学院生</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="department" class="block text-sm font-medium text-gray-700 mb-2 japanese-text">学部・専攻</label>
+                                <input type="text" id="department" name="department"
+                                       class="w-full px-4 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all japanese-text"
+                                       placeholder="例：工学部情報学科">
+                            </div>
+                        </div>
+
+                        <!-- 有效期 -->
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label for="validFrom" class="block text-sm font-medium text-gray-700 mb-2 japanese-text">有効期間（開始） <span class="text-red-500">*</span></label>
+                                <input type="date" id="validFrom" name="validFrom" required
+                                       class="w-full px-4 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all">
+                            </div>
+                            <div>
+                                <label for="validTo" class="block text-sm font-medium text-gray-700 mb-2 japanese-text">有効期間（終了） <span class="text-red-500">*</span></label>
+                                <input type="date" id="validTo" name="validTo" required
+                                       class="w-full px-4 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all">
+                            </div>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- 照片上传区域 -->
+                <div class="form-section p-6">
+                    <div class="flex items-center gap-3 mb-6">
+                        <div class="w-8 h-8 bg-gradient-to-br from-japanese-gold to-yellow-600 rounded-lg flex items-center justify-center">
+                            <i class="fas fa-camera text-white text-sm"></i>
+                        </div>
+                        <h2 class="text-lg font-bold text-gray-800 japanese-text">学生写真</h2>
+                    </div>
+                    
+                    <!-- 文件上传区域 -->
+                    <div id="photoUploadArea" class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-primary-400 hover:bg-primary-50/50 transition-all cursor-pointer">
+                        <div class="space-y-4">
+                            <div class="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto">
+                                <i class="fas fa-cloud-upload text-gray-400 text-2xl"></i>
+                            </div>
+                            <div>
+                                <p class="text-lg font-medium text-gray-700">クリックして写真をアップロード</p>
+                                <p class="text-sm text-gray-500">または、ここにファイルをドラッグ&ドロップ</p>
+                            </div>
+                            <div class="text-xs text-gray-400">
+                                <p>推奨サイズ: 縦横比 3:4 (例：300x400px)</p>
+                                <p>対応形式: JPG、PNG（最大5MB）</p>
+                            </div>
+                        </div>
+                        <input type="file" id="photoInput" accept="image/*" class="hidden">
+                    </div>
+                    
+                    <!-- 照片预览 -->
+                    <div id="photoPreview" class="hidden mt-4 flex justify-center">
+                        <div class="relative">
+                            <img id="previewImage" class="w-32 h-40 object-cover border-2 border-gray-300 rounded-lg shadow-md">
+                            <button id="removePhoto" class="absolute -top-2 -right-2 w-6 h-6 bg-red-500 text-white rounded-full flex items-center justify-center text-xs hover:bg-red-600 transition-colors">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 生成按钮 -->
+                <div class="text-center space-y-4">
+                    <div class="flex flex-col sm:flex-row gap-4 justify-center">
+                        <button id="generateButton" onclick="generateStudentId()" 
+                                class="px-8 py-4 bg-gradient-to-r from-japanese-red to-red-600 text-white rounded-button font-bold text-lg shadow-lg hover:shadow-xl transform hover:-translate-y-1 transition-all duration-200 japanese-text disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none">
+                            <i class="fas fa-magic mr-3"></i>表面を生成する
+                        </button>
+                        <button id="generateBackButton" onclick="generateStudentIdBack()" 
+                                class="px-8 py-4 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-button font-bold text-lg shadow-lg hover:shadow-xl transform hover:-translate-y-1 transition-all duration-200 japanese-text disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none">
+                            <i class="fas fa-clone mr-3"></i>裏面を生成する
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右侧：预览区域 -->
+            <div class="space-y-8">
+                <!-- 实时预览 -->
+                <div class="form-section p-6">
+                    <div class="flex items-center justify-between mb-6">
+                        <div class="flex items-center gap-3">
+                            <div class="w-8 h-8 bg-gradient-to-br from-green-500 to-green-600 rounded-lg flex items-center justify-center">
+                                <i class="fas fa-eye text-white text-sm"></i>
+                            </div>
+                            <h2 class="text-lg font-bold text-gray-800 japanese-text">プレビュー</h2>
+                        </div>
+                        <div class="text-sm text-gray-500">実際のサイズ: 54mm × 86mm</div>
+                    </div>
+                    
+                    <!-- 学生证预览 -->
+                    <div class="flex justify-center mb-6">
+                        <div id="studentIdPreview" class="student-id-card japanese-pattern">
+                            <!-- 顶部横条 - 包含学生証和学校名 -->
+                            <div class="absolute top-0 left-0 right-0 h-9 bg-gradient-to-r from-japanese-navy to-blue-800 rounded-t-lg flex items-center justify-between px-3">
+                                <span class="text-white text-xs font-bold japanese-text">学生証</span>
+                                <span id="previewSchoolName" class="text-white text-xs font-medium japanese-text max-w-44 truncate">
+                                    学校名を入力してください
+                                </span>
+                            </div>
+                            
+                            <!-- 主要内容区域 -->
+                            <div class="absolute top-12 left-4 right-4 bottom-12 flex gap-3">
+                                <!-- 照片区域 -->
+                                <div class="photo-placeholder flex-shrink-0">
+                                    <div id="previewPhotoPlaceholder" class="text-gray-400 text-center">
+                                        <i class="fas fa-user text-2xl mb-2"></i>
+                                        <div class="text-xs japanese-text">写真</div>
+                                    </div>
+                                    <img id="previewPhoto" class="hidden w-full h-full object-cover">
+                                </div>
+                                
+                                <!-- 信息区域 -->
+                                <div class="flex-1 space-y-2 text-xs">
+                                    <!-- 学号 -->
+                                    <div class="flex items-center gap-1">
+                                        <span class="text-gray-600 japanese-text w-10">学籍:</span>
+                                        <span id="previewStudentId" class="text-gray-800 font-medium">-</span>
+                                    </div>
+                                    
+                                    <!-- 姓名(かな) -->
+                                    <div class="flex items-center gap-1">
+                                        <span class="text-gray-600 japanese-text w-10">かな:</span>
+                                        <span id="previewNameKana" class="text-gray-800 font-medium japanese-text">-</span>
+                                    </div>
+                                    
+                                    <!-- 姓名(漢字) -->
+                                    <div class="flex items-center gap-1">
+                                        <span class="text-gray-600 japanese-text w-10">氏名:</span>
+                                        <span id="previewName" class="text-gray-800 font-bold japanese-text">-</span>
+                                    </div>
+                                    
+                                    <!-- 学年 -->
+                                    <div class="flex items-center gap-1">
+                                        <span class="text-gray-600 japanese-text w-10">学年:</span>
+                                        <span id="previewGrade" class="text-gray-800 font-medium japanese-text">-</span>
+                                    </div>
+                                    
+                                    <!-- 学部 -->
+                                    <div class="flex items-center gap-1">
+                                        <span class="text-gray-600 japanese-text w-10">学部:</span>
+                                        <span id="previewDepartment" class="text-gray-800 font-medium japanese-text">-</span>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- 有效期通栏 - 横跨整个卡片宽度 -->
+                            <div class="absolute bottom-1 left-1 right-1 h-7 bg-gradient-to-r from-japanese-navy to-blue-800 rounded-sm flex items-center justify-between px-3">
+                                <span class="text-white japanese-text font-medium text-xs">有効期間</span>
+                                <div class="flex items-center gap-1 text-xs text-white">
+                                    <span id="previewValidFrom">-</span>
+                                    <span>～</span>
+                                    <span id="previewValidTo">-</span>
+                                </div>
+                            </div>
+                            
+                            <!-- 移除底部装饰，因为有效期通栏占据了底部空间 -->
+                        </div>
+                    </div>
+                    
+                    <!-- 操作按钮 -->
+                    <div class="flex justify-center gap-4">
+                        <button id="downloadButton" onclick="downloadStudentId()" disabled
+                                class="px-6 py-3 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-button font-medium shadow-lg hover:shadow-xl transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed japanese-text">
+                            <i class="fas fa-download mr-2"></i>ダウンロード
+                        </button>
+                        <button id="printButton" onclick="printStudentId()" disabled
+                                class="px-6 py-3 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-button font-medium shadow-lg hover:shadow-xl transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed japanese-text">
+                            <i class="fas fa-print mr-2"></i>印刷
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 背面预览 -->
+                <div class="form-section p-6">
+                    <div class="flex items-center justify-between mb-6">
+                        <div class="flex items-center gap-3">
+                            <div class="w-8 h-8 bg-gradient-to-br from-blue-600 to-blue-700 rounded-lg flex items-center justify-center">
+                                <i class="fas fa-clone text-white text-sm"></i>
+                            </div>
+                            <h2 class="text-lg font-bold text-gray-800 japanese-text">背面プレビュー</h2>
+                        </div>
+                    </div>
+                    
+                    <div class="flex justify-center mb-6">
+                        <div id="studentIdBackPreview" class="student-id-card japanese-pattern">
+                            <!-- 顶部横条 - 背面标题 -->
+                            <div class="absolute top-0 left-0 right-0 h-9 bg-gradient-to-r from-japanese-navy to-blue-800 rounded-t-lg flex items-center justify-center px-3">
+                                <span class="text-white text-xs font-bold japanese-text">学生証（裏面）</span>
+                            </div>
+                            
+                            <!-- 主要内容区域 -->
+                            <div class="absolute top-12 left-4 right-4 bottom-8">
+                                <!-- 学校信息框 -->
+                                <div class="bg-white border border-japanese-navy rounded-md p-3 mb-4">
+                                    <div class="text-xs">
+                                        <div class="text-japanese-navy font-medium mb-1 japanese-text">
+                                            発行: <span id="backPreviewSchoolName">学校名を入力してください</span>
+                                        </div>
+                                        <div class="text-gray-600 text-xs japanese-text">学生部 学籍課</div>
+                                        <div class="text-gray-600 text-xs japanese-text">お問い合わせ: 学生課窓口</div>
+                                    </div>
+                                </div>
+                                
+                                <!-- 注意事项 -->
+                                <div class="mb-4">
+                                    <h3 class="text-japanese-navy text-xs font-medium mb-2 japanese-text">注意事項</h3>
+                                    <div class="space-y-1 text-xs text-gray-800">
+                                        <div class="japanese-text">• この学生証は常時携帯してください</div>
+                                        <div class="japanese-text">• 紛失した場合は直ちに届け出てください</div>
+                                        <div class="japanese-text">• 他人への貸与は禁止されています</div>
+                                        <div class="japanese-text">• 有効期限を確認してください</div>
+                                        <div class="japanese-text">• 破損した場合は再発行が必要です</div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- 底部信息栏 -->
+                            <div class="absolute bottom-1 left-1 right-1 h-5 bg-gradient-to-r from-japanese-navy to-blue-800 rounded-sm flex items-center justify-between px-3">
+                                <span class="text-white japanese-text text-xs">発行日: 2024.09.07</span>
+                                <span class="text-white text-xs">Ver.2024</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 背面说明 -->
+                    <div class="text-center text-sm text-gray-600 japanese-text">
+                        背面には学校情報と使用上の注意事項が記載されます
+                    </div>
+                </div>
+
+                <!-- 使用说明 -->
+                <div class="form-section p-6">
+                    <div class="flex items-center gap-3 mb-4">
+                        <div class="w-8 h-8 bg-gradient-to-br from-purple-500 to-purple-600 rounded-lg flex items-center justify-center">
+                            <i class="fas fa-info-circle text-white text-sm"></i>
+                        </div>
+                        <h2 class="text-lg font-bold text-gray-800 japanese-text">使用方法</h2>
+                    </div>
+                    
+                    <div class="space-y-3 text-sm text-gray-600">
+                        <div class="flex items-start gap-3">
+                            <div class="w-6 h-6 bg-primary-100 text-primary-600 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">1</div>
+                            <p>学校名、学生氏名、有効期間などの必要情報を入力してください。</p>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <div class="w-6 h-6 bg-primary-100 text-primary-600 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">2</div>
+                            <p>学生の写真をアップロードします。縦横比3:4を推奨します。</p>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <div class="w-6 h-6 bg-primary-100 text-primary-600 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">3</div>
+                            <p>リアルタイムでプレビューを確認し、「生成」ボタンをクリックします。</p>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <div class="w-6 h-6 bg-primary-100 text-primary-600 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">4</div>
+                            <p>生成された学生証をダウンロードまたは印刷できます。</p>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                        <div class="flex items-center gap-2 mb-2">
+                            <i class="fas fa-exclamation-triangle text-yellow-600"></i>
+                            <span class="font-medium text-yellow-800 japanese-text">注意事項</span>
+                        </div>
+                        <ul class="text-sm text-yellow-700 space-y-1">
+                            <li>• このツールは学習・デモ目的で作成されています</li>
+                            <li>• 実際の学生証として使用しないでください</li>
+                            <li>• 写真は安全に処理され、サーバーに保存されません</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- JavaScript -->
+    <script src="js/student-id-generator.js"></script>
+</body>
+</html>
