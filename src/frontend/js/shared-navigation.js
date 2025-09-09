@@ -86,10 +86,15 @@ class SharedNavigation {
                         </div>
                     </div>
                     
-                    <!-- 导航菜单 -->
+                    <!-- 桌面导航菜单 -->
                     <nav class="hidden md:flex items-center gap-6" role="navigation" aria-label="主导航">
                         ${this.getMenuItems()}
                     </nav>
+                    
+                    <!-- 移动端菜单按钮 -->
+                    <button class="md:hidden p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors" id="mobile-menu-toggle">
+                        <i class="fas fa-bars text-xl"></i>
+                    </button>
                     
                     <!-- 用户操作区 -->
                     <div class="flex items-center gap-3">
@@ -133,86 +138,214 @@ class SharedNavigation {
                     </div>
                 </div>
             </div>
-        </header>`;
+        </header>
+        
+        <!-- 移动端导航菜单面板 -->
+        <div id="mobile-menu-panel" class="md:hidden fixed inset-0 bg-black bg-opacity-50 z-50 hidden">
+            <div class="bg-white h-full w-80 transform -translate-x-full transition-transform duration-300" id="mobile-menu-content">
+                <div class="p-6">
+                    <div class="flex items-center justify-between mb-6">
+                        <div class="flex items-center gap-3">
+                            <div class="w-8 h-8 bg-gradient-to-br from-red-500 to-red-600 rounded-lg flex items-center justify-center">
+                                <i class="fab fa-youtube text-white text-sm"></i>
+                            </div>
+                            <span class="font-bold text-gray-800">Shioa</span>
+                        </div>
+                        <button class="p-2 text-gray-500 hover:text-gray-700 rounded-lg" id="mobile-menu-close">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                    
+                    <nav class="space-y-2">
+                        ${this.getMobileMenuItems()}
+                    </nav>
+                </div>
+            </div>
+        </div>`;
     }
     
-    getMenuItems() {
-        const menuItems = [
+    getMenuStructure() {
+        return [
+            // 核心功能
             {
                 id: 'dashboard',
                 name: '首页',
+                icon: 'fas fa-home',
+                href: 'index.html',
+                standalone: true
+            },
+            // 内容管理
+            {
+                id: 'content',
+                name: '内容管理',
+                icon: 'fas fa-video',
+                dropdown: true,
+                items: [
+                    {
+                        id: 'videos',
+                        name: '视频管理',
+                        icon: 'fas fa-play',
+                        href: 'videos.html'
+                    },
+                    {
+                        id: 'favorites',
+                        name: '我的收藏',
+                        icon: 'fas fa-heart',
+                        href: 'favorites.html'
+                    }
+                ]
+            },
+            // 趋势分析
+            {
+                id: 'analytics',
+                name: '趋势分析',
                 icon: 'fas fa-chart-line',
-                href: 'index.html'
+                dropdown: true,
+                items: [
+                    {
+                        id: 'trending-radar',
+                        name: '趋势雷达',
+                        icon: 'fas fa-radar-line',
+                        href: 'trending-radar.html'
+                    },
+                    {
+                        id: 'trending',
+                        name: '爆款搜索',
+                        icon: 'fas fa-fire',
+                        href: 'trending.html'
+                    },
+                    {
+                        id: 'indie-navigator',
+                        name: '商机发现',
+                        icon: 'fas fa-compass',
+                        href: 'indie-navigator.html'
+                    }
+                ]
             },
+            // 工具箱
             {
-                id: 'videos',
-                name: '视频管理',
-                icon: 'fas fa-play',
-                href: 'videos.html'
-            },
-            {
-                id: 'trending-radar',
-                name: '趋势雷达',
-                icon: 'fas fa-radar-line',
-                href: 'trending-radar.html'
-            },
-            {
-                id: 'trending',
-                name: '爆款视频',
-                icon: 'fas fa-fire',
-                href: 'trending.html'
-            },
-            {
-                id: 'favorites',
-                name: '我的收藏',
-                icon: 'fas fa-heart',
-                href: 'favorites.html'
-            },
-            {
-                id: 'document-converter',
-                name: '文档转换',
-                icon: 'fas fa-file-exchange',
-                href: 'document-converter.html'
-            },
-            {
-                id: 'tts',
-                name: '文本转语音',
-                icon: 'fas fa-microphone',
-                href: 'tts.html'
-            },
-            {
-                id: 'mhtml-pdf',
-                name: 'MHTML转PDF',
-                icon: 'fas fa-file-pdf',
-                href: 'mhtml-pdf.html'
-            },
-            {
-                id: 'student-id-generator',
-                name: '学生证生成器',
-                icon: 'fas fa-id-card',
-                href: 'student-id-generator.html'
-            },
-            {
-                id: 'indie-navigator',
-                name: '商机发现',
-                icon: 'fas fa-compass',
-                href: 'indie-navigator.html'
+                id: 'tools',
+                name: '工具箱',
+                icon: 'fas fa-tools',
+                dropdown: true,
+                items: [
+                    {
+                        id: 'document-converter',
+                        name: '文档转换',
+                        icon: 'fas fa-file-exchange',
+                        href: 'document-converter.html'
+                    },
+                    {
+                        id: 'tts',
+                        name: '语音合成',
+                        icon: 'fas fa-microphone',
+                        href: 'tts.html'
+                    },
+                    {
+                        id: 'mhtml-pdf',
+                        name: 'MHTML转PDF',
+                        icon: 'fas fa-file-pdf',
+                        href: 'mhtml-pdf.html'
+                    },
+                    {
+                        id: 'student-id-generator',
+                        name: '学生证生成',
+                        icon: 'fas fa-id-card',
+                        href: 'student-id-generator.html'
+                    }
+                ]
             }
         ];
+    }
+    
+    getMenuItems() {
+        const menuStructure = this.getMenuStructure();
         
-        return menuItems.map(item => {
-            const isActive = item.id === this.currentPage;
-            const activeClass = isActive 
-                ? 'text-primary-600 font-medium bg-primary-50 border border-primary-200' 
-                : 'text-gray-600 hover:text-primary-600 hover:bg-gray-50';
-            
-            const ariaCurrent = isActive ? ' aria-current="page"' : '';
-            
-            return `
-                <a href="${item.href}" class="nav-link ${activeClass} px-3 py-2 rounded-lg transition-colors"${ariaCurrent}>
-                    <i class="${item.icon} mr-2" aria-hidden="true"></i>${item.name}
-                </a>
-            `;
+        return menuStructure.map(section => {
+            if (section.standalone) {
+                // 独立菜单项
+                const isActive = section.id === this.currentPage;
+                const activeClass = isActive 
+                    ? 'text-primary-600 font-medium bg-primary-50 border border-primary-200' 
+                    : 'text-gray-600 hover:text-primary-600 hover:bg-gray-50';
+                
+                return `
+                    <a href="${section.href}" class="nav-link ${activeClass} px-3 py-2 rounded-lg transition-colors">
+                        <i class="${section.icon} mr-2"></i>${section.name}
+                    </a>
+                `;
+            } else if (section.dropdown) {
+                // 下拉菜单组
+                const hasActiveChild = section.items.some(item => item.id === this.currentPage);
+                const groupActiveClass = hasActiveChild 
+                    ? 'text-primary-600 font-medium' 
+                    : 'text-gray-600';
+                
+                const dropdownItems = section.items.map(item => {
+                    const isActive = item.id === this.currentPage;
+                    const itemActiveClass = isActive ? 'bg-primary-50 text-primary-600' : 'text-gray-700 hover:bg-gray-50';
+                    
+                    return `
+                        <a href="${item.href}" class="block px-4 py-2 text-sm ${itemActiveClass} transition-colors rounded-md">
+                            <i class="${item.icon} mr-2"></i>${item.name}
+                        </a>
+                    `;
+                }).join('');
+                
+                return `
+                    <div class="relative group">
+                        <button class="nav-dropdown-trigger ${groupActiveClass} hover:text-primary-600 px-3 py-2 rounded-lg transition-colors flex items-center">
+                            <i class="${section.icon} mr-2"></i>${section.name}
+                            <i class="fas fa-chevron-down ml-1 text-xs transition-transform group-hover:rotate-180"></i>
+                        </button>
+                        <div class="absolute top-full left-0 mt-1 w-48 bg-white rounded-lg shadow-lg border border-gray-200 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 z-50">
+                            <div class="py-2">
+                                ${dropdownItems}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+        }).join('');
+    }
+    
+    getMobileMenuItems() {
+        const menuStructure = this.getMenuStructure();
+        
+        return menuStructure.map(section => {
+            if (section.standalone) {
+                const isActive = section.id === this.currentPage;
+                const activeClass = isActive ? 'bg-primary-50 text-primary-600' : 'text-gray-700 hover:bg-gray-50';
+                
+                return `
+                    <a href="${section.href}" class="block px-4 py-3 rounded-lg ${activeClass} transition-colors">
+                        <i class="${section.icon} mr-3"></i>${section.name}
+                    </a>
+                `;
+            } else if (section.dropdown) {
+                const hasActiveChild = section.items.some(item => item.id === this.currentPage);
+                const sectionItems = section.items.map(item => {
+                    const isActive = item.id === this.currentPage;
+                    const itemActiveClass = isActive ? 'bg-primary-50 text-primary-600' : 'text-gray-600 hover:bg-gray-50';
+                    
+                    return `
+                        <a href="${item.href}" class="block px-6 py-2 text-sm rounded-md ${itemActiveClass} transition-colors">
+                            <i class="${item.icon} mr-2"></i>${item.name}
+                        </a>
+                    `;
+                }).join('');
+                
+                return `
+                    <div class="space-y-1">
+                        <div class="px-4 py-2 text-sm font-medium text-gray-500 uppercase tracking-wider">
+                            <i class="${section.icon} mr-2"></i>${section.name}
+                        </div>
+                        <div class="space-y-1">
+                            ${sectionItems}
+                        </div>
+                    </div>
+                `;
+            }
         }).join('');
     }
     
@@ -223,7 +356,48 @@ class SharedNavigation {
     }
     
     setupEventListeners() {
-        // 设置事件监听器
+        // 移动端菜单切换
+        const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
+        const mobileMenuPanel = document.getElementById('mobile-menu-panel');
+        const mobileMenuContent = document.getElementById('mobile-menu-content');
+        const mobileMenuClose = document.getElementById('mobile-menu-close');
+        
+        if (mobileMenuToggle && mobileMenuPanel && mobileMenuContent) {
+            // 打开移动端菜单
+            mobileMenuToggle.addEventListener('click', () => {
+                mobileMenuPanel.classList.remove('hidden');
+                setTimeout(() => {
+                    mobileMenuContent.classList.remove('-translate-x-full');
+                }, 10);
+            });
+            
+            // 关闭移动端菜单
+            const closeMobileMenu = () => {
+                mobileMenuContent.classList.add('-translate-x-full');
+                setTimeout(() => {
+                    mobileMenuPanel.classList.add('hidden');
+                }, 300);
+            };
+            
+            if (mobileMenuClose) {
+                mobileMenuClose.addEventListener('click', closeMobileMenu);
+            }
+            
+            // 点击背景关闭菜单
+            mobileMenuPanel.addEventListener('click', (e) => {
+                if (e.target === mobileMenuPanel) {
+                    closeMobileMenu();
+                }
+            });
+            
+            // ESC键关闭菜单
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && !mobileMenuPanel.classList.contains('hidden')) {
+                    closeMobileMenu();
+                }
+            });
+        }
+        
         console.log('🔧 [SHARED_NAV] 事件监听器已设置');
     }
     
