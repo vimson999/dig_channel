@@ -127,9 +127,18 @@ class ChannelManagement {
                 console.log('分页信息:', pagination);
                 console.log('频道数据:', channels);
                 
-                this.updateStatistics(response.data.statistics);
+                this.updateStatistics();
                 this.renderChannelTable();
                 this.updatePagination(pagination.total);
+                
+                // 更新频道总数显示（使用分页信息中的total）
+                const totalChannelsEl = document.getElementById('total-channels');
+                if (totalChannelsEl) {
+                    totalChannelsEl.textContent = pagination.total || 0;
+                }
+                
+                // 异步加载全局统计信息
+                this.loadGlobalStatistics();
             } else {
                 this.showError('加载频道数据失败: ' + response.message);
             }
@@ -141,9 +150,101 @@ class ChannelManagement {
         }
     }
 
-    // 更新统计信息 (已移除统计卡片，这个方法现在为空)
+    // 更新统计信息
     updateStatistics(stats) {
-        // 统计卡片已移除，不需要更新
+        // 计算统计信息
+        const totalChannels = this.channels.length;
+        const activeChannels = this.channels.filter(channel => channel.is_active).length;
+        
+        // 如果API返回了统计信息，使用API数据，否则使用当前页面数据计算
+        let totalSubscribers = 0;
+        let totalVideos = 0;
+        
+        if (stats) {
+            // 使用API返回的全局统计
+            document.getElementById('stat-total-channels').textContent = stats.total_channels || 0;
+            document.getElementById('stat-active-channels').textContent = stats.active_channels || 0;
+            document.getElementById('stat-total-subscribers').textContent = Utils.formatNumber(stats.total_subscribers || 0);
+            document.getElementById('stat-total-videos').textContent = Utils.formatNumber(stats.total_videos || 0);
+        } else {
+            // 使用当前页面数据计算（仅当前页的统计）
+            this.channels.forEach(channel => {
+                // 假设频道数据中有最新的统计信息
+                if (channel.latest_data) {
+                    totalSubscribers += channel.latest_data.subscribers || 0;
+                    totalVideos += channel.latest_data.video_count || 0;
+                }
+            });
+            
+            document.getElementById('stat-total-channels').textContent = totalChannels;
+            document.getElementById('stat-active-channels').textContent = activeChannels;
+            document.getElementById('stat-total-subscribers').textContent = Utils.formatNumber(totalSubscribers);
+            document.getElementById('stat-total-videos').textContent = Utils.formatNumber(totalVideos);
+        }
+        
+        console.log('统计信息更新:', {
+            totalChannels,
+            activeChannels,
+            totalSubscribers,
+            totalVideos,
+            useApiStats: !!stats
+        });
+    }
+
+    // 加载全局统计信息
+    async loadGlobalStatistics() {
+        try {
+            // 获取所有频道的统计信息
+            const allChannelsResponse = await api.getChannels({ 
+                page: 1, 
+                per_page: 1000,  // 获取所有频道
+                active_only: false 
+            });
+            
+            if (allChannelsResponse.success) {
+                let allChannels = [];
+                
+                // 处理响应格式
+                if (allChannelsResponse.data.channels) {
+                    allChannels = allChannelsResponse.data.channels;
+                } else if (Array.isArray(allChannelsResponse.data)) {
+                    allChannels = allChannelsResponse.data;
+                } else {
+                    allChannels = allChannelsResponse.data || [];
+                }
+                
+                // 计算全局统计
+                const totalChannels = allChannels.length;
+                const activeChannels = allChannels.filter(channel => channel.is_active).length;
+                
+                let totalSubscribers = 0;
+                let totalVideos = 0;
+                
+                // 遍历所有频道计算总计
+                allChannels.forEach(channel => {
+                    if (channel.latest_data) {
+                        totalSubscribers += channel.latest_data.subscribers || 0;
+                        totalVideos += channel.latest_data.video_count || 0;
+                    }
+                });
+                
+                // 更新统计显示
+                document.getElementById('stat-total-channels').textContent = totalChannels;
+                document.getElementById('stat-active-channels').textContent = activeChannels;
+                document.getElementById('stat-total-subscribers').textContent = Utils.formatNumber(totalSubscribers);
+                document.getElementById('stat-total-videos').textContent = Utils.formatNumber(totalVideos);
+                
+                console.log('全局统计信息更新:', {
+                    totalChannels,
+                    activeChannels,
+                    totalSubscribers,
+                    totalVideos
+                });
+            }
+        } catch (error) {
+            console.error('加载全局统计失败:', error);
+            // 使用当前页面数据作为回退
+        }
     }
 
     // 加载频道分类
@@ -225,8 +326,11 @@ class ChannelManagement {
 
     // 渲染频道表格
     renderChannelTable() {
-        const tbody = document.getElementById('channels-table-body');
-        if (!tbody) return;
+        const tbody = document.getElementById('channels-tbody');
+        if (!tbody) {
+            console.error('未找到 channels-tbody 元素');
+            return;
+        }
 
         if (this.channels.length === 0) {
             tbody.innerHTML = `
@@ -441,7 +545,7 @@ class ChannelManagement {
         
         const pageStartEl = document.getElementById('page-start');
         const pageEndEl = document.getElementById('page-end');
-        const totalRecordsEl = document.getElementById('total-records');
+        const totalRecordsEl = document.getElementById('total-count');
         
         if (pageStartEl) pageStartEl.textContent = start;
         if (pageEndEl) pageEndEl.textContent = end;
@@ -599,24 +703,54 @@ class ChannelManagement {
         // 使用全局的加载状态
         if (window.app && window.app.showLoading) {
             window.app.showLoading(message);
+        } else {
+            // 回退到页面的加载状态
+            const loadingElement = document.getElementById('channels-loading');
+            const emptyElement = document.getElementById('channels-empty');
+            const tableContainer = document.querySelector('.table-container');
+            
+            if (loadingElement) {
+                loadingElement.classList.remove('hidden');
+            }
+            if (emptyElement) {
+                emptyElement.classList.add('hidden');
+            }
+            if (tableContainer) {
+                tableContainer.style.display = 'none';
+            }
         }
     }
 
     hideLoading() {
         if (window.app && window.app.hideLoading) {
             window.app.hideLoading();
+        } else {
+            // 回退到页面的加载状态
+            const loadingElement = document.getElementById('channels-loading');
+            const tableContainer = document.querySelector('.table-container');
+            
+            if (loadingElement) {
+                loadingElement.classList.add('hidden');
+            }
+            if (tableContainer) {
+                tableContainer.style.display = 'block';
+            }
         }
     }
 
     showSuccess(message) {
         if (window.app && window.app.showToast) {
             window.app.showToast(message, 'success');
+        } else {
+            showToast(message, 'success');
         }
     }
 
     showError(message) {
         if (window.app && window.app.showToast) {
             window.app.showToast(message, 'error');
+        } else {
+            showToast(message, 'error');
         }
     }
 
@@ -885,4 +1019,81 @@ function initChannelManagement() {
         window.channelManagement = new ChannelManagement();
     }
     window.channelManagement.loadChannels();
+}
+
+// 缺失的全局函数定义
+function openAddChannelModal() {
+    // TODO: 实现添加频道模态框
+    showToast('添加频道功能正在开发中', 'info');
+}
+
+function openChannelFilterModal() {
+    // TODO: 实现高级筛选模态框
+    showToast('高级筛选功能正在开发中', 'info');
+}
+
+function sortChannels(field) {
+    if (window.channelManagement) {
+        window.channelManagement.sortChannels(field);
+    }
+}
+
+function previousPage() {
+    if (window.channelManagement) {
+        window.channelManagement.previousPage();
+    }
+}
+
+function nextPage() {
+    if (window.channelManagement) {
+        window.channelManagement.nextPage();
+    }
+}
+
+// Toast 消息显示函数
+function showToast(message, type = 'info') {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+    
+    const toast = document.createElement('div');
+    toast.className = `toast bg-white border rounded-lg shadow-lg p-4 max-w-sm transition-all duration-300 transform translate-x-full opacity-0`;
+    
+    const colors = {
+        success: 'border-green-200 text-green-800',
+        error: 'border-red-200 text-red-800',
+        warning: 'border-yellow-200 text-yellow-800',
+        info: 'border-blue-200 text-blue-800'
+    };
+    
+    const icons = {
+        success: 'fas fa-check-circle',
+        error: 'fas fa-times-circle',
+        warning: 'fas fa-exclamation-triangle',
+        info: 'fas fa-info-circle'
+    };
+    
+    toast.className += ` ${colors[type] || colors.info}`;
+    
+    toast.innerHTML = `
+        <div class="flex items-center">
+            <i class="${icons[type] || icons.info} mr-3"></i>
+            <span>${message}</span>
+            <button onclick="this.parentElement.parentElement.remove()" class="ml-4 text-gray-400 hover:text-gray-600">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    `;
+    
+    container.appendChild(toast);
+    
+    // 显示动画
+    setTimeout(() => {
+        toast.classList.remove('translate-x-full', 'opacity-0');
+    }, 100);
+    
+    // 自动消失
+    setTimeout(() => {
+        toast.classList.add('translate-x-full', 'opacity-0');
+        setTimeout(() => toast.remove(), 300);
+    }, 5000);
 }

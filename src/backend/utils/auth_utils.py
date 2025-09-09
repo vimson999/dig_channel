@@ -83,6 +83,50 @@ def require_login(f):
     def decorated_function(*args, **kwargs):
         current_user = get_current_user()
         
+        # 开发环境：如果没有用户，使用admin用户或创建默认用户
+        if not current_user and current_app.config.get('DEBUG', False):
+            try:
+                # 优先使用已有的admin用户(通常有数据)
+                admin_user = User.query.filter_by(username='admin').first()
+                if admin_user and admin_user.is_active:
+                    print(f"🔧 [开发模式] 使用admin用户: {admin_user.username} (ID: {admin_user.id})")
+                    current_user = admin_user
+                else:
+                    # 如果没有admin用户，则查找或创建test_user
+                    test_user = User.query.filter_by(username='test_user').first()
+                    if not test_user:
+                        from models import db
+                        test_user = User(
+                            username='test_user',
+                            email='test@example.com',
+                            display_name='测试用户',
+                            is_admin=True
+                        )
+                        db.session.add(test_user)
+                        try:
+                            db.session.commit()
+                            print(f"🔧 [开发模式] 创建默认测试用户: {test_user.username}")
+                        except Exception as e:
+                            db.session.rollback()
+                            print(f"❌ 创建测试用户失败: {e}")
+                            # 尝试再次查找
+                            test_user = User.query.filter_by(username='test_user').first()
+                    
+                    if test_user:
+                        print(f"🔧 [开发模式] 使用测试用户: {test_user.username} (ID: {test_user.id})")
+                        current_user = test_user
+            except Exception as db_error:
+                print(f"🔧 [开发模式] 数据库连接失败，创建临时用户对象: {db_error}")
+                # 数据库连接失败时，创建一个临时用户对象
+                class TempUser:
+                    def __init__(self):
+                        self.id = 1
+                        self.username = 'temp_user'
+                        self.email = 'temp@example.com'
+                        self.display_name = '临时用户'
+                        self.is_admin = True
+                current_user = TempUser()
+        
         if not current_user:
             return handle_api_error(401, "请先登录")
         

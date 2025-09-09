@@ -8,10 +8,57 @@
 from datetime import datetime, date
 from typing import List, Optional, Dict, Any
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import and_, desc
 from models import db, Channel, ChannelData
 
 class ChannelService:
     """频道管理服务类"""
+    
+    @staticmethod
+    def _enrich_channels_with_latest_data(channels: List[Channel]) -> List[Dict[str, Any]]:
+        """为频道列表添加最新数据，使用优化的批量查询避免N+1问题
+        
+        Args:
+            channels: 频道对象列表
+            
+        Returns:
+            List[Dict]: 包含latest_data字段的频道字典列表
+        """
+        if not channels:
+            return []
+        
+        # 批量获取所有频道的最新数据，避免N+1查询
+        channel_ids = [channel.id for channel in channels]
+        
+        # 使用子查询找到每个频道的最新日期
+        latest_dates_subquery = db.session.query(
+            ChannelData.channel_id,
+            db.func.max(ChannelData.date).label('max_date')
+        ).filter(
+            ChannelData.channel_id.in_(channel_ids)
+        ).group_by(ChannelData.channel_id).subquery()
+        
+        # 获取每个频道的最新数据记录
+        latest_data_query = db.session.query(ChannelData).join(
+            latest_dates_subquery,
+            and_(
+                ChannelData.channel_id == latest_dates_subquery.c.channel_id,
+                ChannelData.date == latest_dates_subquery.c.max_date
+            )
+        ).all()
+        
+        # 创建映射字典以快速查找
+        latest_data_map = {data.channel_id: data for data in latest_data_query}
+            
+        # 构建结果
+        result = []
+        for channel in channels:
+            channel_dict = channel.to_dict()
+            latest_data = latest_data_map.get(channel.id)
+            channel_dict['latest_data'] = latest_data.to_dict() if latest_data else None
+            result.append(channel_dict)
+            
+        return result
     
     @staticmethod
     def create_channel(user_id: int, name: str, channel_id: str, url: str, 
@@ -85,7 +132,7 @@ class ChannelService:
             order_by_sort: 是否按sort字段排序，默认False
             
         Returns:
-            List[Dict]: 频道列表
+            List[Dict]: 频道列表，包含latest_data字段
         """
         try:
             query = Channel.query.filter_by(user_id=user_id)
@@ -97,8 +144,42 @@ class ChannelService:
                 channels = query.order_by(Channel.sort.asc(), Channel.id.asc()).all()
             else:
                 channels = query.order_by(Channel.created_at.desc()).all()
+            
+            if not channels:
+                return []
+            
+            # 批量获取所有频道的最新数据，避免N+1查询
+            channel_ids = [channel.id for channel in channels]
+            
+            # 使用子查询找到每个频道的最新日期
+            latest_dates_subquery = db.session.query(
+                ChannelData.channel_id,
+                db.func.max(ChannelData.date).label('max_date')
+            ).filter(
+                ChannelData.channel_id.in_(channel_ids)
+            ).group_by(ChannelData.channel_id).subquery()
+            
+            # 获取每个频道的最新数据记录
+            latest_data_query = db.session.query(ChannelData).join(
+                latest_dates_subquery,
+                and_(
+                    ChannelData.channel_id == latest_dates_subquery.c.channel_id,
+                    ChannelData.date == latest_dates_subquery.c.max_date
+                )
+            ).all()
+            
+            # 创建映射字典以快速查找
+            latest_data_map = {data.channel_id: data for data in latest_data_query}
                 
-            return [channel.to_dict() for channel in channels]
+            # 构建结果
+            result = []
+            for channel in channels:
+                channel_dict = channel.to_dict()
+                latest_data = latest_data_map.get(channel.id)
+                channel_dict['latest_data'] = latest_data.to_dict() if latest_data else None
+                result.append(channel_dict)
+                
+            return result
             
         except Exception as e:
             print(f"获取用户频道列表失败: {e}")
@@ -113,7 +194,7 @@ class ChannelService:
             order_by_sort: 是否按sort字段排序，默认False
             
         Returns:
-            List[Dict]: 频道列表
+            List[Dict]: 频道列表，包含latest_data字段
         """
         try:
             query = Channel.query
@@ -125,8 +206,42 @@ class ChannelService:
                 channels = query.order_by(Channel.sort.asc(), Channel.id.asc()).all()
             else:
                 channels = query.order_by(Channel.created_at.desc()).all()
+            
+            if not channels:
+                return []
+            
+            # 批量获取所有频道的最新数据，避免N+1查询
+            channel_ids = [channel.id for channel in channels]
+            
+            # 使用子查询找到每个频道的最新日期
+            latest_dates_subquery = db.session.query(
+                ChannelData.channel_id,
+                db.func.max(ChannelData.date).label('max_date')
+            ).filter(
+                ChannelData.channel_id.in_(channel_ids)
+            ).group_by(ChannelData.channel_id).subquery()
+            
+            # 获取每个频道的最新数据记录
+            latest_data_query = db.session.query(ChannelData).join(
+                latest_dates_subquery,
+                and_(
+                    ChannelData.channel_id == latest_dates_subquery.c.channel_id,
+                    ChannelData.date == latest_dates_subquery.c.max_date
+                )
+            ).all()
+            
+            # 创建映射字典以快速查找
+            latest_data_map = {data.channel_id: data for data in latest_data_query}
                 
-            return [channel.to_dict() for channel in channels]
+            # 构建结果
+            result = []
+            for channel in channels:
+                channel_dict = channel.to_dict()
+                latest_data = latest_data_map.get(channel.id)
+                channel_dict['latest_data'] = latest_data.to_dict() if latest_data else None
+                result.append(channel_dict)
+                
+            return result
             
         except Exception as e:
             print(f"获取频道列表失败: {e}")
@@ -295,7 +410,7 @@ class ChannelService:
             else:
                 channels = query.order_by(Channel.created_at.desc()).all()
                 
-            return [channel.to_dict() for channel in channels]
+            return ChannelService._enrich_channels_with_latest_data(channels)
             
         except Exception as e:
             print(f"搜索用户频道失败: {e}")
@@ -327,7 +442,7 @@ class ChannelService:
             else:
                 channels = query.order_by(Channel.created_at.desc()).all()
                 
-            return [channel.to_dict() for channel in channels]
+            return ChannelService._enrich_channels_with_latest_data(channels)
             
         except Exception as e:
             print(f"搜索频道失败: {e}")
@@ -358,7 +473,7 @@ class ChannelService:
             else:
                 channels = query.order_by(Channel.created_at.desc()).all()
                 
-            return [channel.to_dict() for channel in channels]
+            return ChannelService._enrich_channels_with_latest_data(channels)
             
         except Exception as e:
             print(f"获取用户分类频道失败: {e}")
@@ -388,7 +503,20 @@ class ChannelService:
             else:
                 channels = query.order_by(Channel.created_at.desc()).all()
                 
-            return [channel.to_dict() for channel in channels]
+            # 为每个频道添加latest_data字段
+            result = []
+            for channel in channels:
+                channel_dict = channel.to_dict()
+                
+                # 获取频道的最新数据
+                latest_data = ChannelData.query.filter_by(
+                    channel_id=channel.id
+                ).order_by(ChannelData.date.desc()).first()
+                
+                channel_dict['latest_data'] = latest_data.to_dict() if latest_data else None
+                result.append(channel_dict)
+                
+            return result
             
         except Exception as e:
             print(f"获取分类频道失败: {e}")
