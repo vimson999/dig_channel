@@ -1027,10 +1027,8 @@ function openAddChannelModal() {
     showToast('添加频道功能正在开发中', 'info');
 }
 
-function openChannelFilterModal() {
-    // TODO: 实现高级筛选模态框
-    showToast('高级筛选功能正在开发中', 'info');
-}
+// openChannelFilterModal 函数在 data-table.js 中实现
+// 这里移除重复定义避免函数覆盖
 
 function sortChannels(field) {
     if (window.channelManagement) {

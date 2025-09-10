@@ -247,14 +247,31 @@ class DataCollectorService:
         if self.config.get('twitter_enabled', False):
             self.collectors[PlatformType.TWITTER] = TwitterCollector(self.config)
             
-        # 未来可扩展其他平台
-        # if self.config.get('reddit_enabled', False):
-        #     self.collectors[PlatformType.REDDIT] = RedditCollector(self.config)
+        # Reddit采集器 - 免费API
+        if self.config.get('reddit_enabled', True):  # 默认启用Reddit
+            from .reddit_collector import RedditCollector
+            self.collectors[PlatformType.REDDIT] = RedditCollector(self.config)
+            
+        # RSS采集器 - 免费数据源
+        if self.config.get('rss_enabled', True):  # 默认启用RSS
+            from .rss_collector import RSSCollector
+            self.rss_collector = RSSCollector()
     
     def collect_all_platforms(self, keywords: List[str], limit_per_platform: int = 50) -> List[OpportunitySignal]:
         """从所有平台采集数据"""
         all_signals = []
         
+        # 首先从RSS源采集数据（免费且可靠）
+        if hasattr(self, 'rss_collector'):
+            try:
+                logger.info("开始从RSS源采集数据")
+                rss_signals = self.rss_collector.collect_all_sources(limit_per_platform)
+                all_signals.extend(rss_signals)
+                logger.info(f"RSS源采集到 {len(rss_signals)} 个信号")
+            except Exception as e:
+                logger.error(f"RSS采集失败: {e}")
+        
+        # 然后从其他平台采集
         for platform, collector in self.collectors.items():
             try:
                 logger.info(f"开始采集 {platform.value} 平台数据")
@@ -262,7 +279,8 @@ class DataCollectorService:
                 
                 # 计算可信度分数
                 for signal in signals:
-                    signal.confidence_score = collector.calculate_confidence_score(signal)
+                    if hasattr(collector, 'calculate_confidence_score'):
+                        signal.confidence_score = collector.calculate_confidence_score(signal)
                 
                 all_signals.extend(signals)
                 logger.info(f"{platform.value} 平台采集到 {len(signals)} 个信号")
@@ -285,10 +303,14 @@ class DataCollectorService:
 
 # 配置示例
 DEFAULT_CONFIG = {
-    'twitter_enabled': True,
+    'twitter_enabled': False,  # 禁用昂贵的Twitter API
     'twitter_api_key': 'your_api_key',
     'twitter_bearer_token': 'your_bearer_token',
-    'reddit_enabled': False,
+    'reddit_enabled': True,  # 启用免费Reddit API
+    'reddit_client_id': 'your_reddit_client_id',
+    'reddit_client_secret': 'your_reddit_client_secret',
+    'reddit_user_agent': 'OpportunityBot/1.0',
+    'rss_enabled': True,  # 启用免费RSS数据源
     'collection_interval': 3600,  # 1小时
     'max_signals_per_run': 200,
     'min_confidence_threshold': 0.3

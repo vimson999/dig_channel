@@ -235,8 +235,11 @@ class YouTubeDataApp {
 
             const channelClass = rank === 1 ? 'text-gray-800 font-medium' : 'text-gray-700';
 
+            // 构建跳转链接，将频道信息作为参数传递
+            const videoPageUrl = `videos.html?channel_id=${item.channel_id}&channel_name=${encodeURIComponent(item.channel_name)}`;
+
             return `
-                <div class="ranking-item ${cardClass} rounded-lg p-3 transition-all duration-200 cursor-pointer hover:shadow-md transform hover:-translate-y-0.5">
+                <a href="${videoPageUrl}" class="ranking-item ${cardClass} rounded-lg p-3 transition-all duration-200 cursor-pointer hover:shadow-md transform hover:-translate-y-0.5 block">
                     <div class="flex items-center justify-between">
                         <div class="flex items-center gap-3">
                             <div class="w-8 h-8 flex items-center justify-center">
@@ -251,7 +254,7 @@ class YouTubeDataApp {
                             ${getTrendIcon(value, type)}
                         </div>
                     </div>
-                </div>
+                </a>
             `;
         }).join('');
 
