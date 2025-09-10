@@ -205,101 +205,7 @@ margin: 0;
     <!-- Toast 容器 -->
     <div id="toast-container" class="toast-container space-y-2"></div>
 
-    <!-- 主导航栏 -->
-    <header class="bg-white/80 backdrop-blur-lg border-b border-gray-200/50 sticky top-0 z-40" role="banner">
-        <div class="max-w-[1440px] mx-auto px-6 py-4">
-            <div class="flex items-center justify-between">
-                <!-- Logo 和标题 -->
-                <div class="flex items-center gap-4">
-                    <div class="w-10 h-10 bg-gradient-to-br from-red-500 to-red-600 rounded-xl flex items-center justify-center shadow-lg">
-                        <i class="fab fa-youtube text-white text-xl"></i>
-                    </div>
-                    <div>
-                        <h1 class="text-xl font-bold text-gray-800">Shioa</h1>
-                        <p class="text-sm text-gray-500">智能数据分析平台</p>
-                    </div>
-                </div>
-                
-                <!-- 导航菜单 -->
-                <nav class="hidden md:flex items-center gap-6" role="navigation" aria-label="主导航">
-                    <a href="#dashboard" id="nav-dashboard" onclick="switchPage('dashboard')" class="nav-link text-primary-600 font-medium px-3 py-2 rounded-lg bg-primary-50 border border-primary-200" aria-current="page">
-                        <i class="fas fa-chart-line mr-2" aria-hidden="true"></i>首页
-                    </a>
-                    <a href="#channels" id="nav-channels" onclick="switchPage('channels')" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-tv mr-2" aria-hidden="true"></i>频道管理
-                    </a>
-                    <a href="videos.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-play mr-2" aria-hidden="true"></i>视频管理
-                    </a>
-                    <a href="trending-radar.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-radar-line mr-2" aria-hidden="true"></i>趋势雷达
-                    </a>
-                    <a href="trending.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-fire mr-2" aria-hidden="true"></i>爆款视频
-                    </a>
-                    <a href="favorites.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-heart mr-2" aria-hidden="true"></i>我的收藏
-                    </a>
-                    <a href="document-converter.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-file-exchange mr-2" aria-hidden="true"></i>文档转换
-                    </a>
-                    <a href="tts.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-microphone mr-2" aria-hidden="true"></i>文本转语音
-                    </a>
-                    <a href="mhtml-pdf.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-file-pdf mr-2" aria-hidden="true"></i>MHTML转PDF
-                    </a>
-                    <a href="student-id-generator.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-id-card mr-2" aria-hidden="true"></i>学生证生成器
-                    </a>
-                    <a href="indie-navigator.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-compass mr-2" aria-hidden="true"></i>商机发现
-                    </a>
-                </nav>
-                
-                <!-- 用户操作区 -->
-                <div class="flex items-center gap-3">
-                    <button class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors" title="设置">
-                        <i class="fas fa-cog"></i>
-                    </button>
-                    <button class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors" title="帮助">
-                        <i class="fas fa-question-circle"></i>
-                    </button>
-                    
-                    <!-- 用户下拉菜单 -->
-                    <div class="relative group">
-                        <button class="flex items-center gap-2 p-2 text-gray-700 hover:bg-gray-100 rounded-lg transition-colors">
-                            <div class="w-8 h-8 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center">
-                                <span class="text-white text-sm font-medium user-avatar">U</span>
-                            </div>
-                            <span class="hidden md:block text-sm font-medium user-name">用户</span>
-                            <i class="fas fa-chevron-down text-xs text-gray-400"></i>
-                        </button>
-                        
-                        <!-- 下拉菜单 -->
-                        <div class="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-gray-200 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 z-50">
-                            <div class="py-2">
-                                <div class="px-4 py-2 border-b border-gray-100">
-                                    <p class="text-sm font-medium text-gray-900 user-name">用户</p>
-                                    <p class="text-xs text-gray-500">管理员</p>
-                                </div>
-                                <a href="#" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors">
-                                    <i class="fas fa-user mr-2"></i>个人资料
-                                </a>
-                                <a href="#" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors">
-                                    <i class="fas fa-cog mr-2"></i>账户设置
-                                </a>
-                                <hr class="my-1">
-                                <button onclick="logout()" class="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors">
-                                    <i class="fas fa-sign-out-alt mr-2"></i>退出登录
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </header>
+    <!-- 导航由 shared-navigation.js 统一管理，实现真正的组件复用 -->
 
     <!-- 面包屑导航 -->
     <div class="max-w-[1440px] mx-auto px-6 py-4">
@@ -1110,13 +1016,13 @@ chart.setOption(option);
 // 设置全局API配置
 window.API_BASE_URL = API_BASE_URL;
 </script>
-<script src="js/config.js?v=20250720-002"></script>
-<script src="js/utils.js?v=20250720-002"></script>
-<script src="js/api.js?v=20250720-002"></script>
-<script src="js/navigation.js"></script>
-<script src="js/data-table.js?v=20250720-002"></script>
-<script src="js/dashboard.js?v=20250720-002"></script>
-<script src="js/new-main.js?v=20250720-002"></script>
-<script src="js/channel-management.js?v=20250720-002"></script>
+<script src="js/config.js?v=20250110-001"></script>
+<script src="js/utils.js?v=20250110-001"></script>
+<script src="js/api.js?v=20250110-001"></script>
+<script src="js/data-table.js?v=20250110-001"></script>
+<script src="js/dashboard.js?v=20250110-001"></script>
+<script src="js/new-main.js?v=20250110-001"></script>
+<script src="js/channel-management.js?v=20250110-001"></script>
+<script src="js/shared-navigation.js"></script>
 </body>
 </html>
