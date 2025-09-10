@@ -137,6 +137,10 @@ class APIClient {
         return this.delete(`${CONFIG.ENDPOINTS.CHANNELS}/${channelId}`);
     }
 
+    async addChannel(url, name = null, cpm = 2.5) {
+        return this.post(CONFIG.ENDPOINTS.CHANNELS, { url, name, cpm });
+    }
+
     async previewChannel(url) {
         return this.post(CONFIG.ENDPOINTS.CHANNEL_PREVIEW, { url });
     }

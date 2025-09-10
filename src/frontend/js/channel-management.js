@@ -1023,8 +1023,148 @@ function initChannelManagement() {
 
 // 缺失的全局函数定义
 function openAddChannelModal() {
-    // TODO: 实现添加频道模态框
-    showToast('添加频道功能正在开发中', 'info');
+    const modal = document.getElementById('addChannelModal');
+    const content = document.getElementById('modalContent');
+    
+    if (modal && content) {
+        // 清空表单
+        document.getElementById('addChannelForm').reset();
+        
+        // 显示模态框
+        modal.classList.remove('hidden');
+        document.body.style.overflow = 'hidden';
+        
+        // 动画效果
+        setTimeout(() => {
+            content.classList.remove('scale-95', 'opacity-0');
+            content.classList.add('scale-100', 'opacity-100');
+        }, 10);
+        
+        // 点击模态框外部关闭
+        modal.addEventListener('click', (e) => {
+            if (e.target.id === 'addChannelModal') {
+                closeAddChannelModal();
+            }
+        });
+    } else {
+        showToast('添加频道功能暂时不可用', 'warning');
+    }
+}
+
+// 关闭添加频道模态框
+function closeAddChannelModal() {
+    const modal = document.getElementById('addChannelModal');
+    const content = document.getElementById('modalContent');
+    
+    if (modal && content) {
+        // 动画效果
+        content.classList.remove('scale-100', 'opacity-100');
+        content.classList.add('scale-95', 'opacity-0');
+        
+        setTimeout(() => {
+            modal.classList.add('hidden');
+            document.body.style.overflow = 'auto';
+            document.getElementById('addChannelForm').reset();
+            
+            // 清空预览内容
+            const previewContent = document.getElementById('preview-content');
+            if (previewContent) {
+                previewContent.innerHTML = '';
+            }
+        }, 300);
+    }
+}
+
+// 预览频道
+async function previewChannel() {
+    const url = document.getElementById('channel-url').value.trim();
+    if (!url) {
+        showToast('请输入频道URL', 'warning');
+        return;
+    }
+
+    try {
+        showToast('正在预览频道...', 'info');
+        const response = await api.previewChannel(url);
+        
+        if (response.success) {
+            const previewContent = document.getElementById('preview-content');
+            const channelInfo = response.data.channel_info;
+            const alreadyExists = response.data.already_exists;
+            
+            previewContent.innerHTML = `
+                <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                    <div class="flex items-center gap-4 mb-4">
+                        <img src="${channelInfo.thumbnail}" alt="频道头像" class="w-16 h-16 rounded-full">
+                        <div>
+                            <h4 class="font-bold text-lg">${channelInfo.title}</h4>
+                            <p class="text-gray-600 text-sm">${channelInfo.description.substring(0, 100)}...</p>
+                        </div>
+                    </div>
+                    
+                    <div class="grid grid-cols-3 gap-4 text-sm">
+                        <div class="text-center">
+                            <div class="font-bold text-blue-600">${Utils.formatNumber(channelInfo.subscriber_count)}</div>
+                            <div class="text-gray-500">订阅数</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="font-bold text-green-600">${Utils.formatNumber(channelInfo.view_count)}</div>
+                            <div class="text-gray-500">总播放量</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="font-bold text-purple-600">${channelInfo.video_count}</div>
+                            <div class="text-gray-500">视频数</div>
+                        </div>
+                    </div>
+                    
+                    ${alreadyExists ? 
+                        '<div class="mt-4 p-3 bg-yellow-100 border border-yellow-300 rounded text-yellow-800 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>该频道已存在于系统中</div>' : 
+                        '<div class="mt-4 p-3 bg-green-100 border border-green-300 rounded text-green-800 text-sm"><i class="fas fa-check mr-2"></i>可以添加该频道</div>'
+                    }
+                </div>
+            `;
+            showToast('预览成功', 'success');
+        } else {
+            showToast('预览失败: ' + response.message, 'error');
+        }
+    } catch (error) {
+        console.error('预览频道失败:', error);
+        showToast('预览频道失败', 'error');
+    }
+}
+
+// 添加频道
+async function addChannel() {
+    const url = document.getElementById('channel-url').value.trim();
+    if (!url) {
+        showToast('请输入频道URL', 'warning');
+        return;
+    }
+
+    try {
+        showToast('正在添加频道...', 'info');
+        const response = await api.addChannel(url);
+        
+        if (response.success) {
+            showToast('频道添加成功', 'success');
+            closeAddChannelModal();
+            
+            // 重新加载频道数据
+            if (window.channelManagement) {
+                window.channelManagement.loadChannels();
+            }
+            
+            // 重新加载首页数据
+            if (window.app && window.app.loadInitialData) {
+                window.app.loadInitialData();
+            }
+        } else {
+            showToast('添加失败: ' + response.message, 'error');
+        }
+    } catch (error) {
+        console.error('添加频道失败:', error);
+        showToast('添加频道失败', 'error');
+    }
 }
 
 // openChannelFilterModal 函数在 data-table.js 中实现
