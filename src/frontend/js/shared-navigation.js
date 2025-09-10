@@ -182,6 +182,12 @@ class SharedNavigation {
                 dropdown: true,
                 items: [
                     {
+                        id: 'channels',
+                        name: '频道管理',
+                        icon: 'fas fa-tv',
+                        href: 'channels.html'
+                    },
+                    {
                         id: 'videos',
                         name: '视频管理',
                         icon: 'fas fa-play',

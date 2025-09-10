@@ -121,9 +121,11 @@ def create_channel(current_user):
             return handle_api_error(400, "频道URL不能为空")
         
         # 可选参数
-        name = data.get('name', '').strip() or None
+        name = data.get('name') or ''
+        name = name.strip() if name else None
         cpm = float(data.get('cpm', 1.00))
-        category = data.get('category', '').strip() or None
+        category = data.get('category') or ''
+        category = category.strip() if category else None
         
         # 验证CPM值
         if cpm < 0:
@@ -176,7 +178,8 @@ def update_channel(channel_id):
         update_params = {}
         
         if 'name' in data:
-            name = data['name'].strip()
+            name = data['name'] or ''
+            name = name.strip() if name else ''
             if not name:
                 return handle_api_error(400, "频道名称不能为空")
             update_params['name'] = name
@@ -188,7 +191,8 @@ def update_channel(channel_id):
             update_params['cpm'] = cpm
         
         if 'category' in data:
-            update_params['category'] = data['category'].strip() or None
+            category = data['category'] or ''
+            update_params['category'] = category.strip() if category else None
         
         if 'is_active' in data:
             update_params['is_active'] = bool(data['is_active'])

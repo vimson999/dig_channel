@@ -38,7 +38,7 @@ class IndieNavigator {
     }
     
     async checkAuth() {
-        // 用户认证现在由 navigation.js 统一处理，这里不需要重复处理
+        // 用户认证现在由 shared-navigation.js 统一处理，这里不需要重复处理
         console.log('🔑 [AUTH] 用户认证由导航组件统一管理');
     }
     
@@ -335,9 +335,9 @@ class IndieNavigator {
                 case 'newest':
                     return new Date(b.publishedAt) - new Date(a.publishedAt);
                 case 'revenue':
-                    return (b.metrics.mrr || b.metrics.arr || b.metrics.revenue || 0) - (a.metrics.mrr || a.metrics.arr || a.metrics.revenue || 0);
+                    return ((b.metrics?.mrr || b.metrics?.arr || b.metrics?.revenue || 0) - (a.metrics?.mrr || a.metrics?.arr || a.metrics?.revenue || 0));
                 case 'users':
-                    return (b.metrics.users || 0) - (a.metrics.users || 0);
+                    return (b.metrics?.users || 0) - (a.metrics?.users || 0);
                 case 'engagement':
                     return (b.engagement || 0) - (a.engagement || 0);
                 default:
@@ -388,11 +388,11 @@ class IndieNavigator {
             <div class="flex items-start justify-between mb-4">
                 <div class="flex items-center gap-3">
                     <div class="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center text-white text-sm font-bold">
-                        ${opportunity.creatorName.charAt(0).toUpperCase()}
+                        ${(opportunity.creatorName || '?').charAt(0).toUpperCase()}
                     </div>
                     <div>
-                        <div class="font-semibold text-gray-800">${opportunity.creatorName}</div>
-                        <div class="text-sm text-gray-500">${opportunity.creatorHandle} • ${timeAgo}</div>
+                        <div class="font-semibold text-gray-800">${opportunity.creatorName || '未知创作者'}</div>
+                        <div class="text-sm text-gray-500">${opportunity.creatorHandle || '未知账号'} • ${timeAgo}</div>
                     </div>
                 </div>
                 <div class="flex gap-2">
@@ -420,11 +420,11 @@ class IndieNavigator {
             
             <div class="flex items-center justify-between text-sm text-gray-500">
                 <div class="flex items-center gap-4">
-                    <span><i class="fas fa-heart mr-1"></i>${opportunity.metrics.likes || 0}</span>
-                    <span><i class="fas fa-retweet mr-1"></i>${opportunity.metrics.retweets || 0}</span>
+                    <span><i class="fas fa-heart mr-1"></i>${opportunity.metrics?.likes || 0}</span>
+                    <span><i class="fas fa-retweet mr-1"></i>${opportunity.metrics?.retweets || 0}</span>
                 </div>
                 <div class="flex gap-1">
-                    ${opportunity.tags.slice(0, 2).map(tag => 
+                    ${(opportunity.tags || []).slice(0, 2).map(tag => 
                         `<span class="px-2 py-1 bg-gray-100 rounded text-xs">${tag}</span>`
                     ).join('')}
                 </div>
@@ -435,21 +435,33 @@ class IndieNavigator {
     }
     
     getPrimaryMetric(opportunity) {
-        if (opportunity.metrics.mrr) {
-            return `$${(opportunity.metrics.mrr / 1000).toFixed(1)}k MRR`;
-        } else if (opportunity.metrics.arr) {
-            return `$${(opportunity.metrics.arr / 1000).toFixed(1)}k ARR`;
-        } else if (opportunity.metrics.revenue) {
-            return `$${(opportunity.metrics.revenue / 1000).toFixed(1)}k 收入`;
-        } else if (opportunity.metrics.users) {
-            return `${(opportunity.metrics.users / 1000).toFixed(1)}k 用户`;
+        // 安全检查 metrics 对象是否存在
+        if (!opportunity.metrics) {
+            return '新项目';
+        }
+        
+        const metrics = opportunity.metrics;
+        if (metrics.mrr) {
+            return `$${(metrics.mrr / 1000).toFixed(1)}k MRR`;
+        } else if (metrics.arr) {
+            return `$${(metrics.arr / 1000).toFixed(1)}k ARR`;
+        } else if (metrics.revenue) {
+            return `$${(metrics.revenue / 1000).toFixed(1)}k 收入`;
+        } else if (metrics.users) {
+            return `${(metrics.users / 1000).toFixed(1)}k 用户`;
         }
         return '新项目';
     }
     
     getSecondaryMetric(opportunity) {
-        if (opportunity.metrics.users && (opportunity.metrics.mrr || opportunity.metrics.arr || opportunity.metrics.revenue)) {
-            return `${(opportunity.metrics.users / 1000).toFixed(1)}k 用户`;
+        // 安全检查 metrics 对象是否存在
+        if (!opportunity.metrics) {
+            return null;
+        }
+        
+        const metrics = opportunity.metrics;
+        if (metrics.users && (metrics.mrr || metrics.arr || metrics.revenue)) {
+            return `${(metrics.users / 1000).toFixed(1)}k 用户`;
         }
         return null;
     }
@@ -521,20 +533,20 @@ class IndieNavigator {
                 
                 <!-- 关键指标 -->
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    ${opportunity.metrics.mrr ? `
+                    ${opportunity.metrics?.mrr ? `
                         <div class="text-center p-4 bg-green-50 rounded-lg">
                             <div class="text-2xl font-bold text-green-600">$${(opportunity.metrics.mrr / 1000).toFixed(1)}k</div>
                             <div class="text-sm text-gray-600">月经常性收入</div>
                         </div>
                     ` : ''}
-                    ${opportunity.metrics.users ? `
+                    ${opportunity.metrics?.users ? `
                         <div class="text-center p-4 bg-blue-50 rounded-lg">
                             <div class="text-2xl font-bold text-blue-600">${(opportunity.metrics.users / 1000).toFixed(1)}k</div>
                             <div class="text-sm text-gray-600">用户数量</div>
                         </div>
                     ` : ''}
                     <div class="text-center p-4 bg-purple-50 rounded-lg">
-                        <div class="text-2xl font-bold text-purple-600">${opportunity.metrics.likes || 0}</div>
+                        <div class="text-2xl font-bold text-purple-600">${opportunity.metrics?.likes || 0}</div>
                         <div class="text-sm text-gray-600">点赞数</div>
                     </div>
                     <div class="text-center p-4 bg-orange-50 rounded-lg">

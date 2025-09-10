@@ -456,64 +456,7 @@
         \n        /* 页面标题优化 */\n        .page-title {\n            text-align: center;\n            margin-bottom: 40px;\n        }\n        \n        .page-title h2 {\n            font-size: 2.5rem;\n            font-weight: 800;\n            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #10b981 100%);\n            background-clip: text;\n            -webkit-background-clip: text;\n            -webkit-text-fill-color: transparent;\n            margin: 0 0 12px 0;\n            line-height: 1.2;\n        }\n        \n        .page-title p {\n            color: #64748b;\n            font-size: 1.125rem;\n            margin: 0;\n            max-width: 500px;\n            margin-left: auto;\n            margin-right: auto;\n            line-height: 1.6;\n        }\n        \n        /* 响应式设计 */\n        @media (max-width: 768px) {\n            .converter-container { padding: 16px; }\n            .upload-section { padding: 24px; margin-bottom: 20px; }\n            .upload-area { padding: 40px 20px; }\n            .conversion-options { flex-direction: column; gap: 16px; }\n            .option-group { min-width: auto; }\n        }\n        \n        @media (max-width: 480px) {\n            .upload-area { padding: 32px 16px; }\n            .file-info { padding: 16px; }\n        }\n    </style>
 </head>
 <body class="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen font-sans">
-    <!-- 主导航栏 -->
-    <header class="bg-white/80 backdrop-blur-lg border-b border-gray-200/50 sticky top-0 z-40" role="banner">
-        <div class="max-w-[1440px] mx-auto px-6 py-4">
-            <div class="flex items-center justify-between">
-                <!-- Logo 和标题 -->
-                <div class="flex items-center gap-4">
-                    <div class="w-10 h-10 bg-gradient-to-br from-red-500 to-red-600 rounded-xl flex items-center justify-center shadow-lg">
-                        <i class="fab fa-youtube text-white text-xl"></i>
-                    </div>
-                    <div>
-                        <h1 class="text-xl font-bold text-gray-800">Shioa</h1>
-                        <p class="text-sm text-gray-500">文档转换工具</p>
-                    </div>
-                </div>
-                
-                <!-- 导航菜单 -->
-                <nav class="hidden md:flex items-center gap-6" role="navigation" aria-label="主导航">
-                    <a href="index.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-chart-line mr-2" aria-hidden="true"></i>首页
-                    </a>
-                    <a href="index.html#channels" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-tv mr-2" aria-hidden="true"></i>频道管理
-                    </a>
-                    <a href="videos.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-play mr-2" aria-hidden="true"></i>视频管理
-                    </a>
-                    <a href="trending-radar.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-radar-line mr-2" aria-hidden="true"></i>趋势雷达
-                    </a>
-                    <a href="trending.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-fire mr-2" aria-hidden="true"></i>爆款视频
-                    </a>
-                    <a href="favorites.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-heart mr-2" aria-hidden="true"></i>我的收藏
-                    </a>
-                    <a href="document-converter.html" class="nav-link text-primary-600 font-medium px-3 py-2 rounded-lg bg-primary-50 border border-primary-200" aria-current="page">
-                        <i class="fas fa-file-exchange mr-2" aria-hidden="true"></i>文档转换
-                    </a>
-                    <a href="tts.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-microphone mr-2" aria-hidden="true"></i>文本转语音
-                    </a>
-                    <a href="mhtml-pdf.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-file-pdf mr-2" aria-hidden="true"></i>MHTML转PDF
-                    </a>
-                </nav>
-                
-                <!-- 用户操作区 -->
-                <div class="flex items-center gap-3">
-                    <button class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors" title="设置">
-                        <i class="fas fa-cog"></i>
-                    </button>
-                    <button class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors" title="帮助">
-                        <i class="fas fa-question-circle"></i>
-                    </button>
-                </div>
-            </div>
-        </div>
-    </header>
+    <!-- 导航由 shared-navigation.js 统一管理，实现真正的组件复用 -->
 
     <!-- 面包屑导航 -->
     <div class="max-w-[1440px] mx-auto px-6 py-4">
@@ -620,7 +563,7 @@
     <script src="js/config.js"></script>
     <script src="js/utils.js"></script>
     <script src="js/api.js"></script>
-    <script src="js/navigation.js"></script>
     <script src="js/document-converter.js"></script>
+    <script src="js/shared-navigation.js"></script>
 </body>
 </html>

@@ -79,6 +79,7 @@ class ChannelManagement {
             });
 
             if (response.success) {
+                console.log('🎬 [ChannelMgmt] API响应成功:', response);
                 // 处理后端分页响应格式
                 let channels, pagination;
                 
@@ -108,6 +109,7 @@ class ChannelManagement {
                 
                 // 存储当前页频道数据
                 this.channels = channels;
+                console.log('🎬 [ChannelMgmt] 处理后频道数:', this.channels.length);
                 
                 // 更新分页信息
                 this.totalPages = pagination.pages || 1;
@@ -147,6 +149,7 @@ class ChannelManagement {
             this.showError('加载频道数据失败');
         } finally {
             this.hideLoading();
+            console.log('🎬 [ChannelMgmt] 加载完成，已隐藏加载状态');
         }
     }
 
@@ -326,9 +329,9 @@ class ChannelManagement {
 
     // 渲染频道表格
     renderChannelTable() {
-        const tbody = document.getElementById('channels-tbody');
+        const tbody = document.getElementById('channels-table-body');
         if (!tbody) {
-            console.error('未找到 channels-tbody 元素');
+            console.error('未找到 channels-table-body 元素');
             return;
         }
 

@@ -13,64 +13,7 @@
     <!-- Toast 消息容器 -->
     <div id="toast-container" class="toast-container space-y-2"></div>
 
-    <!-- 主导航栏 -->
-    <header class="bg-white/80 backdrop-blur-lg border-b border-gray-200/50 sticky top-0 z-40">
-        <div class="max-w-[1440px] mx-auto px-6 py-4">
-            <div class="flex items-center justify-between">
-                <!-- Logo 和标题 -->
-                <div class="flex items-center gap-4">
-                    <a href="/" class="flex items-center gap-3 hover:opacity-80 transition-opacity">
-                        <div class="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg">
-                            <i class="fas fa-chart-line text-white text-lg"></i>
-                        </div>
-                        <span class="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">Shioa</span>
-                    </a>
-                </div>
-                
-                <!-- 导航菜单 -->
-                <nav class="hidden md:flex items-center gap-6">
-                    <a href="index.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-chart-line mr-2"></i>首页
-                    </a>
-                    <a href="videos.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-play mr-2"></i>视频管理
-                    </a>
-                    <a href="trending.html" class="nav-link text-gray-600 hover:text-primary-600 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <i class="fas fa-fire mr-2"></i>爆款视频
-                    </a>
-                    <a href="favorites.html" class="nav-link text-primary-600 font-medium px-3 py-2 rounded-lg bg-primary-50 border border-primary-200">
-                        <i class="fas fa-heart mr-2"></i>我的收藏
-                    </a>
-                </nav>
-                
-                <!-- 用户操作区 -->
-                <div class="flex items-center gap-3">
-                    <div class="relative group">
-                        <button class="flex items-center gap-2 p-2 text-gray-700 hover:bg-gray-100 rounded-lg transition-colors">
-                            <div class="w-8 h-8 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center">
-                                <span class="text-white text-sm font-medium user-avatar">U</span>
-                            </div>
-                            <span class="text-sm font-medium user-name">用户</span>
-                            <i class="fas fa-chevron-down text-xs"></i>
-                        </button>
-                        
-                        <!-- 下拉菜单 -->
-                        <div class="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-gray-200 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 z-50">
-                            <div class="py-2">
-                                <div class="px-4 py-2 border-b border-gray-100">
-                                    <p class="text-sm font-medium text-gray-900 user-name">用户</p>
-                                    <p class="text-xs text-gray-500">管理员</p>
-                                </div>
-                                <a href="#" onclick="logout()" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">
-                                    <i class="fas fa-sign-out-alt mr-2"></i>退出登录
-                                </a>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </header>
+    <!-- 导航由 shared-navigation.js 统一管理，实现真正的组件复用 -->
 
     <!-- 面包屑导航 -->
     <div class="max-w-[1440px] mx-auto px-6 py-4">
@@ -85,47 +28,39 @@
 
     <!-- 页面主内容 -->
     <div class="max-w-[1440px] mx-auto px-6 pb-12">
-        <!-- 页面头部 -->
-        <div class="mb-8">
-            <div class="flex items-center justify-between">
-                <div>
-                    <h1 class="text-3xl font-bold text-gray-900 mb-2">我的收藏</h1>
-                    <p class="text-gray-600">管理您收藏的精彩视频</p>
-                </div>
-                <div class="flex items-center gap-4">
-                    <!-- 统计信息 -->
-                    <div class="bg-white rounded-lg px-4 py-2 shadow-sm border">
-                        <div class="text-sm text-gray-500">收藏总数</div>
-                        <div class="text-lg font-semibold text-gray-900" id="total-favorites">0</div>
-                    </div>
-                    <!-- 清空收藏按钮 -->
-                    <button onclick="clearAllFavorites()" class="px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg border border-red-200 transition-colors">
-                        <i class="fas fa-trash mr-2"></i>清空收藏
-                    </button>
-                </div>
-            </div>
-        </div>
-
         <!-- 筛选和排序控制 -->
         <div class="bg-white rounded-lg shadow-sm border mb-6">
-            <div class="p-4 flex items-center justify-between flex-wrap gap-4">
-                <div class="flex items-center gap-4">
-                    <div>
-                        <label class="text-sm font-medium text-gray-700 mr-2">排序方式:</label>
-                        <select id="sort-select" class="border border-gray-300 rounded-md px-3 py-1 text-sm" onchange="changeSorting()">
-                            <option value="favorited_at,desc">收藏时间 (最新)</option>
-                            <option value="favorited_at,asc">收藏时间 (最早)</option>
-                            <option value="hot_score,desc">热度评分 (高到低)</option>
-                            <option value="hot_score,asc">热度评分 (低到高)</option>
-                            <option value="view_count,desc">播放量 (高到低)</option>
-                            <option value="view_count,asc">播放量 (低到高)</option>
-                        </select>
+            <div class="p-4">
+                <div class="flex items-center justify-between flex-wrap gap-4">
+                    <div class="flex items-center gap-6">
+                        <!-- 统计信息 -->
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm text-gray-500">收藏总数:</span>
+                            <span class="text-lg font-semibold text-gray-900" id="total-favorites">0</span>
+                        </div>
+                        <!-- 排序选择 -->
+                        <div class="flex items-center gap-2">
+                            <label class="text-sm font-medium text-gray-700">排序方式:</label>
+                            <select id="sort-select" class="border border-gray-300 rounded-md px-3 py-1 text-sm" onchange="changeSorting()">
+                                <option value="favorited_at,desc">收藏时间 (最新)</option>
+                                <option value="favorited_at,asc">收藏时间 (最早)</option>
+                                <option value="hot_score,desc">热度评分 (高到低)</option>
+                                <option value="hot_score,asc">热度评分 (低到高)</option>
+                                <option value="view_count,desc">播放量 (高到低)</option>
+                                <option value="view_count,asc">播放量 (低到高)</option>
+                            </select>
+                        </div>
                     </div>
-                </div>
-                <div>
-                    <button onclick="refreshFavorites()" class="px-4 py-2 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-lg transition-colors">
-                        <i class="fas fa-refresh mr-2"></i>刷新
-                    </button>
+                    <div class="flex items-center gap-3">
+                        <!-- 刷新按钮 -->
+                        <button onclick="refreshFavorites()" class="px-4 py-2 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-lg transition-colors">
+                            <i class="fas fa-refresh mr-2"></i>刷新
+                        </button>
+                        <!-- 清空收藏按钮 -->
+                        <button onclick="clearAllFavorites()" class="px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg border border-red-200 transition-colors">
+                            <i class="fas fa-trash mr-2"></i>清空收藏
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -158,6 +93,12 @@
     </div>
 
     <!-- JavaScript -->
+    <!-- JavaScript -->
+    <script src="js/env.js"></script>
+    <script>
+    // 设置全局API配置
+    window.API_BASE_URL = API_BASE_URL;
+    </script>
     <script src="js/config.js"></script>
     <script src="js/utils.js"></script>
     <script src="js/api.js"></script>
@@ -280,8 +221,8 @@
                             <h3 class="font-medium text-gray-900 mb-2 line-clamp-2">${favorite.title}</h3>
                             <p class="text-sm text-gray-600 mb-2">${favorite.channel_title}</p>
                             <div class="flex items-center gap-4 text-xs text-gray-500 mb-3">
-                                <span><i class="fas fa-eye mr-1"></i>${formatNumber(favorite.view_count)}</span>
-                                <span><i class="fas fa-thumbs-up mr-1"></i>${formatNumber(favorite.like_count)}</span>
+                                <span><i class="fas fa-eye mr-1"></i>${Utils.formatNumber(favorite.view_count)}</span>
+                                <span><i class="fas fa-thumbs-up mr-1"></i>${Utils.formatNumber(favorite.like_count)}</span>
                                 <span><i class="fas fa-fire mr-1"></i>${favorite.hot_score.toFixed(1)}</span>
                             </div>
                             <div class="flex items-center justify-between">
@@ -431,5 +372,6 @@
             favoritesManager = new FavoritesManager();
         });
     </script>
+    <script src="js/shared-navigation.js"></script>
 </body>
 </html>

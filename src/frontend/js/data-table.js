@@ -1,6 +1,7 @@
 // 数据表格模块
 class DataTable {
     constructor() {
+        console.log('📊 [DataTable] 构造函数被调用，初始化数据表格...');
         this.currentPage = 1;
         this.pageSize = 10;
         this.startDate = null;
@@ -14,6 +15,7 @@ class DataTable {
 
     // 初始化
     init() {
+        console.log('📊 [DataTable] init方法被调用...');
         this.bindEvents();
         this.setDefaultDates();
         this.loadTableData();
@@ -71,12 +73,15 @@ class DataTable {
             }
             
             const response = await api.getTableData(params);
+            console.log('📊 [DataTable] API响应:', response);
             this.tableData = response.data;
+            console.log('📊 [DataTable] 处理后的数据:', this.tableData);
             
             this.renderTable();
             this.renderPagination(this.tableData.pagination);
             
             this.hideLoading();
+            console.log('📊 [DataTable] 数据加载完成，已隐藏加载状态');
             
         } catch (error) {
             console.error('加载表格数据失败:', error);
@@ -87,19 +92,32 @@ class DataTable {
 
     // 渲染表格 - 复用new-main.js的renderTable方法
     renderTable() {
+        console.log('📊 [DataTable] 开始渲染表格...');
         const table = document.getElementById('data-table');
-        if (!table) return;
+        if (!table) {
+            console.error('📊 [DataTable] 未找到data-table元素');
+            return;
+        }
         const thead = table.querySelector('thead');
         const tbody = table.querySelector('tbody');
         
+        // 清空tbody，移除"正在加载数据..."
+        console.log('📊 [DataTable] 清空tbody，移除加载状态...');
+        tbody.innerHTML = '';
+        console.log('📊 [DataTable] tbody已清空');
+        
         if (!this.tableData || !this.tableData.channels || this.tableData.channels.length === 0) {
+            console.log('📊 [DataTable] 无数据，显示空状态');
             thead.innerHTML = '<tr><th class="sticky left-0 bg-gray-50 px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-left">日期</th></tr>';
-            tbody.innerHTML = '<tr><td colspan="100%" class="text-center text-muted py-8">暂无数据</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="100%" class="text-center text-gray-500 py-8">暂无数据</td></tr>';
             return;
         }
         
+        console.log('📊 [DataTable] 有数据，渲染复杂表格，频道数:', this.tableData.channels.length);
+        
         // 使用和new-main.js完全相同的渲染逻辑
         this.renderComplexTable(thead, tbody, this.tableData);
+        console.log('📊 [DataTable] 复杂表格渲染完成');
     }
 
     // 复杂表格渲染方法 - 完全复制new-main.js的逻辑
@@ -176,6 +194,8 @@ class DataTable {
             bodyHtml += '</tr>';
         });
         tbody.innerHTML = bodyHtml;
+        console.log('📊 [DataTable] tbody已更新，新内容长度:', bodyHtml.length, '字符');
+        console.log('📊 [DataTable] 表格更新后tbody内容预览:', tbody.innerHTML.substring(0, 200) + '...');
     }
 
     // 渲染表头
@@ -403,10 +423,14 @@ function exportTableData() {
 let dataTableInstance;
 
 document.addEventListener('DOMContentLoaded', function() {
+    console.log('📊 [DataTable] DOM加载完成，开始初始化...');
     // 检查是否在首页且存在数据表格
     const dataTableElement = document.getElementById('data-table');
     if (dataTableElement) {
+        console.log('📊 [DataTable] 找到data-table元素，创建DataTable实例...');
         dataTableInstance = new DataTable();
+    } else {
+        console.log('📊 [DataTable] 未找到data-table元素，跳过初始化');
     }
     
     // 监听标签页切换

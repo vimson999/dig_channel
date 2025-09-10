@@ -774,6 +774,7 @@ class YouTubeDataApp {
     async checkAuthStatus() {
         try {
             console.log('🔐 [Auth] 开始验证认证状态...');
+            
             const token = localStorage.getItem('access_token');
             if (!token) {
                 console.log('❌ [Auth] 没有找到token');
