@@ -940,14 +940,26 @@ async function batchDelete() {
 async function syncAllChannelsFromManagement() {
     if (window.channelManagement) {
         if (!confirm('确定要同步所有频道的数据吗？这将从YouTube获取最新数据。')) return;
-        
+
+        const defaultWorkers = 5;
+        const input = prompt('请输入并行线程数 (1-10)', String(defaultWorkers));
+        if (input === null) {
+            return;
+        }
+
+        const parsed = parseInt(input, 10);
+        const maxWorkers = Math.min(10, Math.max(1, Number.isNaN(parsed) ? defaultWorkers : parsed));
+
         try {
-            window.channelManagement.showLoading('正在同步所有频道数据...');
-            const response = await api.syncAllChannels();
-            
+            window.channelManagement.showLoading(`正在使用 ${maxWorkers} 线程同步频道数据...`);
+            const response = await api.syncAllChannels({ use_parallel: true, max_workers: maxWorkers });
+
             if (response.success) {
+                const data = response.data || {};
+                const duration = typeof data.duration_seconds === 'number' ? `，耗时 ${data.duration_seconds}s` : '';
+                const workerInfo = data.max_workers ? `（${data.max_workers} 线程）` : '';
                 window.channelManagement.showSuccess(
-                    `同步完成！成功: ${response.data.success_count}, 失败: ${response.data.failed_count}`
+                    `同步完成${workerInfo}！成功: ${data.success_count || 0}, 失败: ${data.failed_count || 0}${duration}`
                 );
                 window.channelManagement.loadChannels();
             } else {

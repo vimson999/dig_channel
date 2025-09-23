@@ -604,13 +604,25 @@ class YouTubeDataApp {
         }
 
         try {
-            this.showLoading('正在同步所有频道数据...');
-            const response = await api.syncAllChannels();
+            const defaultWorkers = 5;
+            const input = prompt('请输入并行线程数 (1-10)', String(defaultWorkers));
+            if (input === null) {
+                return;
+            }
+
+            const parsed = parseInt(input, 10);
+            const maxWorkers = Math.min(10, Math.max(1, Number.isNaN(parsed) ? defaultWorkers : parsed));
+
+            this.showLoading(`正在使用 ${maxWorkers} 线程同步所有频道数据...`);
+            const response = await api.syncAllChannels({ use_parallel: true, max_workers: maxWorkers });
             
             if (response.success) {
+                const data = response.data || {};
+                const duration = typeof data.duration_seconds === 'number' ? `，耗时 ${data.duration_seconds}s` : '';
+                const workerInfo = data.max_workers ? `（${data.max_workers} 线程）` : '';
                 this.showToast(
-                    `同步完成！成功: ${response.data.success_count}, 失败: ${response.data.failed_count}`, 
-                    response.data.failed_count > 0 ? 'warning' : 'success'
+                    `同步完成${workerInfo}！成功: ${data.success_count || 0}, 失败: ${data.failed_count || 0}${duration}`, 
+                    (data.failed_count || 0) > 0 ? 'warning' : 'success'
                 );
                 
                 // 自动刷新页面数据

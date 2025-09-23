@@ -150,9 +150,44 @@ class APIClient {
         return this.post(`${CONFIG.ENDPOINTS.CHANNELS}/${channelId}/sync`, data);
     }
 
-    async syncAllChannels(date = null) {
-        const data = date ? { date } : {};
-        return this.post(CONFIG.ENDPOINTS.CHANNEL_SYNC, data);
+    async syncAllChannels(options = {}) {
+        let payload = {};
+
+        if (options instanceof Date) {
+            payload.date = options.toISOString().slice(0, 10);
+        } else if (typeof options === 'string') {
+            payload.date = options;
+        } else if (options && typeof options === 'object') {
+            const { date, use_parallel, use_optimization, max_workers, active_only } = options;
+
+            if (date instanceof Date) {
+                payload.date = date.toISOString().slice(0, 10);
+            } else if (typeof date === 'string') {
+                payload.date = date;
+            }
+
+            if (typeof use_parallel === 'boolean') {
+                payload.use_parallel = use_parallel;
+            }
+
+            if (typeof use_optimization === 'boolean') {
+                // 兼容旧参数命名
+                payload.use_optimization = use_optimization;
+                if (!payload.use_parallel) {
+                    payload.use_parallel = use_optimization;
+                }
+            }
+
+            if (typeof max_workers === 'number' && !Number.isNaN(max_workers)) {
+                payload.max_workers = max_workers;
+            }
+
+            if (typeof active_only === 'boolean') {
+                payload.active_only = active_only;
+            }
+        }
+
+        return this.post(CONFIG.ENDPOINTS.CHANNEL_SYNC, payload);
     }
 
     async getChannelCategories() {

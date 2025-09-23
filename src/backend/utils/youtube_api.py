@@ -197,21 +197,52 @@ class YouTubeAPI:
             Optional[str]: 频道ID
         """
         try:
-            # YouTube API目前不直接支持句柄搜索，使用搜索API
-            params = {
-                'part': 'snippet',
-                'type': 'channel',
-                'q': handle,
-                'maxResults': 1
-            }
-            
-            data = self._make_request('search', params)
-            
-            if data.get('items'):
-                return data['items'][0]['snippet']['channelId']
-            
-            return None
-            
+            handle_lower = (handle or '').strip().lstrip('@').lower()
+            if not handle_lower:
+                return None
+
+            search_terms = [f'@{handle_lower}', handle_lower]
+            checked_ids = set()
+            fallback_channel_id = None
+
+            for term in search_terms:
+                params = {
+                    'part': 'snippet',
+                    'type': 'channel',
+                    'q': term,
+                    'maxResults': 5
+                }
+
+                data = self._make_request('search', params)
+                items = data.get('items') or []
+                if not items:
+                    continue
+
+                for item in items:
+                    channel_id = item['snippet'].get('channelId')
+                    if not channel_id or channel_id in checked_ids:
+                        continue
+                    checked_ids.add(channel_id)
+
+                    channel_info = self.get_channel_info(channel_id)
+                    if not channel_info:
+                        continue
+
+                    custom_url = (channel_info.get('custom_url') or '').lstrip('@').lower()
+                    if custom_url == handle_lower:
+                        return channel_id
+
+                    title = (channel_info.get('title') or '').strip().lower()
+                    normalised_title = title.replace(' ', '').replace('-', '')
+                    normalised_handle = handle_lower.replace('-', '')
+                    if title == handle_lower or normalised_title == normalised_handle:
+                        return channel_id
+
+                    if not fallback_channel_id:
+                        fallback_channel_id = channel_id
+
+            return fallback_channel_id
+
         except Exception as e:
             print(f"通过句柄获取频道ID失败: {e}")
             return None

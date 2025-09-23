@@ -455,6 +455,110 @@ let channelFilterData = {
     selectedStatus: ''
 };
 
+let channelFilterCategories = [];
+
+function buildFallbackChannelCategories() {
+    if (!channelFilterData.allChannels || channelFilterData.allChannels.length === 0) {
+        return [
+            '科技', '生活', '娱乐', '游戏', '教育', '音乐', '美食', '旅行', '其他'
+        ].map(name => ({ name, count: 0 }));
+    }
+
+    const categoryCounts = channelFilterData.allChannels.reduce((acc, channel) => {
+        const rawName = channel && channel.category;
+        const name = rawName && rawName.toString().trim();
+        if (!name) {
+            return acc;
+        }
+        acc[name] = (acc[name] || 0) + 1;
+        return acc;
+    }, {});
+
+    const categories = Object.entries(categoryCounts).map(([name, count]) => ({ name, count }));
+    return categories.sort((a, b) => {
+        if (b.count !== a.count) {
+            return b.count - a.count;
+        }
+        return a.name.localeCompare(b.name, 'zh-Hans-CN');
+    });
+}
+
+function populateCategoryFilterOptions() {
+    const select = document.getElementById('categoryFilter');
+    if (!select) return;
+
+    const previousValue = select.value || channelFilterData.selectedCategory || '';
+
+    const categoriesToRender = (channelFilterCategories && channelFilterCategories.length)
+        ? channelFilterCategories
+        : buildFallbackChannelCategories();
+
+    select.innerHTML = '';
+
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = '所有分类';
+    select.appendChild(defaultOption);
+
+    const seen = new Set();
+    categoriesToRender.forEach(category => {
+        const name = (category && (category.name || category.category || category))
+            ? category.name || category.category || category
+            : '';
+        const trimmedName = name && name.toString().trim();
+        if (!trimmedName || seen.has(trimmedName)) {
+            return;
+        }
+        seen.add(trimmedName);
+
+        const option = document.createElement('option');
+        option.value = trimmedName;
+        if (category && typeof category.count === 'number') {
+            option.textContent = `${trimmedName} (${category.count})`;
+        } else {
+            option.textContent = trimmedName;
+        }
+        select.appendChild(option);
+    });
+
+    const optionsArray = Array.from(select.options);
+    const hasPrevious = previousValue && optionsArray.some(option => option.value === previousValue);
+
+    if (hasPrevious) {
+        select.value = previousValue;
+    } else {
+        select.value = '';
+        if (channelFilterData.selectedCategory) {
+            channelFilterData.selectedCategory = '';
+        }
+    }
+}
+
+async function loadChannelFilterCategories() {
+    const select = document.getElementById('categoryFilter');
+    if (!select) return;
+
+    try {
+        const response = await api.getChannelCategories();
+        if (response.success && response.data && Array.isArray(response.data.categories) && response.data.categories.length) {
+            channelFilterCategories = response.data.categories.filter(category => {
+                const name = category && (category.name || category.category);
+                return Boolean(name);
+            });
+        } else {
+            console.warn('[ChannelFilter] 未获取到分类数据，使用本地分类统计');
+            channelFilterCategories = [];
+        }
+    } catch (error) {
+        console.error('加载频道分类失败:', error);
+        channelFilterCategories = [];
+    }
+
+    populateCategoryFilterOptions();
+    filterChannelList();
+    updateSelectedChannelCount();
+}
+
 // 打开频道筛选弹层
 async function openChannelFilterModal() {
     const modal = document.getElementById('channelFilterModal');
@@ -470,6 +574,9 @@ async function openChannelFilterModal() {
         
         // 加载频道列表
         await loadChannelFilterList();
+
+        // 同步加载频道分类
+        await loadChannelFilterCategories();
         
         // 绑定搜索和分类筛选事件
         bindChannelFilterEvents();
@@ -508,17 +615,18 @@ async function loadChannelFilterList() {
             // 请求所有频道（包括非活跃的）用于筛选
             const response = await api.getChannels({ include_inactive: true, per_page: 1000 });
             channels = response.data.channels || [];
-            channelFilterData.selectedChannelIds = channels.map(channel => channel.id);
-        }
-        
-        channelFilterData.allChannels = channels;
-        channelFilterData.filteredChannels = channels;
-        
-        if (loadingEl) loadingEl.style.display = 'none';
-        
-        // 渲染频道列表
-        renderChannelFilterList();
-        updateSelectedChannelCount();
+        channelFilterData.selectedChannelIds = channels.map(channel => channel.id);
+    }
+    
+    channelFilterData.allChannels = channels;
+    channelFilterData.filteredChannels = channels;
+
+    populateCategoryFilterOptions();
+
+    if (loadingEl) loadingEl.style.display = 'none';
+
+    filterChannelList();
+    updateSelectedChannelCount();
         
     } catch (error) {
         console.error('加载频道列表失败:', error);

@@ -6,7 +6,7 @@
 """
 
 from flask import Blueprint, request, jsonify
-from services import ChannelService, YouTubeSyncService
+from services import ChannelService, YouTubeSyncService, OptimizedChannelSyncService
 from utils.api_utils import validate_json, handle_api_error
 from utils.decorators import validate_request
 from utils.auth_utils import require_login, require_resource_permission, get_current_user
@@ -343,33 +343,47 @@ def sync_all_channels():
     
     Request Body:
         date (str): 目标日期，格式YYYY-MM-DD，可选，默认今天
+        use_parallel (bool): 是否启用并行同步
+        max_workers (int): 并行线程数（1-10）
     
     Returns:
         JSON: 批量同步结果
     """
     try:
         data = request.get_json() or {}
-        
+
         # 解析日期
         target_date = None
-        if 'date' in data:
+        if 'date' in data and data['date']:
             from datetime import datetime
-            target_date = datetime.strptime(data['date'], '%Y-%m-%d').date()
-        
-        # 批量同步
-        result = youtube_sync.sync_all_channels(target_date)
-        
+            target_date = datetime.strptime(str(data['date']), '%Y-%m-%d').date()
+
+        use_parallel = bool(data.get('use_parallel') or data.get('use_optimization'))
+        max_workers = data.get('max_workers', 5)
+        active_only = data.get('active_only', True)
+
+        if use_parallel:
+            optimized_service = OptimizedChannelSyncService()
+            result = optimized_service.sync_all_channels_parallel(
+                target_date=target_date,
+                max_workers=max_workers,
+                active_only=bool(active_only)
+            )
+        else:
+            result = youtube_sync.sync_all_channels(target_date)
+
         if result['success']:
             return jsonify({
                 'success': True,
                 'message': result['message'],
-                'data': result['data']
+                'data': result['data'],
+                'parallel': use_parallel
             })
         else:
             return handle_api_error(500, result['message'])
-            
+
     except ValueError as e:
-        return handle_api_error(400, f"日期格式错误: {str(e)}")
+        return handle_api_error(400, f"参数错误: {str(e)}")
     except Exception as e:
         return handle_api_error(500, f"批量同步失败: {str(e)}")
 
