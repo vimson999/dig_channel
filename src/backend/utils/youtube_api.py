@@ -197,11 +197,28 @@ class YouTubeAPI:
             Optional[str]: 频道ID
         """
         try:
-            handle_lower = (handle or '').strip().lstrip('@').lower()
+            raw_handle = (handle or '').strip()
+            handle_lower = raw_handle.lstrip('@').lower()
             if not handle_lower:
                 return None
 
-            search_terms = [f'@{handle_lower}', handle_lower]
+            # 1. 优先使用官方 forHandle 参数，精准匹配
+            try:
+                params = {
+                    'part': 'id',
+                    'forHandle': handle_lower
+                }
+                data = self._make_request('channels', params)
+                items = data.get('items') or []
+                for item in items:
+                    channel_id = item.get('id')
+                    if channel_id:
+                        return channel_id
+            except Exception as e:  # noqa: F841 - 调试输出
+                # 如果 forHandle 不可用或失败，退回搜索方案
+                pass
+
+            search_terms = [raw_handle, f'@{handle_lower}', handle_lower]
             checked_ids = set()
             fallback_channel_id = None
 
