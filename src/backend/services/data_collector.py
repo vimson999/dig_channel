@@ -26,22 +26,28 @@ class PlatformType(Enum):
 @dataclass
 class OpportunitySignal:
     """商机信号数据结构"""
+
     id: str
     platform: PlatformType
     title: str
     description: str
     author: str
     author_followers: Optional[int]
-    engagement_metrics: Dict[str, int]  # likes, shares, comments etc.
+    engagement_metrics: Dict[str, int]
     keywords: List[str]
     revenue_mention: Optional[str]
     user_count_mention: Optional[str]
     urls: List[str]
     created_at: datetime
     collected_at: datetime
-    confidence_score: float  # 0-1, 商机可信度
-    category: str  # SaaS, AI Tool, Mobile App etc.
+    confidence_score: float
+    category: str
     raw_data: Dict[str, Any]
+    language: Optional[str] = None
+    country: Optional[str] = None
+    tags: Optional[List[str]] = None
+    source_type: str = 'post'
+    metadata: Optional[Dict[str, Any]] = None
 
 class BasePlatformCollector(ABC):
     """平台数据采集器基类"""
@@ -141,6 +147,7 @@ class TwitterCollector(BasePlatformCollector):
     
     def _parse_tweet_to_signal(self, tweet: Dict) -> OpportunitySignal:
         """将推文解析为商机信号"""
+        keywords = self._extract_keywords(tweet['text'])
         return OpportunitySignal(
             id=tweet['id'],
             platform=self.platform,
@@ -153,7 +160,7 @@ class TwitterCollector(BasePlatformCollector):
                 'retweets': tweet['retweets'],
                 'replies': tweet['replies']
             },
-            keywords=self._extract_keywords(tweet['text']),
+            keywords=keywords,
             revenue_mention=self._extract_revenue(tweet['text']),
             user_count_mention=self._extract_user_count(tweet['text']),
             urls=tweet['urls'],
@@ -161,7 +168,11 @@ class TwitterCollector(BasePlatformCollector):
             collected_at=datetime.now(),
             confidence_score=0,  # 稍后计算
             category=self._classify_category(tweet['text']),
-            raw_data=tweet
+            raw_data=tweet,
+            language=tweet.get('lang', 'en'),
+            tags=keywords,
+            source_type='tweet',
+            metadata={'permalink': tweet.get('permalink')}
         )
     
     def _extract_keywords(self, text: str) -> List[str]:
@@ -245,7 +256,13 @@ class DataCollectorService:
     def _initialize_collectors(self):
         """初始化各平台采集器"""
         if self.config.get('twitter_enabled', False):
-            self.collectors[PlatformType.TWITTER] = TwitterCollector(self.config)
+            if all(
+                self.config.get(key)
+                for key in ('twitter_api_key', 'twitter_api_secret', 'twitter_bearer_token')
+            ):
+                self.collectors[PlatformType.TWITTER] = TwitterCollector(self.config)
+            else:
+                logger.info("Twitter API 未配置完整，跳过初始化 TwitterCollector")
             
         # Reddit采集器 - 免费API
         if self.config.get('reddit_enabled', True):  # 默认启用Reddit
@@ -257,12 +274,22 @@ class DataCollectorService:
             from .rss_collector import RSSCollector
             self.rss_collector = RSSCollector()
     
-    def collect_all_platforms(self, keywords: List[str], limit_per_platform: int = 50) -> List[OpportunitySignal]:
+    def collect_all_platforms(
+        self,
+        keywords: List[str],
+        limit_per_platform: int = 50,
+        platforms: Optional[List[str]] = None,
+    ) -> List[OpportunitySignal]:
         """从所有平台采集数据"""
         all_signals = []
+        platform_whitelist = None
+        if platforms:
+            platform_whitelist = {platform.lower() for platform in platforms}
         
         # 首先从RSS源采集数据（免费且可靠）
-        if hasattr(self, 'rss_collector'):
+        if hasattr(self, 'rss_collector') and (
+            not platform_whitelist or 'rss' in platform_whitelist
+        ):
             try:
                 logger.info("开始从RSS源采集数据")
                 rss_signals = self.rss_collector.collect_all_sources(limit_per_platform)
@@ -273,6 +300,9 @@ class DataCollectorService:
         
         # 然后从其他平台采集
         for platform, collector in self.collectors.items():
+            if platform_whitelist and platform.value not in platform_whitelist:
+                logger.debug("跳过未在白名单的平台: %s", platform.value)
+                continue
             try:
                 logger.info(f"开始采集 {platform.value} 平台数据")
                 signals = collector.collect_signals(keywords, limit_per_platform)
@@ -296,7 +326,7 @@ class DataCollectorService:
     def get_platform_stats(self) -> Dict[str, Any]:
         """获取平台统计信息"""
         return {
-            'enabled_platforms': list(self.collectors.keys()),
+            'enabled_platforms': [platform.value for platform in self.collectors.keys()],
             'total_platforms': len(self.collectors),
             'last_update': datetime.now().isoformat()
         }

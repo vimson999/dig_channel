@@ -202,6 +202,7 @@ class RedditCollector:
             if not revenue_signal and not user_signal:
                 return None
             
+            extracted_keywords = self._extract_keywords(full_text, subreddit_config)
             signal = OpportunitySignal(
                 id=f"reddit_{submission.id}",
                 platform=PlatformType.REDDIT,
@@ -212,9 +213,9 @@ class RedditCollector:
                 engagement_metrics={
                     'score': submission.score,
                     'upvote_ratio': getattr(submission, 'upvote_ratio', 0),
-                    'num_comments': submission.num_comments
+                    'num_comments': submission.num_comments,
                 },
-                keywords=self._extract_keywords(full_text, subreddit_config),
+                keywords=extracted_keywords,
                 revenue_mention=revenue_signal,
                 user_count_mention=user_signal,
                 urls=[f"https://reddit.com{submission.permalink}"],
@@ -226,8 +227,13 @@ class RedditCollector:
                     'subreddit': subreddit_config['name'],
                     'reddit_id': submission.id,
                     'score': submission.score,
-                    'num_comments': submission.num_comments
-                }
+                    'num_comments': submission.num_comments,
+                    'signal_weight': subreddit_config.get('signal_weight'),
+                },
+                language=getattr(submission, 'lang', 'en'),
+                tags=extracted_keywords,
+                source_type='reddit_post',
+                metadata={'subreddit': subreddit_config['name']},
             )
             
             return signal
@@ -256,6 +262,7 @@ class RedditCollector:
             if not revenue_signal and not user_signal:
                 return None
             
+            extracted_keywords = self._extract_keywords(full_text, subreddit_config)
             signal = OpportunitySignal(
                 id=f"reddit_{post['id']}",
                 platform=PlatformType.REDDIT,
@@ -266,9 +273,9 @@ class RedditCollector:
                 engagement_metrics={
                     'score': post.get('score', 0),
                     'upvote_ratio': post.get('upvote_ratio', 0),
-                    'num_comments': post.get('num_comments', 0)
+                    'num_comments': post.get('num_comments', 0),
                 },
-                keywords=self._extract_keywords(full_text, subreddit_config),
+                keywords=extracted_keywords,
                 revenue_mention=revenue_signal,
                 user_count_mention=user_signal,
                 urls=[f"https://reddit.com{post.get('permalink', '')}"],
@@ -280,8 +287,13 @@ class RedditCollector:
                     'subreddit': subreddit_config['name'],
                     'reddit_id': post['id'],
                     'score': post.get('score', 0),
-                    'num_comments': post.get('num_comments', 0)
-                }
+                    'num_comments': post.get('num_comments', 0),
+                    'signal_weight': subreddit_config.get('signal_weight'),
+                },
+                language=post.get('lang', 'en'),
+                tags=extracted_keywords,
+                source_type='reddit_post',
+                metadata={'subreddit': subreddit_config['name']},
             )
             
             return signal

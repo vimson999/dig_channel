@@ -6,14 +6,49 @@
 """
 
 from datetime import datetime, date
+from decimal import Decimal, InvalidOperation
 from typing import List, Optional, Dict, Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import and_, desc
 from models import db, Channel, ChannelData
+from config.channel_defaults import get_default_cpm, DEFAULT_CPM
 
 class ChannelService:
     """频道管理服务类"""
-    
+
+    @staticmethod
+    def _normalize_category(category: Optional[str]) -> Optional[str]:
+        """标准化频道分类字符串"""
+        if category is None:
+            return None
+        normalized = category.strip()
+        return normalized or None
+
+    @staticmethod
+    def _ensure_decimal(value: Optional[float]) -> Optional[Decimal]:
+        """将输入值安全转换为Decimal，失败时返回None"""
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value)).quantize(Decimal('0.01'))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _resolve_cpm(category: Optional[str], cpm: Optional[float], enforce_default: bool = True) -> Decimal:
+        """根据分类计算CPM，必要时强制使用分类默认值"""
+        normalized_category = ChannelService._normalize_category(category)
+        default_cpm = get_default_cpm(normalized_category)
+
+        if enforce_default and normalized_category:
+            return default_cpm
+
+        converted = ChannelService._ensure_decimal(cpm)
+        if converted is None or converted <= 0:
+            return default_cpm
+
+        return converted
+
     @staticmethod
     def _enrich_channels_with_latest_data(channels: List[Channel]) -> List[Dict[str, Any]]:
         """为频道列表添加最新数据，使用优化的批量查询避免N+1问题
@@ -87,14 +122,17 @@ class ChannelService:
                     'data': None
                 }
             
+            normalized_category = ChannelService._normalize_category(category)
+            resolved_cpm = ChannelService._resolve_cpm(normalized_category, cpm, enforce_default=True)
+
             # 创建新频道
             channel = Channel(
                 user_id=user_id,
-                name=name,
+                name=name.strip() if isinstance(name, str) else name,
                 channel_id=channel_id,
                 url=url,
-                cpm=cpm,
-                category=category,
+                cpm=resolved_cpm,
+                category=normalized_category,
                 sort=sort
             )
             
@@ -294,7 +332,7 @@ class ChannelService:
     @staticmethod
     def update_channel(channel_id: int, user_id: int = None, **kwargs) -> Dict[str, Any]:
         """更新频道信息
-        
+
         Args:
             channel_id: 频道数据库ID
             user_id: 用户ID，如果提供则检查权限
@@ -315,22 +353,65 @@ class ChannelService:
                     'message': '频道不存在或无权限访问',
                     'data': None
                 }
-            
-            # 更新允许的字段
-            allowed_fields = ['name', 'url', 'cpm', 'category', 'sort', 'is_active']
-            for key, value in kwargs.items():
-                if key in allowed_fields and hasattr(channel, key):
-                    setattr(channel, key, value)
-            
-            channel.updated_at = datetime.utcnow()
-            db.session.commit()
-            
+
+            has_updates = False
+
+            if 'name' in kwargs:
+                raw_name = kwargs['name'] or ''
+                name = raw_name.strip()
+                if not name:
+                    raise ValueError('频道名称不能为空')
+                if channel.name != name:
+                    channel.name = name
+                    has_updates = True
+
+            if 'url' in kwargs and kwargs['url']:
+                new_url = kwargs['url'].strip()
+                if new_url and channel.url != new_url:
+                    channel.url = new_url
+                    has_updates = True
+
+            if 'sort' in kwargs and kwargs['sort'] is not None:
+                try:
+                    new_sort = int(kwargs['sort'])
+                except (ValueError, TypeError):
+                    new_sort = channel.sort
+                if channel.sort != new_sort:
+                    channel.sort = new_sort
+                    has_updates = True
+
+            if 'is_active' in kwargs:
+                new_state = bool(kwargs['is_active'])
+                if channel.is_active != new_state:
+                    channel.is_active = new_state
+                    has_updates = True
+
+            normalized_category: Optional[str] = None
+            if 'category' in kwargs:
+                normalized_category = ChannelService._normalize_category(kwargs['category'])
+                if channel.category != normalized_category:
+                    channel.category = normalized_category
+                    has_updates = True
+
+            if 'cpm' in kwargs or normalized_category is not None:
+                target_category = channel.category
+                cpm_candidate = kwargs.get('cpm', channel.cpm)
+                resolved_cpm = ChannelService._resolve_cpm(target_category, cpm_candidate, enforce_default=True)
+                current_cpm = ChannelService._ensure_decimal(channel.cpm)
+                if current_cpm is None or current_cpm != resolved_cpm:
+                    channel.cpm = resolved_cpm
+                    has_updates = True
+
+            if has_updates:
+                channel.updated_at = datetime.utcnow()
+                db.session.commit()
+
             return {
                 'success': True,
                 'message': '频道更新成功',
                 'data': channel.to_dict()
             }
-            
+
         except Exception as e:
             db.session.rollback()
             return {
@@ -381,7 +462,41 @@ class ChannelService:
                 'message': f'停用频道失败: {str(e)}',
                 'data': None
             }
-    
+
+    @staticmethod
+    def sync_category_defaults(user_id: Optional[int] = None, commit: bool = True) -> Dict[str, int]:
+        """批量同步频道CPM为分类默认值"""
+        try:
+            query = Channel.query
+            if user_id is not None:
+                query = query.filter_by(user_id=user_id)
+
+            channels = query.all()
+            updated = 0
+
+            for channel in channels:
+                normalized_category = ChannelService._normalize_category(channel.category)
+                resolved_cpm = ChannelService._resolve_cpm(normalized_category, channel.cpm, enforce_default=True)
+                current_cpm = ChannelService._ensure_decimal(channel.cpm) or DEFAULT_CPM
+                if current_cpm != resolved_cpm:
+                    channel.cpm = resolved_cpm
+                    channel.updated_at = datetime.utcnow()
+                    updated += 1
+
+            if commit:
+                if updated:
+                    db.session.commit()
+            else:
+                db.session.rollback()
+
+            return {
+                'total': len(channels),
+                'updated': updated
+            }
+        except Exception:
+            db.session.rollback()
+            raise
+
     @staticmethod
     def search_user_channels(user_id: int, keyword: str, active_only: bool = True, order_by_sort: bool = False) -> List[Dict[str, Any]]:
         """搜索用户的频道

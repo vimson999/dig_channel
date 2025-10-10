@@ -11,7 +11,9 @@ class ChannelManagement {
         this.sortField = 'name';
         this.sortDirection = 'asc';
         this.categories = []; // 存储分类数据
-        
+        this.categoryDefaults = {}; // 分类对应的默认CPM
+        this.defaultCpm = 2.5; // 默认CPM
+
         this.bindEvents();
         this.loadCategories(); // 加载分类数据
     }
@@ -47,6 +49,13 @@ class ChannelManagement {
         
         if (selectAllTable) {
             selectAllTable.addEventListener('change', (e) => this.toggleSelectAll(e.target.checked));
+        }
+
+        const editCategorySelect = document.getElementById('edit-channel-category');
+        if (editCategorySelect) {
+            editCategorySelect.addEventListener('change', (e) => {
+                this.applyDefaultCpmToEdit(e.target.value);
+            });
         }
     }
 
@@ -253,16 +262,49 @@ class ChannelManagement {
     // 加载频道分类
     async loadCategories() {
         try {
-            const response = await api.getChannelCategories();
-            if (response.success && response.data.categories) {
-                this.categories = response.data.categories;
+            const [categoryResponse, defaultsResponse] = await Promise.all([
+                api.getChannelCategories(),
+                api.getChannelDefaults().catch(() => null)
+            ]);
+
+            if (defaultsResponse && defaultsResponse.success && defaultsResponse.data?.defaults) {
+                this.categoryDefaults = defaultsResponse.data.defaults || {};
+                if (typeof defaultsResponse.data.default_cpm === 'number') {
+                    this.defaultCpm = defaultsResponse.data.default_cpm;
+                } else if (typeof this.categoryDefaults.default === 'number') {
+                    this.defaultCpm = this.categoryDefaults.default;
+                }
+            }
+
+            if (categoryResponse.success && categoryResponse.data.categories) {
+                this.categories = categoryResponse.data.categories.map((category) => {
+                    const mappedDefault = typeof category.default_cpm === 'number'
+                        ? category.default_cpm
+                        : this.categoryDefaults[category.name];
+                    if (typeof mappedDefault === 'number') {
+                        this.categoryDefaults[category.name] = mappedDefault;
+                    }
+                    return {
+                        ...category,
+                        default_cpm: typeof mappedDefault === 'number' ? mappedDefault : undefined
+                    };
+                });
+
+                if (typeof this.categoryDefaults.default === 'number') {
+                    this.defaultCpm = this.categoryDefaults.default;
+                }
+
                 console.log('加载到的分类:', this.categories);
-                
+
                 // 更新筛选器下拉框
                 this.updateFilterCategoryDropdown();
-                
+
                 // 更新编辑模态框的分类下拉框
                 this.updateEditCategoryDropdown();
+
+                if (typeof this.categoryDefaults.default !== 'number') {
+                    this.categoryDefaults.default = this.defaultCpm;
+                }
             }
         } catch (error) {
             console.error('加载分类失败:', error);
@@ -276,6 +318,14 @@ class ChannelManagement {
                 { name: '音乐', count: 0 },
                 { name: '其他', count: 0 }
             ];
+            this.categoryDefaults = {
+                default: 2.5,
+                '科技': 9.0,
+                '教育': 4.0,
+                '转发': 6.0,
+                '娱乐': 3.0
+            };
+            this.defaultCpm = this.categoryDefaults.default;
             this.updateFilterCategoryDropdown();
             this.updateEditCategoryDropdown();
         }
@@ -315,7 +365,11 @@ class ChannelManagement {
         // 构建选项HTML
         let options = '<option value="">选择分类</option>';
         this.categories.forEach(category => {
-            options += `<option value="${category.name}">${category.name}</option>`;
+            const defaultCpm = this.getDefaultCpmValue(category.name);
+            const label = Number.isFinite(defaultCpm)
+                ? `${category.name}（$${defaultCpm.toFixed(2)}）`
+                : category.name;
+            options += `<option value="${category.name}">${label}</option>`;
         });
 
         // 更新下拉框
@@ -324,6 +378,44 @@ class ChannelManagement {
         // 恢复之前选中的值
         if (currentValue) {
             editCategory.value = currentValue;
+        }
+    }
+
+    getDefaultCpmValue(category) {
+        const base = (typeof this.defaultCpm === 'number' && !Number.isNaN(this.defaultCpm)) ? this.defaultCpm : 2.5;
+        if (!category) {
+            return base;
+        }
+        const mapped = this.categoryDefaults?.[category];
+        if (typeof mapped === 'number' && !Number.isNaN(mapped)) {
+            return mapped;
+        }
+        return base;
+    }
+
+    applyDefaultCpmToEdit(category, options = {}) {
+        const cpmInput = document.getElementById('edit-channel-cpm');
+        const hintElement = document.getElementById('edit-channel-cpm-hint');
+        const defaultValue = this.getDefaultCpmValue(category);
+        const existingValue = (options && typeof options.existingValue === 'number')
+            ? options.existingValue
+            : undefined;
+
+        if (cpmInput) {
+            const valueToUse = (typeof existingValue === 'number' && !Number.isNaN(existingValue))
+                ? existingValue
+                : defaultValue;
+            cpmInput.value = valueToUse.toFixed(2);
+        }
+
+        if (hintElement) {
+            if (typeof existingValue === 'number' && Math.abs(existingValue - defaultValue) > 0.001) {
+                hintElement.textContent = `分类默认值：$${defaultValue.toFixed(2)}（当前：$${existingValue.toFixed(2)}）`;
+            } else {
+                hintElement.textContent = category
+                    ? `分类默认值：$${defaultValue.toFixed(2)}`
+                    : `默认CPM：$${defaultValue.toFixed(2)}`;
+            }
         }
     }
 
@@ -768,10 +860,17 @@ class ChannelManagement {
         // 填充表单数据
         document.getElementById('edit-channel-id').value = channel.id;
         document.getElementById('edit-channel-name').value = channel.name;
-        document.getElementById('edit-channel-category').value = channel.category || '';
-        document.getElementById('edit-channel-cpm').value = channel.cpm;
+        const categoryField = document.getElementById('edit-channel-category');
+        const categoryValue = channel.category || '';
+        if (categoryField) {
+            categoryField.value = categoryValue;
+        }
+        const numericCpm = Number(channel.cpm);
+        this.applyDefaultCpmToEdit(categoryValue, {
+            existingValue: Number.isFinite(numericCpm) ? numericCpm : undefined
+        });
         document.getElementById('edit-channel-active').checked = channel.is_active;
-        
+
         // 填充统计信息
         const latestData = channel.latest_data || {};
         document.getElementById('edit-stats-subscribers').textContent = Utils.formatNumber(latestData.subscribers || 0);
@@ -1000,7 +1099,6 @@ async function updateChannel() {
     const channelData = {
         name: document.getElementById('edit-channel-name').value.trim(),
         category: document.getElementById('edit-channel-category').value || null,
-        cpm: parseFloat(document.getElementById('edit-channel-cpm').value) || 2.5,
         is_active: document.getElementById('edit-channel-active').checked
     };
 
@@ -1038,29 +1136,36 @@ function initChannelManagement() {
 
 // 缺失的全局函数定义
 function openAddChannelModal() {
+    if (window.app && typeof window.app.openAddChannelModal === 'function') {
+        window.app.openAddChannelModal();
+        return;
+    }
+
     const modal = document.getElementById('addChannelModal');
     const content = document.getElementById('modalContent');
-    
+    const form = document.getElementById('addChannelForm');
+
     if (modal && content) {
-        // 清空表单
-        document.getElementById('addChannelForm').reset();
-        
-        // 显示模态框
+        if (form) {
+            form.reset();
+        }
+
         modal.classList.remove('hidden');
         document.body.style.overflow = 'hidden';
-        
-        // 动画效果
+
         setTimeout(() => {
             content.classList.remove('scale-95', 'opacity-0');
             content.classList.add('scale-100', 'opacity-100');
         }, 10);
-        
-        // 点击模态框外部关闭
-        modal.addEventListener('click', (e) => {
-            if (e.target.id === 'addChannelModal') {
-                closeAddChannelModal();
-            }
-        });
+
+        if (!modal.dataset.boundClose) {
+            modal.addEventListener('click', (e) => {
+                if (e.target.id === 'addChannelModal') {
+                    closeAddChannelModal();
+                }
+            });
+            modal.dataset.boundClose = 'true';
+        }
     } else {
         showToast('添加频道功能暂时不可用', 'warning');
     }
@@ -1068,6 +1173,11 @@ function openAddChannelModal() {
 
 // 关闭添加频道模态框
 function closeAddChannelModal() {
+    if (window.app && typeof window.app.closeAddChannelModal === 'function') {
+        window.app.closeAddChannelModal();
+        return;
+    }
+
     const modal = document.getElementById('addChannelModal');
     const content = document.getElementById('modalContent');
     
@@ -1092,6 +1202,10 @@ function closeAddChannelModal() {
 
 // 预览频道
 async function previewChannel() {
+    if (window.app && typeof window.app.previewChannel === 'function') {
+        return window.app.previewChannel();
+    }
+
     const url = document.getElementById('channel-url').value.trim();
     if (!url) {
         showToast('请输入频道URL', 'warning');
@@ -1101,43 +1215,64 @@ async function previewChannel() {
     try {
         showToast('正在预览频道...', 'info');
         const response = await api.previewChannel(url);
-        
+
         if (response.success) {
+            const previewWrapper = document.getElementById('channel-preview');
             const previewContent = document.getElementById('preview-content');
-            const channelInfo = response.data.channel_info;
-            const alreadyExists = response.data.already_exists;
-            
-            previewContent.innerHTML = `
-                <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                    <div class="flex items-center gap-4 mb-4">
-                        <img src="${channelInfo.thumbnail}" alt="频道头像" class="w-16 h-16 rounded-full">
-                        <div>
-                            <h4 class="font-bold text-lg">${channelInfo.title}</h4>
-                            <p class="text-gray-600 text-sm">${channelInfo.description.substring(0, 100)}...</p>
-                        </div>
-                    </div>
-                    
+            const previewData = response.data || {};
+            const channelInfo = previewData.channel_info || previewData;
+            const alreadyExists = Boolean(previewData.already_exists);
+
+            if (previewContent && channelInfo) {
+                const title = channelInfo.title || channelInfo.name || '未知频道';
+                const description = channelInfo.description || channelInfo.biography || '';
+                const thumbnail = channelInfo.thumbnail || channelInfo.thumbnail_url || '';
+                const subscribers = channelInfo.subscriber_count ?? channelInfo.subscribers ?? 0;
+                const views = channelInfo.view_count ?? channelInfo.views ?? channelInfo.total_views ?? 0;
+                const videos = channelInfo.video_count ?? channelInfo.videos ?? 0;
+
+                const summaryCards = `
                     <div class="grid grid-cols-3 gap-4 text-sm">
                         <div class="text-center">
-                            <div class="font-bold text-blue-600">${Utils.formatNumber(channelInfo.subscriber_count)}</div>
+                            <div class="font-bold text-blue-600">${Utils.formatNumber(subscribers)}</div>
                             <div class="text-gray-500">订阅数</div>
                         </div>
                         <div class="text-center">
-                            <div class="font-bold text-green-600">${Utils.formatNumber(channelInfo.view_count)}</div>
+                            <div class="font-bold text-green-600">${Utils.formatNumber(views)}</div>
                             <div class="text-gray-500">总播放量</div>
                         </div>
                         <div class="text-center">
-                            <div class="font-bold text-purple-600">${channelInfo.video_count}</div>
+                            <div class="font-bold text-purple-600">${Utils.formatNumber(videos)}</div>
                             <div class="text-gray-500">视频数</div>
                         </div>
+                    </div>`;
+
+                previewContent.innerHTML = `
+                    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                        <div class="flex items-center gap-4 mb-4">
+                            ${thumbnail ? `<img src="${thumbnail}" alt="频道头像" class="w-16 h-16 rounded-full">` : ''}
+                            <div>
+                                <h4 class="font-bold text-lg">${title}</h4>
+                                ${description ? `<p class="text-gray-600 text-sm">${description.substring(0, 100)}${description.length > 100 ? '...' : ''}</p>` : ''}
+                            </div>
+                        </div>
+                        ${summaryCards}
+                        ${alreadyExists
+                            ? '<div class="mt-4 p-3 bg-yellow-100 border border-yellow-300 rounded text-yellow-800 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>该频道已存在于系统中</div>'
+                            : '<div class="mt-4 p-3 bg-green-100 border border-green-300 rounded text-green-800 text-sm"><i class="fas fa-check mr-2"></i>可以添加该频道</div>'}
                     </div>
-                    
-                    ${alreadyExists ? 
-                        '<div class="mt-4 p-3 bg-yellow-100 border border-yellow-300 rounded text-yellow-800 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>该频道已存在于系统中</div>' : 
-                        '<div class="mt-4 p-3 bg-green-100 border border-green-300 rounded text-green-800 text-sm"><i class="fas fa-check mr-2"></i>可以添加该频道</div>'
-                    }
-                </div>
-            `;
+                `;
+
+                const nameInput = document.getElementById('channel-name');
+                if (nameInput && !nameInput.value.trim() && (channelInfo.name || channelInfo.title)) {
+                    nameInput.value = channelInfo.name || channelInfo.title;
+                }
+
+                if (previewWrapper) {
+                    previewWrapper.classList.remove('hidden');
+                }
+            }
+
             showToast('预览成功', 'success');
         } else {
             showToast('预览失败: ' + response.message, 'error');
@@ -1150,6 +1285,10 @@ async function previewChannel() {
 
 // 添加频道
 async function addChannel() {
+    if (window.app && typeof window.app.addChannel === 'function') {
+        return window.app.addChannel();
+    }
+
     const url = document.getElementById('channel-url').value.trim();
     if (!url) {
         showToast('请输入频道URL', 'warning');
@@ -1158,7 +1297,28 @@ async function addChannel() {
 
     try {
         showToast('正在添加频道...', 'info');
-        const response = await api.addChannel(url);
+        const options = {};
+
+        const nameInput = document.getElementById('channel-name');
+        const categorySelect = document.getElementById('channel-category');
+        const cpmInput = document.getElementById('channel-cpm');
+
+        if (nameInput && nameInput.value.trim()) {
+            options.name = nameInput.value.trim();
+        }
+
+        if (categorySelect && categorySelect.value.trim()) {
+            options.category = categorySelect.value.trim();
+        }
+
+        if (cpmInput) {
+            const cpmValue = Number(cpmInput.value);
+            if (!Number.isNaN(cpmValue)) {
+                options.cpm = cpmValue;
+            }
+        }
+
+        const response = await api.addChannel(url, options);
         
         if (response.success) {
             showToast('频道添加成功', 'success');

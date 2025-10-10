@@ -11,6 +11,7 @@
 ### 数据同步工具
 - **`sync_missing_channel_data.py`** - 同步缺失的频道数据记录
 - **`sync_missing_data.py`** - 通用缺失数据同步工具
+- **`sync_channel_cpm_defaults.py`** - 按分类默认值批量校准频道CPM（支持dry-run）
 
 ### 环境和配置
 - **`fix_env.py`** - 修复环境变量配置，确保使用PostgreSQL

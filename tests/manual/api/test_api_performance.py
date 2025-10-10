@@ -3,13 +3,18 @@
 测试频道API的响应内容和性能问题
 """
 import sys
-import os
 import requests
 import json
 import time
 
-# 添加src/backend到Python路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src', 'backend'))
+# 添加src/backend到Python路径（自动回溯到项目根目录）
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve()
+while PROJECT_ROOT.parent != PROJECT_ROOT and not (PROJECT_ROOT / 'src' / 'backend').exists():
+    PROJECT_ROOT = PROJECT_ROOT.parent
+
+sys.path.insert(0, str((PROJECT_ROOT / 'src' / 'backend').resolve()))
 
 def test_api_response():
     """测试API响应内容"""

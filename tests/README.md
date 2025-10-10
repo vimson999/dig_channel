@@ -6,11 +6,17 @@
 
 ```
 tests/
-├── __init__.py
 ├── README.md                   # 本文档
+├── __init__.py
 ├── unit/                       # 单元测试
-├── integration/                # 集成测试  
+├── integration/                # 集成测试
 ├── e2e/                        # 端到端测试
+├── manual/                     # 手工验证脚本
+│   ├── api/                    # API/前端联调脚本
+│   └── final_test_all_fixes.py
+├── debug/                      # 线上快速调试脚本
+├── tts/                        # TTS 功能专项测试
+├── celery/                     # Celery 调度测试
 ├── fixtures/                   # 测试数据和配置
 ├── database/                   # 数据库相关脚本
 └── scripts/                    # 工具和维护脚本
@@ -28,6 +34,20 @@ tests/
 
 ### 🌐 e2e/ - 端到端测试
 包含完整业务流程的端到端测试
+
+### 🧭 manual/ - 手工验证
+用于人工验证和复现问题的脚本：
+- `api/` 下的脚本覆盖带认证接口、前端修复验证等场景
+- `final_test_all_fixes.py` 汇总关键修复项的人工检查
+
+### 🛠️ debug/ - 调试脚本
+快速定位线上问题的诊断脚本，例如频道数据对齐、Reddit采集器等。
+
+### 🔊 tts/ - 语音合成专项
+覆盖TTS服务端、模型切换、多说话人对话等专项测试脚本。
+
+### ⚙️ celery/ - 调度测试
+`test_celery_full.py` 用于验证Celery任务的全流程运行。
 
 ### 📊 fixtures/ - 测试数据和配置
 包含测试所需的固定数据、配置文件和模拟数据
@@ -92,6 +112,8 @@ python tests/scripts/sync_missing_data.py
 bash tests/scripts/verify_fix.sh
 ```
 
+> 提示：前端导航相关的手工测试页面已放在 `src/frontend/tests/` 目录，可直接通过本地静态服务打开。
+
 ## 📋 最佳实践
 
 1. **测试分类**: 严格按照功能将测试分类到对应目录
@@ -103,5 +125,4 @@ bash tests/scripts/verify_fix.sh
 ## 🔄 更新日志
 
 - 2025-08-28: 重新组织目录结构，按功能分类文件
-- 原有文件已按类型移动到对应目录
-- 添加了完整的文档说明
+- 2025-09-XX: 整理手工验证与调试脚本，前端测试页面迁移至 `src/frontend/tests/`

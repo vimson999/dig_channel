@@ -7,7 +7,10 @@ class YouTubeDataApp {
         this.currentTimeRange = 7;
         this.channels = [];
         this.chartData = {};
-        
+        this.channelCategories = [];
+        this.channelCategoryDefaults = {};
+        this.defaultChannelCpm = 2.5;
+
         this.init();
     }
 
@@ -31,7 +34,10 @@ class YouTubeDataApp {
         
         // 绑定事件
         this.bindEvents();
-        
+
+        // 预加载频道分类与默认CPM
+        await this.loadChannelMetadata();
+
         // 初始化Dashboard（排行榜功能）
         if (typeof Dashboard !== 'undefined') {
             this.dashboard = new Dashboard();
@@ -85,6 +91,20 @@ class YouTubeDataApp {
                 this.closeAddChannelModal();
             }
         });
+
+        const addCategorySelect = document.getElementById('channel-category');
+        if (addCategorySelect) {
+            addCategorySelect.addEventListener('change', (e) => {
+                this.updateAddChannelCpm(e.target.value);
+            });
+        }
+
+        const editCategorySelect = document.getElementById('edit-channel-category');
+        if (editCategorySelect) {
+            editCategorySelect.addEventListener('change', (e) => {
+                this.updateEditChannelCpm(e.target.value);
+            });
+        }
     }
 
     initChart() {
@@ -167,6 +187,182 @@ class YouTubeDataApp {
         } catch (error) {
             console.error('加载排行榜失败:', error);
             return false;
+        }
+    }
+
+    async loadChannelMetadata() {
+        const fallbackCategories = [
+            { name: '科技', default_cpm: 9.0 },
+            { name: '教育', default_cpm: 4.0 },
+            { name: '娱乐', default_cpm: 3.0 },
+            { name: '转发', default_cpm: 6.0 },
+            { name: '生活', default_cpm: 2.5 },
+            { name: '游戏', default_cpm: 3.0 },
+            { name: '音乐', default_cpm: 3.0 },
+            { name: '美食', default_cpm: 2.0 },
+            { name: '旅行', default_cpm: 2.0 },
+            { name: '其他', default_cpm: 2.5 }
+        ];
+
+        const applyFallback = () => {
+            this.channelCategories = fallbackCategories;
+            this.channelCategoryDefaults = fallbackCategories.reduce((acc, item) => {
+                acc[item.name] = item.default_cpm;
+                return acc;
+            }, { default: 2.5 });
+            this.defaultChannelCpm = this.channelCategoryDefaults.default;
+        };
+
+        try {
+            const [defaultsResponse, categoriesResponse] = await Promise.all([
+                api.getChannelDefaults().catch(() => null),
+                api.getChannelCategories().catch(() => null)
+            ]);
+
+            if (defaultsResponse?.success && defaultsResponse.data?.defaults) {
+                this.channelCategoryDefaults = {};
+                Object.entries(defaultsResponse.data.defaults).forEach(([key, value]) => {
+                    const numeric = Number(value);
+                    if (!Number.isNaN(numeric)) {
+                        this.channelCategoryDefaults[key] = numeric;
+                    }
+                });
+                const defaultValue = Number(defaultsResponse.data.default_cpm);
+                if (!Number.isNaN(defaultValue)) {
+                    this.defaultChannelCpm = defaultValue;
+                } else if (typeof this.channelCategoryDefaults.default === 'number') {
+                    this.defaultChannelCpm = this.channelCategoryDefaults.default;
+                } else {
+                    this.defaultChannelCpm = 2.5;
+                }
+            } else {
+                applyFallback();
+            }
+
+            if (categoriesResponse?.success && Array.isArray(categoriesResponse.data?.categories) && categoriesResponse.data.categories.length) {
+                this.channelCategories = categoriesResponse.data.categories.map((category) => {
+                    const rawDefault = category.default_cpm;
+                    const numericDefault = Number(rawDefault);
+                    const fallbackDefault = this.channelCategoryDefaults[category.name] ?? this.defaultChannelCpm;
+                    const resolvedDefault = !Number.isNaN(numericDefault) ? numericDefault : fallbackDefault;
+                    this.channelCategoryDefaults[category.name] = resolvedDefault;
+                    return {
+                        name: category.name,
+                        count: category.count ?? 0,
+                        default_cpm: resolvedDefault
+                    };
+                });
+            } else if (!this.channelCategories.length) {
+                applyFallback();
+            }
+
+            if (typeof this.channelCategoryDefaults.default !== 'number') {
+                this.channelCategoryDefaults.default = this.defaultChannelCpm;
+            }
+        } catch (error) {
+            console.error('加载频道分类信息失败:', error);
+            applyFallback();
+        }
+
+        this.populateChannelCategoryOptions();
+        this.updateAddChannelCpm(document.getElementById('channel-category')?.value || '');
+        this.updateEditChannelCpm(document.getElementById('edit-channel-category')?.value || '');
+    }
+
+    populateChannelCategoryOptions() {
+        const addSelect = document.getElementById('channel-category');
+        const editSelect = document.getElementById('edit-channel-category');
+        const categories = this.channelCategories || [];
+
+        if (addSelect) {
+            const current = addSelect.value;
+            addSelect.innerHTML = '<option value="">选择分类</option>';
+            categories.forEach((category) => {
+                const defaultValue = this.getCategoryDefaultCpm(category.name);
+                const label = Number.isFinite(defaultValue)
+                    ? `${category.name}（$${defaultValue.toFixed(2)}）`
+                    : category.name;
+                const option = document.createElement('option');
+                option.value = category.name;
+                option.textContent = label;
+                addSelect.appendChild(option);
+            });
+            if (current && Array.from(addSelect.options).some(option => option.value === current)) {
+                addSelect.value = current;
+            } else {
+                addSelect.value = '';
+            }
+        }
+
+        if (editSelect) {
+            const current = editSelect.value;
+            editSelect.innerHTML = '<option value="">选择分类</option>';
+            categories.forEach((category) => {
+                const defaultValue = this.getCategoryDefaultCpm(category.name);
+                const label = Number.isFinite(defaultValue)
+                    ? `${category.name}（$${defaultValue.toFixed(2)}）`
+                    : category.name;
+                const option = document.createElement('option');
+                option.value = category.name;
+                option.textContent = label;
+                editSelect.appendChild(option);
+            });
+            if (current && Array.from(editSelect.options).some(option => option.value === current)) {
+                editSelect.value = current;
+            } else {
+                editSelect.value = '';
+            }
+        }
+    }
+
+    getCategoryDefaultCpm(category) {
+        if (!category) {
+            return this.defaultChannelCpm;
+        }
+        const value = this.channelCategoryDefaults?.[category];
+        if (typeof value === 'number' && !Number.isNaN(value)) {
+            return value;
+        }
+        return this.defaultChannelCpm;
+    }
+
+    updateAddChannelCpm(category) {
+        const cpmInput = document.getElementById('channel-cpm');
+        const hintElement = document.getElementById('channel-cpm-hint');
+        const defaultValue = this.getCategoryDefaultCpm(category);
+
+        if (cpmInput) {
+            cpmInput.value = defaultValue.toFixed(2);
+        }
+
+        if (hintElement) {
+            hintElement.textContent = category
+                ? `分类默认值：$${defaultValue.toFixed(2)}`
+                : `默认CPM：$${defaultValue.toFixed(2)}`;
+        }
+    }
+
+    updateEditChannelCpm(category, options = {}) {
+        const cpmInput = document.getElementById('edit-channel-cpm');
+        const hintElement = document.getElementById('edit-channel-cpm-hint');
+        const defaultValue = this.getCategoryDefaultCpm(category);
+        const existingValue = (options && typeof options.existingValue === 'number') ? options.existingValue : undefined;
+
+        if (cpmInput) {
+            const valueToUse = (typeof existingValue === 'number' && !Number.isNaN(existingValue))
+                ? existingValue
+                : defaultValue;
+            cpmInput.value = valueToUse.toFixed(2);
+        }
+
+        if (hintElement) {
+            if (typeof existingValue === 'number' && Math.abs(existingValue - defaultValue) > 0.001) {
+                hintElement.textContent = `分类默认值：$${defaultValue.toFixed(2)}（当前：$${existingValue.toFixed(2)}）`;
+            } else {
+                hintElement.textContent = category
+                    ? `分类默认值：$${defaultValue.toFixed(2)}`
+                    : `默认CPM：$${defaultValue.toFixed(2)}`;
+            }
         }
     }
 
@@ -468,6 +664,9 @@ class YouTubeDataApp {
         const modal = document.getElementById('addChannelModal');
         const content = document.getElementById('modalContent');
         
+        this.populateChannelCategoryOptions();
+        this.updateAddChannelCpm(document.getElementById('channel-category')?.value || '');
+
         modal.classList.remove('hidden');
         document.body.style.overflow = 'hidden';
         
@@ -491,6 +690,7 @@ class YouTubeDataApp {
             document.body.style.overflow = 'auto';
             document.getElementById('addChannelForm').reset();
             document.getElementById('channel-preview').classList.add('hidden');
+            this.updateAddChannelCpm('');
         }, 300);
     }
 
@@ -541,29 +741,36 @@ class YouTubeDataApp {
 
     // 添加频道
     async addChannel() {
-        const form = document.getElementById('addChannelForm');
-        const formData = new FormData(form);
-        
-        const channelData = {
-            url: document.getElementById('channel-url').value.trim(),
-            name: document.getElementById('channel-name').value.trim(),
-            cpm: parseFloat(document.getElementById('channel-cpm').value) || 2.5,
-            category: document.getElementById('channel-category').value || ''
-        };
+        const url = document.getElementById('channel-url').value.trim();
+        const name = document.getElementById('channel-name').value.trim();
+        const category = (document.getElementById('channel-category')?.value || '').trim();
+        const cpmValue = Number(document.getElementById('channel-cpm')?.value);
 
-        if (!channelData.url) {
+        if (!url) {
             this.showToast('请输入频道URL', 'warning');
             return;
         }
 
         try {
             this.showLoading('正在添加频道...');
-            const response = await api.createChannel(channelData);
+            const options = {};
+            if (name) {
+                options.name = name;
+            }
+            if (category) {
+                options.category = category;
+            }
+            if (!Number.isNaN(cpmValue)) {
+                options.cpm = cpmValue;
+            }
+
+            const response = await api.addChannel(url, options);
             
             if (response.success) {
                 this.showToast('频道添加成功', 'success');
                 this.closeAddChannelModal();
                 await this.loadInitialData(); // 重新加载数据
+                await this.loadChannelMetadata();
             } else {
                 this.showToast('添加失败: ' + response.message, 'error');
             }

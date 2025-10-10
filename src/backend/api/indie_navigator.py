@@ -5,88 +5,286 @@ from sqlalchemy import desc, asc, and_, or_
 import requests
 import json
 import logging
-from typing import List, Dict, Optional
-from dataclasses import dataclass, asdict
+from typing import List, Dict, Optional, Any
 
-from models.indie_navigator import OpportunitySignal, UserOpportunityInteraction, CollectionKeyword, CollectionJob
-from services.data_collector import DataCollectorService, DEFAULT_CONFIG
+from config.data_collection_config import DataCollectionConfig
+from models import db
+from models.indie_navigator import (
+    OpportunitySignal as OpportunitySignalModel,
+    UserOpportunityInteraction,
+    CollectionKeyword,
+    CollectionJob,
+)
+from services.data_collector import DataCollectorService
 
 indie_navigator_bp = Blueprint('indie_navigator', __name__, url_prefix='/api/indie-navigator')
 
-@dataclass
-class OpportunitySignal:
-    """商机信号数据结构"""
-    id: str
-    title: str
-    description: str
-    creator_name: str
-    creator_handle: str
-    creator_avatar: str
-    revenue_signal: str
-    user_signal: str
-    platform: str
-    original_url: str
-    published_at: datetime
-    engagement_metrics: Dict
-    project_type: str
-    project_url: Optional[str] = None
-    created_at: Optional[datetime] = None
-
 class IndieNavigatorService:
     """独立开发者领航员核心服务"""
-    
+
+    DEFAULT_KEYWORDS = [
+        "SaaS",
+        "MRR",
+        "indie hacker",
+        "startup",
+        "AI tool",
+        "chrome extension",
+        "mobile app",
+    ]
+
     def __init__(self, db_session=None):
         self.logger = logging.getLogger(__name__)
-        self.db_session = db_session
-        self.data_collector = DataCollectorService(DEFAULT_CONFIG)
-        
-    def collect_fresh_opportunities(self, keywords: List[str] = None) -> List[Dict]:
-        """从各平台采集最新商机数据"""
-        if not keywords:
-            keywords = ["SaaS", "MRR", "indie hacker", "startup", "AI tool", "chrome extension", "mobile app"]
-        
+        self.db_session = db_session or db.session
+
+        config = DataCollectionConfig()
+        self.collector_config = {
+            'twitter_enabled': config.TWITTER_ENABLED,
+            'twitter_api_key': config.TWITTER_API_KEY,
+            'twitter_api_secret': config.TWITTER_API_SECRET,
+            'twitter_bearer_token': config.TWITTER_BEARER_TOKEN,
+            'reddit_enabled': config.REDDIT_ENABLED,
+            'reddit_client_id': config.REDDIT_CLIENT_ID,
+            'reddit_client_secret': config.REDDIT_CLIENT_SECRET,
+            'reddit_user_agent': config.REDDIT_USER_AGENT,
+            'rss_enabled': True,
+        }
+
+        self.data_collector = DataCollectorService(self.collector_config)
+
+    # ------------------------------------------------------------------
+    # 数据采集 & 持久化
+    # ------------------------------------------------------------------
+    def collect_fresh_opportunities(
+        self,
+        keywords: Optional[List[str]] = None,
+        limit_per_platform: int = 20,
+        platforms: Optional[List[str]] = None,
+    ) -> List[Dict]:
+        """采集最新商机并保存到数据库，返回格式化后的记录"""
+
+        keywords = keywords or self.DEFAULT_KEYWORDS
+        target_platforms = platforms or ['reddit']
+
         try:
-            signals = self.data_collector.collect_all_platforms(keywords, limit_per_platform=20)
-            
-            # 转换为前端需要的格式
-            opportunities = []
+            signals = self.data_collector.collect_all_platforms(
+                keywords,
+                limit_per_platform=limit_per_platform,
+                platforms=target_platforms,
+            )
+            stored_records = self._save_signals(signals)
+            return [self._format_record(record) for record in stored_records]
+        except Exception as exc:
+            self.logger.error("采集数据失败: %s", exc)
+            return self.get_mock_opportunities()  # fallback for now
+
+    def _save_signals(self, signals) -> List[OpportunitySignalModel]:
+        """将采集到的信号写入数据库，返回保存后的记录列表"""
+
+        stored_records: List[OpportunitySignalModel] = []
+        if not signals:
+            return stored_records
+
+        try:
             for signal in signals:
-                opportunity = {
-                    "id": signal.id,
-                    "title": signal.title,
-                    "description": signal.description,
-                    "creator_name": signal.author,
-                    "creator_handle": f"@{signal.author.lower().replace(' ', '_')}",
-                    "creator_avatar": "/api/placeholder/40/40",
-                    "revenue_signal": signal.revenue_mention or "未知收入",
-                    "user_signal": signal.user_count_mention or "用户数未知",
-                    "platform": signal.platform.value,
-                    "original_url": signal.urls[0] if signal.urls else "#",
-                    "published_at": signal.created_at.isoformat(),
-                    "engagement_metrics": signal.engagement_metrics,
-                    "project_type": self._map_category_to_type(signal.category),
-                    "project_url": signal.urls[0] if signal.urls else None,
-                    "confidence_score": signal.confidence_score
-                }
-                opportunities.append(opportunity)
-            
-            return opportunities
-            
-        except Exception as e:
-            self.logger.error(f"采集数据失败: {e}")
-            return self.get_mock_opportunities()  # fallback to mock data
-    
-    def _map_category_to_type(self, category: str) -> str:
-        """映射分类到项目类型"""
+                platform_value = (
+                    signal.platform.value if hasattr(signal.platform, 'value') else signal.platform
+                )
+                record = (
+                    self.db_session.query(OpportunitySignalModel)
+                    .filter_by(platform=platform_value, source_id=signal.id)
+                    .one_or_none()
+                )
+
+                if not record:
+                    record = OpportunitySignalModel(
+                        platform=platform_value,
+                        source_id=signal.id,
+                        source_type=getattr(signal, 'source_type', 'post'),
+                    )
+                    self.db_session.add(record)
+                else:
+                    record.source_type = getattr(signal, 'source_type', record.source_type)
+
+                record.title = (signal.title or '')[:500]
+                record.description = signal.description
+                record.author = signal.author
+                record.author_followers = signal.author_followers
+                record.engagement_metrics = self._safe_json(signal.engagement_metrics or {})
+                record.keywords = signal.keywords or []
+                record.tags = signal.tags or record.keywords or []
+                record.revenue_mention = signal.revenue_mention
+                record.user_count_mention = signal.user_count_mention
+                record.language = getattr(signal, 'language', None)
+                record.country = getattr(signal, 'country', None)
+                record.urls = signal.urls or []
+                record.created_at = signal.created_at or record.created_at or datetime.utcnow()
+                record.collected_at = datetime.utcnow()
+                record.confidence_score = float(signal.confidence_score or 0.0)
+                record.category = self._map_category_to_type(signal.category)
+                record.attributes = self._safe_json(getattr(signal, 'metadata', {}) or {})
+                record.raw_data = self._safe_json(signal.raw_data or {})
+                record.is_archived = False
+                record.is_processed = False
+                record.is_verified = False
+
+                stored_records.append(record)
+
+            self.db_session.flush()
+            self.db_session.commit()
+        except Exception as exc:
+            self.logger.error("保存商机信号失败: %s", exc)
+            self.db_session.rollback()
+            stored_records = []
+
+        return stored_records
+
+    # ------------------------------------------------------------------
+    # 查询逻辑
+    # ------------------------------------------------------------------
+    def query_opportunities(
+        self,
+        search: Optional[str],
+        project_type: str,
+        sort_by: str,
+        limit: int,
+        offset: int,
+    ) -> Dict[str, Any]:
+        """按条件查询机会列表，返回 {'items': [...], 'total': n}"""
+
+        query = self.db_session.query(OpportunitySignalModel).filter(
+            OpportunitySignalModel.is_archived.is_(False)
+        )
+
+        if search:
+            like_pattern = f"%{search}%"
+            query = query.filter(
+                or_(
+                    OpportunitySignalModel.title.ilike(like_pattern),
+                    OpportunitySignalModel.description.ilike(like_pattern),
+                )
+            )
+
+        if project_type and project_type != 'all':
+            query = query.filter(OpportunitySignalModel.category == project_type)
+
+        records = query.all()
+        if not records:
+            return {'items': [], 'total': 0}
+
+        records = self._sort_records(records, sort_by)
+        total = len(records)
+        paged = records[offset : offset + limit]
+
+        return {
+            'items': [self._format_record(record) for record in paged],
+            'total': total,
+        }
+
+    def _sort_records(self, records: List[OpportunitySignalModel], sort_by: str) -> List[OpportunitySignalModel]:
+        if sort_by == 'revenue':
+            return sorted(records, key=self._revenue_value, reverse=True)
+        if sort_by == 'engagement':
+            return sorted(records, key=self._engagement_value, reverse=True)
+        if sort_by == 'confidence':
+            return sorted(records, key=lambda r: r.confidence_score or 0.0, reverse=True)
+        # 默认最新优先
+        return sorted(records, key=lambda r: r.created_at or datetime.min, reverse=True)
+
+    def _revenue_value(self, record: OpportunitySignalModel) -> float:
+        value = record.revenue_mention or ''
+        if not value:
+            return 0.0
+        text = value.lower().replace('$', '').replace(',', '').replace('/月', '').strip()
+        multiplier = 1.0
+        if text.endswith('k'):
+            multiplier = 1_000.0
+            text = text[:-1]
+        if text.endswith('m'):
+            multiplier = 1_000_000.0
+            text = text[:-1]
+        try:
+            return float(text) * multiplier
+        except ValueError:
+            return 0.0
+
+    def _engagement_value(self, record: OpportunitySignalModel) -> int:
+        metrics = record.engagement_metrics or {}
+        base = (
+            int(metrics.get('likes', 0))
+            + int(metrics.get('retweets', 0))
+            + int(metrics.get('replies', 0))
+        )
+        base += int(metrics.get('score', 0))
+        base += int(metrics.get('num_comments', 0))
+        return base
+
+    # ------------------------------------------------------------------
+    # 输出格式化
+    # ------------------------------------------------------------------
+    def _format_record(self, record: OpportunitySignalModel) -> Dict:
+        primary_url = (record.urls or ['#'])[0]
+        creator_handle = (
+            f"@{record.author.lower().replace(' ', '_')}" if record.author else '@unknown'
+        )
+        result = {
+            'id': str(record.id),
+            'source_id': record.source_id,
+            'platform': record.platform,
+            'title': record.title,
+            'description': record.description,
+            'creator_name': record.author or '未知创作者',
+            'creator_handle': creator_handle,
+            'creator_avatar': '/api/placeholder/40/40',
+            'revenue_signal': record.revenue_mention or '未知收入',
+            'user_signal': record.user_count_mention or '用户数未知',
+            'primary_url': primary_url,
+            'original_url': primary_url,
+            'published_at': (record.created_at or datetime.utcnow()).isoformat(),
+            'collected_at': record.collected_at.isoformat() if record.collected_at else None,
+            'engagement_metrics': record.engagement_metrics or {},
+            'project_type': record.category or 'other',
+            'project_url': primary_url,
+            'confidence_score': record.confidence_score or 0.0,
+            'keywords': record.keywords or [],
+            'tags': record.tags or [],
+            'language': record.language,
+            'country': record.country,
+            'metadata': record.attributes or {},
+        }
+
+        # 兼容前端现有字段命名
+        result['projectName'] = result['title']
+        result['creatorName'] = result['creator_name']
+        result['creatorHandle'] = result['creator_handle']
+        result['confidenceScore'] = result['confidence_score']
+
+        return result
+
+    def _map_category_to_type(self, category: Optional[str]) -> str:
+        if not category:
+            return 'other'
         mapping = {
             'AI工具': 'ai',
-            'SaaS应用': 'saas', 
+            'ai': 'ai',
+            'SaaS应用': 'saas',
+            'saas': 'saas',
             '移动应用': 'mobile',
+            'mobile': 'mobile',
             '浏览器扩展': 'extension',
-            '其他': 'other'
+            'extension': 'extension',
         }
         return mapping.get(category, 'other')
-    
+
+    def _safe_json(self, value):
+        try:
+            json.dumps(value)
+            return value
+        except (TypeError, ValueError):
+            return json.loads(json.dumps(value, default=str))
+
+    # ------------------------------------------------------------------
+    # 备用数据
+    # ------------------------------------------------------------------
     def get_mock_opportunities(self) -> List[Dict]:
         """返回模拟商机数据（备用）"""
         mock_data = [
@@ -219,64 +417,38 @@ def get_opportunities():
     """获取商机列表"""
     try:
         service = IndieNavigatorService()
-        
-        # 检查是否请求最新数据
+
         use_fresh_data = request.args.get('fresh', 'false').lower() == 'true'
-        
         if use_fresh_data:
-            opportunities = service.collect_fresh_opportunities()
-        else:
-            opportunities = service.get_mock_opportunities()
-        
-        # 获取查询参数
-        search = request.args.get('search', '').lower()
+            service.collect_fresh_opportunities(platforms=['reddit'])
+
+        search = request.args.get('search', '').strip()
         filter_type = request.args.get('filter', 'all')
         sort_by = request.args.get('sort', 'newest')
-        limit = int(request.args.get('limit', 50))
-        offset = int(request.args.get('offset', 0))
-        
-        # 应用搜索过滤
-        if search:
-            opportunities = [
-                opp for opp in opportunities 
-                if search in opp['title'].lower() or search in opp['description'].lower()
-            ]
-        
-        # 应用类型过滤
-        if filter_type != 'all':
-            opportunities = [
-                opp for opp in opportunities 
-                if opp['project_type'] == filter_type
-            ]
-        
-        # 应用排序
-        if sort_by == 'newest':
-            opportunities.sort(key=lambda x: x['published_at'], reverse=True)
-        elif sort_by == 'revenue':
-            # 简单的收入排序逻辑
-            opportunities.sort(
-                key=lambda x: int(x['revenue_signal'].replace('$', '').replace(',', '').replace('/月', '')), 
-                reverse=True
-            )
-        elif sort_by == 'engagement':
-            opportunities.sort(
-                key=lambda x: x['engagement_metrics']['likes'] + x['engagement_metrics']['retweets'], 
-                reverse=True
-            )
-        
-        # 应用分页
-        total = len(opportunities)
-        opportunities = opportunities[offset:offset + limit]
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'opportunities': opportunities,
-                'total': total,
-                'limit': limit,
-                'offset': offset
+        limit = max(1, min(int(request.args.get('limit', 50)), 100))
+        offset = max(0, int(request.args.get('offset', 0)))
+
+        result = service.query_opportunities(search, filter_type, sort_by, limit, offset)
+        opportunities = result['items']
+        total = result['total']
+
+        if total == 0:
+            # 数据库暂无记录时回退到模拟数据，至少保证页面可用
+            mock_items = service.get_mock_opportunities()
+            total = len(mock_items)
+            opportunities = mock_items[offset:offset + limit]
+
+        return jsonify(
+            {
+                'success': True,
+                'data': {
+                    'opportunities': opportunities,
+                    'total': total,
+                    'limit': limit,
+                    'offset': offset,
+                },
             }
-        })
+        )
         
     except Exception as e:
         current_app.logger.error(f"获取商机列表失败: {str(e)}")
@@ -290,30 +462,34 @@ def get_opportunity_detail(opportunity_id):
     """获取商机详情"""
     try:
         service = IndieNavigatorService()
-        opportunities = service.get_mock_opportunities()
-        
-        opportunity = next((opp for opp in opportunities if opp['id'] == opportunity_id), None)
-        
-        if not opportunity:
-            return jsonify({
-                'success': False,
-                'error': '商机不存在'
-            }), 404
-        
-        # 添加详细信息
-        opportunity['details'] = {
-            'tech_stack': ['React', 'Node.js', 'PostgreSQL'],
-            'pricing_model': 'SaaS订阅制',
-            'target_market': 'B2B企业服务',
-            'competition_level': '中等',
-            'market_size': '大型市场',
-            'growth_trend': '快速增长'
-        }
-        
-        return jsonify({
-            'success': True,
-            'data': opportunity
-        })
+
+        try:
+            opportunity_pk = int(opportunity_id)
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': '商机ID格式不正确'}), 400
+
+        record = service.db_session.get(OpportunitySignalModel, opportunity_pk)
+        if record:
+            opportunity = service._format_record(record)
+            opportunity['details'] = {
+                'tech_stack': ['React', 'Node.js', 'PostgreSQL'],
+                'pricing_model': 'SaaS订阅制',
+                'target_market': 'B2B企业服务',
+                'competition_level': '中等',
+                'market_size': '大型市场',
+                'growth_trend': '快速增长',
+            }
+            return jsonify({'success': True, 'data': opportunity})
+
+        # fallback to mock data
+        mock_opportunity = next(
+            (opp for opp in service.get_mock_opportunities() if opp['id'] == opportunity_id),
+            None,
+        )
+        if mock_opportunity:
+            return jsonify({'success': True, 'data': mock_opportunity})
+
+        return jsonify({'success': False, 'error': '商机不存在'}), 404
         
     except Exception as e:
         current_app.logger.error(f"获取商机详情失败: {str(e)}")
@@ -327,19 +503,37 @@ def get_dashboard_stats():
     """获取仪表盘统计数据"""
     try:
         service = IndieNavigatorService()
-        opportunities = service.get_mock_opportunities()
-        
+        query = service.db_session.query(OpportunitySignalModel).filter(
+            OpportunitySignalModel.is_archived.is_(False)
+        )
+        total = query.count()
+
+        if total == 0:
+            # fallback to mock statistics when db empty
+            mock_stats = {
+                'total_opportunities': 0,
+                'high_potential': 0,
+                'trending_signals': 0,
+                'my_saved': 0,
+            }
+            return jsonify({'success': True, 'data': mock_stats})
+
+        high_potential = (
+            query.filter(OpportunitySignalModel.confidence_score >= 0.7).count()
+        )
+        last_week = datetime.utcnow() - timedelta(days=7)
+        trending = (
+            query.filter(OpportunitySignalModel.created_at >= last_week).count()
+        )
+
         stats = {
-            'total_opportunities': len(opportunities),
-            'high_potential': len([opp for opp in opportunities if '$15' in opp['revenue_signal'] or '$20' in opp['revenue_signal']]),
-            'trending_signals': 12,  # 模拟数据
-            'my_saved': 3  # 模拟数据
+            'total_opportunities': total,
+            'high_potential': high_potential,
+            'trending_signals': trending,
+            'my_saved': 0,
         }
-        
-        return jsonify({
-            'success': True,
-            'data': stats
-        })
+
+        return jsonify({'success': True, 'data': stats})
         
     except Exception as e:
         current_app.logger.error(f"获取统计数据失败: {str(e)}")

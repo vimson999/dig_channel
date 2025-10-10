@@ -7,8 +7,10 @@ from datetime import datetime
 from sqlalchemy.orm import sessionmaker
 import logging
 
-from services.data_collector import DataCollectorService, DEFAULT_CONFIG
+from services.data_collector import DataCollectorService
 from models.indie_navigator import CollectionJob, CollectionKeyword
+from api.indie_navigator import IndieNavigatorService
+from config.data_collection_config import DataCollectionConfig
 
 data_collection_bp = Blueprint('data_collection', __name__, url_prefix='/api/data-collection')
 
@@ -18,7 +20,19 @@ class DataCollectionAPI:
     def __init__(self, db_session=None):
         self.logger = logging.getLogger(__name__)
         self.db_session = db_session
-        self.data_collector = DataCollectorService(DEFAULT_CONFIG)
+        config = DataCollectionConfig()
+        collector_config = {
+            'twitter_enabled': config.TWITTER_ENABLED,
+            'twitter_api_key': config.TWITTER_API_KEY,
+            'twitter_api_secret': config.TWITTER_API_SECRET,
+            'twitter_bearer_token': config.TWITTER_BEARER_TOKEN,
+            'reddit_enabled': config.REDDIT_ENABLED,
+            'reddit_client_id': config.REDDIT_CLIENT_ID,
+            'reddit_client_secret': config.REDDIT_CLIENT_SECRET,
+            'reddit_user_agent': config.REDDIT_USER_AGENT,
+            'rss_enabled': True,
+        }
+        self.data_collector = DataCollectorService(collector_config)
 
 @data_collection_bp.route('/start', methods=['POST'])
 def start_collection():
@@ -28,29 +42,27 @@ def start_collection():
         
         # 获取参数
         keywords = data.get('keywords', ["SaaS", "MRR", "indie hacker", "startup", "AI tool"])
-        platforms = data.get('platforms', ['twitter'])
+        platforms = data.get('platforms', ['reddit'])
         limit_per_platform = data.get('limit_per_platform', 50)
         
-        # 创建采集服务实例
-        collector = DataCollectorService(DEFAULT_CONFIG)
-        
-        # 执行采集
-        signals = collector.collect_all_platforms(keywords, limit_per_platform)
-        
-        # 统计结果
+        service = IndieNavigatorService()
+        opportunities = service.collect_fresh_opportunities(
+            keywords=keywords,
+            limit_per_platform=limit_per_platform,
+            platforms=platforms,
+        )
+
         platform_stats = {}
-        for signal in signals:
-            platform = signal.platform.value
-            if platform not in platform_stats:
-                platform_stats[platform] = 0
-            platform_stats[platform] += 1
+        for opportunity in opportunities:
+            platform = opportunity.get('platform', 'unknown')
+            platform_stats[platform] = platform_stats.get(platform, 0) + 1
         
         return jsonify({
             'success': True,
             'data': {
                 'job_id': f'job_{int(datetime.now().timestamp())}',
                 'status': 'completed',
-                'total_signals': len(signals),
+                'total_signals': len(opportunities),
                 'platform_breakdown': platform_stats,
                 'keywords_used': keywords,
                 'started_at': datetime.now().isoformat(),
@@ -135,21 +147,32 @@ def manage_keywords():
 def get_platform_status():
     """获取平台状态"""
     try:
-        collector = DataCollectorService(DEFAULT_CONFIG)
+        config = DataCollectionConfig()
+        collector = DataCollectorService({
+            'twitter_enabled': config.TWITTER_ENABLED,
+            'twitter_api_key': config.TWITTER_API_KEY,
+            'twitter_api_secret': config.TWITTER_API_SECRET,
+            'twitter_bearer_token': config.TWITTER_BEARER_TOKEN,
+            'reddit_enabled': config.REDDIT_ENABLED,
+            'reddit_client_id': config.REDDIT_CLIENT_ID,
+            'reddit_client_secret': config.REDDIT_CLIENT_SECRET,
+            'reddit_user_agent': config.REDDIT_USER_AGENT,
+            'rss_enabled': True,
+        })
         stats = collector.get_platform_stats()
         
         # 添加平台配置信息
         platform_configs = {
             'twitter': {
                 'name': 'Twitter/X',
-                'enabled': DEFAULT_CONFIG.get('twitter_enabled', False),
+                'enabled': config.TWITTER_ENABLED,
                 'description': '从Twitter获取独立开发者分享的项目信息',
                 'rate_limit': '300 requests/15min',
                 'last_collection': None
             },
             'reddit': {
                 'name': 'Reddit',
-                'enabled': DEFAULT_CONFIG.get('reddit_enabled', False),
+                'enabled': config.REDDIT_ENABLED,
                 'description': '从相关subreddit获取项目分享',
                 'rate_limit': '60 requests/min',
                 'last_collection': None
@@ -242,7 +265,18 @@ def get_collection_jobs():
 def health_check():
     """数据采集服务健康检查"""
     try:
-        collector = DataCollectorService(DEFAULT_CONFIG)
+        config = DataCollectionConfig()
+        collector = DataCollectorService({
+            'twitter_enabled': config.TWITTER_ENABLED,
+            'twitter_api_key': config.TWITTER_API_KEY,
+            'twitter_api_secret': config.TWITTER_API_SECRET,
+            'twitter_bearer_token': config.TWITTER_BEARER_TOKEN,
+            'reddit_enabled': config.REDDIT_ENABLED,
+            'reddit_client_id': config.REDDIT_CLIENT_ID,
+            'reddit_client_secret': config.REDDIT_CLIENT_SECRET,
+            'reddit_user_agent': config.REDDIT_USER_AGENT,
+            'rss_enabled': True,
+        })
         platform_stats = collector.get_platform_stats()
         
         health_status = {

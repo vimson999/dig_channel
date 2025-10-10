@@ -655,25 +655,16 @@ chart.setOption(option);
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 mb-2">CPM值 (每千次展示费用)</label>
                                 <div class="relative">
-                                    <input type="number" id="channel-cpm" class="w-full px-3 py-2 pr-8 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all" 
-                                           value="2.5" step="0.1" min="0" placeholder="2.5">
+                                    <input type="number" id="channel-cpm" class="w-full px-3 py-2 pr-8 border border-gray-300 rounded-button bg-gray-50 focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all" 
+                                           value="2.50" step="0.01" min="0" placeholder="自动根据分类计算" readonly>
                                     <span class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 text-sm">$</span>
                                 </div>
-                                <p class="text-xs text-gray-500 mt-1">根据频道类型和地区调整</p>
+                                <p id="channel-cpm-hint" class="text-xs text-gray-500 mt-1">默认CPM：$2.50</p>
                             </div>
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 mb-2">频道分类</label>
                                 <select id="channel-category" class="w-full px-3 py-2 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all">
                                     <option value="">选择分类</option>
-                                    <option value="科技">科技</option>
-                                    <option value="生活">生活</option>
-                                    <option value="娱乐">娱乐</option>
-                                    <option value="游戏">游戏</option>
-                                    <option value="教育">教育</option>
-                                    <option value="音乐">音乐</option>
-                                    <option value="美食">美食</option>
-                                    <option value="旅行">旅行</option>
-                                    <option value="其他">其他</option>
                                 </select>
                             </div>
                         </div>
@@ -683,12 +674,14 @@ chart.setOption(option);
                             <div class="flex items-start gap-2">
                                 <i class="fas fa-info-circle text-blue-500 text-sm mt-0.5"></i>
                                 <div class="text-xs text-gray-600">
-                                    <p class="font-medium mb-1">CPM参考范围：</p>
+                                    <p class="font-medium mb-1">系统会根据分类自动应用默认CPM：</p>
                                     <div class="space-y-1">
-                                        <div class="flex justify-between"><span>科技/教育:</span><span class="text-blue-600">$2-5</span></div>
-                                        <div class="flex justify-between"><span>娱乐/生活:</span><span class="text-green-600">$1-3</span></div>
-                                        <div class="flex justify-between"><span>游戏/音乐:</span><span class="text-purple-600">$1.5-4</span></div>
+                                        <div class="flex justify-between"><span>科技:</span><span class="text-blue-600">$9.00</span></div>
+                                        <div class="flex justify-between"><span>教育:</span><span class="text-blue-600">$4.00</span></div>
+                                        <div class="flex justify-between"><span>娱乐:</span><span class="text-green-600">$3.00</span></div>
+                                        <div class="flex justify-between"><span>转发:</span><span class="text-purple-600">$6.00</span></div>
                                     </div>
+                                    <p class="mt-2">保存后可在“编辑频道”中查看或重新同步分类默认值。</p>
                                 </div>
                             </div>
                         </div>

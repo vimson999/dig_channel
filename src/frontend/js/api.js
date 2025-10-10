@@ -137,8 +137,23 @@ class APIClient {
         return this.delete(`${CONFIG.ENDPOINTS.CHANNELS}/${channelId}`);
     }
 
-    async addChannel(url, name = null, cpm = 2.5) {
-        return this.post(CONFIG.ENDPOINTS.CHANNELS, { url, name, cpm });
+    async addChannel(url, options = {}) {
+        const payload = { url };
+
+        if (options && typeof options === 'object') {
+            const { name, cpm, category } = options;
+            if (name) {
+                payload.name = name;
+            }
+            if (typeof cpm === 'number' && !Number.isNaN(cpm)) {
+                payload.cpm = cpm;
+            }
+            if (category) {
+                payload.category = category;
+            }
+        }
+
+        return this.post(CONFIG.ENDPOINTS.CHANNELS, payload);
     }
 
     async previewChannel(url) {
@@ -192,6 +207,10 @@ class APIClient {
 
     async getChannelCategories() {
         return this.get(CONFIG.ENDPOINTS.CHANNEL_CATEGORIES);
+    }
+
+    async getChannelDefaults() {
+        return this.get(CONFIG.ENDPOINTS.CHANNEL_DEFAULTS);
     }
 
     async searchChannels(keyword, params = {}) {

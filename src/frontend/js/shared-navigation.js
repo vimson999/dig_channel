@@ -225,7 +225,7 @@ class SharedNavigation {
                         name: '商机发现',
                         icon: 'fas fa-compass',
                         href: 'indie-navigator.html'
-                    }
+                    },
                 ]
             },
             // 工具箱

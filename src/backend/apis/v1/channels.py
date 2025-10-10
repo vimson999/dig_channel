@@ -7,6 +7,7 @@
 
 from flask import Blueprint, request, jsonify
 from services import ChannelService, YouTubeSyncService, OptimizedChannelSyncService
+from config.channel_defaults import serialize_category_defaults, get_default_cpm
 from utils.api_utils import validate_json, handle_api_error
 from utils.decorators import validate_request
 from utils.auth_utils import require_login, require_resource_permission, get_current_user
@@ -390,14 +391,17 @@ def sync_all_channels():
 @bp.route('/categories', methods=['GET'])
 def get_categories():
     """获取所有频道分类
-    
+
     Returns:
         JSON: 分类列表
     """
     try:
         from models import db, Channel
         from sqlalchemy import func
-        
+
+        defaults = serialize_category_defaults()
+        default_fallback = defaults.get('default', float(get_default_cpm(None)))
+
         # 查询所有不为空的分类
         categories = db.session.query(
             Channel.category,
@@ -409,15 +413,16 @@ def get_categories():
         ).group_by(Channel.category).order_by(
             func.count(Channel.id).desc()
         ).all()
-        
+
         category_list = [
             {
                 'name': cat[0],
-                'count': cat[1]
+                'count': cat[1],
+                'default_cpm': defaults.get(cat[0], default_fallback)
             }
             for cat in categories
         ]
-        
+
         return jsonify({
             'success': True,
             'data': {
@@ -425,9 +430,25 @@ def get_categories():
                 'total': len(category_list)
             }
         })
-        
+
     except Exception as e:
         return handle_api_error(500, f"获取分类失败: {str(e)}")
+
+
+@bp.route('/defaults', methods=['GET'])
+def get_channel_defaults():
+    """返回频道分类默认CPM配置"""
+    try:
+        defaults = serialize_category_defaults()
+        return jsonify({
+            'success': True,
+            'data': {
+                'defaults': defaults,
+                'default_cpm': defaults.get('default')
+            }
+        })
+    except Exception as exc:
+        return handle_api_error(500, f"获取默认CPM配置失败: {exc}")
 
 @bp.route('/search', methods=['GET'])
 def search_channels():

@@ -194,6 +194,18 @@ animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
                     <p class="text-xl text-gray-600 mb-6 max-w-3xl mx-auto">
                         自动收集和分析其他独立开发者公开分享的成功项目信息，帮助你找到已经被市场验证的商业机会
                     </p>
+
+                    <!-- Data Collection Actions -->
+                    <div class="flex flex-col sm:flex-row items-center justify-center gap-3 mb-8">
+                        <button id="collect-opportunities-btn" class="inline-flex items-center px-5 py-3 rounded-button bg-primary-600 hover:bg-primary-700 text-white font-medium shadow-soft transition-all duration-200">
+                            <i class="fas fa-cloud-download-alt mr-2"></i>
+                            <span>采集最新商机</span>
+                        </button>
+                        <button id="refresh-opportunities-hero-btn" class="inline-flex items-center px-5 py-3 rounded-button border border-primary-200 text-primary-600 hover:bg-primary-50 font-medium transition-all duration-200">
+                            <i class="fas fa-rotate mr-2"></i>
+                            <span>刷新展示数据</span>
+                        </button>
+                    </div>
                     
                     <!-- Stats Overview -->
                     <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mt-8">
@@ -278,7 +290,7 @@ animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
                         <i class="fas fa-lightbulb mr-2 text-accent-orange"></i>
                         发现的商机
                     </h2>
-                    <button class="bg-white/80 backdrop-blur-sm px-4 py-2 text-gray-600 hover:text-gray-800 rounded-lg transition-all border border-gray-200 hover:bg-white shadow-sm">
+                    <button id="refresh-opportunities-btn" class="bg-white/80 backdrop-blur-sm px-4 py-2 text-gray-600 hover:text-gray-800 rounded-lg transition-all border border-gray-200 hover:bg-white shadow-sm">
                         <i class="fas fa-sync-alt mr-2"></i>刷新数据
                     </button>
                 </div>

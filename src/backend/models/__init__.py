@@ -8,5 +8,18 @@ from .channel import Channel
 from .channel_data import ChannelData
 from .video import Video, VideoData
 from .favorite import FavoriteVideo
+from .indie_navigator import OpportunitySignal, UserOpportunityInteraction, CollectionKeyword, CollectionJob
 
-__all__ = ['db', 'User', 'Channel', 'ChannelData', 'Video', 'VideoData', 'FavoriteVideo']
+__all__ = [
+    'db',
+    'User',
+    'Channel',
+    'ChannelData',
+    'Video',
+    'VideoData',
+    'FavoriteVideo',
+    'OpportunitySignal',
+    'UserOpportunityInteraction',
+    'CollectionKeyword',
+    'CollectionJob'
+]

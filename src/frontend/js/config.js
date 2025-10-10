@@ -11,6 +11,7 @@ const CONFIG = {
         CHANNEL_PREVIEW: '/channels/preview',
         CHANNEL_SYNC: '/channels/sync/all',
         CHANNEL_CATEGORIES: '/channels/categories',
+        CHANNEL_DEFAULTS: '/channels/defaults',
         CHANNEL_SEARCH: '/channels/search',
         
         // 视频相关

@@ -143,7 +143,11 @@ class VideoManager {
             sortBy: 'published_at',
             order: 'desc'
         };
-        
+
+        // 数据缓存
+        this.allChannels = [];
+        this.channelCategories = [];
+
         // 收藏状态缓存
         this.favoriteStatus = new Map();
         
@@ -171,26 +175,18 @@ class VideoManager {
         }
         
         // 筛选功能
-        const filterChannel = document.getElementById('filter-channel');
-        if (filterChannel) {
-            filterChannel.addEventListener('change', (e) => {
-                this.currentFilters.channel = e.target.value;
-                // 清空分类筛选，因为频道改变了
-                this.currentFilters.category = '';
-                const categoryFilter = document.getElementById('filter-category');
-                if (categoryFilter) categoryFilter.value = '';
-                
-                this.currentPage = 1;
-                // 重新加载分类和视频
-                this.loadCategories();
-                this.loadVideos();
-            });
-        }
-        
         const filterCategory = document.getElementById('filter-category');
         if (filterCategory) {
             filterCategory.addEventListener('change', (e) => {
-                this.currentFilters.category = e.target.value;
+                this.handleCategoryChange(e.target.value);
+            });
+        }
+
+        const filterChannel = document.getElementById('filter-channel');
+        if (filterChannel) {
+            filterChannel.addEventListener('change', (e) => {
+                const value = e.target.value;
+                this.currentFilters.channel = value ? Number(value) : '';
                 this.currentPage = 1;
                 this.loadVideos();
             });
@@ -251,10 +247,15 @@ class VideoManager {
     parseUrlParams() {
         const urlParams = new URLSearchParams(window.location.search);
         
-        // 从URL获取频道信息
+        // 从URL获取筛选信息
+        const category = urlParams.get('category');
         const channelId = urlParams.get('channel_id');
         const channelName = urlParams.get('channel_name');
         
+        if (category) {
+            this.currentFilters.category = decodeURIComponent(category);
+        }
+
         if (channelId) {
             this.currentFilters.channel = parseInt(channelId);
             
@@ -267,14 +268,23 @@ class VideoManager {
 
     // 应用URL参数到UI
     applyUrlParams() {
+        // 先应用分类筛选（会联动刷新频道列表）
+        if (this.currentFilters.category) {
+            const filterCategory = document.getElementById('filter-category');
+            if (filterCategory) {
+                filterCategory.value = this.currentFilters.category;
+                this.handleCategoryChange(this.currentFilters.category, { triggerLoad: false, preserveChannel: true });
+            }
+        } else {
+            // 没有分类筛选时也要确保频道列表已渲染
+            this.populateChannelOptions();
+        }
+
         // 设置频道筛选下拉框的值
         if (this.currentFilters.channel) {
             const filterChannel = document.getElementById('filter-channel');
             if (filterChannel) {
                 filterChannel.value = this.currentFilters.channel;
-                
-                // 触发change事件以更新相关UI
-                filterChannel.dispatchEvent(new Event('change'));
             }
         }
     }
@@ -337,24 +347,110 @@ class VideoManager {
         }
     }
     
+    handleCategoryChange(selectedCategory, options = {}) {
+        const { triggerLoad = true, preserveChannel = false } = options;
+        const normalizedCategory = selectedCategory || '';
+
+        const channelSelect = document.getElementById('filter-channel');
+        const previousChannel = this.currentFilters.channel;
+
+        this.currentFilters.category = normalizedCategory;
+
+        if (!preserveChannel) {
+            this.currentFilters.channel = '';
+            if (channelSelect) {
+                channelSelect.value = '';
+            }
+        }
+
+        this.populateChannelOptions();
+
+        if (preserveChannel && previousChannel) {
+            const channelValue = String(previousChannel);
+            if (channelSelect && Array.from(channelSelect.options).some(option => option.value === channelValue)) {
+                channelSelect.value = channelValue;
+                this.currentFilters.channel = previousChannel;
+            } else {
+                this.currentFilters.channel = '';
+                if (channelSelect) {
+                    channelSelect.value = '';
+                }
+            }
+        }
+
+        this.currentPage = 1;
+
+        if (triggerLoad) {
+            this.loadVideos();
+        }
+    }
+
+    populateCategoryOptions() {
+        const select = document.getElementById('filter-category');
+        if (!select) return;
+
+        const currentValue = this.currentFilters.category || '';
+        select.innerHTML = '<option value="">所有频道分类</option>';
+
+        this.channelCategories.forEach(category => {
+            const name = (category && (category.name || category.category || category)) || '';
+            if (!name) return;
+            const option = document.createElement('option');
+            option.value = name;
+            const count = category && category.count;
+            option.textContent = count != null ? `${name} (${count})` : name;
+            select.appendChild(option);
+        });
+
+        if (currentValue) {
+            select.value = currentValue;
+        }
+    }
+
+    populateChannelOptions() {
+        const select = document.getElementById('filter-channel');
+        if (!select) return;
+
+        const categoryFilter = this.currentFilters.category || '';
+        const previousChannelValue = this.currentFilters.channel ? String(this.currentFilters.channel) : '';
+
+        select.innerHTML = '<option value="">所有频道</option>';
+
+        const filteredChannels = this.allChannels.filter(channel => {
+            if (!categoryFilter) return true;
+            const channelCategory = channel.category || '';
+            return channelCategory === categoryFilter;
+        });
+
+        filteredChannels.forEach(channel => {
+            const option = document.createElement('option');
+            option.value = channel.id;
+            option.dataset.category = channel.category || '';
+            const videoCount = channel.video_count != null ? channel.video_count : channel.video_total;
+            const suffix = videoCount != null ? ` (${videoCount}个视频)` : '';
+            option.textContent = `${channel.name}${suffix}`;
+            select.appendChild(option);
+        });
+
+        const hasChannels = filteredChannels.length > 0;
+        select.disabled = !hasChannels;
+        select.title = hasChannels ? '' : (categoryFilter ? '该分类下暂无频道' : '暂无频道数据');
+
+        if (previousChannelValue && filteredChannels.some(channel => String(channel.id) === previousChannelValue)) {
+            select.value = previousChannelValue;
+        } else {
+            if (categoryFilter) {
+                this.currentFilters.channel = '';
+            }
+        }
+    }
+
     async loadChannels() {
         try {
             const response = await api.getVideoChannels();
             if (response.success) {
-                const channels = response.data.channels;
-                const select = document.getElementById('filter-channel');
-                
-                if (select) {
-                    // 清空现有选项（保留第一个"所有频道"）
-                    select.innerHTML = '<option value="">所有频道</option>';
-                    
-                    channels.forEach(channel => {
-                        const option = document.createElement('option');
-                        option.value = channel.id;
-                        option.textContent = `${channel.name} (${channel.video_count || 0}个视频)`;
-                        select.appendChild(option);
-                    });
-                }
+                this.allChannels = response.data.channels || [];
+                this.populateChannelOptions();
             }
         } catch (error) {
             console.error('加载频道列表失败:', error);
@@ -363,39 +459,10 @@ class VideoManager {
     
     async loadCategories() {
         try {
-            // 根据当前筛选状态决定加载哪种分类
-            const channelFilter = document.getElementById('filter-channel');
-            const hasChannelSelected = channelFilter && channelFilter.value;
-            
-            let response;
-            if (hasChannelSelected) {
-                // 如果选择了特定频道，加载视频分类
-                response = await api.getVideoCategories();
-            } else {
-                // 如果没有选择频道，加载频道分类
-                response = await api.getChannelCategories();
-            }
-            
+            const response = await api.getChannelCategories();
             if (response.success) {
-                const categories = response.data.categories;
-                const select = document.getElementById('filter-category');
-                
-                if (select) {
-                    // 清空现有选项并设置正确的默认选项
-                    const defaultLabel = hasChannelSelected ? '所有视频分类' : '所有频道分类';
-                    select.innerHTML = `<option value="">${defaultLabel}</option>`;
-                    
-                    categories.forEach(category => {
-                        const option = document.createElement('option');
-                        option.value = category.name;
-                        if (hasChannelSelected) {
-                            option.textContent = `${category.name} (${category.count}个视频)`;
-                        } else {
-                            option.textContent = `${category.name} (${category.count}个频道)`;
-                        }
-                        select.appendChild(option);
-                    });
-                }
+                this.channelCategories = response.data.categories || [];
+                this.populateCategoryOptions();
             }
         } catch (error) {
             console.error('加载分类列表失败:', error);
@@ -424,12 +491,18 @@ class VideoManager {
             if (this.currentFilters.search) {
                 params.q = this.currentFilters.search;
             }
-            if (this.currentFilters.channel) {
+            const hasChannelFilter = Boolean(this.currentFilters.channel);
+
+            if (hasChannelFilter) {
                 params.channel_id = this.currentFilters.channel;
             }
-            if (this.currentFilters.category) {
+
+            // 频道已选中时忽略分类参数，避免后端按照视频分类再次过滤
+            if (this.currentFilters.category && !hasChannelFilter) {
                 params.category = this.currentFilters.category;
             }
+
+            console.log('🧮 [VideoManager] 最终请求参数:', params);
             
             // 根据是否有搜索条件选择API方法
             const response = this.currentFilters.search 
@@ -1002,6 +1075,8 @@ function clearFilters() {
         order: 'desc'
     };
     videoManager.currentPage = 1;
+    // 重新渲染频道选项，恢复“所有频道”视图
+    videoManager.handleCategoryChange('', { triggerLoad: false });
     videoManager.loadVideos();
 }
 

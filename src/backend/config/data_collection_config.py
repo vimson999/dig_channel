@@ -15,7 +15,7 @@ class DataCollectionConfig:
         """加载配置"""
         
         # Twitter/X API 配置
-        self.TWITTER_ENABLED = os.getenv('TWITTER_ENABLED', 'true').lower() == 'true'
+        self.TWITTER_ENABLED = os.getenv('TWITTER_ENABLED', 'false').lower() == 'true'
         self.TWITTER_API_KEY = os.getenv('TWITTER_API_KEY', '')
         self.TWITTER_API_SECRET = os.getenv('TWITTER_API_SECRET', '')
         self.TWITTER_BEARER_TOKEN = os.getenv('TWITTER_BEARER_TOKEN', '')

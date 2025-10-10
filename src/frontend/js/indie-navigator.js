@@ -81,9 +81,18 @@ class IndieNavigator {
         }
         
         // 刷新按钮
-        document.querySelector('button[title="刷新数据"]')?.addEventListener('click', () => {
-            this.refreshOpportunities();
+        ['refresh-opportunities-btn', 'refresh-opportunities-hero-btn'].forEach(id => {
+            const refreshButton = document.getElementById(id);
+            if (refreshButton) {
+                refreshButton.addEventListener('click', () => this.refreshOpportunities());
+            }
         });
+
+        // 采集按钮
+        const collectButton = document.getElementById('collect-opportunities-btn');
+        if (collectButton) {
+            collectButton.addEventListener('click', () => this.collectLatestOpportunities());
+        }
     }
     
     showLoadingState() {
@@ -160,11 +169,59 @@ class IndieNavigator {
         }
     }
     
-    async refreshOpportunities() {
-        this.showToast('正在刷新数据...', 'info');
+    async refreshOpportunities(options = {}) {
+        const { suppressToast = false } = options;
+
+        if (!suppressToast) {
+            this.showToast('正在刷新数据...', 'info');
+        }
         this.showLoadingState();
         await this.loadOpportunities();
-        this.showToast('数据刷新完成', 'success');
+        if (!suppressToast) {
+            this.showToast('数据刷新完成', 'success');
+        }
+    }
+
+    async collectLatestOpportunities() {
+        const button = document.getElementById('collect-opportunities-btn');
+        if (!button || button.disabled) {
+            return;
+        }
+
+        const originalContent = button.innerHTML;
+        button.disabled = true;
+        button.classList.add('opacity-70', 'cursor-not-allowed');
+        button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>采集中...';
+
+        try {
+            this.showToast('正在采集最新商机...', 'info');
+
+            const response = await fetch(`${this.apiBaseUrl}/api/data-collection/start`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    platforms: ['reddit']
+                })
+            });
+
+            const result = await response.json();
+            if (!response.ok || !result.success) {
+                throw new Error(result.error || result.message || '采集失败，请稍后再试');
+            }
+
+            this.showToast('采集完成，正在刷新列表...', 'success');
+            await this.refreshOpportunities({ suppressToast: true });
+            this.showToast('最新商机已更新', 'success');
+        } catch (error) {
+            console.error('❌ [INDIE_NAVIGATOR] 采集最新商机失败:', error);
+            this.showToast(error.message || '采集失败，请稍后再试', 'error');
+        } finally {
+            button.disabled = false;
+            button.classList.remove('opacity-70', 'cursor-not-allowed');
+            button.innerHTML = originalContent;
+        }
     }
     
     generateMockOpportunities() {
