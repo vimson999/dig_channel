@@ -1,8 +1,0 @@
-#!/Users/v9/Documents/workspace/v9/code/dig_ytb_data_claude_v1/venv-3.11/bin/python3.11
-# -*- coding: UTF-8 -*-
-from __future__ import print_function, division, absolute_import
-
-from numba.misc.numba_entry import main
-
-if __name__ == "__main__":
-    main()
