@@ -57,6 +57,13 @@ class ChannelManagement {
                 this.applyDefaultCpmToEdit(e.target.value);
             });
         }
+
+        const addCategorySelect = document.getElementById('channel-category');
+        if (addCategorySelect) {
+            addCategorySelect.addEventListener('change', (e) => {
+                this.applyDefaultCpmToAdd(e.target.value);
+            });
+        }
     }
 
     // 防抖函数
@@ -299,7 +306,8 @@ class ChannelManagement {
                 // 更新筛选器下拉框
                 this.updateFilterCategoryDropdown();
 
-                // 更新编辑模态框的分类下拉框
+                // 更新新增和编辑模态框的分类下拉框
+                this.updateAddCategoryDropdown();
                 this.updateEditCategoryDropdown();
 
                 if (typeof this.categoryDefaults.default !== 'number') {
@@ -327,6 +335,7 @@ class ChannelManagement {
             };
             this.defaultCpm = this.categoryDefaults.default;
             this.updateFilterCategoryDropdown();
+            this.updateAddCategoryDropdown();
             this.updateEditCategoryDropdown();
         }
     }
@@ -352,6 +361,30 @@ class ChannelManagement {
         if (currentValue) {
             filterCategory.value = currentValue;
         }
+    }
+
+    updateAddCategoryDropdown() {
+        const addCategory = document.getElementById('channel-category');
+        if (!addCategory) return;
+
+        const currentValue = addCategory.value;
+
+        let options = '<option value="">选择分类</option>';
+        this.categories.forEach(category => {
+            const defaultCpm = this.getDefaultCpmValue(category.name);
+            const label = Number.isFinite(defaultCpm)
+                ? `${category.name}（$${defaultCpm.toFixed(2)}）`
+                : category.name;
+            options += `<option value="${category.name}">${label}</option>`;
+        });
+
+        addCategory.innerHTML = options;
+
+        if (currentValue) {
+            addCategory.value = currentValue;
+        }
+
+        this.applyDefaultCpmToAdd(addCategory.value);
     }
 
     // 更新编辑模态框的分类下拉框
@@ -391,6 +424,22 @@ class ChannelManagement {
             return mapped;
         }
         return base;
+    }
+
+    applyDefaultCpmToAdd(category) {
+        const cpmInput = document.getElementById('channel-cpm');
+        const hintElement = document.getElementById('channel-cpm-hint');
+        const defaultValue = this.getDefaultCpmValue(category);
+
+        if (cpmInput) {
+            cpmInput.value = defaultValue.toFixed(2);
+        }
+
+        if (hintElement) {
+            hintElement.textContent = category
+                ? `分类默认值：$${defaultValue.toFixed(2)}`
+                : `默认CPM：$${defaultValue.toFixed(2)}`;
+        }
     }
 
     applyDefaultCpmToEdit(category, options = {}) {
@@ -1148,6 +1197,10 @@ function openAddChannelModal() {
     if (modal && content) {
         if (form) {
             form.reset();
+        }
+
+        if (window.channelManagement) {
+            window.channelManagement.updateAddCategoryDropdown();
         }
 
         modal.classList.remove('hidden');

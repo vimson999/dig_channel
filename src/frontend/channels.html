@@ -321,12 +321,47 @@
                     <p class="text-xs text-gray-500">支持频道主页或频道 ID 链接</p>
                 </div>
 
-                <div id="preview-content" class="bg-gray-50 border border-dashed border-gray-300 rounded-xl p-4 text-sm text-gray-500 flex items-center justify-center min-h-[140px]">
-                    粘贴频道链接后点击“预览”查看频道详情
+                <div class="space-y-2">
+                    <label for="channel-name" class="block text-sm font-medium text-gray-700">频道名称 <span class="text-gray-400">(可选)</span></label>
+                    <input id="channel-name" type="text" class="w-full px-4 py-2.5 border border-gray-300 rounded-button focus:outline-none focus:ring-2 focus:ring-primary-200 focus:border-primary-500" placeholder="留空将自动根据预览结果填充">
+                </div>
+
+                <div class="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl p-4 border border-blue-100 space-y-4">
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 bg-gradient-to-br from-blue-400 to-blue-600 rounded-lg flex items-center justify-center">
+                            <i class="fas fa-dollar-sign text-white text-sm"></i>
+                        </div>
+                        <div>
+                            <h4 class="font-medium text-gray-800">收入设置</h4>
+                            <p class="text-xs text-gray-600">选择分类后会自动应用对应的默认 CPM 值</p>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">频道分类</label>
+                            <select id="channel-category" class="w-full px-3 py-2 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all">
+                                <option value="">选择分类</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">默认 CPM (每千次展示费用)</label>
+                            <div class="relative">
+                                <input type="number" id="channel-cpm" class="w-full px-3 py-2 pr-8 border border-gray-300 rounded-button bg-gray-50 focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all" value="2.50" step="0.01" min="0" readonly>
+                                <span class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 text-sm">$</span>
+                            </div>
+                            <p id="channel-cpm-hint" class="text-xs text-gray-500 mt-1">默认CPM：$2.50</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="channel-preview" class="hidden mb-4 p-4 bg-blue-50 !rounded-button">
+                    <h6 class="text-sm font-medium text-blue-900 mb-2">频道预览：</h6>
+                    <div id="preview-content" class="text-sm text-gray-600">粘贴频道链接后点击“预览”查看频道详情</div>
                 </div>
 
                 <div class="text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded-lg p-3">
-                    提示：保存后可在“编辑频道”页面选择分类，系统会按分类自动应用默认CPM。
+                    提示：系统会根据选择的分类自动计算默认 CPM，后续可在“编辑频道”中调整。
                 </div>
 
                 <div class="flex items-center justify-end gap-3 border-t border-gray-100 pt-5">
