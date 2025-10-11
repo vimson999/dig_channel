@@ -63,6 +63,11 @@ class BaseConfig:
     
     # 确保日志目录存在
     os.makedirs(LOG_DIR, exist_ok=True)
+
+    # 可选功能开关
+    _truthy = {'1', 'true', 'yes', 'on'}
+    ENABLE_TTS_API = os.environ.get('ENABLE_TTS_API', 'false').lower() in _truthy
+    ENABLE_MHTML_API = os.environ.get('ENABLE_MHTML_API', 'false').lower() in _truthy
     
     # API限流配置
     RATELIMIT_STORAGE_URL = REDIS_URL

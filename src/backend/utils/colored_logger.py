@@ -59,22 +59,22 @@ def setup_colored_logger(name: str = None, level: int = logging.INFO) -> logging
     """
     logger = logging.getLogger(name or __name__)
     logger.setLevel(level)
-    
-    # 避免重复添加handler
-    if logger.handlers:
-        return logger
-    
-    # 创建控制台handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(level)
-    
-    # 设置彩色格式化器
-    formatter = ColoredFormatter()
-    console_handler.setFormatter(formatter)
-    
-    # 添加handler到logger
-    logger.addHandler(console_handler)
-    
+
+    # 检查是否已存在控制台handler
+    has_console_handler = False
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and getattr(handler, 'stream', None) is sys.stdout:
+            has_console_handler = True
+            handler.setLevel(level)
+            handler.setFormatter(ColoredFormatter())
+            break
+
+    if not has_console_handler:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(level)
+        console_handler.setFormatter(ColoredFormatter())
+        logger.addHandler(console_handler)
+
     return logger
 
 def log_startup_banner(app_name: str = "YouTube频道数据追踪工具", version: str = "1.0.0"):

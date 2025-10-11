@@ -64,7 +64,7 @@ def create_app(config_class=Config):
     error_handler.init_app(app)
     
     # 设置应用程序日志
-    setup_application_logging()
+    setup_application_logging(app.config)
     schedule_log_maintenance()
     
     # 基础路由

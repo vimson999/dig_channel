@@ -27,13 +27,21 @@ def register_blueprints(app):
     from api.videos import videos_bp
     app.register_blueprint(videos_bp)
     
-    # 注册TTS API
-    from api.tts import tts_bp
-    app.register_blueprint(tts_bp)
-    
-    # 注册MHTML转PDF API
-    from api.mhtml_pdf import mhtml_pdf_bp
-    app.register_blueprint(mhtml_pdf_bp)
+    # 注册TTS API（可配置）
+    if app.config.get('ENABLE_TTS_API', False):
+        from api.tts import tts_bp
+        app.register_blueprint(tts_bp)
+        app.logger.info('TTS API 已启用')
+    else:
+        app.logger.info('TTS API 已禁用，跳过注册')
+
+    # 注册MHTML转PDF API（可配置）
+    if app.config.get('ENABLE_MHTML_API', False):
+        from api.mhtml_pdf import mhtml_pdf_bp
+        app.register_blueprint(mhtml_pdf_bp)
+        app.logger.info('MHTML 转 PDF API 已启用')
+    else:
+        app.logger.info('MHTML 转 PDF API 已禁用，跳过注册')
     
     # 注册学生证生成器API
     from api.student_id_generator import student_id_bp

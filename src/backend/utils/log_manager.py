@@ -28,13 +28,14 @@ class LogManager:
         """设置轮转日志记录器"""
         logger_instance = logging.getLogger(name)
         logger_instance.setLevel(level)
-        
-        # 避免重复添加处理器
-        if logger_instance.handlers:
-            return logger_instance
-        
-        # 创建轮转文件处理器
+
         log_file = self.log_dir / filename
+
+        for handler in logger_instance.handlers:
+            if isinstance(handler, RotatingFileHandler) and getattr(handler, 'baseFilename', None) == str(log_file):
+                handler.setLevel(level)
+                return logger_instance
+
         handler = RotatingFileHandler(
             str(log_file),
             maxBytes=self.max_log_size,
@@ -55,13 +56,13 @@ class LogManager:
         """设置基于时间的轮转日志记录器"""
         logger_instance = logging.getLogger(name)
         logger_instance.setLevel(logging.INFO)
-        
-        # 避免重复添加处理器
-        if logger_instance.handlers:
-            return logger_instance
-        
-        # 创建时间轮转文件处理器
+
         log_file = self.log_dir / filename
+
+        for handler in logger_instance.handlers:
+            if isinstance(handler, TimedRotatingFileHandler) and getattr(handler, 'baseFilename', None) == str(log_file):
+                return logger_instance
+
         handler = TimedRotatingFileHandler(
             str(log_file),
             when=when,
@@ -198,7 +199,18 @@ class LogManager:
 # 全局日志管理器实例
 log_manager = LogManager()
 
-def setup_application_logging():
+def _get_flag(config, key: str) -> bool:
+    if config is None:
+        return False
+    if hasattr(config, 'get'):
+        try:
+            return bool(config.get(key, False))
+        except Exception:
+            pass
+    return bool(getattr(config, key, False))
+
+
+def setup_application_logging(config=None):
     """设置应用程序日志"""
     # 应用主日志
     log_manager.setup_timed_rotating_logger(
@@ -224,6 +236,14 @@ def setup_application_logging():
     log_manager.setup_rotating_logger(
         'security', 'security.log', level=logging.INFO
     )
+
+    # 可选功能日志
+    if _get_flag(config, 'ENABLE_TTS_API'):
+        log_manager.setup_rotating_logger('TTS_API', 'tts.log')
+
+    if _get_flag(config, 'ENABLE_MHTML_API'):
+        log_manager.setup_rotating_logger('MHTML_PDF_API', 'mhtml_pdf.log')
+        log_manager.setup_rotating_logger('MHTML_CONVERTER', 'mhtml_converter.log')
     
     logger.info("📝 应用程序日志配置完成")
 
