@@ -1,12 +1,20 @@
 // 高保真设计的主应用文件 - 强制更新版本
 console.log('🎯 [Main] 主应用模块已加载 - 版本', new Date().toISOString());
+
+const ACTIVE_BUTTON_CLASS = 'px-3 py-2 text-primary-600 bg-white border border-primary-200 rounded-md font-medium shadow-sm hover:bg-primary-50 transition-all duration-200';
+const INACTIVE_BUTTON_CLASS = 'px-3 py-2 text-gray-600 hover:text-primary-600 hover:bg-white rounded-md transition-all duration-200';
+
 class YouTubeDataApp {
     constructor() {
         this.chart = null;
         this.currentChartType = 'line';
         this.currentTimeRange = 7;
+        this.chartGranularity = 'daily';
+        this.chartMetric = 'revenue';
+        this.currentMonthRange = 6;
         this.channels = [];
         this.chartData = {};
+        this.chartMeta = {};
         this.channelCategories = [];
         this.channelCategoryDefaults = {};
         this.defaultChannelCpm = 2.5;
@@ -52,26 +60,47 @@ class YouTubeDataApp {
 
     bindEvents() {
         // 时间范围选择
-        document.getElementById('time-range').addEventListener('change', async (e) => {
-            this.currentTimeRange = parseInt(e.target.value);
-            
-            // 显示加载状态
-            this.showLoading('正在切换时间范围...');
-            
-            try {
-                // 同时重新加载图表和表格数据
-                await Promise.all([
-                    this.loadChartData(),
-                    this.loadTableData()
-                ]);
-                
-                this.hideLoading();
-            } catch (error) {
-                console.error('切换时间范围失败:', error);
-                this.hideLoading();
-                this.showToast('切换时间范围失败', 'error');
-            }
-        });
+        const timeRangeSelect = document.getElementById('time-range');
+        if (timeRangeSelect) {
+            timeRangeSelect.addEventListener('change', async (e) => {
+                this.currentTimeRange = parseInt(e.target.value, 10);
+
+                this.showLoading('正在切换时间范围...');
+
+                try {
+                    await Promise.all([
+                        this.loadChartData(),
+                        this.loadTableData()
+                    ]);
+                    this.hideLoading();
+                } catch (error) {
+                    console.error('切换时间范围失败:', error);
+                    this.hideLoading();
+                    this.showToast('切换时间范围失败', 'error');
+                }
+            });
+        }
+
+        const monthRangeSelect = document.getElementById('month-range');
+        if (monthRangeSelect) {
+            monthRangeSelect.addEventListener('change', async (e) => {
+                const parsed = parseInt(e.target.value, 10);
+                if (!Number.isNaN(parsed) && parsed > 0) {
+                    this.currentMonthRange = parsed;
+                }
+
+                this.showLoading('正在切换时间范围...');
+
+                try {
+                    await this.loadChartData();
+                    this.hideLoading();
+                } catch (error) {
+                    console.error('切换月份范围失败:', error);
+                    this.hideLoading();
+                    this.showToast('切换月份范围失败', 'error');
+                }
+            });
+        }
 
         // 默认CPM修改（如果元素存在）
         const defaultCpmElement = document.getElementById('default-cpm');
@@ -105,6 +134,123 @@ class YouTubeDataApp {
                 this.updateEditChannelCpm(e.target.value);
             });
         }
+        this.updateGranularityUI();
+    }
+
+    updateGranularityUI() {
+        this.setGranularityButtonState('granularity-daily', this.chartGranularity === 'daily');
+        this.setGranularityButtonState('granularity-monthly', this.chartGranularity === 'monthly');
+        this.toggleRangeSelectors();
+    }
+
+    setGranularityButtonState(buttonId, isActive) {
+        const button = document.getElementById(buttonId);
+        if (!button) {
+            return;
+        }
+
+        button.className = isActive ? ACTIVE_BUTTON_CLASS : INACTIVE_BUTTON_CLASS;
+    }
+
+    toggleRangeSelectors() {
+        const timeWrapper = document.getElementById('time-range-wrapper');
+        const monthWrapper = document.getElementById('month-range-wrapper');
+
+        if (this.chartGranularity === 'monthly') {
+            if (timeWrapper) {
+                timeWrapper.classList.add('hidden');
+            }
+            if (monthWrapper) {
+                monthWrapper.classList.remove('hidden');
+            }
+        } else {
+            if (timeWrapper) {
+                timeWrapper.classList.remove('hidden');
+            }
+            if (monthWrapper) {
+                monthWrapper.classList.add('hidden');
+            }
+        }
+    }
+
+    formatAxisLabel(value) {
+        const granularity = (this.chartMeta?.granularity || this.chartData?.granularity || 'daily').toLowerCase();
+        if (!value) {
+            return '-';
+        }
+
+        if (granularity === 'monthly') {
+            if (typeof value === 'string') {
+                return value.slice(0, 7);
+            }
+            const dateObj = new Date(value);
+            if (Number.isNaN(dateObj.getTime())) {
+                return '-';
+            }
+            return `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
+        }
+
+        return Utils.formatDate(value, 'MM-DD');
+    }
+
+    getTooltipLabel(index) {
+        const dates = this.chartData?.dates;
+        if (!Array.isArray(dates) || index == null || index < 0 || index >= dates.length) {
+            return '-';
+        }
+
+        const raw = dates[index];
+        const granularity = (this.chartMeta?.granularity || this.chartData?.granularity || 'daily').toLowerCase();
+
+        if (granularity === 'monthly') {
+            if (typeof raw === 'string') {
+                return raw.slice(0, 7);
+            }
+            return Utils.formatDate(raw, 'YYYY-MM');
+        }
+
+        return Utils.formatDate(raw, 'YYYY-MM-DD');
+    }
+
+    formatChartValue(value) {
+        const numeric = typeof value === 'number' ? value : Number(value) || 0;
+        switch (this.chartMetric) {
+            case 'revenue':
+                return Utils.formatCurrency(numeric);
+            case 'subscribers':
+            case 'views':
+                return Utils.formatNumber(numeric);
+            default:
+                return numeric;
+        }
+    }
+
+    sanitizeTooltipText(value) {
+        if (value === null || value === undefined) {
+            return '';
+        }
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    normalizeSeriesColor(color) {
+        if (!color) {
+            return '#2563eb';
+        }
+        if (typeof color === 'string') {
+            return color;
+        }
+        if (color.colorStops && color.colorStops.length) {
+            return color.colorStops[color.colorStops.length - 1]?.color || '#2563eb';
+        }
+        if (color.color) {
+            return color.color;
+        }
+        return '#2563eb';
     }
 
     initChart() {
@@ -589,74 +735,209 @@ class YouTubeDataApp {
 
     async loadChartData() {
         try {
-            const response = await api.getChartData('revenue', {
-                time_range: this.currentTimeRange
-            });
+            const params = {
+                time_range: this.currentTimeRange,
+                group: this.chartGranularity
+            };
 
-            if (response.success) {
-                this.chartData = response.data.chart_data;
+            if (this.chartGranularity === 'monthly') {
+                params.months = this.currentMonthRange;
+            }
+
+            const response = await api.getChartData(this.chartMetric, params);
+
+            if (response.success && response.data) {
+                const { chart_data: chartData, ...meta } = response.data;
+                this.chartData = chartData || {};
+                this.chartMeta = meta || {};
                 this.refreshChart();
             }
         } catch (error) {
             console.error('加载图表数据失败:', error);
+            this.showToast('加载图表数据失败', 'error');
         }
     }
 
     refreshChart() {
-        if (!this.chartData || !this.chartData.dates) return;
+        if (!this.chart || !this.chartData || !Array.isArray(this.chartData.dates)) {
+            return;
+        }
+
+        const isPieChart = this.currentChartType === 'pie';
+        const legendData = Array.isArray(this.chartData.series)
+            ? this.chartData.series.map(series => series.name)
+            : [];
+
+        const tooltipFormatter = (params) => {
+            if (Array.isArray(params)) {
+                if (params.length === 0) {
+                    return '';
+                }
+
+                const dataIndex = params[0]?.dataIndex ?? 0;
+                const label = this.sanitizeTooltipText(this.getTooltipLabel(dataIndex));
+
+                const entries = params.map((item) => ({
+                    name: this.sanitizeTooltipText(item.seriesName),
+                    value: this.formatChartValue(item.value),
+                    color: this.normalizeSeriesColor(item.color),
+                    rawValue: Number(item.value) || 0
+                }));
+
+                entries.sort((a, b) => b.rawValue - a.rawValue);
+
+                const columnCount = entries.length > 20 ? 5 : entries.length > 12 ? 4 : entries.length > 6 ? 3 : entries.length > 3 ? 2 : 1;
+                const itemsPerColumn = Math.ceil(entries.length / columnCount);
+                const columns = [];
+
+                for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+                    const start = columnIndex * itemsPerColumn;
+                    const columnEntries = entries.slice(start, start + itemsPerColumn);
+                    if (!columnEntries.length) {
+                        continue;
+                    }
+
+                    const columnHtml = columnEntries.map((entry) => (
+                        `<div style="display:flex;align-items:center;gap:12px;font-size:12px;line-height:1.45;color:#1f2937;padding-bottom:8px;border-bottom:1px dashed rgba(148,163,184,0.35);">` +
+                            `<span style="width:8px;height:8px;border-radius:50%;background:${entry.color};flex-shrink:0;"></span>` +
+                            `<span style="flex:1;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${entry.name}</span>` +
+                            `<span style="white-space:nowrap;font-weight:600;color:${entry.rawValue >= 0 ? '#0f172a' : '#ef4444'};">${entry.value}</span>` +
+                        `</div>`
+                    )).join('');
+
+                    columns.push(`<div style="display:flex;flex-direction:column;gap:8px;min-width:220px;">${columnHtml}</div>`);
+                }
+
+                return `
+                    <div style="min-width:320px;max-width:760px;padding-bottom:6px;">
+                        <div style="font-weight:600;color:#0f172a;margin-bottom:14px;font-size:13px;">${label}</div>
+                        <div style="display:flex;flex-wrap:wrap;gap:18px 20px;">${columns.join('')}</div>
+                    </div>
+                `;
+            }
+
+            if (isPieChart) {
+                const name = this.sanitizeTooltipText(params.name);
+                const percent = typeof params.percent === 'number' ? `${params.percent}%` : '';
+                const percentSuffix = percent ? ` (${percent})` : '';
+                return `${name}<br/>最新数值: ${this.formatChartValue(params.value)}${percentSuffix}`;
+            }
+
+            const dataIndex = params?.dataIndex ?? 0;
+            const label = this.sanitizeTooltipText(this.getTooltipLabel(dataIndex));
+            const seriesName = this.sanitizeTooltipText(params.seriesName);
+            return `${seriesName}<br/>日期: ${label}<br/>数值: ${this.formatChartValue(params.value)}`;
+        };
 
         const option = {
             animation: false,
             title: { text: '频道数据趋势' },
-            tooltip: { 
-                trigger: 'item',
-                formatter: function(params) {
-                    return `${params.seriesName}<br/>
-                            日期: ${params.name}<br/>
-                            数值: ${params.value}`;
-                }
+            tooltip: {
+                trigger: isPieChart ? 'item' : 'axis',
+                formatter: tooltipFormatter,
+                renderMode: 'html',
+                confine: true,
+                extraCssText: 'max-height:540px;max-width:780px;overflow:auto;border-radius:18px;border:1px solid rgba(148,163,184,0.45);box-shadow:0 20px 48px rgba(15,23,42,0.2);padding:18px 22px 20px;background:rgba(255,255,255,0.98);color:#1f2937;'
             },
             legend: {
-                data: this.chartData.series?.map(s => s.name) || []
+                data: legendData
             },
             grid: {
                 left: '3%',
                 right: '4%',
                 bottom: '3%',
                 containLabel: true
-            },
-            xAxis: {
+            }
+        };
+
+        if (isPieChart) {
+            // 取每个系列最后一个非空值用于饼图展示
+            const pieData = (this.chartData.series || []).map(series => {
+                const dataPoints = Array.isArray(series.data) ? [...series.data] : [];
+                let value = 0;
+                while (dataPoints.length) {
+                    const candidate = dataPoints.pop();
+                    if (candidate != null) {
+                        value = Number(candidate) || 0;
+                        break;
+                    }
+                }
+                return {
+                    name: series.name,
+                    value
+                };
+            });
+
+            option.series = [
+                {
+                    name: '占比',
+                    type: 'pie',
+                    radius: '60%',
+                    data: pieData,
+                    label: {
+                        formatter: ({ name, value, percent }) => `${name}\n${this.formatChartValue(value)} (${percent}%)`
+                    }
+                }
+            ];
+        } else {
+            option.xAxis = {
                 type: 'category',
-                boundaryGap: false,
-                data: this.chartData.dates.map(date => Utils.formatDate(date, 'MM-DD'))
-            },
-            yAxis: { type: 'value' },
-            series: this.chartData.series?.map(series => ({
+                boundaryGap: this.currentChartType === 'bar',
+                data: this.chartData.dates,
+                axisLabel: {
+                    formatter: (value) => this.formatAxisLabel(value)
+                }
+            };
+
+            option.yAxis = { type: 'value' };
+
+            option.series = (this.chartData.series || []).map(series => ({
                 name: series.name,
                 type: this.currentChartType,
                 data: series.data
-            })) || []
-        };
+            }));
+        }
 
-        this.chart.setOption(option);
+        this.chart.setOption(option, true);
     }
 
     // 图表类型切换
     switchChartType(type) {
         this.currentChartType = type;
-        
-        // 更新按钮状态
-        document.querySelectorAll('[id^="chart-type-"]').forEach(btn => {
-            btn.className = btn.className.replace('text-primary border border-primary', 'text-gray-600');
-            btn.className = btn.className.replace('bg-primary text-white', '');
+
+        ['line', 'bar', 'pie'].forEach((chartType) => {
+            const button = document.getElementById(`chart-type-${chartType}`);
+            if (button) {
+                button.className = chartType === type ? ACTIVE_BUTTON_CLASS : INACTIVE_BUTTON_CLASS;
+            }
         });
-        
-        const activeBtn = document.getElementById(`chart-type-${type}`);
-        if (activeBtn) {
-            activeBtn.className = activeBtn.className.replace('text-gray-600', 'text-primary border border-primary');
-        }
-        
+
         this.refreshChart();
+    }
+
+    async switchGranularity(granularity) {
+        const normalized = (granularity || '').toLowerCase();
+        const target = normalized === 'monthly' ? 'monthly' : 'daily';
+
+        if (this.chartGranularity === target) {
+            this.updateGranularityUI();
+            return;
+        }
+
+        this.chartGranularity = target;
+        this.updateGranularityUI();
+
+        const loadingMessage = target === 'monthly' ? '正在切换按月视图...' : '正在切换按日视图...';
+        this.showLoading(loadingMessage);
+
+        try {
+            await this.loadChartData();
+            this.hideLoading();
+        } catch (error) {
+            console.error('切换图表粒度失败:', error);
+            this.hideLoading();
+            this.showToast('切换图表粒度失败', 'error');
+        }
     }
 
     // 模态框控制
@@ -1060,6 +1341,12 @@ function addChannel() {
 function switchChartType(type) {
     if (window.app) {
         window.app.switchChartType(type);
+    }
+}
+
+function switchGranularity(granularity) {
+    if (window.app) {
+        window.app.switchGranularity(granularity);
     }
 }
 
