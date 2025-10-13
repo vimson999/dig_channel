@@ -7,6 +7,7 @@
 
 from datetime import datetime, date, timedelta
 from typing import List, Optional, Dict, Any, Tuple
+from collections import defaultdict
 from sqlalchemy import func, desc, asc
 from models import db, Channel, ChannelData
 
@@ -298,8 +299,11 @@ class DataService:
             }
     
     @staticmethod
-    def get_chart_data(chart_type: str, time_range: int = 30, 
-                      channel_ids: Optional[List[str]] = None, user_id: int = None) -> Dict[str, Any]:
+    def get_chart_data(chart_type: str, time_range: int = 30,
+                      channel_ids: Optional[List[str]] = None,
+                      user_id: int = None,
+                      group: str = 'daily',
+                      months: Optional[int] = None) -> Dict[str, Any]:
         """获取图表数据
         
         Args:
@@ -314,8 +318,24 @@ class DataService:
         try:
             # 计算日期范围
             end_date = date.today()
-            start_date = end_date - timedelta(days=time_range - 1)
-            
+            grouping = (group or 'daily').lower()
+            if grouping not in ('daily', 'monthly'):
+                grouping = 'daily'
+
+            if grouping == 'monthly':
+                months = max(1, min(int(months or 6), 24))
+
+                def shift_month(base: date, offset: int) -> date:
+                    year = base.year + (base.month - 1 + offset) // 12
+                    month = (base.month - 1 + offset) % 12 + 1
+                    return date(year, month, 1)
+
+                current_month_start = end_date.replace(day=1)
+                start_month = shift_month(current_month_start, -(months - 1))
+                start_date = start_month
+            else:
+                start_date = end_date - timedelta(days=time_range - 1)
+
             # 获取频道列表
             channels_query = Channel.query.filter_by(is_active=True)
             if user_id is not None:
@@ -347,67 +367,131 @@ class DataService:
                 Channel.name.asc()
             ).all()
             
-            # 生成日期序列
-            dates = []
-            current_date = start_date
-            while current_date <= end_date:
-                dates.append(current_date)
-                current_date += timedelta(days=1)
-            
-            # 按频道组织数据
-            chart_data = {
-                'dates': [d.isoformat() for d in dates],
-                'series': []
-            }
-            
-            for channel in channels:
-                # 获取该频道的数据
-                channel_data = {}
+            if grouping == 'monthly':
+                def shift_month(base: date, offset: int) -> date:
+                    year = base.year + (base.month - 1 + offset) // 12
+                    month = (base.month - 1 + offset) % 12 + 1
+                    return date(year, month, 1)
+
+                months_list = []
+                month_pointer = start_date.replace(day=1)
+                last_month = end_date.replace(day=1)
+                while month_pointer <= last_month:
+                    months_list.append(month_pointer)
+                    month_pointer = shift_month(month_pointer, 1)
+
+                chart_data = {
+                    'dates': [m.isoformat() for m in months_list],
+                    'labels': [m.strftime('%Y-%m') for m in months_list],
+                    'series': [],
+                    'granularity': 'monthly',
+                    'label_format': 'YYYY-MM'
+                }
+
+                monthly_buckets = defaultdict(lambda: defaultdict(lambda: {
+                    'revenue': 0.0,
+                    'subscribers': None,
+                    'views': None
+                }))
+
+                month_min = months_list[0] if months_list else start_date.replace(day=1)
+                month_max = months_list[-1] if months_list else end_date.replace(day=1)
+
                 for record in data_records:
-                    if record.channel_id == channel.id:
-                        channel_data[record.date] = record
-                
-                # 生成时间序列数据
-                series_data = []
-                for d in dates:
-                    record = channel_data.get(d)
-                    if record:
-                        if chart_type == 'revenue':
-                            value = float(record.estimated_revenue or 0)
-                        elif chart_type == 'subscribers':
-                            value = record.subscribers or 0
-                        elif chart_type == 'views':
-                            value = record.total_views or 0
+                    month_key = record.date.replace(day=1)
+                    if month_key < month_min or month_key > month_max:
+                        continue
+                    bucket = monthly_buckets[record.channel_id][month_key]
+                    bucket['revenue'] += float(record.estimated_revenue or 0)
+                    bucket['subscribers'] = record.subscribers or bucket['subscribers'] or 0
+                    bucket['views'] = record.total_views or bucket['views'] or 0
+
+                for channel in channels:
+                    series_data = []
+                    channel_month_data = monthly_buckets.get(channel.id, {})
+                    for month_key in months_list:
+                        bucket = channel_month_data.get(month_key)
+                        if bucket:
+                            if chart_type == 'revenue':
+                                value = round(bucket['revenue'], 2)
+                            elif chart_type == 'subscribers':
+                                value = bucket['subscribers'] or 0
+                            elif chart_type == 'views':
+                                value = bucket['views'] or 0
+                            else:
+                                value = 0
                         else:
                             value = 0
-                    else:
-                        value = 0
-                    
-                    series_data.append(value)
-                
-                chart_data['series'].append({
-                    'name': channel.name,
-                    'channel_id': channel.channel_id,
-                    'data': series_data
-                })
-            
-            # 移除总计数据 - 只显示各个频道的独立数据
-            # 不再计算和显示聚合数据（总计），让图表更清晰地展示各频道表现
-            
+                        series_data.append(value)
+
+                    chart_data['series'].append({
+                        'name': channel.name,
+                        'channel_id': channel.channel_id,
+                        'data': series_data
+                    })
+            else:
+                dates = []
+                current_date = start_date
+                while current_date <= end_date:
+                    dates.append(current_date)
+                    current_date += timedelta(days=1)
+
+                chart_data = {
+                    'dates': [d.isoformat() for d in dates],
+                    'series': [],
+                    'granularity': 'daily',
+                    'label_format': 'YYYY-MM-DD'
+                }
+
+                for channel in channels:
+                    channel_data = {}
+                    for record in data_records:
+                        if record.channel_id == channel.id:
+                            channel_data[record.date] = record
+
+                    series_data = []
+                    for d in dates:
+                        record = channel_data.get(d)
+                        if record:
+                            if chart_type == 'revenue':
+                                value = float(record.estimated_revenue or 0)
+                            elif chart_type == 'subscribers':
+                                value = record.subscribers or 0
+                            elif chart_type == 'views':
+                                value = record.total_views or 0
+                            else:
+                                value = 0
+                        else:
+                            value = 0
+
+                        series_data.append(value)
+
+                    chart_data['series'].append({
+                        'name': channel.name,
+                        'channel_id': channel.channel_id,
+                        'data': series_data
+                    })
+
+            response_meta = {
+                'chart_type': chart_type,
+                'time_range': time_range,
+                'months': months if grouping == 'monthly' else None,
+                'total_channels': len(channels),
+                'date_range': {
+                    'start_date': start_date.isoformat(),
+                    'end_date': end_date.isoformat()
+                },
+                'granularity': chart_data.get('granularity', 'daily')
+            }
+
             return {
                 'success': True,
                 'data': {
                     'chart_data': chart_data,
-                    'chart_type': chart_type,
-                    'time_range': time_range,
-                    'total_channels': len(channels),
-                    'date_range': {
-                        'start_date': start_date.isoformat(),
-                        'end_date': end_date.isoformat()
-                    }
+                    **response_meta
                 }
             }
-            
+
         except Exception as e:
             return {
                 'success': False,

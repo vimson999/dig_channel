@@ -311,7 +311,20 @@ def get_chart_data(current_user):
     try:
         chart_type = request.args.get('chart_type', 'revenue')
         time_range = min(int(request.args.get('time_range', 30)), 90)
+        group = request.args.get('group', 'daily').lower()
+        months_param = request.args.get('months')
         channel_ids_str = request.args.get('channel_ids', '')
+
+        if group not in ('daily', 'monthly'):
+            group = 'daily'
+
+        months = None
+        if group == 'monthly':
+            try:
+                months = int(months_param) if months_param is not None else 6
+            except ValueError:
+                months = 6
+            months = max(1, min(months, 24))
         
         # 解析频道ID列表
         channel_ids = []
@@ -319,7 +332,14 @@ def get_chart_data(current_user):
             channel_ids = [cid.strip() for cid in channel_ids_str.split(',') if cid.strip()]
         
         # 获取图表数据（只获取当前用户的数据）
-        result = DataService.get_chart_data(chart_type, time_range, channel_ids, current_user.id)
+        result = DataService.get_chart_data(
+            chart_type=chart_type,
+            time_range=time_range,
+            channel_ids=channel_ids,
+            user_id=current_user.id,
+            group=group,
+            months=months
+        )
         
         if result['success']:
             return jsonify({
