@@ -49,6 +49,12 @@ class BaseConfig:
     GOOGLE_OAUTH_CONFIG_FILE = os.environ.get('GOOGLE_OAUTH_CONFIG_FILE')
     GOOGLE_API_KEYS = os.environ.get('GOOGLE_API_KEYS')
     
+    # Bilibili配置
+    BILI_SESSDATA = os.environ.get('BILI_SESSDATA')
+    BILI_BILI_JCT = os.environ.get('BILI_BILI_JCT')
+    BILI_BUVID3 = os.environ.get('BILI_BUVID3')
+    BILI_DEDEUSERID = os.environ.get('BILI_DEDEUSERID')
+    
     # JWT配置
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or SECRET_KEY
     JWT_ACCESS_TOKEN_EXPIRES = 3600  # 1小时

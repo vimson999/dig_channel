@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bilibili 发布工作台 | Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd',
+                            400: '#60a5fa', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .drag-over { border-color: #3b82f6; background-color: #eff6ff; }
+        /* Custom scrollbar */
+        .logs-container::-webkit-scrollbar { width: 8px; }
+        .logs-container::-webkit-scrollbar-track { background: #1f2937; }
+        .logs-container::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-800">
+    
+    <!-- Navigation will be injected by SharedNavigation -->
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        
+        <!-- Status Alert -->
+        <div id="status-alert" class="hidden mb-6 p-4 rounded-lg border"></div>
+        
+        <!-- B站状态栏 (替代原有顶部导航中的状态) -->
+        <div class="flex justify-end mb-6" id="user-status-container">
+             <span class="text-sm text-gray-500 bg-white px-3 py-1 rounded-full shadow-sm">正在检查 Bilibili 连接状态...</span>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            
+            <!-- Left Column: New Task Form -->
+            <div class="lg:col-span-1 space-y-6">
+                <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+                    <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                        <i class="fa-solid fa-file-video text-blue-500"></i>
+                        登记新视频
+                    </h2>
+                    
+                    <form id="upload-form" class="space-y-4">
+                        <!-- Video File -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">视频文件</label>
+                            <input type="file" name="video" accept=".mp4,.mkv,.mov,.flv,.avi" required
+                                class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 transition-colors">
+                        </div>
+
+                        <!-- Cover File -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">封面图 (可选)</label>
+                            <input type="file" name="cover" accept="image/*"
+                                class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-gray-50 file:text-gray-700 hover:file:bg-gray-100 transition-colors">
+                            <p class="mt-1 text-xs text-gray-400">留空则自动截取第1秒</p>
+                        </div>
+
+                        <!-- Metadata Fields -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">标题</label>
+                            <input type="text" name="title" placeholder="默认使用文件名"
+                                class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm border p-2">
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">类型</label>
+                                <select name="copyright" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm border p-2">
+                                    <option value="1">自制</option>
+                                    <option value="2">转载</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">分区 (TID)</label>
+                                <select name="tid" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm border p-2">
+                                    <optgroup label="热门">
+                                        <option value="171" selected>电子竞技 (171)</option>
+                                        <option value="17">单机游戏 (17)</option>
+                                        <option value="65">网络游戏 (65)</option>
+                                        <option value="138">搞笑 (138)</option>
+                                        <option value="21">日常 (21)</option>
+                                    </optgroup>
+                                    <optgroup label="知识/科技">
+                                        <option value="36">知识 (36)</option>
+                                        <option value="188">科技 (188)</option>
+                                        <option value="201">科学科普 (201)</option>
+                                        <option value="124">社科·法律·心理 (124)</option>
+                                        <option value="122">野生技术协会 (122)</option>
+                                    </optgroup>
+                                    <optgroup label="生活/娱乐">
+                                        <option value="160">生活 (160)</option>
+                                        <option value="76">美食 (76)</option>
+                                        <option value="75">动物圈 (75)</option>
+                                        <option value="5">娱乐 (5)</option>
+                                        <option value="181">影视 (181)</option>
+                                    </optgroup>
+                                    <optgroup label="其他">
+                                        <option value="1">动画 (1)</option>
+                                        <option value="119">鬼畜 (119)</option>
+                                        <option value="129">舞蹈 (129)</option>
+                                        <option value="3">音乐 (3)</option>
+                                        <option value="155">时尚 (155)</option>
+                                    </optgroup>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">标签</label>
+                            <input type="text" name="tags" placeholder="BiliFlow, 自动化" value="BiliFlow"
+                                class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm border p-2">
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">简介</label>
+                            <textarea name="desc" rows="2" 
+                                class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm border p-2"></textarea>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">动态文案</label>
+                            <input type="text" name="dynamic" placeholder="同步发布的动态内容"
+                                class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm border p-2">
+                        </div>
+
+                        <button type="submit" id="submit-btn"
+                            class="w-full flex justify-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors">
+                            登记任务
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Right Column: Queue & Logs -->
+            <div class="lg:col-span-2 space-y-6">
+                
+                <!-- Queue Panel -->
+                <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                    <div class="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                        <h2 class="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                            <i class="fa-solid fa-layer-group text-purple-500"></i>
+                            待发布队列
+                        </h2>
+                        <span id="queue-count" class="bg-blue-100 text-blue-800 text-xs font-semibold px-2.5 py-0.5 rounded-full">0</span>
+                    </div>
+                    
+                    <div id="queue-list" class="divide-y divide-gray-100 min-h-[200px] max-h-[500px] overflow-y-auto">
+                        <!-- Queue items will be injected here -->
+                        <div class="p-8 text-center text-gray-400">
+                            <p>暂无任务，请在左侧登记视频</p>
+                        </div>
+                    </div>
+                    
+                    <div class="p-4 bg-gray-50 border-t border-gray-100 flex justify-between items-center">
+                        <button onclick="refreshQueue()" class="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1">
+                            <i class="fa-solid fa-rotate-right"></i> 刷新列表
+                        </button>
+                        <button onclick="startBatch()" id="start-batch-btn" disabled
+                            class="px-6 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg shadow hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all font-medium flex items-center gap-2">
+                            <i class="fa-solid fa-rocket"></i> 开始批量上传
+                        </button>
+                    </div>
+                </div>
+
+                <!-- History Panel -->
+                <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                    <div class="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                        <h2 class="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                            <i class="fa-solid fa-clock-rotate-left text-gray-500"></i>
+                            最近上传记录
+                        </h2>
+                        <button onclick="refreshHistory()" class="text-xs text-blue-600 hover:text-blue-800">刷新</button>
+                    </div>
+                    <div id="history-list" class="divide-y divide-gray-100 max-h-[300px] overflow-y-auto">
+                        <div class="p-4 text-center text-gray-400 text-sm">加载中...</div>
+                    </div>
+                </div>
+
+                <!-- Logs Panel -->
+                <div class="bg-gray-900 rounded-xl shadow-sm border border-gray-800 overflow-hidden">
+                    <div class="px-4 py-2 bg-gray-800 border-b border-gray-700 flex justify-between items-center">
+                        <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider">系统日志</h3>
+                        <div class="flex gap-2">
+                            <div class="w-2 h-2 rounded-full bg-red-500"></div>
+                            <div class="w-2 h-2 rounded-full bg-yellow-500"></div>
+                            <div class="w-2 h-2 rounded-full bg-green-500"></div>
+                        </div>
+                    </div>
+                    <div id="logs-window" class="logs-container h-48 overflow-y-auto p-4 font-mono text-xs text-green-400 space-y-1">
+                        <div class="opacity-50">Log terminal ready...</div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+    <!-- 引入共享导航组件 -->
+    <script src="/js/shared-navigation.js"></script>
+
+    <script>
+        // 如果页面运行在8888或其他非后端端口，需要指定后端地址
+        // 在生产环境中通常是同源的，可以用相对路径
+        const BACKEND_URL = window.location.port === '5001' ? '' : 'http://localhost:5001';
+        const API_BASE = `${BACKEND_URL}/api/v1/bilibili`;
+        
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', () => {
+            checkStatus();
+            refreshQueue();
+            refreshHistory();
+            startLogPolling();
+            
+            // File input name handler
+            const videoInput = document.querySelector('input[name="video"]');
+            const titleInput = document.querySelector('input[name="title"]');
+            videoInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0 && !titleInput.value) {
+                    // Remove extension for title
+                    const name = e.target.files[0].name;
+                    titleInput.value = name.replace(/\.[^/.]+$/, "");
+                }
+            });
+        });
+
+        // --- Core Functions ---
+        
+        async function checkStatus() {
+            const container = document.getElementById('user-status-container');
+            const alertBox = document.getElementById('status-alert');
+            
+            try {
+                const res = await fetch(`${API_BASE}/status`);
+                const data = await res.json();
+                
+                if (data.success && data.data.valid) {
+                    const user = data.data.data;
+                    container.innerHTML = `
+                        <div class="flex items-center gap-3 bg-white px-3 py-1.5 rounded-full border border-gray-200 shadow-sm">
+                            <span class="text-xs text-gray-400">当前连接:</span>
+                            <img src="${user.face}" class="w-6 h-6 rounded-full border border-gray-200" alt="Avatar">
+                            <span class="text-sm font-semibold text-gray-800">${user.name}</span>
+                            <span class="text-xs text-blue-600 bg-blue-50 px-1.5 rounded">Lv.${user.level}</span>
+                        </div>
+                    `;
+                    // Hide alert if valid
+                    alertBox.classList.add('hidden');
+                } else {
+                    const msg = data.data?.message || data.message || '未配置或Cookie失效';
+                    container.innerHTML = `<span class="text-red-500 text-sm font-medium bg-red-50 px-3 py-1 rounded-full"><i class="fa-solid fa-triangle-exclamation mr-1"></i> Bilibili 连接异常</span>`;
+                    
+                    alertBox.className = 'mb-6 p-4 rounded-lg border bg-yellow-50 border-yellow-200 text-yellow-800 block';
+                    alertBox.innerHTML = `
+                        <div class="flex items-start gap-3">
+                            <i class="fa-solid fa-circle-exclamation mt-1"></i>
+                            <div>
+                                <h3 class="font-semibold">Bilibili 账号未连接</h3>
+                                <p class="text-sm mt-1">请检查后台环境变量配置。错误信息: ${msg}</p>
+                            </div>
+                        </div>
+                    `;
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function refreshQueue() {
+            const list = document.getElementById('queue-list');
+            const countBadge = document.getElementById('queue-count');
+            const startBtn = document.getElementById('start-batch-btn');
+            
+            try {
+                const res = await fetch(`${API_BASE}/queue`);
+                const json = await res.json();
+                
+                if (json.success) {
+                    const files = json.data;
+                    countBadge.textContent = files.length;
+                    startBtn.disabled = files.length === 0;
+                    
+                    if (files.length === 0) {
+                        list.innerHTML = `
+                            <div class="p-8 text-center text-gray-400 flex flex-col items-center gap-2">
+                                <i class="fa-regular fa-folder-open text-2xl"></i>
+                                <p>待发布队列为空</p>
+                            </div>`;
+                        return;
+                    }
+                    
+                    list.innerHTML = files.map(file => `
+                        <div class="p-4 hover:bg-gray-50 flex justify-between items-start group transition-colors">
+                            <div class="flex gap-4">
+                                <div class="w-24 h-16 bg-gray-200 rounded overflow-hidden flex-shrink-0 relative">
+                                    ${file.cover_path 
+                                        ? `<div class="w-full h-full bg-cover bg-center" style="background-image: url('${file.cover_path.includes('http') ? file.cover_path : '/assets/default-cover.png'}')"></div>` 
+                                        : '<div class="w-full h-full flex items-center justify-center text-gray-400"><i class="fa-solid fa-image"></i></div>'
+                                    }
+                                    <div class="absolute bottom-0 right-0 bg-black/60 text-white text-[10px] px-1">
+                                        ${(file.size / 1024 / 1024).toFixed(1)}MB
+                                    </div>
+                                </div>
+                                <div>
+                                    <h3 class="font-medium text-gray-900 line-clamp-1">${file.title}</h3>
+                                    <p class="text-xs text-gray-500 mt-1 line-clamp-2">${file.desc || '无简介'}</p>
+                                    <div class="flex gap-2 mt-2">
+                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                            TID: ${file.tid}
+                                        </span>
+                                        ${file.tags.slice(0, 2).map(t => 
+                                            `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">${t}</span>`
+                                        ).join('')}
+                                    </div>
+                                </div>
+                            </div>
+                            <button onclick="deleteTask('${file.filename}')" class="text-gray-400 hover:text-red-500 p-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <i class="fa-solid fa-trash-can"></i>
+                            </button>
+                        </div>
+                    `).join('');
+
+                    // 如果正在处理中，且队列为空，说明任务全部结束（可能含失败）
+                    if (isProcessing && files.length === 0) {
+                        setTimeout(() => {
+                            resetBatchButton();
+                            refreshHistory(); // 刷新历史记录
+                        }, 1000);
+                    }
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function refreshHistory() {
+            const list = document.getElementById('history-list');
+            try {
+                const res = await fetch(`${API_BASE}/history`);
+                const json = await res.json();
+                
+                if (json.success) {
+                    const files = json.data;
+                    if (files.length === 0) {
+                        list.innerHTML = `<div class="p-4 text-center text-gray-400 text-sm">暂无上传记录</div>`;
+                        return;
+                    }
+                    
+                    list.innerHTML = files.map(file => {
+                        const date = new Date(file.modified * 1000).toLocaleString();
+                        const statusClass = file.status === 'success' ? 'text-green-600 bg-green-50' : 'text-red-600 bg-red-50';
+                        const statusText = file.status === 'success' ? '上传成功' : '上传失败';
+                        const icon = file.status === 'success' ? 'fa-check-circle' : 'fa-circle-exclamation';
+                        
+                        return `
+                        <div class="p-3 hover:bg-gray-50 flex justify-between items-center transition-colors">
+                            <div class="flex items-center gap-3 overflow-hidden">
+                                <div class="w-8 h-8 rounded-full ${file.status === 'success' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'} flex items-center justify-center flex-shrink-0">
+                                    <i class="fa-solid ${icon} text-xs"></i>
+                                </div>
+                                <div class="min-w-0">
+                                    <h4 class="text-sm font-medium text-gray-900 truncate">${file.title}</h4>
+                                    <p class="text-xs text-gray-500">${date}</p>
+                                </div>
+                            </div>
+                            <span class="text-xs font-medium px-2 py-0.5 rounded ${statusClass} flex-shrink-0 ml-2">
+                                ${statusText}
+                            </span>
+                        </div>
+                        `;
+                    }).join('');
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function deleteTask(filename) {
+            if(!confirm('确定要删除这个任务吗？')) return;
+            
+            try {
+                const res = await fetch(`${API_BASE}/task/${filename}`, { method: 'DELETE' });
+                const json = await res.json();
+                if (json.success) {
+                    refreshQueue();
+                } else {
+                    alert('删除失败: ' + json.message);
+                }
+            } catch (e) {
+                alert('系统错误');
+            }
+        }
+
+        let isProcessing = false;
+
+        async function startBatch() {
+            const btn = document.getElementById('start-batch-btn');
+            if(!confirm('确认开始批量上传队列中的所有视频？')) return;
+            
+            isProcessing = true;
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 处理中...';
+            
+            try {
+                const res = await fetch(`${API_BASE}/batch/start`, { method: 'POST' });
+                const json = await res.json();
+                if (json.success) {
+                    // Start aggressive polling for logs
+                    // alert('批量上传已在后台启动，请留意下方日志窗口。'); // 移除弹窗，体验更好
+                } else {
+                    alert('启动失败: ' + json.message);
+                    resetBatchButton();
+                }
+            } catch (e) {
+                console.error(e);
+                resetBatchButton();
+            }
+        }
+
+        function resetBatchButton() {
+            isProcessing = false;
+            const btn = document.getElementById('start-batch-btn');
+            const count = parseInt(document.getElementById('queue-count').textContent || '0');
+            
+            btn.disabled = count === 0;
+            btn.innerHTML = '<i class="fa-solid fa-rocket"></i> 开始批量上传';
+        }
+
+        // Form Submission
+        document.getElementById('upload-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('submit-btn');
+            const originalText = btn.innerHTML;
+            
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i> 上传登记中...';
+            
+            try {
+                const formData = new FormData(e.target);
+                const res = await fetch(`${API_BASE}/task`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const json = await res.json();
+                
+                if (json.success) {
+                    // Reset form but keep some defaults
+                    e.target.reset();
+                    document.querySelector('input[name="tags"]').value = 'BiliFlow'; 
+                    refreshQueue();
+                    alert('任务登记成功！');
+                } else {
+                    alert('登记失败: ' + json.message);
+                }
+            } catch (error) {
+                alert('网络错误');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+            }
+        });
+
+        // Logs Polling
+        let lastLogLine = '';
+        async function startLogPolling() {
+            const logsWindow = document.getElementById('logs-window');
+            
+            setInterval(async () => {
+                try {
+                    const res = await fetch(`${API_BASE}/logs?lines=20`);
+                    const json = await res.json();
+                    if (json.success && json.data.length > 0) {
+                        const html = json.data.map(line => `<div>> ${line}</div>`).join('');
+                        if (html !== lastLogLine) {
+                            logsWindow.innerHTML = html;
+                            logsWindow.scrollTop = logsWindow.scrollHeight;
+                            lastLogLine = html;
+                            
+                            // 监控关键词以自动刷新
+                            if (html.includes('Successfully processed') || html.includes('Batch complete') || html.includes('Failed to upload')) {
+                                refreshQueue();
+                                refreshHistory();
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Silent fail for logs
+                }
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
