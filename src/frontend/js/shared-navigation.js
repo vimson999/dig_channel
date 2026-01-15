@@ -38,6 +38,8 @@ class SharedNavigation {
             return 'indie-navigator';
         } else if (filename === 'favorites.html') {
             return 'favorites';
+        } else if (path.includes('/watermark')) {
+            return 'watermark';
         }
         return 'dashboard';
     }
@@ -51,6 +53,7 @@ class SharedNavigation {
             'document-converter': '文档转换工具',
             'tts': 'AI语音合成服务',
             'mhtml-pdf': 'MHTML转PDF工具',
+            'watermark': 'PDF智能去水印',
             'student-id-generator': '学生证生成器',
             'indie-navigator': '商机发现平台',
             'favorites': '我的收藏'
@@ -252,6 +255,12 @@ class SharedNavigation {
                         name: 'MHTML转PDF',
                         icon: 'fas fa-file-pdf',
                         href: 'mhtml-pdf.html'
+                    },
+                    {
+                        id: 'watermark',
+                        name: 'PDF去水印',
+                        icon: 'fas fa-tint',
+                        href: 'watermark.html'
                     },
                     {
                         id: 'student-id-generator',

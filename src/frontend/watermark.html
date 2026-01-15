@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF智能去水印 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            50: '#eff6ff',
+                            100: '#dbeafe', 
+                            200: '#bfdbfe',
+                            300: '#93c5fd',
+                            400: '#60a5fa',
+                            500: '#3b82f6',
+                            600: '#2563eb',
+                            700: '#1d4ed8',
+                            800: '#1e40af',
+                            900: '#1e3a8a'
+                        },
+                        secondary: '#64748b'
+                    },
+                    borderRadius: {
+                        'button': '8px'
+                    }
+                }
+            }
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .spinner-overlay {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255,255,255,0.8); z-index: 9999;
+            justify-content: center; align-items: center; flex-direction: column;
+        }
+        .drop-zone {
+            transition: all 0.3s ease;
+        }
+        .drop-zone.dragover {
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen font-sans">
+    
+    <!-- 状态加载指示器 -->
+    <div class="spinner-overlay" id="loadingSpinner">
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
+        <h4 class="mt-4 text-gray-700 font-medium">智能算法正在处理中，请稍候...</h4>
+    </div>
+
+    <!-- 导航由 shared-navigation.js 统一管理 -->
+
+    <!-- 面包屑导航 -->
+    <div class="max-w-[1440px] mx-auto px-6 py-4">
+        <nav class="flex items-center gap-2 text-sm text-gray-500">
+            <a href="/" class="hover:text-primary-600 transition-colors">
+                <i class="fas fa-home"></i>
+            </a>
+            <span class="mx-2">/</span>
+            <span class="text-gray-700">PDF智能去水印</span>
+        </nav>
+    </div>
+
+    <!-- 主内容区域 -->
+    <main class="max-w-[1440px] mx-auto px-6 pb-8">
+        <div class="max-w-3xl mx-auto space-y-6">
+            <div class="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
+                <!-- 头部 -->
+                <div class="p-8 text-center border-b border-gray-50 bg-gradient-to-r from-white to-blue-50">
+                    <h1 class="text-3xl font-extrabold text-gray-900 mb-2">PDF 智能去水印</h1>
+                    <p class="text-gray-500">基于 OpenCV 与自适应阈值算法的高精度文档清洗工具</p>
+                </div>
+
+                <!-- 表单区 -->
+                <div class="p-8" id="upload-section">
+                    <form id="uploadForm">
+                        <div class="mb-8">
+                            <div id="dropZone" class="drop-zone border-2 border-dashed border-gray-300 rounded-xl p-12 text-center cursor-pointer hover:border-gray-400 bg-gray-50/50">
+                                <div class="flex flex-col items-center">
+                                    <div class="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mb-4">
+                                        <i class="fas fa-cloud-upload-alt text-primary-500 text-2xl"></i>
+                                    </div>
+                                    <h5 class="text-lg font-semibold text-gray-800 mb-1">点击或拖拽文件到此处</h5>
+                                    <p class="text-sm text-gray-500">支持 PDF 格式 | 单个文件最大 50MB</p>
+                                    <input type="file" name="files" id="fileInput" class="hidden" multiple accept=".pdf">
+                                </div>
+                            </div>
+                            
+                            <!-- 待处理清单 -->
+                            <div id="fileListContainer" class="mt-8 hidden">
+                                <h6 class="text-sm font-semibold text-gray-700 mb-3 flex items-center">
+                                    <i class="fas fa-list-ul mr-2 text-primary-500"></i>待处理文件清单
+                                </h6>
+                                <ul id="fileList" class="space-y-2">
+                                    <!-- 动态插入 -->
+                                </ul>
+                            </div>
+                        </div>
+
+                        <div class="flex justify-center">
+                            <button type="submit" id="submitBtn" disabled 
+                                    class="w-full sm:w-64 py-3 bg-gradient-to-r from-primary-600 to-blue-700 text-white font-bold rounded-xl shadow-lg hover:from-primary-700 hover:to-blue-800 transform hover:-translate-y-0.5 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none">
+                                开始智能处理
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- 结果展示区 (默认隐藏) -->
+                <div id="results-section" class="hidden p-8">
+                    <div class="text-center mb-8">
+                        <div class="w-16 h-16 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <i class="fas fa-check-circle text-green-500 text-3xl"></i>
+                        </div>
+                        <h2 class="text-2xl font-bold text-gray-900">处理完成</h2>
+                        <p class="text-gray-500">您的文件已准备就绪</p>
+                    </div>
+                    
+                    <div id="processed-files-list" class="space-y-3 mb-8">
+                        <!-- 结果列表 -->
+                    </div>
+
+                    <div class="flex justify-center">
+                        <button onclick="resetForm()" class="px-6 py-2 border border-gray-300 text-gray-700 font-medium rounded-lg hover:bg-gray-50 transition-colors">
+                            处理更多文件
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 历史记录区域 -->
+            <div id="history-section" class="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden hidden">
+                <div class="p-6 border-b border-gray-50 flex items-center justify-between">
+                    <h3 class="text-lg font-bold text-gray-800 flex items-center">
+                        <i class="fas fa-history mr-2 text-primary-500"></i>最近处理记录
+                    </h3>
+                    <button onclick="clearHistory()" class="text-xs text-gray-400 hover:text-red-500 transition-colors">
+                        清空记录
+                    </button>
+                </div>
+                <div id="history-list" class="p-6 space-y-3">
+                    <!-- 历史记录将插入这里 -->
+                </div>
+            </div>
+
+            <!-- 说明页 -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="bg-white/60 backdrop-blur-sm p-5 rounded-xl border border-white/50">
+                    <h4 class="font-bold text-gray-800 mb-2 flex items-center">
+                        <i class="fas fa-shield-alt mr-2 text-green-500"></i>安全说明
+                    </h4>
+                    <p class="text-xs text-gray-600">所有文件处理均在受控服务器内存中完成，处理后的文件将在1小时后自动从服务器中彻底删除。</p>
+                </div>
+                <div class="bg-white/60 backdrop-blur-sm p-5 rounded-xl border border-white/50">
+                    <h4 class="font-bold text-gray-800 mb-2 flex items-center">
+                        <i class="fas fa-magic mr-2 text-purple-500"></i>处理提示
+                    </h4>
+                    <p class="text-xs text-gray-600">本工具针对浅色/半透明水印效果最佳。如遇复杂背景水印，处理时间可能会稍有延长。</p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- JavaScript -->
+    <script src="js/env.js"></script>
+    <script>
+        // 设置全局API配置
+        window.API_BASE_URL = API_BASE_URL || 'http://localhost:5001/api/v1';
+        // 水印API地址是顶级路由，不带 v1
+        const WATERMARK_API_URL = window.location.hostname === 'localhost' ? 'http://localhost:5001/watermark' : '/watermark';
+        const HISTORY_KEY = 'watermark_history';
+    </script>
+    <script src="js/config.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/shared-navigation.js"></script>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const dropZone = document.getElementById('dropZone');
+            const fileInput = document.getElementById('fileInput');
+            const fileList = document.getElementById('fileList');
+            const fileListContainer = document.getElementById('fileListContainer');
+            const submitBtn = document.getElementById('submitBtn');
+            const uploadForm = document.getElementById('uploadForm');
+            const loadingSpinner = document.getElementById('loadingSpinner');
+            const uploadSection = document.getElementById('upload-section');
+            const resultsSection = document.getElementById('results-section');
+            const processedList = document.getElementById('processed-files-list');
+            const historySection = document.getElementById('history-section');
+            const historyList = document.getElementById('history-list');
+
+            // 加载历史记录
+            loadHistory();
+
+            // 拖拽事件处理
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, preventDefaults, false);
+            });
+
+            function preventDefaults(e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dropZone.addEventListener(eventName, highlight, false);
+            });
+
+            ['dragleave', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, unhighlight, false);
+            });
+
+            function highlight(e) {
+                dropZone.classList.add('dragover');
+            }
+
+            function unhighlight(e) {
+                dropZone.classList.remove('dragover');
+            }
+
+            dropZone.addEventListener('drop', handleDrop, false);
+
+            function handleDrop(e) {
+                const dt = e.dataTransfer;
+                const files = dt.files;
+                fileInput.files = files;
+                updateFileList(files);
+            }
+
+            dropZone.addEventListener('click', () => fileInput.click());
+
+            fileInput.addEventListener('change', function() {
+                updateFileList(this.files);
+            });
+
+            function formatFileSize(bytes) {
+                if (bytes === 0) return '0 Bytes';
+                const k = 1024;
+                const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+            }
+
+            function updateFileList(files) {
+                fileList.innerHTML = '';
+                
+                if (files.length > 0) {
+                    fileListContainer.classList.remove('hidden');
+                    submitBtn.disabled = false;
+                    
+                    Array.from(files).forEach(file => {
+                        const li = document.createElement('li');
+                        li.className = 'flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100';
+                        li.innerHTML = `
+                            <div class="flex items-center text-truncate mr-3">
+                                <i class="fas fa-file-pdf text-red-500 mr-3"></i>
+                                <span class="text-sm text-gray-700 truncate font-medium" title="${file.name}">${file.name}</span>
+                            </div>
+                            <span class="text-xs text-gray-500 bg-gray-200 px-2 py-1 rounded-full">${formatFileSize(file.size)}</span>
+                        `;
+                        fileList.appendChild(li);
+                    });
+                } else {
+                    fileListContainer.classList.add('hidden');
+                    submitBtn.disabled = true;
+                }
+            }
+
+            // 表单提交
+            uploadForm.addEventListener('submit', async function(e) {
+                e.preventDefault();
+                
+                if (fileInput.files.length === 0) return;
+
+                loadingSpinner.style.display = 'flex';
+                
+                const formData = new FormData();
+                Array.from(fileInput.files).forEach(file => {
+                    formData.append('files', file);
+                });
+
+                try {
+                    const response = await fetch(`${WATERMARK_API_URL}/upload`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        // 保存到历史记录
+                        saveToHistory(data.files);
+                        // 显示本次结果
+                        showResults(data.files);
+                        // 重新加载历史记录显示
+                        loadHistory();
+
+                        if (data.errors && data.errors.length > 0) {
+                            console.warn('Partial errors:', data.errors);
+                            alert('部分文件处理失败，详情请查看控制台。');
+                        }
+                    } else {
+                        alert('处理失败: ' + (data.message || '未知错误'));
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    alert('网络错误或服务器异常');
+                } finally {
+                    loadingSpinner.style.display = 'none';
+                }
+            });
+
+            function resolveUrl(url) {
+                if (url.startsWith('/')) {
+                    if (WATERMARK_API_URL.startsWith('http')) {
+                        const urlObj = new URL(WATERMARK_API_URL);
+                        return `${urlObj.origin}${url}`;
+                    }
+                }
+                return url;
+            }
+
+            function createResultItem(file, isHistory = false) {
+                const downloadUrl = resolveUrl(file.download_url);
+                const previewUrl = resolveUrl(file.preview_url);
+                const timeStr = isHistory ? `<div class="text-xs text-gray-400 mt-1">${new Date(file.timestamp).toLocaleString()}</div>` : '';
+
+                const div = document.createElement('div');
+                div.className = 'flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-100 hover:border-primary-200 transition-colors';
+                
+                div.innerHTML = `
+                    <div class="flex items-center text-left text-truncate mr-4 overflow-hidden">
+                        <i class="fas fa-file-pdf text-red-500 mr-3 text-xl shrink-0"></i>
+                        <div class="min-w-0">
+                            <div class="text-sm font-bold text-gray-800 truncate" title="${file.name}">${file.name}</div>
+                            <div class="text-xs text-gray-500 truncate">原文件: ${file.original_name}</div>
+                            ${timeStr}
+                        </div>
+                    </div>
+                    <div class="flex gap-2 shrink-0">
+                        <a href="${previewUrl}" target="_blank" class="px-3 py-1.5 bg-white border border-gray-300 text-gray-700 text-xs font-bold rounded-lg hover:bg-gray-50 transition-colors shadow-sm flex items-center">
+                            <i class="fas fa-eye mr-1"></i> 预览
+                        </a>
+                        <a href="${downloadUrl}" target="_blank" class="px-3 py-1.5 bg-primary-600 text-white text-xs font-bold rounded-lg hover:bg-primary-700 transition-colors shadow-sm flex items-center">
+                            <i class="fas fa-download mr-1"></i> 下载
+                        </a>
+                    </div>
+                `;
+                return div;
+            }
+
+            function showResults(files) {
+                uploadSection.classList.add('hidden');
+                resultsSection.classList.remove('hidden');
+                processedList.innerHTML = '';
+
+                files.forEach(file => {
+                    processedList.appendChild(createResultItem(file));
+                });
+            }
+
+            window.resetForm = function() {
+                uploadForm.reset();
+                fileList.innerHTML = '';
+                fileListContainer.classList.add('hidden');
+                submitBtn.disabled = true;
+                
+                resultsSection.classList.add('hidden');
+                uploadSection.classList.remove('hidden');
+            }
+
+            // --- 历史记录逻辑 ---
+
+            function saveToHistory(newFiles) {
+                let history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+                const timestamp = new Date().getTime();
+                
+                // 添加时间戳并合并
+                const filesToSave = newFiles.map(f => ({...f, timestamp}));
+                
+                // 放到最前面
+                history = [...filesToSave, ...history];
+                
+                // 限制条数（比如保留最近10条）
+                if (history.length > 10) {
+                    history = history.slice(0, 10);
+                }
+                
+                localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+            }
+
+            function loadHistory() {
+                const history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+                
+                if (history.length > 0) {
+                    historySection.classList.remove('hidden');
+                    historyList.innerHTML = '';
+                    history.forEach(file => {
+                        historyList.appendChild(createResultItem(file, true));
+                    });
+                } else {
+                    historySection.classList.add('hidden');
+                }
+            }
+
+            window.clearHistory = function() {
+                if (confirm('确定要清空历史记录吗？')) {
+                    localStorage.removeItem(HISTORY_KEY);
+                    loadHistory();
+                }
+            }
+        });
+    </script>
+</body>
+</html>
