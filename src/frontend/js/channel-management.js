@@ -320,6 +320,7 @@ class ChannelManagement {
             this.categories = [
                 { name: '科技', count: 0 },
                 { name: '教育', count: 0 },
+                { name: '反贼', count: 0 },
                 { name: '娱乐', count: 0 },
                 { name: '生活', count: 0 },
                 { name: '游戏', count: 0 },
@@ -331,6 +332,7 @@ class ChannelManagement {
                 '科技': 9.0,
                 '教育': 4.0,
                 '转发': 6.0,
+                '反贼': 6.0,
                 '娱乐': 3.0
             };
             this.defaultCpm = this.categoryDefaults.default;

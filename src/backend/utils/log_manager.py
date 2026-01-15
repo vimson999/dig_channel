@@ -237,6 +237,11 @@ def setup_application_logging(config=None):
         'security', 'security.log', level=logging.INFO
     )
 
+    # Google API key轮询日志
+    log_manager.setup_rotating_logger(
+        'google_key_manager', 'google_key_manager.log', level=logging.INFO
+    )
+
     # 可选功能日志
     if _get_flag(config, 'ENABLE_TTS_API'):
         log_manager.setup_rotating_logger('TTS_API', 'tts.log')

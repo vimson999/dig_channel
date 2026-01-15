@@ -123,6 +123,7 @@ youtube-analytics/
 |--------|------|------|--------|
 | `YOUTUBE_API_KEY` | ✅ | YouTube Data API v3 密钥 | - |
 | `SECRET_KEY` | ✅ | Flask应用密钥 | - |
+| `GOOGLE_API_KEYS` | ❌ | Google 远端服务 API Key 列表（逗号分隔，用于轮询/切换） | - |
 | `JWT_SECRET_KEY` | ❌ | JWT令牌密钥 | 使用SECRET_KEY |
 | `DATABASE_URL` | ❌ | 数据库连接URL | SQLite数据库 |
 

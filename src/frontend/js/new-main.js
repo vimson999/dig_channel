@@ -342,6 +342,7 @@ class YouTubeDataApp {
             { name: '教育', default_cpm: 4.0 },
             { name: '娱乐', default_cpm: 3.0 },
             { name: '转发', default_cpm: 6.0 },
+            { name: '反贼', default_cpm: 6.0 },
             { name: '生活', default_cpm: 2.5 },
             { name: '游戏', default_cpm: 3.0 },
             { name: '音乐', default_cpm: 3.0 },

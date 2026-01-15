@@ -156,11 +156,12 @@ class YouTubeSyncService:
                     'message': '无法获取频道统计数据'
                 }
             
-            # 获取前一天的数据用于计算变化量
-            previous_date = target_date - timedelta(days=1)
-            previous_data = ChannelData.query.filter_by(
-                channel_id=db_channel_id,
-                date=previous_date
+            # 获取最近的一条数据用于计算变化量（不限于前一天）
+            previous_data = ChannelData.query.filter(
+                ChannelData.channel_id == db_channel_id,
+                ChannelData.date < target_date
+            ).order_by(
+                ChannelData.date.desc()
             ).first()
             
             if existing_data:
@@ -279,13 +280,6 @@ class YouTubeSyncService:
                                 date=target_date
                             ).first()
                             
-                            # 获取前一天数据
-                            # previous_date = target_date - timedelta(days=1)
-                            # previous_data = ChannelData.query.filter_by(
-                            #     channel_id=db_channel_id,
-                            #     date=previous_date
-                            # ).first()
-
                             # 获取最近一天数据
                             previous_data = ChannelData.query.filter(
                                 ChannelData.channel_id == db_channel_id,
@@ -457,11 +451,12 @@ class YouTubeSyncService:
                                 date=target_date
                             ).first()
                             
-                            # 获取前一天数据
-                            previous_date = target_date - timedelta(days=1)
-                            previous_data = ChannelData.query.filter_by(
-                                channel_id=db_channel_id,
-                                date=previous_date
+                            # 获取最近的一条数据用于计算变化量（不限于前一天）
+                            previous_data = ChannelData.query.filter(
+                                ChannelData.channel_id == db_channel_id,
+                                ChannelData.date < target_date
+                            ).order_by(
+                                ChannelData.date.desc()
                             ).first()
                             
                             if existing_data:

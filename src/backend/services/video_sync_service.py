@@ -3,6 +3,7 @@ import json
 import logging
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Tuple
+from sqlalchemy.orm import joinedload
 
 from models import db, Channel, Video, VideoData
 from utils.youtube_api import YouTubeAPI
@@ -476,7 +477,7 @@ class VideoSyncService:
                         'data': {}
                     }
             
-            query = Video.query.filter_by(channel_id=channel_id, is_active=True)
+            query = Video.query.options(joinedload(Video.channel)).filter_by(channel_id=channel_id, is_active=True)
             
             # 搜索条件
             if search:
@@ -541,7 +542,7 @@ class VideoSyncService:
         """搜索视频"""
         try:
             # 构建查询
-            query = Video.query.join(Channel).filter(Video.is_active == True)
+            query = Video.query.options(joinedload(Video.channel)).join(Channel).filter(Video.is_active == True)
             
             # 用户数据隔离
             if user_id is not None:

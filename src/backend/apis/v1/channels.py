@@ -423,6 +423,18 @@ def get_categories():
             for cat in categories
         ]
 
+        # 补充配置中存在但数据库里暂时没有的分类，count 为 0
+        existing_names = {item['name'] for item in category_list if item.get('name')}
+        for cat_name, default_cpm in defaults.items():
+            if not cat_name or cat_name == 'default':
+                continue
+            if cat_name not in existing_names:
+                category_list.append({
+                    'name': cat_name,
+                    'count': 0,
+                    'default_cpm': default_cpm if isinstance(default_cpm, (int, float)) else default_fallback
+                })
+
         return jsonify({
             'success': True,
             'data': {
