@@ -491,9 +491,16 @@
                             lastLogLine = html;
                             
                             // 监控关键词以自动刷新
-                            if (html.includes('Successfully processed') || html.includes('Batch complete') || html.includes('Failed to upload')) {
+                            if (html.includes('Successfully processed') || html.includes('Failed to upload')) {
                                 refreshQueue();
                                 refreshHistory();
+                            }
+                            
+                            // 监控批处理完成信号
+                            if (html.includes('Batch processing complete') || html.includes('Batch complete') || html.includes('All tasks processed')) {
+                                refreshQueue();
+                                refreshHistory();
+                                resetBatchButton();
                             }
                         }
                     }
