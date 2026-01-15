@@ -55,6 +55,10 @@ def register_blueprints(app):
     from api.data_collection import data_collection_bp
     app.register_blueprint(data_collection_bp)
 
+    # 注册Bilibili API
+    from .bilibili import bp as bilibili_bp
+    app.register_blueprint(bilibili_bp)
+
 __all__ = [
     'auth_bp',
     'channels_bp',

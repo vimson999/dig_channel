@@ -38,6 +38,8 @@ class SharedNavigation {
             return 'indie-navigator';
         } else if (filename === 'favorites.html') {
             return 'favorites';
+        } else if (filename === 'bilibili-publisher.html') {
+            return 'bilibili-publisher';
         }
         return 'dashboard';
     }
@@ -53,7 +55,8 @@ class SharedNavigation {
             'mhtml-pdf': 'MHTML转PDF工具',
             'student-id-generator': '学生证生成器',
             'indie-navigator': '商机发现平台',
-            'favorites': '我的收藏'
+            'favorites': '我的收藏',
+            'bilibili-publisher': 'Bilibili 发布工作台'
         };
         return titles[this.currentPage] || '智能数据分析平台';
     }
@@ -198,6 +201,12 @@ class SharedNavigation {
                         name: '我的收藏',
                         icon: 'fas fa-heart',
                         href: 'favorites.html'
+                    },
+                    {
+                        id: 'bilibili-publisher',
+                        name: 'B站发布',
+                        icon: 'fab fa-bilibili',
+                        href: 'bilibili-publisher.html'
                     }
                 ]
             },
