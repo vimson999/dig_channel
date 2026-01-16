@@ -47,7 +47,7 @@ def create_database_views(app):
             ROW_NUMBER() OVER (PARTITION BY c.user_id ORDER BY cd.estimated_revenue DESC) as rank
         FROM channels c
         JOIN channel_data cd ON c.id = cd.channel_id
-        WHERE cd.date = date('now') AND c.is_active = 1
+        WHERE cd.date = CURRENT_DATE AND c.is_active = true
         ORDER BY c.user_id, cd.estimated_revenue DESC
         """
         
@@ -62,7 +62,7 @@ def create_database_views(app):
             ROW_NUMBER() OVER (PARTITION BY c.user_id ORDER BY SUM(cd.estimated_revenue) DESC) as rank
         FROM channels c
         JOIN channel_data cd ON c.id = cd.channel_id
-        WHERE cd.date >= date('now', '-30 days') AND c.is_active = 1
+        WHERE cd.date >= CURRENT_DATE - INTERVAL '30 days' AND c.is_active = true
         GROUP BY c.user_id, c.id, c.name, c.channel_id
         ORDER BY c.user_id, total_revenue DESC
         """
@@ -78,7 +78,7 @@ def create_database_views(app):
             ROW_NUMBER() OVER (PARTITION BY c.user_id ORDER BY cd.subscriber_change DESC) as rank
         FROM channels c
         JOIN channel_data cd ON c.id = cd.channel_id
-        WHERE cd.date = date('now') AND c.is_active = 1
+        WHERE cd.date = CURRENT_DATE AND c.is_active = true
         ORDER BY c.user_id, cd.subscriber_change DESC
         """
         
@@ -93,7 +93,7 @@ def create_database_views(app):
             ROW_NUMBER() OVER (PARTITION BY c.user_id ORDER BY SUM(cd.subscriber_change) DESC) as rank
         FROM channels c
         JOIN channel_data cd ON c.id = cd.channel_id
-        WHERE cd.date >= date('now', '-30 days') AND c.is_active = 1
+        WHERE cd.date >= CURRENT_DATE - INTERVAL '30 days' AND c.is_active = true
         GROUP BY c.user_id, c.id, c.name, c.channel_id
         ORDER BY c.user_id, total_subscriber_change DESC
         """

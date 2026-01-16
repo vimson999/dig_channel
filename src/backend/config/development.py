@@ -34,5 +34,5 @@ class DevelopmentConfig(BaseConfig):
             'connect_timeout': 5,   # 较短的连接超时
             'sslmode': 'prefer',    # SSL模式
             'options': '-c statement_timeout=30000',  # SQL语句超时30秒
-        } if BaseConfig.SQLALCHEMY_DATABASE_URI.startswith('postgresql') else {}
+        }
     }

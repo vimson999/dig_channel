@@ -33,29 +33,31 @@ except ImportError as e:
 # TTS模型配置
 TTS_MODELS = {
     'tacotron2': {
-        'name': 'Tacotron2',
+        'name': 'Tacotron2 (English)',
         'model_name': 'tts_models/en/ljspeech/tacotron2-DDC',
         'language': 'en',
-        'description': '英语语音合成，自然度较高'
+        'description': '经典英语语音，自然度一般'
     },
-    'glow_tts': {
-        'name': 'Glow-TTS',
-        'model_name': 'tts_models/en/ljspeech/glow-tts',
-        'language': 'en',
-        'description': '英语语音合成，速度较快'
+    'your_tts': {
+        'name': 'YourTTS (高质量多语言)',
+        'model_name': 'tts_models/multilingual/multi-dataset/your_tts',
+        'language': 'multilingual',
+        'description': '基于VITS架构，支持中英等多语言，音质极佳且支持多说话人',
+        'is_vits': True
     },
     'chinese': {
-        'name': 'Chinese TTS',
+        'name': '中文女声 (Baker)',
         'model_name': 'tts_models/zh-CN/baker/tacotron2-DDC-GST',
         'language': 'zh-CN',
-        'description': '中文语音合成'
+        'description': '标准中文合成（标贝女声）'
     },
     'dialogue_mode': {
-        'name': '多人对话模式',
-        'model_name': 'tts_models/zh-CN/baker/tacotron2-DDC-GST',
-        'language': 'zh-CN',
-        'description': '支持多人对话的中文语音合成',
-        'is_dialogue': True
+        'name': '多人对话模式 (高质量)',
+        'model_name': 'tts_models/multilingual/multi-dataset/your_tts',
+        'language': 'multilingual',
+        'description': '使用YourTTS原生支持的多说话人对话',
+        'is_dialogue': True,
+        'is_vits': True
     }
 }
 
@@ -305,35 +307,42 @@ def synthesize_speech(current_user):
         try:
             logger.info(f"🔍 [DEBUG] 开始合成文本: '{text}' (长度: {len(text)})")
             
-            # 强化文本处理，彻底避免重复播放问题
-            if len(text) > 0:
-                # 1. 移除可能导致TTS异常的字符和符号
-                clean_text = text.strip()
-                
-                # 2. 移除连续的标点符号
-                import re
+            # 强化文本处理
+            clean_text = text.strip()
+            if len(clean_text) > 0:
                 clean_text = re.sub(r'[。！？.!?]{2,}', '。', clean_text)
+                if not any(clean_text.endswith(p) for p in '。！？.!?'):
+                    clean_text += '。'
                 
-                # 3. 确保只有一个句尾标点符号
-                clean_text = clean_text.rstrip('。！？.!?') + '。'
+                # 准备合成参数
+                synth_kwargs = {'text': clean_text, 'file_path': audio_path}
                 
-                # 4. 确保文本不会被TTS分句处理
-                # 移除可能导致分句的逗号和分号（在句中）
-                clean_text = re.sub(r'[,，;；]\s*', ' ', clean_text)
+                # 特殊处理 YourTTS 参数
+                if model_key in ['your_tts', 'dialogue_mode']:
+                    # 检查模型支持的语言
+                    target_lang = 'zh-cn'
+                    if hasattr(tts, 'languages') and tts.languages:
+                        if target_lang not in tts.languages:
+                            logger.warning(f"⚠️ 模型不支持中文 ({target_lang})，可用语言: {tts.languages}")
+                            # 尝试回退到英语
+                            if 'en' in tts.languages:
+                                target_lang = 'en'
+                            else:
+                                target_lang = tts.languages[0]
+                            logger.info(f"🔄 回退到语言: {target_lang}")
+                    
+                    synth_kwargs['language'] = target_lang
+                    
+                    # 尝试获取默认说话人
+                    if hasattr(tts, 'speakers') and tts.speakers:
+                        synth_kwargs['speaker'] = tts.speakers[0]
+                    
+                    logger.info(f"✨ 使用 VITS 增强合成: speaker={synth_kwargs.get('speaker')}, lang={synth_kwargs.get('language')}")
                 
-                # 5. 限制文本长度避免TTS超时
-                if len(clean_text) > 100:
-                    # 长文本强制截断并确保完整句子
-                    clean_text = clean_text[:100].rstrip('。！？.!?') + '。'
-                
-                logger.info(f"🔍 [DEBUG] 最终合成文本: '{clean_text}' (长度: {len(clean_text)})")
-                
-                # 6. 使用强制参数确保单句处理
-                tts.tts_to_file(text=clean_text, file_path=audio_path)
+                # 执行合成
+                tts.tts_to_file(**synth_kwargs)
             else:
-                # 空文本fallback
                 tts.tts_to_file(text="测试。", file_path=audio_path)
-                logger.warning("⚠️ 空文本，使用fallback")
                 
             logger.info(f"✅ 语音合成成功: {audio_path}")
         except Exception as e:
@@ -527,64 +536,85 @@ def synthesize_dialogue(current_user):
         dialogue_segments = parse_dialogue_text(text)
         logger.info(f"🎭 解析到 {len(dialogue_segments)} 段对话")
         
-        for i, segment in enumerate(dialogue_segments):
-            logger.debug(f"  段落 {i+1}: [{segment['speaker']}] {segment['text']}")
+        # 初始化合并文本
+        combined_text = text.strip()
         
         # 获取TTS实例
         tts = get_tts_instance(model_key)
         
-        # 处理多人对话 - 新的多声音实现
-        combined_text = ""  # 初始化变量
-        
+        # 处理多人对话 - 支持原生多声音
         if len(dialogue_segments) > 1:
-            logger.info("🎭 实现多人对话声音差异")
-            
-            # 构建合并文本用于显示和统计
-            combined_parts = []
-            for segment in dialogue_segments:
-                combined_parts.append(f"{segment['speaker']}说{segment['text']}")
-            combined_text = "，".join(combined_parts)
+            logger.info(f"🎭 处理多人对话: 使用模型 {model_key}")
             
             # 为每个说话人生成单独的音频片段
             audio_segments = []
             temp_dir = tempfile.gettempdir()
             
+            # 如果是YourTTS，尝试获取原生说话人列表和语言列表
+            available_speakers = []
+            available_languages = []
+            if model_key in ['your_tts', 'dialogue_mode']:
+                try:
+                    if hasattr(tts, 'speakers') and tts.speakers:
+                        available_speakers = tts.speakers
+                        logger.info(f"👥 发现原生说话人列表: {len(available_speakers)}个")
+                    if hasattr(tts, 'languages') and tts.languages:
+                        available_languages = tts.languages
+                except:
+                    pass
+
             for i, segment in enumerate(dialogue_segments):
-                speaker = segment['speaker']
+                speaker_name = segment['speaker']
                 text = segment['text'].strip()
-                
-                # 清理文本并添加句号
                 clean_text = text.rstrip('。！？.!?') + '。'
                 
-                # 为每个片段生成临时音频文件
                 segment_filename = f"temp_segment_{i}_{uuid.uuid4().hex[:6]}.wav"
                 segment_path = os.path.join(temp_dir, segment_filename)
                 
-                logger.info(f"🔄 生成 [{speaker}]: {clean_text}")
+                logger.info(f"🔄 生成 [{speaker_name}]: {clean_text}")
                 
                 try:
-                    # 基础TTS合成
-                    tts.tts_to_file(text=clean_text, file_path=segment_path)
+                    # 准备合成参数
+                    synth_kwargs = {'text': clean_text, 'file_path': segment_path}
                     
-                    # 根据说话人应用音频效果
-                    processed_path = apply_speaker_effects(segment_path, speaker, i)
-                    audio_segments.append(processed_path)
+                    # 如果是YourTTS且有多个说话人，为不同角色分配不同声音
+                    if available_speakers:
+                        # 简单地根据说话人名字或索引映射到不同的原生声音
+                        speaker_idx = i % len(available_speakers)
+                        # 尝试通过名字映射（可选）
+                        synth_kwargs['speaker'] = available_speakers[speaker_idx]
+                        
+                        # 处理语言参数
+                        if 'zh' in model_key or 'multilingual' in TTS_MODELS[model_key]['model_name']:
+                            target_lang = 'zh-cn'
+                            if available_languages and target_lang not in available_languages:
+                                if 'en' in available_languages:
+                                    target_lang = 'en'
+                                else:
+                                    target_lang = available_languages[0]
+                            synth_kwargs['language'] = target_lang
+                        
+                        logger.info(f"👤 [{speaker_name}] 映射到原生说话人: {synth_kwargs['speaker']} (语言: {synth_kwargs.get('language')})")
                     
-                    # 清理原始片段文件
-                    if os.path.exists(segment_path):
-                        os.remove(segment_path)
+                    # 执行合成
+                    tts.tts_to_file(**synth_kwargs)
+                    
+                    # 如果没有原生多说话人支持，才使用后期音效处理
+                    if not available_speakers:
+                        processed_path = apply_speaker_effects(segment_path, speaker_name, i)
+                        audio_segments.append(processed_path)
+                        if processed_path != segment_path and os.path.exists(segment_path):
+                            os.remove(segment_path)
+                    else:
+                        audio_segments.append(segment_path)
                         
                 except Exception as e:
-                    logger.error(f"❌ 生成片段失败 [{speaker}]: {str(e)}")
+                    logger.error(f"❌ 生成片段失败 [{speaker_name}]: {str(e)}")
                     if os.path.exists(segment_path):
                         os.remove(segment_path)
                     raise
             
             # 合并所有音频片段
-            temp_dir = tempfile.gettempdir()
-            audio_filename = f"dialogue_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
-            audio_path = os.path.join(temp_dir, audio_filename)
-            
             combined_path = combine_audio_segments(audio_segments, audio_path)
             
             # 清理临时片段文件

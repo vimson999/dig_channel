@@ -1,0 +1,91 @@
+# YouTube Analytics 配置文件
+# 支持多环境配置，可创建 config.development.yaml, config.production.yaml
+
+# 应用基础配置
+app:
+  name: "YouTube Analytics"
+  version: "1.0.0"
+  debug: false
+  timezone: "Asia/Shanghai"
+
+# 数据库配置
+database:
+  # 使用PostgreSQL还是SQLite
+  use_postgresql: false
+  
+  # PostgreSQL配置
+  postgresql:
+    host: "localhost"
+    port: 5432
+    database: "youtube_analytics"
+    username: "postgres"
+    password: ""
+    pool_size: 10
+    max_overflow: 20
+  
+  # SQLite配置
+  sqlite:
+    path: "instance/youtube_tracker.db"
+    echo: false
+
+# Redis缓存配置
+redis:
+  host: "localhost"
+  port: 6379
+  database: 0
+  password: ""
+  connection_pool_size: 10
+
+# JWT认证配置
+jwt:
+  secret_key: ""
+  access_token_expires: 3600  # 1小时
+  refresh_token_expires: 604800  # 7天
+
+# YouTube API配置
+youtube:
+  api_key: ""
+  quota_limit: 10000
+  cache_duration: 3600  # 缓存1小时
+
+# 管理员用户配置
+admin:
+  username: "admin"
+  email: "admin@example.com"
+  password: "admin123"
+  display_name: "系统管理员"
+
+# 日志配置
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/app.log"
+  max_file_size: "10MB"
+  backup_count: 5
+
+# API限流配置
+rate_limit:
+  default: "200 per day;50 per hour"
+  login: "5 per minute"
+  register: "3 per minute"
+
+# 邮件配置（可选）
+email:
+  smtp_server: ""
+  smtp_port: 587
+  username: ""
+  password: ""
+  use_tls: true
+
+# 监控配置
+monitoring:
+  enable_metrics: false
+  prometheus_port: 9090
+  health_check_interval: 30
+
+# 功能开关
+features:
+  enable_registration: true
+  enable_favorites: true
+  enable_export: true
+  enable_scheduler: true

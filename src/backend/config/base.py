@@ -19,7 +19,17 @@ class BaseConfig:
     
     # 数据库配置
     basedir = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))  # 回到项目根目录
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or f'sqlite:///{os.path.join(basedir, "instance", "youtube_tracker.db")}'
+    
+    # PostgreSQL配置
+    POSTGRES_USER = os.environ.get('POSTGRES_USER', 'postgres')
+    POSTGRES_PASSWORD = os.environ.get('POSTGRES_PASSWORD', 'password')
+    POSTGRES_HOST = os.environ.get('POSTGRES_HOST', 'localhost')
+    POSTGRES_PORT = os.environ.get('POSTGRES_PORT', '5432')
+    POSTGRES_DB = os.environ.get('POSTGRES_DB', 'youtube_analytics')
+
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
+        f'postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
+        
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ECHO = False
     
@@ -33,7 +43,7 @@ class BaseConfig:
         'connect_args': {
             'connect_timeout': 10,  # 连接超时
             'sslmode': 'prefer',    # SSL模式
-        } if os.environ.get('DATABASE_URL', '').startswith('postgresql') else {}
+        }
     }
     
     # Redis配置
@@ -73,7 +83,7 @@ class BaseConfig:
 
     # 可选功能开关
     _truthy = {'1', 'true', 'yes', 'on'}
-    ENABLE_TTS_API = os.environ.get('ENABLE_TTS_API', 'false').lower() in _truthy
+    ENABLE_TTS_API = os.environ.get('ENABLE_TTS_API', 'true').lower() in _truthy
     ENABLE_MHTML_API = os.environ.get('ENABLE_MHTML_API', 'false').lower() in _truthy
     
     # API限流配置
