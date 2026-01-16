@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gemini AI 测试台 - Shioa</title>
-    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -22,110 +21,86 @@
             }
         }
     </script>
-    <!-- Google Fonts & Font Awesome -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body { font-family: 'Inter', sans-serif; }
-        .glass-card {
-            background: rgba(255, 255, 255, 0.8);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.3);
-        }
     </style>
 </head>
 <body class="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen">
 
-    <!-- 导航组件会自动插入到 body 开头 -->
-
     <div class="max-w-[1440px] mx-auto px-6 py-4 mt-4">
-        <nav class="flex items-center gap-2 text-sm text-gray-500" aria-label="面包屑导航">
-            <a href="/" class="hover:text-primary-600 transition-colors"><i class="fas fa-home"></i></a>
+        <nav class="flex items-center gap-2 text-sm text-gray-500">
+            <a href="/" class="hover:text-primary-600 transition-colors"><i class="fas fa-home"></i> 首页</a>
             <span class="mx-2">/</span>
-            <span class="text-gray-700" aria-current="page">Gemini 测试台</span>
+            <span class="text-gray-700 font-medium">Gemini 测试台</span>
         </nav>
     </div>
 
-    <!-- 主内容区 -->
     <main class="max-w-[1000px] mx-auto px-6 py-8">
         <div class="bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
-            <!-- 头部装饰 -->
             <div class="h-2 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500"></div>
             
             <div class="p-8">
                 <div class="flex items-center gap-4 mb-8">
-                    <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-200">
+                    <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center shadow-lg">
                         <i class="fas fa-robot text-white text-xl"></i>
                     </div>
                     <div>
                         <h2 class="text-2xl font-extrabold text-gray-800">Gemini AI 实验室</h2>
-                        <p class="text-gray-500">测试 Google 最新一代多模态大模型的能力</p>
+                        <p class="text-gray-500">基于 Google 官方模型接口</p>
                     </div>
                 </div>
 
                 <div class="space-y-6">
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                         <div class="col-span-2">
-                            <label for="prompt" class="block text-sm font-semibold text-gray-700 mb-2">输入提示词 (Prompt)</label>
-                            <textarea id="prompt" rows="5" 
-                                class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-4 focus:ring-primary-100 focus:border-primary-500 outline-none transition-all resize-none text-gray-700"
-                                placeholder="请描述您想让 AI 执行的任务..."></textarea>
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">输入提示词 (Prompt)</label>
+                            <textarea id="prompt_input" rows="5" 
+                                class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-4 focus:ring-primary-100 focus:border-primary-500 outline-none transition-all text-gray-700"
+                                placeholder="请输入您的问题或指令..."></textarea>
                         </div>
                         <div>
-                            <label for="model-select" class="block text-sm font-semibold text-gray-700 mb-2">选择模型 (Model)</label>
-                            <select id="model-select" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-4 focus:ring-primary-100 focus:border-primary-500 outline-none transition-all bg-white">
-                                <option value="gemini-2.0-flash">Gemini 2.0 Flash (最新/最快)</option>
-                                <option value="gemini-1.5-pro">Gemini 1.5 Pro (推理更强)</option>
-                                <option value="gemini-1.5-flash">Gemini 1.5 Flash (平衡)</option>
+                            <label class="block text-sm font-semibold text-gray-700 mb-2">选择可用模型</label>
+                            <select id="model_select" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-4 focus:ring-primary-100 focus:border-primary-500 outline-none bg-white shadow-sm">
+                                <option value="gemini-2.0-flash">正在加载模型...</option>
                             </select>
-                            <div class="mt-4 p-4 bg-blue-50 rounded-xl border border-blue-100 text-xs text-blue-800">
-                                <p class="font-bold mb-1"><i class="fas fa-info-circle mr-1"></i> 模型说明：</p>
-                                <p>Flash 模型速度快，适合总结和简单任务。</p>
-                                <p class="mt-1">Pro 模型推理能力强，适合复杂分析。</p>
+                            <div class="mt-4 p-4 bg-amber-50 rounded-xl border border-amber-100 text-[11px] text-amber-800">
+                                <p class="font-bold mb-1"><i class="fas fa-lightbulb mr-1"></i> 提示：</p>
+                                <p>如果列表中没有出现模型，请检查后端服务是否启动，并确保 .env 中配置了正确的 Key。</p>
                             </div>
                         </div>
                     </div>
 
-                    <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-4">
-                            <button id="generate-btn" class="px-8 py-3 bg-primary-600 hover:bg-primary-700 text-white font-bold rounded-button shadow-lg shadow-primary-200 transition-all transform hover:-translate-y-0.5 active:translate-y-0 flex items-center gap-2">
-                                <i class="fas fa-paper-plane"></i>
-                                <span>发送请求</span>
-                            </button>
-                            
-                            <div id="loading" class="hidden items-center gap-2 text-primary-600 font-medium">
-                                <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                </svg>
-                                <span>Gemini 正在思考中...</span>
-                            </div>
-                        </div>
+                    <div class="flex items-center gap-4">
+                        <button id="submit_btn" onclick="startGeneration()" class="px-8 py-3 bg-primary-600 hover:bg-primary-700 text-white font-bold rounded-button shadow-lg flex items-center gap-2 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <i class="fas fa-paper-plane"></i>
+                            <span>发送请求</span>
+                        </button>
                         
-                        <div class="hidden text-xs text-gray-400 bg-gray-50 px-3 py-1 rounded-full border border-gray-100">
-                            Model: gemini-2.5-flash
+                        <div id="loading_spinner" class="hidden items-center gap-2 text-primary-600 font-medium">
+                            <i class="fas fa-spinner fa-spin"></i>
+                            <span>AI 正在响应中...</span>
                         </div>
                     </div>
 
-                    <!-- 结果展示 -->
-                    <div id="result-container" class="hidden space-y-2 animate-in fade-in duration-500">
-                        <div class="flex items-center justify-between">
+                    <div id="result_box" class="hidden space-y-2 animate-in slide-in-from-bottom-2 duration-500">
+                        <div class="flex justify-between items-center">
                             <span class="text-sm font-semibold text-emerald-600 flex items-center gap-2">
-                                <i class="fas fa-check-circle"></i> 生成成功
+                                <i class="fas fa-sparkles"></i> AI 生成结果：
                             </span>
-                            <button onclick="copyResult()" class="text-xs text-gray-500 hover:text-primary-600 transition-colors">
-                                <i class="far fa-copy mr-1"></i> 复制全文
+                            <button onclick="copyResult()" class="text-xs text-gray-400 hover:text-primary-600">
+                                <i class="far fa-copy mr-1"></i> 复制
                             </button>
                         </div>
-                        <div id="result-area" class="p-6 bg-slate-50 rounded-2xl border border-slate-200 text-gray-800 leading-relaxed whitespace-pre-wrap font-sans min-h-[150px]"></div>
+                        <div id="result_text" class="p-6 bg-slate-50 rounded-2xl border border-slate-200 text-gray-800 whitespace-pre-wrap min-h-[100px] shadow-inner"></div>
                     </div>
 
-                    <!-- 错误提示 -->
-                    <div id="error-container" class="hidden p-4 bg-red-50 border border-red-100 rounded-xl text-red-600 text-sm flex items-start gap-3">
-                        <i class="fas fa-exclamation-triangle mt-1"></i>
+                    <div id="error_box" class="hidden p-4 bg-red-50 border border-red-100 rounded-xl text-red-600 flex items-start gap-3">
+                        <i class="fas fa-exclamation-circle mt-1"></i>
                         <div>
-                            <p class="font-bold">调用失败</p>
-                            <p id="error-message"></p>
+                            <p class="font-bold">发生错误</p>
+                            <p id="error_text" class="text-xs"></p>
                         </div>
                     </div>
                 </div>
@@ -133,126 +108,83 @@
         </div>
     </main>
 
-    <!-- 通用页脚 -->
-    <footer class="bg-white border-t border-gray-200 mt-16">
-        <div class="max-w-[1440px] mx-auto px-6 py-12">
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-8">
-                <div class="col-span-1 md:col-span-2">
-                    <div class="flex items-center gap-3 mb-4">
-                        <div class="w-8 h-8 bg-gradient-to-br from-red-500 to-red-600 rounded-lg flex items-center justify-center">
-                            <i class="fab fa-youtube text-white text-lg"></i>
-                        </div>
-                        <h3 class="text-lg font-bold text-gray-800">YouTube Analytics</h3>
-                    </div>
-                    <p class="text-gray-600 mb-4 max-w-md">专业的YouTube频道数据分析平台，帮助内容创作者优化策略，提升表现。</p>
-                </div>
-                <div>
-                    <h4 class="text-sm font-semibold text-gray-800 uppercase mb-4">核心功能</h4>
-                    <ul class="space-y-2 text-sm text-gray-600">
-                        <li>趋势图表</li><li>数据明细</li><li>数据导出</li>
-                    </ul>
-                </div>
-                <div>
-                    <h4 class="text-sm font-semibold text-gray-800 uppercase mb-4">帮助支持</h4>
-                    <ul class="space-y-2 text-sm text-gray-600">
-                        <li>使用指南</li><li>API文档</li><li>联系我们</li>
-                    </ul>
-                </div>
-            </div>
-            <div class="border-t border-gray-200 mt-8 pt-8 text-sm text-gray-500 flex justify-between">
-                <span>&copy; 2025 YouTube Analytics. All rights reserved.</span>
-                <span>Made with Flask + Tailwind CSS</span>
-            </div>
-        </div>
-    </footer>
-
-    <!-- Scripts -->
+    <!-- 通用脚本加载 -->
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js"></script>
     <script>
-        const API_BASE_URL = window.API_BASE_URL || 'http://localhost:5001/api';
+        // 初始化
+        window.onload = function() {
+            console.log('✅ Page Init. API URL:', window.API_BASE_URL);
+            fetchModels();
+        };
 
-        // Load models on page load
-        document.addEventListener('DOMContentLoaded', async () => {
-            const modelSelect = document.getElementById('model-select');
-            
+        async function fetchModels() {
+            const select = document.getElementById('model_select');
             try {
-                const response = await fetch(`${API_BASE_URL}/gemini/models`);
-                const data = await response.json();
-                
+                const res = await fetch(`${window.API_BASE_URL}/gemini/models`);
+                const data = await res.json();
                 if (data.models && data.models.length > 0) {
-                    modelSelect.innerHTML = ''; // Clear default options
-                    
-                    // Prioritize specific models
-                    const priorityModels = ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'];
-                    
-                    data.models.sort((a, b) => {
-                        const aIndex = priorityModels.indexOf(a.name);
-                        const bIndex = priorityModels.indexOf(b.name);
-                        if (aIndex !== -1 && bIndex !== -1) return aIndex - bIndex;
-                        if (aIndex !== -1) return -1;
-                        if (bIndex !== -1) return 1;
-                        return a.name.localeCompare(b.name);
+                    select.innerHTML = '';
+                    data.models.forEach(m => {
+                        const opt = document.createElement('option');
+                        opt.value = m.name;
+                        opt.textContent = m.name; // Simplified for clarity
+                        if (m.name === 'gemini-2.0-flash') opt.selected = true;
+                        select.appendChild(opt);
                     });
-
-                    data.models.forEach(model => {
-                        const option = document.createElement('option');
-                        option.value = model.name;
-                        option.textContent = `${model.displayName || model.name} (${model.name})`;
-                        if (model.name.includes('gemini-2.0-flash')) option.selected = true;
-                        modelSelect.appendChild(option);
-                    });
+                } else {
+                    select.innerHTML = '<option value="gemini-2.0-flash">暂无可用模型</option>';
                 }
-            } catch (error) {
-                console.error('Failed to load models:', error);
-                // Keep default hardcoded options as fallback
+            } catch (err) {
+                console.error('Fetch models failed:', err);
+                select.innerHTML = '<option value="gemini-2.0-flash">加载失败 (使用默认)</option>';
             }
-        });
+        }
 
-        document.getElementById('generate-btn').addEventListener('click', async () => {
-            const prompt = document.getElementById('prompt').value.trim();
-            const model = document.getElementById('model-select').value;
-            const btn = document.getElementById('generate-btn');
-            const loading = document.getElementById('loading');
-            const resultContainer = document.getElementById('result-container');
-            const resultArea = document.getElementById('result-area');
-            const errorContainer = document.getElementById('error-container');
+        async function startGeneration() {
+            const prompt = document.getElementById('prompt_input').value.trim();
+            const model = document.getElementById('model_select').value;
+            const btn = document.getElementById('submit_btn');
+            const loading = document.getElementById('loading_spinner');
+            const resultBox = document.getElementById('result_box');
+            const errorBox = document.getElementById('error_box');
 
             if (!prompt) {
-                alert('请输入提示词');
+                alert('请输入内容！');
                 return;
             }
 
+            // Reset UI
             btn.disabled = true;
-            loading.style.display = 'flex';
-            resultContainer.classList.add('hidden');
-            errorContainer.classList.add('hidden');
+            loading.classList.remove('hidden');
+            resultBox.classList.add('hidden');
+            errorBox.classList.add('hidden');
 
             try {
-                const response = await fetch(`${API_BASE_URL}/gemini/generate`, {
+                const response = await fetch(`${window.API_BASE_URL}/gemini/generate`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ prompt, model })
                 });
 
                 const data = await response.json();
-                if (!response.ok) throw new Error(data.error || '请求失败');
+                if (!response.ok) throw new Error(data.error || 'API 返回错误');
 
-                resultArea.textContent = data.result;
-                resultContainer.classList.remove('hidden');
+                document.getElementById('result_text').textContent = data.result;
+                resultBox.classList.remove('hidden');
             } catch (error) {
-                document.getElementById('error-message').textContent = error.message;
-                errorContainer.classList.remove('hidden');
+                console.error('Request failed:', error);
+                document.getElementById('error_text').textContent = error.message;
+                errorBox.classList.remove('hidden');
             } finally {
                 btn.disabled = false;
-                loading.style.display = 'none';
+                loading.classList.add('hidden');
             }
-        });
+        }
 
         function copyResult() {
-            const text = document.getElementById('result-area').textContent;
-            navigator.clipboard.writeText(text);
-            alert('已复制到剪贴板');
+            const text = document.getElementById('result_text').textContent;
+            navigator.clipboard.writeText(text).then(() => alert('已复制'));
         }
     </script>
 </body>

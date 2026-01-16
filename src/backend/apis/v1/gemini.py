@@ -3,10 +3,10 @@ from services.gemini import gemini_service
 import google.generativeai as genai
 import logging
 
-gemini_bp = Blueprint('gemini', __name__)
+bp = Blueprint('gemini', __name__, url_prefix='/gemini')
 logger = logging.getLogger(__name__)
 
-@gemini_bp.route('/generate', methods=['POST'], strict_slashes=False)
+@bp.route('/generate', methods=['POST'], strict_slashes=False)
 def generate():
     try:
         data = request.get_json()
@@ -29,7 +29,7 @@ def generate():
         logger.error(f"Gemini generation error: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
-@gemini_bp.route('/models', methods=['GET'], strict_slashes=False)
+@bp.route('/models', methods=['GET'], strict_slashes=False)
 def list_models():
     try:
         # Use the configured key from service to list models
