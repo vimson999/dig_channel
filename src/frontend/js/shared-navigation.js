@@ -42,6 +42,8 @@ class SharedNavigation {
             return 'watermark';
         } else if (filename === 'bilibili-publisher.html') {
             return 'bilibili-publisher';
+        } else if (filename === 'gemini-test.html') {
+            return 'gemini-test';
         }
         return 'dashboard';
     }
@@ -59,7 +61,8 @@ class SharedNavigation {
             'student-id-generator': '学生证生成器',
             'indie-navigator': '商机发现平台',
             'favorites': '我的收藏',
-            'bilibili-publisher': 'Bilibili 发布工作台'
+            'bilibili-publisher': 'Bilibili 发布工作台',
+            'gemini-test': 'Gemini AI 测试台'
         };
         return titles[this.currentPage] || '智能数据分析平台';
     }
@@ -276,6 +279,12 @@ class SharedNavigation {
                         name: '学生证生成',
                         icon: 'fas fa-id-card',
                         href: 'student-id-generator.html'
+                    },
+                    {
+                        id: 'gemini-test',
+                        name: 'Gemini测试',
+                        icon: 'fas fa-robot',
+                        href: 'gemini-test.html'
                     }
                 ]
             }

@@ -49,6 +49,9 @@ class BaseConfig:
     GOOGLE_OAUTH_CONFIG_FILE = os.environ.get('GOOGLE_OAUTH_CONFIG_FILE')
     GOOGLE_API_KEYS = os.environ.get('GOOGLE_API_KEYS')
     
+    # Gemini API配置 (默认回退到 GOOGLE_API_KEYS)
+    GOOGLE_GEMINI_KEYS = os.environ.get('GOOGLE_GEMINI_KEYS') or GOOGLE_API_KEYS
+    
     # Bilibili配置
     BILI_SESSDATA = os.environ.get('BILI_SESSDATA')
     BILI_BILI_JCT = os.environ.get('BILI_BILI_JCT')
