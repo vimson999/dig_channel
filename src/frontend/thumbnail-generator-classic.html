@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>深度研报封面生成器 v7.2 (稳定版)</title>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f0f2f5;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+
+        .main-container {
+            display: flex;
+            gap: 20px;
+            padding: 20px;
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .controls {
+            flex: 0 0 380px;
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            overflow-y: auto;
+            height: 100%;
+        }
+        h2 { margin-top: 0; color: #333; font-size: 18px; border-bottom: 2px solid #eee; padding-bottom: 8px;}
+        .section-title { font-size: 12px; font-weight: bold; color: #666; background:#f8f9fa; padding:4px 8px; border-radius:4px; margin-top: 8px;}
+        
+        .input-group { display: flex; flex-direction: column; gap: 5px; }
+        .row-group { display: flex; gap: 8px; align-items: center; }
+        label { font-weight: 600; color: #444; font-size: 12px;}
+        
+        input[type="text"], textarea, select, input[type="number"] {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+            transition: border-color 0.3s;
+            flex: 1;
+        }
+        
+        input[type="file"] {
+            padding: 6px;
+            background: #f1f3f5;
+            border: 1px dashed #adb5bd;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        input[type="color"] {
+            width: 30px;
+            height: 30px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            padding: 0;
+        }
+        
+        input[type="range"] { flex: 1; cursor: pointer; }
+        
+        input:focus, textarea:focus, select:focus { border-color: #228be6; outline: none; }
+        textarea { resize: vertical; height: 50px; font-family: inherit;}
+        
+        .radio-group { display: flex; gap: 5px; }
+        .radio-option { flex: 1; text-align: center; }
+        .radio-option input { display: none; }
+        .radio-option label {
+            display: block; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 12px;
+            border: 1px solid #eee; background: #fff; color: #666; transition: all 0.2s;
+        }
+        .radio-option input:checked + label {
+            background: #e7f5ff; border-color: #228be6; color: #228be6; font-weight: bold;
+        }
+
+        button {
+            padding: 10px; border: none; border-radius: 6px; font-size: 14px;
+            font-weight: bold; cursor: pointer; transition: all 0.2s;
+        }
+        button#downloadBtn {
+            margin-top: auto; background-color: #228be6; color: white;
+            box-shadow: 0 4px 6px rgba(34,139,230,0.3);
+        }
+        button#downloadBtn:hover { background-color: #1c7ed6; }
+        button#resetStyleBtn {
+            background-color: transparent; color: #868e96; font-size:12px;
+            padding: 4px 8px; border: 1px solid #dee2e6;
+        }
+        button#resetStyleBtn:hover { background-color: #f8f9fa; color: #333; }
+
+        .preview-container {
+            flex: 1;
+            background: #212529;
+            border-radius: 12px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            overflow: hidden;
+            position: relative;
+            height: 100%;
+        }
+        
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+            border-radius: 4px;
+            object-fit: contain; 
+        }
+        
+        .header-row { display: flex; justify-content: space-between; align-items: center; }
+        .control-row { display: flex; justify-content: space-between; align-items: center; }
+    </style>
+</head>
+<body>
+
+    <div class="main-container">
+        <div class="controls">
+            <h2>研报封面配置 v7.2</h2>
+            
+            <div class="section-title">核心布局</div>
+            <div class="input-group">
+                <div class="radio-group">
+                    <div class="radio-option">
+                        <input type="radio" id="alignRight" name="layout" value="right">
+                        <label for="alignRight">👉 文字居右</label>
+                    </div>
+                    <div class="radio-option">
+                        <input type="radio" id="alignLeft" name="layout" value="left" checked>
+                        <label for="alignLeft">👈 文字居左</label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="header-row">
+                <div class="section-title">图像与氛围</div>
+                <button id="resetStyleBtn">↺ 重置参数</button>
+            </div>
+
+            <div class="input-group">
+                <div class="row-group">
+                    <div style="flex:1">
+                        <label>底图</label>
+                        <input type="file" id="bgUpload" accept="image/*">
+                    </div>
+                    <div style="flex:1">
+                        <label>机构Logo</label>
+                        <input type="file" id="logoUpload" accept="image/*">
+                    </div>
+                </div>
+                <div style="margin-top:5px">
+                     <label>频道/品牌水印 (右上角)</label>
+                     <input type="file" id="watermarkUpload" accept="image/*">
+                </div>
+            </div>
+            
+            <div class="input-group">
+                <div class="control-row">
+                    <label>文字蒙版 (Mask)</label>
+                    <span style="font-size:11px;color:#888" id="maskValueDisplay">40%</span>
+                </div>
+                <input type="range" id="maskStrength" min="0" max="100" value="40">
+            </div>
+
+            <div class="input-group">
+                <div class="control-row">
+                    <label>底图虚化</label>
+                    <span style="font-size:11px;color:#888" id="blurValueDisplay">6px</span>
+                </div>
+                <input type="range" id="bgBlur" min="0" max="20" value="6">
+            </div>
+
+            <div class="section-title">内容排版</div>
+            
+            <div class="input-group">
+                <div class="control-row">
+                    <label>配色方案</label>
+                </div>
+                <select id="colorScheme" style="padding: 10px; font-weight: bold; color: #444; border: 2px solid #e9ecef;">
+                    <!-- 选项由 JS 生成 -->
+                </select>
+            </div>
+
+            <!-- 机构标签 -->
+            <div class="input-group">
+                <div class="control-row">
+                    <label>机构标签</label>
+                    <input type="color" id="tagColor" value="#333333">
+                </div>
+                <input type="text" id="sourceTag" value="Goldman Sachs · 高盛研报">
+            </div>
+
+            <!-- 主标题 -->
+            <div class="input-group">
+                <div class="control-row">
+                    <label>主标题 (超粗宋体)</label>
+                    <div class="row-group">
+                        <input type="range" id="mainTitleSize" min="60" max="250" value="110">
+                        <input type="color" id="mainTitleColor" value="#002244">
+                    </div>
+                </div>
+                <textarea id="mainTitle">深度解读：腾讯 2026 Q1 财报
+为何这可能是最后的上车机会？</textarea>
+            </div>
+
+            <!-- 副标题 -->
+            <div class="input-group">
+                <div class="control-row">
+                    <label>副标题 (钩子金)</label>
+                    <div class="row-group">
+                        <input type="range" id="subTitleSize" min="30" max="80" value="48">
+                        <input type="color" id="subTitleColor" value="#FFD700">
+                    </div>
+                </div>
+                <input type="text" id="subTitle" value="目标价调升至 HK$500，详解核心逻辑">
+            </div>
+
+            <!-- 落款 -->
+            <div class="input-group">
+                <div class="control-row">
+                    <label>底部落款</label>
+                    <div class="row-group">
+                        <input type="range" id="dateSize" min="20" max="60" value="32">
+                        <input type="color" id="dateColor" value="#ffffff">
+                    </div>
+                </div>
+                <input type="text" id="dateText" value="Jan 2026 | 独家解读">
+            </div>
+
+            <button id="downloadBtn">下载 4K 封面</button>
+        </div>
+
+        <div class="preview-container">
+            <canvas id="thumbnailCanvas" width="1920" height="1080"></canvas>
+        </div>
+    </div>
+
+    <script src="js/shared-navigation.js"></script>
+    <script>
+        const canvas = document.getElementById('thumbnailCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const inputs = {
+            bg: document.getElementById('bgUpload'),
+            logo: document.getElementById('logoUpload'),
+            watermark: document.getElementById('watermarkUpload'),
+            tag: document.getElementById('sourceTag'),
+            main: document.getElementById('mainTitle'),
+            sub: document.getElementById('subTitle'),
+            date: document.getElementById('dateText'),
+            
+            mainSize: document.getElementById('mainTitleSize'),
+            subSize: document.getElementById('subTitleSize'),
+            dateSize: document.getElementById('dateSize'),
+            
+            mainColor: document.getElementById('mainTitleColor'),
+            subColor: document.getElementById('subTitleColor'),
+            tagColor: document.getElementById('tagColor'),
+            dateColor: document.getElementById('dateColor'),
+            
+            blur: document.getElementById('bgBlur'),
+            mask: document.getElementById('maskStrength'),
+            
+            layout: document.getElementsByName('layout'),
+            scheme: document.getElementById('colorScheme'),
+            
+            download: document.getElementById('downloadBtn'),
+            reset: document.getElementById('resetStyleBtn'),
+            
+            blurDisplay: document.getElementById('blurValueDisplay'),
+            maskDisplay: document.getElementById('maskValueDisplay')
+        };
+
+        const images = {
+            bg: new Image(),
+            logo: new Image(),
+            watermark: new Image()
+        };
+        let flags = { logoLoaded: false, watermarkLoaded: false };
+
+        const PRESETS = {
+            'light': { 
+                name: '☀ 经典浅色 (Classic Light)', 
+                main: '#002244', sub: '#B8860B', tag: '#222222', date: '#ffffff', 
+                stroke: 'rgba(255,255,255,1.0)', bg: '#e9ecef', isDark: false
+            },
+            'dark': { 
+                name: '🌙 经典深色 (Classic Dark)', 
+                main: '#ffffff', sub: '#FFD700', tag: '#eeeeee', date: '#aaaaaa', 
+                stroke: 'rgba(0,0,0,0.8)', bg: '#1a1a1a', isDark: true
+            },
+            'morgan': { 
+                name: '🏦 摩根深蓝 (Morgan Blue)', 
+                main: '#002D72', sub: '#FFD700', tag: '#002D72', date: '#ffffff', 
+                stroke: 'rgba(255,255,255,1.0)', bg: '#f0f4f8', isDark: false
+            },
+            'gold': { 
+                name: '🏆 黑金奢华 (Black Gold)', 
+                main: '#D4AF37', sub: '#F5F5F5', tag: '#C5A028', date: '#999999', 
+                stroke: 'rgba(0,0,0,0.9)', bg: '#000000', isDark: true
+            },
+            'risk': { 
+                name: '📉 风险警示 (Risk Red)', 
+                main: '#C0392B', sub: '#2C3E50', tag: '#C0392B', date: '#ffffff', 
+                stroke: 'rgba(255,255,255,1.0)', bg: '#ecf0f1', isDark: false
+            },
+            'tech': { 
+                name: '🧬 科技深紫 (Tech Purple)', 
+                main: '#00FFFF', sub: '#FFD700', tag: '#D1C4E9', date: '#B39DDB', 
+                stroke: 'rgba(49, 27, 146, 0.8)', bg: '#240046', isDark: true
+            }
+        };
+
+        Object.keys(PRESETS).forEach(key => {
+            const opt = document.createElement('option');
+            opt.value = key;
+            opt.textContent = PRESETS[key].name;
+            inputs.scheme.appendChild(opt);
+        });
+
+        const DEFAULTS = {
+            sizes: { main: 110, sub: 48, date: 32 },
+            mask: 40,
+            blur: 6
+        };
+
+        Object.values(inputs).forEach(el => {
+            if (el instanceof NodeList) {
+                el.forEach(r => r.addEventListener('change', draw));
+            } else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+                el.addEventListener('input', (e) => {
+                    if(e.target === inputs.blur) inputs.blurDisplay.textContent = e.target.value + 'px';
+                    if(e.target === inputs.mask) inputs.maskDisplay.textContent = e.target.value + '%';
+                    draw();
+                });
+            } else if (el.tagName === 'SELECT') {
+                el.addEventListener('change', () => {
+                    applyTheme();
+                    draw();
+                });
+            }
+        });
+
+        const handleUpload = (input, imgKey, flagKey) => {
+            input.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (evt) => {
+                        images[imgKey].src = evt.target.result;
+                        images[imgKey].onload = () => {
+                            if(flagKey) flags[flagKey] = true;
+                            draw();
+                        }
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+        };
+        handleUpload(inputs.bg, 'bg');
+        handleUpload(inputs.logo, 'logo', 'logoLoaded');
+        handleUpload(inputs.watermark, 'watermark', 'watermarkLoaded');
+
+        inputs.reset.addEventListener('click', () => {
+            inputs.scheme.value = 'light';
+            applyTheme();
+            inputs.mainSize.value = DEFAULTS.sizes.main;
+            inputs.subSize.value = DEFAULTS.sizes.sub;
+            inputs.dateSize.value = DEFAULTS.sizes.date;
+            inputs.blur.value = DEFAULTS.blur;
+            inputs.mask.value = DEFAULTS.mask;
+            inputs.blurDisplay.textContent = '6px';
+            inputs.maskDisplay.textContent = '40%';
+            draw();
+        });
+
+        function applyTheme() {
+            const key = inputs.scheme.value;
+            const theme = PRESETS[key];
+            inputs.mainColor.value = theme.main;
+            inputs.subColor.value = theme.sub;
+            inputs.tagColor.value = theme.tag;
+            inputs.dateColor.value = theme.date;
+        }
+
+        setTimeout(draw, 100);
+
+        function draw() {
+            const w = canvas.width;
+            const h = canvas.height;
+            const layout = document.querySelector('input[name="layout"]:checked').value;
+            const schemeKey = inputs.scheme.value;
+            const themeConfig = PRESETS[schemeKey];
+            
+            // 1. 绘制底图
+            const blurAmount = inputs.blur.value;
+            if (images.bg.complete && images.bg.naturalWidth !== 0) {
+                ctx.save();
+                if (blurAmount > 0) ctx.filter = `blur(${blurAmount}px)`;
+                drawImageCover(ctx, images.bg, 0, 0, w, h);
+                ctx.restore();
+            } else {
+                ctx.fillStyle = themeConfig.bg;
+                ctx.fillRect(0, 0, w, h);
+            }
+
+            // 2. 绘制文字区域蒙版 (线性渐变)
+            const maskAlpha = inputs.mask.value / 100;
+            if (maskAlpha > 0) {
+                ctx.save();
+                const maskWidth = w * 0.6;
+                const maskGradient = ctx.createLinearGradient(
+                    layout === 'left' ? 0 : w, 0, 
+                    layout === 'left' ? maskWidth : w - maskWidth, 0
+                );
+                const maskBaseColor = themeConfig.isDark ? '0, 0, 0' : '0, 15, 30';
+                maskGradient.addColorStop(0, `rgba(${maskBaseColor}, ${maskAlpha})`);
+                maskGradient.addColorStop(0.6, `rgba(${maskBaseColor}, ${maskAlpha * 0.4})`);
+                maskGradient.addColorStop(1, `rgba(${maskBaseColor}, 0)`);
+                
+                ctx.fillStyle = maskGradient;
+                ctx.fillRect(0, 0, w, h);
+                ctx.restore();
+            }
+
+            const baseX = layout === 'left' ? 120 : 880;
+            let currentY = 180;
+
+            // 3. 机构标签：实心官方徽章
+            const tagSize = 30; 
+            const tagText = inputs.tag.value;
+            ctx.font = `900 ${tagSize}px "Noto Serif SC", serif`; 
+            const tagMetrics = ctx.measureText(tagText);
+            const tagPaddingX = 24; 
+            const tagPaddingY = 12; 
+            const tagBgWidth = tagMetrics.width + (tagPaddingX * 2); 
+            const tagBgHeight = tagSize + (tagPaddingY * 2);
+            
+            ctx.save();
+            const tagBgX = baseX - tagPaddingX; 
+            const tagBgY = currentY - tagPaddingY;
+            ctx.beginPath();
+            ctx.roundRect(tagBgX, tagBgY, tagBgWidth, tagBgHeight, 4); 
+            ctx.fillStyle = "#FFFFFF";
+            ctx.shadowColor = "rgba(0,0,0,0.2)"; 
+            ctx.shadowBlur = 10;
+            ctx.fill();
+            ctx.restore();
+
+            ctx.save();
+            ctx.textBaseline = 'top';
+            ctx.fillStyle = inputs.tagColor.value; 
+            ctx.fillText(tagText, baseX, currentY);
+            ctx.restore();
+            
+            currentY += 130; 
+
+            // 4. 主标题
+            const mainSize = parseInt(inputs.mainSize.value);
+            const mainLineHeight = mainSize * 1.25;
+            const titleLines = inputs.main.value.split('\n');
+            const mainStrokeColor = themeConfig.stroke;
+            const mainStrokeWidth = mainSize * 0.06;
+
+            titleLines.forEach(line => {
+                drawHaloText(ctx, line, baseX, currentY, inputs.mainColor.value, mainStrokeColor, mainSize, "Noto Serif SC", "900", mainStrokeWidth);
+                currentY += mainLineHeight;
+            });
+            currentY += 10; 
+
+            // 5. 副标题 (钩子金)
+            const subSize = parseInt(inputs.subSize.value);
+            drawHaloText(ctx, inputs.sub.value, baseX, currentY, inputs.subColor.value, themeConfig.stroke, subSize, "Noto Serif SC", "500");
+
+            // 6. 落款
+            const dateSize = parseInt(inputs.dateSize.value);
+            let dateX = (layout === 'left') ? 120 : (w - 120);
+            let dateAlign = (layout === 'left') ? 'left' : 'right';
+            
+            if (dateAlign === 'right' && flags.logoLoaded) {
+                dateX -= 120;
+            }
+
+            ctx.save();
+            ctx.textAlign = dateAlign;
+            ctx.beginPath();
+            const lineY = h - 100 - dateSize - 15;
+            const lineWidth = 60;
+            const lineX = (dateAlign === 'left') ? dateX : (dateX - lineWidth); 
+            ctx.moveTo(lineX, lineY);
+            ctx.lineTo(lineX + lineWidth, lineY);
+            ctx.strokeStyle = inputs.dateColor.value;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '3px';
+            const dateStroke = themeConfig.isDark ? 'rgba(0,0,0,0.8)' : 'rgba(0,0,0,0.5)';
+            drawHaloText(ctx, inputs.date.value, dateX, h - 100, inputs.dateColor.value, dateStroke, dateSize, "Noto Serif SC", "bold");
+            ctx.restore();
+
+            // 7. 频道 Logo (固定右下角)
+            if (flags.logoLoaded) {
+                const lSize = 90;
+                const lMargin = 60;
+                const lx = w - lSize - lMargin;
+                const ly = h - lSize - lMargin;
+
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(lx + lSize/2, ly + lSize/2, lSize/2, 0, Math.PI * 2);
+                ctx.closePath();
+                ctx.clip(); 
+                ctx.drawImage(images.logo, lx, ly, lSize, lSize);
+                ctx.lineWidth = 4;
+                ctx.strokeStyle = '#ffffff';
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            if (flags.watermarkLoaded) {
+                const wmSize = 120;
+                const wmMargin = 50;
+                ctx.save();
+                ctx.globalAlpha = 0.9;
+                drawImageContain(ctx, images.watermark, w - wmSize - wmMargin, wmMargin, wmSize, wmSize);
+                ctx.restore();
+            }
+        }
+
+        function drawHaloText(ctx, text, x, y, color, strokeColor, fontSize, fontFace="serif", fontWeight="bold", customStrokeWidth=null) {
+            ctx.save();
+            ctx.font = `${fontWeight} ${fontSize}px "${fontFace}", serif`;
+            ctx.textBaseline = 'top';
+            ctx.strokeStyle = strokeColor;
+            ctx.lineWidth = customStrokeWidth || (fontSize * 0.04);
+            ctx.lineJoin = 'round';
+            ctx.miterLimit = 2;
+            ctx.strokeText(text, x, y);
+            ctx.fillStyle = color;
+            ctx.fillText(text, x, y);
+            ctx.restore();
+        }
+
+        function drawImageCover(ctx, img, x, y, w, h) {
+            const imgRatio = img.naturalWidth / img.naturalHeight;
+            const canvasRatio = w / h;
+            let renderW, renderH, renderX, renderY;
+            if (imgRatio > canvasRatio) {
+                renderH = h; renderW = h * imgRatio;
+                renderX = x - (renderW - w) / 2; renderY = y;
+            } else {
+                renderW = w; renderH = w / imgRatio;
+                renderX = x; renderY = y - (renderH - h) / 2; 
+            }
+            ctx.drawImage(img, renderX, renderY, renderW, renderH);
+        }
+        
+        function drawImageContain(ctx, img, x, y, w, h) {
+             const imgRatio = img.naturalWidth / img.naturalHeight;
+             const targetRatio = w / h;
+             let renderW, renderH;
+             if (imgRatio > targetRatio) {
+                 renderW = w; renderH = w / imgRatio;
+             } else {
+                 renderH = h; renderW = h * imgRatio;
+             }
+             const renderX = x + (w - renderW) / 2;
+             const renderY = y + (h - renderH) / 2;
+             ctx.drawImage(img, renderX, renderY, renderW, renderH);
+        }
+
+        inputs.download.addEventListener('click', function() {
+            const dataURI = canvas.toDataURL('image/jpeg', 0.95);
+            const link = document.createElement('a');
+            link.download = `研报封面_v7_2_${new Date().getTime()}.jpg`;
+            link.href = dataURI;
+            link.click();
+        });
+    </script>
+</body>
+</html>

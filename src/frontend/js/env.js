@@ -21,5 +21,8 @@ const isDevelopment = window.location.hostname === 'localhost' ||
 const currentEnv = isDevelopment ? 'development' : 'production';
 const API_BASE_URL = ENV_CONFIG[currentEnv].API_BASE_URL;
 
+// 显式挂载到 window 对象，供其他脚本使用
+window.API_BASE_URL = API_BASE_URL;
+
 console.log('🌍 [ENV] 当前环境:', currentEnv);
-console.log('🌍 [ENV] API地址:', API_BASE_URL);
+console.log('🌍 [ENV] API地址:', window.API_BASE_URL);

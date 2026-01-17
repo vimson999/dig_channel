@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>深度研报封面生成器 v6.1 (全功能版)</title>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700;900&display=swap" rel="stylesheet">
+    <!-- FontAwesome for Navigation -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f0f2f5;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden; /* 防止双重滚动条 */
+        }
+
+        /* 主体内容容器 - 适配顶部导航栏 */
+        .main-container {
+            display: flex;
+            gap: 20px;
+            padding: 20px;
+            flex: 1;
+            overflow: hidden; /* 内部内容自适应 */
+            position: relative;
+        }
+
+        .controls {
+            flex: 0 0 380px;
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            overflow-y: auto;
+            height: 100%; /* 充满容器高度 */
+        }
+        h2 { margin-top: 0; color: #333; font-size: 20px; border-bottom: 2px solid #eee; padding-bottom: 10px;}
+        .section-title { font-size: 12px; font-weight: bold; color: #999; text-transform: uppercase; margin-top: 10px; letter-spacing: 1px;}
+        
+        .input-group { display: flex; flex-direction: column; gap: 6px; }
+        .row-group { display: flex; gap: 10px; align-items: center; }
+        label { font-weight: 600; color: #444; font-size: 13px;}
+        
+        input[type="text"], textarea, select, input[type="number"] {
+            padding: 8px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+            flex: 1;
+        }
+        
+        input[type="file"] {
+            padding: 8px;
+            background: #f1f3f5;
+            border: 1px dashed #adb5bd;
+            border-radius: 6px;
+            font-size: 12px;
+        }
+
+        /* 颜色选择器美化 */
+        input[type="color"] {
+            width: 40px;
+            height: 40px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            padding: 0;
+        }
+        
+        /* 滑块美化 */
+        input[type="range"] {
+            flex: 1;
+            cursor: pointer;
+        }
+        
+        input:focus, textarea:focus, select:focus { border-color: #228be6; outline: none; }
+        textarea { resize: vertical; height: 60px; }
+        
+        .radio-group {
+            display: flex;
+            gap: 5px;
+            background: #f8f9fa;
+            padding: 4px;
+            border-radius: 6px;
+        }
+        .radio-option {
+            flex: 1;
+            text-align: center;
+        }
+        .radio-option input { display: none; }
+        .radio-option label {
+            display: block;
+            padding: 6px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+        }
+        .radio-option input:checked + label {
+            background: white;
+            border-color: #adb5bd;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            font-weight: bold;
+            color: #228be6;
+        }
+
+        /* 按钮样式 */
+        button {
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        button#downloadBtn {
+            margin-top: auto;
+            background-color: #228be6;
+            color: white;
+            font-size: 16px;
+            box-shadow: 0 4px 6px rgba(34,139,230,0.3);
+        }
+        button#downloadBtn:hover { background-color: #1c7ed6; }
+
+        /* 重置按钮样式 */
+        button#resetStyleBtn {
+            background-color: #f1f3f5;
+            color: #495057;
+            margin-top: 5px;
+            border: 1px solid #dee2e6;
+        }
+        button#resetStyleBtn:hover { background-color: #e9ecef; }
+
+        .preview-container {
+            flex: 1;
+            background: #343a40;
+            border-radius: 12px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            overflow: hidden;
+            position: relative;
+            height: 100%;
+        }
+        
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+            border-radius: 4px;
+            object-fit: contain; 
+        }
+        
+        .control-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+    </style>
+</head>
+<body>
+    
+    <!-- 主体内容容器 -->
+    <div class="main-container">
+        <div class="controls">
+            <h2>研报封面配置 v6.1</h2>
+            
+            <div class="section-title">布局与风格</div>
+            
+            <!-- 布局选择 -->
+            <div class="input-group">
+                <label>文字位置</label>
+                <div class="radio-group">
+                    <div class="radio-option">
+                        <input type="radio" id="alignRight" name="layout" value="right" checked>
+                        <label for="alignRight">👉 右侧 (默认)</label>
+                    </div>
+                    <div class="radio-option">
+                        <input type="radio" id="alignLeft" name="layout" value="left">
+                        <label for="alignLeft">👈 左侧</label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 预设主题 -->
+            <div class="input-group">
+                <label>颜色预设</label>
+                <div class="radio-group">
+                    <div class="radio-option">
+                        <input type="radio" id="themeLight" name="theme" value="light" checked>
+                        <label for="themeLight">📄 浅色模式</label>
+                    </div>
+                    <div class="radio-option">
+                        <input type="radio" id="themeDark" name="theme" value="dark">
+                        <label for="themeDark">🌃 深色模式</label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section-title">图像素材</div>
+            <div class="input-group">
+                <label>1. 底图 & Logo</label>
+                <input type="file" id="bgUpload" accept="image/*" title="底图">
+                <input type="file" id="logoUpload" accept="image/*" title="Logo">
+            </div>
+            
+            <!-- 底图虚化滑块 -->
+            <div class="input-group">
+                <div class="control-row">
+                    <label for="bgBlur">底图虚化程度</label>
+                    <span style="font-size:12px;color:#888" id="blurValueDisplay">0px</span>
+                </div>
+                <input type="range" id="bgBlur" min="0" max="20" value="0">
+            </div>
+
+            <div class="header-row">
+                <div class="section-title">文本内容与样式</div>
+                <!-- 重置按钮 -->
+                <button id="resetStyleBtn" title="恢复颜色和大小到默认值">↺ 恢复默认</button>
+            </div>
+
+            <!-- 机构名称 -->
+            <div class="input-group">
+                <div class="control-row">
+                    <label for="sourceTag">机构名称</label>
+                    <input type="color" id="tagColor" value="#5a4a3c">
+                </div>
+                <input type="text" id="sourceTag" value="Goldman Sachs · 高盛研报">
+            </div>
+
+            <!-- 主标题 -->
+            <div class="input-group">
+                <div class="control-row">
+                    <label for="mainTitle">主标题</label>
+                    <div class="row-group">
+                        <input type="range" id="mainTitleSize" min="60" max="150" value="96" title="字号">
+                        <input type="color" id="mainTitleColor" value="#1a1109">
+                    </div>
+                </div>
+                <textarea id="mainTitle">深度解读：腾讯 2026 Q1 财报
+为何这可能是最后的上车机会？</textarea>
+            </div>
+
+            <!-- 副标题 -->
+            <div class="input-group">
+                <div class="control-row">
+                    <label for="subTitle">副标题</label>
+                    <div class="row-group">
+                        <input type="range" id="subTitleSize" min="30" max="80" value="48" title="字号">
+                        <input type="color" id="subTitleColor" value="#5a4a3c">
+                    </div>
+                </div>
+                <input type="text" id="subTitle" value="目标价调升至 HK$500，详解三大核心逻辑变奏">
+            </div>
+
+            <!-- 落款 (新增字号调节) -->
+            <div class="input-group">
+                <div class="control-row">
+                    <label for="dateText">底部落款</label>
+                    <div class="row-group">
+                        <input type="range" id="dateSize" min="20" max="60" value="32" title="字号">
+                        <input type="color" id="dateColor" value="#8c7b6d">
+                    </div>
+                </div>
+                <input type="text" id="dateText" value="Jan 2026 | 独家解读">
+            </div>
+
+            <button id="downloadBtn">下载封面图片</button>
+        </div>
+
+        <div class="preview-container">
+            <canvas id="thumbnailCanvas" width="1920" height="1080"></canvas>
+        </div>
+    </div>
+
+    <script src="js/shared-navigation.js"></script>
+    <script>
+        const canvas = document.getElementById('thumbnailCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // 获取 DOM 元素
+        const bgUpload = document.getElementById('bgUpload');
+        const logoUpload = document.getElementById('logoUpload');
+        const sourceTagInput = document.getElementById('sourceTag');
+        const mainTitleInput = document.getElementById('mainTitle');
+        const subTitleInput = document.getElementById('subTitle');
+        const dateTextInput = document.getElementById('dateText');
+        
+        const downloadBtn = document.getElementById('downloadBtn');
+        const resetStyleBtn = document.getElementById('resetStyleBtn');
+        
+        const themeRadios = document.getElementsByName('theme');
+        const layoutRadios = document.getElementsByName('layout');
+        
+        const bgBlurInput = document.getElementById('bgBlur');
+        const blurValueDisplay = document.getElementById('blurValueDisplay');
+        
+        const mainTitleSizeInput = document.getElementById('mainTitleSize');
+        const subTitleSizeInput = document.getElementById('subTitleSize');
+        const dateSizeInput = document.getElementById('dateSize'); // 新增
+        
+        const mainTitleColorInput = document.getElementById('mainTitleColor');
+        const subTitleColorInput = document.getElementById('subTitleColor');
+        const tagColorInput = document.getElementById('tagColor');
+        const dateColorInput = document.getElementById('dateColor');
+
+        // 图片对象
+        const bgImage = new Image();
+        const logoImage = new Image();
+        let isLogoLoaded = false;
+
+        // --- 预设主题配置 ---
+        const THEMES = {
+            light: {
+                main: '#1a1109', sub: '#5a4a3c', tag: '#5a4a3c', date: '#8c7b6d',
+                stroke: 'rgba(255, 255, 255, 0.8)', logoStroke: '#ffffff'
+            },
+            dark: {
+                main: '#ffffff', sub: '#e0e0e0', tag: '#cccccc', date: '#aaaaaa',
+                stroke: 'rgba(0, 0, 0, 0.6)', logoStroke: 'rgba(255,255,255,0.2)'
+            }
+        };
+
+        // 默认字号配置
+        const DEFAULT_SIZES = {
+            main: 96,
+            sub: 48,
+            date: 32 // 新增
+        };
+
+        // --- 事件监听 ---
+        
+        // 1. 监听所有输入框和滑块
+        const allInputs = [
+            sourceTagInput, mainTitleInput, subTitleInput, dateTextInput,
+            mainTitleSizeInput, subTitleSizeInput, dateSizeInput,
+            mainTitleColorInput, subTitleColorInput, tagColorInput, dateColorInput,
+            bgBlurInput
+        ];
+        allInputs.forEach(input => input.addEventListener('input', (e) => {
+            // 如果是虚化滑块，更新显示数值
+            if (e.target === bgBlurInput) {
+                blurValueDisplay.textContent = bgBlurInput.value + 'px';
+            }
+            draw();
+        }));
+        
+        // 2. 监听布局切换
+        layoutRadios.forEach(r => r.addEventListener('change', draw));
+
+        // 3. 监听主题切换 (自动应用预设颜色)
+        themeRadios.forEach(radio => {
+            radio.addEventListener('change', () => {
+                applyThemeColors();
+                draw();
+            });
+        });
+
+        function applyThemeColors() {
+            const themeMode = document.querySelector('input[name="theme"]:checked').value;
+            const theme = THEMES[themeMode];
+            mainTitleColorInput.value = theme.main;
+            subTitleColorInput.value = theme.sub;
+            tagColorInput.value = theme.tag;
+            dateColorInput.value = theme.date;
+        }
+
+        // 4. 重置按钮逻辑
+        resetStyleBtn.addEventListener('click', () => {
+            // 恢复颜色
+            applyThemeColors();
+            // 恢复字号
+            mainTitleSizeInput.value = DEFAULT_SIZES.main;
+            subTitleSizeInput.value = DEFAULT_SIZES.sub;
+            dateSizeInput.value = DEFAULT_SIZES.date; // 新增
+            // 恢复虚化
+            bgBlurInput.value = 0;
+            blurValueDisplay.textContent = '0px';
+            
+            draw();
+        });
+
+        // 5. 图片上传
+        bgUpload.addEventListener('change', (e) => handleImageUpload(e, bgImage, draw));
+        logoUpload.addEventListener('change', (e) => handleImageUpload(e, logoImage, () => {
+            isLogoLoaded = true;
+            draw();
+        }));
+
+        function handleImageUpload(e, imgObj, callback) {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    imgObj.src = event.target.result;
+                    imgObj.onload = callback;
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+
+        // 初始化
+        // 尝试加载一个默认的白色背景，避免空载
+        // bgImage.src = 'bg_paper.jpg'; 
+        // 改为纯色背景初始化，以免报错
+        setTimeout(draw, 100); 
+
+        // --- 核心绘制 ---
+        function draw() {
+            // 1. 获取当前设置
+            const layout = document.querySelector('input[name="layout"]:checked').value;
+            const themeMode = document.querySelector('input[name="theme"]:checked').value;
+            const themeConfig = THEMES[themeMode]; // 仅用于获取描边颜色
+            const blurAmount = bgBlurInput.value;
+
+            // 2. 绘制背景 (支持虚化)
+            if (bgImage.complete && bgImage.naturalWidth !== 0) {
+                ctx.save();
+                if (blurAmount > 0) {
+                    ctx.filter = `blur(${blurAmount}px)`; // 应用滤镜
+                }
+                drawImageCover(ctx, bgImage, 0, 0, canvas.width, canvas.height);
+                ctx.restore(); // 恢复无滤镜状态，以免影响文字
+            } else {
+                ctx.fillStyle = themeMode === 'light' ? "#e9ecef" : "#1a1a1a";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+
+            // 3. 计算布局坐标
+            const baseX = layout === 'left' ? 100 : 880;
+            let currentY = 180;
+
+            // 4. 绘制 Logo
+            const logoSize = 60; 
+            if (isLogoLoaded && logoImage.complete && logoImage.naturalWidth !== 0) {
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(baseX + logoSize/2, currentY + logoSize/2 - 15, logoSize/2, 0, Math.PI * 2, true);
+                ctx.closePath();
+                ctx.clip(); 
+                ctx.drawImage(logoImage, baseX, currentY - 15, logoSize, logoSize);
+                
+                // Logo 描边
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = themeConfig.logoStroke;
+                ctx.stroke();
+                ctx.restore();
+            } else {
+                // 如果没有Logo，不画红色块，保持干净
+                // ctx.fillStyle = '#c0392b'; 
+                // ctx.fillRect(baseX, currentY + 5, 12, 30); 
+            }
+
+            // 5. 绘制机构名称
+            const tagSize = 36;
+            const textIndent = (isLogoLoaded) ? (logoSize + 15) : 0; // 如果没有Logo，不要缩进 
+            ctx.font = `bold ${tagSize}px "Noto Serif SC", serif`;
+            drawHaloText(ctx, sourceTagInput.value, baseX + textIndent, currentY, tagColorInput.value, themeConfig.stroke, tagSize);
+            currentY += 100;
+
+            // 6. 绘制主标题
+            const mainSize = parseInt(mainTitleSizeInput.value);
+            const mainLineHeight = mainSize * 1.2;
+            const titleLines = mainTitleInput.value.split('\n');
+            
+            ctx.font = `900 ${mainSize}px "Noto Serif SC", serif`; 
+            titleLines.forEach(line => {
+                drawHaloText(ctx, line, baseX, currentY, mainTitleColorInput.value, themeConfig.stroke, mainSize);
+                currentY += mainLineHeight;
+            });
+            currentY += 20; 
+
+            // 7. 绘制副标题
+            const subSize = parseInt(subTitleSizeInput.value);
+            ctx.font = `500 ${subSize}px "Noto Serif SC", serif`;
+            drawHaloText(ctx, subTitleInput.value, baseX, currentY, subTitleColorInput.value, themeConfig.stroke, subSize);
+
+            // 8. 绘制落款 (支持字号调节)
+            const dateSize = parseInt(dateSizeInput.value);
+            ctx.font = `bold ${dateSize}px "Noto Serif SC", serif`;
+            
+            if (layout === 'left') {
+                ctx.textAlign = 'left';
+                drawHaloText(ctx, dateTextInput.value, 100, 980, dateColorInput.value, themeConfig.stroke, dateSize);
+            } else {
+                ctx.textAlign = 'right';
+                drawHaloText(ctx, dateTextInput.value, 1820, 980, dateColorInput.value, themeConfig.stroke, dateSize);
+            }
+            ctx.textAlign = 'left'; // 还原默认值
+        }
+
+        // 辅助：绘制带光晕的文字
+        function drawHaloText(ctx, text, x, y, color, strokeColor, fontSize) {
+            ctx.save();
+            ctx.textBaseline = 'top';
+            
+            ctx.strokeStyle = strokeColor;
+            ctx.lineWidth = fontSize * 0.08; 
+            ctx.lineJoin = 'round';
+            ctx.miterLimit = 2;
+            ctx.strokeText(text, x, y);
+
+            ctx.fillStyle = color;
+            ctx.fillText(text, x, y);
+            ctx.restore();
+        }
+
+        // 辅助：背景Cover模式
+        function drawImageCover(ctx, img, x, y, w, h) {
+            const imgRatio = img.naturalWidth / img.naturalHeight;
+            const canvasRatio = w / h;
+            let renderW, renderH, renderX, renderY;
+            if (imgRatio > canvasRatio) {
+                renderH = h;
+                renderW = h * imgRatio;
+                renderX = x - (renderW - w) / 2;
+                renderY = y;
+            } else {
+                renderW = w;
+                renderH = w / imgRatio;
+                renderX = x;
+                renderY = y - (renderH - h) / 2; 
+            }
+            ctx.drawImage(img, renderX, renderY, renderW, renderH);
+        }
+
+        // 下载功能
+        downloadBtn.addEventListener('click', function() {
+            if (!bgImage.complete || bgImage.naturalWidth === 0) {
+               if(!confirm("还没上传底图，确定要下载纯文字版吗？")) return;
+            }
+            const dataURI = canvas.toDataURL('image/jpeg', 0.92);
+            const link = document.createElement('a');
+            link.download = `研报封面_v6.1_${new Date().toISOString().slice(0,19).replace(/[-:T]/g,'')}.jpg`;
+            link.href = dataURI;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
+    </script>
+</body>
+</html>

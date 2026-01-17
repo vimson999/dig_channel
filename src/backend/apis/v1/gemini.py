@@ -1,9 +1,8 @@
 from flask import Blueprint, request, jsonify
 from services.gemini import gemini_service
-import google.generativeai as genai
 import logging
 
-bp = Blueprint('gemini', __name__, url_prefix='/gemini')
+bp = Blueprint('gemini', __name__, url_prefix='/api/v1/gemini')
 logger = logging.getLogger(__name__)
 
 @bp.route('/generate', methods=['POST'], strict_slashes=False)
@@ -32,15 +31,17 @@ def generate():
 @bp.route('/models', methods=['GET'], strict_slashes=False)
 def list_models():
     try:
-        # Use the configured key from service to list models
-        gemini_service._configure_client()
+        # Use the configured key from service to list models via new SDK client
+        client = gemini_service._get_client()
         
         models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
+        # New SDK method for listing models
+        for m in client.models.list():
+            # Check supported_actions for 'generateContent'
+            if m.supported_actions and 'generateContent' in m.supported_actions:
                 models.append({
                     'name': m.name.replace('models/', ''),
-                    'displayName': m.displayName,
+                    'displayName': m.display_name, # Note: displayName -> display_name in new SDK
                     'description': m.description
                 })
         
