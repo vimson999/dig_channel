@@ -73,13 +73,18 @@
             </div>
             <div class="input-group">
                 <div class="row-group">
-                    <div style="flex:1">
+                    <div style="flex:1; display: flex; flex-direction: column; gap: 5px;">
                         <label>底图</label>
+                        <!-- 底图预设下拉框 -->
+                        <select id="bgPreset" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 11px; color: #555;">
+                            <option value="upload">📂 自定义上传...</option>
+                            <!-- 选项由 JS 生成 -->
+                        </select>
                         <input type="file" id="bgUpload" accept="image/*">
                     </div>
                     <div style="flex:1">
                         <label>频道Logo (右下)</label>
-                        <input type="file" id="logoUpload" accept="image/*">
+                        <input type="file" id="logoUpload" accept="image/*" style="margin-top: 26px;">
                     </div>
                 </div>
                 <div style="margin-top:5px">
@@ -106,8 +111,17 @@
                 <div class="control-row"><label>配色方案</label></div>
                 <select id="colorScheme" style="padding: 10px; font-weight: bold; color: #444; border: 2px solid #e9ecef;"></select>
             </div>
+            <!-- 机构标签 -->
             <div class="input-group">
-                <div class="control-row"><label>机构标签</label><input type="color" id="tagColor" value="#333333"></div>
+                <div class="control-row">
+                    <label>机构标签</label>
+                    <input type="color" id="tagColor" value="#333333">
+                </div>
+                <!-- 预设机构下拉框 -->
+                <select id="orgPreset" style="margin-bottom: 5px; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; color: #555;">
+                    <option value="custom">✏️ 自定义输入...</option>
+                    <!-- 选项由 JS 生成 -->
+                </select>
                 <input type="text" id="sourceTag" value="Goldman Sachs · 高盛研报">
             </div>
             <div class="input-group">
@@ -168,16 +182,87 @@
             dateColor: document.getElementById('dateColor'),
             blur: document.getElementById('bgBlur'),
             mask: document.getElementById('maskStrength'),
+            
             layout: document.getElementsByName('layout'),
             scheme: document.getElementById('colorScheme'),
+            org: document.getElementById('orgPreset'),
+            bgPreset: document.getElementById('bgPreset'), // New
+            
             download: document.getElementById('downloadBtn'),
             reset: document.getElementById('resetStyleBtn'),
+            
             blurDisplay: document.getElementById('blurValueDisplay'),
             maskDisplay: document.getElementById('maskValueDisplay')
         };
 
-        const images = { bg: new Image(), logo: new Image(), watermark: new Image() };
+        const images = {
+            bg: new Image(),
+            logo: new Image(),
+            watermark: new Image()
+        };
         let flags = { logoLoaded: false, watermarkLoaded: false };
+        
+        // 拖动状态
+        let isDragging = false;
+        let dragStart = { x: 0, y: 0 };
+        let logoPos = { x: -1, y: -1 }; 
+        const LOGO_SIZE = 90;
+
+        // 底图预设库
+        const BACKGROUNDS = [
+            { name: '默认 · 几何蓝', file: 'Gemini_Generated_Image_ifcvkkifcvkkifcv.png' },
+            { name: '科技 · 流光紫', file: 'Gemini_Generated_Image_5smjm15smjm15smj.png' },
+            { name: '商务 · 深邃黑', file: 'Gemini_Generated_Image_abyrquabyrquabyr.png' },
+            { name: '抽象 · 波浪线', file: 'Gemini_Generated_Image_dmux10dmux10dmux.png' },
+            { name: '极简 · 纸张纹', file: 'Gemini_Generated_Image_fy2ewzfy2ewzfy2e.png' },
+            { name: '金融 · 上升势', file: 'Gemini_Generated_Image_j1dwoqj1dwoqj1dw.png' },
+            { name: '未来 · 芯片绿', file: 'Gemini_Generated_Image_sgk2hbsgk2hbsgk2.png' },
+            { name: '宏观 · 全球视野', file: 'Gemini_Generated_Image_me7j4pme7j4pme7j.png' },
+            { name: '市场 · 红色警戒', file: 'Gemini_Generated_Image_r98ittr98ittr98i.png' },
+            { name: '深度 · 蓝海探索', file: 'Gemini_Generated_Image_unhywgunhywgunhy.png' },
+            { name: '前沿 · 灰色地带', file: 'Gemini_Generated_Image_xmotmqxmotmqxmot.png' }
+        ];
+
+        // 初始化底图下拉框
+        BACKGROUNDS.forEach(bg => {
+            const opt = document.createElement('option');
+            opt.value = 'assets/cover/' + bg.file;
+            opt.textContent = bg.name;
+            inputs.bgPreset.appendChild(opt);
+        });
+        
+        // 默认选中第一个
+        inputs.bgPreset.value = 'assets/cover/' + BACKGROUNDS[0].file;
+
+        // 顶级机构预设库
+        const ORGANIZATIONS = [
+            { name: 'Goldman Sachs · 高盛研报', color: '#7399C6' }, // 高盛蓝
+            { name: 'Morgan Stanley · 摩根士丹利', color: '#002D72' }, // 大摩深蓝
+            { name: 'J.P. Morgan · 摩根大通', color: '#52433D' }, // 小摩棕/黑
+            { name: 'BlackRock · 贝莱德', color: '#000000' }, // 贝莱德黑
+            { name: 'Bridgewater · 桥水基金', color: '#B31B1B' }, // 桥水红
+            { name: 'CITIC Securities · 中信证券', color: '#C0392B' }, // 中信红
+            { name: 'CICC · 中金公司', color: '#BFA15F' }, // 中金金
+            { name: 'UBS · 瑞银集团', color: '#E60000' }, // 瑞银红
+            { name: 'Credit Suisse · 瑞士信贷', color: '#002D72' },
+            { name: 'HSBC · 汇丰银行', color: '#DB0011' }, // 汇丰红
+            { name: 'Sequoia · 红杉资本', color: '#2E8B57' }, // 红杉绿(微调)
+            { name: 'Berkshire Hathaway · 伯克希尔', color: '#2B3D51' }, // 伯克希尔蓝
+            { name: 'Tesla · 特斯拉', color: '#E82127' },
+            { name: 'NVIDIA · 英伟达', color: '#76B900' }
+        ];
+
+        // 初始化机构下拉框
+        ORGANIZATIONS.forEach(org => {
+            const opt = document.createElement('option');
+            opt.value = org.name;
+            opt.textContent = org.name;
+            inputs.org.appendChild(opt);
+        });
+        
+        // 默认选中第一个
+        inputs.org.value = ORGANIZATIONS[0].name; 
+        inputs.tagColor.value = ORGANIZATIONS[0].color; // 同步颜色
 
         const PRESETS = {
             'light': { name: '☀ 经典浅色', main: '#002244', sub: '#B8860B', tag: '#222222', date: '#ffffff', stroke: 'rgba(255,255,255,1.0)', bg: '#e9ecef', isDark: false },
@@ -322,13 +407,41 @@
 
         // --- 事件绑定 ---
         Object.values(inputs).forEach(el => {
-            if (el instanceof NodeList) el.forEach(r => r.addEventListener('change', draw));
-            else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') el.addEventListener('input', (e) => {
-                if(e.target === inputs.blur) inputs.blurDisplay.textContent = e.target.value + 'px';
-                if(e.target === inputs.mask) inputs.maskDisplay.textContent = e.target.value + '%';
-                draw();
-            });
-            else if (el.tagName === 'SELECT') el.addEventListener('change', () => { applyTheme(); draw(); });
+            if (el instanceof NodeList) {
+                el.forEach(r => r.addEventListener('change', draw));
+            } else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+                el.addEventListener('input', (e) => {
+                    if(e.target === inputs.blur) inputs.blurDisplay.textContent = e.target.value + 'px';
+                    if(e.target === inputs.mask) inputs.maskDisplay.textContent = e.target.value + '%';
+                    draw();
+                });
+            } else if (el.tagName === 'SELECT') {
+                el.addEventListener('change', (e) => {
+                    if (e.target === inputs.org) {
+                        // ... 机构逻辑 ...
+                        const selectedOrg = ORGANIZATIONS.find(o => o.name === e.target.value);
+                        if (selectedOrg) {
+                            inputs.tag.value = selectedOrg.name;
+                            inputs.tagColor.value = selectedOrg.color;
+                        } else if (e.target.value === 'custom') {
+                            inputs.tag.value = '';
+                            inputs.tag.focus();
+                        }
+                    } else if (e.target === inputs.scheme) {
+                        applyTheme();
+                    } else if (e.target === inputs.bgPreset) {
+                        // 底图切换逻辑
+                        if (e.target.value === 'upload') {
+                            inputs.bg.click(); // 自动触发上传点击
+                        } else {
+                            // 加载预设图片
+                            images.bg.src = e.target.value;
+                            // 注意：由于图片加载是异步的，onload 会自动触发 draw
+                        }
+                    }
+                    draw();
+                });
+            }
         });
 
         const handleUpload = (input, imgKey, flagKey) => {
@@ -347,10 +460,18 @@
         handleUpload(inputs.bg, 'bg'); handleUpload(inputs.logo, 'logo', 'logoLoaded'); handleUpload(inputs.watermark, 'watermark', 'watermarkLoaded');
 
         inputs.reset.addEventListener('click', () => {
-            inputs.scheme.value = 'light'; applyTheme();
-            inputs.mainSize.value = DEFAULTS.sizes.main; inputs.subSize.value = DEFAULTS.sizes.sub; inputs.dateSize.value = DEFAULTS.sizes.date;
-            inputs.blur.value = DEFAULTS.blur; inputs.mask.value = DEFAULTS.mask;
-            inputs.blurDisplay.textContent = '6px'; inputs.maskDisplay.textContent = '40%';
+            inputs.scheme.value = 'light';
+            inputs.bgPreset.value = 'assets/cover/' + BACKGROUNDS[0].file; // 重置底图选择
+            images.bg.src = inputs.bgPreset.value; // 重置底图
+            applyTheme();
+            inputs.mainSize.value = DEFAULTS.sizes.main;
+            inputs.subSize.value = DEFAULTS.sizes.sub;
+            inputs.dateSize.value = DEFAULTS.sizes.date;
+            inputs.blur.value = DEFAULTS.blur;
+            inputs.mask.value = DEFAULTS.mask;
+            inputs.blurDisplay.textContent = '6px';
+            inputs.maskDisplay.textContent = '40%';
+            logoPos = { x: -1, y: -1 }; // 重置 Logo 位置
             draw();
         });
 
