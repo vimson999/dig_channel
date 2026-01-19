@@ -6,7 +6,7 @@
 """
 
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 
 # 加载环境变量
 load_dotenv()
@@ -54,6 +54,16 @@ class BaseConfig:
     
     # YouTube API配置
     YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY')
+    
+    # 自动修正: 如果检测到 YOUTUBE_API_KEY 是 Client Secret (以 GOCSPX 开头), 
+    # 则尝试从 .env 文件重新读取
+    if YOUTUBE_API_KEY and YOUTUBE_API_KEY.startswith('GOCSPX'):
+        _env_path = os.path.join(basedir, '.env')
+        if os.path.exists(_env_path):
+            _env_vals = dotenv_values(_env_path)
+            if _env_vals.get('YOUTUBE_API_KEY') and not _env_vals.get('YOUTUBE_API_KEY').startswith('GOCSPX'):
+                YOUTUBE_API_KEY = _env_vals.get('YOUTUBE_API_KEY')
+
     GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
     GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
     GOOGLE_OAUTH_CONFIG_FILE = os.environ.get('GOOGLE_OAUTH_CONFIG_FILE')

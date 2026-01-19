@@ -258,12 +258,68 @@ class TextToSpeechManager {
         
         // 清空并添加模型选项
         modelSelector.innerHTML = '';
+        
+        // 定义分类
+        const groups = {
+            'multi_speaker': { label: '🎭 多人会话模型', options: [] },
+            'chinese': { label: '🇨🇳 中文模型', options: [] },
+            'english': { label: '🇺🇸 英文模型', options: [] },
+            'other': { label: '🌐 其他模型', options: [] }
+        };
+
+        // 对模型进行分类
         this.models.forEach(model => {
-            const option = document.createElement('option');
-            option.value = model.key;
-            option.textContent = `${model.name} (${model.language === 'zh-CN' ? '中文' : 'English'})`;
-            option.selected = model.key === this.selectedModel;
-            modelSelector.appendChild(option);
+            let groupKey = 'other';
+            
+            // 优先判断多人会话
+            if (model.key === 'chattts_v1' || model.key === 'dialogue_mode') {
+                groupKey = 'multi_speaker';
+            } else if (model.language === 'zh-CN' || model.key === 'chinese') {
+                groupKey = 'chinese';
+            } else if (model.language === 'en' || model.key === 'tacotron2') {
+                groupKey = 'english';
+            }
+            
+            groups[groupKey].options.push(model);
+        });
+
+        // 渲染分组
+        // 顺序：多人 -> 中文 -> 英文 -> 其他
+        const renderOrder = ['multi_speaker', 'chinese', 'english', 'other'];
+        
+        renderOrder.forEach(key => {
+            const group = groups[key];
+            if (group.options.length > 0) {
+                const optgroup = document.createElement('optgroup');
+                optgroup.label = group.label;
+                
+                group.options.forEach(model => {
+                    const option = document.createElement('option');
+                    option.value = model.key;
+                    
+                    // 格式化显示名称: [语言] [模式] 名称
+                    let langTag = '[未知]';
+                    let modeTag = '[单人]';
+                    
+                    // 确定语言标签
+                    if (model.language === 'zh-CN' || model.key === 'chinese') langTag = '[中文]';
+                    else if (model.language === 'en' || model.key === 'tacotron2') langTag = '[英文]';
+                    else if (model.language === 'multilingual' || model.key === 'your_tts') langTag = '[多语]';
+                    
+                    // 确定模式标签
+                    if (model.key === 'chattts_v1' || model.key === 'dialogue_mode') {
+                        modeTag = '[多人]';
+                        // ChatTTS 主要支持中文和英文，但在本场景下主要作为中文多人模型使用
+                        if (model.key === 'chattts_v1') langTag = '[中/英]'; 
+                    }
+                    
+                    option.textContent = `${langTag} ${modeTag} ${model.name}`;
+                    option.selected = model.key === this.selectedModel;
+                    optgroup.appendChild(option);
+                });
+                
+                modelSelector.appendChild(optgroup);
+            }
         });
         
         // 更新状态指示器
@@ -281,8 +337,47 @@ class TextToSpeechManager {
         // 更新高级选项
         this.updateAdvancedOptions();
         
+        // 自动填充示例测试文本
+        this.fillExampleText(modelKey);
+        
         // 更新按钮状态
         this.updateButtonStates();
+    }
+    
+    fillExampleText(modelKey) {
+        const textInput = document.getElementById('text-input');
+        // 仅当文本框为空时才填充
+        if (textInput.value.trim().length > 0) return;
+        
+        let exampleText = "";
+        
+        if (modelKey === 'chattts_v1') {
+            exampleText = "[主持人] 大家好，欢迎来到今天的科技访谈节目。今天我们请到了一位特别嘉宾。\n[嘉宾] 谢谢主持人，很高兴能和大家分享我对人工智能的一些看法。\n[主持人] 听说最近在语音合成领域有了新的突破？\n[嘉宾] 是的，现在的技术已经能让机器说话非常自然了，就像真人一样。";
+        } else if (modelKey === 'dialogue_mode') {
+            exampleText = "[小明] 你好！今天天气真不错。\n[小红] 是啊，很久没有见到这么好的太阳了。\n[小明] 我们去公园走走吧？\n[小红] 好主意，走吧！";
+        } else if (['chinese'].includes(modelKey) || modelKey.includes('zh')) {
+            exampleText = "这是一个中文语音合成测试。通过深度学习技术，我们能够生成自然流畅的中文语音。您可以尝试输入更长的文本来测试效果。";
+        } else if (modelKey === 'tacotron2' || modelKey.includes('en')) {
+            exampleText = "Hello! This is a test for English speech synthesis. The system can generate natural-sounding speech from text. Feel free to try it out with your own words.";
+        } else if (modelKey === 'your_tts') {
+            exampleText = "这是一个多语言测试。\nThis is a multilingual test.\n您可以混合输入中英文。";
+        }
+        
+        if (exampleText) {
+            textInput.value = exampleText;
+            // 触发 input 事件以更新计数器
+            textInput.dispatchEvent(new Event('input'));
+            
+            // 如果是对话模式，自动勾选对话选项（如果需要）
+            if (modelKey === 'chattts_v1' || modelKey === 'dialogue_mode') {
+                const dialogueModeCheckbox = document.getElementById('dialogue-mode');
+                if (dialogueModeCheckbox && !dialogueModeCheckbox.checked) {
+                    dialogueModeCheckbox.checked = true;
+                    // 手动触发 change 事件
+                    dialogueModeCheckbox.dispatchEvent(new Event('change'));
+                }
+            }
+        }
     }
     
     async updateAdvancedOptions() {

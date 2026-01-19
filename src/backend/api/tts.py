@@ -22,37 +22,55 @@ logger = setup_colored_logger("TTS_API")
 tts_bp = Blueprint('tts', __name__, url_prefix='/api/v1/tts')
 
 # 导入TTS库（延迟导入避免启动时错误）
+TTS_COQUI_AVAILABLE = False
+CHAT_TTS_AVAILABLE = False
+
 try:
     from TTS.api import TTS
-    TTS_AVAILABLE = True
-    logger.info("✅ TTS库加载成功")
+    TTS_COQUI_AVAILABLE = True
+    logger.info("✅ Coqui TTS库加载成功")
 except ImportError as e:
-    TTS_AVAILABLE = False
-    logger.error(f"❌ TTS库导入失败: {str(e)}")
+    logger.error(f"❌ Coqui TTS库导入失败: {str(e)}")
+
+try:
+    from services.chat_tts_service import chat_tts_service
+    CHAT_TTS_AVAILABLE = True
+    logger.info("✅ ChatTTS服务加载成功")
+except ImportError as e:
+    logger.warning(f"⚠️ ChatTTS服务导入失败: {str(e)}")
+
+TTS_AVAILABLE = TTS_COQUI_AVAILABLE or CHAT_TTS_AVAILABLE
 
 # TTS模型配置
 TTS_MODELS = {
+    'chattts_v1': {
+        'name': '[中/英] [多人] ChatTTS (V1)',
+        'model_name': 'chattts',
+        'language': 'zh-CN',
+        'description': '专为对话优化的TTS，音质自然，支持多人',
+        'is_chattts': True
+    },
     'tacotron2': {
-        'name': 'Tacotron2 (English)',
+        'name': '[英文] [单人] Tacotron2 (English)',
         'model_name': 'tts_models/en/ljspeech/tacotron2-DDC',
         'language': 'en',
         'description': '经典英语语音，自然度一般'
     },
     'your_tts': {
-        'name': 'YourTTS (高质量多语言)',
+        'name': '[多语] [多人] YourTTS (高质量多语言)',
         'model_name': 'tts_models/multilingual/multi-dataset/your_tts',
         'language': 'multilingual',
         'description': '基于VITS架构，支持中英等多语言，音质极佳且支持多说话人',
         'is_vits': True
     },
     'chinese': {
-        'name': '中文女声 (Baker)',
+        'name': '[中文] [单人] 中文女声 (Baker)',
         'model_name': 'tts_models/zh-CN/baker/tacotron2-DDC-GST',
         'language': 'zh-CN',
         'description': '标准中文合成（标贝女声）'
     },
     'dialogue_mode': {
-        'name': '多人对话模式 (高质量)',
+        'name': '[多语] [多人] YourTTS 对话模式',
         'model_name': 'tts_models/multilingual/multi-dataset/your_tts',
         'language': 'multilingual',
         'description': '使用YourTTS原生支持的多说话人对话',
@@ -295,8 +313,12 @@ def synthesize_speech(current_user):
         
         logger.info(f"🎤 开始语音合成: 用户={current_user.username}, 模型={model_key}, 文本长度={len(text)}")
         
-        # 获取TTS实例
-        tts = get_tts_instance(model_key)
+        # 获取TTS实例 (仅非ChatTTS模型需要)
+        tts = None
+        if model_key != 'chattts_v1':
+            tts = get_tts_instance(model_key)
+        elif not CHAT_TTS_AVAILABLE:
+             raise Exception("ChatTTS 服务不可用")
         
         # 生成临时文件名
         temp_dir = tempfile.gettempdir()
@@ -307,42 +329,46 @@ def synthesize_speech(current_user):
         try:
             logger.info(f"🔍 [DEBUG] 开始合成文本: '{text}' (长度: {len(text)})")
             
-            # 强化文本处理
-            clean_text = text.strip()
-            if len(clean_text) > 0:
-                clean_text = re.sub(r'[。！？.!?]{2,}', '。', clean_text)
-                if not any(clean_text.endswith(p) for p in '。！？.!?'):
-                    clean_text += '。'
-                
-                # 准备合成参数
-                synth_kwargs = {'text': clean_text, 'file_path': audio_path}
-                
-                # 特殊处理 YourTTS 参数
-                if model_key in ['your_tts', 'dialogue_mode']:
-                    # 检查模型支持的语言
-                    target_lang = 'zh-cn'
-                    if hasattr(tts, 'languages') and tts.languages:
-                        if target_lang not in tts.languages:
-                            logger.warning(f"⚠️ 模型不支持中文 ({target_lang})，可用语言: {tts.languages}")
-                            # 尝试回退到英语
-                            if 'en' in tts.languages:
-                                target_lang = 'en'
-                            else:
-                                target_lang = tts.languages[0]
-                            logger.info(f"🔄 回退到语言: {target_lang}")
-                    
-                    synth_kwargs['language'] = target_lang
-                    
-                    # 尝试获取默认说话人
-                    if hasattr(tts, 'speakers') and tts.speakers:
-                        synth_kwargs['speaker'] = tts.speakers[0]
-                    
-                    logger.info(f"✨ 使用 VITS 增强合成: speaker={synth_kwargs.get('speaker')}, lang={synth_kwargs.get('language')}")
-                
-                # 执行合成
-                tts.tts_to_file(**synth_kwargs)
+            if model_key == 'chattts_v1':
+                # ChatTTS 合成逻辑
+                chat_tts_service.synthesize(text, output_path=audio_path)
             else:
-                tts.tts_to_file(text="测试。", file_path=audio_path)
+                # 强化文本处理
+                clean_text = text.strip()
+                if len(clean_text) > 0:
+                    clean_text = re.sub(r'[。！？.!?]{2,}', '。', clean_text)
+                    if not any(clean_text.endswith(p) for p in '。！？.!?'):
+                        clean_text += '。'
+                    
+                    # 准备合成参数
+                    synth_kwargs = {'text': clean_text, 'file_path': audio_path}
+                    
+                    # 特殊处理 YourTTS 参数
+                    if model_key in ['your_tts', 'dialogue_mode']:
+                        # 检查模型支持的语言
+                        target_lang = 'zh-cn'
+                        if hasattr(tts, 'languages') and tts.languages:
+                            if target_lang not in tts.languages:
+                                logger.warning(f"⚠️ 模型不支持中文 ({target_lang})，可用语言: {tts.languages}")
+                                # 尝试回退到英语
+                                if 'en' in tts.languages:
+                                    target_lang = 'en'
+                                else:
+                                    target_lang = tts.languages[0]
+                                logger.info(f"🔄 回退到语言: {target_lang}")
+                        
+                        synth_kwargs['language'] = target_lang
+                        
+                        # 尝试获取默认说话人
+                        if hasattr(tts, 'speakers') and tts.speakers:
+                            synth_kwargs['speaker'] = tts.speakers[0]
+                        
+                        logger.info(f"✨ 使用 VITS 增强合成: speaker={synth_kwargs.get('speaker')}, lang={synth_kwargs.get('language')}")
+                    
+                    # 执行合成
+                    tts.tts_to_file(**synth_kwargs)
+                else:
+                    tts.tts_to_file(text="测试。", file_path=audio_path)
                 
             logger.info(f"✅ 语音合成成功: {audio_path}")
         except Exception as e:
@@ -539,11 +565,29 @@ def synthesize_dialogue(current_user):
         # 初始化合并文本
         combined_text = text.strip()
         
+        # 统一生成输出文件名 (修复原代码中 audio_path 可能未定义的bug)
+        temp_dir = tempfile.gettempdir()
+        audio_filename = f"dialogue_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+        audio_path = os.path.join(temp_dir, audio_filename)
+        
         # 获取TTS实例
-        tts = get_tts_instance(model_key)
+        tts = None
+        if model_key != 'chattts_v1':
+            tts = get_tts_instance(model_key)
+        elif not CHAT_TTS_AVAILABLE:
+            raise Exception("ChatTTS 服务不可用")
+        
+        # ChatTTS 处理逻辑
+        if model_key == 'chattts_v1':
+             result_path = chat_tts_service.synthesize_dialogue(dialogue_segments)
+             if result_path:
+                 import shutil
+                 shutil.copy2(result_path, audio_path)
+             else:
+                 raise Exception("ChatTTS 对话合成失败")
         
         # 处理多人对话 - 支持原生多声音
-        if len(dialogue_segments) > 1:
+        elif len(dialogue_segments) > 1:
             logger.info(f"🎭 处理多人对话: 使用模型 {model_key}")
             
             # 为每个说话人生成单独的音频片段

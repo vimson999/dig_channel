@@ -77,7 +77,9 @@ pypandoc==1.15
 
 # TTS语音合成 (CPU版本)
 TTS==0.22.0
-torch==2.1.0  # CPU版本
+ChatTTS
+soundfile
+torch>=2.2.0  # CPU版本
 
 # 音频处理
 pydub==0.25.1
