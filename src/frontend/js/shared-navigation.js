@@ -48,6 +48,8 @@ class SharedNavigation {
             return 'thumbnail-generator';
         } else if (filename === 'thumbnail-generator-classic.html') {
             return 'thumbnail-generator-classic';
+        } else if (filename === 'video-auto-generator.html') {
+            return 'video-auto-generator';
         }
         return 'dashboard';
     }
@@ -68,7 +70,8 @@ class SharedNavigation {
             'bilibili-publisher': 'Bilibili 发布工作台',
             'gemini-test': 'Gemini AI 测试台',
             'thumbnail-generator': '研报封面生成器',
-            'thumbnail-generator-classic': '经典研报封面生成器'
+            'thumbnail-generator-classic': '经典研报封面生成器',
+            'video-auto-generator': 'AI 视频自动生成'
         };
         return titles[this.currentPage] || '智能数据分析平台';
     }
@@ -297,6 +300,12 @@ class SharedNavigation {
                         name: '经典封面 (v7)',
                         icon: 'fas fa-file-image',
                         href: 'thumbnail-generator-classic.html'
+                    },
+                    {
+                        id: 'video-auto-generator',
+                        name: '视频自动生成',
+                        icon: 'fas fa-video',
+                        href: 'video-auto-generator.html'
                     },
                     {
                         id: 'gemini-test',

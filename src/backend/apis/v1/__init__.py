@@ -61,6 +61,10 @@ def register_blueprints(app):
     from .bilibili import bp as bilibili_bp
     app.register_blueprint(bilibili_bp)
 
+    # 注册视频剪辑 API (新增)
+    from .video_editor import bp as video_editor_bp
+    app.register_blueprint(video_editor_bp)
+
 __all__ = [
     'auth_bp',
     'channels_bp',
