@@ -32,6 +32,7 @@ def synthesize_video():
             return jsonify({'error': 'No selected file'}), 400
 
         audio_start = float(request.form.get('audio_start', 7.0))
+        audio_end_offset = float(request.form.get('audio_end_offset', 0.0))
         custom_filename = request.form.get('custom_filename')
         
         # Sanitize custom filename (simple version to allow Chinese)
@@ -53,7 +54,8 @@ def synthesize_video():
         
         # 3. Process video
         output_path = video_editor_service.process_mixed_content(
-            video_path, image_path, audio_path, audio_start, output_filename=custom_filename
+            video_path, image_path, audio_path, audio_start, 
+            audio_end_offset=audio_end_offset, output_filename=custom_filename
         )
         
         # 4. Return result (URL to download)

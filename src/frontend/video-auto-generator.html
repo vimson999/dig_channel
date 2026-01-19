@@ -69,15 +69,26 @@
                 </div>
 
                 <!-- 参数设置 -->
-                <div class="bg-slate-50 rounded-lg p-4 flex items-center justify-between border border-slate-200">
-                    <div class="flex items-center gap-2">
-                        <i class="fas fa-scissors text-slate-400"></i>
-                        <span class="text-sm font-medium text-slate-700">音频截取设置</span>
+                <div class="bg-slate-50 rounded-lg p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border border-slate-200">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                            <i class="fas fa-scissors text-slate-400"></i>
+                            <span class="text-sm font-medium text-slate-700">音频截取：从第</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <input type="number" name="audio_start" value="7" step="0.1" class="w-16 p-1 text-center border border-slate-300 rounded text-sm focus:border-blue-500 focus:outline-none">
+                            <span class="text-xs text-slate-500">秒开始</span>
+                        </div>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <span class="text-xs text-slate-500">从第</span>
-                        <input type="number" name="audio_start" value="7" step="0.1" class="w-16 p-1 text-center border border-slate-300 rounded text-sm focus:border-blue-500 focus:outline-none">
-                        <span class="text-xs text-slate-500">秒开始</span>
+                    <div class="flex items-center justify-between border-t md:border-t-0 md:border-l border-slate-200 pt-4 md:pt-0 md:pl-4">
+                        <div class="flex items-center gap-2">
+                            <i class="fas fa-step-backward text-slate-400"></i>
+                            <span class="text-sm font-medium text-slate-700">音频截取：末尾去掉</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <input type="number" name="audio_end_offset" value="10" step="0.1" class="w-16 p-1 text-center border border-slate-300 rounded text-sm focus:border-blue-500 focus:outline-none">
+                            <span class="text-xs text-slate-500">秒</span>
+                        </div>
                     </div>
                 </div>
 

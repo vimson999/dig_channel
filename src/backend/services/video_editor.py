@@ -16,22 +16,26 @@ class VideoEditorService:
         os.makedirs(self.upload_folder, exist_ok=True)
         os.makedirs(self.output_folder, exist_ok=True)
 
-    def process_mixed_content(self, video_file, image_file, audio_file, audio_start=7.0, output_filename=None):
+    def process_mixed_content(self, video_file, image_file, audio_file, audio_start=7.0, audio_end_offset=0.0, output_filename=None):
         """
-        Synthesize a video from Video A + (Image + Audio[7s:]).
+        Synthesize a video from Video A + (Image + Audio[start:end-offset]).
         """
         try:
-            logger.info(f"Starting video processing: Video={video_file}, Image={image_file}, Audio={audio_file}")
+            logger.info(f"Starting video processing: Video={video_file}, Image={image_file}, Audio={audio_file}, Offset={audio_end_offset}")
             
             # 1. Load Video A
             clip_a = VideoFileClip(video_file)
             
             # 2. Load and Clip Audio
             audio = AudioFileClip(audio_file)
-            if audio.duration < audio_start:
-                raise ValueError(f"Audio duration ({audio.duration}s) is shorter than start time ({audio_start}s)")
             
-            audio_clipped = audio.subclipped(audio_start)
+            # 计算结束时间：总时长 - 尾部偏移
+            end_time = audio.duration - audio_end_offset
+            
+            if end_time <= audio_start:
+                raise ValueError(f"Clip range invalid: start({audio_start}s) is greater than or equal to end({end_time}s)")
+            
+            audio_clipped = audio.subclipped(audio_start, end_time)
             
             # 3. Create Image Clip (Video B)
             # Resize image to match Video A's resolution
