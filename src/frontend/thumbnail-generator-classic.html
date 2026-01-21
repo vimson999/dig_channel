@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>深度研报封面生成器 v7.3 (智能联动版)</title>
+    <title>深度研报封面生成器 v7.4 (体验升级版)</title>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.tailwindcss.com"></script>
@@ -30,10 +30,10 @@
         input[type="text"], textarea, select, input[type="number"] {
             padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; flex: 1;
         }
-        input[type="file"] { padding: 6px; background: #f1f3f5; border: 1px dashed #adb5bd; border-radius: 4px; font-size: 11px; }
+        input[type="file"] { padding: 6px; background: #f1f3f5; border: 1px dashed #adb5bd; border-radius: 4px; font-size: 11px; width: 100%; }
         input[type="color"] { width: 30px; height: 30px; border: none; background: none; cursor: pointer; padding: 0; }
         input[type="range"] { flex: 1; cursor: pointer; }
-        textarea { resize: vertical; height: 50px; font-family: inherit;}
+        textarea { resize: vertical; min-height: 160px; height: 160px !important; font-family: inherit;} /* 强制高度为160px，约5行 */
         .radio-group { display: flex; gap: 5px; }
         .radio-option { flex: 1; text-align: center; }
         .radio-option input { display: none; }
@@ -48,12 +48,13 @@
         .preview-container { flex: 1; background: #212529; border-radius: 12px; display: flex; justify-content: center; align-items: center; padding: 20px; overflow: hidden; }
         canvas { max-width: 100%; max-height: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.6); border-radius: 4px; object-fit: contain; }
         .header-row, .control-row { display: flex; justify-content: space-between; align-items: center; }
+        .val-display { font-size: 11px; color: #888; font-weight: normal; min-width: 30px; text-align: right; }
     </style>
 </head>
 <body>
     <div class="main-container">
         <div class="controls">
-            <h2>研报封面配置 v7.3</h2>
+            <h2>研报封面配置 v7.4</h2>
             <div class="section-title">核心布局</div>
             <div class="input-group">
                 <div class="radio-group">
@@ -71,36 +72,40 @@
                 <div class="section-title">图像与氛围</div>
                 <button id="resetStyleBtn">↺ 重置参数</button>
             </div>
-            <div class="input-group">
-                <div class="row-group">
-                    <div style="flex:1; display: flex; flex-direction: column; gap: 5px;">
-                        <label>底图</label>
-                        <select id="bgPreset" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 11px; color: #555;">
-                            <option value="upload">📂 自定义上传...</option>
-                        </select>
-                        <input type="file" id="bgUpload" accept="image/*">
-                    </div>
-                    <div style="flex:1">
-                        <label>频道Logo (右下)</label>
-                        <input type="file" id="logoUpload" accept="image/*" style="margin-top: 26px;">
-                    </div>
+            
+            <!-- 图像上传区 (结构调整) -->
+            <div class="input-group" style="gap: 10px;">
+                <!-- 底图 -->
+                <div>
+                    <label style="display:block; margin-bottom:4px;">1. 底图选择</label>
+                    <select id="bgPreset" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 11px; color: #555; width: 100%; margin-bottom: 4px;">
+                        <option value="upload">📂 自定义上传...</option>
+                    </select>
+                    <input type="file" id="bgUpload" accept="image/*">
                 </div>
-                <div style="margin-top:5px">
-                     <label>品牌水印 (右上)</label>
+                <!-- Logo -->
+                <div>
+                    <label style="display:block; margin-bottom:4px;">2. 频道Logo (右下)</label>
+                    <input type="file" id="logoUpload" accept="image/*">
+                </div>
+                <!-- 水印 -->
+                <div>
+                     <label style="display:block; margin-bottom:4px;">3. 品牌水印 (右上)</label>
                      <input type="file" id="watermarkUpload" accept="image/*">
                 </div>
             </div>
+            
             <div class="input-group">
                 <div class="control-row">
                     <label>文字蒙版 (Mask)</label>
-                    <span style="font-size:11px;color:#888" id="maskValueDisplay">40%</span>
+                    <span class="val-display" id="maskValueDisplay">40%</span>
                 </div>
                 <input type="range" id="maskStrength" min="0" max="100" value="40">
             </div>
             <div class="input-group">
                 <div class="control-row">
                     <label>底图虚化</label>
-                    <span style="font-size:11px;color:#888" id="blurValueDisplay">6px</span>
+                    <span class="val-display" id="blurValueDisplay">6px</span>
                 </div>
                 <input type="range" id="bgBlur" min="0" max="20" value="6">
             </div>
@@ -109,30 +114,33 @@
                 <div class="control-row"><label>配色方案</label></div>
                 <select id="colorScheme" style="padding: 10px; font-weight: bold; color: #444; border: 2px solid #e9ecef;"></select>
             </div>
+            <!-- 机构标签 -->
             <div class="input-group">
                 <div class="control-row">
                     <label>机构标签</label>
                     <input type="color" id="tagColor" value="#333333">
                 </div>
+                <!-- 预设机构下拉框 -->
                 <select id="orgPreset" style="margin-bottom: 5px; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; color: #555;">
                     <option value="custom">✏️ 自定义输入...</option>
+                    <!-- 选项由 JS 生成 -->
                 </select>
                 <input type="text" id="sourceTag" value="Goldman Sachs · 高盛研报">
             </div>
             <div class="input-group">
                 <div class="control-row">
-                    <label>主标题</label>
+                    <label>主标题 <span class="val-display" id="mainTitleSizeVal">110px</span></label>
                     <div class="row-group">
                         <input type="range" id="mainTitleSize" min="60" max="250" value="110">
                         <input type="color" id="mainTitleColor" value="#002244">
                     </div>
                 </div>
-                <textarea id="mainTitle">深度解读：腾讯 2026 Q1 财报
+                <textarea id="mainTitle" rows="5">深度解读：腾讯 2026 Q1 财报
 为何这可能是最后的上车机会？</textarea>
             </div>
             <div class="input-group">
                 <div class="control-row">
-                    <label>副标题 (钩子金)</label>
+                    <label>副标题 (钩子金) <span class="val-display" id="subTitleSizeVal">48px</span></label>
                     <div class="row-group">
                         <input type="range" id="subTitleSize" min="30" max="80" value="48">
                         <input type="color" id="subTitleColor" value="#FFD700">
@@ -142,13 +150,13 @@
             </div>
             <div class="input-group">
                 <div class="control-row">
-                    <label>底部落款</label>
+                    <label>底部落款 <span class="val-display" id="dateSizeVal">32px</span></label>
                     <div class="row-group">
                         <input type="range" id="dateSize" min="20" max="60" value="32">
                         <input type="color" id="dateColor" value="#ffffff">
                     </div>
                 </div>
-                <input type="text" id="dateText" value="Jan 2026 | 独家解读">
+                <input type="text" id="dateText" value="Jan 2026 | 胶囊播客">
             </div>
             <button id="downloadBtn">下载 4K 封面</button>
         </div>
@@ -183,8 +191,13 @@
             bgPreset: document.getElementById('bgPreset'),
             download: document.getElementById('downloadBtn'),
             reset: document.getElementById('resetStyleBtn'),
+            
+            // Value Displays
             blurDisplay: document.getElementById('blurValueDisplay'),
-            maskDisplay: document.getElementById('maskValueDisplay')
+            maskDisplay: document.getElementById('maskValueDisplay'),
+            mainSizeDisplay: document.getElementById('mainTitleSizeVal'),
+            subSizeDisplay: document.getElementById('subTitleSizeVal'),
+            dateSizeDisplay: document.getElementById('dateSizeVal')
         };
 
         const images = { bg: new Image(), logo: new Image(), watermark: new Image() };
@@ -199,6 +212,7 @@
             { name: 'Goldman Sachs · 高盛研报', color: '#7399C6' },
             { name: 'Morgan Stanley · 摩根士丹利', color: '#002D72' },
             { name: 'J.P. Morgan · 摩根大通', color: '#52433D' },
+            { name: 'CSC · 中信建投', color: '#C00000' }, // 新增：中信建投
             { name: 'BlackRock · 贝莱德', color: '#000000' },
             { name: 'Bridgewater · 桥水基金', color: '#B31B1B' },
             { name: 'CITIC Securities · 中信证券', color: '#C0392B' },
@@ -209,7 +223,8 @@
             { name: 'Sequoia · 红杉资本', color: '#2E8B57' },
             { name: 'Berkshire Hathaway · 伯克希尔', color: '#2B3D51' },
             { name: 'Tesla · 特斯拉', color: '#E82127' },
-            { name: 'NVIDIA · 英伟达', color: '#76B900' }
+            { name: 'NVIDIA · 英伟达', color: '#76B900' },
+            { name: 'Nomura · 野村证券', color: '#EF3340' }
         ];
 
         ORGANIZATIONS.forEach(org => {
@@ -224,6 +239,8 @@
             'light': { name: '☀ 经典浅色', main: '#002244', sub: '#B8860B', tag: '#222222', date: '#ffffff', stroke: 'rgba(255,255,255,1.0)', bg: '#e9ecef', isDark: false },
             'dark': { name: '🌙 经典深色', main: '#ffffff', sub: '#FFD700', tag: '#eeeeee', date: '#aaaaaa', stroke: 'rgba(0,0,0,0.8)', bg: '#1a1a1a', isDark: true },
             'morgan': { name: '🏦 摩根深蓝', main: '#002D72', sub: '#FFD700', tag: '#002D72', date: '#ffffff', stroke: 'rgba(255,255,255,1.0)', bg: '#f0f4f8', isDark: false },
+            'warm_pro': { name: '🏛 投行 · 暖色专供', main: '#002D72', sub: '#C0392B', tag: '#002D72', date: '#333333', stroke: 'rgba(255,255,255,0.95)', bg: '#FFF8E1', isDark: false },
+            'bloomberg': { name: '📊 彭博风 · 投行流', main: '#FFFFFF', sub: '#FFA500', tag: '#00A4FF', date: '#00A4FF', stroke: 'rgba(0, 45, 114, 0.8)', bg: '#003366', isDark: true },
             'gold': { name: '🏆 黑金奢华', main: '#D4AF37', sub: '#F5F5F5', tag: '#C5A028', date: '#999999', stroke: 'rgba(0,0,0,0.9)', bg: '#000000', isDark: true },
             'risk': { name: '📉 风险警示', main: '#C0392B', sub: '#2C3E50', tag: '#C0392B', date: '#ffffff', stroke: 'rgba(255,255,255,1.0)', bg: '#ecf0f1', isDark: false },
             'tech': { name: '🧬 科技深紫', main: '#00FFFF', sub: '#FFD700', tag: '#D1C4E9', date: '#B39DDB', stroke: 'rgba(49, 27, 146, 0.8)', bg: '#240046', isDark: true },
@@ -231,28 +248,6 @@
             'quantum': { name: '🌌 深空 · 量子灰', main: '#ECEFF1', sub: '#00B0FF', tag: '#B0BEC5', date: '#90A4AE', stroke: 'rgba(38, 50, 56, 0.8)', bg: '#263238', isDark: true },
             'vintage': { name: '🍷 复古 · 华尔街', main: '#5D4037', sub: '#8D6E63', tag: '#3E2723', date: '#ffffff', stroke: 'rgba(255,248,225,1.0)', bg: '#FFF8E1', isDark: false }
         };
-
-        // 底图预设库 (绑定默认配色)
-        const BACKGROUNDS = [
-            { name: '默认 · 几何蓝', file: 'Gemini_Generated_Image_ifcvkkifcvkkifcv.png', defaultScheme: 'morgan' },
-            { name: '科技 · 流光紫', file: 'Gemini_Generated_Image_5smjm15smjm15smj.png', defaultScheme: 'tech' },
-            { name: '商务 · 深邃黑', file: 'Gemini_Generated_Image_abyrquabyrquabyr.png', defaultScheme: 'dark' },
-            { name: '抽象 · 波浪线', file: 'Gemini_Generated_Image_dmux10dmux10dmux.png', defaultScheme: 'quantum' },
-            { name: '极简 · 纸张纹', file: 'Gemini_Generated_Image_fy2ewzfy2ewzfy2e.png', defaultScheme: 'light' },
-            { name: '金融 · 上升势', file: 'Gemini_Generated_Image_j1dwoqj1dwoqj1dw.png', defaultScheme: 'vintage' },
-            { name: '未来 · 芯片绿', file: 'Gemini_Generated_Image_sgk2hbsgk2hbsgk2.png', defaultScheme: 'clean' },
-            { name: '宏观 · 全球视野', file: 'Gemini_Generated_Image_me7j4pme7j4pme7j.png', defaultScheme: 'morgan' },
-            { name: '市场 · 红色警戒', file: 'Gemini_Generated_Image_r98ittr98ittr98i.png', defaultScheme: 'risk' },
-            { name: '深度 · 蓝海探索', file: 'Gemini_Generated_Image_unhywgunhywgunhy.png', defaultScheme: 'morgan' },
-            { name: '前沿 · 灰色地带', file: 'Gemini_Generated_Image_xmotmqxmotmqxmot.png', defaultScheme: 'gold' }
-        ];
-
-        BACKGROUNDS.forEach(bg => {
-            const opt = document.createElement('option');
-            opt.value = 'assets/cover/' + bg.file; opt.textContent = bg.name;
-            inputs.bgPreset.appendChild(opt);
-        });
-        inputs.bgPreset.value = 'assets/cover/' + BACKGROUNDS[0].file;
 
         Object.keys(PRESETS).forEach(key => {
             const opt = document.createElement('option');
@@ -263,12 +258,12 @@
         const DEFAULTS = { sizes: { main: 110, sub: 48, date: 32 }, mask: 40, blur: 6 };
 
         function draw() {
+            // ... (draw function implementation remains same, relying on updated inputs)
             const w = canvas.width; const h = canvas.height;
             const layout = document.querySelector('input[name="layout"]:checked').value;
             const schemeKey = inputs.scheme.value;
             const themeConfig = PRESETS[schemeKey];
             
-            // 1. 底图
             const blurAmount = inputs.blur.value;
             if (images.bg.complete && images.bg.naturalWidth !== 0) {
                 ctx.save();
@@ -279,7 +274,6 @@
                 ctx.fillStyle = themeConfig.bg; ctx.fillRect(0, 0, w, h);
             }
 
-            // 2. 蒙版
             const maskAlpha = inputs.mask.value / 100;
             if (maskAlpha > 0) {
                 ctx.save();
@@ -296,7 +290,6 @@
             const baseX = layout === 'left' ? 120 : 880;
             let currentY = 180;
 
-            // 3. 标签 (实心白底)
             const tagSize = 30; const tagText = inputs.tag.value;
             ctx.font = `900 ${tagSize}px "Noto Serif SC", serif`; 
             const tagMetrics = ctx.measureText(tagText);
@@ -314,7 +307,6 @@
             ctx.fillText(tagText, baseX, currentY); ctx.restore();
             currentY += 130; 
 
-            // 4. 主标题
             const mainSize = parseInt(inputs.mainSize.value);
             const mainLineHeight = mainSize * 1.25;
             const titleLines = inputs.main.value.split('\n');
@@ -326,11 +318,9 @@
             });
             currentY += 10; 
 
-            // 5. 副标题
             const subSize = parseInt(inputs.subSize.value);
             drawHaloText(ctx, inputs.sub.value, baseX, currentY, inputs.subColor.value, themeConfig.stroke, subSize, "Noto Serif SC", "500");
 
-            // 6. 落款
             const dateSize = parseInt(inputs.dateSize.value);
             let dateX = (layout === 'left') ? 120 : (w - 120);
             let dateAlign = (layout === 'left') ? 'left' : 'right';
@@ -345,7 +335,6 @@
             drawHaloText(ctx, inputs.date.value, dateX, h - 100, inputs.dateColor.value, dateStroke, dateSize, "Noto Serif SC", "bold");
             ctx.restore();
 
-            // 7. Logo (右下)
             if (flags.logoLoaded) {
                 if (logoPos.x === -1) {
                     const lMargin = 60;
@@ -365,6 +354,7 @@
             }
         }
 
+        // --- 工具函数 ---
         function drawHaloText(ctx, text, x, y, color, strokeColor, fontSize, fontFace="serif", fontWeight="bold", customStrokeWidth=null) {
             ctx.save(); ctx.font = `${fontWeight} ${fontSize}px "${fontFace}", serif`;
             ctx.textBaseline = 'top'; ctx.strokeStyle = strokeColor;
@@ -388,33 +378,90 @@
              ctx.drawImage(img, renderX, renderY, renderW, renderH);
         }
 
-        // 交互逻辑
-        function getMousePos(evt) {
-            const rect = canvas.getBoundingClientRect();
-            const scaleX = canvas.width / rect.width; const scaleY = canvas.height / rect.height;
-            return { x: (evt.clientX - rect.left) * scaleX, y: (evt.clientY - rect.top) * scaleY };
-        }
-        canvas.addEventListener('mousedown', function(e) {
-            if (!flags.logoLoaded) return;
-            const pos = getMousePos(e);
-            const dx = pos.x - (logoPos.x + LOGO_SIZE/2); const dy = pos.y - (logoPos.y + LOGO_SIZE/2);
-            if (dx*dx + dy*dy < (LOGO_SIZE/2)*(LOGO_SIZE/2)) { isDragging = true; dragStart = { x: pos.x - logoPos.x, y: pos.y - logoPos.y }; canvas.style.cursor = 'grabbing'; }
-        });
-        canvas.addEventListener('mousemove', function(e) {
-            const pos = getMousePos(e);
-            if (isDragging) { logoPos.x = pos.x - dragStart.x; logoPos.y = pos.y - dragStart.y; draw(); }
-            else if (flags.logoLoaded) {
-                const dx = pos.x - (logoPos.x + LOGO_SIZE/2); const dy = pos.y - (logoPos.y + LOGO_SIZE/2);
-                canvas.style.cursor = (dx*dx + dy*dy < (LOGO_SIZE/2)*(LOGO_SIZE/2)) ? 'grab' : 'default';
+        // --- 底图预设 (升级版：包含专属配置) ---
+        const BACKGROUNDS = [
+            { 
+                name: '默认 · 几何蓝', 
+                file: 'Gemini_Generated_Image_ifcvkkifcvkkifcv.png', 
+                config: { scheme: 'bloomberg', blur: 8, mask: 45 } 
+            },
+            { 
+                name: '科技 · 流光紫', 
+                file: 'Gemini_Generated_Image_5smjm15smjm15smj.png', 
+                config: { scheme: 'tech', blur: 4, mask: 50 }
+            },
+            { 
+                name: '商务 · 深邃黑', 
+                file: 'Gemini_Generated_Image_abyrquabyrquabyr.png', 
+                config: { scheme: 'dark', blur: 8, mask: 30 }
+            },
+            { 
+                name: '抽象 · 波浪线', 
+                file: 'Gemini_Generated_Image_dmux10dmux10dmux.png', 
+                config: { scheme: 'quantum', blur: 5, mask: 45 }
+            },
+            { 
+                name: '极简 · 纸张纹', 
+                file: 'Gemini_Generated_Image_fy2ewzfy2ewzfy2e.png', 
+                config: { scheme: 'light', blur: 3, mask: 20 }
+            },
+            { 
+                name: '金融 · 上升势 (暖色推荐)', 
+                file: 'Gemini_Generated_Image_j1dwoqj1dwoqj1dw.png', 
+                config: { scheme: 'warm_pro', blur: 10, mask: 50 } // 关联新方案，并增加模糊
+            },
+            { 
+                name: '未来 · 芯片绿', 
+                file: 'Gemini_Generated_Image_sgk2hbsgk2hbsgk2.png', 
+                config: { scheme: 'clean', blur: 4, mask: 40 }
+            },
+            { 
+                name: '宏观 · 全球视野', 
+                file: 'Gemini_Generated_Image_me7j4pme7j4pme7j.png', 
+                config: { scheme: 'morgan', blur: 6, mask: 50 }
+            },
+            { 
+                name: '市场 · 红色警戒', 
+                file: 'Gemini_Generated_Image_r98ittr98ittr98i.png', 
+                config: { scheme: 'risk', blur: 8, mask: 60 }
+            },
+            { 
+                name: '深度 · 蓝海探索', 
+                file: 'Gemini_Generated_Image_unhywgunhywgunhy.png', 
+                config: { scheme: 'morgan', blur: 5, mask: 40 }
+            },
+            { 
+                name: '前沿 · 灰色地带', 
+                file: 'Gemini_Generated_Image_xmotmqxmotmqxmot.png', 
+                config: { scheme: 'gold', blur: 12, mask: 55 }
             }
+        ];
+        
+        BACKGROUNDS.forEach(bg => {
+            const opt = document.createElement('option');
+            opt.value = 'assets/cover/' + bg.file; opt.textContent = bg.name;
+            inputs.bgPreset.appendChild(opt);
         });
-        window.addEventListener('mouseup', function() { if (isDragging) { isDragging = false; canvas.style.cursor = 'grab'; } });
+        // 初始化默认选中
+        const defaultBg = BACKGROUNDS[0];
+        inputs.bgPreset.value = 'assets/cover/' + defaultBg.file;
+
+        // 应用默认底图的配置
+        if (defaultBg.config) {
+            if (defaultBg.config.scheme) { inputs.scheme.value = defaultBg.config.scheme; applyTheme(); }
+            if (defaultBg.config.blur !== undefined) { inputs.blur.value = defaultBg.config.blur; inputs.blurDisplay.textContent = defaultBg.config.blur + 'px'; }
+            if (defaultBg.config.mask !== undefined) { inputs.mask.value = defaultBg.config.mask; inputs.maskDisplay.textContent = defaultBg.config.mask + '%'; }
+        }
+
+        // --- 事件绑定 ---
 
         Object.values(inputs).forEach(el => {
             if (el instanceof NodeList) el.forEach(r => r.addEventListener('change', draw));
             else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') el.addEventListener('input', (e) => {
+                // ... (value display updates)
                 if(e.target === inputs.blur) inputs.blurDisplay.textContent = e.target.value + 'px';
                 if(e.target === inputs.mask) inputs.maskDisplay.textContent = e.target.value + '%';
+                // ...
                 draw();
             });
             else if (el.tagName === 'SELECT') {
@@ -426,12 +473,31 @@
                     } else if (e.target === inputs.scheme) {
                         applyTheme();
                     } else if (e.target === inputs.bgPreset) {
-                        if (e.target.value === 'upload') { inputs.bg.click(); }
-                        else { 
+                        if (e.target.value === 'upload') { 
+                            inputs.bg.click(); 
+                        } else { 
                             images.bg.src = e.target.value; 
                             const filename = e.target.value.split('/').pop();
                             const selectedBg = BACKGROUNDS.find(bg => bg.file === filename);
-                            if (selectedBg && selectedBg.defaultScheme) { inputs.scheme.value = selectedBg.defaultScheme; applyTheme(); }
+                            
+                            // 核心修改：应用背景图绑定的专属配置
+                            if (selectedBg && selectedBg.config) { 
+                                // 1. 应用配色方案
+                                if (selectedBg.config.scheme) {
+                                    inputs.scheme.value = selectedBg.config.scheme; 
+                                    applyTheme(); 
+                                }
+                                // 2. 应用虚化程度
+                                if (selectedBg.config.blur !== undefined) {
+                                    inputs.blur.value = selectedBg.config.blur;
+                                    inputs.blurDisplay.textContent = selectedBg.config.blur + 'px';
+                                }
+                                // 3. 应用蒙版强度
+                                if (selectedBg.config.mask !== undefined) {
+                                    inputs.mask.value = selectedBg.config.mask;
+                                    inputs.maskDisplay.textContent = selectedBg.config.mask + '%';
+                                }
+                            }
                         }
                     }
                     draw();
@@ -455,13 +521,26 @@
         handleUpload(inputs.bg, 'bg'); handleUpload(inputs.logo, 'logo', 'logoLoaded'); handleUpload(inputs.watermark, 'watermark', 'watermarkLoaded');
 
         inputs.reset.addEventListener('click', () => {
-            inputs.bgPreset.value = 'assets/cover/' + BACKGROUNDS[0].file;
+            const defBg = BACKGROUNDS[0];
+            inputs.bgPreset.value = 'assets/cover/' + defBg.file;
             images.bg.src = inputs.bgPreset.value;
             logoPos = { x: -1, y: -1 };
-            inputs.scheme.value = 'morgan'; applyTheme();
+            
+            // 重置为默认配置
+            if (defBg.config) {
+                inputs.scheme.value = defBg.config.scheme || 'morgan'; applyTheme();
+                inputs.blur.value = defBg.config.blur !== undefined ? defBg.config.blur : 6;
+                inputs.mask.value = defBg.config.mask !== undefined ? defBg.config.mask : 40;
+            } else {
+                inputs.scheme.value = 'morgan'; applyTheme();
+                inputs.blur.value = DEFAULTS.blur; inputs.mask.value = DEFAULTS.mask;
+            }
+            
+            // 重置数值显示
+            inputs.blurDisplay.textContent = inputs.blur.value + 'px'; 
+            inputs.maskDisplay.textContent = inputs.mask.value + '%';
             inputs.mainSize.value = DEFAULTS.sizes.main; inputs.subSize.value = DEFAULTS.sizes.sub; inputs.dateSize.value = DEFAULTS.sizes.date;
-            inputs.blur.value = DEFAULTS.blur; inputs.mask.value = DEFAULTS.mask;
-            inputs.blurDisplay.textContent = '6px'; inputs.maskDisplay.textContent = '40%';
+            inputs.mainSizeDisplay.textContent = '110px'; inputs.subSizeDisplay.textContent = '48px'; inputs.dateSizeDisplay.textContent = '32px';
             draw();
         });
 
@@ -477,7 +556,7 @@
             link.download = `研报封面_${new Date().getTime()}.jpg`; link.href = dataURI; link.click();
         });
 
-        images.bg.src = 'assets/cover/Gemini_Generated_Image_ifcvkkifcvkkifcv.png';
+        images.bg.src = inputs.bgPreset.value;
         images.bg.onload = draw;
         images.bg.onerror = () => { console.warn('默认底图加载失败'); draw(); };
         setTimeout(draw, 500); 
