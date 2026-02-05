@@ -44,6 +44,8 @@ def get_status():
         try:
             # Check if credential has enough info
             cred = service.uploader.credential
+            logger.info(f"Checking Bili Credentials: SESSDATA={'Set' if cred.sessdata else 'Missing'}, JCT={'Set' if cred.bili_jct else 'Missing'}")
+            
             if not (cred.sessdata and cred.bili_jct):
                  return {'configured': False, 'message': 'Missing credentials in environment'}
             

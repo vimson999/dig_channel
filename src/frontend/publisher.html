@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>一键发布台 - Shioa 智能数据分析平台</title>
+    
+    <!-- 引入通用库 -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700;900&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd',
+                            400: '#60a5fa', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8',
+                            800: '#1e40af', 900: '#1e3a8a'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        body { background-color: #f8fafc; color: #1e293b; font-family: 'Segoe UI', Roboto, sans-serif; }
+        .glass-card { background: rgba(255, 255, 255, 0.9); backdrop-blur: 8px; border: 1px border-slate-200; border-radius: 16px; padding: 24px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
+        .section-title { font-size: 1.125rem; font-weight: 700; color: #0f172a; margin-bottom: 1.25rem; display: flex; align-items: center; gap: 0.5rem; }
+        .input-group { margin-bottom: 1rem; }
+        .input-label { display: block; font-size: 0.875rem; font-weight: 600; color: #475569; margin-bottom: 0.375rem; }
+        .input-field { width: 100%; padding: 0.625rem 0.875rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.875rem; transition: all 0.2s; background: #fff; }
+        .input-field:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1); outline: none; }
+        .btn-primary { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: white; padding: 0.75rem 1.5rem; border-radius: 10px; font-weight: 600; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2); transition: all 0.2s; }
+        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(37, 99, 235, 0.3); }
+        .btn-primary:active { transform: translateY(0); }
+        .progress-bar-fill { transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1); }
+        
+        .upload-area { border: 2px dashed #cbd5e1; border-radius: 12px; transition: all 0.2s; cursor: pointer; position: relative; overflow: hidden; background: #f8fafc; }
+        .upload-area:hover { border-color: #3b82f6; background: #eff6ff; }
+        .upload-area.uploaded { border-style: solid; border-color: #10b981; background: #ecfdf5; }
+        .upload-spinner { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,0.8); display: flex; align-items: center; justify-content: center; z-index: 10; }
+
+        #previewCanvas { width: 100%; height: auto; aspect-ratio: 16/9; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); background: #eee; }
+        
+        .history-item { padding: 12px; border-bottom: 1px solid #f1f5f9; cursor: pointer; transition: background 0.2s; }
+        .history-item:hover { background-color: #f8fafc; }
+        .history-item:last-child { border-bottom: none; }
+    </style>
+</head>
+<body class="min-h-screen">
+
+    <main class="max-w-[1440px] mx-auto px-6 py-8">
+        
+        <div class="mb-8 flex justify-between items-end">
+            <div>
+                <h2 class="text-2xl font-extrabold text-slate-900 tracking-tight">一键发布工作台</h2>
+                <p class="text-slate-500 mt-1">集成视频合成、封面设计、渠道发布的全流程自动化流水线</p>
+            </div>
+            <div id="bili-status-badge" class="hidden flex items-center gap-2 bg-white px-3 py-1.5 rounded-full border border-slate-200 shadow-sm text-sm">
+                <div class="w-2 h-2 rounded-full bg-slate-300"></div>
+                <span class="text-slate-500">检查连接中...</span>
+            </div>
+        </div>
+
+        <div class="flex flex-col lg:flex-row gap-8">
+            
+            <div class="flex-1 space-y-6">
+                <form id="publishForm">
+                    
+                    <!-- 1. Video Synthesis -->
+                    <div class="glass-card">
+                        <div class="section-title">
+                            <div class="w-8 h-8 bg-indigo-100 text-indigo-600 rounded-lg flex items-center justify-center">
+                                <i class="fas fa-film"></i>
+                            </div>
+                            1. 视频合成参数
+                        </div>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                            <div class="upload-area h-40 flex flex-col items-center justify-center p-4" id="area-video">
+                                <input type="file" accept="video/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'video')">
+                                <input type="hidden" name="video_path" id="val-video">
+                                <i class="fas fa-film text-3xl text-slate-300 mb-3" id="icon-video"></i>
+                                <div class="text-center">
+                                    <p class="text-sm font-bold text-slate-600" id="label-video">Step 1: 片头视频 (可选)</p>
+                                    <p class="text-xs text-slate-400 mt-1" id="sub-video">点击或拖拽上传</p>
+                                </div>
+                                <div id="spin-video" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-blue-500 text-xl"></i></div>
+                            </div>
+
+                            <div class="upload-area h-40 flex flex-col items-center justify-center p-4" id="area-audio">
+                                <input type="file" accept="audio/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'audio')">
+                                <input type="hidden" name="audio_path" id="val-audio">
+                                <i class="fas fa-microphone text-3xl text-slate-300 mb-3" id="icon-audio"></i>
+                                <div class="text-center">
+                                    <p class="text-sm font-bold text-slate-600" id="label-audio">Step 4: 正文音频</p>
+                                    <p class="text-xs text-slate-400 mt-1" id="sub-audio">点击或拖拽上传</p>
+                                </div>
+                                <div id="spin-audio" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-green-500 text-xl"></i></div>
+                            </div>
+
+                            <div class="upload-area h-40 flex flex-col items-center justify-center p-4" id="area-image">
+                                <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'image')">
+                                <input type="hidden" name="image_path" id="val-image">
+                                <i class="fas fa-image text-3xl text-slate-300 mb-3" id="icon-image"></i>
+                                <div class="text-center">
+                                    <p class="text-sm font-bold text-slate-600" id="label-image">Step 3: 正文图片</p>
+                                    <p class="text-xs text-slate-400 mt-1" id="sub-image">点击或拖拽上传</p>
+                                </div>
+                                <div id="spin-image" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-pink-500 text-xl"></i></div>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-3 bg-slate-50 p-4 rounded-lg border border-slate-100">
+                            <div class="input-group mb-0">
+                                <label class="input-label">音频切入 (秒)</label>
+                                <input type="number" name="audio_start" class="input-field" value="7.0" step="0.1">
+                            </div>
+                            <div class="input-group mb-0">
+                                <label class="input-label">结束偏移 (秒)</label>
+                                <input type="number" name="audio_end_offset" class="input-field" value="0.0" step="0.1">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 2. Thumbnail -->
+                    <div class="glass-card">
+                        <div class="flex justify-between items-center mb-5">
+                            <div class="section-title mb-0">
+                                <div class="w-8 h-8 bg-pink-100 text-pink-600 rounded-lg flex items-center justify-center">
+                                    <i class="fas fa-image"></i>
+                                </div>
+                                2. 封面工坊 (所见即所得)
+                            </div>
+                            <span class="text-xs text-pink-500 bg-pink-50 px-2 py-1 rounded-full font-medium">实时渲染中</span>
+                        </div>
+
+                        <div class="flex flex-col xl:flex-row gap-6">
+                            <div class="flex-1 space-y-4">
+                                <div class="input-group">
+                                    <label class="input-label">主标题 (Main Title)</label>
+                                    <textarea name="thumb_main" id="thumb_main" rows="3" class="input-field">深度解读：2026 全球宏观展望&#10;通胀下行下的资产配置指南&#10;为何现在是布局的关键时刻？</textarea>
+                                </div>
+                                <div class="input-group">
+                                    <label class="input-label">副标题 (Sub Title)</label>
+                                    <input type="text" name="thumb_sub" id="thumb_sub" class="input-field" value="详解美联储降息路径与新兴市场机会">
+                                </div>
+                                <div class="grid grid-cols-2 gap-3">
+                                    <div class="input-group">
+                                        <label class="input-label">预设机构</label>
+                                        <select id="select-org" class="input-field"></select>
+                                        <input type="hidden" name="thumb_tag" id="val-tag" value="Goldman Sachs · 高盛研报">
+                                    </div>
+                                    <div class="input-group">
+                                        <label class="input-label">底图预设</label>
+                                        <select name="thumb_bg_index" id="select-bg" class="input-field"></select>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label class="input-label">底部落款</label>
+                                    <input type="text" name="thumb_date" id="thumb_date" class="input-field" value="Feb 2026 | 胶囊播客">
+                                </div>
+                            </div>
+                            <div class="w-full xl:w-[480px] shrink-0">
+                                <label class="input-label">效果预览</label>
+                                <canvas id="previewCanvas" width="1920" height="1080"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 3. Bilibili -->
+                    <div class="glass-card">
+                        <div class="flex justify-between items-center mb-5">
+                            <div class="section-title mb-0">
+                                <div class="w-8 h-8 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center">
+                                    <i class="fab fa-bilibili"></i>
+                                </div>
+                                3. 渠道发布 (Bilibili)
+                            </div>
+                            <div id="bili-status-badge" class="flex items-center gap-2 text-xs bg-slate-100 px-3 py-1 rounded-full text-slate-500">
+                                <div class="w-2 h-2 rounded-full bg-slate-400"></div>
+                                <span>检查中...</span>
+                            </div>
+                        </div>
+
+                        <div class="space-y-4">
+                            <div class="input-group">
+                                <label class="input-label">视频标题</label>
+                                <input type="text" name="bili_title" id="bili_title" class="input-field" placeholder="留空则自动抓取主标题第一行">
+                            </div>
+                            
+                            <div class="input-group">
+                                <label class="input-label">视频简介</label>
+                                <textarea name="bili_desc" class="input-field" rows="3" placeholder="填写视频简介..."></textarea>
+                            </div>
+                            
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div>
+                                    <label class="input-label">投稿类型</label>
+                                    <select name="bili_copyright" class="input-field">
+                                        <option value="1" selected>自制 (Original)</option>
+                                        <option value="2">转载 (Reprint)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="input-label">分区 (TID)</label>
+                                    <select name="bili_tid" id="bili_tid" class="input-field"></select>
+                                </div>
+                                <div>
+                                    <label class="input-label">合集 ID (可选)</label>
+                                    <input type="number" name="bili_season_id" class="input-field" placeholder="Season ID">
+                                </div>
+                            </div>
+
+                            <div class="grid grid-cols-2 gap-4 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                                <label class="flex items-center gap-2 cursor-pointer">
+                                    <input type="checkbox" name="bili_no_reprint" class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" checked>
+                                    <span class="text-sm text-slate-700">未经授权禁止转载 (添加水印)</span>
+                                </label>
+                                <label class="flex items-center gap-2 cursor-pointer">
+                                    <input type="checkbox" name="bili_private" class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500">
+                                    <span class="text-sm text-slate-700">仅自己可见 (私密发布)</span>
+                                </label>
+                            </div>
+
+                            <div class="input-group">
+                                <label class="input-label">视频标签 (逗号分隔)</label>
+                                <input type="text" name="bili_tags" class="input-field" value="金融, 投资, 宏观, 财经">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="h-12"></div>
+                </form>
+            </div>
+
+            <!-- Right Console -->
+            <div class="lg:w-96 space-y-6">
+                <div class="glass-card bg-slate-900 border-none sticky top-24 z-20">
+                    <h3 class="text-white font-bold mb-4 flex items-center justify-between">任务控制台</h3>
+                    <button id="submitBtn" class="btn-primary w-full py-4 text-lg">
+                        <i class="fas fa-paper-plane mr-2"></i> 开始全流程投递
+                    </button>
+                    <p class="text-slate-400 text-xs mt-4">点击后进入异步队列。您可以关闭页面。</p>
+                </div>
+
+                <div id="statusCard" class="hidden glass-card border-blue-100 bg-blue-50/30 sticky top-80">
+                    <div class="flex justify-between items-start mb-4">
+                        <div>
+                            <p class="text-[10px] font-mono text-blue-500 uppercase tracking-wider" id="taskIdDisplay">TASK ID</p>
+                            <h4 class="font-bold text-slate-800 mt-1" id="stepDisplay">正在处理...</h4>
+                        </div>
+                        <span id="statusBadge" class="px-2 py-1 bg-blue-600 text-white text-[10px] font-black rounded shadow-sm">RUNNING</span>
+                    </div>
+                    <div class="space-y-3">
+                        <div class="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
+                            <div id="progressBar" class="bg-blue-600 h-full progress-bar-fill" style="width: 0%"></div>
+                        </div>
+                        <div class="flex justify-between text-xs font-medium">
+                            <span class="text-blue-600" id="progressText">0%</span>
+                            <span class="text-slate-400" id="timerText">00:00</span>
+                        </div>
+                    </div>
+                    <div id="resultArea" class="mt-6 pt-4 border-t border-slate-200 hidden">
+                        <div id="successMsg" class="text-sm text-emerald-600"></div>
+                        <div id="errorMsg" class="text-sm text-red-600"></div>
+                    </div>
+                </div>
+
+                <div class="glass-card sticky top-[280px]">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-sm font-bold text-slate-700">最近任务</h3>
+                        <button onclick="loadHistory()" class="text-xs text-blue-600 hover:text-blue-800"><i class="fas fa-sync"></i></button>
+                    </div>
+                    <div id="historyList" class="space-y-0 text-sm">
+                        <div class="text-center text-slate-400 py-4 text-xs">加载中...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Modal -->
+    <div id="bili-modal" class="fixed inset-0 z-[100] hidden">
+        <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onclick="closeBiliModal()"></div>
+        <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg">
+            <div class="glass-card !p-0 overflow-hidden shadow-2xl border-slate-200">
+                <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                    <h3 class="font-bold text-slate-800 flex items-center gap-2"><i class="fa-solid fa-circle-info text-blue-500"></i> Bilibili 连接配置指南</h3>
+                    <button onclick="closeBiliModal()" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="p-6 max-h-[70vh] overflow-y-auto space-y-6">
+                    <div class="flex gap-4"><div class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">1</div><p class="text-sm">在浏览器登录 bilibili.com</p></div>
+                    <div class="flex gap-4"><div class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">2</div><p class="text-sm">按 F12 切换到 Application (应用) 面板</p></div>
+                    <div class="flex gap-4"><div class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">3</div><div class="text-sm">找到 Cookies -> bilibili.com，复制以下值填入 .env:<br><code class="block mt-2 bg-slate-900 text-slate-300 p-2 rounded">SESSDATA, bili_jct, buvid3, DedeUserID</code></div></div>
+                </div>
+                <div class="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end">
+                    <button onclick="closeBiliModal()" class="px-4 py-2 bg-slate-800 text-white rounded-lg text-sm font-bold">我知道了</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/shared-navigation.js"></script>
+    <script>
+        const API_BASE = 'http://localhost:5001/api/v1';
+        let currentTaskId = null;
+        let pollInterval = null;
+        let startTime = null;
+
+        function showBiliModal() { document.getElementById('bili-modal').classList.remove('hidden'); }
+        function closeBiliModal() { document.getElementById('bili-modal').classList.add('hidden'); }
+
+        const BILI_TIDS = [
+            { label: "知识/科技", items: [{ value: "207", label: "财经" }, { value: "36", label: "知识" }, { value: "188", label: "科技" }, { value: "201", label: "科学科普" }] },
+            { label: "热门", items: [{ value: "171", label: "电子竞技" }, { value: "17", label: "单机游戏" }, { value: "65", label: "网络游戏" }] }
+        ];
+
+        function initBiliTids() {
+            const select = document.getElementById('bili_tid');
+            BILI_TIDS.forEach(group => {
+                const optgroup = document.createElement('optgroup'); optgroup.label = group.label;
+                group.items.forEach(item => {
+                    const opt = document.createElement('option'); opt.value = item.value; opt.textContent = `${item.label} (${item.value})`; optgroup.appendChild(opt);
+                });
+                select.appendChild(optgroup);
+            });
+            select.value = "207";
+        }
+
+        async function checkBiliStatus() {
+            const el = document.getElementById('bili-status-badge');
+            el.classList.remove('hidden');
+            try {
+                const res = await fetch(`${API_BASE}/bilibili/status`);
+                const json = await res.json();
+                if (json.success && json.data.valid) {
+                    const user = json.data.data;
+                    el.className = "flex items-center gap-2 text-xs bg-emerald-50 px-3 py-1 rounded-full text-emerald-600 border border-emerald-100";
+                    el.innerHTML = `<img src="${user.face}" class="w-4 h-4 rounded-full"> <span class="font-bold">${user.name}</span>`;
+                } else {
+                    el.className = "flex items-center gap-2 text-xs bg-red-50 px-3 py-1 rounded-full text-red-600 border border-red-100 cursor-pointer";
+                    el.innerHTML = `<i class="fa-solid fa-circle-xmark"></i> <span>未连接 (点击配置)</span>`;
+                    el.onclick = showBiliModal;
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        async function loadHistory() {
+            const list = document.getElementById('historyList');
+            try {
+                const res = await fetch(`${API_BASE}/publisher/tasks`);
+                const json = await res.json();
+                if (json.success && json.data.length > 0) {
+                    list.innerHTML = json.data.map(task => {
+                        const date = new Date(task.created_at).toLocaleString('zh-CN', { hour12: false, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                        let statusColor = 'text-slate-500';
+                        let icon = 'fa-circle-dot';
+                        if (task.status === 'completed') { statusColor = 'text-emerald-500'; icon = 'fa-check-circle'; }
+                        if (task.status === 'failed') { statusColor = 'text-red-500'; icon = 'fa-times-circle'; }
+                        if (task.status === 'processing') { statusColor = 'text-blue-500'; icon = 'fa-spinner fa-spin'; }
+                        return `<div class="history-item flex justify-between items-center" onclick="trackTask('${task.id}')"><div><div class="font-mono text-xs text-slate-500">ID: ${task.id.split('-')[0].toUpperCase()}</div><div class="text-xs text-slate-400">${date}</div></div><div class="${statusColor} text-sm"><i class="fas ${icon}"></i></div></div>`;
+                    }).join('');
+                } else { list.innerHTML = '<div class="text-center text-slate-400 py-4 text-xs">暂无历史任务</div>'; }
+            } catch (e) { console.error(e); }
+        }
+
+        function trackTask(taskId) { currentTaskId = taskId; startPolling(taskId); }
+
+        const canvas = document.getElementById('previewCanvas'), ctx = canvas.getContext('2d'), images = { bg: new Image() };
+        let bgData = [];
+        const THEME = { main: '#002D72', sub: '#FFD700', tag: '#002D72', date: '#ffffff', stroke: 'rgba(255,255,255,1.0)', bg: '#f0f4f8' };
+
+        function draw() {
+            const w = canvas.width, h = canvas.height;
+            if (images.bg.complete && images.bg.naturalWidth !== 0) drawImageCover(ctx, images.bg, 0, 0, w, h);
+            else { ctx.fillStyle = THEME.bg; ctx.fillRect(0, 0, w, h); }
+            const maskGradient = ctx.createLinearGradient(0, 0, w * 0.6, 0);
+            maskGradient.addColorStop(0, `rgba(0, 15, 30, 0.4)`); maskGradient.addColorStop(1, `rgba(0, 15, 30, 0)`);
+            ctx.fillStyle = maskGradient; ctx.fillRect(0, 0, w, h);
+            let currentY = 180; const tagText = document.getElementById('val-tag').value;
+            ctx.font = `900 30px "Noto Serif SC", serif`; const tm = ctx.measureText(tagText);
+            ctx.save(); ctx.beginPath(); ctx.roundRect(120 - 24, currentY - 12, tm.width + 48, 30 + 24, 4); ctx.fillStyle = "#FFFFFF"; ctx.shadowColor = "rgba(0,0,0,0.2)"; ctx.shadowBlur = 10; ctx.fill(); ctx.restore();
+            ctx.fillStyle = '#333'; ctx.textBaseline = 'top'; ctx.fillText(tagText, 120, currentY); currentY += 130;
+            const mainLines = document.getElementById('thumb_main').value.split('\n');
+            mainLines.forEach(l => { drawHaloText(ctx, l, 120, currentY, THEME.main, THEME.stroke, 110, "Noto Serif SC", "900"); currentY += 137.5; });
+            drawHaloText(ctx, document.getElementById('thumb_sub').value, 120, currentY + 10, THEME.sub, THEME.stroke, 48, "Noto Serif SC", "500");
+            const dateY = h - 100; ctx.beginPath(); ctx.moveTo(120, dateY - 47); ctx.lineTo(180, dateY - 47); ctx.strokeStyle = THEME.date; ctx.stroke();
+            drawHaloText(ctx, document.getElementById('thumb_date').value, 120, dateY - 32, THEME.date, 'rgba(0,0,0,0.5)', 32, "Noto Serif SC", "bold");
+        }
+
+        function drawHaloText(ctx, text, x, y, color, strokeColor, fontSize, fontFace, fontWeight) {
+            ctx.save(); ctx.font = `${fontWeight} ${fontSize}px "${fontFace}", serif`; ctx.textBaseline = 'top';
+            ctx.strokeStyle = strokeColor; ctx.lineWidth = fontSize * 0.04; ctx.lineJoin = 'round'; ctx.strokeText(text, x, y);
+            ctx.fillStyle = color; ctx.fillText(text, x, y); ctx.restore();
+        }
+
+        function drawImageCover(ctx, img, x, y, w, h) {
+            const r = img.naturalWidth / img.naturalHeight, cr = w / h;
+            let rw, rh, rx, ry;
+            if (r > cr) { rh = h; rw = h * r; rx = x - (rw - w) / 2; ry = y; } else { rw = w; rh = w / r; rx = x; ry = y - (rh - h) / 2; }
+            ctx.drawImage(img, rx, ry, rw, rh);
+        }
+
+        async function loadPresets() {
+            try {
+                const res = await fetch(`${API_BASE}/thumbnail/presets`);
+                const data = await res.json(); bgData = data.backgrounds;
+                const orgS = document.getElementById('select-org'); orgS.innerHTML = '';
+                data.organizations.forEach(o => { const opt = document.createElement('option'); opt.value = o.name; opt.textContent = o.name; orgS.appendChild(opt); });
+                orgS.value = "Goldman Sachs · 高盛研报";
+                const bgS = document.getElementById('select-bg'); bgS.innerHTML = '';
+                data.backgrounds.forEach((b, i) => { const opt = document.createElement('option'); opt.value = i; opt.textContent = b.name; bgS.appendChild(opt); });
+                ['thumb_main', 'thumb_sub', 'thumb_date'].forEach(id => document.getElementById(id).addEventListener('input', draw));
+                orgS.addEventListener('change', (e) => { document.getElementById('val-tag').value = e.target.value; draw(); });
+                bgS.addEventListener('change', (e) => { const i = e.target.value; if (bgData[i]) { images.bg.src = 'assets/cover/' + bgData[i].file; } });
+                if (bgData[0]) images.bg.src = 'assets/cover/' + bgData[0].file;
+                images.bg.onload = draw; draw();
+            } catch (e) { console.error(e); }
+        }
+
+        async function handleUpload(input, type) {
+            const file = input.files[0]; if (!file) return;
+            const area = document.getElementById(`area-${type}`), spinner = document.getElementById(`spin-${type}`), hiddenInput = document.getElementById(`val-${type}`);
+            spinner.classList.remove('hidden');
+            const fd = new FormData(); fd.append('file', file);
+            try {
+                const res = await fetch(`${API_BASE}/resources/upload`, { method: 'POST', body: fd });
+                const data = await res.json();
+                if (data.success) { area.classList.add('uploaded'); hiddenInput.value = data.path; }
+            } catch (e) { console.error(e); } finally { spinner.classList.add('hidden'); }
+        }
+
+        document.getElementById('submitBtn').addEventListener('click', async () => {
+            const btn = document.getElementById('submitBtn'), form = document.getElementById('publishForm'), fd = new FormData(form);
+            // 视频 Video A 是可选的，只有 Audio B 和 Image B 是必须的
+            if (!fd.get('audio_path') || !fd.get('image_path')) { alert('请先上传必要的正文素材 (音频 + 图片)'); return; }
+            const payload = {
+                video: { video_path: fd.get('video_path'), audio_path: fd.get('audio_path'), image_path: fd.get('image_path'), audio_start: fd.get('audio_start'), audio_end_offset: fd.get('audio_end_offset') },
+                thumbnail: { main_title: fd.get('thumb_main'), sub_title: fd.get('thumb_sub'), tag_text: fd.get('thumb_tag'), date_text: fd.get('thumb_date'), bg_index: fd.get('thumb_bg_index'), layout: 'left' },
+                bilibili: { title: fd.get('bili_title') || fd.get('thumb_main').split('\n')[0], desc: fd.get('bili_desc') || "由一键发布台自动合成投递。", copyright: fd.get('bili_copyright'), season_id: fd.get('bili_season_id'), tid: fd.get('bili_tid'), no_reprint: document.querySelector('input[name="bili_no_reprint"]').checked ? 1 : 0, tags: fd.get('bili_tags').split(',').map(t => t.trim()).filter(t => t) }
+            };
+            try {
+                btn.disabled = true; btn.innerHTML = '正在提交...';
+                const res = await fetch(`${API_BASE}/publisher/submit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const data = await res.json();
+                if (data.success) { currentTaskId = data.task_id; startPolling(data.task_id); btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane mr-2"></i> 提交新任务'; loadHistory(); }
+                else { alert('提交失败'); btn.disabled = false; btn.innerHTML = '重新提交'; }
+            } catch (e) { alert('连接失败'); btn.disabled = false; btn.innerHTML = '重新提交'; }
+        });
+
+        function startPolling(taskId) {
+            document.getElementById('statusCard').classList.remove('hidden'); startTime = Date.now();
+            pollInterval = setInterval(async () => {
+                const res = await fetch(`${API_BASE}/publisher/task/${taskId}`);
+                const json = await res.json();
+                if (json.success) updateUI(json.data);
+            }, 2000);
+        }
+
+        function updateUI(task) {
+            const progress = document.getElementById('progressBar'), timer = document.getElementById('timerText'), badge = document.getElementById('statusBadge'), step = document.getElementById('stepDisplay');
+            progress.style.width = `${task.progress}%`;
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            timer.innerText = `${Math.floor(elapsed/60).toString().padStart(2, '0')}:${(elapsed%60).toString().padStart(2, '0')}`;
+            if (task.status === 'completed' || task.status === 'failed') {
+                clearInterval(pollInterval); document.getElementById('resultArea').classList.remove('hidden');
+                document.getElementById('successMsg').innerText = task.status === 'completed' ? '发布成功！' : '发布失败: ' + task.error_message;
+                loadHistory();
+            } else { const map = { 'synthesis': '🎬 正在合成视频...', 'thumbnail': '🎨 正在生成封面...', 'upload': '🚀 正在上传B站...' }; step.innerText = map[task.current_step] || '处理中...'; }
+        }
+
+        loadPresets(); initBiliTids(); checkBiliStatus(); loadHistory();
+    </script>
+</body>
+</html>

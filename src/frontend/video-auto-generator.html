@@ -35,35 +35,61 @@
                         class="w-full p-3 border border-slate-300 rounded-xl focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition-all text-slate-700">
                 </div>
 
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                     
-                    <!-- 1. 视频 A -->
+                    <!-- 1. 视频 A (片头) -->
                     <div class="group relative">
-                        <label class="block text-sm font-bold text-slate-700 mb-2">Step 1: 基础视频 (Video A)</label>
-                        <div class="border-2 border-dashed border-slate-300 rounded-xl p-6 text-center hover:border-blue-500 hover:bg-blue-50 transition-colors cursor-pointer relative" id="drop-video">
+                        <label class="block text-sm font-bold text-slate-700 mb-2">Step 1: 片头视频 (Video A)</label>
+                        <div class="border-2 border-dashed border-slate-300 rounded-xl p-4 text-center hover:border-blue-500 hover:bg-blue-50 transition-colors cursor-pointer relative h-40 flex flex-col justify-center items-center" id="drop-video">
                             <input type="file" name="video" accept="video/*" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onchange="previewFile(this, 'preview-video-icon', 'preview-video-text')">
-                            <i class="fas fa-film text-4xl text-slate-300 mb-3 group-hover:text-blue-500" id="preview-video-icon"></i>
-                            <p class="text-xs text-slate-500 truncate px-2" id="preview-video-text">点击或拖拽上传视频</p>
+                            <i class="fas fa-film text-3xl text-slate-300 mb-2 group-hover:text-blue-500" id="preview-video-icon"></i>
+                            <p class="text-xs text-slate-500 truncate px-2 w-full" id="preview-video-text">点击上传片头视频</p>
                         </div>
                     </div>
 
-                    <!-- 2. 图片 -->
+                    <!-- 2. 插播 C (可选) -->
                     <div class="group relative">
-                        <label class="block text-sm font-bold text-slate-700 mb-2">Step 2: 补充画面 (Image)</label>
-                        <div class="border-2 border-dashed border-slate-300 rounded-xl p-6 text-center hover:border-purple-500 hover:bg-purple-50 transition-colors cursor-pointer relative" id="drop-image">
+                        <label class="block text-sm font-bold text-slate-700 mb-2">Step 2: 插播片段 (可选)</label>
+                        <div class="border-2 border-dashed border-slate-300 rounded-xl p-2 text-center hover:border-orange-500 hover:bg-orange-50 transition-colors relative h-40 flex flex-col justify-between">
+                            
+                            <!-- Video C Input -->
+                            <div class="relative h-1/2 w-full border-b border-dashed border-slate-200 flex flex-col justify-center items-center cursor-pointer">
+                                <input type="file" name="video_c" accept="video/*" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onchange="previewFile(this, 'preview-videoc-icon', 'preview-videoc-text')">
+                                <div class="flex items-center gap-2">
+                                    <i class="fas fa-video text-slate-300 group-hover:text-orange-500" id="preview-videoc-icon"></i>
+                                    <span class="text-xs text-slate-500 truncate max-w-[100px]" id="preview-videoc-text">上传插播画面</span>
+                                </div>
+                            </div>
+
+                            <!-- Audio C Input -->
+                            <div class="relative h-1/2 w-full flex flex-col justify-center items-center cursor-pointer">
+                                <input type="file" name="audio_c" accept="audio/*" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onchange="previewFile(this, 'preview-audioc-icon', 'preview-audioc-text')">
+                                <div class="flex items-center gap-2">
+                                    <i class="fas fa-microphone text-slate-300 group-hover:text-orange-500" id="preview-audioc-icon"></i>
+                                    <span class="text-xs text-slate-500 truncate max-w-[100px]" id="preview-audioc-text">上传插播音频</span>
+                                </div>
+                            </div>
+                            
+                        </div>
+                    </div>
+
+                    <!-- 3. 图片 (Video B 画面) -->
+                    <div class="group relative">
+                        <label class="block text-sm font-bold text-slate-700 mb-2">Step 3: 正文画面 (Image B)</label>
+                        <div class="border-2 border-dashed border-slate-300 rounded-xl p-4 text-center hover:border-purple-500 hover:bg-purple-50 transition-colors cursor-pointer relative h-40 flex flex-col justify-center items-center" id="drop-image">
                             <input type="file" name="image" accept="image/*" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onchange="previewFile(this, 'preview-image-icon', 'preview-image-text')">
-                            <i class="fas fa-image text-4xl text-slate-300 mb-3 group-hover:text-purple-500" id="preview-image-icon"></i>
-                            <p class="text-xs text-slate-500 truncate px-2" id="preview-image-text">点击或拖拽上传图片</p>
+                            <i class="fas fa-image text-3xl text-slate-300 mb-2 group-hover:text-purple-500" id="preview-image-icon"></i>
+                            <p class="text-xs text-slate-500 truncate px-2 w-full" id="preview-image-text">点击上传正文图片</p>
                         </div>
                     </div>
 
-                    <!-- 3. 音频 -->
+                    <!-- 4. 音频 (Video B 声音) -->
                     <div class="group relative">
-                        <label class="block text-sm font-bold text-slate-700 mb-2">Step 3: 配套音频 (Audio)</label>
-                        <div class="border-2 border-dashed border-slate-300 rounded-xl p-6 text-center hover:border-green-500 hover:bg-green-50 transition-colors cursor-pointer relative" id="drop-audio">
+                        <label class="block text-sm font-bold text-slate-700 mb-2">Step 4: 正文音频 (Audio B)</label>
+                        <div class="border-2 border-dashed border-slate-300 rounded-xl p-4 text-center hover:border-green-500 hover:bg-green-50 transition-colors cursor-pointer relative h-40 flex flex-col justify-center items-center" id="drop-audio">
                             <input type="file" name="audio" accept="audio/*" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onchange="previewFile(this, 'preview-audio-icon', 'preview-audio-text')">
-                            <i class="fas fa-music text-4xl text-slate-300 mb-3 group-hover:text-green-500" id="preview-audio-icon"></i>
-                            <p class="text-xs text-slate-500 truncate px-2" id="preview-audio-text">点击或拖拽上传音频</p>
+                            <i class="fas fa-music text-3xl text-slate-300 mb-2 group-hover:text-green-500" id="preview-audio-icon"></i>
+                            <p class="text-xs text-slate-500 truncate px-2 w-full" id="preview-audio-text">点击上传正文音频</p>
                         </div>
                     </div>
                 </div>
@@ -73,7 +99,7 @@
                     <div class="flex items-center justify-between">
                         <div class="flex items-center gap-2">
                             <i class="fas fa-scissors text-slate-400"></i>
-                            <span class="text-sm font-medium text-slate-700">音频截取：从第</span>
+                            <span class="text-sm font-medium text-slate-700">Step 4 音频截取：从第</span>
                         </div>
                         <div class="flex items-center gap-2">
                             <input type="number" name="audio_start" value="7" step="0.1" class="w-16 p-1 text-center border border-slate-300 rounded text-sm focus:border-blue-500 focus:outline-none">
@@ -83,7 +109,7 @@
                     <div class="flex items-center justify-between border-t md:border-t-0 md:border-l border-slate-200 pt-4 md:pt-0 md:pl-4">
                         <div class="flex items-center gap-2">
                             <i class="fas fa-step-backward text-slate-400"></i>
-                            <span class="text-sm font-medium text-slate-700">音频截取：末尾去掉</span>
+                            <span class="text-sm font-medium text-slate-700">Step 4 音频截取：末尾去掉</span>
                         </div>
                         <div class="flex items-center gap-2">
                             <input type="number" name="audio_end_offset" value="10" step="0.1" class="w-16 p-1 text-center border border-slate-300 rounded text-sm focus:border-blue-500 focus:outline-none">
@@ -169,9 +195,18 @@
             const video = form.video.files[0];
             const image = form.image.files[0];
             const audio = form.audio.files[0];
+            
+            // C 部分校验 (选填，但必须成对)
+            const videoC = form.video_c.files[0];
+            const audioC = form.audio_c.files[0];
 
             if (!video || !image || !audio) {
-                alert('请上传所有必要的文件（视频、图片、音频）');
+                alert('请上传 Step 1 (片头), Step 3 (正文画面), Step 4 (正文音频) 的必要文件');
+                return;
+            }
+            
+            if (!videoC && audioC) {
+                alert('Step 2 (插播片段) 如果上传了音频，必须同时也上传视频画面');
                 return;
             }
 

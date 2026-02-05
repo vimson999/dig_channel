@@ -8,6 +8,18 @@ YouTube频道数据追踪工具 - Flask应用主文件
 - 初始化数据库和其他服务
 """
 
+import os
+import sys
+from dotenv import load_dotenv
+
+# Ensure the backend directory is in sys.path
+backend_dir = os.path.dirname(os.path.abspath(__file__))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
+# Load environment variables from .env file
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env'))
+
 from flask import Flask
 from flask_cors import CORS
 from config import Config

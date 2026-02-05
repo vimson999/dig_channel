@@ -50,6 +50,8 @@ class SharedNavigation {
             return 'thumbnail-generator-classic';
         } else if (filename === 'video-auto-generator.html') {
             return 'video-auto-generator';
+        } else if (filename === 'publisher.html') {
+            return 'publisher';
         }
         return 'dashboard';
     }
@@ -71,7 +73,8 @@ class SharedNavigation {
             'gemini-test': 'Gemini AI 测试台',
             'thumbnail-generator': '研报封面生成器',
             'thumbnail-generator-classic': '经典研报封面生成器',
-            'video-auto-generator': 'AI 视频自动生成'
+            'video-auto-generator': 'AI 视频自动生成',
+            'publisher': '一键智能发布台'
         };
         return titles[this.currentPage] || '智能数据分析平台';
     }
@@ -192,10 +195,10 @@ class SharedNavigation {
                 href: 'index.html',
                 standalone: true
             },
-            // 内容管理
+            // 内容中心
             {
                 id: 'content',
-                name: '内容管理',
+                name: '内容中心',
                 icon: 'fas fa-video',
                 dropdown: true,
                 items: [
@@ -207,7 +210,7 @@ class SharedNavigation {
                     },
                     {
                         id: 'videos',
-                        name: '视频管理',
+                        name: '视频库',
                         icon: 'fas fa-play',
                         href: 'videos.html'
                     },
@@ -219,25 +222,25 @@ class SharedNavigation {
                     },
                     {
                         id: 'bilibili-publisher',
-                        name: 'B站发布',
+                        name: '发布工作台',
                         icon: 'fab fa-bilibili',
                         href: 'bilibili-publisher.html'
+                    },
+                    {
+                        id: 'publisher',
+                        name: '一键发布台',
+                        icon: 'fas fa-rocket',
+                        href: 'publisher.html'
                     }
                 ]
             },
-            // 趋势分析
+            // 洞察与商机
             {
                 id: 'analytics',
-                name: '趋势分析',
+                name: '洞察与商机',
                 icon: 'fas fa-chart-line',
                 dropdown: true,
                 items: [
-                    {
-                        id: 'trending-radar',
-                        name: '趋势雷达',
-                        icon: 'fas fa-radar-line',
-                        href: 'trending-radar.html'
-                    },
                     {
                         id: 'trending',
                         name: '爆款搜索',
@@ -245,44 +248,77 @@ class SharedNavigation {
                         href: 'trending.html'
                     },
                     {
+                        id: 'trending-radar',
+                        name: '趋势雷达',
+                        icon: 'fas fa-radar-line',
+                        href: 'trending-radar.html'
+                    },
+                    {
                         id: 'indie-navigator',
-                        name: '商机发现',
+                        name: '独立领航员',
                         icon: 'fas fa-compass',
                         href: 'indie-navigator.html'
                     },
                 ]
             },
-            // 工具箱
+            // 创意工坊 (新核心生产力)
             {
-                id: 'tools',
-                name: '工具箱',
-                icon: 'fas fa-tools',
+                id: 'creative',
+                name: '创意工坊',
+                icon: 'fas fa-paint-brush',
                 dropdown: true,
                 items: [
                     {
-                        id: 'document-converter',
-                        name: '文档转换',
-                        icon: 'fas fa-file-exchange',
-                        href: 'document-converter.html'
+                        id: 'thumbnail-generator-classic',
+                        name: '经典研报封面 (V7)',
+                        icon: 'fas fa-file-image',
+                        href: 'thumbnail-generator-classic.html'
+                    },
+                    {
+                        id: 'thumbnail-generator',
+                        name: '通用封面生成 (V6)',
+                        icon: 'fas fa-image',
+                        href: 'thumbnail-generator.html'
+                    },
+                    {
+                        id: 'video-auto-generator',
+                        name: 'AI 视频合成',
+                        icon: 'fas fa-film',
+                        href: 'video-auto-generator.html'
                     },
                     {
                         id: 'tts',
-                        name: '语音合成',
+                        name: '语音合成 (TTS)',
                         icon: 'fas fa-microphone',
                         href: 'tts.html'
                     },
                     {
-                        id: 'mhtml-pdf',
-                        name: 'MHTML转PDF',
-                        icon: 'fas fa-file-pdf',
-                        href: 'mhtml-pdf.html'
+                        id: 'document-converter',
+                        name: '文档转换器',
+                        icon: 'fas fa-file-exchange',
+                        href: 'document-converter.html'
                     },
                     {
                         id: 'watermark',
-                        name: 'PDF去水印',
+                        name: 'PDF 工具箱',
                         icon: 'fas fa-tint',
                         href: 'watermark.html'
                     },
+                    {
+                        id: 'mhtml-pdf',
+                        name: 'MHTML 转 PDF',
+                        icon: 'fas fa-file-pdf',
+                        href: 'mhtml-pdf.html'
+                    }
+                ]
+            },
+            // 更多工具
+            {
+                id: 'tools',
+                name: '更多工具',
+                icon: 'fas fa-toolbox',
+                dropdown: true,
+                items: [
                     {
                         id: 'student-id-generator',
                         name: '学生证生成',
@@ -290,26 +326,8 @@ class SharedNavigation {
                         href: 'student-id-generator.html'
                     },
                     {
-                        id: 'thumbnail-generator',
-                        name: '封面生成器 (v6)',
-                        icon: 'fas fa-image',
-                        href: 'thumbnail-generator.html'
-                    },
-                    {
-                        id: 'thumbnail-generator-classic',
-                        name: '经典封面 (v7)',
-                        icon: 'fas fa-file-image',
-                        href: 'thumbnail-generator-classic.html'
-                    },
-                    {
-                        id: 'video-auto-generator',
-                        name: '视频自动生成',
-                        icon: 'fas fa-video',
-                        href: 'video-auto-generator.html'
-                    },
-                    {
                         id: 'gemini-test',
-                        name: 'Gemini测试',
+                        name: 'Gemini 调试',
                         icon: 'fas fa-robot',
                         href: 'gemini-test.html'
                     }

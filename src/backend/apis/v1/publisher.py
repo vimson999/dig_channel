@@ -1,0 +1,70 @@
+from flask import Blueprint, request, jsonify
+from models.task import PublicationTask
+from models import db
+import logging
+
+bp = Blueprint('publisher', __name__, url_prefix='/api/v1/publisher')
+logger = logging.getLogger(__name__)
+
+@bp.route('/submit', methods=['POST'])
+def submit_task():
+    """
+    Submit a new publication task.
+    """
+    # 延迟导入以避免循环依赖
+    from tasks.publisher import run_publication_pipeline
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON'}), 400
+            
+        # Validation could be added here
+        
+        # Create DB Task
+        task = PublicationTask(params=data)
+        db.session.add(task)
+        db.session.commit()
+        
+        # Trigger Celery Task
+        celery_task = run_publication_pipeline.delay(task.id)
+        
+        # Update DB with Celery ID
+        task.celery_task_id = celery_task.id
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Task submitted',
+            'task_id': task.id,
+            'celery_id': celery_task.id
+        })
+
+    except Exception as e:
+        logger.error(f"Submit task failed: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+@bp.route('/task/<task_id>', methods=['GET'])
+def get_task_status(task_id):
+    """
+    Get status of a specific task.
+    """
+    task = PublicationTask.query.get(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+        
+    return jsonify({
+        'success': True,
+        'data': task.to_dict()
+    })
+
+@bp.route('/tasks', methods=['GET'])
+def list_tasks():
+    """
+    List recent tasks (pagination could be added).
+    """
+    tasks = PublicationTask.query.order_by(PublicationTask.created_at.desc()).limit(20).all()
+    return jsonify({
+        'success': True,
+        'data': [t.to_dict() for t in tasks]
+    })

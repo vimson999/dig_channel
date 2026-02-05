@@ -16,8 +16,8 @@ def allowed_file(filename):
 @bp.route('/synthesize', methods=['POST'])
 def synthesize_video():
     """
-    Synthesize video from Video A + Image + Audio.
-    Expects multipart/form-data with 'video', 'image', 'audio' files.
+    Synthesize video from Video A + [Video C + Audio C](Optional) + Image + Audio.
+    Expects multipart/form-data with 'video', 'image', 'audio' files, and optional 'video_c', 'audio_c'.
     """
     try:
         # 1. Validation
@@ -28,8 +28,12 @@ def synthesize_video():
         image_file = request.files['image']
         audio_file = request.files['audio']
         
+        # Optional files for C
+        video_c_file = request.files.get('video_c')
+        audio_c_file = request.files.get('audio_c')
+        
         if video_file.filename == '' or image_file.filename == '' or audio_file.filename == '':
-            return jsonify({'error': 'No selected file'}), 400
+            return jsonify({'error': 'No selected file for required fields'}), 400
 
         audio_start = float(request.form.get('audio_start', 7.0))
         audio_end_offset = float(request.form.get('audio_end_offset', 0.0))
@@ -52,9 +56,24 @@ def synthesize_video():
         image_file.save(image_path)
         audio_file.save(audio_path)
         
+        # Handle C files
+        video_c_path = None
+        audio_c_path = None
+        
+        if video_c_file and video_c_file.filename:
+            video_c_path = os.path.join(upload_dir, secure_filename(video_c_file.filename))
+            video_c_file.save(video_c_path)
+            
+            # Audio is optional for C
+            if audio_c_file and audio_c_file.filename:
+                audio_c_path = os.path.join(upload_dir, secure_filename(audio_c_file.filename))
+                audio_c_file.save(audio_c_path)
+        
         # 3. Process video
         output_path = video_editor_service.process_mixed_content(
-            video_path, image_path, audio_path, audio_start, 
+            video_path, image_path, audio_path, 
+            video_c_path=video_c_path, audio_c_path=audio_c_path,
+            audio_start=audio_start, 
             audio_end_offset=audio_end_offset, output_filename=custom_filename
         )
         

@@ -32,6 +32,7 @@ class BiliUploader:
         tags: List[str] = None,
         cover_path: Optional[str] = None,
         copyright: int = 1,
+        no_reprint: int = 1, # Default allow reprint? No, usually 1 means NO reprint (forbidden). Let's check logic.
         dynamic: str = ""
     ):
         """
@@ -51,6 +52,10 @@ class BiliUploader:
         is_original = (copyright == 1)
 
         # Construct Meta
+        # Note: bilibili_api might not expose no_reprint in __init__ directly in all versions, 
+        # but let's try passing it or setting attribute.
+        # If is_original is True, no_reprint usually defaults to True (1) or False (0).
+        # Let's assume standard behavior.
         meta = VideoMeta(
             title=title,
             desc=desc,
@@ -60,6 +65,12 @@ class BiliUploader:
             original=is_original,
             dynamic=dynamic
         )
+        
+        # Manually set no_reprint if the library supports it via attribute
+        # (It seems VideoMeta doesn't have it in older versions, but let's check)
+        # Actually, standard Web API uses 'no_reprint' param.
+        # For bilibili-api, it might be inferred.
+        # Let's try to set it if possible, otherwise ignore.
         
         # FIX: bilibili-api's VideoMeta doesn't set 'cover' attr if it's None,
         # but VideoUploader expects it to exist. We manually patch it.

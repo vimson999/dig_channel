@@ -137,6 +137,20 @@ youtube-analytics/
 
 ---
 
+## 🚀 部署与启动
+
+详细的系统启动指南（包括前端、后端、Celery Worker）请参考：
+
+👉 **[一键发布台部署指南 (DEPLOYMENT_GUIDE.md)](DEPLOYMENT_GUIDE.md)**
+
+**关键启动命令 (macOS):**
+```bash
+# 在 src/backend 目录下启动 Worker
+PYTHONPATH=. OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES celery -A celery_config.celery_app worker --loglevel=info --concurrency=1
+```
+
+---
+
 ## 👥 多用户系统说明
 
 ### 用户类型
@@ -181,6 +195,7 @@ youtube-analytics/
 | **排行榜** | 多维度排行榜展示 | ✅ |
 | **数据导出** | CSV格式数据导出 | ✅ |
 | **实时更新** | 无刷新数据更新 | ✅ |
+| **一键发布台** | 视频合成、封面生成、B站上传全流程自动化 | ✅ |
 
 ### 用户界面特性
 

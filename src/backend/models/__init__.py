@@ -9,6 +9,7 @@ from .channel_data import ChannelData
 from .video import Video, VideoData
 from .favorite import FavoriteVideo
 from .indie_navigator import OpportunitySignal, UserOpportunityInteraction, CollectionKeyword, CollectionJob
+from .task import PublicationTask
 
 __all__ = [
     'db',
@@ -21,5 +22,6 @@ __all__ = [
     'OpportunitySignal',
     'UserOpportunityInteraction',
     'CollectionKeyword',
-    'CollectionJob'
+    'CollectionJob',
+    'PublicationTask'
 ]

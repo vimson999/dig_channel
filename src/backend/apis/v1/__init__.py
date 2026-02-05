@@ -65,6 +65,18 @@ def register_blueprints(app):
     from .video_editor import bp as video_editor_bp
     app.register_blueprint(video_editor_bp)
 
+    # 注册研报封面生成 API (新增)
+    from .thumbnail import bp as thumbnail_bp
+    app.register_blueprint(thumbnail_bp)
+
+    # 注册一键发布 API (新增)
+    from .publisher import bp as publisher_bp
+    app.register_blueprint(publisher_bp)
+
+    # 注册资源管理 API (新增)
+    from .resources import bp as resources_bp
+    app.register_blueprint(resources_bp)
+
 __all__ = [
     'auth_bp',
     'channels_bp',

@@ -139,3 +139,9 @@ node_modules/
 *.temp
 .tmp/
 .temp/venv-3.11/
+
+# Project Data
+data/generated_thumbnails/
+data/processed/
+data/uploads/
+.gemini/
