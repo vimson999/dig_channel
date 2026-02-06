@@ -86,3 +86,6 @@ pydub==0.25.1
 Pillow==10.1.0
 PyMuPDF>=1.22.0
 opencv-python-headless>=4.8.0
+
+# 视频处理
+moviepy==2.2.1

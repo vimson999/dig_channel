@@ -15,6 +15,8 @@ from models import db
 from services.video_editor import video_editor_service
 from services.thumbnail_service import thumbnail_service
 from services.bilibili.uploader import BiliUploader
+from services.youtube.uploader import YouTubeUploader
+from services.config_service import ConfigService
 from config import get_config
 
 logger = logging.getLogger(__name__)
@@ -107,12 +109,12 @@ def run_publication_pipeline(self, task_id):
             logger.info(f"Task {task_id}: Uploading to Bilibili...")
             bili_params = params.get('bilibili', {})
             
-            config = get_config()
+            # 从数据库读取 B 站凭证
             uploader = BiliUploader(
-                sessdata=config.BILI_SESSDATA,
-                bili_jct=config.BILI_BILI_JCT,
-                buvid3=config.BILI_BUVID3,
-                dedeuserid=config.BILI_DEDEUSERID
+                sessdata=ConfigService.get('sessdata', 'bilibili_auth'),
+                bili_jct=ConfigService.get('bili_jct', 'bilibili_auth'),
+                buvid3=ConfigService.get('buvid3', 'bilibili_auth'),
+                dedeuserid=ConfigService.get('dedeuserid', 'bilibili_auth')
             )
             
             async def _do_upload():
@@ -131,6 +133,33 @@ def run_publication_pipeline(self, task_id):
             upload_result = asyncio.run(_do_upload())
             
             task.result['bilibili_result'] = upload_result
+            db.session.commit()
+
+            # --- Step 4: YouTube Upload ---
+            yt_params = params.get('youtube', {})
+            if yt_params:
+                task.current_step = 'upload_youtube'
+                db.session.commit()
+                
+                logger.info(f"Task {task_id}: Uploading to YouTube...")
+                try:
+                    yt_uploader = YouTubeUploader()
+                    yt_response = yt_uploader.upload_video(
+                        video_path=final_video_path,
+                        title=yt_params.get('title', bili_params.get('title')), # Fallback to Bili title
+                        description=yt_params.get('desc', bili_params.get('desc', '')),
+                        tags=yt_params.get('tags', bili_params.get('tags', [])),
+                        category_id=yt_params.get('category_id', '22'),
+                        privacy_status=yt_params.get('privacy', 'private'),
+                        thumbnail_path=final_cover_path
+                    )
+                    task.result['youtube_result'] = yt_response
+                except Exception as ye:
+                    logger.error(f"YouTube upload failed for task {task_id}: {ye}")
+                    task.result['youtube_error'] = str(ye)
+                
+                db.session.commit()
+
             task.status = 'completed'
             task.current_step = 'done'
             task.progress = 100

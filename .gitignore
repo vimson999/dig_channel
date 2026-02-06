@@ -145,3 +145,6 @@ data/generated_thumbnails/
 data/processed/
 data/uploads/
 .gemini/
+*.safetensors
+youtube_token.pickle
+client_secrets.json

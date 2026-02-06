@@ -56,6 +56,10 @@ def create_app(config_class=Config):
     from models import db
     db.init_app(app)
     
+    # 初始化迁移工具
+    from flask_migrate import Migrate
+    migrate = Migrate(app, db)
+    
     # 初始化CORS
     cors.init_app(app, 
                  origins=["*"], 

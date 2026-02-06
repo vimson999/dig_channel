@@ -232,6 +232,60 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- 4. YouTube -->
+                    <div class="glass-card">
+                        <div class="flex justify-between items-center mb-5">
+                            <div class="section-title mb-0">
+                                <div class="w-8 h-8 bg-red-100 text-red-600 rounded-lg flex items-center justify-center">
+                                    <i class="fab fa-youtube"></i>
+                                </div>
+                                4. 渠道发布 (YouTube)
+                            </div>
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <span class="text-xs text-slate-500">开启同步</span>
+                                <input type="checkbox" name="yt_enabled" id="yt_enabled" class="w-4 h-4 text-red-600 rounded border-gray-300 focus:ring-red-500">
+                            </label>
+                        </div>
+
+                        <div id="yt_config_area" class="space-y-4 opacity-50 pointer-events-none transition-opacity">
+                            <div class="input-group">
+                                <label class="input-label">YouTube 标题</label>
+                                <input type="text" name="yt_title" id="yt_title" class="input-field" placeholder="留空则同步 B 站标题">
+                            </div>
+                            
+                            <div class="input-group">
+                                <label class="input-label">YouTube 简介</label>
+                                <textarea name="yt_desc" id="yt_desc" class="input-field" rows="3" placeholder="填写 YouTube 视频简介..."></textarea>
+                            </div>
+                            
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label class="input-label">隐私设置</label>
+                                    <select name="yt_privacy" class="input-field">
+                                        <option value="private" selected>私有 (Private)</option>
+                                        <option value="unlisted">不列出 (Unlisted)</option>
+                                        <option value="public">公开 (Public)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="input-label">分类 (Category ID)</label>
+                                    <select name="yt_category" class="input-field">
+                                        <option value="22" selected>People & Blogs</option>
+                                        <option value="27">Education</option>
+                                        <option value="25">News & Politics</option>
+                                        <option value="28">Science & Technology</option>
+                                        <option value="1">Film & Animation</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="input-group">
+                                <label class="input-label">视频标签 (逗号分隔)</label>
+                                <input type="text" name="yt_tags" class="input-field" value="Finance, Investment, Macro, Economics">
+                            </div>
+                        </div>
+                    </div>
                     <div class="h-12"></div>
                 </form>
             </div>
@@ -422,6 +476,27 @@
             } catch (e) { console.error(e); }
         }
 
+        loadHistory();
+
+        // YouTube Toggle
+        document.getElementById('yt_enabled').addEventListener('change', (e) => {
+            const area = document.getElementById('yt_config_area');
+            if (e.target.checked) {
+                area.classList.remove('opacity-50', 'pointer-events-none');
+                
+                // 自动同步 B 站内容到 YouTube (如果 YouTube 还是空的)
+                const ytTitle = document.getElementById('yt_title');
+                const ytDesc = document.getElementById('yt_desc');
+                const biliTitle = document.getElementById('bili_title').value || document.getElementById('thumb_main').value.split('\n')[0];
+                const biliDesc = document.querySelector('textarea[name="bili_desc"]').value;
+                
+                if (!ytTitle.value) ytTitle.value = biliTitle;
+                if (!ytDesc.value) ytDesc.value = biliDesc;
+            } else {
+                area.classList.add('opacity-50', 'pointer-events-none');
+            }
+        });
+
         async function handleUpload(input, type) {
             const file = input.files[0]; if (!file) return;
             const area = document.getElementById(`area-${type}`), spinner = document.getElementById(`spin-${type}`), hiddenInput = document.getElementById(`val-${type}`);
@@ -443,6 +518,17 @@
                 thumbnail: { main_title: fd.get('thumb_main'), sub_title: fd.get('thumb_sub'), tag_text: fd.get('thumb_tag'), date_text: fd.get('thumb_date'), bg_index: fd.get('thumb_bg_index'), layout: 'left' },
                 bilibili: { title: fd.get('bili_title') || fd.get('thumb_main').split('\n')[0], desc: fd.get('bili_desc') || "由一键发布台自动合成投递。", copyright: fd.get('bili_copyright'), season_id: fd.get('bili_season_id'), tid: fd.get('bili_tid'), no_reprint: document.querySelector('input[name="bili_no_reprint"]').checked ? 1 : 0, tags: fd.get('bili_tags').split(',').map(t => t.trim()).filter(t => t) }
             };
+            
+            if (document.getElementById('yt_enabled').checked) {
+                payload.youtube = {
+                    title: fd.get('yt_title') || payload.bilibili.title,
+                    desc: fd.get('yt_desc') || payload.bilibili.desc,
+                    privacy: fd.get('yt_privacy'),
+                    category_id: fd.get('yt_category'),
+                    tags: fd.get('yt_tags').split(',').map(t => t.trim()).filter(t => t)
+                };
+            }
+
             try {
                 btn.disabled = true; btn.innerHTML = '正在提交...';
                 const res = await fetch(`${API_BASE}/publisher/submit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -470,7 +556,7 @@
                 clearInterval(pollInterval); document.getElementById('resultArea').classList.remove('hidden');
                 document.getElementById('successMsg').innerText = task.status === 'completed' ? '发布成功！' : '发布失败: ' + task.error_message;
                 loadHistory();
-            } else { const map = { 'synthesis': '🎬 正在合成视频...', 'thumbnail': '🎨 正在生成封面...', 'upload': '🚀 正在上传B站...' }; step.innerText = map[task.current_step] || '处理中...'; }
+            } else { const map = { 'synthesis': '🎬 正在合成视频...', 'thumbnail': '🎨 正在生成封面...', 'upload': '🚀 正在上传B站...', 'upload_youtube': '📺 正在上传YouTube...' }; step.innerText = map[task.current_step] || '处理中...'; }
         }
 
         loadPresets(); initBiliTids(); checkBiliStatus(); loadHistory();

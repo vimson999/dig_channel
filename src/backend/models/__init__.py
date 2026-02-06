@@ -10,18 +10,17 @@ from .video import Video, VideoData
 from .favorite import FavoriteVideo
 from .indie_navigator import OpportunitySignal, UserOpportunityInteraction, CollectionKeyword, CollectionJob
 from .task import PublicationTask
+from .system_config import SystemConfig
 
 __all__ = [
-    'db',
-    'User',
-    'Channel',
-    'ChannelData',
-    'Video',
-    'VideoData',
-    'FavoriteVideo',
+    'db', 
+    'User', 
+    'Channel', 
+    'ChannelData', 
+    'Video', 
+    'VideoData', 
+    'FavoriteVideo', 
     'OpportunitySignal',
-    'UserOpportunityInteraction',
-    'CollectionKeyword',
-    'CollectionJob',
-    'PublicationTask'
+    'PublicationTask',
+    'SystemConfig'
 ]
