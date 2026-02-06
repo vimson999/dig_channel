@@ -97,10 +97,19 @@ class BiliUploader:
             logger.debug(f"Bilibili Upload MSG: {data}")
             
         logger.info(f"Starting Bilibili upload for {title}...")
-        try:
-            result = await uploader.start()
-            logger.info(f"Bilibili upload successful for {title}! Result: {result}")
-            return result
-        except Exception as e:
-            logger.error(f"Bilibili upload failed for {title}: {e}")
-            raise
+        
+        # Retry logic for network stability
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                result = await uploader.start()
+                logger.info(f"Bilibili upload successful for {title}! Result: {result}")
+                return result
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 5
+                    logger.warning(f"Upload attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"Bilibili upload failed for {title} after {max_retries} attempts: {e}")
+                    raise
