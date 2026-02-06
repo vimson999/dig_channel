@@ -362,13 +362,51 @@
                         if (task.status === 'completed') { statusColor = 'text-emerald-500'; icon = 'fa-check-circle'; }
                         if (task.status === 'failed') { statusColor = 'text-red-500'; icon = 'fa-times-circle'; }
                         if (task.status === 'processing') { statusColor = 'text-blue-500'; icon = 'fa-spinner fa-spin'; }
-                        return `<div class="history-item flex justify-between items-center" onclick="trackTask('${task.id}')"><div><div class="font-mono text-xs text-slate-500">ID: ${task.id.split('-')[0].toUpperCase()}</div><div class="text-xs text-slate-400">${date}</div></div><div class="${statusColor} text-sm"><i class="fas ${icon}"></i></div></div>`;
-                    }).join('');
-                } else { list.innerHTML = '<div class="text-center text-slate-400 py-4 text-xs">暂无历史任务</div>'; }
-            } catch (e) { console.error(e); }
-        }
-
-        function trackTask(taskId) { currentTaskId = taskId; startPolling(taskId); }
+                                                                        return `
+                                                                        <div class="history-item flex justify-between items-center group">
+                                                                            <div class="min-w-0 pr-2 flex-1" onclick="trackTask('${task.id}')">
+                                                                                <div class="font-bold text-slate-700 truncate" title="${task.title}">${task.title}</div>
+                                                                                <div class="text-xs text-slate-400 flex gap-2">
+                                                                                    <span class="font-mono">${date}</span>
+                                                                                    <span class="bg-slate-100 px-1 rounded text-slate-500">ID:${task.id.split('-')[0]}</span>
+                                                                                </div>
+                                                                            </div>
+                                                                            <div class="flex items-center gap-3">
+                                                                                <div class="${statusColor} text-sm flex-shrink-0"><i class="fas ${icon}"></i></div>
+                                                                                <button onclick="retryTask('${task.id}', event)" class="text-slate-400 hover:text-blue-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="重新投递">
+                                                                                    <i class="fas fa-rotate-right"></i>
+                                                                                </button>
+                                                                            </div>
+                                                                        </div>
+                                                                        `;
+                                                                    }).join('');
+                                                                } else {
+                                                                    list.innerHTML = '<div class="text-center text-slate-400 py-4 text-xs">暂无历史任务</div>';
+                                                                }
+                                                            } catch (e) { console.error(e); }
+                                                        }
+                                                
+                                                        async function retryTask(taskId, event) {
+                                                            if(event) event.stopPropagation(); // Prevent triggering trackTask
+                                                            if(!confirm('确定要使用相同参数重新投递此任务吗？')) return;
+                                                            
+                                                            try {
+                                                                const res = await fetch(`${API_BASE}/publisher/retry/${taskId}`, { method: 'POST' });
+                                                                const json = await res.json();
+                                                                if(json.success) {
+                                                                    currentTaskId = json.task_id;
+                                                                    startPolling(json.task_id);
+                                                                    loadHistory();
+                                                                    alert('已重新提交任务！');
+                                                                } else {
+                                                                    alert('重试失败: ' + json.error);
+                                                                }
+                                                            } catch(e) {
+                                                                alert('网络错误');
+                                                            }
+                                                        }
+                                                
+                                                        function trackTask(taskId) { currentTaskId = taskId; startPolling(taskId); }
 
         const canvas = document.getElementById('previewCanvas'), ctx = canvas.getContext('2d'), images = { bg: new Image() };
         let bgData = [];

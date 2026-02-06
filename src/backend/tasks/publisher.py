@@ -27,6 +27,15 @@ def to_abs_path(rel_path):
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     return os.path.join(base_dir, rel_path)
 
+def sanitize_filename(name):
+    """Sanitize filename to keep Chinese characters but remove illegal fs chars."""
+    import re
+    # Remove / \ : * ? " < > |
+    name = re.sub(r'[\\/*?:"<>|]', "", name)
+    # Replace spaces with underscores
+    name = name.replace(" ", "_")
+    return name.strip()
+
 @celery_app.task(bind=True)
 def run_publication_pipeline(self, task_id):
     """
@@ -42,6 +51,20 @@ def run_publication_pipeline(self, task_id):
             return
 
         try:
+            # --- Prepare Naming ---
+            params = task.params
+            bili_params = params.get('bilibili', {})
+            thumb_params = params.get('thumbnail', {})
+            
+            # Determine base filename from Title -> Main Title -> Task ID
+            raw_title = bili_params.get('title') or thumb_params.get('main_title', '').split('\n')[0]
+            if raw_title:
+                base_name = sanitize_filename(raw_title)
+                # Add short task_id suffix to ensure uniqueness if title repeats
+                base_name = f"{base_name}_{task_id[:6]}"
+            else:
+                base_name = f"pub_{task_id}"
+
             # --- Step 1: Synthesis ---
             task.status = 'processing'
             task.current_step = 'synthesis'
@@ -49,7 +72,6 @@ def run_publication_pipeline(self, task_id):
             db.session.commit()
             
             logger.info(f"Task {task_id}: Starting video synthesis...")
-            params = task.params
             
             # Extract and Absolute-ify Video Params
             vid_params = params.get('video', {})
@@ -71,7 +93,7 @@ def run_publication_pipeline(self, task_id):
                 audio_c_path=audio_c_path,
                 audio_start=audio_start,
                 audio_end_offset=audio_end_offset,
-                output_filename=f"pub_{task_id}.mp4"
+                output_filename=f"{base_name}.mp4"
             )
             
             task.result = task.result or {}
@@ -84,7 +106,6 @@ def run_publication_pipeline(self, task_id):
             db.session.commit()
             
             logger.info(f"Task {task_id}: Generating thumbnail...")
-            thumb_params = params.get('thumbnail', {})
             
             final_cover_path = thumbnail_service.generate_thumbnail(
                 main_title=thumb_params.get('main_title'),
@@ -93,7 +114,7 @@ def run_publication_pipeline(self, task_id):
                 tag_text=thumb_params.get('tag_text'),
                 bg_preset_index=int(thumb_params.get('bg_index', 0)),
                 layout=thumb_params.get('layout', 'center'),
-                output_filename=f"pub_cover_{task_id}.jpg"
+                output_filename=f"{base_name}.jpg"
             )
             
             task.result['cover_path'] = final_cover_path

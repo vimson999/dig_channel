@@ -44,6 +44,40 @@ def submit_task():
         logger.error(f"Submit task failed: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
+@bp.route('/retry/<task_id>', methods=['POST'])
+def retry_task(task_id):
+    """
+    Retry an existing task by creating a new one with same params.
+    """
+    from tasks.publisher import run_publication_pipeline
+    
+    try:
+        original_task = PublicationTask.query.get(task_id)
+        if not original_task:
+            return jsonify({'error': 'Task not found'}), 404
+            
+        # Create new task with same params
+        new_task = PublicationTask(params=original_task.params)
+        db.session.add(new_task)
+        db.session.commit()
+        
+        # Trigger Celery
+        celery_task = run_publication_pipeline.delay(new_task.id)
+        
+        new_task.celery_task_id = celery_task.id
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Task retried successfully',
+            'task_id': new_task.id,
+            'celery_id': celery_task.id
+        })
+        
+    except Exception as e:
+        logger.error(f"Retry task failed: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
 @bp.route('/task/<task_id>', methods=['GET'])
 def get_task_status(task_id):
     """

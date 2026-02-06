@@ -33,8 +33,18 @@ class PublicationTask(db.Model):
     completed_at = db.Column(db.DateTime, nullable=True)
 
     def to_dict(self):
+        # Extract a human-readable title
+        title = "未命名任务"
+        if self.params:
+            if isinstance(self.params, dict):
+                title = self.params.get('bilibili', {}).get('title')
+                if not title:
+                    main_title = self.params.get('thumbnail', {}).get('main_title', '')
+                    title = main_title.split('\n')[0] if main_title else "未命名任务"
+        
         return {
             'id': self.id,
+            'title': title, # Added title
             'celery_task_id': self.celery_task_id,
             'status': self.status,
             'current_step': self.current_step,
