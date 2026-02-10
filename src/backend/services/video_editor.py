@@ -37,7 +37,7 @@ class VideoEditorService:
         )
         return VideoFileClip(temp_path)
 
-    def process_mixed_content(self, video_file, image_file, audio_file, video_c_path=None, audio_c_path=None, audio_start=7.0, audio_end_offset=0.0, output_filename=None):
+    def process_mixed_content(self, video_file, image_file, audio_file, video_c_path=None, audio_c_path=None, audio_start=7.0, audio_end_offset=10.0, output_filename=None):
         """
         Synthesize a video using intermediate rendering for stability.
         """
