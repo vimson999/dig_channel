@@ -7,7 +7,7 @@
     
     <!-- 引入通用库 -->
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700;900&amp;display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -96,7 +96,7 @@
                                 <input type="hidden" name="audio_path" id="val-audio">
                                 <i class="fas fa-microphone text-3xl text-slate-300 mb-3" id="icon-audio"></i>
                                 <div class="text-center">
-                                    <p class="text-sm font-bold text-slate-600" id="label-audio">Step 4: 正文音频</p>
+                                    <p class="text-sm font-bold text-slate-600" id="label-audio">Step 4: 音频解说</p>
                                     <p class="text-xs text-slate-400 mt-1" id="sub-audio">点击或拖拽上传</p>
                                 </div>
                                 <div id="spin-audio" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-green-500 text-xl"></i></div>
@@ -121,7 +121,7 @@
                             </div>
                             <div class="input-group mb-0">
                                 <label class="input-label">结束偏移 (秒)</label>
-                                <input type="number" name="audio_end_offset" class="input-field" value="0.0" step="0.1">
+                                <input type="number" name="audio_end_offset" class="input-field" value="10.0" step="0.1">
                             </div>
                         </div>
                     </div>
@@ -333,7 +333,6 @@
 
         async function checkBiliStatus() {
             const el = document.getElementById('bili-status-badge');
-            el.classList.remove('hidden');
             try {
                 const res = await fetch(`${API_BASE}/bilibili/status`);
                 const json = await res.json();
@@ -362,53 +361,47 @@
                         if (task.status === 'completed') { statusColor = 'text-emerald-500'; icon = 'fa-check-circle'; }
                         if (task.status === 'failed') { statusColor = 'text-red-500'; icon = 'fa-times-circle'; }
                         if (task.status === 'processing') { statusColor = 'text-blue-500'; icon = 'fa-spinner fa-spin'; }
-                                                                        return `
-                                                                        <div class="history-item flex justify-between items-center group">
-                                                                            <div class="min-w-0 pr-2 flex-1" onclick="trackTask('${task.id}')">
-                                                                                <div class="font-bold text-slate-700 truncate" title="${task.title}">${task.title}</div>
-                                                                                <div class="text-xs text-slate-400 flex gap-2">
-                                                                                    <span class="font-mono">${date}</span>
-                                                                                    <span class="bg-slate-100 px-1 rounded text-slate-500">ID:${task.id.split('-')[0]}</span>
-                                                                                </div>
-                                                                            </div>
-                                                                            <div class="flex items-center gap-3">
-                                                                                <div class="${statusColor} text-sm flex-shrink-0"><i class="fas ${icon}"></i></div>
-                                                                                <button onclick="retryTask('${task.id}', event)" class="text-slate-400 hover:text-blue-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="重新投递">
-                                                                                    <i class="fas fa-rotate-right"></i>
-                                                                                </button>
-                                                                            </div>
-                                                                        </div>
-                                                                        `;
-                                                                    }).join('');
-                                                                } else {
-                                                                    list.innerHTML = '<div class="text-center text-slate-400 py-4 text-xs">暂无历史任务</div>';
-                                                                }
-                                                            } catch (e) { console.error(e); }
-                                                        }
-                                                
-                                                        async function retryTask(taskId, event) {
-                                                            if(event) event.stopPropagation(); // Prevent triggering trackTask
-                                                            if(!confirm('确定要使用相同参数重新投递此任务吗？')) return;
-                                                            
-                                                            try {
-                                                                const res = await fetch(`${API_BASE}/publisher/retry/${taskId}`, { method: 'POST' });
-                                                                const json = await res.json();
-                                                                if(json.success) {
-                                                                    currentTaskId = json.task_id;
-                                                                    startPolling(json.task_id);
-                                                                    loadHistory();
-                                                                    alert('已重新提交任务！');
-                                                                } else {
-                                                                    alert('重试失败: ' + json.error);
-                                                                }
-                                                            } catch(e) {
-                                                                alert('网络错误');
-                                                            }
-                                                        }
-                                                
-                                                        function trackTask(taskId) { currentTaskId = taskId; startPolling(taskId); }
+                        
+                        return `
+                        <div class="history-item flex justify-between items-center group">
+                            <div class="min-w-0 pr-2 flex-1" onclick="trackTask('${task.id}')">
+                                <div class="font-bold text-slate-700 truncate" title="${task.title}">${task.title}</div>
+                                <div class="text-xs text-slate-400 flex gap-2">
+                                    <span class="font-mono">${date}</span>
+                                    <span class="bg-slate-100 px-1 rounded text-slate-500">ID:${task.id.split('-')[0]}</span>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <div class="${statusColor} text-sm flex-shrink-0"><i class="fas ${icon}"></i></div>
+                                <button onclick="retryTask('${task.id}', event)" class="text-slate-400 hover:text-blue-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="重新投递">
+                                    <i class="fas fa-rotate-right"></i>
+                                </button>
+                            </div>
+                        </div>
+                        `;
+                    }).join('');
+                } else {
+                    list.innerHTML = '<div class="text-center text-slate-400 py-4 text-xs">暂无历史任务</div>';
+                }
+            } catch (e) { console.error(e); }
+        }
 
-        const canvas = document.getElementById('previewCanvas'), ctx = canvas.getContext('2d'), images = { bg: new Image() };
+        async function retryTask(taskId, event) {
+            if(event) event.stopPropagation();
+            if(!confirm('确定要使用相同参数重新投递此任务吗？')) return;
+            try {
+                const res = await fetch(`${API_BASE}/publisher/retry/${taskId}`, { method: 'POST' });
+                const json = await res.json();
+                if(json.success) { currentTaskId = json.task_id; startPolling(json.task_id); loadHistory(); alert('已重新提交任务！'); } else { alert('重试失败: ' + json.error); }
+            } catch(e) { alert('网络错误'); }
+        }
+
+        function trackTask(taskId) { currentTaskId = taskId; startPolling(taskId); }
+
+        // --- Canvas ---
+        const canvas = document.getElementById('previewCanvas');
+        const ctx = canvas.getContext('2d');
+        const images = { bg: new Image() };
         let bgData = [];
         const THEME = { main: '#002D72', sub: '#FFD700', tag: '#002D72', date: '#ffffff', stroke: 'rgba(255,255,255,1.0)', bg: '#f0f4f8' };
 
@@ -474,24 +467,33 @@
 
         document.getElementById('submitBtn').addEventListener('click', async () => {
             const btn = document.getElementById('submitBtn'), form = document.getElementById('publishForm'), fd = new FormData(form);
-            // 视频 Video A 是可选的，只有 Audio B 和 Image B 是必须的
             if (!fd.get('audio_path') || !fd.get('image_path')) { alert('请先上传必要的正文素材 (音频 + 图片)'); return; }
             const payload = {
                 video: { video_path: fd.get('video_path'), audio_path: fd.get('audio_path'), image_path: fd.get('image_path'), audio_start: fd.get('audio_start'), audio_end_offset: fd.get('audio_end_offset') },
                 thumbnail: { main_title: fd.get('thumb_main'), sub_title: fd.get('thumb_sub'), tag_text: fd.get('thumb_tag'), date_text: fd.get('thumb_date'), bg_index: fd.get('thumb_bg_index'), layout: 'left' },
-                bilibili: { title: fd.get('bili_title') || fd.get('thumb_main').split('\n')[0], desc: fd.get('bili_desc') || "由一键发布台自动合成投递。", copyright: fd.get('bili_copyright'), season_id: fd.get('bili_season_id'), tid: fd.get('bili_tid'), no_reprint: document.querySelector('input[name="bili_no_reprint"]').checked ? 1 : 0, tags: fd.get('bili_tags').split(',').map(t => t.trim()).filter(t => t) }
+                bilibili: {
+                    title: (function() {
+                        const explicitTitle = fd.get('bili_title');
+                        if (explicitTitle) return explicitTitle;
+                        const mainLines = fd.get('thumb_main').split('\n').map(l => l.trim()).filter(l => l);
+                        const subText = fd.get('thumb_sub').trim();
+                        const combinedParts = [...mainLines];
+                        if (subText) combinedParts.push(subText);
+                        return combinedParts.join(' | ');
+                    })(),
+                    desc: fd.get('bili_desc') || "由一键发布台自动合成投递。", copyright: fd.get('bili_copyright'), season_id: fd.get('bili_season_id'), tid: fd.get('bili_tid'), no_reprint: document.querySelector('input[name="bili_no_reprint"]').checked ? 1 : 0, tags: fd.get('bili_tags').split(',').map(t => t.trim()).filter(t => t) }
             };
             try {
                 btn.disabled = true; btn.innerHTML = '正在提交...';
                 const res = await fetch(`${API_BASE}/publisher/submit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                 const data = await res.json();
-                if (data.success) { currentTaskId = data.task_id; startPolling(data.task_id); btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane mr-2"></i> 提交新任务'; loadHistory(); }
-                else { alert('提交失败'); btn.disabled = false; btn.innerHTML = '重新提交'; }
+                if (data.success) { currentTaskId = data.task_id; startPolling(data.task_id); btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane mr-2"></i> 提交新任务'; loadHistory(); } else { alert('提交失败'); btn.disabled = false; btn.innerHTML = '重新提交'; }
             } catch (e) { alert('连接失败'); btn.disabled = false; btn.innerHTML = '重新提交'; }
         });
 
         function startPolling(taskId) {
             document.getElementById('statusCard').classList.remove('hidden'); startTime = Date.now();
+            if (pollInterval) clearInterval(pollInterval);
             pollInterval = setInterval(async () => {
                 const res = await fetch(`${API_BASE}/publisher/task/${taskId}`);
                 const json = await res.json();
@@ -500,15 +502,16 @@
         }
 
         function updateUI(task) {
-            const progress = document.getElementById('progressBar'), timer = document.getElementById('timerText'), badge = document.getElementById('statusBadge'), step = document.getElementById('stepDisplay');
+            const progress = document.getElementById('progressBar'), timer = document.getElementById('timerText');
             progress.style.width = `${task.progress}%`;
             const elapsed = Math.floor((Date.now() - startTime) / 1000);
             timer.innerText = `${Math.floor(elapsed/60).toString().padStart(2, '0')}:${(elapsed%60).toString().padStart(2, '0')}`;
             if (task.status === 'completed' || task.status === 'failed') {
-                clearInterval(pollInterval); document.getElementById('resultArea').classList.remove('hidden');
+                clearInterval(pollInterval);
+                document.getElementById('resultArea').classList.remove('hidden');
                 document.getElementById('successMsg').innerText = task.status === 'completed' ? '发布成功！' : '发布失败: ' + task.error_message;
                 loadHistory();
-            } else { const map = { 'synthesis': '🎬 正在合成视频...', 'thumbnail': '🎨 正在生成封面...', 'upload': '🚀 正在上传B站...' }; step.innerText = map[task.current_step] || '处理中...'; }
+            } else { const map = { 'synthesis': '🎬 正在合成视频...', 'thumbnail': '🎨 正在生成封面...', 'upload': '🚀 正在上传B站...' }; document.getElementById('stepDisplay').innerText = map[task.current_step] || '处理中...'; }
         }
 
         loadPresets(); initBiliTids(); checkBiliStatus(); loadHistory();

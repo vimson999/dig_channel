@@ -56,8 +56,16 @@ def run_publication_pipeline(self, task_id):
             bili_params = params.get('bilibili', {})
             thumb_params = params.get('thumbnail', {})
             
-            # Determine base filename from Title -> Main Title -> Task ID
-            raw_title = bili_params.get('title') or thumb_params.get('main_title', '').split('\n')[0]
+            # Determine base filename from Title -> (Main Title lines + Sub Title) -> Task ID
+            raw_title = bili_params.get('title')
+            if not raw_title:
+                # 自动合成逻辑：主标题各行 + 副标题
+                main_lines = [l.strip() for l in thumb_params.get('main_title', '').split('\n') if l.strip()]
+                sub_text = thumb_params.get('sub_title', '').strip()
+                if sub_text:
+                    main_lines.append(sub_text)
+                raw_title = " | ".join(main_lines) if main_lines else ""
+
             if raw_title:
                 base_name = sanitize_filename(raw_title)
                 # Add short task_id suffix to ensure uniqueness if title repeats
@@ -82,7 +90,7 @@ def run_publication_pipeline(self, task_id):
             audio_c_path = to_abs_path(vid_params.get('audio_c_path'))
             
             audio_start = float(vid_params.get('audio_start', 7.0))
-            audio_end_offset = float(vid_params.get('audio_end_offset', 0.0))
+            audio_end_offset = float(vid_params.get('audio_end_offset', 10.0))
             
             # Synthesis
             final_video_path = video_editor_service.process_mixed_content(

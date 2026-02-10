@@ -40,7 +40,13 @@ class PublicationTask(db.Model):
                 title = self.params.get('bilibili', {}).get('title')
                 if not title:
                     main_title = self.params.get('thumbnail', {}).get('main_title', '')
-                    title = main_title.split('\n')[0] if main_title else "未命名任务"
+                    sub_title = self.params.get('thumbnail', {}).get('sub_title', '')
+                    
+                    parts = [l.strip() for l in main_title.split('\n') if l.strip()]
+                    if sub_title.strip():
+                        parts.append(sub_title.strip())
+                    
+                    title = " | ".join(parts) if parts else "未命名任务"
         
         return {
             'id': self.id,
