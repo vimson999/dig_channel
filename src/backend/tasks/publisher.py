@@ -106,30 +106,35 @@ def run_publication_pipeline(self, task_id):
                 output_filename=f"{base_name}.mp4"
             )
             
-            task.result = task.result or {}
-            task.result['video_path'] = final_video_path
+            task.result = {**(task.result or {}), 'video_path': final_video_path}
             task.progress = 50
             db.session.commit()
 
             # --- Step 2: Thumbnail ---
-            task.current_step = 'thumbnail'
-            db.session.commit()
-            
-            logger.info(f"Task {task_id}: Generating thumbnail...")
-            
-            final_cover_path = thumbnail_service.generate_thumbnail(
-                main_title=thumb_params.get('main_title'),
-                sub_title=thumb_params.get('sub_title'),
-                date_text=thumb_params.get('date_text'),
-                tag_text=thumb_params.get('tag_text'),
-                bg_preset_index=int(thumb_params.get('bg_index', 0)),
-                layout=thumb_params.get('layout', 'center'),
-                output_filename=f"{base_name}.jpg"
-            )
-            
-            task.result['cover_path'] = final_cover_path
-            task.progress = 70
-            db.session.commit()
+            final_cover_path = None
+            if thumb_params:
+                task.current_step = 'thumbnail'
+                db.session.commit()
+                
+                logger.info(f"Task {task_id}: Generating thumbnail...")
+                
+                final_cover_path = thumbnail_service.generate_thumbnail(
+                    main_title=thumb_params.get('main_title'),
+                    sub_title=thumb_params.get('sub_title'),
+                    date_text=thumb_params.get('date_text'),
+                    tag_text=thumb_params.get('tag_text'),
+                    bg_preset_index=int(thumb_params.get('bg_index', 0)),
+                    layout=thumb_params.get('layout', 'center'),
+                    output_filename=f"{base_name}.jpg"
+                )
+                
+                task.result = {**(task.result or {}), 'cover_path': final_cover_path}
+                task.progress = 70
+                db.session.commit()
+            else:
+                logger.info(f"Task {task_id}: Skipping thumbnail generation (disabled by user).")
+                task.progress = 70
+                db.session.commit()
 
             # --- Step 3: Upload ---
             task.current_step = 'upload'
@@ -161,7 +166,7 @@ def run_publication_pipeline(self, task_id):
             
             upload_result = asyncio.run(_do_upload())
             
-            task.result['bilibili_result'] = upload_result
+            task.result = {**(task.result or {}), 'bilibili_result': upload_result}
             db.session.commit()
 
             # --- Step 4: YouTube Upload ---
@@ -182,10 +187,10 @@ def run_publication_pipeline(self, task_id):
                         privacy_status=yt_params.get('privacy', 'private'),
                         thumbnail_path=final_cover_path
                     )
-                    task.result['youtube_result'] = yt_response
+                    task.result = {**(task.result or {}), 'youtube_result': yt_response}
                 except Exception as ye:
-                    logger.error(f"YouTube upload failed for task {task_id}: {ye}")
-                    task.result['youtube_error'] = str(ye)
+                    logger.error(f"YouTube upload failed for task {task_id}: {ye}", exc_info=True)
+                    task.result = {**(task.result or {}), 'youtube_error': str(ye)}
                 
                 db.session.commit()
 
@@ -201,4 +206,65 @@ def run_publication_pipeline(self, task_id):
             logger.error(f"Task {task_id} failed: {e}", exc_info=True)
             task.status = 'failed'
             task.error_message = str(e)
+            db.session.commit()
+
+@celery_app.task(bind=True)
+def run_youtube_upload_only(self, task_id):
+    """
+    Supplements an existing task by uploading its already-synthesized video to YouTube.
+    """
+    from app import create_app
+    app = create_app()
+    
+    with app.app_context():
+        task = PublicationTask.query.get(task_id)
+        if not task:
+            logger.error(f"Task {task_id} not found")
+            return
+
+        # Check if we have the necessary files
+        video_path = task.result.get('video_path')
+        if not video_path or not os.path.exists(video_path):
+            logger.error(f"Cannot supplement YouTube: Video file missing at {video_path}")
+            task.error_message = "无法补发：找不到原始视频文件"
+            db.session.commit()
+            return
+
+        try:
+            task.status = 'processing'
+            task.current_step = 'upload_youtube'
+            db.session.commit()
+
+            params = task.params
+            yt_params = params.get('youtube') or {}
+            bili_params = params.get('bilibili') or {}
+            final_cover_path = task.result.get('cover_path')
+
+            logger.info(f"Task {task_id}: Supplementing YouTube upload...")
+            
+            yt_uploader = YouTubeUploader()
+            yt_response = yt_uploader.upload_video(
+                video_path=video_path,
+                title=yt_params.get('title') or bili_params.get('title'),
+                description=yt_params.get('desc') or bili_params.get('desc', ''),
+                tags=yt_params.get('tags') or bili_params.get('tags', []),
+                category_id=yt_params.get('category_id', '22'),
+                privacy_status=yt_params.get('privacy', 'private'),
+                thumbnail_path=final_cover_path
+            )
+            
+            task.result = {**(task.result or {}), 'youtube_result': yt_response}
+            task.status = 'completed'
+            task.current_step = 'done'
+            task.progress = 100
+            db.session.commit()
+            logger.info(f"Task {task_id}: YouTube supplement successful.")
+
+        except Exception as e:
+            logger.error(f"YouTube supplement failed for task {task_id}: {e}", exc_info=True)
+            # Don't mark the whole task as failed if it was previously completed, 
+            # just record the error in result
+            task.result = {**(task.result or {}), 'youtube_error': str(e)}
+            task.status = 'completed' # Keep as completed since Bili was done
+            task.current_step = 'done'
             db.session.commit()

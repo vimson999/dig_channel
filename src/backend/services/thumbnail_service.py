@@ -53,7 +53,8 @@ ORGANIZATIONS = [
     {'name': 'Nomura · 野村证券', 'color': '#EF3340'},
     {'name': 'Bank of America · 美国银行', 'color': '#0061AA'}, # Added
     {'name': 'Deutsche Bank · 德意志银行', 'color': '#0018A8'},  # Added
-    {'name': 'Bernstein · 伯恩斯坦', 'color': '#002C77'}  # Added
+    {'name': 'Bernstein · 伯恩斯坦', 'color': '#002C77'},  # Added
+    {'name': '新闻速读', 'color': '#E60000'}
 ]
 
 class ThumbnailService:

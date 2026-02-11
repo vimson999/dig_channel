@@ -5,6 +5,7 @@ from pathlib import Path
 
 from bilibili_api import Credential
 from bilibili_api.video_uploader import VideoUploader, VideoUploaderPage, VideoMeta
+from .utils import extract_cover
 
 logger = logging.getLogger("bilibili")
 
@@ -48,34 +49,41 @@ class BiliUploader:
             
         logger.info(f"Preparing Bilibili upload for: {title}")
 
+        # Bilibili title limit is 80 characters
+        if len(title) > 80:
+            logger.warning(f"Title too long ({len(title)} chars), truncating for Bilibili.")
+            title = title[:77] + "..."
+
+        # Bilibili description limit is 2000 characters
+        if desc and len(desc) > 2000:
+            logger.warning(f"Description too long ({len(desc)} chars), truncating for Bilibili.")
+            desc = desc[:1997] + "..."
+
         # Map copyright (1=Original, 2=Reprint) to VideoMeta 'original' (bool)
         is_original = (copyright == 1)
 
+        # Fallback for cover: if not provided, extract from video
+        # This avoids 'NoneType' or 'missing argument' errors in bilibili_api
+        actual_cover = cover_path
+        temp_cover_created = False
+        if not actual_cover:
+            try:
+                logger.info("No custom cover provided, extracting frame from video...")
+                actual_cover = await extract_cover(path_obj)
+                temp_cover_created = True
+            except Exception as e:
+                logger.warning(f"Failed to extract cover: {e}. Trying to continue without cover (may fail).")
+
         # Construct Meta
-        # Note: bilibili_api might not expose no_reprint in __init__ directly in all versions, 
-        # but let's try passing it or setting attribute.
-        # If is_original is True, no_reprint usually defaults to True (1) or False (0).
-        # Let's assume standard behavior.
         meta = VideoMeta(
             title=title,
             desc=desc,
             tid=tid,
             tags=tags,
-            cover=cover_path,
+            cover=actual_cover or "", # Ensure it's never None
             original=is_original,
             dynamic=dynamic
         )
-        
-        # Manually set no_reprint if the library supports it via attribute
-        # (It seems VideoMeta doesn't have it in older versions, but let's check)
-        # Actually, standard Web API uses 'no_reprint' param.
-        # For bilibili-api, it might be inferred.
-        # Let's try to set it if possible, otherwise ignore.
-        
-        # FIX: bilibili-api's VideoMeta doesn't set 'cover' attr if it's None,
-        # but VideoUploader expects it to exist. We manually patch it.
-        if not hasattr(meta, "cover"):
-            meta.cover = None
         
         # Construct Page
         page = VideoUploaderPage(
@@ -88,7 +96,7 @@ class BiliUploader:
             pages=[page],
             meta=meta,
             credential=self.credential,
-            cover=cover_path
+            cover=actual_cover or ""
         )
         
         # Add event listeners for logging

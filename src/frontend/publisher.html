@@ -135,10 +135,16 @@
                                 </div>
                                 2. 封面工坊 (所见即所得)
                             </div>
-                            <span class="text-xs text-pink-500 bg-pink-50 px-2 py-1 rounded-full font-medium">实时渲染中</span>
+                            <div class="flex items-center gap-3">
+                                <label class="flex items-center gap-2 cursor-pointer">
+                                    <span class="text-xs text-slate-500">启用自定义封面</span>
+                                    <input type="checkbox" name="thumb_enabled" id="thumb_enabled" class="w-4 h-4 text-pink-600 rounded border-gray-300 focus:ring-pink-500" checked>
+                                </label>
+                                <span class="text-[10px] text-pink-500 bg-pink-50 px-2 py-0.5 rounded-full font-medium">实时渲染</span>
+                            </div>
                         </div>
 
-                        <div class="flex flex-col xl:flex-row gap-6">
+                        <div id="thumb_config_area" class="flex flex-col xl:flex-row gap-6 transition-opacity duration-300">
                             <div class="flex-1 space-y-4">
                                 <div class="input-group">
                                     <label class="input-label">主标题 (Main Title)</label>
@@ -188,13 +194,19 @@
 
                         <div class="space-y-4">
                             <div class="input-group">
-                                <label class="input-label">视频标题</label>
-                                <input type="text" name="bili_title" id="bili_title" class="input-field" placeholder="留空则自动抓取主标题第一行">
+                                <div class="flex justify-between items-center mb-1">
+                                    <label class="input-label mb-0">视频标题</label>
+                                    <span id="bili_title_counter" class="text-[10px] text-slate-400">0/80</span>
+                                </div>
+                                <input type="text" name="bili_title" id="bili_title" class="input-field" maxlength="80" placeholder="留空则自动抓取主标题第一行" oninput="updateCounter('bili_title', 80)">
                             </div>
                             
                             <div class="input-group">
-                                <label class="input-label">视频简介</label>
-                                <textarea name="bili_desc" class="input-field" rows="3" placeholder="填写视频简介..."></textarea>
+                                <div class="flex justify-between items-center mb-1">
+                                    <label class="input-label mb-0">视频简介</label>
+                                    <span id="bili_desc_counter" class="text-[10px] text-slate-400">0/2000</span>
+                                </div>
+                                <textarea name="bili_desc" id="bili_desc" class="input-field" rows="3" maxlength="2000" placeholder="填写视频简介..." oninput="updateCounter('bili_desc', 2000)"></textarea>
                             </div>
                             
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -210,8 +222,10 @@
                                     <select name="bili_tid" id="bili_tid" class="input-field"></select>
                                 </div>
                                 <div>
-                                    <label class="input-label">合集 ID (可选)</label>
-                                    <input type="number" name="bili_season_id" class="input-field" placeholder="Season ID">
+                                    <label class="input-label">合集 (可选)</label>
+                                    <select name="bili_season_id" id="bili_season_id" class="input-field">
+                                        <option value="">-- 请选择合集 --</option>
+                                    </select>
                                 </div>
                             </div>
 
@@ -250,22 +264,28 @@
 
                         <div id="yt_config_area" class="space-y-4 opacity-50 pointer-events-none transition-opacity">
                             <div class="input-group">
-                                <label class="input-label">YouTube 标题</label>
-                                <input type="text" name="yt_title" id="yt_title" class="input-field" placeholder="留空则同步 B 站标题">
+                                <div class="flex justify-between items-center mb-1">
+                                    <label class="input-label mb-0">YouTube 标题</label>
+                                    <span id="yt_title_counter" class="text-[10px] text-slate-400">0/100</span>
+                                </div>
+                                <input type="text" name="yt_title" id="yt_title" class="input-field" maxlength="100" placeholder="留空则同步 B 站标题" oninput="updateCounter('yt_title', 100)">
                             </div>
                             
                             <div class="input-group">
-                                <label class="input-label">YouTube 简介</label>
-                                <textarea name="yt_desc" id="yt_desc" class="input-field" rows="3" placeholder="填写 YouTube 视频简介..."></textarea>
+                                <div class="flex justify-between items-center mb-1">
+                                    <label class="input-label mb-0">YouTube 简介</label>
+                                    <span id="yt_desc_counter" class="text-[10px] text-slate-400">0/5000</span>
+                                </div>
+                                <textarea name="yt_desc" id="yt_desc" class="input-field" rows="3" maxlength="5000" placeholder="填写 YouTube 视频简介..." oninput="updateCounter('yt_desc', 5000)"></textarea>
                             </div>
                             
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div>
                                     <label class="input-label">隐私设置</label>
                                     <select name="yt_privacy" class="input-field">
-                                        <option value="private" selected>私有 (Private)</option>
+                                        <option value="public" selected>公开 (Public)</option>
                                         <option value="unlisted">不列出 (Unlisted)</option>
-                                        <option value="public">公开 (Public)</option>
+                                        <option value="private">私有 (Private)</option>
                                     </select>
                                 </div>
                                 <div>
@@ -394,12 +414,33 @@
                     const user = json.data.data;
                     el.className = "flex items-center gap-2 text-xs bg-emerald-50 px-3 py-1 rounded-full text-emerald-600 border border-emerald-100";
                     el.innerHTML = `<img src="${user.face}" class="w-4 h-4 rounded-full"> <span class="font-bold">${user.name}</span>`;
+                    
+                    // Fetch and init seasons
+                    initBiliSeasons();
                 } else {
                     el.className = "flex items-center gap-2 text-xs bg-red-50 px-3 py-1 rounded-full text-red-600 border border-red-100 cursor-pointer";
                     el.innerHTML = `<i class="fa-solid fa-circle-xmark"></i> <span>未连接 (点击配置)</span>`;
                     el.onclick = showBiliModal;
                 }
             } catch (e) { console.error(e); }
+        }
+
+        async function initBiliSeasons() {
+            const select = document.getElementById('bili_season_id');
+            try {
+                const res = await fetch(`${API_BASE}/bilibili/seasons`);
+                const json = await res.json();
+                if (json.success && json.data.length > 0) {
+                    // Clear existing except placeholder
+                    select.innerHTML = '<option value="">-- 请选择合集 --</option>';
+                    json.data.forEach(s => {
+                        const opt = document.createElement('option');
+                        opt.value = s.id;
+                        opt.textContent = s.title;
+                        select.appendChild(opt);
+                    });
+                }
+            } catch (e) { console.error('Failed to fetch Bili seasons:', e); }
         }
 
         async function loadHistory() {
@@ -416,6 +457,9 @@
                         if (task.status === 'failed') { statusColor = 'text-red-500'; icon = 'fa-times-circle'; }
                         if (task.status === 'processing') { statusColor = 'text-blue-500'; icon = 'fa-spinner fa-spin'; }
                         
+                        // Show YT button if Bili completed but YT missing
+                        const showYTBtn = task.status === 'completed' && (!task.result || !task.result.youtube_result);
+
                         return `
                         <div class="history-item flex justify-between items-center group">
                             <div class="min-w-0 pr-2 flex-1" onclick="trackTask('${task.id}')">
@@ -425,9 +469,16 @@
                                     <span class="bg-slate-100 px-1 rounded text-slate-500">ID:${task.id.split('-')[0]}</span>
                                 </div>
                             </div>
-                            <div class="flex items-center gap-3">
+                            <div class="flex items-center gap-2">
                                 <div class="${statusColor} text-sm flex-shrink-0"><i class="fas ${icon}"></i></div>
-                                <button onclick="retryTask('${task.id}', event)" class="text-slate-400 hover:text-blue-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="重新投递">
+                                
+                                ${showYTBtn ? `
+                                <button onclick="postToYouTube('${task.id}', event)" class="text-slate-400 hover:text-red-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="仅补发 YouTube">
+                                    <i class="fab fa-youtube"></i>
+                                </button>
+                                ` : ''}
+
+                                <button onclick="retryTask('${task.id}', event)" class="text-slate-400 hover:text-blue-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="全部重试 (重新合成)">
                                     <i class="fas fa-rotate-right"></i>
                                 </button>
                             </div>
@@ -442,7 +493,7 @@
 
         async function retryTask(taskId, event) {
             if(event) event.stopPropagation();
-            if(!confirm('确定要使用相同参数重新投递此任务吗？')) return;
+            if(!confirm('确定要使用相同参数重新投递此任务吗？\n(这会重新合成视频并投递到所有已勾选渠道)')) return;
             try {
                 const res = await fetch(`${API_BASE}/publisher/retry/${taskId}`, { method: 'POST' });
                 const json = await res.json();
@@ -450,7 +501,36 @@
             } catch(e) { alert('网络错误'); }
         }
 
+        async function postToYouTube(taskId, event) {
+            if(event) event.stopPropagation();
+            if(!confirm('确定要直接投递现有的视频到 YouTube 吗？\n(不会重新烧制视频)')) return;
+            try {
+                const res = await fetch(`${API_BASE}/publisher/post-youtube/${taskId}`, { method: 'POST' });
+                const json = await res.json();
+                if(json.success) { currentTaskId = taskId; startPolling(taskId); loadHistory(); } else { alert('补发失败: ' + json.error); }
+            } catch(e) { alert('网络错误'); }
+        }
+
         function trackTask(taskId) { currentTaskId = taskId; startPolling(taskId); }
+
+        function updateCounter(id, max) {
+            const el = document.getElementById(id);
+            const counter = document.getElementById(id + '_counter');
+            if (el && counter) {
+                const len = el.value.length;
+                counter.innerText = `${len}/${max}`;
+                if (len >= max) {
+                    counter.classList.remove('text-slate-400');
+                    counter.classList.add('text-red-500', 'font-bold');
+                } else if (len >= max * 0.8) {
+                    counter.classList.remove('text-slate-400', 'text-red-500');
+                    counter.classList.add('text-amber-500');
+                } else {
+                    counter.classList.remove('text-red-500', 'text-amber-500', 'font-bold');
+                    counter.classList.add('text-slate-400');
+                }
+            }
+        }
 
         // --- Canvas ---
         const canvas = document.getElementById('previewCanvas');
@@ -509,6 +589,16 @@
 
         loadHistory();
 
+        // Thumbnail Toggle
+        document.getElementById('thumb_enabled').addEventListener('change', (e) => {
+            const area = document.getElementById('thumb_config_area');
+            if (e.target.checked) {
+                area.classList.remove('opacity-40', 'pointer-events-none');
+            } else {
+                area.classList.add('opacity-40', 'pointer-events-none');
+            }
+        });
+
         // YouTube Toggle
         document.getElementById('yt_enabled').addEventListener('change', (e) => {
             const area = document.getElementById('yt_config_area');
@@ -521,8 +611,14 @@
                 const biliTitle = document.getElementById('bili_title').value || document.getElementById('thumb_main').value.split('\n')[0];
                 const biliDesc = document.querySelector('textarea[name="bili_desc"]').value;
                 
-                if (!ytTitle.value) ytTitle.value = biliTitle;
-                if (!ytDesc.value) ytDesc.value = biliDesc;
+                if (!ytTitle.value) {
+                    ytTitle.value = biliTitle;
+                    updateCounter('yt_title', 100);
+                }
+                if (!ytDesc.value) {
+                    ytDesc.value = biliDesc;
+                    updateCounter('yt_desc', 5000);
+                }
             } else {
                 area.classList.add('opacity-50', 'pointer-events-none');
             }
@@ -543,9 +639,10 @@
         document.getElementById('submitBtn').addEventListener('click', async () => {
             const btn = document.getElementById('submitBtn'), form = document.getElementById('publishForm'), fd = new FormData(form);
             if (!fd.get('audio_path') || !fd.get('image_path')) { alert('请先上传必要的正文素材 (音频 + 图片)'); return; }
+            
+            const thumbEnabled = document.getElementById('thumb_enabled').checked;
             const payload = {
                 video: { video_path: fd.get('video_path'), audio_path: fd.get('audio_path'), image_path: fd.get('image_path'), audio_start: fd.get('audio_start'), audio_end_offset: fd.get('audio_end_offset') },
-                thumbnail: { main_title: fd.get('thumb_main'), sub_title: fd.get('thumb_sub'), tag_text: fd.get('thumb_tag'), date_text: fd.get('thumb_date'), bg_index: fd.get('thumb_bg_index'), layout: 'left' },
                 bilibili: {
                     title: (function() {
                         const explicitTitle = fd.get('bili_title');
@@ -558,6 +655,17 @@
                     })(),
                     desc: fd.get('bili_desc') || "由一键发布台自动合成投递。", copyright: fd.get('bili_copyright'), season_id: fd.get('bili_season_id'), tid: fd.get('bili_tid'), no_reprint: document.querySelector('input[name="bili_no_reprint"]').checked ? 1 : 0, tags: fd.get('bili_tags').split(',').map(t => t.trim()).filter(t => t) }
             };
+
+            if (thumbEnabled) {
+                payload.thumbnail = { 
+                    main_title: fd.get('thumb_main'), 
+                    sub_title: fd.get('thumb_sub'), 
+                    tag_text: fd.get('thumb_tag'), 
+                    date_text: fd.get('thumb_date'), 
+                    bg_index: fd.get('thumb_bg_index'), 
+                    layout: 'left' 
+                };
+            }
             
             if (document.getElementById('yt_enabled').checked) {
                 payload.youtube = {

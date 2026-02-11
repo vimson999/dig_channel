@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 
 from .bilibili import BiliUploader, load_metadata, extract_cover
 from config.base import BaseConfig
+from services.config_service import ConfigService
 
 logger = logging.getLogger("bilibili")
 
@@ -31,10 +32,10 @@ class BilibiliSyncService:
             
         # Initialize Uploader
         self.uploader = BiliUploader(
-            sessdata=self.config.BILI_SESSDATA,
-            bili_jct=self.config.BILI_BILI_JCT,
-            buvid3=self.config.BILI_BUVID3,
-            dedeuserid=self.config.BILI_DEDEUSERID
+            sessdata=ConfigService.get('sessdata', 'bilibili_auth'),
+            bili_jct=ConfigService.get('bili_jct', 'bilibili_auth'),
+            buvid3=ConfigService.get('buvid3', 'bilibili_auth'),
+            dedeuserid=ConfigService.get('dedeuserid', 'bilibili_auth')
         )
 
     async def process_video(self, video_path: Path):

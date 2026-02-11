@@ -8,6 +8,7 @@ from services.bilibili_sync_service import BilibiliSyncService
 from services.bilibili import load_metadata, save_metadata, BiliVideoMetadata
 from bilibili_api import user, Credential
 from werkzeug.utils import secure_filename
+from utils.redis_client import cache_response
 
 bp = Blueprint('bilibili', __name__, url_prefix='/api/v1/bilibili')
 logger = logging.getLogger("bilibili")
@@ -73,6 +74,40 @@ def get_status():
 
     try:
         result = run_async(_check())
+        return jsonify({'success': True, 'data': result})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@bp.route('/seasons', methods=['GET'])
+@cache_response(timeout=3600, key_prefix="bili_seasons")
+def get_seasons():
+    """Fetch Bilibili collections (seasons) for the user."""
+    service = get_bili_service()
+    
+    async def _fetch():
+        try:
+            cred = service.uploader.credential
+            if not (cred.sessdata and cred.bili_jct):
+                 return []
+            
+            u = user.User(credential=cred, uid=int(os.environ.get('BILI_DEDEUSERID', 0)))
+            channels = await u.get_channels()
+            
+            seasons = []
+            for c in channels:
+                meta = c.meta
+                seasons.append({
+                    'id': meta.get('season_id'),
+                    'title': meta.get('title'),
+                    'name': meta.get('name')
+                })
+            return seasons
+        except Exception as e:
+            logger.error(f"Failed to fetch seasons: {e}")
+            return []
+
+    try:
+        result = run_async(_fetch())
         return jsonify({'success': True, 'data': result})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
