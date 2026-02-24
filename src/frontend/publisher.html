@@ -161,8 +161,33 @@
                                         <input type="hidden" name="thumb_tag" id="val-tag" value="Goldman Sachs · 高盛研报">
                                     </div>
                                     <div class="input-group">
-                                        <label class="input-label">底图预设</label>
+                                        <label class="input-label">底图模式</label>
+                                        <select id="thumb_bg_mode" class="input-field" onchange="toggleBgMode()">
+                                            <option value="preset">底图预设</option>
+                                            <option value="screenshot">研报截图</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-2 gap-3">
+                                    <div id="preset_bg_area" class="input-group">
+                                        <label class="input-label">选择底图</label>
                                         <select name="thumb_bg_index" id="select-bg" class="input-field"></select>
+                                    </div>
+                                    <div id="screenshot_bg_area" class="input-group hidden">
+                                        <label class="input-label">上传截图</label>
+                                        <div class="upload-area h-10 flex items-center justify-center relative" id="area-thumb-bg">
+                                            <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'thumb-bg')">
+                                            <input type="hidden" name="custom_bg_path" id="val-thumb-bg">
+                                            <div class="flex items-center gap-2">
+                                                <i class="fas fa-upload text-xs text-slate-400"></i>
+                                                <span class="text-xs text-slate-500" id="label-thumb-bg">选择截图...</span>
+                                            </div>
+                                            <div id="spin-thumb-bg" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-blue-500 text-xs"></i></div>
+                                        </div>
+                                    </div>
+                                    <div class="input-group">
+                                        <label class="input-label">蒙层透明度</label>
+                                        <input type="range" name="overlay_opacity" id="overlay_opacity" min="0" max="1" step="0.1" value="0.5" class="w-full mt-2" oninput="draw()">
                                     </div>
                                 </div>
                                 <div class="input-group">
@@ -535,17 +560,48 @@
         // --- Canvas ---
         const canvas = document.getElementById('previewCanvas');
         const ctx = canvas.getContext('2d');
-        const images = { bg: new Image() };
+        const images = { bg: new Image(), custom: new Image() };
         let bgData = [];
         const THEME = { main: '#002D72', sub: '#FFD700', tag: '#002D72', date: '#ffffff', stroke: 'rgba(255,255,255,1.0)', bg: '#f0f4f8' };
 
+        function toggleBgMode() {
+            const mode = document.getElementById('thumb_bg_mode').value;
+            const presetArea = document.getElementById('preset_bg_area');
+            const screenshotArea = document.getElementById('screenshot_bg_area');
+            if (mode === 'preset') {
+                presetArea.classList.remove('hidden');
+                screenshotArea.classList.add('hidden');
+            } else {
+                presetArea.classList.add('hidden');
+                screenshotArea.classList.remove('hidden');
+            }
+            draw();
+        }
+
         function draw() {
             const w = canvas.width, h = canvas.height;
-            if (images.bg.complete && images.bg.naturalWidth !== 0) drawImageCover(ctx, images.bg, 0, 0, w, h);
-            else { ctx.fillStyle = THEME.bg; ctx.fillRect(0, 0, w, h); }
-            const maskGradient = ctx.createLinearGradient(0, 0, w * 0.6, 0);
-            maskGradient.addColorStop(0, `rgba(0, 15, 30, 0.4)`); maskGradient.addColorStop(1, `rgba(0, 15, 30, 0)`);
-            ctx.fillStyle = maskGradient; ctx.fillRect(0, 0, w, h);
+            const mode = document.getElementById('thumb_bg_mode').value;
+            
+            // Draw Background
+            if (mode === 'screenshot' && images.custom.src && images.custom.complete && images.custom.naturalWidth !== 0) {
+                drawImageCover(ctx, images.custom, 0, 0, w, h);
+                // Apply global overlay
+                const opacity = document.getElementById('overlay_opacity').value;
+                ctx.fillStyle = `rgba(0, 0, 0, ${opacity})`;
+                ctx.fillRect(0, 0, w, h);
+            } else if (images.bg.complete && images.bg.naturalWidth !== 0) {
+                drawImageCover(ctx, images.bg, 0, 0, w, h);
+            } else {
+                ctx.fillStyle = THEME.bg; ctx.fillRect(0, 0, w, h);
+            }
+
+            // Draw Gradient Mask (only for preset mode or if preferred)
+            if (mode === 'preset') {
+                const maskGradient = ctx.createLinearGradient(0, 0, w * 0.6, 0);
+                maskGradient.addColorStop(0, `rgba(0, 15, 30, 0.4)`); maskGradient.addColorStop(1, `rgba(0, 15, 30, 0)`);
+                ctx.fillStyle = maskGradient; ctx.fillRect(0, 0, w, h);
+            }
+
             let currentY = 180; const tagText = document.getElementById('val-tag').value;
             ctx.font = `900 30px "Noto Serif SC", serif`; const tm = ctx.measureText(tagText);
             ctx.save(); ctx.beginPath(); ctx.roundRect(120 - 24, currentY - 12, tm.width + 48, 30 + 24, 4); ctx.fillStyle = "#FFFFFF"; ctx.shadowColor = "rgba(0,0,0,0.2)"; ctx.shadowBlur = 10; ctx.fill(); ctx.restore();
@@ -632,7 +688,17 @@
             try {
                 const res = await fetch(`${API_BASE}/resources/upload`, { method: 'POST', body: fd });
                 const data = await res.json();
-                if (data.success) { area.classList.add('uploaded'); hiddenInput.value = data.path; }
+                if (data.success) { 
+                    area.classList.add('uploaded'); 
+                    hiddenInput.value = data.path;
+                    
+                    if (type === 'thumb-bg') {
+                        // For thumbnail background, update the custom image for preview
+                        images.custom.src = '/api/v1/resources/view?path=' + encodeURIComponent(data.path);
+                        images.custom.onload = draw;
+                        document.getElementById('label-thumb-bg').innerText = '已上传底图';
+                    }
+                }
             } catch (e) { console.error(e); } finally { spinner.classList.add('hidden'); }
         }
 
@@ -663,7 +729,9 @@
                     tag_text: fd.get('thumb_tag'), 
                     date_text: fd.get('thumb_date'), 
                     bg_index: fd.get('thumb_bg_index'), 
-                    layout: 'left' 
+                    layout: 'left',
+                    custom_bg_path: fd.get('custom_bg_path'),
+                    overlay_opacity: fd.get('overlay_opacity')
                 };
             }
             

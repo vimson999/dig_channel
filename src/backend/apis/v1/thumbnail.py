@@ -26,6 +26,8 @@ def generate_thumbnail():
         tag_text = data.get('tag_text', "")
         bg_preset_index = int(data.get('bg_preset_index', 0))
         layout = data.get('layout', 'left')
+        custom_bg_path = data.get('custom_bg_path')
+        overlay_opacity = float(data.get('overlay_opacity', 0.5))
         
         # Generate
         output_path = thumbnail_service.generate_thumbnail(
@@ -34,7 +36,9 @@ def generate_thumbnail():
             date_text=date_text,
             tag_text=tag_text,
             bg_preset_index=bg_preset_index,
-            layout=layout
+            layout=layout,
+            custom_bg_path=custom_bg_path,
+            overlay_opacity=overlay_opacity
         )
         
         filename = os.path.basename(output_path)

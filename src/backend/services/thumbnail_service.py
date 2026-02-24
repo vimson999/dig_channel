@@ -133,7 +133,9 @@ class ThumbnailService:
                           tag_text: str = "",
                           bg_preset_index: int = 0,
                           layout: str = 'left',
-                          output_filename: str = None) -> str:
+                          output_filename: str = None,
+                          custom_bg_path: str = None,
+                          overlay_opacity: float = 0.5) -> str:
         """
         Generate a thumbnail image.
         """
@@ -146,54 +148,63 @@ class ThumbnailService:
             theme_name = bg_config['config']['scheme']
             theme = PRESETS.get(theme_name, PRESETS['morgan'])
             
-            # Check 'default' subdirectory first, then root asset_dir
-            bg_path_default = os.path.join(self.asset_dir, 'default', bg_config['file'])
-            bg_path_root = os.path.join(self.asset_dir, bg_config['file'])
-            
-            if os.path.exists(bg_path_default):
-                bg_path = bg_path_default
-            elif os.path.exists(bg_path_root):
-                bg_path = bg_path_root
-            else:
-                logger.warning(f"Background not found: {bg_config['file']} in {self.asset_dir}, using blank canvas.")
-                bg_path = None
-
-            if bg_path:
-                img = Image.open(bg_path).convert('RGBA')
+            if custom_bg_path and os.path.exists(custom_bg_path):
+                img = Image.open(custom_bg_path).convert('RGBA')
                 img = ImageOps.fit(img, (1920, 1080), method=Image.Resampling.LANCZOS)
+                
+                # Apply custom overlay for custom background
+                if overlay_opacity > 0:
+                    overlay = Image.new('RGBA', (1920, 1080), (0, 0, 0, int(255 * overlay_opacity)))
+                    img = Image.alpha_composite(img, overlay)
             else:
-                # Use RGBA for base theme
-                img = Image.new('RGB', (1920, 1080), theme['bg']).convert('RGBA')
-
-            # 2. Apply Blur
-            blur_amount = bg_config['config'].get('blur', 0)
-            if blur_amount > 0:
-                img = img.filter(ImageFilter.GaussianBlur(radius=blur_amount))
-
-            # 3. Apply Mask
-            mask_alpha = bg_config['config'].get('mask', 40) / 100.0
-            if mask_alpha > 0:
-                # Create gradient mask for smooth fade
-                mask_layer = Image.new('L', (1920, 1080), 0)
-                mask_draw = ImageDraw.Draw(mask_layer)
+                # Check 'default' subdirectory first, then root asset_dir
+                bg_path_default = os.path.join(self.asset_dir, 'default', bg_config['file'])
+                bg_path_root = os.path.join(self.asset_dir, bg_config['file'])
                 
-                # Determine gradient direction based on layout
-                is_dark = theme['isDark']
-                base_color_rgb = (0, 0, 0) if is_dark else (0, 15, 30)
-                
-                # Gradient width: covers 70% of screen
-                gradient_width = int(1920 * 0.7)
-                
-                for x in range(gradient_width):
-                    alpha_val = int(255 * mask_alpha * (1 - x / gradient_width))
-                    if layout == 'left':
-                        mask_draw.line((x, 0, x, 1080), fill=alpha_val)
-                    else:
-                        mask_draw.line((1920 - x - 1, 0, 1920 - x - 1, 1080), fill=alpha_val)
+                if os.path.exists(bg_path_default):
+                    bg_path = bg_path_default
+                elif os.path.exists(bg_path_root):
+                    bg_path = bg_path_root
+                else:
+                    logger.warning(f"Background not found: {bg_config['file']} in {self.asset_dir}, using blank canvas.")
+                    bg_path = None
 
-                # Composite the colored mask layer
-                solid_color = Image.new('RGBA', (1920, 1080), base_color_rgb + (255,))
-                img.paste(solid_color, (0, 0), mask_layer)
+                if bg_path:
+                    img = Image.open(bg_path).convert('RGBA')
+                    img = ImageOps.fit(img, (1920, 1080), method=Image.Resampling.LANCZOS)
+                else:
+                    # Use RGBA for base theme
+                    img = Image.new('RGB', (1920, 1080), theme['bg']).convert('RGBA')
+
+                # 2. Apply Blur
+                blur_amount = bg_config['config'].get('blur', 0)
+                if blur_amount > 0:
+                    img = img.filter(ImageFilter.GaussianBlur(radius=blur_amount))
+
+                # 3. Apply Mask
+                mask_alpha = bg_config['config'].get('mask', 40) / 100.0
+                if mask_alpha > 0:
+                    # Create gradient mask for smooth fade
+                    mask_layer = Image.new('L', (1920, 1080), 0)
+                    mask_draw = ImageDraw.Draw(mask_layer)
+                    
+                    # Determine gradient direction based on layout
+                    is_dark = theme['isDark']
+                    base_color_rgb = (0, 0, 0) if is_dark else (0, 15, 30)
+                    
+                    # Gradient width: covers 70% of screen
+                    gradient_width = int(1920 * 0.7)
+                    
+                    for x in range(gradient_width):
+                        alpha_val = int(255 * mask_alpha * (1 - x / gradient_width))
+                        if layout == 'left':
+                            mask_draw.line((x, 0, x, 1080), fill=alpha_val)
+                        else:
+                            mask_draw.line((1920 - x - 1, 0, 1920 - x - 1, 1080), fill=alpha_val)
+
+                    # Composite the colored mask layer
+                    solid_color = Image.new('RGBA', (1920, 1080), base_color_rgb + (255,))
+                    img.paste(solid_color, (0, 0), mask_layer)
 
             # 4. Text Drawing Setup
             draw = ImageDraw.Draw(img)

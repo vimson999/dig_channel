@@ -14,7 +14,7 @@ def make_celery(app_name=__name__):
         app_name,
         backend=redis_url,
         broker=redis_url,
-        include=['tasks.publisher'] # Auto-discover tasks
+        include=['tasks.publisher', 'tasks.downloader'] # Auto-discover tasks
     )
     
     celery.conf.update(

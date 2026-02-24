@@ -10,6 +10,7 @@ from .video import Video, VideoData
 from .favorite import FavoriteVideo
 from .indie_navigator import OpportunitySignal, UserOpportunityInteraction, CollectionKeyword, CollectionJob
 from .task import PublicationTask
+from .download_task import DownloadTask
 from .system_config import SystemConfig
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     'FavoriteVideo', 
     'OpportunitySignal',
     'PublicationTask',
+    'DownloadTask',
     'SystemConfig'
 ]

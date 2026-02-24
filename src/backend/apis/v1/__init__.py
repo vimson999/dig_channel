@@ -77,6 +77,10 @@ def register_blueprints(app):
     from .resources import bp as resources_bp
     app.register_blueprint(resources_bp)
 
+    # 注册视频下载 API (新增)
+    from .downloader import bp as downloader_bp
+    app.register_blueprint(downloader_bp)
+
 __all__ = [
     'auth_bp',
     'channels_bp',
