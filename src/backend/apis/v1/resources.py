@@ -78,3 +78,33 @@ def list_resources():
     scan_dir('data/uploads', 'upload')
     
     return jsonify({'data': files})
+
+@bp.route('/view', methods=['GET'])
+def view_resource():
+    """
+    View/Download a resource by its path.
+    """
+    from flask import send_from_directory, make_response
+    
+    file_path = request.args.get('path')
+    if not file_path:
+        return "Path is required", 400
+        
+    # Security: Ensure path doesn't escape project root
+    project_root = os.getcwd()
+    abs_path = os.path.abspath(os.path.join(project_root, file_path))
+    
+    if not abs_path.startswith(project_root):
+        return "Access denied", 403
+        
+    if not os.path.exists(abs_path):
+        return "File not found", 404
+        
+    # Get dir and filename
+    directory = os.path.dirname(abs_path)
+    filename = os.path.basename(abs_path)
+    
+    response = make_response(send_from_directory(directory, filename))
+    # Important for Canvas preview!
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response

@@ -7,7 +7,6 @@
     
     <!-- 引入通用库 -->
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700;900&amp;display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -102,7 +101,7 @@
                                 <div id="spin-audio" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-green-500 text-xl"></i></div>
                             </div>
 
-                            <div class="upload-area h-40 flex flex-col items-center justify-center p-4" id="area-image">
+                            <div class="upload-area h-40 flex flex-col items-center justify-center p-4 relative" id="area-image">
                                 <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'image')">
                                 <input type="hidden" name="image_path" id="val-image">
                                 <i class="fas fa-image text-3xl text-slate-300 mb-3" id="icon-image"></i>
@@ -111,6 +110,10 @@
                                     <p class="text-xs text-slate-400 mt-1" id="sub-image">点击或拖拽上传</p>
                                 </div>
                                 <div id="spin-image" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-pink-500 text-xl"></i></div>
+                                <!-- 快捷联动按钮 -->
+                                <button type="button" id="btn-sync-to-cover" onclick="syncToCover(event)" class="absolute bottom-2 right-2 bg-white/90 hover:bg-white text-pink-600 text-[10px] px-2 py-1 rounded shadow-sm border border-pink-100 hidden z-20">
+                                    <i class="fas fa-magic"></i> 设为封面
+                                </button>
                             </div>
                         </div>
 
@@ -147,7 +150,12 @@
                         <div id="thumb_config_area" class="flex flex-col xl:flex-row gap-6 transition-opacity duration-300">
                             <div class="flex-1 space-y-4">
                                 <div class="input-group">
-                                    <label class="input-label">主标题 (Main Title)</label>
+                                    <div class="flex justify-between items-end mb-1">
+                                        <label class="input-label mb-0">主标题 (Main Title)</label>
+                                        <button type="button" onclick="syncTitleFromBili()" class="text-[10px] text-blue-600 hover:underline">
+                                            <i class="fas fa-sync-alt"></i> 同步视频标题
+                                        </button>
+                                    </div>
                                     <textarea name="thumb_main" id="thumb_main" rows="3" class="input-field">深度解读：2026 全球宏观展望&#10;通胀下行下的资产配置指南&#10;为何现在是布局的关键时刻？</textarea>
                                 </div>
                                 <div class="input-group">
@@ -402,6 +410,7 @@
         </div>
     </div>
 
+    <script src="js/config.js"></script>
     <script src="js/api.js"></script>
     <script src="js/shared-navigation.js"></script>
     <script>
@@ -439,8 +448,6 @@
                     const user = json.data.data;
                     el.className = "flex items-center gap-2 text-xs bg-emerald-50 px-3 py-1 rounded-full text-emerald-600 border border-emerald-100";
                     el.innerHTML = `<img src="${user.face}" class="w-4 h-4 rounded-full"> <span class="font-bold">${user.name}</span>`;
-                    
-                    // Fetch and init seasons
                     initBiliSeasons();
                 } else {
                     el.className = "flex items-center gap-2 text-xs bg-red-50 px-3 py-1 rounded-full text-red-600 border border-red-100 cursor-pointer";
@@ -456,12 +463,10 @@
                 const res = await fetch(`${API_BASE}/bilibili/seasons`);
                 const json = await res.json();
                 if (json.success && json.data.length > 0) {
-                    // Clear existing except placeholder
                     select.innerHTML = '<option value="">-- 请选择合集 --</option>';
                     json.data.forEach(s => {
                         const opt = document.createElement('option');
-                        opt.value = s.id;
-                        opt.textContent = s.title;
+                        opt.value = s.id; opt.textContent = s.title;
                         select.appendChild(opt);
                     });
                 }
@@ -478,13 +483,10 @@
                         const date = new Date(task.created_at).toLocaleString('zh-CN', { hour12: false, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                         let statusColor = 'text-slate-500';
                         let icon = 'fa-circle-dot';
-                        if (task.status === 'completed') { statusColor = 'text-emerald-500'; icon = 'fa-check-circle'; }
+                        if (task.status === 'completed' || task.status === 'success') { statusColor = 'text-emerald-500'; icon = 'fa-check-circle'; }
                         if (task.status === 'failed') { statusColor = 'text-red-500'; icon = 'fa-times-circle'; }
                         if (task.status === 'processing') { statusColor = 'text-blue-500'; icon = 'fa-spinner fa-spin'; }
-                        
-                        // Show YT button if Bili completed but YT missing
                         const showYTBtn = task.status === 'completed' && (!task.result || !task.result.youtube_result);
-
                         return `
                         <div class="history-item flex justify-between items-center group">
                             <div class="min-w-0 pr-2 flex-1" onclick="trackTask('${task.id}')">
@@ -496,29 +498,18 @@
                             </div>
                             <div class="flex items-center gap-2">
                                 <div class="${statusColor} text-sm flex-shrink-0"><i class="fas ${icon}"></i></div>
-                                
-                                ${showYTBtn ? `
-                                <button onclick="postToYouTube('${task.id}', event)" class="text-slate-400 hover:text-red-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="仅补发 YouTube">
-                                    <i class="fab fa-youtube"></i>
-                                </button>
-                                ` : ''}
-
-                                <button onclick="retryTask('${task.id}', event)" class="text-slate-400 hover:text-blue-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="全部重试 (重新合成)">
-                                    <i class="fas fa-rotate-right"></i>
-                                </button>
+                                ${showYTBtn ? `<button onclick="postToYouTube('${task.id}', event)" class="text-slate-400 hover:text-red-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="仅补发 YouTube"><i class="fab fa-youtube"></i></button>` : ''}
+                                <button onclick="retryTask('${task.id}', event)" class="text-slate-400 hover:text-blue-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="全部重试 (重新合成)"><i class="fas fa-rotate-right"></i></button>
                             </div>
-                        </div>
-                        `;
+                        </div>`;
                     }).join('');
-                } else {
-                    list.innerHTML = '<div class="text-center text-slate-400 py-4 text-xs">暂无历史任务</div>';
-                }
+                } else { list.innerHTML = '<div class="text-center text-slate-400 py-4 text-xs">暂无历史任务</div>'; }
             } catch (e) { console.error(e); }
         }
 
         async function retryTask(taskId, event) {
             if(event) event.stopPropagation();
-            if(!confirm('确定要使用相同参数重新投递此任务吗？\n(这会重新合成视频并投递到所有已勾选渠道)')) return;
+            if(!confirm('确定要使用相同参数重新投递此任务吗？')) return;
             try {
                 const res = await fetch(`${API_BASE}/publisher/retry/${taskId}`, { method: 'POST' });
                 const json = await res.json();
@@ -528,7 +519,7 @@
 
         async function postToYouTube(taskId, event) {
             if(event) event.stopPropagation();
-            if(!confirm('确定要直接投递现有的视频到 YouTube 吗？\n(不会重新烧制视频)')) return;
+            if(!confirm('确定要补发吗？')) return;
             try {
                 const res = await fetch(`${API_BASE}/publisher/post-youtube/${taskId}`, { method: 'POST' });
                 const json = await res.json();
@@ -544,16 +535,8 @@
             if (el && counter) {
                 const len = el.value.length;
                 counter.innerText = `${len}/${max}`;
-                if (len >= max) {
-                    counter.classList.remove('text-slate-400');
-                    counter.classList.add('text-red-500', 'font-bold');
-                } else if (len >= max * 0.8) {
-                    counter.classList.remove('text-slate-400', 'text-red-500');
-                    counter.classList.add('text-amber-500');
-                } else {
-                    counter.classList.remove('text-red-500', 'text-amber-500', 'font-bold');
-                    counter.classList.add('text-slate-400');
-                }
+                if (len >= max) { counter.classList.add('text-red-500', 'font-bold'); }
+                else { counter.classList.remove('text-red-500', 'font-bold'); counter.classList.add('text-slate-400'); }
             }
         }
 
@@ -568,53 +551,81 @@
             const mode = document.getElementById('thumb_bg_mode').value;
             const presetArea = document.getElementById('preset_bg_area');
             const screenshotArea = document.getElementById('screenshot_bg_area');
-            if (mode === 'preset') {
-                presetArea.classList.remove('hidden');
-                screenshotArea.classList.add('hidden');
-            } else {
-                presetArea.classList.add('hidden');
-                screenshotArea.classList.remove('hidden');
-            }
+            if (mode === 'preset') { presetArea.classList.remove('hidden'); screenshotArea.classList.add('hidden'); }
+            else { presetArea.classList.add('hidden'); screenshotArea.classList.remove('hidden'); }
             draw();
         }
 
         function draw() {
             const w = canvas.width, h = canvas.height;
             const mode = document.getElementById('thumb_bg_mode').value;
+            const isScreenshot = (mode === 'screenshot');
+            ctx.clearRect(0, 0, w, h);
             
-            // Draw Background
-            if (mode === 'screenshot' && images.custom.src && images.custom.complete && images.custom.naturalWidth !== 0) {
-                drawImageCover(ctx, images.custom, 0, 0, w, h);
-                // Apply global overlay
-                const opacity = document.getElementById('overlay_opacity').value;
-                ctx.fillStyle = `rgba(0, 0, 0, ${opacity})`;
-                ctx.fillRect(0, 0, w, h);
+            if (isScreenshot && images.custom.src && images.custom.complete && images.custom.naturalWidth !== 0) {
+                // 方案：实色看板
+                ctx.save();
+                ctx.beginPath(); ctx.rect(0, 0, w, h * 0.45); ctx.clip();
+                drawImageCover(ctx, images.custom, 0, 0, w, h * 0.45);
+                ctx.restore();
+                ctx.fillStyle = '#001529'; 
+                ctx.fillRect(0, h * 0.45, w, h * 0.55);
             } else if (images.bg.complete && images.bg.naturalWidth !== 0) {
                 drawImageCover(ctx, images.bg, 0, 0, w, h);
-            } else {
-                ctx.fillStyle = THEME.bg; ctx.fillRect(0, 0, w, h);
-            }
-
-            // Draw Gradient Mask (only for preset mode or if preferred)
-            if (mode === 'preset') {
                 const maskGradient = ctx.createLinearGradient(0, 0, w * 0.6, 0);
                 maskGradient.addColorStop(0, `rgba(0, 15, 30, 0.4)`); maskGradient.addColorStop(1, `rgba(0, 15, 30, 0)`);
                 ctx.fillStyle = maskGradient; ctx.fillRect(0, 0, w, h);
+            } else { ctx.fillStyle = THEME.bg; ctx.fillRect(0, 0, w, h); }
+
+            const leftMargin = 120;
+            let currentY = isScreenshot ? 606 : 180;
+            
+            // 4.1 Tag
+            if (!isScreenshot) {
+                const tagText = document.getElementById('val-tag').value;
+                ctx.font = `900 30px sans-serif`;
+                const tm = ctx.measureText(tagText);
+                ctx.save(); ctx.beginPath(); ctx.roundRect(leftMargin - 24, currentY - 12, tm.width + 48, 30 + 24, 4); ctx.fillStyle = "#FFFFFF"; ctx.fill(); ctx.restore();
+                ctx.fillStyle = '#333'; ctx.textBaseline = 'top'; ctx.fillText(tagText, leftMargin, currentY); 
+                currentY += 130;
             }
 
-            let currentY = 180; const tagText = document.getElementById('val-tag').value;
-            ctx.font = `900 30px "Noto Serif SC", serif`; const tm = ctx.measureText(tagText);
-            ctx.save(); ctx.beginPath(); ctx.roundRect(120 - 24, currentY - 12, tm.width + 48, 30 + 24, 4); ctx.fillStyle = "#FFFFFF"; ctx.shadowColor = "rgba(0,0,0,0.2)"; ctx.shadowBlur = 10; ctx.fill(); ctx.restore();
-            ctx.fillStyle = '#333'; ctx.textBaseline = 'top'; ctx.fillText(tagText, 120, currentY); currentY += 130;
+            // 4.2 Main Title (黑体)
             const mainLines = document.getElementById('thumb_main').value.split('\n');
-            mainLines.forEach(l => { drawHaloText(ctx, l, 120, currentY, THEME.main, THEME.stroke, 110, "Noto Serif SC", "900"); currentY += 137.5; });
-            drawHaloText(ctx, document.getElementById('thumb_sub').value, 120, currentY + 10, THEME.sub, THEME.stroke, 48, "Noto Serif SC", "500");
-            const dateY = h - 100; ctx.beginPath(); ctx.moveTo(120, dateY - 47); ctx.lineTo(180, dateY - 47); ctx.strokeStyle = THEME.date; ctx.stroke();
-            drawHaloText(ctx, document.getElementById('thumb_date').value, 120, dateY - 32, THEME.date, 'rgba(0,0,0,0.5)', 32, "Noto Serif SC", "bold");
+            const mainFontSize = 110; 
+            ctx.font = `900 ${mainFontSize}px sans-serif`;
+            const mainColor = isScreenshot ? '#FFD700' : THEME.main;
+            mainLines.forEach(l => {
+                if (!l.trim()) return;
+                if (isScreenshot) { ctx.fillStyle = mainColor; ctx.textBaseline = 'top'; ctx.fillText(l, leftMargin, currentY); }
+                else { drawHaloText(ctx, l, leftMargin, currentY, mainColor, THEME.stroke, mainFontSize, "sans-serif", "900"); }
+                currentY += mainFontSize * 1.3; 
+            });
+
+            // 4.3 Sub Title (白)
+            const subText = document.getElementById('thumb_sub').value;
+            if (subText) {
+                const subColor = isScreenshot ? '#FFFFFF' : THEME.sub;
+                if (isScreenshot) { ctx.font = `700 56px sans-serif`; ctx.fillStyle = subColor; ctx.fillText(subText, leftMargin, currentY + 15); }
+                else { drawHaloText(ctx, subText, leftMargin, currentY + 15, subColor, THEME.stroke, 56, "sans-serif", "700"); }
+            }
+
+            // 4.4 Date (左下角加线 + 浅灰)
+            const footerY = h - 100;
+            const footerColor = isScreenshot ? 'rgba(200, 200, 200, 0.8)' : THEME.date;
+            ctx.save(); ctx.textAlign = 'left';
+            if (isScreenshot) {
+                ctx.beginPath(); ctx.moveTo(leftMargin, footerY - 47); ctx.lineTo(leftMargin + 60, footerY - 47); ctx.strokeStyle = footerColor; ctx.lineWidth = 2; ctx.stroke();
+                ctx.font = `600 32px sans-serif`; ctx.fillStyle = footerColor; ctx.fillText(document.getElementById('thumb_date').value, leftMargin, footerY - 32);
+            } else {
+                ctx.beginPath(); ctx.moveTo(leftMargin, footerY - 40); ctx.lineTo(leftMargin + 60, footerY - 40); ctx.strokeStyle = footerColor; ctx.lineWidth = 2; ctx.stroke();
+                drawHaloText(ctx, document.getElementById('thumb_date').value, leftMargin, footerY - 32, footerColor, 'rgba(0,0,0,0.5)', 32, "sans-serif", "600");
+            }
+            ctx.restore();
         }
 
         function drawHaloText(ctx, text, x, y, color, strokeColor, fontSize, fontFace, fontWeight) {
-            ctx.save(); ctx.font = `${fontWeight} ${fontSize}px "${fontFace}", serif`; ctx.textBaseline = 'top';
+            ctx.save(); ctx.font = `${fontWeight} ${fontSize}px "${fontFace}", sans-serif`; ctx.textBaseline = 'top';
             ctx.strokeStyle = strokeColor; ctx.lineWidth = fontSize * 0.04; ctx.lineJoin = 'round'; ctx.strokeText(text, x, y);
             ctx.fillStyle = color; ctx.fillText(text, x, y); ctx.restore();
         }
@@ -622,7 +633,7 @@
         function drawImageCover(ctx, img, x, y, w, h) {
             const r = img.naturalWidth / img.naturalHeight, cr = w / h;
             let rw, rh, rx, ry;
-            if (r > cr) { rh = h; rw = h * r; rx = x - (rw - w) / 2; ry = y; } else { rw = w; rh = w / r; rx = x; ry = y - (rh - h) / 2; }
+            if (r > cr) { rh = h; rw = h * r; rx = x - (rw - w) / 2; ry = y; } else { rw = w; rh = w / r; rx = x; ry = y; }
             ctx.drawImage(img, rx, ry, rw, rh);
         }
 
@@ -643,43 +654,6 @@
             } catch (e) { console.error(e); }
         }
 
-        loadHistory();
-
-        // Thumbnail Toggle
-        document.getElementById('thumb_enabled').addEventListener('change', (e) => {
-            const area = document.getElementById('thumb_config_area');
-            if (e.target.checked) {
-                area.classList.remove('opacity-40', 'pointer-events-none');
-            } else {
-                area.classList.add('opacity-40', 'pointer-events-none');
-            }
-        });
-
-        // YouTube Toggle
-        document.getElementById('yt_enabled').addEventListener('change', (e) => {
-            const area = document.getElementById('yt_config_area');
-            if (e.target.checked) {
-                area.classList.remove('opacity-50', 'pointer-events-none');
-                
-                // 自动同步 B 站内容到 YouTube (如果 YouTube 还是空的)
-                const ytTitle = document.getElementById('yt_title');
-                const ytDesc = document.getElementById('yt_desc');
-                const biliTitle = document.getElementById('bili_title').value || document.getElementById('thumb_main').value.split('\n')[0];
-                const biliDesc = document.querySelector('textarea[name="bili_desc"]').value;
-                
-                if (!ytTitle.value) {
-                    ytTitle.value = biliTitle;
-                    updateCounter('yt_title', 100);
-                }
-                if (!ytDesc.value) {
-                    ytDesc.value = biliDesc;
-                    updateCounter('yt_desc', 5000);
-                }
-            } else {
-                area.classList.add('opacity-50', 'pointer-events-none');
-            }
-        });
-
         async function handleUpload(input, type) {
             const file = input.files[0]; if (!file) return;
             const area = document.getElementById(`area-${type}`), spinner = document.getElementById(`spin-${type}`), hiddenInput = document.getElementById(`val-${type}`);
@@ -689,62 +663,58 @@
                 const res = await fetch(`${API_BASE}/resources/upload`, { method: 'POST', body: fd });
                 const data = await res.json();
                 if (data.success) { 
-                    area.classList.add('uploaded'); 
-                    hiddenInput.value = data.path;
-                    
+                    area.classList.add('uploaded'); hiddenInput.value = data.path;
+                    if (type === 'image') document.getElementById('btn-sync-to-cover').classList.remove('hidden');
                     if (type === 'thumb-bg') {
-                        // For thumbnail background, update the custom image for preview
-                        images.custom.src = '/api/v1/resources/view?path=' + encodeURIComponent(data.path);
-                        images.custom.onload = draw;
-                        document.getElementById('label-thumb-bg').innerText = '已上传底图';
+                        images.custom.crossOrigin = "anonymous";
+                        images.custom.onload = () => draw();
+                        images.custom.src = API_BASE + '/resources/view?path=' + encodeURIComponent(data.path);
+                        document.getElementById('label-thumb-bg').innerText = '已上传截图';
                     }
                 }
             } catch (e) { console.error(e); } finally { spinner.classList.add('hidden'); }
         }
 
+        function syncToCover(event) {
+            if (event) event.stopPropagation();
+            const imgPath = document.getElementById('val-image').value;
+            if (!imgPath) { alert("请先上传正文图片"); return; }
+            document.getElementById('val-thumb-bg').value = imgPath;
+            document.getElementById('thumb_bg_mode').value = 'screenshot';
+            toggleBgMode(); 
+            images.custom.crossOrigin = "anonymous";
+            images.custom.onload = () => draw();
+            images.custom.src = API_BASE + '/resources/view?path=' + encodeURIComponent(imgPath);
+            document.getElementById('area-thumb-bg').classList.add('uploaded');
+            document.getElementById('label-thumb-bg').innerText = '已同步正文图';
+            document.getElementById('previewCanvas').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        function syncTitleFromBili() {
+            const biliTitle = document.getElementById('bili_title').value;
+            if (biliTitle) {
+                const processed = biliTitle.replace(/\|/g, '\n').replace(/ - /g, '\n');
+                document.getElementById('thumb_main').value = processed;
+                draw();
+            } else { alert('请先填写视频标题'); }
+        }
+
         document.getElementById('submitBtn').addEventListener('click', async () => {
             const btn = document.getElementById('submitBtn'), form = document.getElementById('publishForm'), fd = new FormData(form);
             if (!fd.get('audio_path') || !fd.get('image_path')) { alert('请先上传必要的正文素材 (音频 + 图片)'); return; }
-            
             const thumbEnabled = document.getElementById('thumb_enabled').checked;
             const payload = {
                 video: { video_path: fd.get('video_path'), audio_path: fd.get('audio_path'), image_path: fd.get('image_path'), audio_start: fd.get('audio_start'), audio_end_offset: fd.get('audio_end_offset') },
                 bilibili: {
-                    title: (function() {
-                        const explicitTitle = fd.get('bili_title');
-                        if (explicitTitle) return explicitTitle;
-                        const mainLines = fd.get('thumb_main').split('\n').map(l => l.trim()).filter(l => l);
-                        const subText = fd.get('thumb_sub').trim();
-                        const combinedParts = [...mainLines];
-                        if (subText) combinedParts.push(subText);
-                        return combinedParts.join(' | ');
-                    })(),
+                    title: fd.get('bili_title') || fd.get('thumb_main').split('\n').join(' | '),
                     desc: fd.get('bili_desc') || "由一键发布台自动合成投递。", copyright: fd.get('bili_copyright'), season_id: fd.get('bili_season_id'), tid: fd.get('bili_tid'), no_reprint: document.querySelector('input[name="bili_no_reprint"]').checked ? 1 : 0, tags: fd.get('bili_tags').split(',').map(t => t.trim()).filter(t => t) }
             };
-
             if (thumbEnabled) {
-                payload.thumbnail = { 
-                    main_title: fd.get('thumb_main'), 
-                    sub_title: fd.get('thumb_sub'), 
-                    tag_text: fd.get('thumb_tag'), 
-                    date_text: fd.get('thumb_date'), 
-                    bg_index: fd.get('thumb_bg_index'), 
-                    layout: 'left',
-                    custom_bg_path: fd.get('custom_bg_path'),
-                    overlay_opacity: fd.get('overlay_opacity')
-                };
+                payload.thumbnail = { main_title: fd.get('thumb_main'), sub_title: fd.get('thumb_sub'), tag_text: fd.get('thumb_tag'), date_text: fd.get('thumb_date'), bg_index: fd.get('thumb_bg_index'), layout: 'left', custom_bg_path: fd.get('custom_bg_path'), overlay_opacity: fd.get('overlay_opacity') };
             }
-            
             if (document.getElementById('yt_enabled').checked) {
-                payload.youtube = {
-                    title: fd.get('yt_title') || payload.bilibili.title,
-                    desc: fd.get('yt_desc') || payload.bilibili.desc,
-                    privacy: fd.get('yt_privacy'),
-                    category_id: fd.get('yt_category'),
-                    tags: fd.get('yt_tags').split(',').map(t => t.trim()).filter(t => t)
-                };
+                payload.youtube = { title: fd.get('yt_title') || payload.bilibili.title, desc: fd.get('yt_desc') || payload.bilibili.desc, privacy: fd.get('yt_privacy'), category_id: fd.get('yt_category'), tags: fd.get('yt_tags').split(',').map(t => t.trim()).filter(t => t) };
             }
-
             try {
                 btn.disabled = true; btn.innerHTML = '正在提交...';
                 const res = await fetch(`${API_BASE}/publisher/submit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -768,18 +738,13 @@
             progress.style.width = `${task.progress}%`;
             const elapsed = Math.floor((Date.now() - startTime) / 1000);
             timer.innerText = `${Math.floor(elapsed/60).toString().padStart(2, '0')}:${(elapsed%60).toString().padStart(2, '0')}`;
-            if (task.status === 'completed' || task.status === 'failed') {
+            if (task.status === 'completed' || task.status === 'success' || task.status === 'failed') {
                 clearInterval(pollInterval);
                 document.getElementById('resultArea').classList.remove('hidden');
-                document.getElementById('successMsg').innerText = task.status === 'completed' ? '发布成功！' : '发布失败: ' + task.error_message;
+                document.getElementById('successMsg').innerText = (task.status === 'completed' || task.status === 'success') ? '发布成功！' : '发布失败: ' + task.error_message;
                 loadHistory();
             } else { 
-                const map = { 
-                    'synthesis': '🎬 正在合成视频...', 
-                    'thumbnail': '🎨 正在生成封面...', 
-                    'upload': '🚀 正在上传B站...', 
-                    'upload_youtube': '📺 正在上传YouTube...' 
-                }; 
+                const map = { 'synthesis': '🎬 正在合成视频...', 'thumbnail': '🎨 正在生成封面...', 'upload': '🚀 正在上传B站...', 'upload_youtube': '📺 正在上传YouTube...' }; 
                 document.getElementById('stepDisplay').innerText = map[task.current_step] || '处理中...'; 
             }
         }

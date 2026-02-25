@@ -5,7 +5,7 @@ from typing import Dict, Any, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
-# --- Constants from Frontend ---
+# --- Constants ---
 PRESETS = {
     'light': {'name': '☀ 经典浅色', 'main': '#002244', 'sub': '#B8860B', 'tag': '#222222', 'date': '#ffffff', 'stroke': 'rgba(255,255,255,1.0)', 'bg': '#e9ecef', 'isDark': False},
     'dark': {'name': '🌙 经典深色', 'main': '#ffffff', 'sub': '#FFD700', 'tag': '#eeeeee', 'date': '#aaaaaa', 'stroke': 'rgba(0,0,0,0.8)', 'bg': '#1a1a1a', 'isDark': True},
@@ -34,294 +34,139 @@ BACKGROUNDS = [
     {'name': '前沿 · 灰色地带', 'file': 'Gemini_Generated_Image_xmotmqxmotmqxmot.png', 'config': {'scheme': 'gold', 'blur': 12, 'mask': 55}}
 ]
 
-ORGANIZATIONS = [
-    {'name': 'Goldman Sachs · 高盛研报', 'color': '#7399C6'},
-    {'name': 'Morgan Stanley · 摩根士丹利', 'color': '#002D72'},
-    {'name': 'J.P. Morgan · 摩根大通', 'color': '#52433D'},
-    {'name': 'CSC · 中信建投', 'color': '#C00000'},
-    {'name': 'BlackRock · 贝莱德', 'color': '#000000'},
-    {'name': 'Bridgewater · 桥水基金', 'color': '#B31B1B'},
-    {'name': 'CITIC Securities · 中信证券', 'color': '#C0392B'},
-    {'name': 'CICC · 中金公司', 'color': '#BFA15F'},
-    {'name': 'UBS · 瑞银集团', 'color': '#E60000'},
-    {'name': 'Credit Suisse · 瑞士信贷', 'color': '#002D72'},
-    {'name': 'HSBC · 汇丰银行', 'color': '#DB0011'},
-    {'name': 'Sequoia · 红杉资本', 'color': '#2E8B57'},
-    {'name': 'Berkshire Hathaway · 伯克希尔', 'color': '#2B3D51'},
-    {'name': 'Tesla · 特斯拉', 'color': '#E82127'},
-    {'name': 'NVIDIA · 英伟达', 'color': '#76B900'},
-    {'name': 'Nomura · 野村证券', 'color': '#EF3340'},
-    {'name': 'Bank of America · 美国银行', 'color': '#0061AA'}, # Added
-    {'name': 'Deutsche Bank · 德意志银行', 'color': '#0018A8'},  # Added
-    {'name': 'Bernstein · 伯恩斯坦', 'color': '#002C77'},  # Added
-    {'name': '新闻速读', 'color': '#E60000'}
-]
-
 class ThumbnailService:
     def __init__(self, asset_dir=None):
         if asset_dir is None:
-            # Determine project root relative to this file
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
             self.asset_dir = os.path.join(base_dir, 'assets', 'cover')
             self.font_base_dir = os.path.join(base_dir, 'assets', 'fonts')
         else:
             self.asset_dir = asset_dir
             self.font_base_dir = os.path.join(os.path.dirname(asset_dir), 'fonts')
-            
-        self.output_dir = os.path.join(os.path.dirname(self.asset_dir), '..', 'data', 'generated_thumbnails')
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir, exist_ok=True)
-            
-        # Try to load fonts
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        self.output_dir = os.path.join(project_root, 'data', 'generated_thumbnails')
+        if not os.path.exists(self.output_dir): os.makedirs(self.output_dir, exist_ok=True)
         self.font_path = self._find_font()
         logger.info(f"Using font: {self.font_path}")
 
     def _find_font(self):
-        """Find a suitable Chinese font, prioritizing Serif (Songti) style to match frontend."""
+        # 强制现代黑体：确保手机端极致清晰度
         candidates = [
-            os.path.join(self.font_base_dir, 'NotoSerifSC-Bold.otf'),
-            '/System/Library/Fonts/Supplemental/Songti.ttc', # macOS Catalina+
-            '/System/Library/Fonts/Songti.ttc', # macOS older
-            '/System/Library/Fonts/PingFang.ttc', # macOS Fallback (Sans)
-            '/System/Library/Fonts/STHeiti Light.ttc', # macOS Legacy
-            '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf', # Linux
-            'C:\\Windows\\Fonts\\msyh.ttc', # Windows
+            os.path.join(self.font_base_dir, 'SourceHanSansSC-Heavy.otf'),
+            '/System/Library/Fonts/PingFang.ttc', 
+            '/System/Library/Fonts/Cache/PingFang.ttc',
+            '/usr/share/fonts/truetype/source-han-sans/SourceHanSansSC-Heavy.otf',
+            'C:\\Windows\\Fonts\\msyhbd.ttc'
         ]
-        
         for path in candidates:
-            if os.path.exists(path):
-                return path
+            if os.path.exists(path): return path
         return None 
 
     def _parse_rgba(self, rgba_str: str) -> Tuple[int, int, int, int]:
-        """Parse 'rgba(r,g,b,a)' or hex string to (r,g,b,a) tuple."""
-        if rgba_str.startswith('#'):
-            return self._hex_to_rgb(rgba_str) + (255,)
-            
+        if rgba_str.startswith('#'): return self._hex_to_rgb(rgba_str) + (255,)
         try:
             parts = rgba_str.replace('rgba(', '').replace(')', '').split(',')
             r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
             a = float(parts[3]) if len(parts) > 3 else 1.0
             return (r, g, b, int(a * 255))
-        except:
-            return (0, 0, 0, 255)
+        except: return (0, 0, 0, 255)
 
     def _hex_to_rgb(self, hex_color: str) -> Tuple[int, int, int]:
         hex_color = hex_color.lstrip('#')
         return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
 
     def _draw_halo_text(self, draw, text, pos, font, fill_color, stroke_color, stroke_width):
-        """Draw text with halo (stroke) using single-pass rendering for better quality."""
         x, y = pos
-        # Ensure minimum stroke width for visibility at 1080p
-        actual_stroke_width = max(2, int(round(stroke_width)))
-        
-        # Pillow's text() method supports both fill and stroke in one call
-        draw.text(
-            (x, y), 
-            text, 
-            font=font, 
-            fill=fill_color, 
-            stroke_width=actual_stroke_width, 
-            stroke_fill=stroke_color
-        )
+        if stroke_color is None:
+            draw.text((x, y), text, font=font, fill=fill_color)
+        else:
+            actual_stroke_width = max(2, int(round(stroke_width)))
+            draw.text((x, y), text, font=font, fill=fill_color, stroke_width=actual_stroke_width, stroke_fill=stroke_color)
 
-    def generate_thumbnail(self, 
-                          main_title: str, 
-                          sub_title: str = "", 
-                          date_text: str = "",
-                          tag_text: str = "",
-                          bg_preset_index: int = 0,
-                          layout: str = 'left',
-                          output_filename: str = None,
-                          custom_bg_path: str = None,
-                          overlay_opacity: float = 0.5) -> str:
-        """
-        Generate a thumbnail image.
-        """
+    def generate_thumbnail(self, main_title: str, sub_title: str = "", date_text: str = "", tag_text: str = "",
+                          bg_preset_index: int = 0, layout: str = 'left', output_filename: str = None,
+                          custom_bg_path: str = None, overlay_opacity: float = 0.5) -> str:
         try:
-            # 1. Load Config & Assets
-            if bg_preset_index < 0 or bg_preset_index >= len(BACKGROUNDS):
-                bg_preset_index = 0
-            
+            if bg_preset_index < 0 or bg_preset_index >= len(BACKGROUNDS): bg_preset_index = 0
             bg_config = BACKGROUNDS[bg_preset_index]
-            theme_name = bg_config['config']['scheme']
-            theme = PRESETS.get(theme_name, PRESETS['morgan'])
+            theme = PRESETS.get(bg_config['config']['scheme'], PRESETS['morgan'])
+            is_custom = bool(custom_bg_path and os.path.exists(custom_bg_path))
             
-            if custom_bg_path and os.path.exists(custom_bg_path):
-                img = Image.open(custom_bg_path).convert('RGBA')
-                img = ImageOps.fit(img, (1920, 1080), method=Image.Resampling.LANCZOS)
-                
-                # Apply custom overlay for custom background
-                if overlay_opacity > 0:
-                    overlay = Image.new('RGBA', (1920, 1080), (0, 0, 0, int(255 * overlay_opacity)))
-                    img = Image.alpha_composite(img, overlay)
+            if is_custom:
+                # 定稿看板：极致清爽衔接
+                img = Image.new('RGBA', (1920, 1080), (0, 21, 41, 255)) 
+                screenshot = Image.open(custom_bg_path).convert('RGBA')
+                screenshot_fit = ImageOps.fit(screenshot, (1920, 486), method=Image.Resampling.LANCZOS, centering=(0.5, 0))
+                img.paste(screenshot_fit, (0, 0))
             else:
-                # Check 'default' subdirectory first, then root asset_dir
                 bg_path_default = os.path.join(self.asset_dir, 'default', bg_config['file'])
                 bg_path_root = os.path.join(self.asset_dir, bg_config['file'])
-                
-                if os.path.exists(bg_path_default):
-                    bg_path = bg_path_default
-                elif os.path.exists(bg_path_root):
-                    bg_path = bg_path_root
-                else:
-                    logger.warning(f"Background not found: {bg_config['file']} in {self.asset_dir}, using blank canvas.")
-                    bg_path = None
-
-                if bg_path:
-                    img = Image.open(bg_path).convert('RGBA')
-                    img = ImageOps.fit(img, (1920, 1080), method=Image.Resampling.LANCZOS)
-                else:
-                    # Use RGBA for base theme
-                    img = Image.new('RGB', (1920, 1080), theme['bg']).convert('RGBA')
-
-                # 2. Apply Blur
+                bg_path = bg_path_default if os.path.exists(bg_path_default) else (bg_path_root if os.path.exists(bg_path_root) else None)
+                img = Image.open(bg_path).convert('RGBA') if bg_path else Image.new('RGB', (1920, 1080), theme['bg']).convert('RGBA')
+                img = ImageOps.fit(img, (1920, 1080), method=Image.Resampling.LANCZOS)
                 blur_amount = bg_config['config'].get('blur', 0)
-                if blur_amount > 0:
-                    img = img.filter(ImageFilter.GaussianBlur(radius=blur_amount))
-
-                # 3. Apply Mask
+                if blur_amount > 0: img = img.filter(ImageFilter.GaussianBlur(radius=blur_amount))
                 mask_alpha = bg_config['config'].get('mask', 40) / 100.0
                 if mask_alpha > 0:
-                    # Create gradient mask for smooth fade
                     mask_layer = Image.new('L', (1920, 1080), 0)
                     mask_draw = ImageDraw.Draw(mask_layer)
-                    
-                    # Determine gradient direction based on layout
-                    is_dark = theme['isDark']
-                    base_color_rgb = (0, 0, 0) if is_dark else (0, 15, 30)
-                    
-                    # Gradient width: covers 70% of screen
-                    gradient_width = int(1920 * 0.7)
-                    
-                    for x in range(gradient_width):
-                        alpha_val = int(255 * mask_alpha * (1 - x / gradient_width))
-                        if layout == 'left':
-                            mask_draw.line((x, 0, x, 1080), fill=alpha_val)
-                        else:
-                            mask_draw.line((1920 - x - 1, 0, 1920 - x - 1, 1080), fill=alpha_val)
+                    base_color = (0, 0, 0) if theme['isDark'] else (0, 15, 30)
+                    grad_w = int(1920 * 0.7)
+                    for x in range(grad_w):
+                        alpha = int(255 * mask_alpha * (1 - x / grad_w))
+                        line_x = x if layout == 'left' else (1919 - x)
+                        mask_draw.line((line_x, 0, line_x, 1080), fill=alpha)
+                    img.paste(Image.new('RGBA', (1920, 1080), base_color + (255,)), (0, 0), mask_layer)
 
-                    # Composite the colored mask layer
-                    solid_color = Image.new('RGBA', (1920, 1080), base_color_rgb + (255,))
-                    img.paste(solid_color, (0, 0), mask_layer)
-
-            # 4. Text Drawing Setup
             draw = ImageDraw.Draw(img)
-            
-            # Coordinates
-            base_x = 120 if layout == 'left' else 880
-            current_y = 180
-            
-            # Load Fonts
+            base_x = 120
+            # 黄金坐标：606px
+            current_y = 606 if is_custom else 180
             try:
-                font_tag = ImageFont.truetype(self.font_path, 30)
-                font_main = ImageFont.truetype(self.font_path, 110)
-                font_sub = ImageFont.truetype(self.font_path, 48)
+                main_size = 110
+                font_main = ImageFont.truetype(self.font_path, main_size)
+                font_sub = ImageFont.truetype(self.font_path, 56)
                 font_date = ImageFont.truetype(self.font_path, 32)
-            except IOError:
-                logger.error("Could not load font, using default.")
-                font_tag = font_main = font_sub = font_date = ImageFont.load_default()
+            except: font_main = font_sub = font_date = ImageFont.load_default()
 
-            # 4.1 Draw Tag (Rounded Rect + Shadow + Text)
-            if tag_text:
-                # Find tag color
-                tag_color_hex = theme['tag']
-                for org in ORGANIZATIONS:
-                    if org['name'] == tag_text:
-                        tag_color_hex = org['color']
-                        break
-                
-                left, top, right, bottom = draw.textbbox((0, 0), tag_text, font=font_tag)
-                text_width = right - left
-                text_height = bottom - top
-                
-                padding_x = 24
-                padding_y = 12
-                bg_width = text_width + padding_x * 2
-                bg_height = 30 + padding_y * 2 
-                
-                tag_bg_x = base_x - padding_x
-                tag_bg_y = current_y - padding_y
-                
-                # Draw Shadow for Tag
-                shadow_layer = Image.new('RGBA', (1920, 1080), (0,0,0,0))
-                shadow_draw = ImageDraw.Draw(shadow_layer)
-                shadow_draw.rounded_rectangle(
-                    (tag_bg_x, tag_bg_y + 4, tag_bg_x + bg_width, tag_bg_y + bg_height + 4),
-                    radius=4,
-                    fill=(0, 0, 0, 50)
-                )
-                shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(4))
-                img.alpha_composite(shadow_layer)
-                
-                draw = ImageDraw.Draw(img)
-                draw.rounded_rectangle(
-                    (tag_bg_x, tag_bg_y, tag_bg_x + bg_width, tag_bg_y + bg_height),
-                    radius=4,
-                    fill='white'
-                )
-                
-                draw.text((base_x, current_y), tag_text, font=font_tag, fill=tag_color_hex)
+            if tag_text and not is_custom:
+                l, t, r, b = draw.textbbox((0, 0), tag_text, font=font_tag)
+                draw.rounded_rectangle((base_x-24, current_y-12, base_x+(r-l)+24, current_y+(b-t)+12), radius=4, fill='white')
+                draw.text((base_x, current_y), tag_text, font=font_tag, fill='#333333')
                 current_y += 130
 
-            # 4.2 Draw Main Title
             if main_title:
-                lines = main_title.split('\n')
-                main_line_height = 110 * 1.25
-                stroke_rgba = self._parse_rgba(theme['stroke'])
-                main_color = theme['main']
-                
-                for line in lines:
-                    self._draw_halo_text(draw, line, (base_x, current_y), font_main, main_color, stroke_rgba, 110 * 0.06)
-                    current_y += main_line_height
+                # 定稿：主标题亮黄
+                main_color = '#FFD700' if is_custom else theme['main']
+                stroke_color = None if is_custom else self._parse_rgba(theme['stroke'])
+                for line in main_title.split('\n'):
+                    if not line.strip(): continue
+                    self._draw_halo_text(draw, line, (base_x, current_y), font_main, main_color, stroke_color, main_size * 0.04)
+                    current_y += main_size * 1.3
                 current_y += 10
 
-            # 4.3 Draw Sub Title
             if sub_title:
-                stroke_rgba = self._parse_rgba(theme['stroke'])
-                sub_color = theme['sub']
-                self._draw_halo_text(draw, sub_title, (base_x, current_y), font_sub, sub_color, stroke_rgba, 48 * 0.04)
+                # 定稿：副标题纯白
+                sub_color = '#FFFFFF' if is_custom else theme['sub']
+                self._draw_halo_text(draw, sub_title, (base_x, current_y), font_sub, sub_color, None if is_custom else self._parse_rgba(theme['stroke']), 56 * 0.04)
 
-            # 4.4 Draw Footer (Date)
-            if date_text:
-                date_x = 120 if layout == 'left' else 1920 - 120
-                date_y = 1080 - 100
-                
-                line_width = 60
-                line_x = date_x if layout == 'left' else date_x - line_width
-                line_y = date_y - 15 - 32 
-                
-                draw.line((line_x, line_y, line_x + line_width, line_y), fill=theme['date'], width=1)
-                
-                date_stroke = (0,0,0,200) if theme['isDark'] else (0,0,0,128)
-                
-                if layout == 'right':
-                    w = draw.textlength(date_text, font=font_date)
-                    final_x = date_x - w
-                else:
-                    final_x = date_x
-                    
-                self._draw_halo_text(draw, date_text, (final_x, date_y), font_date, theme['date'], date_stroke, 32 * 0.04)
+            # 定稿：落款回归左下角，加装饰线，色调浅灰
+            date_y = 1080 - 100
+            f_color = (200, 200, 200, 200) if is_custom else theme['date']
+            # 加线
+            draw.line((base_x, date_y - 47, base_x + 60, date_y - 47), fill=f_color, width=2)
+            self._draw_halo_text(draw, date_text, (base_x, date_y-32), font_date, f_color, None, 0)
 
-            # 5. Save Output
             if not output_filename:
                 import uuid
-                output_filename = f"thumbnail_{{uuid.uuid4().hex[:8]}}.jpg"
-            
-            if not output_filename.lower().endswith('.jpg'):
-                output_filename += '.jpg'
-                
+                output_filename = f"thumbnail_{uuid.uuid4().hex[:8]}.jpg"
+            if not output_filename.lower().endswith('.jpg'): output_filename += '.jpg'
             output_path = os.path.join(self.output_dir, output_filename)
-            # Convert to RGB before saving as JPG
             img.convert('RGB').save(output_path, quality=95)
             logger.info(f"Thumbnail generated: {output_path}")
-            
             return output_path
-
         except Exception as e:
             logger.error(f"Thumbnail generation failed: {e}", exc_info=True)
             raise e
 
-# Singleton
 thumbnail_service = ThumbnailService()
