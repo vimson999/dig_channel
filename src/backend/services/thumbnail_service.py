@@ -34,6 +34,29 @@ BACKGROUNDS = [
     {'name': '前沿 · 灰色地带', 'file': 'Gemini_Generated_Image_xmotmqxmotmqxmot.png', 'config': {'scheme': 'gold', 'blur': 12, 'mask': 55}}
 ]
 
+ORGANIZATIONS = [
+    {'name': 'Goldman Sachs · 高盛研报', 'color': '#7399C6'},
+    {'name': 'Morgan Stanley · 摩根士丹利', 'color': '#002D72'},
+    {'name': 'J.P. Morgan · 摩根大通', 'color': '#52433D'},
+    {'name': 'CSC · 中信建投', 'color': '#C00000'},
+    {'name': 'BlackRock · 贝莱德', 'color': '#000000'},
+    {'name': 'Bridgewater · 桥水基金', 'color': '#B31B1B'},
+    {'name': 'CITIC Securities · 中信证券', 'color': '#C0392B'},
+    {'name': 'CICC · 中金公司', 'color': '#BFA15F'},
+    {'name': 'UBS · 瑞银集团', 'color': '#E60000'},
+    {'name': 'Credit Suisse · 瑞士信贷', 'color': '#002D72'},
+    {'name': 'HSBC · 汇丰银行', 'color': '#DB0011'},
+    {'name': 'Sequoia · 红杉资本', 'color': '#2E8B57'},
+    {'name': 'Berkshire Hathaway · 伯克希尔', 'color': '#2B3D51'},
+    {'name': 'Tesla · 特斯拉', 'color': '#E82127'},
+    {'name': 'NVIDIA · 英伟达', 'color': '#76B900'},
+    {'name': 'Nomura · 野村证券', 'color': '#EF3340'},
+    {'name': 'Bank of America · 美国银行', 'color': '#0061AA'}, 
+    {'name': 'Deutsche Bank · 德意志银行', 'color': '#0018A8'},  
+    {'name': 'Bernstein · 伯恩斯坦', 'color': '#002C77'},  
+    {'name': '新闻速读', 'color': '#E60000'}
+]
+
 class ThumbnailService:
     def __init__(self, asset_dir=None):
         if asset_dir is None:
@@ -50,11 +73,9 @@ class ThumbnailService:
         logger.info(f"Using font: {self.font_path}")
 
     def _find_font(self):
-        # 强制现代黑体：确保手机端极致清晰度
         candidates = [
             os.path.join(self.font_base_dir, 'SourceHanSansSC-Heavy.otf'),
             '/System/Library/Fonts/PingFang.ttc', 
-            '/System/Library/Fonts/Cache/PingFang.ttc',
             '/usr/share/fonts/truetype/source-han-sans/SourceHanSansSC-Heavy.otf',
             'C:\\Windows\\Fonts\\msyhbd.ttc'
         ]
@@ -93,7 +114,6 @@ class ThumbnailService:
             is_custom = bool(custom_bg_path and os.path.exists(custom_bg_path))
             
             if is_custom:
-                # 定稿看板：极致清爽衔接
                 img = Image.new('RGBA', (1920, 1080), (0, 21, 41, 255)) 
                 screenshot = Image.open(custom_bg_path).convert('RGBA')
                 screenshot_fit = ImageOps.fit(screenshot, (1920, 486), method=Image.Resampling.LANCZOS, centering=(0.5, 0))
@@ -120,8 +140,8 @@ class ThumbnailService:
 
             draw = ImageDraw.Draw(img)
             base_x = 120
-            # 黄金坐标：606px
-            current_y = 606 if is_custom else 180
+            # 最终重心上移至 520px
+            current_y = 520 if is_custom else 180
             try:
                 main_size = 110
                 font_main = ImageFont.truetype(self.font_path, main_size)
@@ -136,21 +156,19 @@ class ThumbnailService:
                 current_y += 130
 
             if main_title:
-                # 定稿：主标题亮黄
                 main_color = '#FFD700' if is_custom else theme['main']
                 stroke_color = None if is_custom else self._parse_rgba(theme['stroke'])
                 for line in main_title.split('\n'):
                     if not line.strip(): continue
                     self._draw_halo_text(draw, line, (base_x, current_y), font_main, main_color, stroke_color, main_size * 0.04)
                     current_y += main_size * 1.3
-                current_y += 10
+                current_y += 15
 
             if sub_title:
-                # 定稿：副标题纯白
                 sub_color = '#FFFFFF' if is_custom else theme['sub']
                 self._draw_halo_text(draw, sub_title, (base_x, current_y), font_sub, sub_color, None if is_custom else self._parse_rgba(theme['stroke']), 56 * 0.04)
 
-            # 定稿：落款回归左下角，加装饰线，色调浅灰
+            # 落款回归左下角，加装饰线，色调浅灰
             date_y = 1080 - 100
             f_color = (200, 200, 200, 200) if is_custom else theme['date']
             # 加线

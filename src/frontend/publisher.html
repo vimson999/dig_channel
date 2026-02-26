@@ -578,7 +578,8 @@
             } else { ctx.fillStyle = THEME.bg; ctx.fillRect(0, 0, w, h); }
 
             const leftMargin = 120;
-            let currentY = isScreenshot ? 606 : 180;
+            // 最终重心上移至 520px
+            let currentY = isScreenshot ? 520 : 180;
             
             // 4.1 Tag
             if (!isScreenshot) {
@@ -614,12 +615,14 @@
             const footerY = h - 100;
             const footerColor = isScreenshot ? 'rgba(200, 200, 200, 0.8)' : THEME.date;
             ctx.save(); ctx.textAlign = 'left';
+            
+            // 定稿：加线
+            ctx.beginPath(); ctx.moveTo(leftMargin, footerY - 47); ctx.lineTo(leftMargin + 60, footerY - 47); ctx.strokeStyle = footerColor; ctx.lineWidth = 2; ctx.stroke();
+            
             if (isScreenshot) {
-                ctx.beginPath(); ctx.moveTo(leftMargin, footerY - 47); ctx.lineTo(leftMargin + 60, footerY - 47); ctx.strokeStyle = footerColor; ctx.lineWidth = 2; ctx.stroke();
                 ctx.font = `600 32px sans-serif`; ctx.fillStyle = footerColor; ctx.fillText(document.getElementById('thumb_date').value, leftMargin, footerY - 32);
             } else {
-                ctx.beginPath(); ctx.moveTo(leftMargin, footerY - 40); ctx.lineTo(leftMargin + 60, footerY - 40); ctx.strokeStyle = footerColor; ctx.lineWidth = 2; ctx.stroke();
-                drawHaloText(ctx, document.getElementById('thumb_date').value, leftMargin, footerY - 32, footerColor, 'rgba(0,0,0,0.5)', 32, "sans-serif", "600");
+                ctx.font = `600 32px sans-serif`; ctx.fillStyle = footerColor; ctx.fillText(document.getElementById('thumb_date').value, leftMargin, footerY - 32);
             }
             ctx.restore();
         }
