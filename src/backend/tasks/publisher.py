@@ -94,6 +94,9 @@ def run_publication_pipeline(self, task_id):
             audio_start = float(vid_params.get('audio_start', 7.0))
             audio_end_offset = float(vid_params.get('audio_end_offset', 10.0))
             
+            # Extract CTA Config
+            cta_config = vid_params.get('cta')
+            
             # Synthesis
             final_video_path = video_editor_service.process_mixed_content(
                 video_file=video_path,
@@ -103,7 +106,8 @@ def run_publication_pipeline(self, task_id):
                 audio_c_path=audio_c_path,
                 audio_start=audio_start,
                 audio_end_offset=audio_end_offset,
-                output_filename=f"{base_name}.mp4"
+                output_filename=f"{base_name}.mp4",
+                cta_config=cta_config
             )
             
             task.result = {**(task.result or {}), 'video_path': final_video_path}

@@ -78,53 +78,134 @@
                             1. 视频合成参数
                         </div>
                         
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                            <div class="upload-area h-40 flex flex-col items-center justify-center p-4" id="area-video">
-                                <input type="file" accept="video/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'video')">
-                                <input type="hidden" name="video_path" id="val-video">
-                                <i class="fas fa-film text-3xl text-slate-300 mb-3" id="icon-video"></i>
-                                <div class="text-center">
-                                    <p class="text-sm font-bold text-slate-600" id="label-video">Step 1: 片头视频 (可选)</p>
-                                    <p class="text-xs text-slate-400 mt-1" id="sub-video">点击或拖拽上传</p>
-                                </div>
-                                <div id="spin-video" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-blue-500 text-xl"></i></div>
-                            </div>
+                        <div class="flex flex-col xl:flex-row gap-6">
+                            <div class="flex-1 space-y-6">
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div class="upload-area h-32 flex flex-col items-center justify-center p-4" id="area-video">
+                                        <input type="file" accept="video/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'video')">
+                                        <input type="hidden" name="video_path" id="val-video">
+                                        <i class="fas fa-film text-2xl text-slate-300 mb-2" id="icon-video"></i>
+                                        <div class="text-center">
+                                            <p class="text-[13px] font-bold text-slate-600" id="label-video">Step 1: 片头</p>
+                                            <p class="text-[10px] text-slate-400 mt-0.5" id="sub-video">可选</p>
+                                        </div>
+                                        <div id="spin-video" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-blue-500 text-xl"></i></div>
+                                    </div>
 
-                            <div class="upload-area h-40 flex flex-col items-center justify-center p-4" id="area-audio">
-                                <input type="file" accept="audio/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'audio')">
-                                <input type="hidden" name="audio_path" id="val-audio">
-                                <i class="fas fa-microphone text-3xl text-slate-300 mb-3" id="icon-audio"></i>
-                                <div class="text-center">
-                                    <p class="text-sm font-bold text-slate-600" id="label-audio">Step 4: 音频解说</p>
-                                    <p class="text-xs text-slate-400 mt-1" id="sub-audio">点击或拖拽上传</p>
-                                </div>
-                                <div id="spin-audio" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-green-500 text-xl"></i></div>
-                            </div>
+                                    <div class="upload-area h-32 flex flex-col items-center justify-center p-4" id="area-audio">
+                                        <input type="file" accept="audio/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'audio')">
+                                        <input type="hidden" name="audio_path" id="val-audio">
+                                        <i class="fas fa-microphone text-2xl text-slate-300 mb-2" id="icon-audio"></i>
+                                        <div class="text-center">
+                                            <p class="text-[13px] font-bold text-slate-600" id="label-audio">Step 2: 音频</p>
+                                            <p class="text-[10px] text-slate-400 mt-0.5" id="sub-audio">必需</p>
+                                        </div>
+                                        <div id="spin-audio" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-green-500 text-xl"></i></div>
+                                    </div>
 
-                            <div class="upload-area h-40 flex flex-col items-center justify-center p-4 relative" id="area-image">
-                                <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'image')">
-                                <input type="hidden" name="image_path" id="val-image">
-                                <i class="fas fa-image text-3xl text-slate-300 mb-3" id="icon-image"></i>
-                                <div class="text-center">
-                                    <p class="text-sm font-bold text-slate-600" id="label-image">Step 3: 正文图片</p>
-                                    <p class="text-xs text-slate-400 mt-1" id="sub-image">点击或拖拽上传</p>
+                                    <div class="upload-area h-32 flex flex-col items-center justify-center p-4 relative" id="area-image">
+                                        <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'image')">
+                                        <input type="hidden" name="image_path" id="val-image">
+                                        <i class="fas fa-image text-2xl text-slate-300 mb-2" id="icon-image"></i>
+                                        <div class="text-center">
+                                            <p class="text-[13px] font-bold text-slate-600" id="label-image">Step 3: 正文图</p>
+                                            <p class="text-[10px] text-slate-400 mt-0.5" id="sub-image">必需</p>
+                                        </div>
+                                        <div id="spin-image" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-pink-500 text-xl"></i></div>
+                                        <button type="button" id="btn-sync-to-cover" onclick="syncToCover(event)" class="absolute bottom-1 right-1 bg-white/90 hover:bg-white text-pink-600 text-[9px] px-1.5 py-0.5 rounded shadow-sm border border-pink-100 hidden z-20">
+                                            <i class="fas fa-magic"></i> 同步封面
+                                        </button>
+                                    </div>
                                 </div>
-                                <div id="spin-image" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-pink-500 text-xl"></i></div>
-                                <!-- 快捷联动按钮 -->
-                                <button type="button" id="btn-sync-to-cover" onclick="syncToCover(event)" class="absolute bottom-2 right-2 bg-white/90 hover:bg-white text-pink-600 text-[10px] px-2 py-1 rounded shadow-sm border border-pink-100 hidden z-20">
-                                    <i class="fas fa-magic"></i> 设为封面
-                                </button>
-                            </div>
-                        </div>
 
-                        <div class="grid grid-cols-2 gap-3 bg-slate-50 p-4 rounded-lg border border-slate-100">
-                            <div class="input-group mb-0">
-                                <label class="input-label">音频切入 (秒)</label>
-                                <input type="number" name="audio_start" class="input-field" value="7.0" step="0.1">
+                                <div class="grid grid-cols-2 gap-3 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                                    <div class="input-group mb-0">
+                                        <label class="input-label text-[12px]">音频切入 (秒)</label>
+                                        <input type="number" name="audio_start" class="input-field py-1" value="7.0" step="0.1">
+                                    </div>
+                                    <div class="input-group mb-0">
+                                        <label class="input-label text-[12px]">结束偏移 (秒)</label>
+                                        <input type="number" name="audio_end_offset" class="input-field py-1" value="10.0" step="0.1">
+                                    </div>
+                                </div>
+
+                                <!-- 视频 CTA 增强配置 -->
+                                <div class="p-4 bg-indigo-50/50 rounded-xl border border-indigo-100 shadow-inner">
+                                    <div class="flex items-center gap-2 mb-3">
+                                        <div class="w-6 h-6 bg-indigo-600 text-white rounded-lg flex items-center justify-center shadow-md">
+                                            <i class="fas fa-bullhorn text-[10px]"></i>
+                                        </div>
+                                        <span class="text-sm font-bold text-slate-700">视频正文 CTA 视觉配置</span>
+                                        <label class="ml-auto flex items-center gap-2 cursor-pointer group">
+                                            <input type="checkbox" id="cta_enabled" name="cta_enabled" class="w-4 h-4 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500 transition-all">
+                                            <span class="text-[11px] font-bold text-indigo-600 group-hover:text-indigo-700">启用增强层</span>
+                                        </label>
+                                    </div>
+                                    <div id="cta_config_panel" class="space-y-3 transition-all duration-300 opacity-50 pointer-events-none">
+                                        <div>
+                                            <label class="text-[10px] text-slate-400 mb-1 flex justify-between">
+                                                <span>引导话术 (支持多行)</span>
+                                                <span class="text-indigo-400">建议 1-2 行</span>
+                                            </label>
+                                            <textarea id="cta_text" name="cta_text" class="input-field py-2 text-sm leading-tight h-16 resize-none" placeholder="例如：&#10;私信回复“研报”&#10;领 PDF 完整版">私信回复“研报”&#10;领 PDF 完整版</textarea>
+                                        </div>
+                                        <div class="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label class="text-[10px] text-slate-400 mb-1 block">呈现形态/位置</label>
+                                                <select id="cta_position" name="cta_position" class="input-field py-1.5 text-xs font-medium" onchange="checkCtaPosition(this)">
+                                                    <option value="bottom_bar">底部·全宽横条</option>
+                                                    <option value="right_center">右侧·居中卡片 (推荐)</option>
+                                                    <option value="bottom_right">右下角·悬浮卡片 (安全位)</option>
+                                                    <option value="top_bar">顶部·通知横条</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="text-[10px] text-slate-400 mb-1 block">质感与配色</label>
+                                                <select id="cta_style" name="cta_style" class="input-field py-1.5 text-xs font-medium">
+                                                    <option value="premium_dark">高级·深邃灰 (半透明)</option>
+                                                    <option value="nomura_red">投行·暗酒红 (半透明)</option>
+                                                    <option value="institutional_blue">机构·深海蓝 (半透明)</option>
+                                                    <option value="investment_gold">投行·琥珀金 (半透明)</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div id="cta_warning" class="hidden animate-pulse bg-amber-50 border border-amber-200 p-2 rounded-lg">
+                                            <p class="text-[10px] text-amber-700 flex items-center gap-1">
+                                                <i class="fas fa-exclamation-triangle"></i>
+                                                <b>位置预警</b>: 该位置极易遮挡研报抬头信息，建议使用底部横条。
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                            <div class="input-group mb-0">
-                                <label class="input-label">结束偏移 (秒)</label>
-                                <input type="number" name="audio_end_offset" class="input-field" value="10.0" step="0.1">
+                            
+                            <!-- 视频正文预览区 -->
+                            <div class="w-full xl:w-[480px] shrink-0">
+                                <div class="bg-slate-50 p-3 rounded-[24px] shadow-[0_20px_50px_rgba(0,0,0,0.1)] border border-white/60 relative">
+                                    <label class="input-label flex justify-between px-2 pt-1 pb-3">
+                                        <span class="text-slate-800 flex items-center gap-2 font-bold tracking-tight">
+                                            <i class="fas fa-video text-indigo-500"></i> 视频产出预览
+                                        </span>
+                                        <span class="text-[9px] font-bold text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100">STUDIO MODE</span>
+                                    </label>
+                                    <!-- 增加内凹效果的容器 -->
+                                    <div class="relative overflow-hidden rounded-[16px] shadow-[inset_0_2px_10px_rgba(0,0,0,0.1)] bg-slate-900 border border-slate-200">
+                                        <canvas id="videoPreviewCanvas" width="1920" height="1080" class="w-full h-auto aspect-video block"></canvas>
+                                        <div id="cta-placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-slate-400 bg-slate-100/95 transition-all duration-700">
+                                            <div class="w-16 h-16 bg-white rounded-[20px] shadow-[0_10px_20px_rgba(0,0,0,0.05)] flex items-center justify-center mb-4 border border-slate-50">
+                                                <i class="fas fa-image text-3xl text-slate-200"></i>
+                                            </div>
+                                            <p class="text-[10px] font-black tracking-[0.2em] text-slate-300 uppercase">Input Required</p>
+                                            <p class="text-[11px] mt-2 text-slate-400 font-medium">请在左侧上传研报正文图片</p>
+                                        </div>
+                                    </div>
+                                    <!-- 底部装饰细节 -->
+                                    <div class="mt-3 flex justify-center gap-1.5">
+                                        <div class="w-1.5 h-1.5 rounded-full bg-slate-200"></div>
+                                        <div class="w-1.5 h-1.5 rounded-full bg-slate-200"></div>
+                                        <div class="w-8 h-1.5 rounded-full bg-indigo-200"></div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -540,10 +621,17 @@
             }
         }
 
-        // --- Canvas ---
-        const canvas = document.getElementById('previewCanvas');
-        const ctx = canvas.getContext('2d');
-        const images = { bg: new Image(), custom: new Image() };
+        // --- Canvas 独立化 ---
+        const coverCanvas = document.getElementById('previewCanvas');
+        const coverCtx = coverCanvas.getContext('2d');
+        const videoCanvas = document.getElementById('videoPreviewCanvas');
+        const videoCtx = videoCanvas.getContext('2d');
+        
+        const images = { 
+            bg: new Image(),      // 封面预设背景
+            custom: new Image(),  // 用户上传的正文图/研报截图 (用于封面)
+            videoBody: new Image() // 专门用于视频预览的图 (同 custom，但逻辑分离)
+        };
         let bgData = [];
         const THEME = { main: '#002D72', sub: '#FFD700', tag: '#002D72', date: '#ffffff', stroke: 'rgba(255,255,255,1.0)', bg: '#f0f4f8' };
 
@@ -553,29 +641,30 @@
             const screenshotArea = document.getElementById('screenshot_bg_area');
             if (mode === 'preset') { presetArea.classList.remove('hidden'); screenshotArea.classList.add('hidden'); }
             else { presetArea.classList.add('hidden'); screenshotArea.classList.remove('hidden'); }
-            draw();
+            drawCover();
         }
 
-        function draw() {
-            const w = canvas.width, h = canvas.height;
+        // 1. 专门绘制封面预览
+        function drawCover() {
+            const w = coverCanvas.width, h = coverCanvas.height;
             const mode = document.getElementById('thumb_bg_mode').value;
             const isScreenshot = (mode === 'screenshot');
-            ctx.clearRect(0, 0, w, h);
+            coverCtx.clearRect(0, 0, w, h);
             
             if (isScreenshot && images.custom.src && images.custom.complete && images.custom.naturalWidth !== 0) {
                 // 方案：实色看板
-                ctx.save();
-                ctx.beginPath(); ctx.rect(0, 0, w, h * 0.45); ctx.clip();
-                drawImageCover(ctx, images.custom, 0, 0, w, h * 0.45);
-                ctx.restore();
-                ctx.fillStyle = '#001529'; 
-                ctx.fillRect(0, h * 0.45, w, h * 0.55);
+                coverCtx.save();
+                coverCtx.beginPath(); coverCtx.rect(0, 0, w, h * 0.45); coverCtx.clip();
+                drawImageCover(coverCtx, images.custom, 0, 0, w, h * 0.45);
+                coverCtx.restore();
+                coverCtx.fillStyle = '#001529'; 
+                coverCtx.fillRect(0, h * 0.45, w, h * 0.55);
             } else if (images.bg.complete && images.bg.naturalWidth !== 0) {
-                drawImageCover(ctx, images.bg, 0, 0, w, h);
-                const maskGradient = ctx.createLinearGradient(0, 0, w * 0.6, 0);
+                drawImageCover(coverCtx, images.bg, 0, 0, w, h);
+                const maskGradient = coverCtx.createLinearGradient(0, 0, w * 0.6, 0);
                 maskGradient.addColorStop(0, `rgba(0, 15, 30, 0.4)`); maskGradient.addColorStop(1, `rgba(0, 15, 30, 0)`);
-                ctx.fillStyle = maskGradient; ctx.fillRect(0, 0, w, h);
-            } else { ctx.fillStyle = THEME.bg; ctx.fillRect(0, 0, w, h); }
+                coverCtx.fillStyle = maskGradient; coverCtx.fillRect(0, 0, w, h);
+            } else { coverCtx.fillStyle = THEME.bg; coverCtx.fillRect(0, 0, w, h); }
 
             const leftMargin = 120;
             // 最终重心上移至 520px
@@ -584,22 +673,22 @@
             // 4.1 Tag
             if (!isScreenshot) {
                 const tagText = document.getElementById('val-tag').value;
-                ctx.font = `900 30px sans-serif`;
-                const tm = ctx.measureText(tagText);
-                ctx.save(); ctx.beginPath(); ctx.roundRect(leftMargin - 24, currentY - 12, tm.width + 48, 30 + 24, 4); ctx.fillStyle = "#FFFFFF"; ctx.fill(); ctx.restore();
-                ctx.fillStyle = '#333'; ctx.textBaseline = 'top'; ctx.fillText(tagText, leftMargin, currentY); 
+                coverCtx.font = `900 30px sans-serif`;
+                const tm = coverCtx.measureText(tagText);
+                coverCtx.save(); coverCtx.beginPath(); coverCtx.roundRect(leftMargin - 24, currentY - 12, tm.width + 48, 30 + 24, 4); coverCtx.fillStyle = "#FFFFFF"; coverCtx.fill(); coverCtx.restore();
+                coverCtx.fillStyle = '#333'; coverCtx.textBaseline = 'top'; coverCtx.fillText(tagText, leftMargin, currentY); 
                 currentY += 130;
             }
 
             // 4.2 Main Title (黑体)
             const mainLines = document.getElementById('thumb_main').value.split('\n');
             const mainFontSize = 110; 
-            ctx.font = `900 ${mainFontSize}px sans-serif`;
+            coverCtx.font = `900 ${mainFontSize}px sans-serif`;
             const mainColor = isScreenshot ? '#FFD700' : THEME.main;
             mainLines.forEach(l => {
                 if (!l.trim()) return;
-                if (isScreenshot) { ctx.fillStyle = mainColor; ctx.textBaseline = 'top'; ctx.fillText(l, leftMargin, currentY); }
-                else { drawHaloText(ctx, l, leftMargin, currentY, mainColor, THEME.stroke, mainFontSize, "sans-serif", "900"); }
+                if (isScreenshot) { coverCtx.fillStyle = mainColor; coverCtx.textBaseline = 'top'; coverCtx.fillText(l, leftMargin, currentY); }
+                else { drawHaloText(coverCtx, l, leftMargin, currentY, mainColor, THEME.stroke, mainFontSize, "sans-serif", "900"); }
                 currentY += mainFontSize * 1.3; 
             });
 
@@ -607,27 +696,142 @@
             const subText = document.getElementById('thumb_sub').value;
             if (subText) {
                 const subColor = isScreenshot ? '#FFFFFF' : THEME.sub;
-                if (isScreenshot) { ctx.font = `700 56px sans-serif`; ctx.fillStyle = subColor; ctx.fillText(subText, leftMargin, currentY + 15); }
-                else { drawHaloText(ctx, subText, leftMargin, currentY + 15, subColor, THEME.stroke, 56, "sans-serif", "700"); }
+                if (isScreenshot) { coverCtx.font = `700 56px sans-serif`; coverCtx.fillStyle = subColor; coverCtx.fillText(subText, leftMargin, currentY + 15); }
+                else { drawHaloText(coverCtx, subText, leftMargin, currentY + 15, subColor, THEME.stroke, 56, "sans-serif", "700"); }
             }
 
             // 4.4 Date (左下角加线 + 浅灰)
             const footerY = h - 100;
             const footerColor = isScreenshot ? 'rgba(200, 200, 200, 0.8)' : THEME.date;
-            ctx.save(); ctx.textAlign = 'left';
+            coverCtx.save(); coverCtx.textAlign = 'left';
             
             // 定稿：加线
-            ctx.beginPath(); ctx.moveTo(leftMargin, footerY - 47); ctx.lineTo(leftMargin + 60, footerY - 47); ctx.strokeStyle = footerColor; ctx.lineWidth = 2; ctx.stroke();
-            
-            if (isScreenshot) {
-                ctx.font = `600 32px sans-serif`; ctx.fillStyle = footerColor; ctx.fillText(document.getElementById('thumb_date').value, leftMargin, footerY - 32);
-            } else {
-                ctx.font = `600 32px sans-serif`; ctx.fillStyle = footerColor; ctx.fillText(document.getElementById('thumb_date').value, leftMargin, footerY - 32);
-            }
-            ctx.restore();
+            coverCtx.beginPath(); coverCtx.moveTo(leftMargin, footerY - 47); coverCtx.lineTo(leftMargin + 60, footerY - 47); coverCtx.strokeStyle = footerColor; coverCtx.lineWidth = 2; coverCtx.stroke();
+            coverCtx.font = `600 32px sans-serif`; coverCtx.fillStyle = footerColor; coverCtx.fillText(document.getElementById('thumb_date').value, leftMargin, footerY - 32);
+            coverCtx.restore();
         }
 
-        function drawHaloText(ctx, text, x, y, color, strokeColor, fontSize, fontFace, fontWeight) {
+                                function checkCtaPosition(select) {
+                                    const warning = document.getElementById('cta_warning');
+                                    if (select.value === 'top_right') warning.classList.remove('hidden');
+                                    else warning.classList.add('hidden');
+                                    drawVideoPreview();
+                                }
+                        
+                                // 2. 专门绘制视频正文预览
+                                // 2. 专门绘制视频正文预览
+                                function drawVideoPreview() {
+                                    const w = videoCanvas.width, h = videoCanvas.height;
+                                    videoCtx.clearRect(0, 0, w, h);
+                                    const placeholder = document.getElementById('cta-placeholder');
+                                    
+                                    if (images.videoBody.src && images.videoBody.complete && images.videoBody.naturalWidth !== 0) {
+                                        placeholder.classList.add('opacity-0', 'pointer-events-none');
+                                        drawImageCover(videoCtx, images.videoBody, 0, 0, w, h);
+                                        
+                                        const ctaEnabled = document.getElementById('cta_enabled').checked;
+                                        const ctaText = document.getElementById('cta_text').value;
+                                        if (ctaEnabled && ctaText) {
+                                            videoCtx.save();
+                                            
+                                            const rawLines = ctaText.split('\n').filter(l => l.trim());
+                                            if (rawLines.length === 0) { videoCtx.restore(); return; }
+                        
+                                            const pos = document.getElementById('cta_position').value;
+                                            const style = document.getElementById('cta_style').value;
+                                            const isFullBar = pos.includes('bar');
+                        
+                                            // --- 质感映射 (去营销化) ---
+                                            const styles = {
+                                                'premium_dark': { bg: 'rgba(25, 28, 36, 0.85)', text: 'rgba(255,255,255,0.95)', action: '#ffffff', border: 'rgba(255,255,255,0.15)' },
+                                                'nomura_red': { bg: 'rgba(128, 20, 30, 0.88)', text: 'rgba(255,255,255,0.95)', action: '#ffffff', border: 'rgba(255,255,255,0.2)' },
+                                                'institutional_blue': { bg: 'rgba(15, 30, 60, 0.85)', text: 'rgba(255,255,255,0.95)', action: '#ffffff', border: 'rgba(255,255,255,0.2)' },
+                                                'investment_gold': { bg: 'rgba(212, 175, 55, 0.85)', text: 'rgba(25, 30, 40, 0.95)', action: '#000000', border: 'rgba(0,0,0,0.1)' }
+                                            };
+                                            const s = styles[style] || styles.premium_dark;
+
+                                            // 极简箭头
+                                            const getActionText = (txt) => {
+                                                if(txt.startsWith('↓') || txt.includes('PDF')) return txt;
+                                                return "↓ " + txt;
+                                            };
+
+                                            if (isFullBar) {
+                                                // --- 【模式 A: 全宽横条 - 左右分栏】 ---
+                                                const barHeight = 140; 
+                                                const barY = (pos === 'bottom_bar') ? (h - barHeight) : 0;
+                                                videoCtx.fillStyle = s.bg;
+                                                videoCtx.fillRect(0, barY, w, barHeight);
+                                                videoCtx.strokeStyle = s.border; videoCtx.lineWidth = 2;
+                                                videoCtx.beginPath();
+                                                if (pos === 'bottom_bar') { videoCtx.moveTo(0, barY); videoCtx.lineTo(w, barY); }
+                                                else { videoCtx.moveTo(0, barHeight); videoCtx.lineTo(w, barHeight); }
+                                                videoCtx.stroke();
+
+                                                const horizontalMargin = 100;
+                                                const centerY = barY + (barHeight / 2);
+                                                const leftText = rawLines[0] || "";
+                                                const rightText = rawLines[1] || (rawLines.length === 1 ? rawLines[0] : "");
+                                                
+                                                videoCtx.textAlign = 'left'; videoCtx.textBaseline = 'middle';
+                                                videoCtx.font = `500 42px "Helvetica Neue", "Inter", sans-serif`; videoCtx.fillStyle = s.text;
+                                                videoCtx.fillText(leftText, horizontalMargin, centerY);
+
+                                                videoCtx.textAlign = 'right';
+                                                videoCtx.font = `600 48px "Helvetica Neue", "Inter", sans-serif`; videoCtx.fillStyle = s.action;
+                                                videoCtx.fillText(getActionText(rightText), w - horizontalMargin, centerY);
+
+                                            } else {
+                                                // --- 【模式 B: 悬浮卡片 - 纵向三段堆叠】 ---
+                                                // 层级规则：第一行主标题(48px)，第二行描述(32px)，最后一行行动(48px Medium)
+                                                const metrics = rawLines.map((line, i) => {
+                                                    let fs = 32, fw = '400', color = s.text;
+                                                    if (i === 0) { fs = 48; fw = '500'; } // 主价值
+                                                    else if (i === rawLines.length - 1 && rawLines.length > 1) { fs = 48; fw = '600'; color = s.action; } // 号召位
+                                                    videoCtx.font = `${fw} ${fs}px "Helvetica Neue", "Inter", sans-serif`;
+                                                    return { text: line, width: videoCtx.measureText(line).width, height: fs, fw, color };
+                                                });
+                        
+                                                const maxW = Math.max(...metrics.map(m => m.width));
+                                                const lineSpacing = 25;
+                                                const totalTextH = metrics.reduce((sum, m) => sum + m.height, 0) + (metrics.length - 1) * lineSpacing;
+                        
+                                                const paddingH = 80, paddingV = 60;
+                                                const boxW = maxW + paddingH * 2;
+                                                const boxH = totalTextH + paddingV * 2;
+                                                const safeMarginRight = 120;
+                                                const safeMarginBottom = 220; // 20% 安全高度
+                                                
+                                                let bx = w - boxW - safeMarginRight;
+                                                let by = (pos === 'right_center') ? (h - boxH) / 2 : (h - boxH - safeMarginBottom);
+                        
+                                                // 绘制背景 (双层空间阴影系统)
+                                                videoCtx.shadowColor = 'rgba(0,0,0,0.4)'; videoCtx.shadowBlur = 60; videoCtx.shadowOffsetY = 25;
+                                                videoCtx.fillStyle = s.bg;
+                                                videoCtx.beginPath(); videoCtx.roundRect(bx, by, boxW, boxH, 32); videoCtx.fill();
+                                                
+                                                videoCtx.shadowColor = 'rgba(0,0,0,0.2)'; videoCtx.shadowBlur = 10; videoCtx.shadowOffsetY = 5;
+                                                videoCtx.strokeStyle = 'rgba(255,255,255,0.15)'; videoCtx.lineWidth = 2; videoCtx.stroke();
+                                                videoCtx.shadowColor = 'transparent';
+                                                videoCtx.textAlign = 'center'; videoCtx.textBaseline = 'top';
+                                                let currY = by + paddingV;
+                                                metrics.forEach((m, i) => {
+                                                    videoCtx.font = `${m.fw} ${m.height}px "Helvetica Neue", "Inter", sans-serif`;
+                                                    videoCtx.fillStyle = m.color;
+                                                    let txt = m.text;
+                                                    if (i === metrics.length - 1 && rawLines.length > 1) txt = getActionText(txt);
+                                                    videoCtx.fillText(txt, bx + boxW / 2, currY);
+                                                    currY += m.height + lineSpacing;
+                                                });
+                                            }
+                                            videoCtx.restore();
+                                        }
+                                    } else {
+                                        placeholder.classList.remove('opacity-0', 'pointer-events-none');
+                                        videoCtx.fillStyle = '#1e293b';
+                                        videoCtx.fillRect(0, 0, w, h);
+                                    }
+                                }        function drawHaloText(ctx, text, x, y, color, strokeColor, fontSize, fontFace, fontWeight) {
             ctx.save(); ctx.font = `${fontWeight} ${fontSize}px "${fontFace}", sans-serif`; ctx.textBaseline = 'top';
             ctx.strokeStyle = strokeColor; ctx.lineWidth = fontSize * 0.04; ctx.lineJoin = 'round'; ctx.strokeText(text, x, y);
             ctx.fillStyle = color; ctx.fillText(text, x, y); ctx.restore();
@@ -649,11 +853,33 @@
                 orgS.value = "Goldman Sachs · 高盛研报";
                 const bgS = document.getElementById('select-bg'); bgS.innerHTML = '';
                 data.backgrounds.forEach((b, i) => { const opt = document.createElement('option'); opt.value = i; opt.textContent = b.name; bgS.appendChild(opt); });
-                ['thumb_main', 'thumb_sub', 'thumb_date'].forEach(id => document.getElementById(id).addEventListener('input', draw));
-                orgS.addEventListener('change', (e) => { document.getElementById('val-tag').value = e.target.value; draw(); });
+                
+                // --- 封面配置监听 ---
+                ['thumb_main', 'thumb_sub', 'thumb_date', 'overlay_opacity'].forEach(id => {
+                    const el = document.getElementById(id); 
+                    if (el) el.addEventListener('input', drawCover);
+                });
+                
+                // --- 视频 CTA 监听 ---
+                ['cta_text', 'cta_position', 'cta_style'].forEach(id => {
+                    const el = document.getElementById(id); 
+                    if (el) el.addEventListener('input', drawVideoPreview);
+                });
+                
+                const ctaToggle = document.getElementById('cta_enabled');
+                ctaToggle.addEventListener('change', (e) => {
+                    const panel = document.getElementById('cta_config_panel');
+                    if (e.target.checked) panel.classList.remove('opacity-50', 'pointer-events-none');
+                    else panel.classList.add('opacity-50', 'pointer-events-none');
+                    drawVideoPreview();
+                });
+
+                orgS.addEventListener('change', (e) => { document.getElementById('val-tag').value = e.target.value; drawCover(); });
                 bgS.addEventListener('change', (e) => { const i = e.target.value; if (bgData[i]) { images.bg.src = 'assets/cover/' + bgData[i].file; } });
+                
                 if (bgData[0]) images.bg.src = 'assets/cover/' + bgData[0].file;
-                images.bg.onload = draw; draw();
+                images.bg.onload = drawCover; 
+                drawCover(); drawVideoPreview();
             } catch (e) { console.error(e); }
         }
 
@@ -667,10 +893,16 @@
                 const data = await res.json();
                 if (data.success) { 
                     area.classList.add('uploaded'); hiddenInput.value = data.path;
-                    if (type === 'image') document.getElementById('btn-sync-to-cover').classList.remove('hidden');
+                    if (type === 'image') {
+                        document.getElementById('btn-sync-to-cover').classList.remove('hidden');
+                        // 更新视频预览
+                        images.videoBody.crossOrigin = "anonymous";
+                        images.videoBody.onload = () => drawVideoPreview();
+                        images.videoBody.src = API_BASE + '/resources/view?path=' + encodeURIComponent(data.path);
+                    }
                     if (type === 'thumb-bg') {
                         images.custom.crossOrigin = "anonymous";
-                        images.custom.onload = () => draw();
+                        images.custom.onload = () => drawCover();
                         images.custom.src = API_BASE + '/resources/view?path=' + encodeURIComponent(data.path);
                         document.getElementById('label-thumb-bg').innerText = '已上传截图';
                     }
@@ -686,7 +918,7 @@
             document.getElementById('thumb_bg_mode').value = 'screenshot';
             toggleBgMode(); 
             images.custom.crossOrigin = "anonymous";
-            images.custom.onload = () => draw();
+            images.custom.onload = () => drawCover();
             images.custom.src = API_BASE + '/resources/view?path=' + encodeURIComponent(imgPath);
             document.getElementById('area-thumb-bg').classList.add('uploaded');
             document.getElementById('label-thumb-bg').innerText = '已同步正文图';
@@ -698,7 +930,7 @@
             if (biliTitle) {
                 const processed = biliTitle.replace(/\|/g, '\n').replace(/ - /g, '\n');
                 document.getElementById('thumb_main').value = processed;
-                draw();
+                drawCover();
             } else { alert('请先填写视频标题'); }
         }
 
@@ -706,8 +938,21 @@
             const btn = document.getElementById('submitBtn'), form = document.getElementById('publishForm'), fd = new FormData(form);
             if (!fd.get('audio_path') || !fd.get('image_path')) { alert('请先上传必要的正文素材 (音频 + 图片)'); return; }
             const thumbEnabled = document.getElementById('thumb_enabled').checked;
+            const ctaEnabled = document.getElementById('cta_enabled').checked;
+            
             const payload = {
-                video: { video_path: fd.get('video_path'), audio_path: fd.get('audio_path'), image_path: fd.get('image_path'), audio_start: fd.get('audio_start'), audio_end_offset: fd.get('audio_end_offset') },
+                video: { 
+                    video_path: fd.get('video_path'), 
+                    audio_path: fd.get('audio_path'), 
+                    image_path: fd.get('image_path'), 
+                    audio_start: fd.get('audio_start'), 
+                    audio_end_offset: fd.get('audio_end_offset'),
+                    cta: ctaEnabled ? {
+                        text: fd.get('cta_text'),
+                        position: fd.get('cta_position'),
+                        style: fd.get('cta_style')
+                    } : null
+                },
                 bilibili: {
                     title: fd.get('bili_title') || fd.get('thumb_main').split('\n').join(' | '),
                     desc: fd.get('bili_desc') || "由一键发布台自动合成投递。", copyright: fd.get('bili_copyright'), season_id: fd.get('bili_season_id'), tid: fd.get('bili_tid'), no_reprint: document.querySelector('input[name="bili_no_reprint"]').checked ? 1 : 0, tags: fd.get('bili_tags').split(',').map(t => t.trim()).filter(t => t) }
