@@ -147,7 +147,8 @@ class ThumbnailService:
                 font_main = ImageFont.truetype(self.font_path, main_size)
                 font_sub = ImageFont.truetype(self.font_path, 56)
                 font_date = ImageFont.truetype(self.font_path, 32)
-            except: font_main = font_sub = font_date = ImageFont.load_default()
+                font_tag = ImageFont.truetype(self.font_path, 30)
+            except: font_main = font_sub = font_date = font_tag = ImageFont.load_default()
 
             if tag_text and not is_custom:
                 l, t, r, b = draw.textbbox((0, 0), tag_text, font=font_tag)

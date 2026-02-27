@@ -22,12 +22,30 @@ from config import get_config
 logger = logging.getLogger(__name__)
 
 def to_abs_path(rel_path):
-    """Helper to convert relative path to project-root-based absolute path."""
+    """Helper to convert path to absolute, staying robust regardless of current working directory."""
     if not rel_path: return None
-    if os.path.isabs(rel_path): return rel_path
-    # Root is 4 levels up: tasks/publisher.py -> backend -> src -> root
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    return os.path.join(base_dir, rel_path)
+    
+    # 1. 如果已经是绝对路径且存在，直接返回
+    if os.path.isabs(rel_path) and os.path.exists(rel_path):
+        return rel_path
+        
+    # 2. 尝试相对于当前工作目录 (通常是项目根目录)
+    cwd_path = os.path.abspath(os.path.join(os.getcwd(), rel_path))
+    if os.path.exists(cwd_path):
+        return cwd_path
+        
+    # 3. 备选方案：尝试相对于文件所在位置向上追溯 (兼容不同启动方式)
+    try:
+        # tasks/publisher.py -> backend -> src -> root
+        alt_base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        alt_path = os.path.abspath(os.path.join(alt_base, rel_path))
+        if os.path.exists(alt_path):
+            return alt_path
+    except:
+        pass
+
+    # 如果都找不到，返回原始路径让 moviepy 自己报错，或者返回 cwd_path
+    return cwd_path
 
 def sanitize_filename(name):
     """Sanitize filename to keep Chinese characters but remove illegal fs chars."""
@@ -129,7 +147,9 @@ def run_publication_pipeline(self, task_id):
                     tag_text=thumb_params.get('tag_text'),
                     bg_preset_index=int(thumb_params.get('bg_index', 0)),
                     layout=thumb_params.get('layout', 'center'),
-                    output_filename=f"{base_name}.jpg"
+                    output_filename=f"{base_name}.jpg",
+                    custom_bg_path=to_abs_path(thumb_params.get('custom_bg_path')),
+                    overlay_opacity=float(thumb_params.get('overlay_opacity', 0.5))
                 )
                 
                 task.result = {**(task.result or {}), 'cover_path': final_cover_path}
@@ -141,37 +161,41 @@ def run_publication_pipeline(self, task_id):
                 db.session.commit()
 
             # --- Step 3: Upload ---
-            task.current_step = 'upload'
-            db.session.commit()
-            
-            logger.info(f"Task {task_id}: Uploading to Bilibili...")
-            bili_params = params.get('bilibili', {})
-            
-            # 从数据库读取 B 站凭证
-            uploader = BiliUploader(
-                sessdata=ConfigService.get('sessdata', 'bilibili_auth'),
-                bili_jct=ConfigService.get('bili_jct', 'bilibili_auth'),
-                buvid3=ConfigService.get('buvid3', 'bilibili_auth'),
-                dedeuserid=ConfigService.get('dedeuserid', 'bilibili_auth')
-            )
-            
-            async def _do_upload():
-                return await uploader.upload_single(
-                    video_path=final_video_path,
-                    title=bili_params.get('title'),
-                    desc=bili_params.get('desc', ''),
-                    tid=int(bili_params.get('tid', 17)),
-                    tags=bili_params.get('tags', []),
-                    cover_path=final_cover_path,
-                    copyright=int(bili_params.get('copyright', 1)),
-                    no_reprint=int(bili_params.get('no_reprint', 1)),
-                    dynamic=bili_params.get('dynamic', '')
+            if bili_params.get('enabled', True):
+                task.current_step = 'upload'
+                db.session.commit()
+                
+                logger.info(f"Task {task_id}: Uploading to Bilibili...")
+                
+                # 从数据库读取 B 站凭证
+                uploader = BiliUploader(
+                    sessdata=ConfigService.get('sessdata', 'bilibili_auth'),
+                    bili_jct=ConfigService.get('bili_jct', 'bilibili_auth'),
+                    buvid3=ConfigService.get('buvid3', 'bilibili_auth'),
+                    dedeuserid=ConfigService.get('dedeuserid', 'bilibili_auth')
                 )
-            
-            upload_result = asyncio.run(_do_upload())
-            
-            task.result = {**(task.result or {}), 'bilibili_result': upload_result}
-            db.session.commit()
+                
+                async def _do_upload():
+                    return await uploader.upload_single(
+                        video_path=final_video_path,
+                        title=bili_params.get('title'),
+                        desc=bili_params.get('desc', ''),
+                        tid=int(bili_params.get('tid', 17)),
+                        tags=bili_params.get('tags', []),
+                        cover_path=final_cover_path,
+                        copyright=int(bili_params.get('copyright', 1)),
+                        no_reprint=int(bili_params.get('no_reprint', 1)),
+                        dynamic=bili_params.get('dynamic', '')
+                    )
+                
+                upload_result = asyncio.run(_do_upload())
+                
+                task.result = {**(task.result or {}), 'bilibili_result': upload_result}
+                db.session.commit()
+            else:
+                logger.info(f"Task {task_id}: Skipping Bilibili upload (disabled by user).")
+                task.progress = 90
+                db.session.commit()
 
             # --- Step 4: YouTube Upload ---
             yt_params = params.get('youtube', {})

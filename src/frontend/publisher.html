@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -5,18 +6,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>一键发布台 - Shioa 智能数据分析平台</title>
     
-    <!-- 引入通用库 -->
+    <!-- 核心库 (带容错) -->
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: {
-                        primary: {
-                            50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd',
-                            400: '#60a5fa', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8',
-                            800: '#1e40af', 900: '#1e3a8a'
+        if (typeof tailwind !== 'undefined') {
+            tailwind.config = {
+                theme: {
+                    extend: {
+                        colors: {
+                            primary: {
+                                50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd',
+                                400: '#60a5fa', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8',
+                                800: '#1e40af', 900: '#1e3a8a'
+                            }
                         }
                     }
                 }
@@ -24,153 +27,134 @@
         }
     </script>
 
-    <style>
-        body { background-color: #f8fafc; color: #1e293b; font-family: 'Segoe UI', Roboto, sans-serif; }
-        .glass-card { background: rgba(255, 255, 255, 0.9); backdrop-blur: 8px; border: 1px border-slate-200; border-radius: 16px; padding: 24px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
-        .section-title { font-size: 1.125rem; font-weight: 700; color: #0f172a; margin-bottom: 1.25rem; display: flex; align-items: center; gap: 0.5rem; }
-        .input-group { margin-bottom: 1rem; }
-        .input-label { display: block; font-size: 0.875rem; font-weight: 600; color: #475569; margin-bottom: 0.375rem; }
-        .input-field { width: 100%; padding: 0.625rem 0.875rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.875rem; transition: all 0.2s; background: #fff; }
-        .input-field:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1); outline: none; }
-        .btn-primary { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: white; padding: 0.75rem 1.5rem; border-radius: 10px; font-weight: 600; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2); transition: all 0.2s; }
-        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(37, 99, 235, 0.3); }
-        .btn-primary:active { transform: translateY(0); }
-        .progress-bar-fill { transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1); }
-        
-        .upload-area { border: 2px dashed #cbd5e1; border-radius: 12px; transition: all 0.2s; cursor: pointer; position: relative; overflow: hidden; background: #f8fafc; }
-        .upload-area:hover { border-color: #3b82f6; background: #eff6ff; }
-        .upload-area.uploaded { border-style: solid; border-color: #10b981; background: #ecfdf5; }
-        .upload-spinner { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,0.8); display: flex; align-items: center; justify-content: center; z-index: 10; }
-
-        #previewCanvas { width: 100%; height: auto; aspect-ratio: 16/9; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); background: #eee; }
-        
-        .history-item { padding: 12px; border-bottom: 1px solid #f1f5f9; cursor: pointer; transition: background 0.2s; }
-        .history-item:hover { background-color: #f8fafc; }
-        .history-item:last-child { border-bottom: none; }
-    </style>
+    <!-- 模块化样式 -->
+    <link rel="stylesheet" href="css/publisher.css?v=0227">
 </head>
-<body class="min-h-screen">
+<body class="min-h-screen bg-slate-50">
+
+    <!-- 统一导航由 shared-navigation.js 自动注入 -->
 
     <main class="max-w-[1440px] mx-auto px-6 py-8">
         
         <div class="mb-8 flex justify-between items-end">
             <div>
-                <h2 class="text-2xl font-extrabold text-slate-900 tracking-tight">一键发布工作台</h2>
-                <p class="text-slate-500 mt-1">集成视频合成、封面设计、渠道发布的全流程自动化流水线</p>
+                <h2 class="text-3xl font-black text-slate-900 tracking-tight text-gradient bg-clip-text">发布工作台</h2>
+                <p class="text-slate-500 text-xs font-bold uppercase tracking-[0.2em] mt-1 opacity-60">Studio Pipeline & Distribution</p>
             </div>
-            <div id="bili-status-badge" class="hidden flex items-center gap-2 bg-white px-3 py-1.5 rounded-full border border-slate-200 shadow-sm text-sm">
-                <div class="w-2 h-2 rounded-full bg-slate-300"></div>
-                <span class="text-slate-500">检查连接中...</span>
+            <div id="bili-status-badge" class="flex items-center gap-3 bg-white px-5 py-2 rounded-full border border-slate-200 shadow-sm text-sm transition-all duration-300">
+                <div class="w-2 h-2 rounded-full bg-slate-300 animate-pulse"></div>
+                <span class="text-slate-400 font-bold">检查服务中...</span>
             </div>
         </div>
-
-        <div class="flex flex-col lg:flex-row gap-8">
+        
+        <div class="flex flex-col lg:flex-row gap-10">
             
-            <div class="flex-1 space-y-6">
+            <!-- 左侧：配置区域 -->
+            <div class="flex-1 space-y-10">
                 <form id="publishForm">
                     
-                    <!-- 1. Video Synthesis -->
-                    <div class="glass-card">
+                    <!-- 1. 视频合成参数 -->
+                    <section class="glass-card">
                         <div class="section-title">
-                            <div class="w-8 h-8 bg-indigo-100 text-indigo-600 rounded-lg flex items-center justify-center">
+                            <div class="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center shadow-sm">
                                 <i class="fas fa-film"></i>
                             </div>
                             1. 视频合成参数
                         </div>
                         
-                        <div class="flex flex-col xl:flex-row gap-6">
+                        <div class="flex flex-col xl:flex-row gap-8">
                             <div class="flex-1 space-y-6">
                                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                    <div class="upload-area h-32 flex flex-col items-center justify-center p-4" id="area-video">
-                                        <input type="file" accept="video/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'video')">
+                                    <div class="upload-area h-36 flex flex-col items-center justify-center p-4 relative group" id="area-video">
+                                        <input type="file" accept="video/*" class="absolute inset-0 opacity-0 cursor-pointer z-[5]" onchange="handleUpload(this, 'video')">
                                         <input type="hidden" name="video_path" id="val-video">
-                                        <i class="fas fa-film text-2xl text-slate-300 mb-2" id="icon-video"></i>
+                                        <i id="icon-video" class="fas fa-film text-3xl text-slate-300 mb-3 group-hover:text-indigo-400"></i>
                                         <div class="text-center">
-                                            <p class="text-[13px] font-bold text-slate-600" id="label-video">Step 1: 片头</p>
-                                            <p class="text-[10px] text-slate-400 mt-0.5" id="sub-video">可选</p>
+                                            <p id="label-video" class="text-[13px] font-bold text-slate-600">Step 1: 片头</p>
+                                            <p class="text-[10px] text-slate-400 mt-0.5">可选视频素材</p>
                                         </div>
                                         <div id="spin-video" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-blue-500 text-xl"></i></div>
                                     </div>
 
-                                    <div class="upload-area h-32 flex flex-col items-center justify-center p-4" id="area-audio">
-                                        <input type="file" accept="audio/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'audio')">
+                                    <div class="upload-area h-36 flex flex-col items-center justify-center p-4 relative group" id="area-audio">
+                                        <input type="file" accept="audio/*" class="absolute inset-0 opacity-0 cursor-pointer z-[5]" onchange="handleUpload(this, 'audio')">
                                         <input type="hidden" name="audio_path" id="val-audio">
-                                        <i class="fas fa-microphone text-2xl text-slate-300 mb-2" id="icon-audio"></i>
+                                        <i id="icon-audio" class="fas fa-microphone text-3xl text-slate-300 mb-3 group-hover:text-green-400"></i>
                                         <div class="text-center">
-                                            <p class="text-[13px] font-bold text-slate-600" id="label-audio">Step 2: 音频</p>
-                                            <p class="text-[10px] text-slate-400 mt-0.5" id="sub-audio">必需</p>
+                                            <p id="label-audio" class="text-[13px] font-bold text-slate-600">Step 2: 音频</p>
+                                            <p class="text-[10px] text-slate-400 mt-0.5">必需音频解说</p>
                                         </div>
                                         <div id="spin-audio" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-green-500 text-xl"></i></div>
                                     </div>
 
-                                    <div class="upload-area h-32 flex flex-col items-center justify-center p-4 relative" id="area-image">
-                                        <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'image')">
+                                    <div class="upload-area h-36 flex flex-col items-center justify-center p-4 relative group" id="area-image">
+                                        <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-[5]" onchange="handleUpload(this, 'image')">
                                         <input type="hidden" name="image_path" id="val-image">
-                                        <i class="fas fa-image text-2xl text-slate-300 mb-2" id="icon-image"></i>
+                                        <i id="icon-image" class="fas fa-image text-3xl text-slate-300 mb-3 group-hover:text-pink-400"></i>
                                         <div class="text-center">
-                                            <p class="text-[13px] font-bold text-slate-600" id="label-image">Step 3: 正文图</p>
-                                            <p class="text-[10px] text-slate-400 mt-0.5" id="sub-image">必需</p>
+                                            <p id="label-image" class="text-[13px] font-bold text-slate-600">Step 3: 正文图</p>
+                                            <p class="text-[10px] text-slate-400 mt-0.5">必需研报截图</p>
                                         </div>
                                         <div id="spin-image" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-pink-500 text-xl"></i></div>
-                                        <button type="button" id="btn-sync-to-cover" onclick="syncToCover(event)" class="absolute bottom-1 right-1 bg-white/90 hover:bg-white text-pink-600 text-[9px] px-1.5 py-0.5 rounded shadow-sm border border-pink-100 hidden z-20">
+                                        <button type="button" id="btn-sync-to-cover" onclick="syncToCover(event)" class="absolute bottom-2 right-2 bg-white text-pink-600 text-[10px] font-bold px-2 py-1 rounded shadow-md border border-pink-100 hidden z-[10] hover:bg-pink-50 transition-all">
                                             <i class="fas fa-magic"></i> 同步封面
                                         </button>
                                     </div>
                                 </div>
 
-                                <div class="grid grid-cols-2 gap-3 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                                <div class="grid grid-cols-2 gap-4 bg-slate-50/50 p-4 rounded-2xl border border-slate-100 shadow-inner relative z-[1]">
                                     <div class="input-group mb-0">
-                                        <label class="input-label text-[12px]">音频切入 (秒)</label>
-                                        <input type="number" name="audio_start" class="input-field py-1" value="7.0" step="0.1">
+                                        <label class="input-label">音频切入 (秒)</label>
+                                        <input type="number" id="audio_start" name="audio_start" class="input-field" value="7.0" step="0.1">
                                     </div>
                                     <div class="input-group mb-0">
-                                        <label class="input-label text-[12px]">结束偏移 (秒)</label>
-                                        <input type="number" name="audio_end_offset" class="input-field py-1" value="10.0" step="0.1">
+                                        <label class="input-label">结束偏移 (秒)</label>
+                                        <input type="number" id="audio_end_offset" name="audio_end_offset" class="input-field" value="10.0" step="0.1">
                                     </div>
                                 </div>
 
                                 <!-- 视频 CTA 增强配置 -->
-                                <div class="p-4 bg-indigo-50/50 rounded-xl border border-indigo-100 shadow-inner">
-                                    <div class="flex items-center gap-2 mb-3">
-                                        <div class="w-6 h-6 bg-indigo-600 text-white rounded-lg flex items-center justify-center shadow-md">
-                                            <i class="fas fa-bullhorn text-[10px]"></i>
+                                <div class="p-5 bg-indigo-50/30 rounded-[24px] border border-indigo-100 shadow-inner relative z-[10]">
+                                    <div class="flex items-center gap-2 mb-4">
+                                        <div class="w-8 h-8 bg-indigo-600 text-white rounded-xl flex items-center justify-center shadow-lg">
+                                            <i class="fas fa-bullhorn text-xs"></i>
                                         </div>
-                                        <span class="text-sm font-bold text-slate-700">视频正文 CTA 视觉配置</span>
+                                        <span class="text-[15px] font-black text-slate-800 tracking-tight">视频正文 CTA 增强层</span>
                                         <label class="ml-auto flex items-center gap-2 cursor-pointer group">
-                                            <input type="checkbox" id="cta_enabled" name="cta_enabled" class="w-4 h-4 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500 transition-all">
-                                            <span class="text-[11px] font-bold text-indigo-600 group-hover:text-indigo-700">启用增强层</span>
+                                            <input type="checkbox" id="cta_enabled" name="cta_enabled" class="w-5 h-5 text-indigo-600 rounded-lg border-gray-300 focus:ring-indigo-500 transition-all">
+                                            <span class="text-[12px] font-black text-indigo-600 group-hover:text-indigo-700">启用</span>
                                         </label>
                                     </div>
-                                    <div id="cta_config_panel" class="space-y-3 transition-all duration-300 opacity-50 pointer-events-none">
+                                    <div id="cta_config_panel" class="space-y-4 transition-all duration-300 opacity-50 pointer-events-none">
                                         <div>
-                                            <label class="text-[10px] text-slate-400 mb-1 flex justify-between">
+                                            <label class="text-[10px] text-slate-400 mb-1.5 flex justify-between font-bold uppercase tracking-widest">
                                                 <span>引导话术 (支持多行)</span>
-                                                <span class="text-indigo-400">建议 1-2 行</span>
+                                                <span class="text-indigo-400">Premium Tool</span>
                                             </label>
-                                            <textarea id="cta_text" name="cta_text" class="input-field py-2 text-sm leading-tight h-16 resize-none" placeholder="例如：&#10;私信回复“研报”&#10;领 PDF 完整版">私信回复“研报”&#10;领 PDF 完整版</textarea>
+                                            <textarea id="cta_text" name="cta_text" class="input-field py-3 text-[13px] leading-relaxed h-20 resize-none font-medium" placeholder="例如：&#10;私信回复“研报”&#10;领 PDF 完整版">私信回复“研报”&#10;领 PDF 完整版</textarea>
                                         </div>
-                                        <div class="grid grid-cols-2 gap-3">
+                                        <div class="grid grid-cols-2 gap-4">
                                             <div>
-                                                <label class="text-[10px] text-slate-400 mb-1 block">呈现形态/位置</label>
-                                                <select id="cta_position" name="cta_position" class="input-field py-1.5 text-xs font-medium" onchange="checkCtaPosition(this)">
+                                                <label class="text-[10px] text-slate-400 mb-1.5 font-bold uppercase tracking-widest block">呈现形态/位置</label>
+                                                <select id="cta_position" name="cta_position" class="input-field py-2 text-xs font-bold" onchange="checkCtaPosition(this)">
                                                     <option value="bottom_bar">底部·全宽横条</option>
-                                                    <option value="right_center">右侧·居中卡片 (推荐)</option>
-                                                    <option value="bottom_right">右下角·悬浮卡片 (安全位)</option>
+                                                    <option value="right_center">右侧·居中卡片</option>
+                                                    <option value="bottom_right" selected>右下角·悬浮卡片</option>
                                                     <option value="top_bar">顶部·通知横条</option>
                                                 </select>
                                             </div>
                                             <div>
-                                                <label class="text-[10px] text-slate-400 mb-1 block">质感与配色</label>
-                                                <select id="cta_style" name="cta_style" class="input-field py-1.5 text-xs font-medium">
+                                                <label class="text-[10px] text-slate-400 mb-1.5 font-bold uppercase tracking-widest block">质感与配色</label>
+                                                <select id="cta_style" name="cta_style" class="input-field py-2 text-xs font-bold">
                                                     <option value="premium_dark">高级·深邃灰 (半透明)</option>
-                                                    <option value="nomura_red">投行·暗酒红 (半透明)</option>
+                                                    <option value="nomura_red" selected>投行·暗酒红 (半透明)</option>
                                                     <option value="institutional_blue">机构·深海蓝 (半透明)</option>
                                                     <option value="investment_gold">投行·琥珀金 (半透明)</option>
                                                 </select>
                                             </div>
                                         </div>
-                                        <div id="cta_warning" class="hidden animate-pulse bg-amber-50 border border-amber-200 p-2 rounded-lg">
-                                            <p class="text-[10px] text-amber-700 flex items-center gap-1">
+                                        <div id="cta_warning" class="hidden animate-pulse bg-amber-50 border border-amber-200 p-3 rounded-xl">
+                                            <p class="text-[11px] text-amber-700 flex items-center gap-2">
                                                 <i class="fas fa-exclamation-triangle"></i>
                                                 <b>位置预警</b>: 该位置极易遮挡研报抬头信息，建议使用底部横条。
                                             </p>
@@ -179,825 +163,356 @@
                                 </div>
                             </div>
                             
-                            <!-- 视频正文预览区 -->
+                            <!-- 视频预览 -->
                             <div class="w-full xl:w-[480px] shrink-0">
-                                <div class="bg-slate-50 p-3 rounded-[24px] shadow-[0_20px_50px_rgba(0,0,0,0.1)] border border-white/60 relative">
-                                    <label class="input-label flex justify-between px-2 pt-1 pb-3">
-                                        <span class="text-slate-800 flex items-center gap-2 font-bold tracking-tight">
-                                            <i class="fas fa-video text-indigo-500"></i> 视频产出预览
+                                <div class="bg-slate-100/50 p-4 rounded-[32px] border border-white shadow-xl relative">
+                                    <label class="input-label flex justify-between px-2 pb-3">
+                                        <span class="text-slate-800 flex items-center gap-2 font-black text-[11px] tracking-wider uppercase">
+                                            <i class="fas fa-video text-indigo-500"></i> Output Monitor
                                         </span>
-                                        <span class="text-[9px] font-bold text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100">STUDIO MODE</span>
+                                        <span class="text-[9px] font-black text-indigo-500 bg-white px-2 py-0.5 rounded-full border border-indigo-50 shadow-sm">1080P</span>
                                     </label>
-                                    <!-- 增加内凹效果的容器 -->
-                                    <div class="relative overflow-hidden rounded-[16px] shadow-[inset_0_2px_10px_rgba(0,0,0,0.1)] bg-slate-900 border border-slate-200">
+                                    <div class="relative overflow-hidden rounded-[20px] shadow-[inset_0_2px_15px_rgba(0,0,0,0.15)] bg-slate-900 border-2 border-white/80">
                                         <canvas id="videoPreviewCanvas" width="1920" height="1080" class="w-full h-auto aspect-video block"></canvas>
                                         <div id="cta-placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-slate-400 bg-slate-100/95 transition-all duration-700">
-                                            <div class="w-16 h-16 bg-white rounded-[20px] shadow-[0_10px_20px_rgba(0,0,0,0.05)] flex items-center justify-center mb-4 border border-slate-50">
+                                            <div class="w-16 h-16 bg-white rounded-[24px] shadow-sm flex items-center justify-center mb-4 border border-slate-50">
                                                 <i class="fas fa-image text-3xl text-slate-200"></i>
                                             </div>
                                             <p class="text-[10px] font-black tracking-[0.2em] text-slate-300 uppercase">Input Required</p>
-                                            <p class="text-[11px] mt-2 text-slate-400 font-medium">请在左侧上传研报正文图片</p>
                                         </div>
                                     </div>
-                                    <!-- 底部装饰细节 -->
-                                    <div class="mt-3 flex justify-center gap-1.5">
-                                        <div class="w-1.5 h-1.5 rounded-full bg-slate-200"></div>
-                                        <div class="w-1.5 h-1.5 rounded-full bg-slate-200"></div>
-                                        <div class="w-8 h-1.5 rounded-full bg-indigo-200"></div>
+                                    <div class="mt-4 flex justify-center gap-2">
+                                        <div class="w-2 h-2 rounded-full bg-slate-200"></div>
+                                        <div class="w-2 h-2 rounded-full bg-slate-200"></div>
+                                        <div class="w-10 h-2 rounded-full bg-indigo-400 shadow-sm shadow-indigo-200"></div>
                                     </div>
                                 </div>
                             </div>
                         </div>
-                    </div>
+                    </section>
 
-                    <!-- 2. Thumbnail -->
-                    <div class="glass-card">
-                        <div class="flex justify-between items-center mb-5">
-                            <div class="section-title mb-0">
-                                <div class="w-8 h-8 bg-pink-100 text-pink-600 rounded-lg flex items-center justify-center">
-                                    <i class="fas fa-image"></i>
-                                </div>
-                                2. 封面工坊 (所见即所得)
+                    <!-- 2. 封面工坊 -->
+                    <section class="glass-card">
+                        <div class="section-title">
+                            <div class="w-10 h-10 bg-pink-100 text-pink-600 rounded-xl flex items-center justify-center shadow-sm">
+                                <i class="fas fa-image"></i>
                             </div>
-                            <div class="flex items-center gap-3">
-                                <label class="flex items-center gap-2 cursor-pointer">
-                                    <span class="text-xs text-slate-500">启用自定义封面</span>
-                                    <input type="checkbox" name="thumb_enabled" id="thumb_enabled" class="w-4 h-4 text-pink-600 rounded border-gray-300 focus:ring-pink-500" checked>
-                                </label>
-                                <span class="text-[10px] text-pink-500 bg-pink-50 px-2 py-0.5 rounded-full font-medium">实时渲染</span>
-                            </div>
+                            2. 封面工坊 (所见即所得)
                         </div>
 
-                        <div id="thumb_config_area" class="flex flex-col xl:flex-row gap-6 transition-opacity duration-300">
-                            <div class="flex-1 space-y-4">
+                        <div id="thumb_config_area" class="flex flex-col xl:flex-row gap-8">
+                            <div class="flex-1 space-y-5">
+                                <div class="flex items-center justify-between bg-pink-50/30 p-3 rounded-2xl border border-pink-100 mb-2">
+                                    <label class="flex items-center gap-3 cursor-pointer">
+                                        <input type="checkbox" name="thumb_enabled" id="thumb_enabled" class="w-5 h-5 text-pink-600 rounded-lg border-gray-300 focus:ring-pink-500" checked>
+                                        <span class="text-sm font-black text-pink-700 uppercase tracking-tighter">启用自定义封面</span>
+                                    </label>
+                                    <span class="text-[10px] text-pink-500 bg-white px-3 py-1 rounded-full font-bold border border-pink-50 shadow-sm">实时渲染模式</span>
+                                </div>
+
                                 <div class="input-group">
-                                    <div class="flex justify-between items-end mb-1">
-                                        <label class="input-label mb-0">主标题 (Main Title)</label>
-                                        <button type="button" onclick="syncTitleFromBili()" class="text-[10px] text-blue-600 hover:underline">
+                                    <div class="flex justify-between items-end mb-1.5">
+                                        <label class="input-label">主标题 (Main Title)</label>
+                                        <button type="button" onclick="syncTitleFromBili()" class="text-[10px] font-bold text-blue-600 hover:bg-blue-50 px-2 py-0.5 rounded-full border border-blue-100 transition-all">
                                             <i class="fas fa-sync-alt"></i> 同步视频标题
                                         </button>
                                     </div>
-                                    <textarea name="thumb_main" id="thumb_main" rows="3" class="input-field">深度解读：2026 全球宏观展望&#10;通胀下行下的资产配置指南&#10;为何现在是布局的关键时刻？</textarea>
+                                    <textarea name="thumb_main" id="thumb_main" rows="3" class="input-field font-medium leading-relaxed" oninput="drawCover()">深度解读：2026 全球宏观展望&#10;通胀下行下的资产配置指南</textarea>
                                 </div>
                                 <div class="input-group">
                                     <label class="input-label">副标题 (Sub Title)</label>
-                                    <input type="text" name="thumb_sub" id="thumb_sub" class="input-field" value="详解美联储降息路径与新兴市场机会">
+                                    <input type="text" name="thumb_sub" id="thumb_sub" class="input-field font-medium" value="详解美联储降息路径与新兴市场机会" oninput="drawCover()">
                                 </div>
-                                <div class="grid grid-cols-2 gap-3">
+                                <div class="grid grid-cols-2 gap-4">
                                     <div class="input-group">
                                         <label class="input-label">预设机构</label>
-                                        <select id="select-org" class="input-field"></select>
+                                        <select id="select-org" class="input-field text-xs font-bold"></select>
                                         <input type="hidden" name="thumb_tag" id="val-tag" value="Goldman Sachs · 高盛研报">
                                     </div>
                                     <div class="input-group">
                                         <label class="input-label">底图模式</label>
-                                        <select id="thumb_bg_mode" class="input-field" onchange="toggleBgMode()">
-                                            <option value="preset">底图预设</option>
-                                            <option value="screenshot">研报截图</option>
+                                        <select id="thumb_bg_mode" class="input-field text-xs font-bold" onchange="toggleBgMode()">
+                                            <option value="preset">底图预设库</option>
+                                            <option value="screenshot">研报截图模式</option>
                                         </select>
                                     </div>
                                 </div>
-                                <div class="grid grid-cols-2 gap-3">
+                                <div class="grid grid-cols-2 gap-4">
                                     <div id="preset_bg_area" class="input-group">
-                                        <label class="input-label">选择底图</label>
-                                        <select name="thumb_bg_index" id="select-bg" class="input-field"></select>
+                                        <label class="input-label">选择预设底图</label>
+                                        <select name="thumb_bg_index" id="select-bg" class="input-field text-xs font-bold"></select>
                                     </div>
                                     <div id="screenshot_bg_area" class="input-group hidden">
-                                        <label class="input-label">上传截图</label>
-                                        <div class="upload-area h-10 flex items-center justify-center relative" id="area-thumb-bg">
+                                        <label class="input-label">上传研报截图</label>
+                                        <div class="upload-area h-11 flex items-center justify-center relative shadow-sm" id="area-thumb-bg">
                                             <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'thumb-bg')">
                                             <input type="hidden" name="custom_bg_path" id="val-thumb-bg">
                                             <div class="flex items-center gap-2">
                                                 <i class="fas fa-upload text-xs text-slate-400"></i>
-                                                <span class="text-xs text-slate-500" id="label-thumb-bg">选择截图...</span>
+                                                <span class="text-xs text-slate-500 font-bold" id="label-thumb-bg">选择图片...</span>
                                             </div>
-                                            <div id="spin-thumb-bg" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-blue-500 text-xs"></i></div>
                                         </div>
                                     </div>
                                     <div class="input-group">
                                         <label class="input-label">蒙层透明度</label>
-                                        <input type="range" name="overlay_opacity" id="overlay_opacity" min="0" max="1" step="0.1" value="0.5" class="w-full mt-2" oninput="draw()">
+                                        <input type="range" id="overlay_opacity" name="overlay_opacity" min="0" max="1" step="0.1" value="0.5" class="w-full mt-2 accent-pink-500" oninput="drawCover()">
                                     </div>
                                 </div>
-                                <div class="input-group">
-                                    <label class="input-label">底部落款</label>
-                                    <input type="text" name="thumb_date" id="thumb_date" class="input-field" value="Feb 2026 | 胶囊播客">
+                                <div class="input-group mb-0">
+                                    <label class="input-label">底部落款 (Sign-off)</label>
+                                    <input type="text" name="thumb_date" id="thumb_date" class="input-field font-medium" value="Feb 2026 | 胶囊播客" oninput="drawCover()">
                                 </div>
                             </div>
                             <div class="w-full xl:w-[480px] shrink-0">
-                                <label class="input-label">效果预览</label>
-                                <canvas id="previewCanvas" width="1920" height="1080"></canvas>
+                                <label class="input-label">封面效果实时预览</label>
+                                <div class="relative overflow-hidden rounded-[24px] shadow-2xl border-4 border-white bg-slate-100">
+                                    <canvas id="previewCanvas" width="1920" height="1080" class="w-full h-auto aspect-video block"></canvas>
+                                </div>
                             </div>
                         </div>
-                    </div>
+                    </section>
 
-                    <!-- 3. Bilibili -->
-                    <div class="glass-card">
-                        <div class="flex justify-between items-center mb-5">
+                    <!-- 3. Bilibili (完整版恢复) -->
+                    <section class="glass-card">
+                        <div class="flex justify-between items-center mb-6">
                             <div class="section-title mb-0">
-                                <div class="w-8 h-8 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center">
+                                <div class="w-10 h-10 bg-blue-100 text-blue-600 rounded-xl flex items-center justify-center shadow-sm">
                                     <i class="fab fa-bilibili"></i>
                                 </div>
                                 3. 渠道发布 (Bilibili)
                             </div>
-                            <div id="bili-status-badge" class="flex items-center gap-2 text-xs bg-slate-100 px-3 py-1 rounded-full text-slate-500">
-                                <div class="w-2 h-2 rounded-full bg-slate-400"></div>
-                                <span>检查中...</span>
+                            <div class="flex items-center gap-4">
+                                <label class="flex items-center gap-3 cursor-pointer group">
+                                    <span class="text-xs font-black text-blue-600 uppercase tracking-widest">开启发布</span>
+                                    <input type="checkbox" id="bili_enabled" name="bili_enabled" class="w-5 h-5 text-blue-600 rounded-lg border-gray-300 transition-all" checked>
+                                </label>
                             </div>
                         </div>
 
-                        <div class="space-y-4">
+                        <div id="bili_config_area" class="space-y-5 transition-all duration-300">
                             <div class="input-group">
-                                <div class="flex justify-between items-center mb-1">
-                                    <label class="input-label mb-0">视频标题</label>
-                                    <span id="bili_title_counter" class="text-[10px] text-slate-400">0/80</span>
+                                <div class="flex justify-between items-center mb-1.5">
+                                    <label class="input-label">视频标题</label>
+                                    <span id="bili_title_counter" class="text-[10px] font-bold text-slate-400">0/80</span>
                                 </div>
-                                <input type="text" name="bili_title" id="bili_title" class="input-field" maxlength="80" placeholder="留空则自动抓取主标题第一行" oninput="updateCounter('bili_title', 80)">
+                                <input type="text" name="bili_title" id="bili_title" class="input-field font-bold" maxlength="80" placeholder="留空则自动抓取主标题第一行" oninput="updateCounter('bili_title', 80)">
                             </div>
                             
                             <div class="input-group">
-                                <div class="flex justify-between items-center mb-1">
-                                    <label class="input-label mb-0">视频简介</label>
-                                    <span id="bili_desc_counter" class="text-[10px] text-slate-400">0/2000</span>
+                                <div class="flex justify-between items-center mb-1.5">
+                                    <label class="input-label">视频简介</label>
+                                    <span id="bili_desc_counter" class="text-[10px] font-bold text-slate-400">0/2000</span>
                                 </div>
-                                <textarea name="bili_desc" id="bili_desc" class="input-field" rows="3" maxlength="2000" placeholder="填写视频简介..." oninput="updateCounter('bili_desc', 2000)"></textarea>
+                                <textarea name="bili_desc" id="bili_desc" class="input-field font-medium" rows="3" maxlength="2000" placeholder="填写视频简介..." oninput="updateCounter('bili_desc', 2000)"></textarea>
                             </div>
                             
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div>
                                     <label class="input-label">投稿类型</label>
-                                    <select name="bili_copyright" class="input-field">
+                                    <select name="bili_copyright" class="input-field font-bold">
                                         <option value="1" selected>自制 (Original)</option>
                                         <option value="2">转载 (Reprint)</option>
                                     </select>
                                 </div>
                                 <div>
                                     <label class="input-label">分区 (TID)</label>
-                                    <select name="bili_tid" id="bili_tid" class="input-field"></select>
+                                    <select name="bili_tid" id="bili_tid" class="input-field font-bold"></select>
                                 </div>
                                 <div>
                                     <label class="input-label">合集 (可选)</label>
-                                    <select name="bili_season_id" id="bili_season_id" class="input-field">
+                                    <select name="bili_season_id" id="bili_season_id" class="input-field font-bold">
                                         <option value="">-- 请选择合集 --</option>
                                     </select>
                                 </div>
                             </div>
 
-                            <div class="grid grid-cols-2 gap-4 bg-slate-50 p-3 rounded-lg border border-slate-100">
-                                <label class="flex items-center gap-2 cursor-pointer">
-                                    <input type="checkbox" name="bili_no_reprint" class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" checked>
-                                    <span class="text-sm text-slate-700">未经授权禁止转载 (添加水印)</span>
+                            <div class="grid grid-cols-2 gap-4 bg-slate-50/50 p-4 rounded-2xl border border-slate-100">
+                                <label class="flex items-center gap-3 cursor-pointer">
+                                    <input type="checkbox" name="bili_no_reprint" class="w-5 h-5 text-blue-600 rounded-lg border-gray-300 focus:ring-blue-500" checked>
+                                    <span class="text-[13px] text-slate-700 font-bold">未经授权禁止转载</span>
                                 </label>
-                                <label class="flex items-center gap-2 cursor-pointer">
-                                    <input type="checkbox" name="bili_private" class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500">
-                                    <span class="text-sm text-slate-700">仅自己可见 (私密发布)</span>
+                                <label class="flex items-center gap-3 cursor-pointer">
+                                    <input type="checkbox" name="bili_private" class="w-5 h-5 text-blue-600 rounded-lg border-gray-300 focus:ring-blue-500">
+                                    <span class="text-[13px] text-slate-700 font-bold">仅自己可见 (私密发布)</span>
                                 </label>
                             </div>
 
-                            <div class="input-group">
+                            <div class="input-group mb-0">
                                 <label class="input-label">视频标签 (逗号分隔)</label>
-                                <input type="text" name="bili_tags" class="input-field" value="金融, 投资, 宏观, 财经">
+                                <input type="text" name="bili_tags" id="bili_tags" class="input-field font-medium" value="金融, 投资, 宏观, 财经">
                             </div>
                         </div>
-                    </div>
+                    </section>
 
-                    <!-- 4. YouTube -->
-                    <div class="glass-card">
-                        <div class="flex justify-between items-center mb-5">
+                    <!-- 4. YouTube (完整版恢复) -->
+                    <section class="glass-card">
+                        <div class="flex justify-between items-center mb-6">
                             <div class="section-title mb-0">
-                                <div class="w-8 h-8 bg-red-100 text-red-600 rounded-lg flex items-center justify-center">
+                                <div class="w-10 h-10 bg-red-100 text-red-600 rounded-xl flex items-center justify-center shadow-sm">
                                     <i class="fab fa-youtube"></i>
                                 </div>
                                 4. 渠道发布 (YouTube)
                             </div>
-                            <label class="flex items-center gap-2 cursor-pointer">
-                                <span class="text-xs text-slate-500">开启同步</span>
-                                <input type="checkbox" name="yt_enabled" id="yt_enabled" class="w-4 h-4 text-red-600 rounded border-gray-300 focus:ring-red-500">
+                            <label class="flex items-center gap-3 cursor-pointer group">
+                                <span class="text-xs font-black text-red-600 uppercase tracking-widest">开启同步</span>
+                                <input type="checkbox" name="yt_enabled" id="yt_enabled" class="w-5 h-5 text-red-600 rounded-lg border-gray-300 focus:ring-red-500 transition-all">
                             </label>
                         </div>
 
-                        <div id="yt_config_area" class="space-y-4 opacity-50 pointer-events-none transition-opacity">
+                        <div id="yt_config_area" class="space-y-5 opacity-50 pointer-events-none transition-all duration-300">
                             <div class="input-group">
-                                <div class="flex justify-between items-center mb-1">
-                                    <label class="input-label mb-0">YouTube 标题</label>
-                                    <span id="yt_title_counter" class="text-[10px] text-slate-400">0/100</span>
+                                <div class="flex justify-between items-center mb-1.5">
+                                    <label class="input-label">视频标题 (留空同B站)</label>
+                                    <span id="yt_title_counter" class="text-[10px] font-bold text-slate-400">0/100</span>
                                 </div>
-                                <input type="text" name="yt_title" id="yt_title" class="input-field" maxlength="100" placeholder="留空则同步 B 站标题" oninput="updateCounter('yt_title', 100)">
+                                <input type="text" name="yt_title" id="yt_title" class="input-field font-bold" maxlength="100" placeholder="留空则自动抓取 B 站标题" oninput="updateCounter('yt_title', 100)">
                             </div>
-                            
+
                             <div class="input-group">
-                                <div class="flex justify-between items-center mb-1">
-                                    <label class="input-label mb-0">YouTube 简介</label>
-                                    <span id="yt_desc_counter" class="text-[10px] text-slate-400">0/5000</span>
+                                <div class="flex justify-between items-center mb-1.5">
+                                    <label class="input-label">视频简介 (留空同B站)</label>
+                                    <span id="yt_desc_counter" class="text-[10px] font-bold text-slate-400">0/5000</span>
                                 </div>
-                                <textarea name="yt_desc" id="yt_desc" class="input-field" rows="3" maxlength="5000" placeholder="填写 YouTube 视频简介..." oninput="updateCounter('yt_desc', 5000)"></textarea>
+                                <textarea name="yt_desc" id="yt_desc" class="input-field font-medium" rows="3" maxlength="5000" placeholder="填写 YouTube 简介..." oninput="updateCounter('yt_desc', 5000)"></textarea>
                             </div>
-                            
+
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div>
-                                    <label class="input-label">隐私设置</label>
-                                    <select name="yt_privacy" class="input-field">
-                                        <option value="public" selected>公开 (Public)</option>
-                                        <option value="unlisted">不列出 (Unlisted)</option>
-                                        <option value="private">私有 (Private)</option>
+                                <div class="input-group">
+                                    <label class="input-label">隐私状态</label>
+                                    <select name="yt_privacy" class="input-field font-bold">
+                                        <option value="private" selected>私密 (Private)</option>
+                                        <option value="unlisted">不公开 (Unlisted)</option>
+                                        <option value="public">公开 (Public)</option>
                                     </select>
                                 </div>
-                                <div>
-                                    <label class="input-label">分类 (Category ID)</label>
-                                    <select name="yt_category" class="input-field">
-                                        <option value="22" selected>People & Blogs</option>
-                                        <option value="27">Education</option>
-                                        <option value="25">News & Politics</option>
-                                        <option value="28">Science & Technology</option>
-                                        <option value="1">Film & Animation</option>
+                                <div class="input-group">
+                                    <label class="input-label">分类 (Category)</label>
+                                    <select name="yt_category" class="input-field font-bold">
+                                        <option value="22" selected>人物和博客</option>
+                                        <option value="27">教育</option>
+                                        <option value="28">科技</option>
+                                        <option value="25">新闻</option>
                                     </select>
                                 </div>
                             </div>
 
-                            <div class="input-group">
-                                <label class="input-label">视频标签 (逗号分隔)</label>
-                                <input type="text" name="yt_tags" class="input-field" value="Finance, Investment, Macro, Economics">
+                            <div class="input-group mb-0">
+                                <label class="input-label">标签 (逗号分隔)</label>
+                                <input type="text" name="yt_tags" id="yt_tags" class="input-field font-medium" value="Finance, Investment, Macro">
                             </div>
                         </div>
-                    </div>
-                    <div class="h-12"></div>
+                    </section>
                 </form>
             </div>
 
-            <!-- Right Console -->
-            <div class="lg:w-96 space-y-6">
-                <div class="glass-card bg-slate-900 border-none sticky top-24 z-20">
-                    <h3 class="text-white font-bold mb-4 flex items-center justify-between">任务控制台</h3>
-                    <button id="submitBtn" class="btn-primary w-full py-4 text-lg">
-                        <i class="fas fa-paper-plane mr-2"></i> 开始全流程投递
-                    </button>
-                    <p class="text-slate-400 text-xs mt-4">点击后进入异步队列。您可以关闭页面。</p>
-                </div>
+            <!-- 右侧：状态面板 & 提交 -->
+            <aside class="w-full lg:w-[420px] shrink-0">
+                <div class="sticky top-24 space-y-8">
+                    
+                    <!-- 提交按钮 -->
+                    <div class="bg-white p-6 rounded-[32px] shadow-[0_30px_60px_rgba(0,0,0,0.12)] border border-slate-100">
+                        <h3 class="text-sm font-black text-slate-800 uppercase tracking-widest mb-4 flex items-center gap-2">
+                            <i class="fas fa-paper-plane text-blue-500"></i> Pipeline Execution
+                        </h3>
+                        <p class="text-[11px] text-slate-400 mb-6 font-medium leading-relaxed">
+                            点击下方按钮开始自动化合成流程。我们将为您处理素材拼接、封面渲染及多平台分发。
+                        </p>
+                        <button type="button" id="submitBtn" class="w-full btn-primary py-5 text-xl flex justify-center items-center gap-3">
+                            <i class="fas fa-rocket"></i> 提交新任务
+                        </button>
+                    </div>
 
-                <div id="statusCard" class="hidden glass-card border-blue-100 bg-blue-50/30 sticky top-80">
-                    <div class="flex justify-between items-start mb-4">
-                        <div>
-                            <p class="text-[10px] font-mono text-blue-500 uppercase tracking-wider" id="taskIdDisplay">TASK ID</p>
-                            <h4 class="font-bold text-slate-800 mt-1" id="stepDisplay">正在处理...</h4>
+                    <!-- 实时状态 -->
+                    <div id="statusCard" class="glass-card hidden border-indigo-100 bg-indigo-50/10">
+                        <h3 class="font-bold text-slate-800 mb-4 flex items-center justify-between">
+                            <span class="flex items-center gap-2 text-sm"><i class="fas fa-satellite-dish text-blue-500 animate-pulse"></i> 实时状态</span>
+                            <span id="timerText" class="text-xs font-mono bg-white px-2 py-1 rounded border border-slate-100 text-slate-600 shadow-sm">00:00</span>
+                        </h3>
+                        
+                        <div class="bg-white p-4 rounded-2xl mb-4 border border-slate-100 shadow-sm">
+                            <div class="flex justify-between text-xs mb-2">
+                                <span class="text-slate-400 font-black uppercase tracking-tighter">Current Step</span>
+                                <span id="stepDisplay" class="font-black text-blue-600">初始化...</span>
+                            </div>
+                            <div class="h-3 w-full bg-slate-100 rounded-full overflow-hidden border border-slate-200 p-0.5">
+                                <div id="progressBar" class="h-full bg-gradient-to-r from-blue-400 to-indigo-600 rounded-full progress-bar-fill w-0 shadow-sm"></div>
+                            </div>
                         </div>
-                        <span id="statusBadge" class="px-2 py-1 bg-blue-600 text-white text-[10px] font-black rounded shadow-sm">RUNNING</span>
-                    </div>
-                    <div class="space-y-3">
-                        <div class="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
-                            <div id="progressBar" class="bg-blue-600 h-full progress-bar-fill" style="width: 0%"></div>
-                        </div>
-                        <div class="flex justify-between text-xs font-medium">
-                            <span class="text-blue-600" id="progressText">0%</span>
-                            <span class="text-slate-400" id="timerText">00:00</span>
-                        </div>
-                    </div>
-                    <div id="resultArea" class="mt-6 pt-4 border-t border-slate-200 hidden">
-                        <div id="successMsg" class="text-sm text-emerald-600"></div>
-                        <div id="errorMsg" class="text-sm text-red-600"></div>
-                    </div>
-                </div>
 
-                <div class="glass-card sticky top-[280px]">
-                    <div class="flex justify-between items-center mb-4">
-                        <h3 class="text-sm font-bold text-slate-700">最近任务</h3>
-                        <button onclick="loadHistory()" class="text-xs text-blue-600 hover:text-blue-800"><i class="fas fa-sync"></i></button>
+                        <div id="resultArea" class="hidden">
+                            <div class="p-4 bg-emerald-50 border border-emerald-100 rounded-2xl flex items-start gap-3 shadow-sm">
+                                <i class="fas fa-check-circle text-emerald-500 text-lg mt-0.5"></i>
+                                <div>
+                                    <p class="text-sm font-black text-emerald-800" id="successMsg">发布成功！</p>
+                                    <p class="text-[11px] text-emerald-600 mt-1 leading-relaxed">资源已成功上传并保存副本。</p>
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div id="historyList" class="space-y-0 text-sm">
-                        <div class="text-center text-slate-400 py-4 text-xs">加载中...</div>
+
+                    <!-- 最近任务 -->
+                    <div class="glass-card bg-white/50 border-dashed">
+                        <div class="flex justify-between items-center mb-5 px-1">
+                            <h3 class="text-sm font-black text-slate-800 uppercase tracking-widest flex items-center gap-2">
+                                <i class="fas fa-layer-group text-slate-400"></i> History
+                            </h3>
+                            <button onclick="loadHistory()" class="text-[9px] font-black tracking-[0.2em] text-blue-500 hover:text-blue-700 bg-blue-50 px-3 py-1 rounded-full uppercase transition-all">
+                                Refresh
+                            </button>
+                        </div>
+                        <div id="historyList" class="space-y-3 max-h-[500px] overflow-y-auto pr-1">
+                            <div class="text-center text-slate-400 py-12">
+                                <i class="fas fa-spinner fa-spin text-2xl mb-3 block opacity-20"></i>
+                                <span class="text-[10px] font-bold uppercase tracking-widest">Loading...</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            </div>
+            </aside>
         </div>
     </main>
 
-    <!-- Modal -->
-    <div id="bili-modal" class="fixed inset-0 z-[100] hidden">
-        <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onclick="closeBiliModal()"></div>
-        <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg">
-            <div class="glass-card !p-0 overflow-hidden shadow-2xl border-slate-200">
-                <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-                    <h3 class="font-bold text-slate-800 flex items-center gap-2"><i class="fa-solid fa-circle-info text-blue-500"></i> Bilibili 连接配置指南</h3>
-                    <button onclick="closeBiliModal()" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+    <!-- Bili Auth Modal -->
+    <div id="bili-modal" class="hidden fixed inset-0 bg-slate-900/60 backdrop-blur-md z-50 flex items-center justify-center">
+        <div class="bg-white rounded-[32px] shadow-2xl w-full max-w-md mx-4 overflow-hidden border border-slate-100">
+            <div class="px-8 py-6 border-b border-slate-50 flex justify-between items-center bg-slate-50/50">
+                <h3 class="font-black text-xl tracking-tight text-slate-800">Bilibili 凭证配置</h3>
+                <button onclick="closeBiliModal()" class="w-10 h-10 flex items-center justify-center rounded-full hover:bg-slate-100 transition-all text-slate-400"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="p-8 space-y-6">
+                <div class="bg-blue-50 text-blue-700 p-5 rounded-2xl text-[13px] font-bold leading-relaxed border border-blue-100/50 shadow-sm">
+                    <i class="fas fa-shield-halved mr-2"></i> 请确保您的 SESSDATA 处于有效期内。
                 </div>
-                <div class="p-6 max-h-[70vh] overflow-y-auto space-y-6">
-                    <div class="flex gap-4"><div class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">1</div><p class="text-sm">在浏览器登录 bilibili.com</p></div>
-                    <div class="flex gap-4"><div class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">2</div><p class="text-sm">按 F12 切换到 Application (应用) 面板</p></div>
-                    <div class="flex gap-4"><div class="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-xs font-bold">3</div><div class="text-sm">找到 Cookies -> bilibili.com，复制以下值填入 .env:<br><code class="block mt-2 bg-slate-900 text-slate-300 p-2 rounded">SESSDATA, bili_jct, buvid3, DedeUserID</code></div></div>
+                <div class="space-y-6">
+                    <div class="flex gap-5 items-start">
+                        <div class="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-xl flex items-center justify-center text-xs font-black shadow-sm">1</div>
+                        <p class="text-sm font-bold text-slate-600 mt-1">在浏览器登录 bilibili.com</p>
+                    </div>
+                    <div class="flex gap-5 items-start">
+                        <div class="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-xl flex items-center justify-center text-xs font-black shadow-sm">2</div>
+                        <p class="text-sm font-bold text-slate-600 mt-1">按 F12 切换到 Application 面板</p>
+                    </div>
+                    <div class="flex gap-5 items-start">
+                        <div class="flex-shrink-0 w-8 h-8 bg-blue-100 text-blue-600 rounded-xl flex items-center justify-center text-xs font-black shadow-sm">3</div>
+                        <div class="text-sm font-bold text-slate-600 flex-1">
+                            找到 Cookies 复制以下值填入 .env:
+                            <code class="block mt-3 bg-slate-900 text-blue-300 p-5 rounded-2xl font-mono text-[11px] leading-relaxed border border-slate-800">SESSDATA, bili_jct, buvid3, DedeUserID</code>
+                        </div>
+                    </div>
                 </div>
-                <div class="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end">
-                    <button onclick="closeBiliModal()" class="px-4 py-2 bg-slate-800 text-white rounded-lg text-sm font-bold">我知道了</button>
-                </div>
+            </div>
+            <div class="px-8 py-6 bg-slate-50 border-t border-slate-100 flex justify-end">
+                <button onclick="closeBiliModal()" class="px-8 py-3 bg-slate-900 text-white rounded-2xl text-xs font-black tracking-widest uppercase shadow-xl">I Understand</button>
             </div>
         </div>
     </div>
 
+    <!-- 脚本引用 -->
     <script src="js/config.js"></script>
     <script src="js/api.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script>
-        const API_BASE = 'http://localhost:5001/api/v1';
-        let currentTaskId = null;
-        let pollInterval = null;
-        let startTime = null;
-
-        function showBiliModal() { document.getElementById('bili-modal').classList.remove('hidden'); }
-        function closeBiliModal() { document.getElementById('bili-modal').classList.add('hidden'); }
-
-        const BILI_TIDS = [
-            { label: "知识/科技", items: [{ value: "207", label: "财经" }, { value: "36", label: "知识" }, { value: "188", label: "科技" }, { value: "201", label: "科学科普" }] },
-            { label: "热门", items: [{ value: "171", label: "电子竞技" }, { value: "17", label: "单机游戏" }, { value: "65", label: "网络游戏" }] }
-        ];
-
-        function initBiliTids() {
-            const select = document.getElementById('bili_tid');
-            BILI_TIDS.forEach(group => {
-                const optgroup = document.createElement('optgroup'); optgroup.label = group.label;
-                group.items.forEach(item => {
-                    const opt = document.createElement('option'); opt.value = item.value; opt.textContent = `${item.label} (${item.value})`; optgroup.appendChild(opt);
-                });
-                select.appendChild(optgroup);
-            });
-            select.value = "207";
-        }
-
-        async function checkBiliStatus() {
-            const el = document.getElementById('bili-status-badge');
-            try {
-                const res = await fetch(`${API_BASE}/bilibili/status`);
-                const json = await res.json();
-                if (json.success && json.data.valid) {
-                    const user = json.data.data;
-                    el.className = "flex items-center gap-2 text-xs bg-emerald-50 px-3 py-1 rounded-full text-emerald-600 border border-emerald-100";
-                    el.innerHTML = `<img src="${user.face}" class="w-4 h-4 rounded-full"> <span class="font-bold">${user.name}</span>`;
-                    initBiliSeasons();
-                } else {
-                    el.className = "flex items-center gap-2 text-xs bg-red-50 px-3 py-1 rounded-full text-red-600 border border-red-100 cursor-pointer";
-                    el.innerHTML = `<i class="fa-solid fa-circle-xmark"></i> <span>未连接 (点击配置)</span>`;
-                    el.onclick = showBiliModal;
-                }
-            } catch (e) { console.error(e); }
-        }
-
-        async function initBiliSeasons() {
-            const select = document.getElementById('bili_season_id');
-            try {
-                const res = await fetch(`${API_BASE}/bilibili/seasons`);
-                const json = await res.json();
-                if (json.success && json.data.length > 0) {
-                    select.innerHTML = '<option value="">-- 请选择合集 --</option>';
-                    json.data.forEach(s => {
-                        const opt = document.createElement('option');
-                        opt.value = s.id; opt.textContent = s.title;
-                        select.appendChild(opt);
-                    });
-                }
-            } catch (e) { console.error('Failed to fetch Bili seasons:', e); }
-        }
-
-        async function loadHistory() {
-            const list = document.getElementById('historyList');
-            try {
-                const res = await fetch(`${API_BASE}/publisher/tasks`);
-                const json = await res.json();
-                if (json.success && json.data.length > 0) {
-                    list.innerHTML = json.data.map(task => {
-                        const date = new Date(task.created_at).toLocaleString('zh-CN', { hour12: false, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                        let statusColor = 'text-slate-500';
-                        let icon = 'fa-circle-dot';
-                        if (task.status === 'completed' || task.status === 'success') { statusColor = 'text-emerald-500'; icon = 'fa-check-circle'; }
-                        if (task.status === 'failed') { statusColor = 'text-red-500'; icon = 'fa-times-circle'; }
-                        if (task.status === 'processing') { statusColor = 'text-blue-500'; icon = 'fa-spinner fa-spin'; }
-                        const showYTBtn = task.status === 'completed' && (!task.result || !task.result.youtube_result);
-                        return `
-                        <div class="history-item flex justify-between items-center group">
-                            <div class="min-w-0 pr-2 flex-1" onclick="trackTask('${task.id}')">
-                                <div class="font-bold text-slate-700 truncate" title="${task.title}">${task.title}</div>
-                                <div class="text-xs text-slate-400 flex gap-2">
-                                    <span class="font-mono">${date}</span>
-                                    <span class="bg-slate-100 px-1 rounded text-slate-500">ID:${task.id.split('-')[0]}</span>
-                                </div>
-                            </div>
-                            <div class="flex items-center gap-2">
-                                <div class="${statusColor} text-sm flex-shrink-0"><i class="fas ${icon}"></i></div>
-                                ${showYTBtn ? `<button onclick="postToYouTube('${task.id}', event)" class="text-slate-400 hover:text-red-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="仅补发 YouTube"><i class="fab fa-youtube"></i></button>` : ''}
-                                <button onclick="retryTask('${task.id}', event)" class="text-slate-400 hover:text-blue-600 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="全部重试 (重新合成)"><i class="fas fa-rotate-right"></i></button>
-                            </div>
-                        </div>`;
-                    }).join('');
-                } else { list.innerHTML = '<div class="text-center text-slate-400 py-4 text-xs">暂无历史任务</div>'; }
-            } catch (e) { console.error(e); }
-        }
-
-        async function retryTask(taskId, event) {
-            if(event) event.stopPropagation();
-            if(!confirm('确定要使用相同参数重新投递此任务吗？')) return;
-            try {
-                const res = await fetch(`${API_BASE}/publisher/retry/${taskId}`, { method: 'POST' });
-                const json = await res.json();
-                if(json.success) { currentTaskId = json.task_id; startPolling(json.task_id); loadHistory(); alert('已重新提交任务！'); } else { alert('重试失败: ' + json.error); }
-            } catch(e) { alert('网络错误'); }
-        }
-
-        async function postToYouTube(taskId, event) {
-            if(event) event.stopPropagation();
-            if(!confirm('确定要补发吗？')) return;
-            try {
-                const res = await fetch(`${API_BASE}/publisher/post-youtube/${taskId}`, { method: 'POST' });
-                const json = await res.json();
-                if(json.success) { currentTaskId = taskId; startPolling(taskId); loadHistory(); } else { alert('补发失败: ' + json.error); }
-            } catch(e) { alert('网络错误'); }
-        }
-
-        function trackTask(taskId) { currentTaskId = taskId; startPolling(taskId); }
-
-        function updateCounter(id, max) {
-            const el = document.getElementById(id);
-            const counter = document.getElementById(id + '_counter');
-            if (el && counter) {
-                const len = el.value.length;
-                counter.innerText = `${len}/${max}`;
-                if (len >= max) { counter.classList.add('text-red-500', 'font-bold'); }
-                else { counter.classList.remove('text-red-500', 'font-bold'); counter.classList.add('text-slate-400'); }
-            }
-        }
-
-        // --- Canvas 独立化 ---
-        const coverCanvas = document.getElementById('previewCanvas');
-        const coverCtx = coverCanvas.getContext('2d');
-        const videoCanvas = document.getElementById('videoPreviewCanvas');
-        const videoCtx = videoCanvas.getContext('2d');
-        
-        const images = { 
-            bg: new Image(),      // 封面预设背景
-            custom: new Image(),  // 用户上传的正文图/研报截图 (用于封面)
-            videoBody: new Image() // 专门用于视频预览的图 (同 custom，但逻辑分离)
-        };
-        let bgData = [];
-        const THEME = { main: '#002D72', sub: '#FFD700', tag: '#002D72', date: '#ffffff', stroke: 'rgba(255,255,255,1.0)', bg: '#f0f4f8' };
-
-        function toggleBgMode() {
-            const mode = document.getElementById('thumb_bg_mode').value;
-            const presetArea = document.getElementById('preset_bg_area');
-            const screenshotArea = document.getElementById('screenshot_bg_area');
-            if (mode === 'preset') { presetArea.classList.remove('hidden'); screenshotArea.classList.add('hidden'); }
-            else { presetArea.classList.add('hidden'); screenshotArea.classList.remove('hidden'); }
-            drawCover();
-        }
-
-        // 1. 专门绘制封面预览
-        function drawCover() {
-            const w = coverCanvas.width, h = coverCanvas.height;
-            const mode = document.getElementById('thumb_bg_mode').value;
-            const isScreenshot = (mode === 'screenshot');
-            coverCtx.clearRect(0, 0, w, h);
-            
-            if (isScreenshot && images.custom.src && images.custom.complete && images.custom.naturalWidth !== 0) {
-                // 方案：实色看板
-                coverCtx.save();
-                coverCtx.beginPath(); coverCtx.rect(0, 0, w, h * 0.45); coverCtx.clip();
-                drawImageCover(coverCtx, images.custom, 0, 0, w, h * 0.45);
-                coverCtx.restore();
-                coverCtx.fillStyle = '#001529'; 
-                coverCtx.fillRect(0, h * 0.45, w, h * 0.55);
-            } else if (images.bg.complete && images.bg.naturalWidth !== 0) {
-                drawImageCover(coverCtx, images.bg, 0, 0, w, h);
-                const maskGradient = coverCtx.createLinearGradient(0, 0, w * 0.6, 0);
-                maskGradient.addColorStop(0, `rgba(0, 15, 30, 0.4)`); maskGradient.addColorStop(1, `rgba(0, 15, 30, 0)`);
-                coverCtx.fillStyle = maskGradient; coverCtx.fillRect(0, 0, w, h);
-            } else { coverCtx.fillStyle = THEME.bg; coverCtx.fillRect(0, 0, w, h); }
-
-            const leftMargin = 120;
-            // 最终重心上移至 520px
-            let currentY = isScreenshot ? 520 : 180;
-            
-            // 4.1 Tag
-            if (!isScreenshot) {
-                const tagText = document.getElementById('val-tag').value;
-                coverCtx.font = `900 30px sans-serif`;
-                const tm = coverCtx.measureText(tagText);
-                coverCtx.save(); coverCtx.beginPath(); coverCtx.roundRect(leftMargin - 24, currentY - 12, tm.width + 48, 30 + 24, 4); coverCtx.fillStyle = "#FFFFFF"; coverCtx.fill(); coverCtx.restore();
-                coverCtx.fillStyle = '#333'; coverCtx.textBaseline = 'top'; coverCtx.fillText(tagText, leftMargin, currentY); 
-                currentY += 130;
-            }
-
-            // 4.2 Main Title (黑体)
-            const mainLines = document.getElementById('thumb_main').value.split('\n');
-            const mainFontSize = 110; 
-            coverCtx.font = `900 ${mainFontSize}px sans-serif`;
-            const mainColor = isScreenshot ? '#FFD700' : THEME.main;
-            mainLines.forEach(l => {
-                if (!l.trim()) return;
-                if (isScreenshot) { coverCtx.fillStyle = mainColor; coverCtx.textBaseline = 'top'; coverCtx.fillText(l, leftMargin, currentY); }
-                else { drawHaloText(coverCtx, l, leftMargin, currentY, mainColor, THEME.stroke, mainFontSize, "sans-serif", "900"); }
-                currentY += mainFontSize * 1.3; 
-            });
-
-            // 4.3 Sub Title (白)
-            const subText = document.getElementById('thumb_sub').value;
-            if (subText) {
-                const subColor = isScreenshot ? '#FFFFFF' : THEME.sub;
-                if (isScreenshot) { coverCtx.font = `700 56px sans-serif`; coverCtx.fillStyle = subColor; coverCtx.fillText(subText, leftMargin, currentY + 15); }
-                else { drawHaloText(coverCtx, subText, leftMargin, currentY + 15, subColor, THEME.stroke, 56, "sans-serif", "700"); }
-            }
-
-            // 4.4 Date (左下角加线 + 浅灰)
-            const footerY = h - 100;
-            const footerColor = isScreenshot ? 'rgba(200, 200, 200, 0.8)' : THEME.date;
-            coverCtx.save(); coverCtx.textAlign = 'left';
-            
-            // 定稿：加线
-            coverCtx.beginPath(); coverCtx.moveTo(leftMargin, footerY - 47); coverCtx.lineTo(leftMargin + 60, footerY - 47); coverCtx.strokeStyle = footerColor; coverCtx.lineWidth = 2; coverCtx.stroke();
-            coverCtx.font = `600 32px sans-serif`; coverCtx.fillStyle = footerColor; coverCtx.fillText(document.getElementById('thumb_date').value, leftMargin, footerY - 32);
-            coverCtx.restore();
-        }
-
-                                function checkCtaPosition(select) {
-                                    const warning = document.getElementById('cta_warning');
-                                    if (select.value === 'top_right') warning.classList.remove('hidden');
-                                    else warning.classList.add('hidden');
-                                    drawVideoPreview();
-                                }
-                        
-                                // 2. 专门绘制视频正文预览
-                                // 2. 专门绘制视频正文预览
-                                function drawVideoPreview() {
-                                    const w = videoCanvas.width, h = videoCanvas.height;
-                                    videoCtx.clearRect(0, 0, w, h);
-                                    const placeholder = document.getElementById('cta-placeholder');
-                                    
-                                    if (images.videoBody.src && images.videoBody.complete && images.videoBody.naturalWidth !== 0) {
-                                        placeholder.classList.add('opacity-0', 'pointer-events-none');
-                                        drawImageCover(videoCtx, images.videoBody, 0, 0, w, h);
-                                        
-                                        const ctaEnabled = document.getElementById('cta_enabled').checked;
-                                        const ctaText = document.getElementById('cta_text').value;
-                                        if (ctaEnabled && ctaText) {
-                                            videoCtx.save();
-                                            
-                                            const rawLines = ctaText.split('\n').filter(l => l.trim());
-                                            if (rawLines.length === 0) { videoCtx.restore(); return; }
-                        
-                                            const pos = document.getElementById('cta_position').value;
-                                            const style = document.getElementById('cta_style').value;
-                                            const isFullBar = pos.includes('bar');
-                        
-                                            // --- 质感映射 (去营销化) ---
-                                            const styles = {
-                                                'premium_dark': { bg: 'rgba(25, 28, 36, 0.85)', text: 'rgba(255,255,255,0.95)', action: '#ffffff', border: 'rgba(255,255,255,0.15)' },
-                                                'nomura_red': { bg: 'rgba(128, 20, 30, 0.88)', text: 'rgba(255,255,255,0.95)', action: '#ffffff', border: 'rgba(255,255,255,0.2)' },
-                                                'institutional_blue': { bg: 'rgba(15, 30, 60, 0.85)', text: 'rgba(255,255,255,0.95)', action: '#ffffff', border: 'rgba(255,255,255,0.2)' },
-                                                'investment_gold': { bg: 'rgba(212, 175, 55, 0.85)', text: 'rgba(25, 30, 40, 0.95)', action: '#000000', border: 'rgba(0,0,0,0.1)' }
-                                            };
-                                            const s = styles[style] || styles.premium_dark;
-
-                                            // 极简箭头
-                                            const getActionText = (txt) => {
-                                                if(txt.startsWith('↓') || txt.includes('PDF')) return txt;
-                                                return "↓ " + txt;
-                                            };
-
-                                            if (isFullBar) {
-                                                // --- 【模式 A: 全宽横条 - 左右分栏】 ---
-                                                const barHeight = 140; 
-                                                const barY = (pos === 'bottom_bar') ? (h - barHeight) : 0;
-                                                videoCtx.fillStyle = s.bg;
-                                                videoCtx.fillRect(0, barY, w, barHeight);
-                                                videoCtx.strokeStyle = s.border; videoCtx.lineWidth = 2;
-                                                videoCtx.beginPath();
-                                                if (pos === 'bottom_bar') { videoCtx.moveTo(0, barY); videoCtx.lineTo(w, barY); }
-                                                else { videoCtx.moveTo(0, barHeight); videoCtx.lineTo(w, barHeight); }
-                                                videoCtx.stroke();
-
-                                                const horizontalMargin = 100;
-                                                const centerY = barY + (barHeight / 2);
-                                                const leftText = rawLines[0] || "";
-                                                const rightText = rawLines[1] || (rawLines.length === 1 ? rawLines[0] : "");
-                                                
-                                                videoCtx.textAlign = 'left'; videoCtx.textBaseline = 'middle';
-                                                videoCtx.font = `500 42px "Helvetica Neue", "Inter", sans-serif`; videoCtx.fillStyle = s.text;
-                                                videoCtx.fillText(leftText, horizontalMargin, centerY);
-
-                                                videoCtx.textAlign = 'right';
-                                                videoCtx.font = `600 48px "Helvetica Neue", "Inter", sans-serif`; videoCtx.fillStyle = s.action;
-                                                videoCtx.fillText(getActionText(rightText), w - horizontalMargin, centerY);
-
-                                            } else {
-                                                // --- 【模式 B: 悬浮卡片 - 纵向三段堆叠】 ---
-                                                // 层级规则：第一行主标题(48px)，第二行描述(32px)，最后一行行动(48px Medium)
-                                                const metrics = rawLines.map((line, i) => {
-                                                    let fs = 32, fw = '400', color = s.text;
-                                                    if (i === 0) { fs = 48; fw = '500'; } // 主价值
-                                                    else if (i === rawLines.length - 1 && rawLines.length > 1) { fs = 48; fw = '600'; color = s.action; } // 号召位
-                                                    videoCtx.font = `${fw} ${fs}px "Helvetica Neue", "Inter", sans-serif`;
-                                                    return { text: line, width: videoCtx.measureText(line).width, height: fs, fw, color };
-                                                });
-                        
-                                                const maxW = Math.max(...metrics.map(m => m.width));
-                                                const lineSpacing = 25;
-                                                const totalTextH = metrics.reduce((sum, m) => sum + m.height, 0) + (metrics.length - 1) * lineSpacing;
-                        
-                                                const paddingH = 80, paddingV = 60;
-                                                const boxW = maxW + paddingH * 2;
-                                                const boxH = totalTextH + paddingV * 2;
-                                                const safeMarginRight = 120;
-                                                const safeMarginBottom = 220; // 20% 安全高度
-                                                
-                                                let bx = w - boxW - safeMarginRight;
-                                                let by = (pos === 'right_center') ? (h - boxH) / 2 : (h - boxH - safeMarginBottom);
-                        
-                                                // 绘制背景 (双层空间阴影系统)
-                                                videoCtx.shadowColor = 'rgba(0,0,0,0.4)'; videoCtx.shadowBlur = 60; videoCtx.shadowOffsetY = 25;
-                                                videoCtx.fillStyle = s.bg;
-                                                videoCtx.beginPath(); videoCtx.roundRect(bx, by, boxW, boxH, 32); videoCtx.fill();
-                                                
-                                                videoCtx.shadowColor = 'rgba(0,0,0,0.2)'; videoCtx.shadowBlur = 10; videoCtx.shadowOffsetY = 5;
-                                                videoCtx.strokeStyle = 'rgba(255,255,255,0.15)'; videoCtx.lineWidth = 2; videoCtx.stroke();
-                                                videoCtx.shadowColor = 'transparent';
-                                                videoCtx.textAlign = 'center'; videoCtx.textBaseline = 'top';
-                                                let currY = by + paddingV;
-                                                metrics.forEach((m, i) => {
-                                                    videoCtx.font = `${m.fw} ${m.height}px "Helvetica Neue", "Inter", sans-serif`;
-                                                    videoCtx.fillStyle = m.color;
-                                                    let txt = m.text;
-                                                    if (i === metrics.length - 1 && rawLines.length > 1) txt = getActionText(txt);
-                                                    videoCtx.fillText(txt, bx + boxW / 2, currY);
-                                                    currY += m.height + lineSpacing;
-                                                });
-                                            }
-                                            videoCtx.restore();
-                                        }
-                                    } else {
-                                        placeholder.classList.remove('opacity-0', 'pointer-events-none');
-                                        videoCtx.fillStyle = '#1e293b';
-                                        videoCtx.fillRect(0, 0, w, h);
-                                    }
-                                }        function drawHaloText(ctx, text, x, y, color, strokeColor, fontSize, fontFace, fontWeight) {
-            ctx.save(); ctx.font = `${fontWeight} ${fontSize}px "${fontFace}", sans-serif`; ctx.textBaseline = 'top';
-            ctx.strokeStyle = strokeColor; ctx.lineWidth = fontSize * 0.04; ctx.lineJoin = 'round'; ctx.strokeText(text, x, y);
-            ctx.fillStyle = color; ctx.fillText(text, x, y); ctx.restore();
-        }
-
-        function drawImageCover(ctx, img, x, y, w, h) {
-            const r = img.naturalWidth / img.naturalHeight, cr = w / h;
-            let rw, rh, rx, ry;
-            if (r > cr) { rh = h; rw = h * r; rx = x - (rw - w) / 2; ry = y; } else { rw = w; rh = w / r; rx = x; ry = y; }
-            ctx.drawImage(img, rx, ry, rw, rh);
-        }
-
-        async function loadPresets() {
-            try {
-                const res = await fetch(`${API_BASE}/thumbnail/presets`);
-                const data = await res.json(); bgData = data.backgrounds;
-                const orgS = document.getElementById('select-org'); orgS.innerHTML = '';
-                data.organizations.forEach(o => { const opt = document.createElement('option'); opt.value = o.name; opt.textContent = o.name; orgS.appendChild(opt); });
-                orgS.value = "Goldman Sachs · 高盛研报";
-                const bgS = document.getElementById('select-bg'); bgS.innerHTML = '';
-                data.backgrounds.forEach((b, i) => { const opt = document.createElement('option'); opt.value = i; opt.textContent = b.name; bgS.appendChild(opt); });
-                
-                // --- 封面配置监听 ---
-                ['thumb_main', 'thumb_sub', 'thumb_date', 'overlay_opacity'].forEach(id => {
-                    const el = document.getElementById(id); 
-                    if (el) el.addEventListener('input', drawCover);
-                });
-                
-                // --- 视频 CTA 监听 ---
-                ['cta_text', 'cta_position', 'cta_style'].forEach(id => {
-                    const el = document.getElementById(id); 
-                    if (el) el.addEventListener('input', drawVideoPreview);
-                });
-                
-                const ctaToggle = document.getElementById('cta_enabled');
-                ctaToggle.addEventListener('change', (e) => {
-                    const panel = document.getElementById('cta_config_panel');
-                    if (e.target.checked) panel.classList.remove('opacity-50', 'pointer-events-none');
-                    else panel.classList.add('opacity-50', 'pointer-events-none');
-                    drawVideoPreview();
-                });
-
-                orgS.addEventListener('change', (e) => { document.getElementById('val-tag').value = e.target.value; drawCover(); });
-                bgS.addEventListener('change', (e) => { const i = e.target.value; if (bgData[i]) { images.bg.src = 'assets/cover/' + bgData[i].file; } });
-                
-                if (bgData[0]) images.bg.src = 'assets/cover/' + bgData[0].file;
-                images.bg.onload = drawCover; 
-                drawCover(); drawVideoPreview();
-            } catch (e) { console.error(e); }
-        }
-
-        async function handleUpload(input, type) {
-            const file = input.files[0]; if (!file) return;
-            const area = document.getElementById(`area-${type}`), spinner = document.getElementById(`spin-${type}`), hiddenInput = document.getElementById(`val-${type}`);
-            spinner.classList.remove('hidden');
-            const fd = new FormData(); fd.append('file', file);
-            try {
-                const res = await fetch(`${API_BASE}/resources/upload`, { method: 'POST', body: fd });
-                const data = await res.json();
-                if (data.success) { 
-                    area.classList.add('uploaded'); hiddenInput.value = data.path;
-                    if (type === 'image') {
-                        document.getElementById('btn-sync-to-cover').classList.remove('hidden');
-                        // 更新视频预览
-                        images.videoBody.crossOrigin = "anonymous";
-                        images.videoBody.onload = () => drawVideoPreview();
-                        images.videoBody.src = API_BASE + '/resources/view?path=' + encodeURIComponent(data.path);
-                    }
-                    if (type === 'thumb-bg') {
-                        images.custom.crossOrigin = "anonymous";
-                        images.custom.onload = () => drawCover();
-                        images.custom.src = API_BASE + '/resources/view?path=' + encodeURIComponent(data.path);
-                        document.getElementById('label-thumb-bg').innerText = '已上传截图';
-                    }
-                }
-            } catch (e) { console.error(e); } finally { spinner.classList.add('hidden'); }
-        }
-
-        function syncToCover(event) {
-            if (event) event.stopPropagation();
-            const imgPath = document.getElementById('val-image').value;
-            if (!imgPath) { alert("请先上传正文图片"); return; }
-            document.getElementById('val-thumb-bg').value = imgPath;
-            document.getElementById('thumb_bg_mode').value = 'screenshot';
-            toggleBgMode(); 
-            images.custom.crossOrigin = "anonymous";
-            images.custom.onload = () => drawCover();
-            images.custom.src = API_BASE + '/resources/view?path=' + encodeURIComponent(imgPath);
-            document.getElementById('area-thumb-bg').classList.add('uploaded');
-            document.getElementById('label-thumb-bg').innerText = '已同步正文图';
-            document.getElementById('previewCanvas').scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-
-        function syncTitleFromBili() {
-            const biliTitle = document.getElementById('bili_title').value;
-            if (biliTitle) {
-                const processed = biliTitle.replace(/\|/g, '\n').replace(/ - /g, '\n');
-                document.getElementById('thumb_main').value = processed;
-                drawCover();
-            } else { alert('请先填写视频标题'); }
-        }
-
-        document.getElementById('submitBtn').addEventListener('click', async () => {
-            const btn = document.getElementById('submitBtn'), form = document.getElementById('publishForm'), fd = new FormData(form);
-            if (!fd.get('audio_path') || !fd.get('image_path')) { alert('请先上传必要的正文素材 (音频 + 图片)'); return; }
-            const thumbEnabled = document.getElementById('thumb_enabled').checked;
-            const ctaEnabled = document.getElementById('cta_enabled').checked;
-            
-            const payload = {
-                video: { 
-                    video_path: fd.get('video_path'), 
-                    audio_path: fd.get('audio_path'), 
-                    image_path: fd.get('image_path'), 
-                    audio_start: fd.get('audio_start'), 
-                    audio_end_offset: fd.get('audio_end_offset'),
-                    cta: ctaEnabled ? {
-                        text: fd.get('cta_text'),
-                        position: fd.get('cta_position'),
-                        style: fd.get('cta_style')
-                    } : null
-                },
-                bilibili: {
-                    title: fd.get('bili_title') || fd.get('thumb_main').split('\n').join(' | '),
-                    desc: fd.get('bili_desc') || "由一键发布台自动合成投递。", copyright: fd.get('bili_copyright'), season_id: fd.get('bili_season_id'), tid: fd.get('bili_tid'), no_reprint: document.querySelector('input[name="bili_no_reprint"]').checked ? 1 : 0, tags: fd.get('bili_tags').split(',').map(t => t.trim()).filter(t => t) }
-            };
-            if (thumbEnabled) {
-                payload.thumbnail = { main_title: fd.get('thumb_main'), sub_title: fd.get('thumb_sub'), tag_text: fd.get('thumb_tag'), date_text: fd.get('thumb_date'), bg_index: fd.get('thumb_bg_index'), layout: 'left', custom_bg_path: fd.get('custom_bg_path'), overlay_opacity: fd.get('overlay_opacity') };
-            }
-            if (document.getElementById('yt_enabled').checked) {
-                payload.youtube = { title: fd.get('yt_title') || payload.bilibili.title, desc: fd.get('yt_desc') || payload.bilibili.desc, privacy: fd.get('yt_privacy'), category_id: fd.get('yt_category'), tags: fd.get('yt_tags').split(',').map(t => t.trim()).filter(t => t) };
-            }
-            try {
-                btn.disabled = true; btn.innerHTML = '正在提交...';
-                const res = await fetch(`${API_BASE}/publisher/submit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                const data = await res.json();
-                if (data.success) { currentTaskId = data.task_id; startPolling(data.task_id); btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane mr-2"></i> 提交新任务'; loadHistory(); } else { alert('提交失败'); btn.disabled = false; btn.innerHTML = '重新提交'; }
-            } catch (e) { alert('连接失败'); btn.disabled = false; btn.innerHTML = '重新提交'; }
-        });
-
-        function startPolling(taskId) {
-            document.getElementById('statusCard').classList.remove('hidden'); startTime = Date.now();
-            if (pollInterval) clearInterval(pollInterval);
-            pollInterval = setInterval(async () => {
-                const res = await fetch(`${API_BASE}/publisher/task/${taskId}`);
-                const json = await res.json();
-                if (json.success) updateUI(json.data);
-            }, 2000);
-        }
-
-        function updateUI(task) {
-            const progress = document.getElementById('progressBar'), timer = document.getElementById('timerText');
-            progress.style.width = `${task.progress}%`;
-            const elapsed = Math.floor((Date.now() - startTime) / 1000);
-            timer.innerText = `${Math.floor(elapsed/60).toString().padStart(2, '0')}:${(elapsed%60).toString().padStart(2, '0')}`;
-            if (task.status === 'completed' || task.status === 'success' || task.status === 'failed') {
-                clearInterval(pollInterval);
-                document.getElementById('resultArea').classList.remove('hidden');
-                document.getElementById('successMsg').innerText = (task.status === 'completed' || task.status === 'success') ? '发布成功！' : '发布失败: ' + task.error_message;
-                loadHistory();
-            } else { 
-                const map = { 'synthesis': '🎬 正在合成视频...', 'thumbnail': '🎨 正在生成封面...', 'upload': '🚀 正在上传B站...', 'upload_youtube': '📺 正在上传YouTube...' }; 
-                document.getElementById('stepDisplay').innerText = map[task.current_step] || '处理中...'; 
-            }
-        }
-
-        loadPresets(); initBiliTids(); checkBiliStatus(); loadHistory();
-    </script>
+    <script src="js/publisher/renderer.js?v=0227"></script>
+    <script src="js/publisher/services.js?v=0227"></script>
+    <script src="js/publisher/main.js?v=0227"></script>
 </body>
 </html>

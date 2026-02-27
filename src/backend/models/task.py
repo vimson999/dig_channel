@@ -58,7 +58,7 @@ class PublicationTask(db.Model):
             'params': self.params,
             'result': self.result,
             'error_message': self.error_message,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-            'completed_at': self.completed_at.isoformat() if self.completed_at else None
+            'created_at': (self.created_at.isoformat() + "Z") if self.created_at else None,
+            'updated_at': (self.updated_at.isoformat() + "Z") if self.updated_at else None,
+            'completed_at': (self.completed_at.isoformat() + "Z") if self.completed_at else None
         }
