@@ -144,6 +144,7 @@ node_modules/
 data/generated_thumbnails/
 data/processed/
 data/uploads/
+src/backend/data/uploads/
 .gemini/
 *.safetensors
 youtube_token.pickle

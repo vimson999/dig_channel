@@ -82,9 +82,21 @@
                                         <i id="icon-audio" class="fas fa-microphone text-3xl text-slate-300 mb-3 group-hover:text-green-400"></i>
                                         <div class="text-center">
                                             <p id="label-audio" class="text-[13px] font-bold text-slate-600">Step 2: 音频</p>
-                                            <p class="text-[10px] text-slate-400 mt-0.5">必需音频解说</p>
+                                            <p class="text-[10px] text-slate-400 mt-0.5">支持多个音频顺序拼接</p>
                                         </div>
                                         <div id="spin-audio" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-green-500 text-xl"></i></div>
+                                    </div>
+
+                                    <div id="audio-list-wrapper" class="hidden col-span-1 md:col-span-3 mt-2">
+                                        <div class="bg-white/60 border border-slate-200 rounded-2xl p-4 shadow-inner">
+                                            <div class="flex justify-between items-center mb-3 px-1">
+                                                <span class="text-[11px] font-black text-slate-400 uppercase tracking-widest">已上传音频队列 (按顺序拼接)</span>
+                                                <span id="audio-count-badge" class="text-[10px] font-black bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full border border-indigo-100">0 Clips</span>
+                                            </div>
+                                            <div id="audio-list" class="space-y-2 max-h-48 overflow-y-auto pr-1 custom-scrollbar">
+                                                <!-- 音频片段将在这里动态生成 -->
+                                            </div>
+                                        </div>
                                     </div>
 
                                     <div class="upload-area h-36 flex flex-col items-center justify-center p-4 relative group" id="area-image">
@@ -131,7 +143,7 @@
                                                 <span>引导话术 (支持多行)</span>
                                                 <span class="text-indigo-400">Premium Tool</span>
                                             </label>
-                                            <textarea id="cta_text" name="cta_text" class="input-field py-3 text-[13px] leading-relaxed h-20 resize-none font-medium" placeholder="例如：&#10;私信回复“研报”&#10;领 PDF 完整版">私信回复“研报”&#10;领 PDF 完整版</textarea>
+                                            <textarea id="cta_text" name="cta_text" class="input-field py-3 text-[13px] leading-relaxed h-20 resize-none font-medium" placeholder="例如：&#10;私信回复“研报”&#10;领 PDF 完整版">会员空间获取研报&#10;解锁精选研报独家分析</textarea>
                                         </div>
                                         <div class="grid grid-cols-2 gap-4">
                                             <div>

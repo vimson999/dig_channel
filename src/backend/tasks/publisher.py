@@ -105,7 +105,24 @@ def run_publication_pipeline(self, task_id):
             vid_params = params.get('video', {})
             video_path = to_abs_path(vid_params.get('video_path'))
             image_path = to_abs_path(vid_params.get('image_path'))
-            audio_path = to_abs_path(vid_params.get('audio_path'))
+            
+            audio_raw_val = vid_params.get('audio_path')
+            audio_path = None
+            if audio_raw_val:
+                import json
+                if isinstance(audio_raw_val, str) and audio_raw_val.strip().startswith('['):
+                    try:
+                        paths_list = json.loads(audio_raw_val)
+                        if isinstance(paths_list, list):
+                            audio_path = [to_abs_path(p) for p in paths_list]
+                        else:
+                            audio_path = to_abs_path(audio_raw_val)
+                    except Exception as e:
+                        logger.warning(f"Failed to parse audio_path as JSON: {e}")
+                        audio_path = to_abs_path(audio_raw_val)
+                else:
+                    audio_path = to_abs_path(audio_raw_val)
+            
             video_c_path = to_abs_path(vid_params.get('video_c_path'))
             audio_c_path = to_abs_path(vid_params.get('audio_c_path'))
             

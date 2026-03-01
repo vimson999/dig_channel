@@ -13,6 +13,7 @@ const state = {
         custom: new Image(),  
         videoBody: new Image() 
     },
+    audio_segments: [], // 支持多段音频
     bgData: []
 };
 
@@ -167,16 +168,37 @@ async function handleUpload(input, type) {
     try {
         const data = await PublisherService.uploadFile(file);
         if (data.success) {
-            if (area) area.classList.add('uploaded');
-            if (hiddenInput) hiddenInput.value = data.path;
-            
-            const icon = document.getElementById(`icon-${type}`);
-            const label = document.getElementById(`label-${type}`);
-            if (icon) icon.className = "fas fa-check-circle text-3xl text-emerald-500 mb-3";
-            if (label) {
-                const typeMap = { 'video': '片头视频', 'audio': '音频解说', 'image': '正文图片', 'thumb-bg': '封面底图' };
-                label.innerText = `${typeMap[type] || '素材'} 已就绪`;
-                label.classList.add('text-emerald-600');
+            if (type === 'audio') {
+                // 音频特殊处理：支持多个片段
+                state.audio_segments.push({
+                    name: file.name,
+                    path: data.path
+                });
+                renderAudioList();
+                // 存储 JSON 数组字符串，后端将负责解析
+                if (hiddenInput) hiddenInput.value = JSON.stringify(state.audio_segments.map(s => s.path));
+                
+                if (area) area.classList.add('uploaded');
+                const label = document.getElementById(`label-audio`);
+                if (label) {
+                    label.innerText = `已添加 ${state.audio_segments.length} 个片段`;
+                    label.classList.add('text-emerald-600');
+                }
+                const icon = document.getElementById(`icon-audio`);
+                if (icon) icon.className = "fas fa-check-circle text-3xl text-emerald-500 mb-3";
+            } else {
+                // 其他类型保持原样
+                if (area) area.classList.add('uploaded');
+                if (hiddenInput) hiddenInput.value = data.path;
+                
+                const icon = document.getElementById(`icon-${type}`);
+                const label = document.getElementById(`label-${type}`);
+                if (icon) icon.className = "fas fa-check-circle text-3xl text-emerald-500 mb-3";
+                if (label) {
+                    const typeMap = { 'video': '片头视频', 'image': '正文图片', 'thumb-bg': '封面底图' };
+                    label.innerText = `${typeMap[type] || '素材'} 已就绪`;
+                    label.classList.add('text-emerald-600');
+                }
             }
 
             const viewUrl = PublisherService.API_BASE + '/resources/view?path=' + encodeURIComponent(data.path);
@@ -194,13 +216,66 @@ async function handleUpload(input, type) {
     } catch (e) { console.error(e); } finally { if (spinner) spinner.classList.add('hidden'); }
 }
 
+function renderAudioList() {
+    const wrapper = document.getElementById('audio-list-wrapper');
+    const container = document.getElementById('audio-list');
+    const badge = document.getElementById('audio-count-badge');
+    
+    if (!container || !wrapper) return;
+    
+    if (state.audio_segments.length === 0) {
+        wrapper.classList.add('hidden');
+        return;
+    }
+    
+    wrapper.classList.remove('hidden');
+    if (badge) badge.innerText = `${state.audio_segments.length} Clips`;
+    
+    container.innerHTML = state.audio_segments.map((s, i) => `
+        <div class="flex items-center justify-between bg-slate-50 border border-slate-100 p-3 rounded-xl hover:bg-white transition-all group">
+            <div class="flex items-center gap-3 min-w-0">
+                <span class="w-5 h-5 bg-slate-200 text-slate-500 rounded-full flex items-center justify-center text-[9px] font-black">${i + 1}</span>
+                <div class="truncate">
+                    <p class="text-[11px] font-bold text-slate-700 truncate">${s.name}</p>
+                    <p class="text-[9px] text-slate-400 font-mono truncate opacity-60">${s.path.split('/').pop()}</p>
+                </div>
+            </div>
+            <button type="button" onclick="removeAudioSegment(${i})" class="text-slate-300 hover:text-red-500 p-2 transition-colors">
+                <i class="fas fa-trash-alt text-[11px]"></i>
+            </button>
+        </div>
+    `).join('');
+}
+
+window.removeAudioSegment = (index) => {
+    state.audio_segments.splice(index, 1);
+    renderAudioList();
+    const hiddenInput = document.getElementById(`val-audio`);
+    if (hiddenInput) hiddenInput.value = state.audio_segments.length > 0 ? JSON.stringify(state.audio_segments.map(s => s.path)) : "";
+    
+    const label = document.getElementById(`label-audio`);
+    if (label) {
+        if (state.audio_segments.length > 0) {
+            label.innerText = `已添加 ${state.audio_segments.length} 个片段`;
+        } else {
+            label.innerText = "Step 2: 音频";
+            label.classList.remove('text-emerald-600');
+            const icon = document.getElementById(`icon-audio`);
+            if (icon) icon.className = "fas fa-microphone text-3xl text-slate-300 mb-3";
+            document.getElementById('area-audio')?.classList.remove('uploaded');
+        }
+    }
+};
+
 async function handleTaskSubmit() {
     const fd = new FormData(elements.publishForm);
     if (!fd.get('audio_path') || !fd.get('image_path')) { alert('请上传必需素材 (音频 + 图片)'); return; }
 
     const payload = {
         video: { 
-            video_path: fd.get('video_path'), audio_path: fd.get('audio_path'), image_path: fd.get('image_path'),
+            video_path: fd.get('video_path'), 
+            audio_path: fd.get('audio_path'), // 此处可能包含 JSON 字符串数组
+            image_path: fd.get('image_path'),
             audio_start: fd.get('audio_start'), audio_end_offset: fd.get('audio_end_offset'),
             cta: document.getElementById('cta_enabled')?.checked ? { 
                 text: fd.get('cta_text') || "", 
@@ -251,7 +326,11 @@ function resetFormUI() {
     // 1. 重置 HTML 表单
     elements.publishForm.reset();
     
-    // 2. 清空隐藏路径
+    // 2. 清空状态和列表
+    state.audio_segments = [];
+    renderAudioList();
+    
+    // 3. 清空隐藏路径
     ['video', 'audio', 'image', 'thumb-bg'].forEach(type => {
         const input = document.getElementById(`val-${type}`);
         if (input) input.value = "";

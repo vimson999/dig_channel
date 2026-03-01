@@ -3,6 +3,7 @@ import logging
 from moviepy import VideoFileClip, AudioFileClip, ImageClip, concatenate_videoclips, CompositeVideoClip
 from werkzeug.utils import secure_filename
 import uuid
+import json
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ class VideoEditorService:
         return VideoFileClip(temp_path)
 
     def process_mixed_content(self, video_file, image_file, audio_file, video_c_path=None, audio_c_path=None, audio_start=7.0, audio_end_offset=10.0, output_filename=None, cta_config=None):
-        """Synthesize video with advanced CTA placement."""
+        """Synthesize video with advanced CTA placement. Supports multiple audio segments."""
         raw_resources = []
         intermediate_clips = []
         final_clip = None
@@ -171,10 +172,40 @@ class VideoEditorService:
                 temp_files_to_clean.append(os.path.join(self.output_folder, temp_c_name))
                 clip_c_composed.close()
 
-            # Process Video B
-            audio_b_raw = AudioFileClip(audio_file)
-            raw_resources.append(audio_b_raw)
-            audio_b_clipped = audio_b_raw.subclipped(audio_start, audio_b_raw.duration - audio_end_offset)
+            # Process Audio B (Support Multiple)
+            audio_paths = []
+            if isinstance(audio_file, list):
+                audio_paths = audio_file
+            elif isinstance(audio_file, str) and audio_file.strip().startswith('['):
+                try:
+                    audio_paths = json.loads(audio_file)
+                except:
+                    audio_paths = [audio_file]
+            else:
+                audio_paths = [audio_file] if audio_file else []
+
+            # Ensure all paths in audio_paths are strings and exist
+            audio_segments = []
+            for p in audio_paths:
+                if isinstance(p, str) and os.path.exists(p):
+                    segment = AudioFileClip(p)
+                    audio_segments.append(segment)
+                    raw_resources.append(segment)
+                elif p:
+                    logger.warning(f"Audio path not found or invalid: {p}")
+            
+            if not audio_segments:
+                raise ValueError(f"No valid audio files found in: {audio_paths}")
+            
+            if len(audio_segments) > 1:
+                from moviepy import concatenate_audioclips
+                logger.info(f"Concatenating {len(audio_segments)} audio segments...")
+                audio_b_raw = concatenate_audioclips(audio_segments)
+                raw_resources.append(audio_b_raw)
+            else:
+                audio_b_raw = audio_segments[0]
+
+            audio_b_clipped = audio_b_raw.subclipped(audio_start, max(0, audio_b_raw.duration - audio_end_offset))
             target_duration_b = audio_b_clipped.duration
             
             main_image_clip = ImageClip(image_file).with_duration(target_duration_b).resized(new_size=(target_w, target_h))
