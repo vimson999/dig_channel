@@ -146,6 +146,16 @@ data/processed/
 data/uploads/
 src/backend/data/uploads/
 .gemini/
+
+# Prevent media files in backend source directory
+src/backend/**/*.png
+src/backend/**/*.jpg
+src/backend/**/*.jpeg
+src/backend/**/*.gif
+src/backend/**/*.mp4
+src/backend/**/*.mp3
+src/backend/**/*.wav
+src/backend/**/*.webp
 *.safetensors
 youtube_token.pickle
 client_secrets.json
