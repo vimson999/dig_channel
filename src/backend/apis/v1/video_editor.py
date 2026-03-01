@@ -97,8 +97,9 @@ def synthesize_video():
 def download_file(filename):
     """Serve the generated video file."""
     try:
+        # video_editor_service.output_folder is already absolute
         return send_file(
-            os.path.join(os.getcwd(), video_editor_service.output_folder, filename),
+            os.path.join(video_editor_service.output_folder, filename),
             as_attachment=True
         )
     except Exception as e:

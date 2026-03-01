@@ -6,9 +6,13 @@ from pathlib import Path
 
 bp = Blueprint('resources', __name__, url_prefix='/api/v1/resources')
 
-UPLOAD_FOLDER = os.path.abspath(os.path.join(os.getcwd(), 'data', 'uploads'))
+# Get project root reliably
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+UPLOAD_FOLDER = os.path.abspath(os.path.join(PROJECT_ROOT, 'data', 'uploads'))
+
 # Ensure folder exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'mov', 'avi', 'mp3', 'wav', 'm4a'}
 
@@ -60,19 +64,22 @@ def list_resources():
     """
     files = []
     
+    # Get project root (apis/v1/resources.py -> v1 -> apis -> backend -> src -> root)
+    project_root = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))))
+    
     # Helper to scan dir
     def scan_dir(path_str, category):
-        p = Path(path_str)
+        p = project_root / path_str
         if not p.exists(): return
         # Sort by mtime desc
-        for item in sorted(p.iterdir(), key=os.path.getmtime, reverse=True)[:20]:
-            if item.is_file() and item.name != '.gitkeep':
-                files.append({
-                    'name': item.name,
-                    'path': str(item.relative_to(Path.cwd())),
-                    'type': category,
-                    'mtime': item.stat().st_mtime
-                })
+        items = [f for f in p.iterdir() if f.is_file() and f.name != '.gitkeep']
+        for item in sorted(items, key=lambda x: x.stat().st_mtime, reverse=True)[:20]:
+            files.append({
+                'name': item.name,
+                'path': str(item.relative_to(project_root)),
+                'type': category,
+                'mtime': item.stat().st_mtime
+            })
 
     scan_dir('data/input', 'input')
     scan_dir('data/uploads', 'upload')
@@ -90,11 +97,11 @@ def view_resource():
     if not file_path:
         return "Path is required", 400
         
-    # Security: Ensure path doesn't escape project root
-    project_root = os.getcwd()
+    # Get project root
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
     abs_path = os.path.abspath(os.path.join(project_root, file_path))
     
-    if not abs_path.startswith(project_root):
+    if not abs_path.startswith(os.path.abspath(project_root)):
         return "Access denied", 403
         
     if not os.path.exists(abs_path):

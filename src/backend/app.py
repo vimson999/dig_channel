@@ -49,7 +49,13 @@ def create_app(config_class=Config):
     """
     import os
     frontend_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'frontend')
-    app = Flask(__name__, static_folder=frontend_path, static_url_path='')
+    root_path = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    instance_path = os.path.join(root_path, 'instance')
+    
+    app = Flask(__name__, 
+                static_folder=frontend_path, 
+                static_url_path='',
+                instance_path=instance_path)
     app.config.from_object(config_class)
     
     # 初始化数据库

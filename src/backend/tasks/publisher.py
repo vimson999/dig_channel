@@ -25,27 +25,25 @@ def to_abs_path(rel_path):
     """Helper to convert path to absolute, staying robust regardless of current working directory."""
     if not rel_path: return None
     
+    # Get project root (tasks/publisher.py -> backend -> src -> root)
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    
     # 1. 如果已经是绝对路径且存在，直接返回
     if os.path.isabs(rel_path) and os.path.exists(rel_path):
         return rel_path
         
-    # 2. 尝试相对于当前工作目录 (通常是项目根目录)
+    # 2. 优先尝试相对于项目根目录
+    abs_root_path = os.path.abspath(os.path.join(project_root, rel_path))
+    if os.path.exists(abs_root_path):
+        return abs_root_path
+        
+    # 3. 备选方案：尝试相对于当前工作目录
     cwd_path = os.path.abspath(os.path.join(os.getcwd(), rel_path))
     if os.path.exists(cwd_path):
         return cwd_path
-        
-    # 3. 备选方案：尝试相对于文件所在位置向上追溯 (兼容不同启动方式)
-    try:
-        # tasks/publisher.py -> backend -> src -> root
-        alt_base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-        alt_path = os.path.abspath(os.path.join(alt_base, rel_path))
-        if os.path.exists(alt_path):
-            return alt_path
-    except:
-        pass
 
-    # 如果都找不到，返回原始路径让 moviepy 自己报错，或者返回 cwd_path
-    return cwd_path
+    # 如果都找不到，返回基于项目根目录的路径作为默认期望值
+    return abs_root_path
 
 def sanitize_filename(name):
     """Sanitize filename to keep Chinese characters but remove illegal fs chars."""
