@@ -91,59 +91,82 @@ def run_publication_pipeline(self, task_id):
             else:
                 base_name = f"pub_{task_id}"
 
-            # --- Step 1: Synthesis ---
-            task.status = 'processing'
-            task.current_step = 'synthesis'
-            task.progress = 10
-            db.session.commit()
-            
-            logger.info(f"Task {task_id}: Starting video synthesis...")
-            
-            # Extract and Absolute-ify Video Params
+            # --- Step 1: Landscape Synthesis ---
             vid_params = params.get('video', {})
-            video_path = to_abs_path(vid_params.get('video_path'))
-            image_path = to_abs_path(vid_params.get('image_path'))
-            
-            audio_raw_val = vid_params.get('audio_path')
-            audio_path = None
-            if audio_raw_val:
-                import json
-                if isinstance(audio_raw_val, str) and audio_raw_val.strip().startswith('['):
-                    try:
-                        paths_list = json.loads(audio_raw_val)
-                        if isinstance(paths_list, list):
+            landscape_enabled = vid_params.get('enabled', True)
+            final_video_path = None
+
+            if landscape_enabled:
+                task.status = 'processing'
+                task.current_step = 'synthesis'
+                task.progress = 10
+                db.session.commit()
+                
+                logger.info(f"Task {task_id}: Starting landscape video synthesis...")
+                
+                video_path = to_abs_path(vid_params.get('video_path'))
+                image_path = to_abs_path(vid_params.get('image_path'))
+                
+                audio_raw_val = vid_params.get('audio_path')
+                audio_path = None
+                if audio_raw_val:
+                    import json
+                    if isinstance(audio_raw_val, str) and audio_raw_val.strip().startswith('['):
+                        try:
+                            paths_list = json.loads(audio_raw_val)
                             audio_path = [to_abs_path(p) for p in paths_list]
-                        else:
-                            audio_path = to_abs_path(audio_raw_val)
-                    except Exception as e:
-                        logger.warning(f"Failed to parse audio_path as JSON: {e}")
-                        audio_path = to_abs_path(audio_raw_val)
-                else:
-                    audio_path = to_abs_path(audio_raw_val)
+                        except: audio_path = to_abs_path(audio_raw_val)
+                    else: audio_path = to_abs_path(audio_raw_val)
+                
+                video_c_path = to_abs_path(vid_params.get('video_c_path'))
+                audio_c_path = to_abs_path(vid_params.get('audio_c_path'))
+                audio_start = float(vid_params.get('audio_start', 0))
+                audio_end_offset = float(vid_params.get('audio_end_offset', 0))
+                cta_config = vid_params.get('cta')
+                
+                final_video_path = video_editor_service.process_mixed_content(
+                    video_file=video_path,
+                    image_file=image_path,
+                    audio_file=audio_path,
+                    video_c_path=video_c_path,
+                    audio_c_path=audio_c_path,
+                    audio_start=audio_start,
+                    audio_end_offset=audio_end_offset,
+                    output_filename=f"{base_name}.mp4",
+                    cta_config=cta_config
+                )
+                task.result = {**(task.result or {}), 'video_path': final_video_path}
             
-            video_c_path = to_abs_path(vid_params.get('video_c_path'))
-            audio_c_path = to_abs_path(vid_params.get('audio_c_path'))
+            # --- Step 1.5: Vertical Synthesis (NEW) ---
+            v_vid_params = params.get('vertical_video', {})
+            if v_vid_params.get('enabled', False):
+                task.current_step = 'v_synthesis'
+                task.progress = 30
+                db.session.commit()
+                
+                logger.info(f"Task {task_id}: Starting vertical video synthesis...")
+                
+                v_image_path = to_abs_path(v_vid_params.get('image_path'))
+                
+                # --- 修复：确保竖屏使用的音频路径也是绝对路径 ---
+                v_audio_raw = vid_params.get('audio_path')
+                v_audio_processed = None
+                if v_audio_raw:
+                    import json
+                    if isinstance(v_audio_raw, str) and v_audio_raw.strip().startswith('['):
+                        try:
+                            v_audio_processed = [to_abs_path(p) for p in json.loads(v_audio_raw)]
+                        except: v_audio_processed = to_abs_path(v_audio_raw)
+                    else:
+                        v_audio_processed = to_abs_path(v_audio_raw)
+                
+                v_video_path = video_editor_service.process_vertical_video(
+                    image_file=v_image_path,
+                    audio_files=v_audio_processed,
+                    output_filename=f"v_{base_name}.mp4"
+                )
+                task.result = {**(task.result or {}), 'vertical_video_path': v_video_path}
             
-            audio_start = float(vid_params.get('audio_start', 7.0))
-            audio_end_offset = float(vid_params.get('audio_end_offset', 10.0))
-            
-            # Extract CTA Config
-            cta_config = vid_params.get('cta')
-            
-            # Synthesis
-            final_video_path = video_editor_service.process_mixed_content(
-                video_file=video_path,
-                image_file=image_path,
-                audio_file=audio_path,
-                video_c_path=video_c_path,
-                audio_c_path=audio_c_path,
-                audio_start=audio_start,
-                audio_end_offset=audio_end_offset,
-                output_filename=f"{base_name}.mp4",
-                cta_config=cta_config
-            )
-            
-            task.result = {**(task.result or {}), 'video_path': final_video_path}
             task.progress = 50
             db.session.commit()
 
@@ -171,7 +194,6 @@ def run_publication_pipeline(self, task_id):
                 task.progress = 70
                 db.session.commit()
             else:
-                logger.info(f"Task {task_id}: Skipping thumbnail generation (disabled by user).")
                 task.progress = 70
                 db.session.commit()
 

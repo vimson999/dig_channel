@@ -53,75 +53,92 @@
             <div class="flex-1 space-y-10">
                 <form id="publishForm">
                     
-                    <!-- 1. 视频合成参数 -->
-                    <section class="glass-card">
+                    <!-- 1. 核心音频素材 (全局公用) -->
+                    <section class="glass-card border-emerald-100 bg-emerald-50/5">
                         <div class="section-title">
-                            <div class="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center shadow-sm">
-                                <i class="fas fa-film"></i>
+                            <div class="w-10 h-10 bg-emerald-100 text-emerald-600 rounded-xl flex items-center justify-center shadow-sm">
+                                <i class="fas fa-microphone-lines"></i>
                             </div>
-                            1. 视频合成参数
+                            1. 核心音频素材 (时长基准)
                         </div>
                         
-                        <div class="flex flex-col xl:flex-row gap-8">
+                        <div class="space-y-6">
+                            <div class="flex flex-col md:flex-row gap-4">
+                                <!-- 音频上传主区域 -->
+                                <div class="upload-area flex-1 h-32 flex flex-col items-center justify-center p-4 relative group" id="area-audio">
+                                    <input type="file" accept="audio/*" class="absolute inset-0 opacity-0 cursor-pointer z-[5]" onchange="handleUpload(this, 'audio')" multiple>
+                                    <input type="hidden" name="audio_path" id="val-audio">
+                                    <i id="icon-audio" class="fas fa-file-audio text-3xl text-emerald-300 mb-3 group-hover:text-emerald-500 transition-colors"></i>
+                                    <div class="text-center">
+                                        <p id="label-audio" class="text-[13px] font-bold text-emerald-700">点击上传配音文件</p>
+                                        <p class="text-[10px] text-emerald-400 mt-0.5">支持多个音频片段按序自动拼接</p>
+                                    </div>
+                                    <div id="spin-audio" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-emerald-500 text-xl"></i></div>
+                                </div>
+
+                                <!-- 偏移设置 -->
+                                <div class="w-full md:w-64 grid grid-cols-1 gap-3 bg-white/60 p-4 rounded-2xl border border-emerald-100 shadow-inner">
+                                    <div class="input-group mb-0">
+                                        <label class="text-[10px] font-black text-emerald-600 uppercase tracking-wider block mb-1">音频切入 (秒)</label>
+                                        <input type="number" id="audio_start" name="audio_start" class="input-field py-2 text-sm" value="0" step="0.1">
+                                    </div>
+                                    <div class="input-group mb-0">
+                                        <label class="text-[10px] font-black text-emerald-600 uppercase tracking-wider block mb-1">结束偏移 (秒)</label>
+                                        <input type="number" id="audio_end_offset" name="audio_end_offset" class="input-field py-2 text-sm" value="0" step="0.1">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 音频队列列表 -->
+                            <div id="audio-list-wrapper" class="hidden">
+                                <div class="bg-white/80 border border-emerald-100 rounded-2xl p-4 shadow-sm">
+                                    <div class="flex justify-between items-center mb-3 px-1">
+                                        <span class="text-[11px] font-black text-emerald-400 uppercase tracking-widest">已上传配音队列</span>
+                                        <span id="audio-count-badge" class="text-[10px] font-black bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full border border-emerald-100">0 Clips</span>
+                                    </div>
+                                    <div id="audio-list" class="space-y-2 max-h-48 overflow-y-auto pr-1 custom-scrollbar">
+                                        <!-- 音频片段将在这里动态生成 -->
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- 2. 横屏视频合成 (16:9) -->
+                    <section class="glass-card">
+                        <div class="flex justify-between items-center mb-6">
+                            <div class="section-title mb-0">
+                                <div class="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center shadow-sm">
+                                    <i class="fas fa-desktop"></i>
+                                </div>
+                                2. 横屏工作流 (16:9 Production)
+                            </div>
+                            <label class="flex items-center gap-3 cursor-pointer group">
+                                <span class="text-xs font-black text-indigo-600 uppercase tracking-widest">开启横屏合成</span>
+                                <input type="checkbox" id="landscape_enabled" name="landscape_enabled" class="w-5 h-5 text-indigo-600 rounded-lg border-gray-300 transition-all" checked>
+                            </label>
+                        </div>
+                        
+                        <div id="landscape_config_area" class="flex flex-col xl:flex-row gap-8 transition-all duration-300">
                             <div class="flex-1 space-y-6">
-                                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                    <div class="upload-area h-36 flex flex-col items-center justify-center p-4 relative group" id="area-video">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div class="upload-area h-32 flex flex-col items-center justify-center p-4 relative group" id="area-video">
                                         <input type="file" accept="video/*" class="absolute inset-0 opacity-0 cursor-pointer z-[5]" onchange="handleUpload(this, 'video')">
                                         <input type="hidden" name="video_path" id="val-video">
-                                        <i id="icon-video" class="fas fa-film text-3xl text-slate-300 mb-3 group-hover:text-indigo-400"></i>
-                                        <div class="text-center">
-                                            <p id="label-video" class="text-[13px] font-bold text-slate-600">Step 1: 片头</p>
-                                            <p class="text-[10px] text-slate-400 mt-0.5">可选视频素材</p>
-                                        </div>
+                                        <i id="icon-video" class="fas fa-film text-2xl text-slate-300 mb-2 group-hover:text-indigo-400"></i>
+                                        <p id="label-video" class="text-[12px] font-bold text-slate-600">Step 1: 片头视频 (可选)</p>
                                         <div id="spin-video" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-blue-500 text-xl"></i></div>
                                     </div>
 
-                                    <div class="upload-area h-36 flex flex-col items-center justify-center p-4 relative group" id="area-audio">
-                                        <input type="file" accept="audio/*" class="absolute inset-0 opacity-0 cursor-pointer z-[5]" onchange="handleUpload(this, 'audio')">
-                                        <input type="hidden" name="audio_path" id="val-audio">
-                                        <i id="icon-audio" class="fas fa-microphone text-3xl text-slate-300 mb-3 group-hover:text-green-400"></i>
-                                        <div class="text-center">
-                                            <p id="label-audio" class="text-[13px] font-bold text-slate-600">Step 2: 音频</p>
-                                            <p class="text-[10px] text-slate-400 mt-0.5">支持多个音频顺序拼接</p>
-                                        </div>
-                                        <div id="spin-audio" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-green-500 text-xl"></i></div>
-                                    </div>
-
-                                    <div id="audio-list-wrapper" class="hidden col-span-1 md:col-span-3 mt-2">
-                                        <div class="bg-white/60 border border-slate-200 rounded-2xl p-4 shadow-inner">
-                                            <div class="flex justify-between items-center mb-3 px-1">
-                                                <span class="text-[11px] font-black text-slate-400 uppercase tracking-widest">已上传音频队列 (按顺序拼接)</span>
-                                                <span id="audio-count-badge" class="text-[10px] font-black bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full border border-indigo-100">0 Clips</span>
-                                            </div>
-                                            <div id="audio-list" class="space-y-2 max-h-48 overflow-y-auto pr-1 custom-scrollbar">
-                                                <!-- 音频片段将在这里动态生成 -->
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <div class="upload-area h-36 flex flex-col items-center justify-center p-4 relative group" id="area-image">
+                                    <div class="upload-area h-32 flex flex-col items-center justify-center p-4 relative group" id="area-image">
                                         <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-[5]" onchange="handleUpload(this, 'image')">
                                         <input type="hidden" name="image_path" id="val-image">
-                                        <i id="icon-image" class="fas fa-image text-3xl text-slate-300 mb-3 group-hover:text-pink-400"></i>
-                                        <div class="text-center">
-                                            <p id="label-image" class="text-[13px] font-bold text-slate-600">Step 3: 正文图</p>
-                                            <p class="text-[10px] text-slate-400 mt-0.5">必需研报截图</p>
-                                        </div>
+                                        <i id="icon-image" class="fas fa-image text-2xl text-slate-300 mb-2 group-hover:text-pink-400"></i>
+                                        <p id="label-image" class="text-[12px] font-bold text-slate-600">Step 2: 正文背景图 (必需)</p>
                                         <div id="spin-image" class="upload-spinner hidden"><i class="fas fa-circle-notch fa-spin text-pink-500 text-xl"></i></div>
-                                        <button type="button" id="btn-sync-to-cover" onclick="syncToCover(event)" class="absolute bottom-2 right-2 bg-white text-pink-600 text-[10px] font-bold px-2 py-1 rounded shadow-md border border-pink-100 hidden z-[10] hover:bg-pink-50 transition-all">
+                                        <button type="button" id="btn-sync-to-cover" onclick="syncToCover(event)" class="absolute bottom-2 right-2 bg-white text-pink-600 text-[9px] font-black px-2 py-1 rounded shadow-md border border-pink-100 hidden z-[10] hover:bg-pink-50">
                                             <i class="fas fa-magic"></i> 同步封面
                                         </button>
-                                    </div>
-                                </div>
-
-                                <div class="grid grid-cols-2 gap-4 bg-slate-50/50 p-4 rounded-2xl border border-slate-100 shadow-inner relative z-[1]">
-                                    <div class="input-group mb-0">
-                                        <label class="input-label">音频切入 (秒)</label>
-                                        <input type="number" id="audio_start" name="audio_start" class="input-field" value="7.0" step="0.1">
-                                    </div>
-                                    <div class="input-group mb-0">
-                                        <label class="input-label">结束偏移 (秒)</label>
-                                        <input type="number" id="audio_end_offset" name="audio_end_offset" class="input-field" value="10.0" step="0.1">
                                     </div>
                                 </div>
 
@@ -131,286 +148,221 @@
                                         <div class="w-8 h-8 bg-indigo-600 text-white rounded-xl flex items-center justify-center shadow-lg">
                                             <i class="fas fa-bullhorn text-xs"></i>
                                         </div>
-                                        <span class="text-[15px] font-black text-slate-800 tracking-tight">视频正文 CTA 增强层</span>
+                                        <span class="text-[14px] font-black text-slate-800 tracking-tight">横屏正文 CTA 增强层</span>
                                         <label class="ml-auto flex items-center gap-2 cursor-pointer group">
                                             <input type="checkbox" id="cta_enabled" name="cta_enabled" class="w-5 h-5 text-indigo-600 rounded-lg border-gray-300 focus:ring-indigo-500 transition-all">
-                                            <span class="text-[12px] font-black text-indigo-600 group-hover:text-indigo-700">启用</span>
+                                            <span class="text-[11px] font-black text-indigo-600 group-hover:text-indigo-700">启用</span>
                                         </label>
                                     </div>
                                     <div id="cta_config_panel" class="space-y-4 transition-all duration-300 opacity-50 pointer-events-none">
-                                        <div>
-                                            <label class="text-[10px] text-slate-400 mb-1.5 flex justify-between font-bold uppercase tracking-widest">
-                                                <span>引导话术 (支持多行)</span>
-                                                <span class="text-indigo-400">Premium Tool</span>
-                                            </label>
-                                            <textarea id="cta_text" name="cta_text" class="input-field py-3 text-[13px] leading-relaxed h-20 resize-none font-medium" placeholder="例如：&#10;私信回复“研报”&#10;领 PDF 完整版">会员空间获取研报&#10;解锁精选研报独家分析</textarea>
-                                        </div>
+                                        <textarea id="cta_text" name="cta_text" class="input-field py-3 text-[13px] leading-relaxed h-16 resize-none font-medium" placeholder="引导话术...">会员空间获取研报&#10;解锁精选研报独家分析</textarea>
                                         <div class="grid grid-cols-2 gap-4">
-                                            <div>
-                                                <label class="text-[10px] text-slate-400 mb-1.5 font-bold uppercase tracking-widest block">呈现形态/位置</label>
-                                                <select id="cta_position" name="cta_position" class="input-field py-2 text-xs font-bold" onchange="checkCtaPosition(this)">
-                                                    <option value="bottom_bar">底部·全宽横条</option>
-                                                    <option value="right_center">右侧·居中卡片</option>
-                                                    <option value="bottom_right" selected>右下角·悬浮卡片</option>
-                                                    <option value="top_bar">顶部·通知横条</option>
-                                                </select>
-                                            </div>
-                                            <div>
-                                                <label class="text-[10px] text-slate-400 mb-1.5 font-bold uppercase tracking-widest block">质感与配色</label>
-                                                <select id="cta_style" name="cta_style" class="input-field py-2 text-xs font-bold">
-                                                    <option value="premium_dark">高级·深邃灰 (半透明)</option>
-                                                    <option value="nomura_red" selected>投行·暗酒红 (半透明)</option>
-                                                    <option value="institutional_blue">机构·深海蓝 (半透明)</option>
-                                                    <option value="investment_gold">投行·琥珀金 (半透明)</option>
-                                                </select>
-                                            </div>
-                                        </div>
-                                        <div id="cta_warning" class="hidden animate-pulse bg-amber-50 border border-amber-200 p-3 rounded-xl">
-                                            <p class="text-[11px] text-amber-700 flex items-center gap-2">
-                                                <i class="fas fa-exclamation-triangle"></i>
-                                                <b>位置预警</b>: 该位置极易遮挡研报抬头信息，建议使用底部横条。
-                                            </p>
+                                            <select id="cta_position" name="cta_position" class="input-field py-2 text-xs font-bold" onchange="checkCtaPosition(this)">
+                                                <option value="bottom_bar">底部·全宽横条</option>
+                                                <option value="right_center">右侧·居中卡片</option>
+                                                <option value="bottom_right" selected>右下角·悬浮卡片</option>
+                                            </select>
+                                            <select id="cta_style" name="cta_style" class="input-field py-2 text-xs font-bold">
+                                                <option value="premium_dark">高级·深邃灰</option>
+                                                <option value="nomura_red" selected>投行·暗酒红</option>
+                                                <option value="institutional_blue">机构·深海蓝</option>
+                                            </select>
                                         </div>
                                     </div>
                                 </div>
                             </div>
                             
-                            <!-- 视频预览 -->
-                            <div class="w-full xl:w-[480px] shrink-0">
-                                <div class="bg-slate-100/50 p-4 rounded-[32px] border border-white shadow-xl relative">
-                                    <label class="input-label flex justify-between px-2 pb-3">
-                                        <span class="text-slate-800 flex items-center gap-2 font-black text-[11px] tracking-wider uppercase">
-                                            <i class="fas fa-video text-indigo-500"></i> Output Monitor
-                                        </span>
-                                        <span class="text-[9px] font-black text-indigo-500 bg-white px-2 py-0.5 rounded-full border border-indigo-50 shadow-sm">1080P</span>
-                                    </label>
-                                    <div class="relative overflow-hidden rounded-[20px] shadow-[inset_0_2px_15px_rgba(0,0,0,0.15)] bg-slate-900 border-2 border-white/80">
-                                        <canvas id="videoPreviewCanvas" width="1920" height="1080" class="w-full h-auto aspect-video block"></canvas>
+                            <!-- 横屏预览 -->
+                            <div class="w-full xl:w-[400px] shrink-0">
+                                <div class="bg-slate-100/50 p-3 rounded-[24px] border border-white shadow-xl relative">
+                                    <div class="relative overflow-hidden rounded-[16px] bg-slate-900 aspect-video">
+                                        <canvas id="videoPreviewCanvas" width="1920" height="1080" class="w-full h-auto block"></canvas>
                                         <div id="cta-placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-slate-400 bg-slate-100/95 transition-all duration-700">
-                                            <div class="w-16 h-16 bg-white rounded-[24px] shadow-sm flex items-center justify-center mb-4 border border-slate-50">
-                                                <i class="fas fa-image text-3xl text-slate-200"></i>
-                                            </div>
-                                            <p class="text-[10px] font-black tracking-[0.2em] text-slate-300 uppercase">Input Required</p>
+                                            <i class="fas fa-image text-2xl text-slate-200 mb-2"></i>
+                                            <p class="text-[9px] font-black tracking-widest text-slate-300 uppercase">Monitor Ready</p>
                                         </div>
                                     </div>
-                                    <div class="mt-4 flex justify-center gap-2">
-                                        <div class="w-2 h-2 rounded-full bg-slate-200"></div>
-                                        <div class="w-2 h-2 rounded-full bg-slate-200"></div>
-                                        <div class="w-10 h-2 rounded-full bg-indigo-400 shadow-sm shadow-indigo-200"></div>
-                                    </div>
                                 </div>
                             </div>
                         </div>
-                    </section>
 
-                    <!-- 2. 封面工坊 -->
-                    <section class="glass-card">
-                        <div class="section-title">
-                            <div class="w-10 h-10 bg-pink-100 text-pink-600 rounded-xl flex items-center justify-center shadow-sm">
-                                <i class="fas fa-image"></i>
+                        <!-- 2.2 横屏封面预览 (折叠式) -->
+                        <div class="mt-8 pt-8 border-t border-slate-100">
+                            <div class="flex items-center gap-3 mb-6">
+                                <div class="w-8 h-8 bg-pink-100 text-pink-600 rounded-lg flex items-center justify-center shadow-sm"><i class="fas fa-palette text-sm"></i></div>
+                                <span class="text-sm font-black text-slate-800 uppercase tracking-tight">横屏封面设计 (Landscape Cover)</span>
+                                <label class="ml-auto flex items-center gap-2 cursor-pointer">
+                                    <input type="checkbox" name="thumb_enabled" id="thumb_enabled" class="w-4 h-4 text-pink-600 rounded border-gray-300" checked>
+                                    <span class="text-[11px] font-bold text-slate-400">开启生成</span>
+                                </label>
                             </div>
-                            2. 封面工坊 (所见即所得)
-                        </div>
-
-                        <div id="thumb_config_area" class="flex flex-col xl:flex-row gap-8">
-                            <div class="flex-1 space-y-5">
-                                <div class="flex items-center justify-between bg-pink-50/30 p-3 rounded-2xl border border-pink-100 mb-2">
-                                    <label class="flex items-center gap-3 cursor-pointer">
-                                        <input type="checkbox" name="thumb_enabled" id="thumb_enabled" class="w-5 h-5 text-pink-600 rounded-lg border-gray-300 focus:ring-pink-500" checked>
-                                        <span class="text-sm font-black text-pink-700 uppercase tracking-tighter">启用自定义封面</span>
-                                    </label>
-                                    <span class="text-[10px] text-pink-500 bg-white px-3 py-1 rounded-full font-bold border border-pink-50 shadow-sm">实时渲染模式</span>
-                                </div>
-
-                                <div class="input-group">
-                                    <div class="flex justify-between items-end mb-1.5">
-                                        <label class="input-label">主标题 (Main Title)</label>
-                                        <button type="button" onclick="syncTitleFromBili()" class="text-[10px] font-bold text-blue-600 hover:bg-blue-50 px-2 py-0.5 rounded-full border border-blue-100 transition-all">
-                                            <i class="fas fa-sync-alt"></i> 同步视频标题
-                                        </button>
+                            
+                            <div id="thumb_config_area" class="flex flex-col xl:flex-row gap-8">
+                                <div class="flex-1 space-y-4">
+                                    <div class="grid grid-cols-1 gap-4">
+                                        <textarea name="thumb_main" id="thumb_main" rows="2" class="input-field font-bold leading-tight" oninput="drawCover()">深度解读：2026 全球宏观展望&#10;通胀下行下的资产配置指南</textarea>
+                                        <input type="text" name="thumb_sub" id="thumb_sub" class="input-field text-sm font-medium" value="详解美联储降息路径与新兴市场机会" oninput="drawCover()">
                                     </div>
-                                    <textarea name="thumb_main" id="thumb_main" rows="3" class="input-field font-medium leading-relaxed" oninput="drawCover()">深度解读：2026 全球宏观展望&#10;通胀下行下的资产配置指南</textarea>
-                                </div>
-                                <div class="input-group">
-                                    <label class="input-label">副标题 (Sub Title)</label>
-                                    <input type="text" name="thumb_sub" id="thumb_sub" class="input-field font-medium" value="详解美联储降息路径与新兴市场机会" oninput="drawCover()">
-                                </div>
-                                <div class="grid grid-cols-2 gap-4">
-                                    <div class="input-group">
-                                        <label class="input-label">预设机构</label>
-                                        <select id="select-org" class="input-field text-xs font-bold"></select>
+                                    <div class="grid grid-cols-2 gap-4">
+                                        <select id="select-org" class="input-field text-xs font-bold" onchange="drawCover()"></select>
                                         <input type="hidden" name="thumb_tag" id="val-tag" value="Goldman Sachs · 高盛研报">
-                                    </div>
-                                    <div class="input-group">
-                                        <label class="input-label">底图模式</label>
                                         <select id="thumb_bg_mode" class="input-field text-xs font-bold" onchange="toggleBgMode()">
                                             <option value="preset">底图预设库</option>
                                             <option value="screenshot">研报截图模式</option>
                                         </select>
                                     </div>
-                                </div>
-                                <div class="grid grid-cols-2 gap-4">
-                                    <div id="preset_bg_area" class="input-group">
-                                        <label class="input-label">选择预设底图</label>
+                                    <div id="preset_bg_area" class="input-group mb-0">
                                         <select name="thumb_bg_index" id="select-bg" class="input-field text-xs font-bold"></select>
                                     </div>
-                                    <div id="screenshot_bg_area" class="input-group hidden">
-                                        <label class="input-label">上传研报截图</label>
-                                        <div class="upload-area h-11 flex items-center justify-center relative shadow-sm" id="area-thumb-bg">
+                                    <div id="screenshot_bg_area" class="hidden">
+                                        <div class="upload-area h-10 flex items-center justify-center relative border-dashed" id="area-thumb-bg">
                                             <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'thumb-bg')">
                                             <input type="hidden" name="custom_bg_path" id="val-thumb-bg">
-                                            <div class="flex items-center gap-2">
-                                                <i class="fas fa-upload text-xs text-slate-400"></i>
-                                                <span class="text-xs text-slate-500 font-bold" id="label-thumb-bg">选择图片...</span>
-                                            </div>
+                                            <span class="text-[11px] text-slate-500 font-bold" id="label-thumb-bg">上传底图...</span>
                                         </div>
                                     </div>
-                                    <div class="input-group">
-                                        <label class="input-label">蒙层透明度</label>
-                                        <input type="range" id="overlay_opacity" name="overlay_opacity" min="0" max="1" step="0.1" value="0.5" class="w-full mt-2 accent-pink-500" oninput="drawCover()">
+                                    <div class="flex items-center gap-4">
+                                        <input type="text" name="thumb_date" id="thumb_date" class="input-field flex-1 text-xs" oninput="drawCover()">
+                                        <input type="range" id="overlay_opacity" name="overlay_opacity" min="0" max="1" step="0.1" value="0.5" class="w-24 accent-pink-500" oninput="drawCover()">
                                     </div>
                                 </div>
-                                <div class="input-group mb-0">
-                                    <label class="input-label">底部落款 (Sign-off)</label>
-                                    <input type="text" name="thumb_date" id="thumb_date" class="input-field font-medium" value="Feb 2026 | 胶囊播客" oninput="drawCover()">
-                                </div>
-                            </div>
-                            <div class="w-full xl:w-[480px] shrink-0">
-                                <label class="input-label">封面效果实时预览</label>
-                                <div class="relative overflow-hidden rounded-[24px] shadow-2xl border-4 border-white bg-slate-100">
-                                    <canvas id="previewCanvas" width="1920" height="1080" class="w-full h-auto aspect-video block"></canvas>
+                                <div class="w-full xl:w-[400px] shrink-0">
+                                    <div class="rounded-2xl border-4 border-white shadow-lg overflow-hidden">
+                                        <canvas id="previewCanvas" width="1920" height="1080" class="w-full h-auto aspect-video block"></canvas>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </section>
 
-                    <!-- 3. Bilibili (完整版恢复) -->
-                    <section class="glass-card">
+                    <!-- 3. 竖屏视频工作流 (9:16) -->
+                    <section class="glass-card border-amber-100 bg-amber-50/5">
                         <div class="flex justify-between items-center mb-6">
                             <div class="section-title mb-0">
-                                <div class="w-10 h-10 bg-blue-100 text-blue-600 rounded-xl flex items-center justify-center shadow-sm">
-                                    <i class="fab fa-bilibili"></i>
+                                <div class="w-10 h-10 bg-amber-100 text-amber-600 rounded-xl flex items-center justify-center shadow-sm">
+                                    <i class="fas fa-mobile-screen-button"></i>
                                 </div>
-                                3. 渠道发布 (Bilibili)
-                            </div>
-                            <div class="flex items-center gap-4">
-                                <label class="flex items-center gap-3 cursor-pointer group">
-                                    <span class="text-xs font-black text-blue-600 uppercase tracking-widest">开启发布</span>
-                                    <input type="checkbox" id="bili_enabled" name="bili_enabled" class="w-5 h-5 text-blue-600 rounded-lg border-gray-300 transition-all">
-                                </label>
-                            </div>
-                        </div>
-
-                        <div id="bili_config_area" class="space-y-5 transition-all duration-300 opacity-50 pointer-events-none">
-                            <div class="input-group">
-                                <div class="flex justify-between items-center mb-1.5">
-                                    <label class="input-label">视频标题</label>
-                                    <span id="bili_title_counter" class="text-[10px] font-bold text-slate-400">0/80</span>
-                                </div>
-                                <input type="text" name="bili_title" id="bili_title" class="input-field font-bold" maxlength="80" placeholder="留空则自动抓取主标题第一行" oninput="updateCounter('bili_title', 80)">
-                            </div>
-                            
-                            <div class="input-group">
-                                <div class="flex justify-between items-center mb-1.5">
-                                    <label class="input-label">视频简介</label>
-                                    <span id="bili_desc_counter" class="text-[10px] font-bold text-slate-400">0/2000</span>
-                                </div>
-                                <textarea name="bili_desc" id="bili_desc" class="input-field font-medium" rows="3" maxlength="2000" placeholder="填写视频简介..." oninput="updateCounter('bili_desc', 2000)"></textarea>
-                            </div>
-                            
-                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                <div>
-                                    <label class="input-label">投稿类型</label>
-                                    <select name="bili_copyright" class="input-field font-bold">
-                                        <option value="1" selected>自制 (Original)</option>
-                                        <option value="2">转载 (Reprint)</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label class="input-label">分区 (TID)</label>
-                                    <select name="bili_tid" id="bili_tid" class="input-field font-bold"></select>
-                                </div>
-                                <div>
-                                    <label class="input-label">合集 (可选)</label>
-                                    <select name="bili_season_id" id="bili_season_id" class="input-field font-bold">
-                                        <option value="">-- 请选择合集 --</option>
-                                    </select>
-                                </div>
-                            </div>
-
-                            <div class="grid grid-cols-2 gap-4 bg-slate-50/50 p-4 rounded-2xl border border-slate-100">
-                                <label class="flex items-center gap-3 cursor-pointer">
-                                    <input type="checkbox" name="bili_no_reprint" class="w-5 h-5 text-blue-600 rounded-lg border-gray-300 focus:ring-blue-500" checked>
-                                    <span class="text-[13px] text-slate-700 font-bold">未经授权禁止转载</span>
-                                </label>
-                                <label class="flex items-center gap-3 cursor-pointer">
-                                    <input type="checkbox" name="bili_private" class="w-5 h-5 text-blue-600 rounded-lg border-gray-300 focus:ring-blue-500">
-                                    <span class="text-[13px] text-slate-700 font-bold">仅自己可见 (私密发布)</span>
-                                </label>
-                            </div>
-
-                            <div class="input-group mb-0">
-                                <label class="input-label">视频标签 (逗号分隔)</label>
-                                <input type="text" name="bili_tags" id="bili_tags" class="input-field font-medium" value="金融, 投资, 宏观, 财经">
-                            </div>
-                        </div>
-                    </section>
-
-                    <!-- 4. YouTube (完整版恢复) -->
-                    <section class="glass-card">
-                        <div class="flex justify-between items-center mb-6">
-                            <div class="section-title mb-0">
-                                <div class="w-10 h-10 bg-red-100 text-red-600 rounded-xl flex items-center justify-center shadow-sm">
-                                    <i class="fab fa-youtube"></i>
-                                </div>
-                                4. 渠道发布 (YouTube)
+                                3. 竖屏工作流 (9:16 Production)
                             </div>
                             <label class="flex items-center gap-3 cursor-pointer group">
-                                <span class="text-xs font-black text-red-600 uppercase tracking-widest">开启同步</span>
-                                <input type="checkbox" name="yt_enabled" id="yt_enabled" class="w-5 h-5 text-red-600 rounded-lg border-gray-300 focus:ring-red-500 transition-all">
+                                <span class="text-xs font-black text-amber-600 uppercase tracking-widest">开启竖屏合成</span>
+                                <input type="checkbox" id="v_video_enabled" name="v_video_enabled" class="w-5 h-5 text-amber-600 rounded-lg border-gray-300 transition-all">
                             </label>
                         </div>
 
-                        <div id="yt_config_area" class="space-y-5 opacity-50 pointer-events-none transition-all duration-300">
-                            <div class="input-group">
-                                <div class="flex justify-between items-center mb-1.5">
-                                    <label class="input-label">视频标题 (留空同B站)</label>
-                                    <span id="yt_title_counter" class="text-[10px] font-bold text-slate-400">0/100</span>
+                        <div id="v_video_config_area" class="space-y-8 opacity-50 pointer-events-none transition-all duration-300">
+                            <!-- 3.1 竖屏封面设计 -->
+                            <div class="flex flex-col xl:flex-row gap-8">
+                                <div class="flex-1 space-y-5">
+                                    <div class="flex items-center justify-between bg-white/60 p-3 rounded-2xl border border-amber-100 mb-2">
+                                        <label class="flex items-center gap-3 cursor-pointer">
+                                            <input type="checkbox" name="v_thumb_enabled" id="v_thumb_enabled" class="w-4 h-4 text-amber-600 rounded" checked>
+                                            <span class="text-xs font-black text-amber-700 uppercase">设计竖屏封面</span>
+                                        </label>
+                                        <span class="text-[9px] text-amber-500 font-black uppercase">9:16 Canvas</span>
+                                    </div>
+
+                                    <div class="input-group">
+                                        <div class="flex justify-between items-end mb-1.5">
+                                            <label class="input-label text-amber-800">竖版主标题</label>
+                                            <button type="button" onclick="syncVTitle()" class="text-[9px] font-black text-amber-600 hover:bg-amber-50 px-2 py-0.5 rounded-full border border-amber-100 transition-all uppercase">Sync Main</button>
+                                        </div>
+                                        <textarea name="v_thumb_main" id="v_thumb_main" rows="3" class="input-field font-black text-base" oninput="drawVerticalCover()" placeholder="高盛：车市1月疲软&#10;只是假象？"></textarea>
+                                    </div>
+                                    <div class="input-group">
+                                        <label class="input-label text-amber-800">竖版副标题</label>
+                                        <input type="text" name="v_thumb_sub" id="v_thumb_sub" class="input-field font-bold text-sm" value="" oninput="drawVerticalCover()" placeholder="核心观点提炼...">
+                                    </div>
+                                    <div class="input-group">
+                                        <label class="input-label text-amber-800">上传研报截图 (展示区)</label>
+                                        <div class="upload-area h-14 flex items-center justify-center relative shadow-sm border-dashed border-amber-200" id="area-v-screenshot">
+                                            <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'v-screenshot')">
+                                            <input type="hidden" name="v_screenshot_path" id="val-v-screenshot">
+                                            <span class="text-[11px] text-amber-600 font-bold" id="label-v-screenshot">点击上传截图...</span>
+                                        </div>
+                                    </div>
+                                    <input type="text" name="v_thumb_date" id="v_thumb_date" class="input-field font-medium text-xs" oninput="drawVerticalCover()">
                                 </div>
-                                <input type="text" name="yt_title" id="yt_title" class="input-field font-bold" maxlength="100" placeholder="留空则自动抓取 B 站标题" oninput="updateCounter('yt_title', 100)">
+                                
+                                <div class="w-full xl:w-[280px] shrink-0 flex flex-col items-center">
+                                    <div class="relative overflow-hidden rounded-[24px] shadow-xl border-[4px] border-slate-900 bg-black w-[220px] h-[391px] group/canvas">
+                                        <canvas id="verticalCanvas" width="1080" height="1920" class="w-full h-full object-contain block"></canvas>
+                                        <button type="button" onclick="downloadVerticalPreview()" class="absolute top-2 right-2 w-8 h-8 bg-white/90 shadow rounded-full flex items-center justify-center text-slate-800 opacity-0 group-hover/canvas:opacity-100 transition-all hover:bg-amber-500 hover:text-white z-20">
+                                            <i class="fas fa-download text-xs"></i>
+                                        </button>
+                                        <div id="safeZoneOverlay" class="absolute inset-0 pointer-events-none border-x-[20%] border-b-[20%] border-red-500/20 hidden"></div>
+                                    </div>
+                                    <button type="button" onclick="toggleSafeZone()" class="mt-3 text-[9px] font-black text-slate-400 hover:text-amber-600 uppercase tracking-widest"><i class="fas fa-shield-alt"></i> Safe Zone</button>
+                                </div>
                             </div>
 
-                            <div class="input-group">
-                                <div class="flex justify-between items-center mb-1.5">
-                                    <label class="input-label">视频简介 (留空同B站)</label>
-                                    <span id="yt_desc_counter" class="text-[10px] font-bold text-slate-400">0/5000</span>
-                                </div>
-                                <textarea name="yt_desc" id="yt_desc" class="input-field font-medium" rows="3" maxlength="5000" placeholder="填写 YouTube 简介..." oninput="updateCounter('yt_desc', 5000)"></textarea>
-                            </div>
-
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div class="input-group">
-                                    <label class="input-label">隐私状态</label>
-                                    <select name="yt_privacy" class="input-field font-bold">
-                                        <option value="private" selected>私密 (Private)</option>
-                                        <option value="unlisted">不公开 (Unlisted)</option>
-                                        <option value="public">公开 (Public)</option>
-                                    </select>
-                                </div>
-                                <div class="input-group">
-                                    <label class="input-label">分类 (Category)</label>
-                                    <select name="yt_category" class="input-field font-bold">
-                                        <option value="22" selected>人物和博客</option>
-                                        <option value="27">教育</option>
-                                        <option value="28">科技</option>
-                                        <option value="25">新闻</option>
-                                    </select>
+                            <!-- 3.2 竖屏合成背景图 -->
+                            <div class="pt-6 border-t border-amber-100/50">
+                                <label class="input-label text-amber-800 flex justify-between items-end">
+                                    <span>竖屏视频视频背景 (必需)</span>
+                                    <button type="button" onclick="syncVThumbToVideo(event)" class="text-[9px] font-black bg-white text-amber-600 px-3 py-1 rounded-full shadow-sm border border-amber-100 hover:bg-amber-50"><i class="fas fa-magic"></i> 使用上方生成的封面</button>
+                                </label>
+                                <div class="flex items-center gap-4 mt-3">
+                                    <div class="upload-area flex-1 h-16 flex items-center justify-center relative border-dashed border-amber-200" id="area-v-video-image">
+                                        <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'v-video-image')">
+                                        <input type="hidden" name="v_video_image_path" id="val-v-video-image">
+                                        <span class="text-xs text-amber-600 font-bold" id="label-v-video-image">上传自定义背景...</span>
+                                    </div>
+                                    <div class="w-12 h-20 bg-slate-900 rounded-lg border-2 border-white shadow overflow-hidden">
+                                        <img id="v-video-preview-img" src="" class="w-full h-full object-cover hidden">
+                                    </div>
                                 </div>
                             </div>
+                        </div>
+                    </section>
 
-                            <div class="input-group mb-0">
-                                <label class="input-label">标签 (逗号分隔)</label>
-                                <input type="text" name="yt_tags" id="yt_tags" class="input-field font-medium" value="Finance, Investment, Macro">
+                    <!-- 4. 渠道发布配置 -->
+                    <section class="glass-card">
+                        <div class="section-title">
+                            <div class="w-10 h-10 bg-blue-100 text-blue-600 rounded-xl flex items-center justify-center shadow-sm">
+                                <i class="fas fa-share-nodes"></i>
+                            </div>
+                            4. 渠道发布配置 (Distribution)
+                        </div>
+
+                        <div class="grid grid-cols-1 xl:grid-cols-2 gap-8">
+                            <!-- Bilibili -->
+                            <div class="space-y-4 p-5 bg-blue-50/20 rounded-3xl border border-blue-100">
+                                <div class="flex justify-between items-center mb-2">
+                                    <span class="text-sm font-black text-blue-600 uppercase tracking-wider"><i class="fab fa-bilibili mr-2"></i>Bilibili</span>
+                                    <input type="checkbox" id="bili_enabled" name="bili_enabled" class="w-4 h-4 text-blue-600 rounded">
+                                </div>
+                                <div id="bili_config_area" class="space-y-4 opacity-50 pointer-events-none transition-all">
+                                    <input type="text" name="bili_title" id="bili_title" class="input-field py-2 text-sm font-bold" placeholder="视频标题 (留空自动生成)">
+                                    <textarea name="bili_desc" id="bili_desc" class="input-field py-2 text-xs h-16" placeholder="视频简介..."></textarea>
+                                    <div class="grid grid-cols-2 gap-3">
+                                        <select name="bili_tid" id="bili_tid" class="input-field py-2 text-xs font-bold"></select>
+                                        <select name="bili_season_id" id="bili_season_id" class="input-field py-2 text-xs font-bold"><option value="">-- 合集 --</option></select>
+                                    </div>
+                                    <input type="text" name="bili_tags" id="bili_tags" class="input-field py-2 text-xs" value="金融, 投资, 宏观">
+                                </div>
+                            </div>
+
+                            <!-- YouTube -->
+                            <div class="space-y-4 p-5 bg-red-50/20 rounded-3xl border border-red-100">
+                                <div class="flex justify-between items-center mb-2">
+                                    <span class="text-sm font-black text-red-600 uppercase tracking-wider"><i class="fab fa-youtube mr-2"></i>YouTube</span>
+                                    <input type="checkbox" name="yt_enabled" id="yt_enabled" class="w-4 h-4 text-red-600 rounded">
+                                </div>
+                                <div id="yt_config_area" class="space-y-4 opacity-50 pointer-events-none transition-all">
+                                    <input type="text" name="yt_title" id="yt_title" class="input-field py-2 text-sm font-bold" placeholder="YouTube 标题 (留空同B站)">
+                                    <textarea name="yt_desc" id="yt_desc" class="input-field py-2 text-xs h-16" placeholder="YouTube 简介..."></textarea>
+                                    <div class="grid grid-cols-2 gap-3">
+                                        <select name="yt_privacy" class="input-field py-2 text-xs font-bold">
+                                            <option value="private" selected>私密 (Private)</option>
+                                            <option value="public">公开 (Public)</option>
+                                        </select>
+                                        <select name="yt_category" class="input-field py-2 text-xs font-bold">
+                                            <option value="22" selected>人物和博客</option>
+                                            <option value="27">教育</option>
+                                        </select>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </section>
@@ -523,8 +475,8 @@
     <script src="js/config.js"></script>
     <script src="js/api.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/publisher/renderer.js?v=0227"></script>
+    <script src="js/publisher/renderer.js?v=0304"></script>
     <script src="js/publisher/services.js?v=0227"></script>
-    <script src="js/publisher/main.js?v=0227"></script>
+    <script src="js/publisher/main.js?v=0304"></script>
 </body>
 </html>

@@ -80,6 +80,127 @@ const CanvasRenderer = {
     },
 
     /**
+     * 核心：绘制 9:16 竖版封面 (PRD 实现)
+     */
+    drawVerticalCover(ctx, canvas, images, config) {
+        if (!ctx) return;
+        const w = canvas.width, h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
+
+        // 1. 区域划分
+        const splitY = 700;
+        
+        // 2. 背景绘制
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, w, splitY);
+        
+        // --- 新增：阴影过渡 (纸张悬浮感) ---
+        const shadowH = 60;
+        const gradShadow = ctx.createLinearGradient(0, splitY - shadowH, 0, splitY);
+        gradShadow.addColorStop(0, 'rgba(0,0,0,0)');
+        gradShadow.addColorStop(1, 'rgba(0,0,0,0.08)');
+        ctx.fillStyle = gradShadow;
+        ctx.fillRect(0, splitY - shadowH, w, shadowH);
+
+        ctx.fillStyle = '#051C33';
+        ctx.fillRect(0, splitY, w, h - splitY);
+
+        // 3. 截图区域渲染 (Object-fit: contain 逻辑)
+        if (images.v_screenshot && images.v_screenshot.complete && images.v_screenshot.naturalWidth) {
+            const img = images.v_screenshot;
+            const scale = Math.min(w / img.naturalWidth, splitY / img.naturalHeight);
+            const nw = img.naturalWidth * scale;
+            const nh = img.naturalHeight * scale;
+            const nx = (w - nw) / 2;
+            const ny = (splitY - nh) / 2;
+            ctx.drawImage(img, nx, ny, nw, nh);
+            
+            // 细微分割线
+            ctx.strokeStyle = 'rgba(0,0,0,0.05)';
+            ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(0, splitY); ctx.lineTo(w, splitY); ctx.stroke();
+        } else {
+            ctx.fillStyle = '#F8F9FA';
+            ctx.fillRect(40, 40, w - 80, splitY - 80);
+            ctx.fillStyle = '#DEE2E6';
+            ctx.textAlign = 'center'; ctx.font = 'bold 30px sans-serif';
+            ctx.fillText('等待上传研报截图...', w / 2, splitY / 2);
+        }
+
+        // 4. 文字排版规则
+        const leftPadding = 80;
+        const maxTextW = w * 0.82 - leftPadding; // 安全区控制
+        let currentY = splitY + 120;
+
+        // 主标题绘制 (亮黄色 #FFD700)
+        let mainFs = 95;
+        if (config.mainTitle.length > 25) mainFs = 82;
+        ctx.font = `900 ${mainFs}px sans-serif`;
+        ctx.fillStyle = '#FFD700';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+
+        const mainLines = this._wrapText(ctx, config.mainTitle, maxTextW).slice(0, 4);
+        mainLines.forEach(line => {
+            ctx.fillText(line, leftPadding, currentY);
+            currentY += mainFs * 1.35;
+        });
+
+        // 副标题绘制 (纯白 #FFFFFF)
+        currentY += 40;
+        const subFs = 55;
+        ctx.font = `500 ${subFs}px sans-serif`;
+        ctx.fillStyle = '#FFFFFF';
+        const subLines = this._wrapText(ctx, config.subTitle, maxTextW).slice(0, 3);
+        subLines.forEach(line => {
+            ctx.fillText(line, leftPadding, currentY);
+            currentY += subFs * 1.5;
+        });
+
+        // 5. 底部品牌标识 (上移至离底部 400px，避开 UI 遮挡)
+        const brandY = h - 400; 
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        // 精致短横线 (位于文字上方 15px)
+        ctx.fillRect(leftPadding, brandY - 45, 100, 2);
+        // 品牌文字
+        ctx.font = '500 38px sans-serif';
+        ctx.fillText(config.dateText, leftPadding, brandY - 30);
+    },
+
+    /**
+     * 工具：文字自动换行 (改进版：支持词组保护和手动换行)
+     */
+    _wrapText(ctx, text, maxWidth) {
+        const lines = [];
+        const paragraphs = text.split('\n');
+        
+        paragraphs.forEach(p => {
+            // 如果是空行，也保留一个空位
+            if (p.trim() === '') {
+                lines.push('');
+                return;
+            }
+            
+            // 改进：使用更细粒度的分词（正则匹配中文字符或连续的英文/数字）
+            const tokens = p.match(/[\u4e00-\u9fa5]|([a-zA-Z0-9\.]+)|[^\u4e00-\u9fa5]/g) || [];
+            let currentLine = '';
+            
+            tokens.forEach(token => {
+                const testLine = currentLine + token;
+                const metrics = ctx.measureText(testLine);
+                if (metrics.width > maxWidth && currentLine.length > 0) {
+                    lines.push(currentLine);
+                    currentLine = token;
+                } else {
+                    currentLine = testLine;
+                }
+            });
+            lines.push(currentLine);
+        });
+        return lines;
+    },
+
+    /**
      * 核心：绘制视频正文 CTA
      */
     drawVideoPreview(ctx, canvas, image, config) {

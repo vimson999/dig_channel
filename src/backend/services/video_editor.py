@@ -134,6 +134,52 @@ class VideoEditorService:
         )
         return VideoFileClip(temp_path)
 
+    def process_vertical_video(self, image_file, audio_files, output_filename=None):
+        """Synthesize a pure 9:16 vertical video from an image and audio segments."""
+        raw_resources = []
+        try:
+            target_w, target_h = 1080, 1920
+            target_fps = 24
+
+            # 1. Process Audio
+            audio_paths = []
+            if isinstance(audio_files, list): audio_paths = audio_files
+            elif isinstance(audio_files, str) and audio_files.startswith('['):
+                import json
+                try: audio_paths = json.loads(audio_files)
+                except: audio_paths = [audio_files]
+            else: audio_paths = [audio_files] if audio_files else []
+
+            audio_segments = []
+            for p in audio_paths:
+                if p and os.path.exists(p):
+                    segment = AudioFileClip(p)
+                    audio_segments.append(segment)
+                    raw_resources.append(segment)
+            
+            if not audio_segments:
+                raise ValueError("No valid audio files for vertical video.")
+
+            if len(audio_segments) > 1:
+                from moviepy import concatenate_audioclips
+                audio_final = concatenate_audioclips(audio_segments)
+                raw_resources.append(audio_final)
+            else:
+                audio_final = audio_segments[0]
+
+            # 2. Process Image to Video
+            duration = audio_final.duration
+            video_clip = ImageClip(image_file).with_duration(duration).resized(new_size=(target_w, target_h)).with_fps(target_fps).with_audio(audio_final)
+            
+            output_path = os.path.join(self.output_folder, output_filename or f"v_video_{uuid.uuid4().hex[:8]}.mp4")
+            video_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', remove_temp=True, logger=None)
+            
+            return output_path
+
+        finally:
+            for r in raw_resources:
+                if hasattr(r, 'close'): r.close()
+
     def process_mixed_content(self, video_file, image_file, audio_file, video_c_path=None, audio_c_path=None, audio_start=7.0, audio_end_offset=10.0, output_filename=None, cta_config=None):
         """Synthesize video with advanced CTA placement. Supports multiple audio segments."""
         raw_resources = []

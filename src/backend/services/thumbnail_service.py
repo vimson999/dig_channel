@@ -49,7 +49,7 @@ ORGANIZATIONS = [
     {'name': 'Sequoia · 红杉资本', 'color': '#2E8B57'},
     {'name': 'Berkshire Hathaway · 伯克希尔', 'color': '#2B3D51'},
     {'name': 'Tesla · 特斯拉', 'color': '#E82127'},
-    {'name': 'NVIDIA · 英伟达', 'color': '#76B900'},
+    {'name': 'NVIDIA · 英英达', 'color': '#76B900'},
     {'name': 'Nomura · 野村证券', 'color': '#EF3340'},
     {'name': 'Bank of America · 美国银行', 'color': '#0061AA'}, 
     {'name': 'Deutsche Bank · 德意志银行', 'color': '#0018A8'},  

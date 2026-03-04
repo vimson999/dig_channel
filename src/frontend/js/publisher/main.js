@@ -9,9 +9,10 @@ let startTime = null;
 
 const state = {
     images: { 
-        bg: new Image(),      
-        custom: new Image(),  
-        videoBody: new Image() 
+        bg: (() => { const img = new Image(); img.crossOrigin = "anonymous"; return img; })(),      
+        custom: (() => { const img = new Image(); img.crossOrigin = "anonymous"; return img; })(),  
+        videoBody: (() => { const img = new Image(); img.crossOrigin = "anonymous"; return img; })(),
+        v_screenshot: (() => { const img = new Image(); img.crossOrigin = "anonymous"; return img; })() 
     },
     audio_segments: [], // 支持多段音频
     bgData: []
@@ -21,6 +22,7 @@ const state = {
 const elements = {
     coverCanvas: document.getElementById('previewCanvas'),
     videoCanvas: document.getElementById('videoPreviewCanvas'),
+    verticalCanvas: document.getElementById('verticalCanvas'),
     publishForm: document.getElementById('publishForm'),
     submitBtn: document.getElementById('submitBtn'),
     historyList: document.getElementById('historyList'),
@@ -32,6 +34,7 @@ const elements = {
 
 const coverCtx = elements.coverCanvas ? elements.coverCanvas.getContext('2d') : null;
 const videoCtx = elements.videoCanvas ? elements.videoCanvas.getContext('2d') : null;
+const verticalCtx = elements.verticalCanvas ? elements.verticalCanvas.getContext('2d') : null;
 
 // --- 初始化入口 ---
 
@@ -42,6 +45,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 function initUI() {
+    // 动态设置当前日期落款
+    const dateInput = document.getElementById('thumb_date');
+    const vDateInput = document.getElementById('v_thumb_date');
+    const now = new Date();
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const defaultDate = `${monthNames[now.getMonth()]} ${now.getFullYear()} | 胶囊播客`;
+    
+    if (dateInput) dateInput.value = defaultDate;
+    if (vDateInput) vDateInput.value = defaultDate;
+
     const select = document.getElementById('bili_tid');
     if (select) {
         const BILI_TIDS = [
@@ -115,13 +128,11 @@ async function loadSeasons() {
 
 function bindEvents() {
     const coverInputs = ['thumb_main', 'thumb_sub', 'thumb_date', 'overlay_opacity', 'thumb_bg_mode'];
+    const vCoverInputs = ['v_thumb_main', 'v_thumb_sub', 'v_thumb_date', 'v_thumb_enabled'];
     const ctaInputs = ['cta_text', 'cta_position', 'cta_style'];
     
-    coverInputs.forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.addEventListener('input', refreshPreviews);
-    });
-    
+    coverInputs.forEach(id => document.getElementById(id)?.addEventListener('input', refreshPreviews));
+    vCoverInputs.forEach(id => document.getElementById(id)?.addEventListener('input', refreshPreviews));
     ctaInputs.forEach(id => document.getElementById(id)?.addEventListener('input', refreshPreviews));
     
     document.getElementById('thumb_bg_mode')?.addEventListener('change', () => {
@@ -144,6 +155,22 @@ function bindEvents() {
         refreshPreviews();
     });
 
+    document.getElementById('v_thumb_enabled')?.addEventListener('change', (e) => {
+        refreshPreviews();
+    });
+
+    document.getElementById('landscape_enabled')?.addEventListener('change', (e) => {
+        const area = document.getElementById('landscape_config_area');
+        if (e.target.checked) area.classList.remove('opacity-50', 'pointer-events-none');
+        else area.classList.add('opacity-50', 'pointer-events-none');
+    });
+
+    document.getElementById('v_video_enabled')?.addEventListener('change', (e) => {
+        const area = document.getElementById('v_video_config_area');
+        if (e.target.checked) area.classList.remove('opacity-50', 'pointer-events-none');
+        else area.classList.add('opacity-50', 'pointer-events-none');
+    });
+
     document.getElementById('bili_enabled')?.addEventListener('change', (e) => {
         const panel = document.getElementById('bili_config_area');
         if (e.target.checked) panel.classList.remove('opacity-50', 'pointer-events-none');
@@ -161,33 +188,47 @@ function bindEvents() {
 // --- 核心业务逻辑 ---
 
 async function handleUpload(input, type) {
-    const file = input.files[0]; if (!file) return;
-    const area = document.getElementById(`area-${type}`), spinner = document.getElementById(`spin-${type}`), hiddenInput = document.getElementById(`val-${type}`);
+    const files = input.files;
+    if (!files || files.length === 0) return;
+    
+    const area = document.getElementById(`area-${type}`), 
+          spinner = document.getElementById(`spin-${type}`), 
+          hiddenInput = document.getElementById(`val-${type}`);
+          
     if (spinner) spinner.classList.remove('hidden');
     
     try {
-        const data = await PublisherService.uploadFile(file);
-        if (data.success) {
-            if (type === 'audio') {
-                // 音频特殊处理：支持多个片段
-                state.audio_segments.push({
-                    name: file.name,
-                    path: data.path
-                });
-                renderAudioList();
-                // 存储 JSON 数组字符串，后端将负责解析
-                if (hiddenInput) hiddenInput.value = JSON.stringify(state.audio_segments.map(s => s.path));
-                
-                if (area) area.classList.add('uploaded');
-                const label = document.getElementById(`label-audio`);
-                if (label) {
-                    label.innerText = `已添加 ${state.audio_segments.length} 个片段`;
-                    label.classList.add('text-emerald-600');
+        // 如果是音频，循环处理所有文件
+        if (type === 'audio') {
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const data = await PublisherService.uploadFile(file);
+                if (data.success) {
+                    state.audio_segments.push({
+                        name: file.name,
+                        path: data.path
+                    });
                 }
-                const icon = document.getElementById(`icon-audio`);
-                if (icon) icon.className = "fas fa-check-circle text-3xl text-emerald-500 mb-3";
-            } else {
-                // 其他类型保持原样
+            }
+            
+            renderAudioList();
+            // 存储 JSON 数组字符串，后端将负责解析
+            if (hiddenInput) hiddenInput.value = JSON.stringify(state.audio_segments.map(s => s.path));
+            
+            if (area) area.classList.add('uploaded');
+            const label = document.getElementById(`label-audio`);
+            if (label) {
+                label.innerText = `已添加 ${state.audio_segments.length} 个片段`;
+                label.classList.add('text-emerald-600');
+            }
+            const icon = document.getElementById(`icon-audio`);
+            if (icon) icon.className = "fas fa-check-circle text-3xl text-emerald-500 mb-3";
+            
+        } else {
+            // 非音频文件，保持单文件处理逻辑
+            const file = files[0];
+            const data = await PublisherService.uploadFile(file);
+            if (data.success) {
                 if (area) area.classList.add('uploaded');
                 if (hiddenInput) hiddenInput.value = data.path;
                 
@@ -195,25 +236,52 @@ async function handleUpload(input, type) {
                 const label = document.getElementById(`label-${type}`);
                 if (icon) icon.className = "fas fa-check-circle text-3xl text-emerald-500 mb-3";
                 if (label) {
-                    const typeMap = { 'video': '片头视频', 'image': '正文图片', 'thumb-bg': '封面底图' };
+                    const typeMap = { 
+                        'video': '片头视频', 'image': '正文图片', 'thumb-bg': '封面底图', 
+                        'v-screenshot': '竖版截图', 'v-video-image': '竖版视频背景' 
+                    };
                     label.innerText = `${typeMap[type] || '素材'} 已就绪`;
                     label.classList.add('text-emerald-600');
                 }
-            }
 
-            const viewUrl = PublisherService.API_BASE + '/resources/view?path=' + encodeURIComponent(data.path);
-            if (type === 'image') {
-                document.getElementById('btn-sync-to-cover')?.classList.remove('hidden');
-                state.images.videoBody.crossOrigin = "anonymous";
-                state.images.videoBody.onload = refreshPreviews;
-                state.images.videoBody.src = viewUrl;
-            } else if (type === 'thumb-bg') {
-                state.images.custom.crossOrigin = "anonymous";
-                state.images.custom.onload = refreshPreviews;
-                state.images.custom.src = viewUrl;
+                const viewUrl = `${PublisherService.API_BASE}/resources/view?path=${encodeURIComponent(data.path)}&_t=${Date.now()}`;
+                
+                if (type === 'image') {
+                    document.getElementById('btn-sync-to-cover')?.classList.remove('hidden');
+                    state.images.videoBody.onload = () => { console.log('✅ 正文图已加载'); refreshPreviews(); };
+                    state.images.videoBody.onerror = () => console.error('❌ 正文图加载失败:', viewUrl);
+                    state.images.videoBody.src = viewUrl;
+                } else if (type === 'thumb-bg') {
+                    const bgMode = document.getElementById('thumb_bg_mode');
+                    if (bgMode) {
+                        bgMode.value = 'screenshot';
+                        document.getElementById('preset_bg_area')?.classList.add('hidden');
+                        document.getElementById('screenshot_bg_area')?.classList.remove('hidden');
+                    }
+                    state.images.custom.onload = () => { console.log('✅ 封面图已加载'); refreshPreviews(); };
+                    state.images.custom.src = viewUrl;
+                } else if (type === 'v-screenshot') {
+                    state.images.v_screenshot.onload = () => { console.log('✅ 竖版截图已加载'); refreshPreviews(); };
+                    state.images.v_screenshot.src = viewUrl;
+                } else if (type === 'v-video-image') {
+                    const vImg = document.getElementById('v-video-preview-img');
+                    if (vImg) {
+                        vImg.onload = () => { vImg.classList.remove('hidden'); console.log('✅ 竖屏背景已就绪'); };
+                        vImg.src = viewUrl;
+                    }
+                }
             }
         }
-    } catch (e) { console.error(e); } finally { if (spinner) spinner.classList.add('hidden'); }
+        
+        // 统一重绘
+        refreshPreviews();
+        
+    } catch (e) { 
+        console.error('Upload Error:', e); 
+        alert('文件上传失败，请重试');
+    } finally { 
+        if (spinner) spinner.classList.add('hidden'); 
+    }
 }
 
 function renderAudioList() {
@@ -269,12 +337,13 @@ window.removeAudioSegment = (index) => {
 
 async function handleTaskSubmit() {
     const fd = new FormData(elements.publishForm);
-    if (!fd.get('audio_path') || !fd.get('image_path')) { alert('请上传必需素材 (音频 + 图片)'); return; }
+    if (!fd.get('audio_path')) { alert('请上传音频素材'); return; }
 
     const payload = {
         video: { 
+            enabled: document.getElementById('landscape_enabled')?.checked ?? true,
             video_path: fd.get('video_path'), 
-            audio_path: fd.get('audio_path'), // 此处可能包含 JSON 字符串数组
+            audio_path: fd.get('audio_path'),
             image_path: fd.get('image_path'),
             audio_start: fd.get('audio_start'), audio_end_offset: fd.get('audio_end_offset'),
             cta: document.getElementById('cta_enabled')?.checked ? { 
@@ -282,6 +351,10 @@ async function handleTaskSubmit() {
                 position: fd.get('cta_position') || "bottom_bar", 
                 style: fd.get('cta_style') || "premium_dark" 
             } : null
+        },
+        vertical_video: {
+            enabled: document.getElementById('v_video_enabled')?.checked ?? false,
+            image_path: fd.get('v_video_image_path')
         },
         bilibili: {
             enabled: document.getElementById('bili_enabled')?.checked ?? true,
@@ -304,6 +377,15 @@ async function handleTaskSubmit() {
             layout: 'left', 
             custom_bg_path: document.getElementById('val-thumb-bg')?.value, 
             overlay_opacity: document.getElementById('overlay_opacity')?.value || 0.5
+        };
+    }
+
+    if (document.getElementById('v_thumb_enabled')?.checked) {
+        payload.vertical_thumbnail = {
+            main_title: document.getElementById('v_thumb_main').value,
+            sub_title: document.getElementById('v_thumb_sub').value,
+            date_text: document.getElementById('v_thumb_date').value,
+            screenshot_path: document.getElementById('val-v-screenshot')?.value
         };
     }
 
@@ -389,8 +471,14 @@ function refreshPreviews() {
         position: document.getElementById('cta_position')?.value || "bottom_bar",
         style: document.getElementById('cta_style')?.value || "premium_dark"
     };
+    const verticalConfig = {
+        mainTitle: document.getElementById('v_thumb_main')?.value || "",
+        subTitle: document.getElementById('v_thumb_sub')?.value || "",
+        dateText: document.getElementById('v_thumb_date')?.value || ""
+    };
     CanvasRenderer.drawCover(coverCtx, elements.coverCanvas, state.images, coverConfig);
     CanvasRenderer.drawVideoPreview(videoCtx, elements.videoCanvas, state.images.videoBody, videoConfig);
+    CanvasRenderer.drawVerticalCover(verticalCtx, elements.verticalCanvas, state.images, verticalConfig);
 }
 
 async function loadHistory() {
@@ -455,7 +543,14 @@ function startPolling(taskId) {
 function updateProgressUI(task) {
     if (elements.progressBar) elements.progressBar.style.width = `${task.progress}%`;
     if (elements.stepDisplay) {
-        const map = { 'synthesis': '🎬 视频合成', 'thumbnail': '🎨 封面生成', 'upload': '🚀 上传B站', 'done': '✅ 完成' };
+        const map = { 
+            'synthesis': '🎬 横屏视频合成', 
+            'v_synthesis': '📱 竖屏视频合成', 
+            'thumbnail': '🎨 封面生成', 
+            'upload': '🚀 上传B站', 
+            'upload_youtube': '📺 上传YouTube',
+            'done': '✅ 完成' 
+        };
         elements.stepDisplay.innerText = map[task.current_step] || task.current_step;
     }
     if (task.status === 'completed' || task.status === 'failed') {
@@ -486,8 +581,15 @@ window.syncToCover = (e) => {
     const imgPath = document.getElementById('val-image').value;
     if (!imgPath) return;
     document.getElementById('val-thumb-bg').value = imgPath;
-    document.getElementById('thumb_bg_mode').value = 'screenshot';
-    state.images.custom.src = PublisherService.API_BASE + '/resources/view?path=' + encodeURIComponent(imgPath);
+    
+    const bgMode = document.getElementById('thumb_bg_mode');
+    if (bgMode) {
+        bgMode.value = 'screenshot';
+        document.getElementById('preset_bg_area')?.classList.add('hidden');
+        document.getElementById('screenshot_bg_area')?.classList.remove('hidden');
+    }
+    
+    state.images.custom.src = PublisherService.API_BASE + '/resources/view?path=' + encodeURIComponent(imgPath) + '&_t=' + Date.now();
     refreshPreviews();
 };
 window.trackTask = trackTask;
@@ -505,12 +607,69 @@ window.updateCounter = (id, max) => {
     if (el && counter) counter.innerText = `${el.value.length}/${max}`;
 };
 window.drawCover = refreshPreviews;
+window.drawVerticalCover = refreshPreviews;
 window.syncTitleFromBili = () => {
     const bt = document.getElementById('bili_title')?.value;
     if (bt && document.getElementById('thumb_main')) {
         document.getElementById('thumb_main').value = bt.replace(/\|/g, '\n');
         refreshPreviews();
     }
+};
+window.syncVTitle = () => {
+    const mt = document.getElementById('thumb_main')?.value;
+    const st = document.getElementById('thumb_sub')?.value;
+    if (mt) document.getElementById('v_thumb_main').value = mt;
+    if (st) document.getElementById('v_thumb_sub').value = st;
+    refreshPreviews();
+};
+window.syncVThumbToVideo = (e) => {
+    if (e) e.stopPropagation();
+    const canvas = document.getElementById('verticalCanvas');
+    if (!canvas) return;
+    
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+    
+    // 模拟文件上传过程
+    const blob = dataURLToBlob(dataUrl);
+    const file = new File([blob], "auto_v_bg.jpg", { type: "image/jpeg" });
+    
+    // 使用现有的 handleUpload 逻辑
+    const mockInput = { files: [file] };
+    handleUpload(mockInput, 'v-video-image');
+};
+
+// 辅助函数：DataURL 转 Blob
+function dataURLToBlob(dataurl) {
+    var arr = dataurl.split(','), mime = arr[0].match(/:(.*?);/)[1],
+        bstr = atob(arr[1]), n = bstr.length, u8arr = new Uint8Array(n);
+    while(n--){ u8arr[n] = bstr.charCodeAt(n); }
+    return new Blob([u8arr], {type:mime});
+}
+
+window.toggleSafeZone = () => {
+    const overlay = document.getElementById('safeZoneOverlay');
+    if (overlay) overlay.classList.toggle('hidden');
+};
+window.downloadVerticalPreview = () => {
+    const canvas = document.getElementById('verticalCanvas');
+    if (!canvas) return;
+    
+    // 强制一次完整渲染
+    refreshPreviews();
+    
+    // 导出为 JPEG (质量 0.95)
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+    const link = document.createElement('a');
+    
+    // 生成带时间戳的文件名
+    const now = new Date();
+    const ts = `${now.getMonth()+1}${now.getDate()}_${now.getHours()}${now.getMinutes()}`;
+    link.download = `Vertical_Cover_${ts}.jpg`;
+    link.href = dataUrl;
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
 };
 window.closeBiliModal = () => document.getElementById('bili-modal').classList.add('hidden');
 window.toggleBgMode = () => { /* 内部联动处理 */ };
