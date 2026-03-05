@@ -650,12 +650,20 @@ window.toggleSafeZone = () => {
     const overlay = document.getElementById('safeZoneOverlay');
     if (overlay) overlay.classList.toggle('hidden');
 };
-window.downloadVerticalPreview = () => {
-    const canvas = document.getElementById('verticalCanvas');
+window.downloadVerticalPreview = () => downloadCanvasAsImage('verticalCanvas', 'Vertical_Cover');
+window.downloadLandscapePreview = () => downloadCanvasAsImage('previewCanvas', 'Landscape_Cover');
+
+/**
+ * 通用下载 Canvas 为图片
+ * @param {string} canvasId 
+ * @param {string} filenamePrefix 
+ */
+function downloadCanvasAsImage(canvasId, filenamePrefix) {
+    const canvas = document.getElementById(canvasId);
     if (!canvas) return;
     
     // 强制一次完整渲染
-    refreshPreviews();
+    if (typeof refreshPreviews === 'function') refreshPreviews();
     
     // 导出为 JPEG (质量 0.95)
     const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
@@ -664,12 +672,12 @@ window.downloadVerticalPreview = () => {
     // 生成带时间戳的文件名
     const now = new Date();
     const ts = `${now.getMonth()+1}${now.getDate()}_${now.getHours()}${now.getMinutes()}`;
-    link.download = `Vertical_Cover_${ts}.jpg`;
+    link.download = `${filenamePrefix}_${ts}.jpg`;
     link.href = dataUrl;
     
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-};
+}
 window.closeBiliModal = () => document.getElementById('bili-modal').classList.add('hidden');
 window.toggleBgMode = () => { /* 内部联动处理 */ };
