@@ -46,6 +46,8 @@ class SharedNavigation {
             return 'gemini-test';
         } else if (filename === 'thumbnail-generator.html') {
             return 'thumbnail-generator';
+        } else if (filename === 'thumbnail-workbench.html') {
+            return 'thumbnail-workbench';
         } else if (filename === 'thumbnail-generator-classic.html') {
             return 'thumbnail-generator-classic';
         } else if (filename === 'video-auto-generator.html') {
@@ -73,6 +75,7 @@ class SharedNavigation {
             'favorites': '我的收藏',
             'bilibili-publisher': 'Bilibili 发布工作台',
             'gemini-test': 'Gemini AI 测试台',
+            'thumbnail-workbench': '听见资本封面工作台',
             'thumbnail-generator': '研报封面生成器',
             'thumbnail-generator-classic': '经典研报封面生成器',
             'video-auto-generator': 'AI 视频自动生成',
@@ -277,6 +280,12 @@ class SharedNavigation {
                 icon: 'fas fa-paint-brush',
                 dropdown: true,
                 items: [
+                    {
+                        id: 'thumbnail-workbench',
+                        name: '封面工作台 (3合1)',
+                        icon: 'fas fa-magic',
+                        href: 'thumbnail-workbench.html'
+                    },
                     {
                         id: 'thumbnail-generator-classic',
                         name: '经典研报封面 (V7)',

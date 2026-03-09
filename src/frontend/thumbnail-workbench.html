@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>全能封面工作台 - Shioa 智能数据分析平台</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: { 50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd', 400: '#60a5fa', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8', 800: '#1e40af', 900: '#1e3a8a' },
+                        secondary: '#64748b',
+                        accent: { green: '#10b981', purple: '#8b5cf6', orange: '#f59e0b', red: '#ef4444', blue: '#06b6d4' }
+                    }
+                }
+            }
+        }
+    </script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        body { background-color: #f8fafc; }
+        .canvas-container {
+            position: relative;
+            margin: 0 auto;
+            background-color: #0B132B;
+            border-radius: 0.75rem;
+            overflow: hidden;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+            transition: all 0.3s ease-in-out;
+        }
+        canvas {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            object-fit: contain;
+        }
+        .pattern-grid {
+            background-image: radial-gradient(#e2e8f0 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+    </style>
+</head>
+<body class="min-h-screen font-sans">
+    
+    <!-- 导航将通过 shared-navigation.js 加载 -->
+    
+    <!-- 面包屑导航 -->
+    <div class="max-w-[1440px] mx-auto px-6 py-4">
+        <nav class="flex items-center gap-2 text-sm text-gray-500">
+            <a href="/" class="hover:text-primary-600 transition-colors"><i class="fas fa-home"></i></a>
+            <span class="mx-2">/</span>
+            <span class="text-gray-700">工具箱</span>
+            <span class="mx-2">/</span>
+            <span class="text-gray-700">封面工作台</span>
+        </nav>
+    </div>
+
+    <!-- 主体内容 -->
+    <main class="max-w-[1440px] mx-auto px-6 pb-12">
+        <div class="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex flex-col md:flex-row h-[calc(100vh-180px)] min-h-[700px]">
+            
+            <!-- 左侧控制面板 -->
+            <aside class="w-full md:w-[400px] border-r border-gray-100 p-6 overflow-y-auto flex flex-col gap-6 shrink-0 bg-slate-50/50">
+                <div class="flex items-center gap-3 mb-2">
+                    <div class="w-10 h-10 bg-primary-600 rounded-xl flex items-center justify-center shadow-lg shadow-primary-500/20">
+                        <i class="fas fa-magic text-white"></i>
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-bold text-gray-800">封面配置</h2>
+                        <p class="text-xs text-gray-500">定制您的财经视频封面</p>
+                    </div>
+                </div>
+
+                <!-- 尺寸/版式 -->
+                <div>
+                    <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">画布尺寸 / 版式</label>
+                    <select id="formatSelect" class="w-full bg-white border border-gray-200 rounded-xl p-3 text-gray-700 focus:ring-2 focus:ring-primary-500 outline-none shadow-sm cursor-pointer transition-all">
+                        <option value="horizontal">💻 横版封面 (16:9)</option>
+                        <option value="vertical">📱 竖版视频 (9:16)</option>
+                        <option value="wx_cover">🟢 视频号封面 (3:4)</option>
+                        <option value="podcast">🎙️ 播客封面 (1:1)</option>
+                        <option value="video_bg">🎬 视频内容背景板 (带横屏框)</option>
+                        <option value="video_bg_audio">🎵 纯音频背景板 (图+字幕)</option>
+                    </select>
+                    <div class="mt-3 flex items-center">
+                        <input type="checkbox" id="showGuides" class="w-4 h-4 text-primary-600 bg-white border-gray-300 rounded focus:ring-primary-500 cursor-pointer" checked>
+                        <label for="showGuides" class="ml-2 text-sm text-gray-500 cursor-pointer">显示辅助提示</label>
+                    </div>
+                </div>
+
+                <!-- 机构 -->
+                <div>
+                    <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">投行/机构背书</label>
+                    <select id="instSelect" class="w-full bg-white border border-gray-200 rounded-xl p-3 text-gray-700 focus:ring-2 focus:ring-primary-500 outline-none cursor-pointer transition-all">
+                        <option value="J.P. Morgan">摩根大通 (J.P. Morgan)</option>
+                        <option value="Goldman Sachs">高盛 (Goldman Sachs)</option>
+                        <option value="Morgan Stanley">摩根士丹利 (Morgan Stanley)</option>
+                        <option value="UBS">瑞银 (UBS)</option>
+                        <option value="Nomura">野村证券 (Nomura)</option>
+                        <option value="BofA">美国银行 (BofA)</option>
+                        <option value="HSBC">汇丰 (HSBC)</option>
+                        <option value="深度研报">无机构 (通用深度研报)</option>
+                    </select>
+                </div>
+
+                <!-- 情绪配色 -->
+                <div>
+                    <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">市场情绪 (主色调)</label>
+                    <div class="grid grid-cols-3 gap-3">
+                        <label class="cursor-pointer">
+                            <input type="radio" name="emotion" value="macro" class="peer sr-only">
+                            <div class="text-center p-2 rounded-xl bg-white border border-gray-100 peer-checked:border-yellow-400 peer-checked:bg-yellow-50 transition-all shadow-sm">
+                                <div class="w-full h-1.5 bg-yellow-400 rounded-full mb-2"></div>
+                                <span class="text-[10px] font-bold text-gray-500">宏观</span>
+                            </div>
+                        </label>
+                        <label class="cursor-pointer">
+                            <input type="radio" name="emotion" value="bull" class="peer sr-only" checked>
+                            <div class="text-center p-2 rounded-xl bg-white border border-gray-100 peer-checked:border-green-400 peer-checked:bg-green-50 transition-all shadow-sm">
+                                <div class="w-full h-1.5 bg-green-400 rounded-full mb-2"></div>
+                                <span class="text-[10px] font-bold text-gray-500">看多</span>
+                            </div>
+                        </label>
+                        <label class="cursor-pointer">
+                            <input type="radio" name="emotion" value="bear" class="peer sr-only">
+                            <div class="text-center p-2 rounded-xl bg-white border border-gray-100 peer-checked:border-red-500 peer-checked:bg-red-50 transition-all shadow-sm">
+                                <div class="w-full h-1.5 bg-red-500 rounded-full mb-2"></div>
+                                <span class="text-[10px] font-bold text-gray-500">看空</span>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- 文案 -->
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">主标题</label>
+                        <textarea id="mainTitle" rows="2" class="w-full bg-white border border-gray-200 rounded-xl p-3 text-gray-800 text-base font-bold focus:ring-2 focus:ring-primary-500 outline-none resize-none shadow-sm transition-all" placeholder="请输入主标题...">核心大牛
+集体出走！</textarea>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">副标题</label>
+                        <input type="text" id="subTitle" class="w-full bg-white border border-gray-200 rounded-xl p-3 text-gray-700 focus:ring-2 focus:ring-primary-500 outline-none shadow-sm transition-all" value="阿里AI被小摩看空？">
+                    </div>
+                </div>
+
+                <!-- 图片上传 -->
+                <div class="flex-1">
+                    <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">底图/图表</label>
+                    <label class="flex flex-col items-center justify-center w-full h-24 border-2 border-gray-200 border-dashed rounded-xl cursor-pointer bg-white hover:bg-gray-50 transition-all">
+                        <div class="flex flex-col items-center justify-center py-4">
+                            <i class="fas fa-cloud-upload-alt text-gray-400 mb-1"></i>
+                            <p class="text-[10px] text-gray-500">点击或拖拽上传</p>
+                        </div>
+                        <input id="imageUpload" type="file" class="hidden" accept="image/*" />
+                    </label>
+                    <button id="clearImageBtn" class="mt-2 text-[10px] text-red-500 hover:text-red-600 font-bold hidden flex items-center gap-1">
+                        <i class="fas fa-trash-alt"></i> 移除底图
+                    </button>
+                </div>
+            </aside>
+
+            <!-- 右侧预览区 -->
+            <section class="flex-1 p-8 flex flex-col justify-center items-center relative overflow-hidden pattern-grid">
+                <div id="previewWrapper" class="w-full flex justify-center flex-col items-center transition-all duration-300">
+                    <div class="flex justify-between items-end mb-4 w-full" id="previewHeader">
+                        <div>
+                            <h3 class="text-sm font-bold text-gray-800" id="previewTitle">横版预览区</h3>
+                            <p class="text-[10px] text-gray-500" id="previewSize">1920 x 1080 (16:9)</p>
+                        </div>
+                        <button onclick="downloadThumbnail()" class="bg-primary-600 hover:bg-primary-700 text-white px-6 py-2.5 rounded-xl font-bold transition-all shadow-lg shadow-primary-500/20 flex items-center gap-2">
+                            <i class="fas fa-download"></i>
+                            <span id="downloadBtnText">保存图片</span>
+                        </button>
+                    </div>
+                    
+                    <div id="canvasContainer" class="canvas-container w-full max-w-5xl aspect-video">
+                        <canvas id="thumbnailCanvas"></canvas>
+                    </div>
+
+                    <div class="mt-6 flex items-center gap-6 text-xs text-gray-400">
+                        <span class="flex items-center gap-1"><i class="fas fa-mouse"></i> 滚轮缩放</span>
+                        <span class="flex items-center gap-1"><i class="fas fa-arrows-alt"></i> 鼠标拖拽</span>
+                        <span class="flex items-center gap-1"><i class="fas fa-keyboard"></i> 换行支持</span>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- 页脚将通过 shared-navigation.js 加载 -->
+
+    <!-- JavaScript -->
+    <script src="js/env.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/shared-navigation.js"></script>
+    <script src="js/thumbnail-workbench.js"></script>
+</body>
+</html>
