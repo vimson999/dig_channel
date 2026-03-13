@@ -52,9 +52,14 @@ const PublisherService = {
     },
 
     async postToYouTube(taskId) {
-        const res = await fetch(`${this.API_BASE}/publisher/post-youtube/${taskId}`, { method: 'POST' });
+        const res = await fetch(`${this.API_BASE}/post-youtube/${taskId}`, { method: 'POST' });
+        return await res.json();
+    },
+
+    async transcribeAudio(path) {
+        const res = await fetch(`${this.API_BASE}/resources/transcribe?path=${encodeURIComponent(path)}`);
         return await res.json();
     }
-};
+    };
 
 window.PublisherService = PublisherService;

@@ -91,11 +91,51 @@ def run_publication_pipeline(self, task_id):
             else:
                 base_name = f"pub_{task_id}"
 
-            # --- Step 1: Landscape Synthesis ---
+            # --- Step 0: Pre-process Audio & Subtitles (Shared for H and V) ---
+            # Use general audio source from main video params as foundation
             vid_params = params.get('video', {})
-            landscape_enabled = vid_params.get('enabled', True)
-            final_video_path = None
+            audio_raw_val = vid_params.get('audio_path')
+            audio_path_abs = None
+            if audio_raw_val:
+                import json
+                if isinstance(audio_raw_val, str) and audio_raw_val.strip().startswith('['):
+                    try:
+                        paths_list = json.loads(audio_raw_val)
+                        audio_path_abs = [to_abs_path(p) for p in paths_list]
+                    except: audio_path_abs = to_abs_path(audio_raw_val)
+                else: audio_path_abs = to_abs_path(audio_raw_val)
 
+            # Get subtitles (UI source of truth)
+            v_vid_params = params.get('vertical_video', {})
+            subtitles = v_vid_params.get('subtitles')
+            
+            asr_enabled = vid_params.get('asr_enabled', False)
+            sub_burn_enabled = vid_params.get('sub_burn_enabled', False)
+
+            # Backend ASR Compensation (Unified) - Only if ASR is enabled
+            if audio_path_abs and asr_enabled:
+                from services.asr_service import asr_service
+                processed_subs = []
+                audio_list = audio_path_abs if isinstance(audio_path_abs, list) else [audio_path_abs]
+                if not subtitles: subtitles = ["" for _ in audio_list]
+                
+                for i, a_p in enumerate(audio_list):
+                    s_text = subtitles[i] if i < len(subtitles) else ""
+                    if not s_text or s_text == "识别中...":
+                        try:
+                            logger.info(f"Task {task_id}: Shared ASR triggered for segment {i}")
+                            s_text = asr_service.transcribe(a_p)
+                        except Exception as e:
+                            logger.error(f"Shared ASR failed: {e}")
+                            s_text = ""
+                    processed_subs.append(s_text)
+                subtitles = processed_subs
+            
+            # If sub_burn_enabled is False, we clear subtitles so synthesis methods don't render them
+            final_subtitles = subtitles if sub_burn_enabled else None
+
+            # --- Step 1: Landscape Synthesis ---
+            landscape_enabled = vid_params.get('enabled', True)
             if landscape_enabled:
                 task.status = 'processing'
                 task.current_step = 'synthesis'
@@ -106,18 +146,6 @@ def run_publication_pipeline(self, task_id):
                 
                 video_path = to_abs_path(vid_params.get('video_path'))
                 image_path = to_abs_path(vid_params.get('image_path'))
-                
-                audio_raw_val = vid_params.get('audio_path')
-                audio_path = None
-                if audio_raw_val:
-                    import json
-                    if isinstance(audio_raw_val, str) and audio_raw_val.strip().startswith('['):
-                        try:
-                            paths_list = json.loads(audio_raw_val)
-                            audio_path = [to_abs_path(p) for p in paths_list]
-                        except: audio_path = to_abs_path(audio_raw_val)
-                    else: audio_path = to_abs_path(audio_raw_val)
-                
                 video_c_path = to_abs_path(vid_params.get('video_c_path'))
                 audio_c_path = to_abs_path(vid_params.get('audio_c_path'))
                 audio_start = float(vid_params.get('audio_start', 0))
@@ -127,18 +155,22 @@ def run_publication_pipeline(self, task_id):
                 final_video_path = video_editor_service.process_mixed_content(
                     video_file=video_path,
                     image_file=image_path,
-                    audio_file=audio_path,
+                    audio_file=audio_path_abs,
                     video_c_path=video_c_path,
                     audio_c_path=audio_c_path,
                     audio_start=audio_start,
                     audio_end_offset=audio_end_offset,
                     output_filename=f"{base_name}.mp4",
-                    cta_config=cta_config
+                    cta_config=cta_config,
+                    subtitles=final_subtitles
                 )
                 task.result = {**(task.result or {}), 'video_path': final_video_path}
             
-            # --- Step 1.5: Vertical Synthesis (NEW) ---
-            v_vid_params = params.get('vertical_video', {})
+            # Define image_path for fallback even if landscape disabled
+            if not landscape_enabled:
+                image_path = to_abs_path(vid_params.get('image_path'))
+
+            # --- Step 1.5: Vertical Synthesis ---
             if v_vid_params.get('enabled', False):
                 task.current_step = 'v_synthesis'
                 task.progress = 30
@@ -147,22 +179,13 @@ def run_publication_pipeline(self, task_id):
                 logger.info(f"Task {task_id}: Starting vertical video synthesis...")
                 
                 v_image_path = to_abs_path(v_vid_params.get('image_path'))
-                
-                # --- 修复：确保竖屏使用的音频路径也是绝对路径 ---
-                v_audio_raw = vid_params.get('audio_path')
-                v_audio_processed = None
-                if v_audio_raw:
-                    import json
-                    if isinstance(v_audio_raw, str) and v_audio_raw.strip().startswith('['):
-                        try:
-                            v_audio_processed = [to_abs_path(p) for p in json.loads(v_audio_raw)]
-                        except: v_audio_processed = to_abs_path(v_audio_raw)
-                    else:
-                        v_audio_processed = to_abs_path(v_audio_raw)
+                if not v_image_path or not os.path.exists(v_image_path):
+                    v_image_path = to_abs_path(vid_params.get('image_path'))
                 
                 v_video_path = video_editor_service.process_vertical_video(
                     image_file=v_image_path,
-                    audio_files=v_audio_processed,
+                    audio_files=audio_path_abs,
+                    subtitles=final_subtitles,
                     output_filename=f"v_{base_name}.mp4"
                 )
                 task.result = {**(task.result or {}), 'vertical_video_path': v_video_path}

@@ -3,6 +3,7 @@ import time
 from flask import Blueprint, request, jsonify, send_from_directory, make_response
 from werkzeug.utils import secure_filename
 from pathlib import Path
+from services.asr_service import asr_service
 
 bp = Blueprint('resources', __name__, url_prefix='/api/v1/resources')
 
@@ -114,3 +115,37 @@ def view_resource():
     # 核心：允许 Canvas 跨域加载预览
     response.headers['Access-Control-Allow-Origin'] = '*'
     return response
+
+@bp.route('/transcribe', methods=['GET', 'POST'])
+def transcribe_audio_api():
+    """
+    使用本地 Whisper 模型转录音频文件为文字。
+    """
+    data = request.json if request.is_json else {}
+    file_path = request.args.get('path') or data.get('path')
+    
+    if not file_path:
+        return jsonify({'success': False, 'error': 'Path is required'}), 400
+        
+    # 路径解析：始终相对于 PROJECT_ROOT
+    abs_path = os.path.abspath(os.path.join(PROJECT_ROOT, file_path))
+    
+    # 安全检查：防止目录穿越
+    if not abs_path.startswith(os.path.abspath(PROJECT_ROOT)):
+        return jsonify({'success': False, 'error': 'Access denied'}), 403
+        
+    if not os.path.exists(abs_path):
+        return jsonify({'success': False, 'error': f'File not found: {file_path}'}), 404
+        
+    try:
+        text = asr_service.transcribe(abs_path)
+        return jsonify({
+            'success': True,
+            'text': text
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+

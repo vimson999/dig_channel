@@ -103,7 +103,13 @@ async function loadInitialData() {
             presets.backgrounds.forEach((b, i) => { const opt = document.createElement('option'); opt.value = i; opt.textContent = b.name; bgS.appendChild(opt); });
         }
 
-        if (state.bgData[0]) state.images.bg.src = 'assets/cover/' + state.bgData[0].file;
+        const currentMode = document.getElementById('thumb_bg_mode')?.value || 'preset';
+        if (currentMode === 'preset' && state.bgData[0]) {
+            state.images.bg.src = 'assets/cover/' + state.bgData[0].file;
+        } else {
+            // 截图模式下，确保预览刷新以显示占位背景
+            refreshPreviews();
+        }
         state.images.bg.onload = refreshPreviews;
 
         loadHistory();
@@ -204,10 +210,12 @@ async function handleUpload(input, type) {
                 const file = files[i];
                 const data = await PublisherService.uploadFile(file);
                 if (data.success) {
-                    state.audio_segments.push({
+                    const segment = {
                         name: file.name,
-                        path: data.path
-                    });
+                        path: data.path,
+                        subtitle: "" // 由后端自动识别或用户手动输入
+                    };
+                    state.audio_segments.push(segment);
                 }
             }
             
@@ -300,17 +308,23 @@ function renderAudioList() {
     if (badge) badge.innerText = `${state.audio_segments.length} Clips`;
     
     container.innerHTML = state.audio_segments.map((s, i) => `
-        <div class="flex items-center justify-between bg-slate-50 border border-slate-100 p-3 rounded-xl hover:bg-white transition-all group">
-            <div class="flex items-center gap-3 min-w-0">
-                <span class="w-5 h-5 bg-slate-200 text-slate-500 rounded-full flex items-center justify-center text-[9px] font-black">${i + 1}</span>
-                <div class="truncate">
-                    <p class="text-[11px] font-bold text-slate-700 truncate">${s.name}</p>
-                    <p class="text-[9px] text-slate-400 font-mono truncate opacity-60">${s.path.split('/').pop()}</p>
+        <div class="flex flex-col bg-slate-50 border border-slate-100 rounded-xl hover:bg-white transition-all group p-3">
+            <div class="flex items-center justify-between mb-2">
+                <div class="flex items-center gap-3 min-w-0">
+                    <span class="w-5 h-5 bg-slate-200 text-slate-500 rounded-full flex items-center justify-center text-[9px] font-black">${i + 1}</span>
+                    <div class="truncate">
+                        <p class="text-[11px] font-bold text-slate-700 truncate">${s.name}</p>
+                    </div>
                 </div>
+                <button type="button" onclick="removeAudioSegment(${i})" class="text-slate-300 hover:text-red-500 p-1 transition-colors">
+                    <i class="fas fa-trash-alt text-[11px]"></i>
+                </button>
             </div>
-            <button type="button" onclick="removeAudioSegment(${i})" class="text-slate-300 hover:text-red-500 p-2 transition-colors">
-                <i class="fas fa-trash-alt text-[11px]"></i>
-            </button>
+            <input type="text" 
+                class="audio-subtitle-input w-full bg-white/50 border border-slate-200 rounded-lg px-3 py-1.5 text-[11px] font-medium focus:ring-1 focus:ring-blue-500 outline-none transition-all" 
+                placeholder="(可选) 手动覆盖字幕文字，留空则由系统自动识别" 
+                oninput="state.audio_segments[${i}].subtitle = this.value"
+                value="${s.subtitle || ''}">
         </div>
     `).join('');
 }
@@ -326,10 +340,10 @@ window.removeAudioSegment = (index) => {
         if (state.audio_segments.length > 0) {
             label.innerText = `已添加 ${state.audio_segments.length} 个片段`;
         } else {
-            label.innerText = "Step 2: 音频";
+            label.innerText = "1. 核心音频素材 (时长基准)";
             label.classList.remove('text-emerald-600');
             const icon = document.getElementById(`icon-audio`);
-            if (icon) icon.className = "fas fa-microphone text-3xl text-slate-300 mb-3";
+            if (icon) icon.className = "fas fa-microphone-lines text-3xl text-slate-300 mb-3";
             document.getElementById('area-audio')?.classList.remove('uploaded');
         }
     }
@@ -339,9 +353,13 @@ async function handleTaskSubmit() {
     const fd = new FormData(elements.publishForm);
     if (!fd.get('audio_path')) { alert('请上传音频素材'); return; }
 
+    const vSubtitles = state.audio_segments.map(s => s.subtitle || "");
+
     const payload = {
         video: { 
             enabled: document.getElementById('landscape_enabled')?.checked ?? true,
+            asr_enabled: document.getElementById('asr_enabled')?.checked ?? false,
+            sub_burn_enabled: document.getElementById('sub_burn_enabled')?.checked ?? false,
             video_path: fd.get('video_path'), 
             audio_path: fd.get('audio_path'),
             image_path: fd.get('image_path'),
@@ -353,8 +371,9 @@ async function handleTaskSubmit() {
             } : null
         },
         vertical_video: {
-            enabled: document.getElementById('v_video_enabled')?.checked ?? false,
-            image_path: fd.get('v_video_image_path')
+            enabled: document.getElementById('v_video_enabled')?.checked ?? true,
+            image_path: fd.get('v_video_image_path'),
+            subtitles: vSubtitles
         },
         bilibili: {
             enabled: document.getElementById('bili_enabled')?.checked ?? true,
@@ -458,7 +477,7 @@ function refreshPreviews() {
     }
 
     const coverConfig = {
-        mode: document.getElementById('thumb_bg_mode')?.value || 'preset',
+        mode: document.getElementById('thumb_bg_mode')?.value || 'screenshot',
         tagText: document.getElementById('val-tag')?.value || "",
         mainTitle: document.getElementById('thumb_main')?.value || "",
         subTitle: document.getElementById('thumb_sub')?.value || "",
@@ -652,6 +671,7 @@ window.toggleSafeZone = () => {
 };
 window.downloadVerticalPreview = () => downloadCanvasAsImage('verticalCanvas', 'Vertical_Cover');
 window.downloadLandscapePreview = () => downloadCanvasAsImage('previewCanvas', 'Landscape_Cover');
+window.downloadVideoPreview = () => downloadCanvasAsImage('videoPreviewCanvas', 'Landscape_CTA');
 
 /**
  * 通用下载 Canvas 为图片

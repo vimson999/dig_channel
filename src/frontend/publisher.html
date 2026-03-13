@@ -86,6 +86,17 @@
                                         <label class="text-[10px] font-black text-emerald-600 uppercase tracking-wider block mb-1">结束偏移 (秒)</label>
                                         <input type="number" id="audio_end_offset" name="audio_end_offset" class="input-field py-2 text-sm" value="0" step="0.1">
                                     </div>
+                                    <!-- 字幕控制开关 -->
+                                    <div class="pt-2 border-t border-emerald-100/50 mt-1 space-y-2">
+                                        <label class="flex items-center gap-2 cursor-pointer group">
+                                            <input type="checkbox" id="asr_enabled" name="asr_enabled" class="w-3.5 h-3.5 text-emerald-600 rounded border-emerald-300">
+                                            <span class="text-[10px] font-bold text-emerald-700 uppercase tracking-tighter opacity-70 group-hover:opacity-100">自动提取音频字幕</span>
+                                        </label>
+                                        <label class="flex items-center gap-2 cursor-pointer group">
+                                            <input type="checkbox" id="sub_burn_enabled" name="sub_burn_enabled" class="w-3.5 h-3.5 text-emerald-600 rounded border-emerald-300">
+                                            <span class="text-[10px] font-bold text-emerald-700 uppercase tracking-tighter opacity-70 group-hover:opacity-100">视频合成同步字幕</span>
+                                        </label>
+                                    </div>
                                 </div>
                             </div>
 
@@ -175,8 +186,11 @@
                             <!-- 横屏预览 -->
                             <div class="w-full xl:w-[400px] shrink-0">
                                 <div class="bg-slate-100/50 p-3 rounded-[24px] border border-white shadow-xl relative">
-                                    <div class="relative overflow-hidden rounded-[16px] bg-slate-900 aspect-video">
+                                    <div class="relative overflow-hidden rounded-[16px] bg-slate-900 aspect-video group/video">
                                         <canvas id="videoPreviewCanvas" width="1920" height="1080" class="w-full h-auto block"></canvas>
+                                        <button type="button" onclick="downloadVideoPreview()" class="absolute top-2 right-2 w-8 h-8 bg-white/90 shadow rounded-full flex items-center justify-center text-slate-800 opacity-0 group-hover/video:opacity-100 transition-all hover:bg-indigo-500 hover:text-white z-20">
+                                            <i class="fas fa-download text-xs"></i>
+                                        </button>
                                         <div id="cta-placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-slate-400 bg-slate-100/95 transition-all duration-700">
                                             <i class="fas fa-image text-2xl text-slate-200 mb-2"></i>
                                             <p class="text-[9px] font-black tracking-widest text-slate-300 uppercase">Monitor Ready</p>
@@ -208,13 +222,13 @@
                                         <input type="hidden" name="thumb_tag" id="val-tag" value="Goldman Sachs · 高盛研报">
                                         <select id="thumb_bg_mode" class="input-field text-xs font-bold" onchange="toggleBgMode()">
                                             <option value="preset">底图预设库</option>
-                                            <option value="screenshot">研报截图模式</option>
+                                            <option value="screenshot" selected>研报截图模式</option>
                                         </select>
                                     </div>
-                                    <div id="preset_bg_area" class="input-group mb-0">
+                                    <div id="preset_bg_area" class="input-group mb-0 hidden">
                                         <select name="thumb_bg_index" id="select-bg" class="input-field text-xs font-bold"></select>
                                     </div>
-                                    <div id="screenshot_bg_area" class="hidden">
+                                    <div id="screenshot_bg_area">
                                         <div class="upload-area h-10 flex items-center justify-center relative border-dashed" id="area-thumb-bg">
                                             <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'thumb-bg')">
                                             <input type="hidden" name="custom_bg_path" id="val-thumb-bg">
@@ -249,11 +263,11 @@
                             </div>
                             <label class="flex items-center gap-3 cursor-pointer group">
                                 <span class="text-xs font-black text-amber-600 uppercase tracking-widest">开启竖屏合成</span>
-                                <input type="checkbox" id="v_video_enabled" name="v_video_enabled" class="w-5 h-5 text-amber-600 rounded-lg border-gray-300 transition-all">
+                                <input type="checkbox" id="v_video_enabled" name="v_video_enabled" class="w-5 h-5 text-amber-600 rounded-lg border-gray-300 transition-all" checked>
                             </label>
                         </div>
 
-                        <div id="v_video_config_area" class="space-y-8 opacity-50 pointer-events-none transition-all duration-300">
+                        <div id="v_video_config_area" class="space-y-8 transition-all duration-300">
                             <!-- 3.1 竖屏封面设计 -->
                             <div class="flex flex-col xl:flex-row gap-8">
                                 <div class="flex-1 space-y-5">

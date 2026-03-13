@@ -29,13 +29,21 @@ const CanvasRenderer = {
         ctx.clearRect(0, 0, w, h);
         
         // 1. 背景渲染
-        if (isScreenshot && images.custom.src && images.custom.complete) {
-            ctx.save();
-            ctx.beginPath(); ctx.rect(0, 0, w, h * 0.45); ctx.clip();
-            this.drawImageCover(ctx, images.custom, 0, 0, w, h * 0.45);
-            ctx.restore();
+        if (isScreenshot) {
+            if (images.custom.src && images.custom.complete && images.custom.naturalWidth > 0) {
+                ctx.save();
+                ctx.beginPath(); ctx.rect(0, 0, w, h * 0.45); ctx.clip();
+                this.drawImageCover(ctx, images.custom, 0, 0, w, h * 0.45);
+                ctx.restore();
+            } else {
+                // 截图模式占位：深蓝色顶部 + 提示文字
+                ctx.fillStyle = '#002140'; ctx.fillRect(0, 0, w, h * 0.45);
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.2)'; ctx.textAlign = 'center'; ctx.font = 'bold 40px sans-serif';
+                ctx.fillText('等待上传研报截图...', w/2, h * 0.22);
+                ctx.textAlign = 'left'; // 恢复对齐
+            }
             ctx.fillStyle = '#001529'; ctx.fillRect(0, h * 0.45, w, h * 0.55);
-        } else if (images.bg.complete) {
+        } else if (images.bg.complete && images.bg.naturalWidth > 0) {
             this.drawImageCover(ctx, images.bg, 0, 0, w, h);
             const opacity = config.overlayOpacity || 0.5; // 使用动态透明度
             const maskGradient = ctx.createLinearGradient(0, 0, w * 0.6, 0);
