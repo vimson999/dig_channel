@@ -14,9 +14,14 @@ const state = {
         videoBody: (() => { const img = new Image(); img.crossOrigin = "anonymous"; return img; })(),
         v_screenshot: (() => { const img = new Image(); img.crossOrigin = "anonymous"; return img; })() 
     },
+    transforms: {
+        cover: { x: 0, y: 0, scale: 1 },
+        video: { x: 0, y: 0, scale: 1 }
+    },
     audio_segments: [], // 支持多段音频
     bgData: []
 };
+
 
 // --- DOM 元素引用 ---
 const elements = {
@@ -42,6 +47,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initUI();
     await loadInitialData();
     bindEvents();
+    initCanvasInteractions();
 });
 
 function initUI() {
@@ -132,6 +138,72 @@ async function loadSeasons() {
     } catch (e) { console.error('Failed to load seasons:', e); }
 }
 
+function initCanvasInteractions() {
+    const interactionConfigs = [
+        { canvas: elements.coverCanvas, key: 'cover' },
+        { canvas: elements.videoCanvas, key: 'video' }
+    ];
+
+    interactionConfigs.forEach(item => {
+        if (!item.canvas) return;
+        
+        let isDragging = false;
+        let lastX, lastY;
+
+        item.canvas.style.cursor = 'move';
+
+        item.canvas.addEventListener('mousedown', e => {
+            isDragging = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            e.preventDefault();
+        });
+
+        // Use window for mousemove/mouseup to handle drag out of canvas
+        window.addEventListener('mousemove', e => {
+            if (!isDragging) return;
+            const rect = item.canvas.getBoundingClientRect();
+            // Note: 1920/1080 is the internal resolution of the canvases
+            const scaleX = 1920 / rect.width;
+            const scaleY = 1080 / rect.height;
+            
+            const deltaX = (e.clientX - lastX) * scaleX;
+            const deltaY = (e.clientY - lastY) * scaleY;
+            
+            state.transforms[item.key].x += deltaX;
+            state.transforms[item.key].y += deltaY;
+            
+            lastX = e.clientX;
+            lastY = e.clientY;
+            refreshPreviews();
+        });
+
+        window.addEventListener('mouseup', () => {
+            isDragging = false;
+        });
+
+        item.canvas.addEventListener('wheel', e => {
+            // Only zoom if the mouse is over the canvas
+            const rect = item.canvas.getBoundingClientRect();
+            if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) return;
+
+            e.preventDefault();
+            const delta = -e.deltaY;
+            const factor = 1.1; // Slightly faster zoom
+            const oldScale = state.transforms[item.key].scale;
+            const newScale = delta > 0 ? oldScale * factor : oldScale / factor;
+            state.transforms[item.key].scale = Math.max(0.1, Math.min(10, newScale));
+            refreshPreviews();
+        }, { passive: false });
+        
+        // 双击重置
+        item.canvas.addEventListener('dblclick', () => {
+            state.transforms[item.key] = { x: 0, y: 0, scale: 1 };
+            refreshPreviews();
+        });
+    });
+}
+
 function bindEvents() {
     const coverInputs = ['thumb_main', 'thumb_sub', 'thumb_date', 'overlay_opacity', 'thumb_bg_mode'];
     const vCoverInputs = ['v_thumb_main', 'v_thumb_sub', 'v_thumb_date', 'v_thumb_enabled'];
@@ -141,6 +213,12 @@ function bindEvents() {
     vCoverInputs.forEach(id => document.getElementById(id)?.addEventListener('input', refreshPreviews));
     ctaInputs.forEach(id => document.getElementById(id)?.addEventListener('input', refreshPreviews));
     
+    document.getElementById('v_video_2_enabled')?.addEventListener('change', (e) => {
+        const area = document.getElementById('v_video_2_config_area');
+        if (e.target.checked) area.classList.remove('opacity-50', 'pointer-events-none');
+        else area.classList.add('opacity-50', 'pointer-events-none');
+    });
+
     document.getElementById('thumb_bg_mode')?.addEventListener('change', () => {
         const mode = document.getElementById('thumb_bg_mode').value;
         document.getElementById('preset_bg_area')?.classList.toggle('hidden', mode !== 'preset');
@@ -277,6 +355,12 @@ async function handleUpload(input, type) {
                         vImg.onload = () => { vImg.classList.remove('hidden'); console.log('✅ 竖屏背景已就绪'); };
                         vImg.src = viewUrl;
                     }
+                } else if (type === 'v-video-2-image') {
+                    const vImg2 = document.getElementById('v-video-2-preview-img');
+                    if (vImg2) {
+                        vImg2.onload = () => { vImg2.classList.remove('hidden'); console.log('✅ 备选竖屏背景已就绪'); };
+                        vImg2.src = viewUrl;
+                    }
                 }
             }
         }
@@ -358,12 +442,13 @@ async function handleTaskSubmit() {
     const payload = {
         video: { 
             enabled: document.getElementById('landscape_enabled')?.checked ?? true,
-            asr_enabled: document.getElementById('asr_enabled')?.checked ?? false,
             sub_burn_enabled: document.getElementById('sub_burn_enabled')?.checked ?? false,
+            asr_model: fd.get('asr_model') || 'base',
             video_path: fd.get('video_path'), 
             audio_path: fd.get('audio_path'),
             image_path: fd.get('image_path'),
             audio_start: fd.get('audio_start'), audio_end_offset: fd.get('audio_end_offset'),
+            transform: state.transforms.video,
             cta: document.getElementById('cta_enabled')?.checked ? { 
                 text: fd.get('cta_text') || "", 
                 position: fd.get('cta_position') || "bottom_bar", 
@@ -372,8 +457,13 @@ async function handleTaskSubmit() {
         },
         vertical_video: {
             enabled: document.getElementById('v_video_enabled')?.checked ?? true,
+            asr_model: fd.get('asr_model') || 'base',
             image_path: fd.get('v_video_image_path'),
             subtitles: vSubtitles
+        },
+        vertical_video_2: {
+            enabled: document.getElementById('v_video_2_enabled')?.checked ?? false,
+            image_path: fd.get('v_video_2_image_path')
         },
         bilibili: {
             enabled: document.getElementById('bili_enabled')?.checked ?? true,
@@ -395,7 +485,8 @@ async function handleTaskSubmit() {
             bg_index: document.getElementById('select-bg').value,
             layout: 'left', 
             custom_bg_path: document.getElementById('val-thumb-bg')?.value, 
-            overlay_opacity: document.getElementById('overlay_opacity')?.value || 0.5
+            overlay_opacity: document.getElementById('overlay_opacity')?.value || 0.5,
+            transform: state.transforms.cover
         };
     }
 
@@ -432,7 +523,7 @@ function resetFormUI() {
     renderAudioList();
     
     // 3. 清空隐藏路径
-    ['video', 'audio', 'image', 'thumb-bg'].forEach(type => {
+    ['video', 'audio', 'image', 'thumb-bg', 'v-video-image', 'v-video-2-image'].forEach(type => {
         const input = document.getElementById(`val-${type}`);
         if (input) input.value = "";
         
@@ -443,18 +534,26 @@ function resetFormUI() {
         const icon = document.getElementById(`icon-${type}`);
         const label = document.getElementById(`label-${type}`);
         if (icon) {
-            const iconMap = { 'video': 'fa-film', 'audio': 'fa-microphone', 'image': 'fa-image', 'thumb-bg': 'fa-upload' };
+            const iconMap = { 
+                'video': 'fa-film', 'audio': 'fa-microphone', 'image': 'fa-image', 
+                'thumb-bg': 'fa-upload', 'v-video-image': 'fa-image', 'v-video-2-image': 'fa-image' 
+            };
             icon.className = `fas ${iconMap[type]} text-3xl text-slate-300 mb-3`;
         }
         if (label) {
-            const labelMap = { 'video': 'Step 1: 片头', 'audio': 'Step 2: 音频', 'image': 'Step 3: 正文图', 'thumb-bg': '选择图片...' };
+            const labelMap = { 
+                'video': 'Step 1: 片头', 'audio': 'Step 2: 音频', 'image': 'Step 3: 正文图', 
+                'thumb-bg': '选择图片...', 'v-video-image': '上传自定义背景...', 'v-video-2-image': '上传备选背景图...' 
+            };
             label.innerText = labelMap[type];
             label.classList.remove('text-emerald-600');
         }
     });
 
-    // 3. 隐藏联动按钮
+    // 3. 隐藏联动预览
     document.getElementById('btn-sync-to-cover')?.classList.add('hidden');
+    document.getElementById('v-video-preview-img')?.classList.add('hidden');
+    document.getElementById('v-video-2-preview-img')?.classList.add('hidden');
     
     // 4. 重置状态对象
     state.images.videoBody.src = "";
@@ -482,13 +581,15 @@ function refreshPreviews() {
         mainTitle: document.getElementById('thumb_main')?.value || "",
         subTitle: document.getElementById('thumb_sub')?.value || "",
         dateText: document.getElementById('thumb_date')?.value || "",
-        overlayOpacity: document.getElementById('overlay_opacity')?.value || 0.5
+        overlayOpacity: document.getElementById('overlay_opacity')?.value || 0.5,
+        transform: state.transforms.cover
     };
     const videoConfig = {
         enabled: document.getElementById('cta_enabled')?.checked || false,
         text: document.getElementById('cta_text')?.value || "",
         position: document.getElementById('cta_position')?.value || "bottom_bar",
-        style: document.getElementById('cta_style')?.value || "premium_dark"
+        style: document.getElementById('cta_style')?.value || "premium_dark",
+        transform: state.transforms.video
     };
     const verticalConfig = {
         mainTitle: document.getElementById('v_thumb_main')?.value || "",
@@ -669,6 +770,20 @@ window.toggleSafeZone = () => {
     const overlay = document.getElementById('safeZoneOverlay');
     if (overlay) overlay.classList.toggle('hidden');
 };
+
+window.changeZoom = (key, factor) => {
+    if (!state.transforms[key]) return;
+    const oldScale = state.transforms[key].scale;
+    state.transforms[key].scale = Math.max(0.1, Math.min(10, oldScale * factor));
+    refreshPreviews();
+};
+
+window.resetTransform = (key) => {
+    if (!state.transforms[key]) return;
+    state.transforms[key] = { x: 0, y: 0, scale: 1 };
+    refreshPreviews();
+};
+
 window.downloadVerticalPreview = () => downloadCanvasAsImage('verticalCanvas', 'Vertical_Cover');
 window.downloadLandscapePreview = () => downloadCanvasAsImage('previewCanvas', 'Landscape_Cover');
 window.downloadVideoPreview = () => downloadCanvasAsImage('videoPreviewCanvas', 'Landscape_CTA');

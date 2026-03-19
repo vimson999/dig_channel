@@ -159,3 +159,4 @@ src/backend/**/*.webp
 *.safetensors
 youtube_token.pickle
 client_secrets.json
+data/models/

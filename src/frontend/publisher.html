@@ -87,15 +87,26 @@
                                         <input type="number" id="audio_end_offset" name="audio_end_offset" class="input-field py-2 text-sm" value="0" step="0.1">
                                     </div>
                                     <!-- 字幕控制开关 -->
-                                    <div class="pt-2 border-t border-emerald-100/50 mt-1 space-y-2">
+                                    <div class="pt-2 border-t border-emerald-100/50 mt-1 space-y-3">
                                         <label class="flex items-center gap-2 cursor-pointer group">
-                                            <input type="checkbox" id="asr_enabled" name="asr_enabled" class="w-3.5 h-3.5 text-emerald-600 rounded border-emerald-300">
-                                            <span class="text-[10px] font-bold text-emerald-700 uppercase tracking-tighter opacity-70 group-hover:opacity-100">自动提取音频字幕</span>
+                                            <input type="checkbox" id="sub_burn_enabled" name="sub_burn_enabled" class="w-4 h-4 text-emerald-600 rounded border-emerald-300 transition-all focus:ring-emerald-500" checked>
+                                            <div class="flex flex-col">
+                                                <span class="text-[10px] font-black text-emerald-700 uppercase tracking-wider group-hover:text-emerald-900">自动识别并同步字幕</span>
+                                                <span class="text-[8px] font-bold text-emerald-400 uppercase tracking-widest opacity-80">AI Transcription & Subtitle Burn</span>
+                                            </div>
                                         </label>
-                                        <label class="flex items-center gap-2 cursor-pointer group">
-                                            <input type="checkbox" id="sub_burn_enabled" name="sub_burn_enabled" class="w-3.5 h-3.5 text-emerald-600 rounded border-emerald-300">
-                                            <span class="text-[10px] font-bold text-emerald-700 uppercase tracking-tighter opacity-70 group-hover:opacity-100">视频合成同步字幕</span>
-                                        </label>
+
+                                        <!-- ASR 模型选择 -->
+                                        <div class="flex flex-col gap-1.5 pl-6">
+                                            <label class="text-[9px] font-black text-emerald-500 uppercase tracking-widest">识别模型 (ASR Model)</label>
+                                            <select id="asr-model-select" name="asr_model" class="w-full bg-white/40 border border-emerald-100 rounded-lg py-1 px-2 text-[10px] font-bold text-emerald-700 focus:outline-none focus:ring-1 focus:ring-emerald-400 transition-all cursor-pointer">
+                                                <option value="tiny">极速 (Tiny) - 仅限测试</option>
+                                                <option value="base">平衡 (Base) - 推荐</option>
+                                                <option value="small">进阶 (Small) - 较快</option>
+                                                <option value="medium">专业 (Medium) - 准确</option>
+                                                <option value="large-v3" selected>极致 (Large-v3) - 最慢但最准</option>
+                                            </select>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -188,6 +199,18 @@
                                 <div class="bg-slate-100/50 p-3 rounded-[24px] border border-white shadow-xl relative">
                                     <div class="relative overflow-hidden rounded-[16px] bg-slate-900 aspect-video group/video">
                                         <canvas id="videoPreviewCanvas" width="1920" height="1080" class="w-full h-auto block"></canvas>
+                                        <!-- 缩放控制工具栏 -->
+                                        <div class="absolute bottom-2 left-2 flex gap-1.5 opacity-0 group-hover/video:opacity-100 transition-all z-20">
+                                            <button type="button" onclick="changeZoom('video', 1.1)" class="w-7 h-7 bg-white/90 shadow rounded-lg flex items-center justify-center text-slate-700 hover:bg-indigo-500 hover:text-white" title="放大">
+                                                <i class="fas fa-plus text-[10px]"></i>
+                                            </button>
+                                            <button type="button" onclick="changeZoom('video', 0.9)" class="w-7 h-7 bg-white/90 shadow rounded-lg flex items-center justify-center text-slate-700 hover:bg-indigo-500 hover:text-white" title="缩小">
+                                                <i class="fas fa-minus text-[10px]"></i>
+                                            </button>
+                                            <button type="button" onclick="resetTransform('video')" class="w-7 h-7 bg-white/90 shadow rounded-lg flex items-center justify-center text-slate-700 hover:bg-indigo-500 hover:text-white" title="重置">
+                                                <i class="fas fa-arrows-to-dot text-[10px]"></i>
+                                            </button>
+                                        </div>
                                         <button type="button" onclick="downloadVideoPreview()" class="absolute top-2 right-2 w-8 h-8 bg-white/90 shadow rounded-full flex items-center justify-center text-slate-800 opacity-0 group-hover/video:opacity-100 transition-all hover:bg-indigo-500 hover:text-white z-20">
                                             <i class="fas fa-download text-xs"></i>
                                         </button>
@@ -243,6 +266,18 @@
                                 <div class="w-full xl:w-[400px] shrink-0">
                                     <div class="relative overflow-hidden rounded-2xl border-4 border-white shadow-lg group/canvas">
                                         <canvas id="previewCanvas" width="1920" height="1080" class="w-full h-auto aspect-video block"></canvas>
+                                        <!-- 缩放控制工具栏 -->
+                                        <div class="absolute bottom-2 left-2 flex gap-1.5 opacity-0 group-hover/canvas:opacity-100 transition-all z-20">
+                                            <button type="button" onclick="changeZoom('cover', 1.1)" class="w-7 h-7 bg-white/90 shadow rounded-lg flex items-center justify-center text-slate-700 hover:bg-pink-500 hover:text-white" title="放大底图">
+                                                <i class="fas fa-plus text-[10px]"></i>
+                                            </button>
+                                            <button type="button" onclick="changeZoom('cover', 0.9)" class="w-7 h-7 bg-white/90 shadow rounded-lg flex items-center justify-center text-slate-700 hover:bg-pink-500 hover:text-white" title="缩小底图">
+                                                <i class="fas fa-minus text-[10px]"></i>
+                                            </button>
+                                            <button type="button" onclick="resetTransform('cover')" class="w-7 h-7 bg-white/90 shadow rounded-lg flex items-center justify-center text-slate-700 hover:bg-pink-500 hover:text-white" title="重置位置">
+                                                <i class="fas fa-arrows-to-dot text-[10px]"></i>
+                                            </button>
+                                        </div>
                                         <button type="button" onclick="downloadLandscapePreview()" class="absolute top-2 right-2 w-8 h-8 bg-white/90 shadow rounded-full flex items-center justify-center text-slate-800 opacity-0 group-hover/canvas:opacity-100 transition-all hover:bg-pink-500 hover:text-white z-20">
                                             <i class="fas fa-download text-xs"></i>
                                         </button>
@@ -316,7 +351,7 @@
                             <!-- 3.2 竖屏合成背景图 -->
                             <div class="pt-6 border-t border-amber-100/50">
                                 <label class="input-label text-amber-800 flex justify-between items-end">
-                                    <span>竖屏视频视频背景 (必需)</span>
+                                    <span>竖屏视频背景 (主视频)</span>
                                     <button type="button" onclick="syncVThumbToVideo(event)" class="text-[9px] font-black bg-white text-amber-600 px-3 py-1 rounded-full shadow-sm border border-amber-100 hover:bg-amber-50"><i class="fas fa-magic"></i> 使用上方生成的封面</button>
                                 </label>
                                 <div class="flex items-center gap-4 mt-3">
@@ -328,6 +363,30 @@
                                     <div class="w-12 h-20 bg-slate-900 rounded-lg border-2 border-white shadow overflow-hidden">
                                         <img id="v-video-preview-img" src="" class="w-full h-full object-cover hidden">
                                     </div>
+                                </div>
+                            </div>
+
+                            <!-- 3.3 备选竖屏视频 (Alternative Vertical) -->
+                            <div class="pt-6 border-t border-amber-100/50">
+                                <div class="flex justify-between items-center mb-4">
+                                    <label class="input-label text-amber-800 mb-0">3.3 备选竖屏视频 (Alternative Vertical)</label>
+                                    <label class="flex items-center gap-2 cursor-pointer group">
+                                        <input type="checkbox" id="v_video_2_enabled" name="v_video_2_enabled" class="w-4 h-4 text-amber-600 rounded-lg border-gray-300 transition-all">
+                                        <span class="text-[11px] font-black text-amber-600 group-hover:text-amber-700">开启</span>
+                                    </label>
+                                </div>
+                                <div id="v_video_2_config_area" class="opacity-50 pointer-events-none transition-all duration-300">
+                                    <div class="flex items-center gap-4">
+                                        <div class="upload-area flex-1 h-16 flex items-center justify-center relative border-dashed border-amber-200" id="area-v-video-2-image">
+                                            <input type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleUpload(this, 'v-video-2-image')">
+                                            <input type="hidden" name="v_video_2_image_path" id="val-v-video-2-image">
+                                            <span class="text-xs text-amber-600 font-bold" id="label-v-video-2-image">上传备选背景图...</span>
+                                        </div>
+                                        <div class="w-12 h-20 bg-slate-900 rounded-lg border-2 border-white shadow overflow-hidden">
+                                            <img id="v-video-2-preview-img" src="" class="w-full h-full object-cover hidden">
+                                        </div>
+                                    </div>
+                                    <p class="text-[9px] text-amber-400 font-bold mt-2 uppercase tracking-widest"><i class="fas fa-info-circle"></i> 将使用与主视频相同的音频和字幕流</p>
                                 </div>
                             </div>
                         </div>

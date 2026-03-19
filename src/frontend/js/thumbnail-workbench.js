@@ -16,6 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
         inst: document.getElementById('instSelect'),
         mainTitle: document.getElementById('mainTitle'),
         subTitle: document.getElementById('subTitle'),
+        footerText: document.getElementById('footerText'),
         emotions: document.querySelectorAll('input[name="emotion"]'),
         upload: document.getElementById('imageUpload'),
         clearImg: document.getElementById('clearImageBtn')
@@ -50,6 +51,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const layouts = {
         horizontal: { w: 1920, h: 1080, aspectClass: 'max-w-5xl aspect-video', title: '横版预览区', size: '1920 x 1080 (16:9)', btn: '下载横版封面 (1920x1080)' },
+        horizontal_reverse: { w: 1920, h: 1080, aspectClass: 'max-w-5xl aspect-video', title: '横版反向预览区', size: '1920 x 1080 (16:9)', btn: '下载横版反向封面 (1920x1080)' },
         vertical: { w: 1080, h: 1920, aspectClass: 'max-w-[42vh] aspect-[9/16]', title: '竖版预览区', size: '1080 x 1920 (9:16)', btn: '下载竖版封面 (1080x1920)' },
         wx_cover: { w: 1080, h: 1440, aspectClass: 'max-w-[45vh] aspect-[3/4]', title: '视频号封面预览区', size: '1080 x 1440 (3:4)', btn: '下载视频号封面 (1080x1440)' },
         podcast: { w: 1400, h: 1400, aspectClass: 'max-w-[50vh] aspect-square', title: '播客封面预览区', size: '1400 x 1400 (1:1)', btn: '下载播客封面 (1400x1400)' },
@@ -66,6 +68,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (inputs.inst) inputs.inst.addEventListener('change', draw);
     if (inputs.mainTitle) inputs.mainTitle.addEventListener('input', draw);
     if (inputs.subTitle) inputs.subTitle.addEventListener('input', draw);
+    if (inputs.footerText) inputs.footerText.addEventListener('input', draw);
     inputs.emotions.forEach(radio => radio.addEventListener('change', draw));
 
     if (inputs.upload) {
@@ -220,6 +223,10 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateLayoutAndDraw() {
         const currentFormat = getCurrentFormat();
         const layout = layouts[currentFormat];
+        if (!layout) {
+            console.warn('⚠️ [WORKBENCH] 未知版式:', currentFormat);
+            return;
+        }
         imgOffsetX = 0;
         imgOffsetY = 0;
         imgScale = 1.0;
@@ -228,7 +235,7 @@ document.addEventListener('DOMContentLoaded', () => {
         uiElements.container.className = `canvas-container w-full ${layout.aspectClass}`;
         
         // 健壮地提取 max-width 类名并应用给 header，确保 header 宽度与 canvas 对齐
-        const maxWidthClass = layout.aspectClass.split(' ').find(c => c.startsWith('max-w-')) || '';
+        const maxWidthClass = (layout.aspectClass || '').split(' ').find(c => c.startsWith('max-w-')) || '';
         uiElements.header.className = `flex justify-between items-end mb-4 w-full ${maxWidthClass}`;
         
         uiElements.title.innerText = layout.title;
@@ -273,6 +280,29 @@ document.addEventListener('DOMContentLoaded', () => {
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 }
                 const mask = ctx.createLinearGradient(400, 0, 1200, 0);
+                mask.addColorStop(0, '#0a1128');
+                mask.addColorStop(0.5, 'rgba(10, 17, 40, 0.9)'); 
+                mask.addColorStop(1, 'rgba(10, 17, 40, 0)');
+                ctx.fillStyle = mask; ctx.fillRect(0, 0, w, h);
+            } else if (format === 'horizontal_reverse') {
+                targetWidth = 1200; targetHeight = 1080;
+                const targetX = 0; // 图片在左侧
+                const targetRatio = targetWidth / targetHeight;
+                if (imgRatio > targetRatio) {
+                    let dw = reportImg.width * (targetHeight / reportImg.height);
+                    let sDw = dw * imgScale; let sDh = targetHeight * imgScale;
+                    drawX = targetX - (sDw - targetWidth) / 2 + imgOffsetX; 
+                    drawY = 0 - (sDh - targetHeight) / 2 + imgOffsetY;
+                    ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
+                } else {
+                    let dh = reportImg.height * (targetWidth / reportImg.width);
+                    let sDw = targetWidth * imgScale; let sDh = dh * imgScale;
+                    drawX = targetX - (sDw - targetWidth) / 2 + imgOffsetX; 
+                    drawY = -(sDh - targetHeight) / 2 + imgOffsetY;
+                    ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
+                }
+                // 遮罩渐变：右侧实色，向左透明
+                const mask = ctx.createLinearGradient(1520, 0, 720, 0);
                 mask.addColorStop(0, '#0a1128');
                 mask.addColorStop(0.5, 'rgba(10, 17, 40, 0.9)'); 
                 mask.addColorStop(1, 'rgba(10, 17, 40, 0)');
@@ -363,6 +393,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const instText = inputs.inst.value;
         const mainText = inputs.mainTitle.value || "请输入主标题";
         const subText = inputs.subTitle.value;
+        const footerText = inputs.footerText ? inputs.footerText.value : "听见资本";
 
         if (format === 'horizontal') {
             const margin = 120;
@@ -381,7 +412,25 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             const by = 960; ctx.fillStyle = colors.main;
             ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 45px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#94a3b8'; ctx.fillText("听见资本", margin + 70, by);
+            ctx.font = 'bold 45px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#94a3b8'; ctx.fillText(footerText, margin + 70, by);
+        } else if (format === 'horizontal_reverse') {
+            const margin = 820; // 文字在右侧起始位置
+            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
+            ctx.fillRect(margin, 160, 12, 45); ctx.fillStyle = '#e2e8f0';
+            ctx.fillText(instText + " · 研报解构", margin + 30, 195);
+            ctx.font = '900 130px "Microsoft YaHei", "PingFang SC", sans-serif'; ctx.fillStyle = colors.main;
+            ctx.shadowColor = colors.glow; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+            let nextY = wrapText(ctx, mainText, margin, 400, 1000, 150);
+            ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+            if (subText) {
+                ctx.font = 'bold 70px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#ffffff';
+                ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 5;
+                wrapText(ctx, subText, margin, nextY + 60, 1000, 90);
+                ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+            }
+            const by = 960; ctx.fillStyle = colors.main;
+            ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
+            ctx.font = 'bold 45px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#94a3b8'; ctx.fillText(footerText, margin + 70, by);
         } else if (format === 'vertical') {
             const margin = 80; const maxW = w - margin * 2;
             ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
@@ -399,7 +448,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             const by = 1750; ctx.fillStyle = colors.main;
             ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText("听见资本", margin + 70, by);
+            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 70, by);
         } else if (format === 'wx_cover') {
             const margin = 80; const maxW = w - margin * 2;
             ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
@@ -417,7 +466,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             const by = 1300; ctx.fillStyle = colors.main;
             ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText("听见资本", margin + 70, by);
+            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 70, by);
         } else if (format === 'podcast') {
             const margin = 100; const maxW = w - margin * 2;
 
@@ -438,7 +487,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
                 const by = 1340; ctx.fillStyle = colors.main;            ctx.fillRect(margin, by-20, 8, 20); ctx.fillRect(margin+16, by-40, 8, 40); ctx.fillRect(margin+32, by-25, 8, 25); ctx.fillRect(margin+48, by-45, 8, 45); ctx.fillRect(margin+64, by-15, 8, 15);
-            ctx.font = 'bold 55px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText("听见资本", margin + 95, by);
+            ctx.font = 'bold 55px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 95, by);
         } else if (format === 'video_bg') {
             const margin = 80; const maxW = w - margin * 2;
             ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
@@ -473,7 +522,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             const by = 1750; ctx.fillStyle = colors.main;
             ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText("听见资本", margin + 70, by);
+            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 70, by);
         } else if (format === 'video_bg_audio') {
             const margin = 80; const maxW = w - margin * 2;
             ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
@@ -528,14 +577,16 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             const by = 1750; ctx.fillStyle = colors.main;
             ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText("听见资本", margin + 70, by);
+            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 70, by);
         }
     }
 
     // 绑定到 window 用于 HTML 按钮调用
     window.downloadThumbnail = function() {
         const currentFormat = getCurrentFormat();
+        const footerText = (inputs.footerText && inputs.footerText.value) ? inputs.footerText.value : '听见资本';
         let formatName = '横版';
+        if (currentFormat === 'horizontal_reverse') formatName = '横版(反向)';
         if (currentFormat === 'vertical') formatName = '竖版';
         if (currentFormat === 'wx_cover') formatName = '视频号封面';
         if (currentFormat === 'podcast') formatName = '播客';
@@ -543,7 +594,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (currentFormat === 'video_bg_audio') formatName = '音频背景';
         const link = document.createElement('a');
         const titleStr = inputs.mainTitle.value.replace(/\s+/g, '_').substring(0, 8).replace(/\n/g, '');
-        link.download = `听见资本_${formatName}_${titleStr}.png`;
+        link.download = `${footerText}_${formatName}_${titleStr}.png`;
         link.href = canvas.toDataURL('image/png', 1.0);
         link.click();
     };

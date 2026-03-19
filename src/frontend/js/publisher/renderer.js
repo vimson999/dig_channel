@@ -33,7 +33,8 @@ const CanvasRenderer = {
             if (images.custom.src && images.custom.complete && images.custom.naturalWidth > 0) {
                 ctx.save();
                 ctx.beginPath(); ctx.rect(0, 0, w, h * 0.45); ctx.clip();
-                this.drawImageCover(ctx, images.custom, 0, 0, w, h * 0.45);
+                const trans = config.transform || { x: 0, y: 0, scale: 1 };
+                this.drawImageCover(ctx, images.custom, 0, 0, w, h * 0.45, trans.x, trans.y, trans.scale);
                 ctx.restore();
             } else {
                 // 截图模式占位：深蓝色顶部 + 提示文字
@@ -217,7 +218,8 @@ const CanvasRenderer = {
         ctx.clearRect(0, 0, w, h);
         
         if (image.src && image.complete) {
-            this.drawImageCover(ctx, image, 0, 0, w, h);
+            const trans = config.transform || { x: 0, y: 0, scale: 1 };
+            this.drawImageCover(ctx, image, 0, 0, w, h, trans.x, trans.y, trans.scale);
             if (config.enabled && config.text) {
                 ctx.save();
                 const rawLines = config.text.split('\n').filter(l => l.trim());
@@ -304,14 +306,26 @@ const CanvasRenderer = {
     },
 
     /**
-     * 工具：图片 Cover 填充
+     * 工具：图片 Cover 填充 (支持平移和缩放)
      */
-    drawImageCover(ctx, img, x, y, w, h) {
+    drawImageCover(ctx, img, x, y, w, h, offsetX = 0, offsetY = 0, scale = 1) {
         if (!img.naturalWidth) return;
         const r = img.naturalWidth / img.naturalHeight, cr = w / h;
         let rw, rh, rx, ry;
-        if (r > cr) { rh = h; rw = h * r; rx = x - (rw - w) / 2; ry = y; } else { rw = w; rh = w / r; rx = x; ry = y; }
-        ctx.drawImage(img, rx, ry, rw, rh);
+        if (r > cr) { 
+            rh = h; rw = h * r; rx = x - (rw - w) / 2; ry = y; 
+        } else { 
+            rw = w; rh = w / r; rx = x; ry = y; 
+        }
+        
+        // 应用自定义变换 (相对于填充后的尺寸)
+        // 缩放围绕中心进行
+        const sw = rw * scale;
+        const sh = rh * scale;
+        const finalX = rx + (rw - sw) / 2 + offsetX;
+        const finalY = ry + (rh - sh) / 2 + offsetY;
+        
+        ctx.drawImage(img, finalX, finalY, sw, sh);
     }
 };
 

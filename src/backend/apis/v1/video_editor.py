@@ -1,4 +1,5 @@
 import os
+import json
 from flask import Blueprint, request, jsonify, send_file
 from werkzeug.utils import secure_filename
 from services.video_editor import video_editor_service
@@ -20,6 +21,10 @@ def synthesize_video():
     Expects multipart/form-data with 'video', 'image', 'audio' files, and optional 'video_c', 'audio_c'.
     """
     try:
+        # 记录所有接收到的表单数据和文件名
+        logger.info(f"📥 [API] 接收到视频合成请求")
+        logger.info(f"  - 表单参数: {request.form.to_dict()}")
+        logger.info(f"  - 接收文件: {[f.filename for f in request.files.values() if f.filename]}")
         # 1. Validation
         if 'video' not in request.files or 'image' not in request.files or 'audio' not in request.files:
             return jsonify({'error': 'Missing required files (video, image, audio)'}), 400
@@ -38,6 +43,16 @@ def synthesize_video():
         audio_start = float(request.form.get('audio_start', 7.0))
         audio_end_offset = float(request.form.get('audio_end_offset', 0.0))
         custom_filename = request.form.get('custom_filename')
+        
+        # 字幕与 CTA 支持
+        subtitles_raw = request.form.get('subtitles')
+        subtitles = json.loads(subtitles_raw) if subtitles_raw else None
+        
+        cta_raw = request.form.get('cta_config')
+        cta_config = json.loads(cta_raw) if cta_raw else None
+
+        if subtitles:
+            logger.info(f"  - 携带字幕: {len(subtitles)} 条")
         
         # Sanitize custom filename (simple version to allow Chinese)
         if custom_filename:
@@ -74,7 +89,10 @@ def synthesize_video():
             video_path, image_path, audio_path, 
             video_c_path=video_c_path, audio_c_path=audio_c_path,
             audio_start=audio_start, 
-            audio_end_offset=audio_end_offset, output_filename=custom_filename
+            audio_end_offset=audio_end_offset, 
+            output_filename=custom_filename,
+            subtitles=subtitles,
+            cta_config=cta_config
         )
         
         # 4. Return result (URL to download)

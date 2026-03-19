@@ -106,7 +106,7 @@ class ThumbnailService:
 
     def generate_thumbnail(self, main_title: str, sub_title: str = "", date_text: str = "", tag_text: str = "",
                           bg_preset_index: int = 0, layout: str = 'left', output_filename: str = None,
-                          custom_bg_path: str = None, overlay_opacity: float = 0.5) -> str:
+                          custom_bg_path: str = None, overlay_opacity: float = 0.5, transform: dict = None) -> str:
         try:
             if bg_preset_index < 0 or bg_preset_index >= len(BACKGROUNDS): bg_preset_index = 0
             bg_config = BACKGROUNDS[bg_preset_index]
@@ -116,8 +116,47 @@ class ThumbnailService:
             if is_custom:
                 img = Image.new('RGBA', (1920, 1080), (0, 21, 41, 255)) 
                 screenshot = Image.open(custom_bg_path).convert('RGBA')
-                screenshot_fit = ImageOps.fit(screenshot, (1920, 486), method=Image.Resampling.LANCZOS, centering=(0.5, 0))
-                img.paste(screenshot_fit, (0, 0))
+                
+                # 实现与前端一致的 drawImageCover 逻辑 (带变换)
+                target_w, target_h = 1920, 486
+                sw_orig, sh_orig = screenshot.size
+                r = sw_orig / sh_orig
+                cr = target_w / target_h
+                
+                if r > cr:
+                    rh = target_h
+                    rw = int(target_h * r)
+                else:
+                    rw = target_w
+                    rh = int(target_w / r)
+                
+                # 应用变换
+                trans = transform or {'x': 0, 'y': 0, 'scale': 1.0}
+                scale = trans.get('scale', 1.0)
+                offset_x = trans.get('x', 0)
+                offset_y = trans.get('y', 0)
+                
+                sw = int(rw * scale)
+                sh = int(rh * scale)
+                
+                rx = (target_w - rw) // 2
+                ry = 0 # 顶部对齐
+                
+                final_x = rx + (rw - sw) // 2 + int(offset_x)
+                final_y = ry + (rh - sh) // 2 + int(offset_y)
+                
+                screenshot_resized = screenshot.resize((sw, sh), Image.Resampling.LANCZOS)
+                
+                # 创建一个裁剪层
+                paste_layer = Image.new('RGBA', (1920, 1080), (0, 0, 0, 0))
+                paste_layer.paste(screenshot_resized, (final_x, final_y))
+                
+                # 裁剪到顶部区域
+                mask = Image.new('L', (1920, 1080), 0)
+                mask_draw = ImageDraw.Draw(mask)
+                mask_draw.rectangle([0, 0, 1920, 486], fill=255)
+                
+                img.paste(paste_layer, (0, 0), mask)
             else:
                 bg_path_default = os.path.join(self.asset_dir, 'default', bg_config['file'])
                 bg_path_root = os.path.join(self.asset_dir, bg_config['file'])
@@ -170,11 +209,12 @@ class ThumbnailService:
                 self._draw_halo_text(draw, sub_title, (base_x, current_y), font_sub, sub_color, None if is_custom else self._parse_rgba(theme['stroke']), 56 * 0.04)
 
             # 落款回归左下角，加装饰线，色调浅灰
-            date_y = 1080 - 100
-            f_color = (200, 200, 200, 200) if is_custom else theme['date']
-            # 加线
-            draw.line((base_x, date_y - 47, base_x + 60, date_y - 47), fill=f_color, width=2)
-            self._draw_halo_text(draw, date_text, (base_x, date_y-32), font_date, f_color, None, 0)
+            if date_text:
+                date_y = 1080 - 100
+                f_color = (200, 200, 200, 200) if is_custom else theme['date']
+                # 加线
+                draw.line((base_x, date_y - 47, base_x + 60, date_y - 47), fill=f_color, width=2)
+                self._draw_halo_text(draw, date_text, (base_x, date_y-32), font_date, f_color, None, 0)
 
             if not output_filename:
                 import uuid

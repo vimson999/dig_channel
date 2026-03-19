@@ -22,4 +22,4 @@ export DATABASE_URL=${DATABASE_URL:-"postgresql://cappa_rw:RWcappaDb!!!2025@101.
 export REDIS_URL=${REDIS_URL:-"redis://localhost:6379/0"}
 
 cd src/backend
-celery -A celery_config.celery_app worker --loglevel=info --concurrency=1
+celery -A celery_config.celery_app worker --loglevel=info --concurrency=1 -P threads

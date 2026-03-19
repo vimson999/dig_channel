@@ -1,374 +1,360 @@
 import os
 import logging
+import platform
 from moviepy import VideoFileClip, AudioFileClip, ImageClip, concatenate_videoclips, CompositeVideoClip
 from werkzeug.utils import secure_filename
 import uuid
 import json
+import datetime
+import subprocess
+import copy
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
 class VideoEditorService:
-    def __init__(self, upload_folder='data/uploads', output_folder='data/processed'):
-        # Convert to absolute paths based on project root
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-        self.upload_folder = os.path.join(base_dir, upload_folder)
-        self.output_folder = os.path.join(base_dir, output_folder)
+    def __init__(self):
+        self.base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        self.upload_folder = os.path.join(self.base_dir, 'data', 'uploads')
+        self.output_folder = os.path.join(self.base_dir, 'data', 'processed')
         
-        # Ensure directories exist
+        # 针对 Mac M 系列芯片默认使用硬件加速
+        self.video_codec = 'h264_videotoolbox' if platform.system() == 'Darwin' else 'libx264'
+        logger.info(f"Detected {platform.system()}, using codec: {self.video_codec}")
+        
         os.makedirs(self.upload_folder, exist_ok=True)
         os.makedirs(self.output_folder, exist_ok=True)
 
+    def _generate_srt(self, subtitle_data, audio_base_time=0):
+        """Convert timed subtitle data to a standard SRT file string."""
+        all_segments = []
+        def flatten_extract(data):
+            if isinstance(data, dict) and 'text' in data: all_segments.append(data)
+            elif isinstance(data, list):
+                for item in data: flatten_extract(item)
+        
+        flatten_extract(subtitle_data)
+        if not all_segments: 
+            return ""
+
+        def format_time(seconds):
+            td = datetime.timedelta(seconds=max(0, seconds))
+            total_seconds = int(td.total_seconds())
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            secs = total_seconds % 60
+            millis = int(td.microseconds / 1000)
+            return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+        srt_content = ""
+        for i, seg in enumerate(all_segments):
+            try:
+                start = float(seg.get('start', 0)) + audio_base_time
+                end = float(seg.get('end', start + 2.0)) + audio_base_time
+                text = str(seg.get('text', '')).strip()
+                if not text: continue
+                srt_content += f"{i+1}\n{format_time(start)} --> {format_time(end)}\n{text}\n\n"
+            except: continue
+        return srt_content
+
+    def _extract_global_subtitles(self, subtitles, audio_paths):
+        """统一提取并计算带偏移量的全局字幕列表"""
+        global_subs = []
+        curr_offset = 0
+        
+        if not subtitles: 
+            return []
+
+        # 核心修复：判断是单音频的字幕列表 (list of dicts) 还是多音频的分组列表 (list of lists)
+        if isinstance(subtitles, list) and len(subtitles) > 0 and isinstance(subtitles[0], dict):
+            sub_groups = [subtitles]
+        elif isinstance(subtitles, list):
+            sub_groups = subtitles
+        else:
+            sub_groups = [subtitles]
+            
+        for i, group in enumerate(sub_groups):
+            # 获取对应的音频时长
+            duration = 0
+            if i < len(audio_paths) and os.path.exists(audio_paths[i]):
+                try:
+                    from moviepy import AudioFileClip
+                    temp_a = AudioFileClip(audio_paths[i])
+                    duration = temp_a.duration
+                    temp_a.close()
+                except: pass
+            
+            def extract(d, offset):
+                if isinstance(d, dict) and 'text' in d:
+                    new_d = copy.deepcopy(d)
+                    new_d['start'] = float(new_d.get('start', 0)) + offset
+                    new_d['end'] = float(new_d.get('end', 0)) + offset
+                    global_subs.append(new_d)
+                elif isinstance(d, list):
+                    for x in d: extract(x, offset)
+            
+            extract(group, curr_offset)
+            curr_offset += duration
+            
+        return global_subs
+
     def _create_cta_image(self, text, style='premium_dark', position='bottom_bar', video_w=1920):
         """Create a multi-line CTA image with transparency and layout support."""
-        # Style mapping (matches frontend)
         styles = {
             'premium_dark': {'bg': (25, 28, 36, 217), 'text': (255, 255, 255, 242), 'action': (255, 255, 255, 255), 'border': (255, 255, 255, 38)},
-            'nomura_red': {'bg': (128, 20, 30, 225), 'text': (255, 255, 255, 242), 'action': (255, 255, 255, 255), 'border': (255, 255, 255, 50)},
-            'institutional_blue': {'bg': (15, 30, 60, 217), 'text': (255, 255, 255, 242), 'action': (255, 255, 255, 255), 'border': (255, 255, 255, 50)},
-            'investment_gold': {'bg': (212, 175, 55, 217), 'text': (25, 30, 40, 242), 'action': (0, 0, 0, 255), 'border': (0, 0, 0, 25)}
+            'nomura_red': {'bg': (184, 20, 33, 230), 'text': (255, 255, 255, 255), 'action': (255, 255, 255, 255), 'border': (255, 255, 255, 50)},
+            'glass_dark': {'bg': (0, 0, 0, 160), 'text': (255, 255, 255, 230), 'action': (255, 255, 255, 255), 'border': (255, 255, 255, 30)}
         }
-        s = styles.get(style, styles['premium_dark'])
-        is_full_bar = 'bar' in position
+        theme = styles.get(style, styles['premium_dark'])
+        text_color = theme['text']
         
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
-        if not lines: lines = ["Call to Action"]
-
-        try:
-            font_paths_bold = ["/System/Library/Fonts/Hiragino Sans GB.ttc", "/System/Library/Fonts/PingFang.ttc", "Arial Unicode MS"]
-            font_paths_reg = ["/System/Library/Fonts/STHeiti Light.ttc", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", "Arial Unicode MS"]
-            
-            def get_font(size, bold=False):
-                paths = font_paths_bold if bold else font_paths_reg
-                for p in paths:
-                    if os.path.exists(p): return ImageFont.truetype(p, size)
-                return ImageFont.load_default()
-        except:
-            def get_font(size, bold=False): return ImageFont.load_default()
-
-        def get_action_text(txt):
-            if txt.startswith('↓') or 'PDF' in txt: return txt
-            return "↓ " + txt
-
-        if is_full_bar:
-            # --- 【模式 A: 全宽横条 - 左右分栏】 ---
-            bw, bh = video_w, 140
-            img = Image.new('RGBA', (int(bw), int(bh)), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
-            draw.rectangle([0, 0, bw, bh], fill=s['bg'])
-            if position == 'bottom_bar': draw.line([0, 0, bw, 0], fill=s['border'], width=2)
-            else: draw.line([0, bh-2, bw, bh-2], fill=s['border'], width=2)
-
-            h_margin = 100
-            left_t = lines[0]
-            right_t = lines[1] if len(lines) > 1 else lines[0]
-            
-            f_l, f_r = get_font(42, False), get_font(48, True)
-            action_str = get_action_text(right_t)
-            
-            l_bbox, r_bbox = f_l.getbbox(left_t), f_r.getbbox(action_str)
-            draw.text((h_margin, (bh - (l_bbox[3]-l_bbox[1]))/2 - 4), left_t, font=f_l, fill=s['text'])
-            draw.text((bw - h_margin - (r_bbox[2]-r_bbox[0]), (bh - (r_bbox[3]-r_bbox[1]))/2 - 4), 
-                      action_str, font=f_r, fill=s['action'])
-
-        else:
-            # --- 【模式 B: 悬浮卡片 - 纵向三段式】 ---
-            line_metrics = []
-            max_w, total_h = 0, 0
-            spacing = 25
-            
-            for i, line in enumerate(lines):
-                fs, bold, color = 32, False, s['text']
-                if i == 0: fs, bold = 48, True
-                elif i == len(lines)-1 and len(lines) > 1: 
-                    fs, bold, color = 48, True, s['action']
-                    line = get_action_text(line)
-                
-                f = get_font(fs, bold)
-                bbox = f.getbbox(line)
-                lw, lh = bbox[2]-bbox[0], bbox[3]-bbox[1]
-                if lw > max_w: max_w = lw
-                total_h += lh + (spacing if i < len(lines)-1 else 0)
-                line_metrics.append({'text': line, 'w': lw, 'h': lh, 'f': f, 'color': color})
-
-            padding_h, padding_v = 80, 60
-            bw, bh = max_w + padding_h * 2, total_h + padding_v * 2
-            
-            # 为阴影预留空间
-            sw, sh = 30, 20 # 阴影模糊扩散值和偏移量
-            img_w, img_h = bw + sw * 2, bh + sw * 2 + sh
-            img = Image.new('RGBA', (int(img_w), int(img_h)), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
-            
-            # 1. 模拟阴影层
-            shadow_box = [sw, sw + sh, sw + bw, sw + bh + sh]
-            draw.rounded_rectangle(shadow_box, radius=32, fill=(0, 0, 0, 70))
-            
-            # 2. 绘制主体卡片
-            card_box = [sw, sw, sw + bw, sw + bh]
-            draw.rounded_rectangle(card_box, radius=32, fill=s['bg'])
-            # 3. 精致内描边
-            draw.rounded_rectangle(card_box, radius=32, outline=s['border'], width=2)
-            
-            curr_y = sw + padding_v
-            for m in line_metrics:
-                lx = sw + (bw - m['w'])/2
-                draw.text((lx, curr_y), m['text'], font=m['f'], fill=m['color'])
-                curr_y += m['h'] + spacing
-
-        temp_cta_path = os.path.join(self.upload_folder, f"cta_{uuid.uuid4().hex[:6]}.png")
-        img.save(temp_cta_path)
-        return temp_cta_path
-
-    def _render_intermediate_clip(self, clip, filename, target_fps=24):
-        """Helper to render a clip to a temp file and reload it."""
-        temp_path = os.path.join(self.output_folder, filename)
-        clip.write_videofile(
-            temp_path,
-            fps=target_fps,
-            codec='libx264',
-            audio_codec='aac',
-            preset='ultrafast',
-            threads=4,
-            logger=None
-        )
-        return VideoFileClip(temp_path)
-
-    def _create_subtitle_image(self, text, video_w=1080):
-        """Create a subtitle image (Yellow, Bold, Transparent background)."""
-        if not text: return None
+        is_bar = 'bar' in position
+        img_w = video_w if is_bar else 600
+        img_h = 140 if is_bar else 280
         
-        # 字幕样式配置
-        text_color = (255, 215, 0, 255)  # 黄色 #FFD700
-        font_size = 72 # 对应竖屏的大号字体
-        
-        try:
-            # 优先使用黑体
-            font_paths_bold = ["/System/Library/Fonts/Hiragino Sans GB.ttc", "/System/Library/Fonts/PingFang.ttc", "Arial Unicode MS"]
-            font = None
-            for p in font_paths_bold:
-                if os.path.exists(p): 
-                    font = ImageFont.truetype(p, font_size)
-                    break
-            if not font: font = ImageFont.load_default()
-        except:
-            font = ImageFont.load_default()
-
-        # 处理换行：每行约 12-15 个汉字
-        chars_per_line = 14
-        lines = [text[i:i+chars_per_line] for i in range(0, len(text), chars_per_line)]
-        
-        line_height = font_size * 1.3
-        total_h = int(len(lines) * line_height)
-        img = Image.new('RGBA', (video_w, total_h + 40), (0, 0, 0, 0))
+        img = Image.new('RGBA', (img_w, img_h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         
-        for i, line in enumerate(lines):
-            bbox = font.getbbox(line)
-            lw = bbox[2] - bbox[0]
-            lx = (video_w - lw) / 2
-            # 增加细微的黑色描边提升可读性
-            draw.text((lx-2, i*line_height-2), line, font=font, fill=(0,0,0,180))
-            draw.text((lx+2, i*line_height+2), line, font=font, fill=(0,0,0,180))
-            draw.text((lx, i*line_height), line, font=font, fill=text_color)
+        if is_bar:
+            draw.rectangle([0, 0, img_w, img_h], fill=theme['bg'])
+            draw.line([0, 0, img_w, 0], fill=theme['border'], width=1)
+        else:
+            draw.rounded_rectangle([0, 0, img_w, img_h], radius=20, fill=theme['bg'], outline=theme['border'], width=2)
 
-        temp_path = os.path.join(self.upload_folder, f"sub_{uuid.uuid4().hex[:6]}.png")
+        try:
+            font_path = "/System/Library/Fonts/PingFang.ttc"
+            font_main = ImageFont.truetype(font_path, 32 if is_bar else 38)
+        except:
+            font_main = ImageFont.load_default()
+
+        lines = text.split('\n')
+        total_text_h = len(lines) * 45
+        curr_y = (img_h - total_text_h) / 2
+        
+        for line in lines:
+            bbox = font_main.getbbox(line)
+            lw = bbox[2] - bbox[0]
+            draw.text(((img_w - lw)/2, curr_y), line, font=font_main, fill=text_color)
+            curr_y += 45
+
+        temp_path = os.path.join(self.upload_folder, f"cta_{uuid.uuid4().hex[:6]}.png")
         img.save(temp_path)
         return temp_path
 
-    def _create_subtitle_clip(self, text, duration, start_time, video_w=1080, position_y=1250):
-        """Create a professional subtitle clip (Yellow, Bold, High-Visibility)."""
-        if not text: return None
+    def _synthesize_ffmpeg_direct(self, image_file, audio_file, output_path, subtitles=None, cta_image_path=None, cta_pos=(0,0), is_vertical=False, audio_start=0, audio_duration=None, transform=None, margin_v_override=None):
+        """High-performance synthesis using direct FFmpeg command."""
+        import time
+        s_t = time.time()
+        srt_path = None
         
-        import numpy as np
-        font_size = 60 # 调优字号，避免遮挡
-        
-        # 静态缓存字体对象
-        if not hasattr(self, '_cached_font'):
-            self._cached_font = None
-            font_paths = ["/System/Library/Fonts/Hiragino Sans GB.ttc", "/System/Library/Fonts/PingFang.ttc", "Arial Unicode MS"]
-            for p in font_paths:
-                if os.path.exists(p): 
-                    self._cached_font = ImageFont.truetype(p, font_size)
-                    break
-            if not self._cached_font: self._cached_font = ImageFont.load_default()
-
-        font = self._cached_font
-        chars_per_line = 18 # 字号变小后，每行容纳更多字
-        lines = [text[i:i+chars_per_line] for i in range(0, len(text), chars_per_line)]
-        line_height = int(font_size * 1.3)
-        total_h = len(lines) * line_height + 20
-        
-        img = Image.new('RGBA', (video_w, total_h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        
-        for i, line in enumerate(lines):
-            bbox = font.getbbox(line)
-            lw = bbox[2] - bbox[0]
-            lx = (video_w - lw) / 2
-            ly = i * line_height
-            
-            # 4 方向强描边
-            shadow_color = (0, 0, 0, 240)
-            for dx, dy in [(-2,-2), (2,-2), (-2,2), (2,2)]:
-                draw.text((lx+dx, ly+dy), line, font=font, fill=shadow_color)
-            
-            # 主文字：亮黄色
-            draw.text((lx, ly), line, font=font, fill=(255, 230, 0, 255))
-
-        return ImageClip(np.array(img)).with_duration(duration).with_start(start_time).with_position(('center', position_y))
-
-    def process_vertical_video(self, image_file, audio_files, subtitles=None, output_filename=None):
-        """Synthesize a 9:16 vertical video with timed subtitles (Sync Fixed)."""
-        raw_resources = []
         try:
-            target_w, target_h = 1080, 1920
-            target_fps = 24
+            # 1. 准备字幕 SRT
+            # ... (rest of SRT prep unchanged) ...
+            if subtitles:
+                srt_content = self._generate_srt(subtitles, 0)
+                if srt_content:
+                    srt_path = os.path.join(self.upload_folder, f"temp_{uuid.uuid4().hex[:6]}.srt")
+                    with open(srt_path, 'w', encoding='utf-8') as f:
+                        f.write(srt_content)
+                    logger.info(f"📝 [FFMPEG] Generated SRT with {srt_content.count('-->')} segments")
 
-            audio_paths = audio_files if isinstance(audio_files, list) else [audio_files]
-            sub_texts = subtitles if isinstance(subtitles, list) else [subtitles]
+            # 2. 获取视频时长
+            if not audio_duration:
+                from moviepy import AudioFileClip
+                temp_a = AudioFileClip(audio_file)
+                audio_duration = temp_a.duration - audio_start
+                temp_a.close()
 
-            current_time = 0
-            subtitle_clips = []
-            audio_segments = []
-
-            for i, p in enumerate(audio_paths):
-                if not (p and os.path.exists(p)): continue
-                segment = AudioFileClip(p)
-                audio_segments.append(segment)
-                raw_resources.append(segment)
+            # 3. 构建底图滤镜链 (支持平移与缩放)
+            target_w, target_h = (1080, 1920) if is_vertical else (1920, 1080)
+            target_res = f"{target_w}:{target_h}"
+            
+            if transform:
+                scale = transform.get('scale', 1.0)
+                off_x = transform.get('x', 0)
+                off_y = transform.get('y', 0)
                 
-                duration = segment.duration
-                if i < len(sub_texts) and sub_texts[i]:
-                    # 对齐当前音频片段的时间段
-                    sub_clip = self._create_subtitle_clip(sub_texts[i], duration, current_time, video_w=target_w, position_y=1250)
-                    if sub_clip:
-                        subtitle_clips.append(sub_clip)
-                        raw_resources.append(sub_clip)
-                current_time += duration
-            
-            if not audio_segments: raise ValueError("No audio.")
-
-            from moviepy import concatenate_audioclips
-            audio_final = concatenate_audioclips(audio_segments)
-            raw_resources.append(audio_final)
-
-            bg_clip = ImageClip(image_file).with_duration(audio_final.duration).resized(new_size=(target_w, target_h)).with_fps(target_fps)
-            # 这里的 CompositeVideoClip 会尊重 sub_clip 的 start 和 duration
-            final_video = CompositeVideoClip([bg_clip] + subtitle_clips).with_audio(audio_final)
-            raw_resources.append(bg_clip)
-            raw_resources.append(final_video)
-
-            output_path = os.path.join(self.output_folder, output_filename or f"v_video_{uuid.uuid4().hex[:8]}.mp4")
-            final_video.write_videofile(output_path, codec='libx264', audio_codec='aac', preset='ultrafast', threads=8, logger=None)
-            return output_path
-
-        finally:
-            for r in raw_resources:
-                if hasattr(r, 'close'): r.close()
-
-    def process_mixed_content(self, video_file, image_file, audio_file, video_c_path=None, audio_c_path=None, audio_start=7.0, audio_end_offset=10.0, output_filename=None, cta_config=None, subtitles=None):
-        """Synthesize horizontal video with perfect subtitle sync."""
-        raw_resources = []
-        try:
-            clips_to_concat = []
-            target_w, target_h = 1920, 1080 
-            target_fps = 24 
-
-            # intro
-            if video_file and os.path.exists(video_file):
-                clip_a = VideoFileClip(video_file)
-                if clip_a.w != target_w or clip_a.h != target_h:
-                    clip_a = clip_a.resized(new_size=(target_w, target_h))
-                raw_resources.append(clip_a)
-                clips_to_concat.append(clip_a)
-            
-            # Process Main Audio & Subtitles
-            audio_paths = audio_file if isinstance(audio_file, list) else [audio_file]
-            sub_texts = subtitles if isinstance(subtitles, list) else [subtitles]
-
-            audio_segments = []
-            subtitle_clips_raw = []
-            current_full_time = 0
-
-            for i, p in enumerate(audio_paths):
-                if not (isinstance(p, str) and os.path.exists(p)): continue
-                segment = AudioFileClip(p)
-                audio_segments.append(segment)
-                raw_resources.append(segment)
-                
-                duration = segment.duration
-                if i < len(sub_texts) and sub_texts[i]:
-                    # 先生成相对于“完整拼接音频”时间轴的字幕
-                    sub_clip = self._create_subtitle_clip(sub_texts[i], duration, current_full_time, video_w=target_w, position_y=750)
-                    if sub_clip:
-                        subtitle_clips_raw.append(sub_clip)
-                        raw_resources.append(sub_clip)
-                current_full_time += duration
-            
-            if not audio_segments: raise ValueError("No audio.")
-            
-            from moviepy import concatenate_audioclips
-            audio_b_full = concatenate_audioclips(audio_segments)
-            # 根据偏移裁剪音频
-            audio_b_clipped = audio_b_full.subclipped(audio_start, max(0, audio_b_full.duration - audio_end_offset))
-            target_duration_b = audio_b_clipped.duration
-            raw_resources.append(audio_b_full)
-            raw_resources.append(audio_b_clipped)
-
-            main_image_clip = ImageClip(image_file).with_duration(target_duration_b).resized(new_size=(target_w, target_h))
-            raw_resources.append(main_image_clip)
-            
-            composition_elements = [main_image_clip]
-            
-            # --- 关键修复：根据 audio_start 重新对齐所有字幕 ---
-            for sc in subtitle_clips_raw:
-                # 计算字幕在裁剪后音频中的相对开始时间
-                new_start = sc.start - audio_start
-                if new_start + sc.duration > 0:
-                    actual_start = max(0, new_start)
-                    actual_duration = sc.duration - (actual_start - new_start)
-                    # 确保字幕时长不会超过裁剪后的正文时长
-                    if actual_start < target_duration_b:
-                        composition_elements.append(
-                            sc.with_start(actual_start).with_duration(min(actual_duration, target_duration_b - actual_start))
-                        )
-
-            if cta_config and cta_config.get('text'):
-                cta_img_path = self._create_cta_image(cta_config['text'], cta_config.get('style', 'glass_dark'), cta_config.get('position', 'bottom_bar'), video_w=target_w)
-                cta_clip = ImageClip(cta_img_path).with_duration(target_duration_b)
-                pos_val = cta_config.get('position', 'bottom_bar')
-                if 'bar' in pos_val: final_pos = (0, (target_h - cta_clip.h) if 'bottom' in pos_val else 0)
+                # 复杂的滤镜链实现：先 scale 成覆盖态，再应用用户自定义缩放，最后用带偏移量的 crop
+                vf_chain = f"loop=loop=-1:size=1:start=0,scale={target_res}:force_original_aspect_ratio=increase"
+                vf_chain += f",scale=iw*{scale}:ih*{scale}"
+                vf_chain += f",crop={target_w}:{target_h}:(iw-{target_w})/2-{off_x}:(ih-{target_h})/2-{off_y},setsar=1"
+            else:
+                # 默认逻辑优化：
+                # 竖版视频 (is_vertical=True) 通常是截图，使用 force_original_aspect_ratio=decrease 防止裁剪
+                # 横屏视频 (is_vertical=False) 通常是背景，使用 force_original_aspect_ratio=increase 确保填满
+                fit_mode = "decrease" if is_vertical else "increase"
+                vf_chain = f"loop=loop=-1:size=1:start=0,scale={target_res}:force_original_aspect_ratio={fit_mode}"
+                if is_vertical:
+                    # 如果是缩小适配，需要补黑边居中
+                    vf_chain += f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
                 else:
-                    safe_r, safe_b = 120, 220 
-                    if pos_val == 'right_center': final_pos = (target_w - cta_clip.w - safe_r, (target_h - cta_clip.h) / 2)
-                    else: final_pos = (target_w - cta_clip.w - safe_r, target_h - cta_clip.h - safe_b)
-                composition_elements.append(cta_clip.with_position(final_pos))
-                raw_resources.append(cta_clip)
-                if os.path.exists(cta_img_path): os.remove(cta_img_path)
+                    # 如果是放大适配，需要裁剪
+                    vf_chain += f",crop={target_res}"
+                vf_chain += ",setsar=1"
 
-            clip_b_composed = CompositeVideoClip(composition_elements).with_audio(audio_b_clipped).with_fps(target_fps)
-            raw_resources.append(clip_b_composed)
-            clips_to_concat.append(clip_b_composed)
+            if srt_path:
+                # 针对 Mac 优化路径转义：使用双引号并转义冒号
+                safe_srt_path = srt_path.replace(":", "\\:").replace("'", "'\\\\''")
+                
+                if is_vertical:
+                    # 📱 竖屏样式：黄色 Bold 加粗，位置进一步下移 (MarginV 198, 从顶向下)
+                    font_size = 10
+                    margin_v = margin_v_override if margin_v_override is not None else 198
+                    alignment = 6
+                    # PrimaryColour: &H0000FFFF (纯黄)
+                    style = f"FontName=PingFang SC,FontSize={font_size},PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment={alignment},MarginV={margin_v},Bold=1"
+                else:
+                    # 🖥️ 横屏样式：纯黄 Bold (去掉底框)，位置下移 (MarginV 38, 从底向上)
+                    # BorderStyle=1 (无底框), PrimaryColour=&H0000FFFF (纯黄)
+                    font_size = 20
+                    margin_v = margin_v_override if margin_v_override is not None else 38
+                    alignment = 2
+                    style = f"FontName=PingFang SC,FontSize={font_size},PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment={alignment},MarginV={margin_v},Bold=1"
+                
+                vf_chain += f",subtitles='{safe_srt_path}':force_style='{style}'"
 
-            # outro
-            if video_c_path and os.path.exists(video_c_path):
-                raw_video_c = VideoFileClip(video_c_path)
-                if raw_video_c.w != target_w or raw_video_c.h != target_h:
-                    raw_video_c = raw_video_c.resized(new_size=(target_w, target_h))
-                # ... rest of outro logic
-                clips_to_concat.append(raw_video_c)
-                raw_resources.append(raw_video_c)
+            # 4. 输入与参数
+            audio_args = f"-ss {audio_start} -t {audio_duration}"
+            inputs = [f"-loop 1 -t {audio_duration} -i \"{image_file}\"", f"{audio_args} -i \"{audio_file}\""]
+            
+            if cta_image_path:
+                inputs.append(f"-i \"{cta_image_path}\"")
+                cta_idx = len(inputs) - 1
+                vf_chain += f" [bg]; [{cta_idx}:v] format=rgba [cta]; [bg][cta] overlay={cta_pos[0]}:{cta_pos[1]}"
 
-            final_clip = concatenate_videoclips(clips_to_concat)
-            output_path = os.path.join(self.output_folder, output_filename or f"video_{uuid.uuid4().hex[:8]}.mp4")
-            final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', preset='ultrafast', threads=8, logger=None)
+            cmd = f"ffmpeg -y " + " ".join(inputs) + f" -filter_complex \"{vf_chain}\" -c:v {self.video_codec} -b:v 6000k -c:a aac -shortest \"{output_path}\""
+            
+            logger.info(f"🚀 [FFMPEG_DIRECT] Executing: {cmd}")
+            # 使用 check=True 确保报错能被捕获
+            subprocess.run(cmd, shell=True, check=True, capture_output=True)
+            logger.info(f"✅ [FFMPEG_DIRECT] Synthesis success in {time.time()-s_t:.2f}s")
             return output_path
 
+        except Exception as e:
+            logger.error(f"❌ [FFMPEG_DIRECT] Synthesis failed: {e}")
+            if hasattr(e, 'stderr') and e.stderr:
+                logger.error(f"FFmpeg Stderr: {e.stderr.decode()}")
+            return None
         finally:
-            if 'final_clip' in locals() and final_clip: final_clip.close()
-            for r in raw_resources: 
-                if hasattr(r, 'close'): r.close()
+            if srt_path and os.path.exists(srt_path): os.remove(srt_path)
 
+    def process_vertical_video(self, image_file, audio_files, subtitles=None, output_filename=None, transform=None, margin_v_override=None):
+        """Synthesize a 9:16 vertical video with correct sequential subtitles."""
+        logger.info(f"🎥 [VIDEO_EDITOR] Starting Vertical Production: {os.path.basename(image_file)}")
+        
+        output_path = os.path.join(self.output_folder, output_filename or f"v_video_{uuid.uuid4().hex[:6]}.mp4")
+        temp_audio = os.path.join(self.upload_folder, f"temp_v_a_{uuid.uuid4().hex[:6]}.mp3")
+        
+        try:
+            audio_list = audio_files if isinstance(audio_files, list) else [audio_files]
+            
+            # 1. 统一提取全局对齐字幕
+            global_subs = self._extract_global_subtitles(subtitles, audio_list)
+            logger.info(f"📊 [VIDEO_EDITOR] Extracted {len(global_subs)} total subtitle segments for vertical")
+
+            # 2. 合并音频
+            from moviepy import AudioFileClip, concatenate_audioclips
+            clips = [AudioFileClip(a) for a in audio_list if os.path.exists(a)]
+            if not clips: raise ValueError("No valid audio clips.")
+            
+            final_audio = concatenate_audioclips(clips)
+            final_audio.write_audiofile(temp_audio, logger=None)
+            for c in clips: c.close()
+            final_audio.close()
+
+            # 3. 调用合成
+            return self._synthesize_ffmpeg_direct(
+                image_file=image_file,
+                audio_file=temp_audio,
+                output_path=output_path,
+                subtitles=global_subs,
+                is_vertical=True,
+                transform=transform,
+                margin_v_override=margin_v_override
+            )
+        finally:
+            if os.path.exists(temp_audio): os.remove(temp_audio)
+
+    def process_mixed_content(self, video_file, image_file, audio_file, video_c_path=None, audio_c_path=None, audio_start=7.0, audio_end_offset=10.0, output_filename=None, cta_config=None, subtitles=None, transform=None):
+        """Synthesize horizontal video with intro/outro and sequential subtitles."""
+        logger.info(f"🎥 [VIDEO_EDITOR] Starting Horizontal Production: {os.path.basename(image_file)}")
+        
+        target_w, target_h = 1920, 1080
+        temp_audio = os.path.join(self.upload_folder, f"temp_h_a_{uuid.uuid4().hex[:6]}.mp3")
+        temp_body = os.path.join(self.upload_folder, f"temp_h_body_{uuid.uuid4().hex[:6]}.mp4")
+        cta_img = None
+        
+        try:
+            audio_list = audio_file if isinstance(audio_file, list) else [audio_file]
+            
+            # 1. 统一提取全局对齐字幕
+            global_subs = self._extract_global_subtitles(subtitles, audio_list)
+            
+            from moviepy import AudioFileClip, concatenate_audioclips
+            clips = [AudioFileClip(a) for a in audio_list if os.path.exists(a)]
+            merged_audio = concatenate_audioclips(clips)
+            merged_audio.write_audiofile(temp_audio, logger=None)
+            
+            # 计算切分后的正文时长
+            body_duration = max(0.1, merged_audio.duration - audio_start - audio_end_offset)
+            
+            # 对字幕应用切分偏移
+            adjusted_subs = []
+            for s in global_subs:
+                new_s, new_e = s['start'] - audio_start, s['end'] - audio_start
+                if new_e > 0:
+                    adjusted_subs.append({'start': max(0, new_s), 'end': new_e, 'text': s['text']})
+            
+            for c in clips: c.close()
+            merged_audio.close()
+
+            # 2. 准备 CTA
+            cta_pos = (0, 0)
+            if cta_config and cta_config.get('text'):
+                cta_img = self._create_cta_image(cta_config['text'], cta_config.get('style', 'premium_dark'), cta_config.get('position', 'bottom_bar'), video_w=target_w)
+                pos_val = cta_config.get('position', 'bottom_bar')
+                cta_h = 140 if 'bar' in pos_val else 280 
+                cta_w = target_w if 'bar' in pos_val else 600
+                if 'bar' in pos_val: cta_pos = (0, (target_h - cta_h) if 'bottom' in pos_val else 0)
+                else:
+                    if pos_val == 'right_center': cta_pos = (target_w - cta_w - 120, (target_h - cta_h) / 2)
+                    else: cta_pos = (target_w - cta_w - 120, target_h - cta_h - 220)
+
+            # 3. 合成正文
+            self._synthesize_ffmpeg_direct(
+                image_file=image_file, audio_file=temp_audio, output_path=temp_body,
+                subtitles=adjusted_subs, cta_image_path=cta_img, cta_pos=cta_pos,
+                audio_start=audio_start, audio_duration=body_duration,
+                transform=transform
+            )
+
+            # 4. 拼接
+            final_clips = []
+            if video_file and os.path.exists(video_file):
+                v_in = VideoFileClip(video_file)
+                final_clips.append(v_in.resized(new_size=(target_w, target_h)) if v_in.w != target_w else v_in)
+            
+            final_clips.append(VideoFileClip(temp_body))
+            
+            if video_c_path and os.path.exists(video_c_path):
+                v_out = VideoFileClip(video_c_path)
+                final_clips.append(v_out.resized(new_size=(target_w, target_h)) if v_out.w != target_w else v_out)
+
+            final_path = os.path.join(self.output_folder, output_filename or f"video_{uuid.uuid4().hex[:8]}.mp4")
+            if len(final_clips) > 1:
+                concat = concatenate_videoclips(final_clips)
+                concat.write_videofile(final_path, codec=self.video_codec, audio_codec='aac', logger=None)
+                for c in final_clips: c.close()
+            else:
+                import shutil
+                shutil.move(temp_body, final_path)
+            
+            return final_path
+
+        finally:
+            for f in [temp_audio, temp_body, cta_img]:
+                if f and os.path.exists(f): 
+                    try: os.remove(f)
+                    except: pass
 
 video_editor_service = VideoEditorService()

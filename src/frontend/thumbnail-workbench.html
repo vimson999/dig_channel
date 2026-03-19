@@ -79,7 +79,8 @@
                 <div>
                     <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">画布尺寸 / 版式</label>
                     <select id="formatSelect" class="w-full bg-white border border-gray-200 rounded-xl p-3 text-gray-700 focus:ring-2 focus:ring-primary-500 outline-none shadow-sm cursor-pointer transition-all">
-                        <option value="horizontal">💻 横版封面 (16:9)</option>
+                        <option value="horizontal">💻 横版封面 (文字在左)</option>
+                        <option value="horizontal_reverse">💻 横版封面 (文字在右)</option>
                         <option value="vertical">📱 竖版视频 (9:16)</option>
                         <option value="wx_cover">🟢 视频号封面 (3:4)</option>
                         <option value="podcast">🎙️ 播客封面 (1:1)</option>
@@ -145,6 +146,10 @@
                     <div>
                         <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">副标题</label>
                         <input type="text" id="subTitle" class="w-full bg-white border border-gray-200 rounded-xl p-3 text-gray-700 focus:ring-2 focus:ring-primary-500 outline-none shadow-sm transition-all" value="阿里AI被小摩看空？">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">底款文字</label>
+                        <input type="text" id="footerText" class="w-full bg-white border border-gray-200 rounded-xl p-3 text-gray-700 focus:ring-2 focus:ring-primary-500 outline-none shadow-sm transition-all" value="听见资本">
                     </div>
                 </div>
 
