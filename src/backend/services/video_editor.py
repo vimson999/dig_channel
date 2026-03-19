@@ -57,22 +57,22 @@ class VideoEditorService:
             except: continue
         return srt_content
 
-    def _extract_global_subtitles(self, subtitles, audio_paths):
-        """统一提取并计算带偏移量的全局字幕列表"""
+    def _extract_global_subtitles(self, subtitles, audio_paths, audio_start=0):
+        """统一提取并计算带偏移量的全局字幕列表，支持开头偏移量纠正"""
         global_subs = []
         curr_offset = 0
-        
-        if not subtitles: 
+
+        if not subtitles:
             return []
 
-        # 核心修复：判断是单音频的字幕列表 (list of dicts) 还是多音频的分组列表 (list of lists)
+        # 核心修复：判断是单音频的字幕列表还是多音频的分组列表
         if isinstance(subtitles, list) and len(subtitles) > 0 and isinstance(subtitles[0], dict):
             sub_groups = [subtitles]
         elif isinstance(subtitles, list):
             sub_groups = subtitles
         else:
             sub_groups = [subtitles]
-            
+
         for i, group in enumerate(sub_groups):
             # 获取对应的音频时长
             duration = 0
@@ -83,21 +83,26 @@ class VideoEditorService:
                     duration = temp_a.duration
                     temp_a.close()
                 except: pass
-            
+
             def extract(d, offset):
                 if isinstance(d, dict) and 'text' in d:
                     new_d = copy.deepcopy(d)
-                    new_d['start'] = float(new_d.get('start', 0)) + offset
-                    new_d['end'] = float(new_d.get('end', 0)) + offset
-                    global_subs.append(new_d)
+                    # 关键修复：应用全局 audio_start 偏移
+                    # 每一段字幕的绝对时间 = 原始时间 + 之前所有段的总长 - 开头剪掉的时长
+                    new_d['start'] = float(new_d.get('start', 0)) + offset - audio_start
+                    new_d['end'] = float(new_d.get('end', 0)) + offset - audio_start
+
+                    # 只保留在视频范围内的字幕
+                    if new_d['end'] > 0:
+                        new_d['start'] = max(0, new_d['start'])
+                        global_subs.append(new_d)
                 elif isinstance(d, list):
                     for x in d: extract(x, offset)
-            
+
             extract(group, curr_offset)
             curr_offset += duration
-            
-        return global_subs
 
+        return global_subs
     def _create_cta_image(self, text, style='premium_dark', position='bottom_bar', video_w=1920):
         """Create a multi-line CTA image with transparency and layout support."""
         styles = {
@@ -287,8 +292,8 @@ class VideoEditorService:
         try:
             audio_list = audio_file if isinstance(audio_file, list) else [audio_file]
             
-            # 1. 统一提取全局对齐字幕
-            global_subs = self._extract_global_subtitles(subtitles, audio_list)
+            # 1. 统一提取全局对齐字幕 (直接传入 audio_start 统一处理)
+            global_subs = self._extract_global_subtitles(subtitles, audio_list, audio_start=audio_start)
             
             from moviepy import AudioFileClip, concatenate_audioclips
             clips = [AudioFileClip(a) for a in audio_list if os.path.exists(a)]
@@ -297,13 +302,6 @@ class VideoEditorService:
             
             # 计算切分后的正文时长
             body_duration = max(0.1, merged_audio.duration - audio_start - audio_end_offset)
-            
-            # 对字幕应用切分偏移
-            adjusted_subs = []
-            for s in global_subs:
-                new_s, new_e = s['start'] - audio_start, s['end'] - audio_start
-                if new_e > 0:
-                    adjusted_subs.append({'start': max(0, new_s), 'end': new_e, 'text': s['text']})
             
             for c in clips: c.close()
             merged_audio.close()
