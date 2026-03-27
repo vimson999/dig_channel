@@ -341,7 +341,7 @@ class DataService:
             if user_id is not None:
                 channels_query = channels_query.filter(Channel.user_id == user_id)
             if channel_ids:
-                channels_query = channels_query.filter(Channel.channel_id.in_(channel_ids))
+                channels_query = channels_query.filter(Channel.id.in_(channel_ids))
             channels = channels_query.order_by(Channel.name.asc()).all()
             
             if not channels:
@@ -360,7 +360,7 @@ class DataService:
             if user_id is not None:
                 data_query = data_query.filter(Channel.user_id == user_id)
             if channel_ids:
-                data_query = data_query.filter(Channel.channel_id.in_(channel_ids))
+                data_query = data_query.filter(Channel.id.in_(channel_ids))
             
             data_records = data_query.order_by(
                 ChannelData.date.asc(),

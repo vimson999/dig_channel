@@ -369,12 +369,10 @@ class DataTable {
             // 请求所有频道（包括非活跃的）用于筛选
             const response = await api.getChannels({ include_inactive: true, per_page: 1000 });
             this.allChannels = response.data.channels || [];
-            // 默认选择所有活跃频道
-            if (this.selectedChannelIds.length === 0) {
-                this.selectedChannelIds = this.allChannels
-                    .filter(channel => channel.is_active)
-                    .map(channel => channel.id);
-            }
+            
+            // 移除默认全选逻辑，保持 selectedChannelIds 为空（代表显示全部）
+            // 除非已经有选中的频道，否则不进行自动填充
+            
             return this.allChannels;
         } catch (error) {
             console.error('加载频道列表失败:', error);
@@ -384,7 +382,7 @@ class DataTable {
 
     // 设置选中的频道
     setSelectedChannels(channelIds) {
-        this.selectedChannelIds = channelIds;
+        this.selectedChannelIds = channelIds || [];
         this.currentPage = 1; // 重置到第一页
         this.loadTableData();
     }
@@ -610,23 +608,27 @@ async function loadChannelFilterList() {
         let channels = [];
         if (dataTableInstance) {
             channels = await dataTableInstance.loadAllChannels();
-            channelFilterData.selectedChannelIds = dataTableInstance.getSelectedChannels();
+            // 复制一份，避免直接操作 DataTable 的私有状态
+            channelFilterData.selectedChannelIds = [...(dataTableInstance.getSelectedChannels() || [])];
         } else {
             // 请求所有频道（包括非活跃的）用于筛选
             const response = await api.getChannels({ include_inactive: true, per_page: 1000 });
             channels = response.data.channels || [];
-        channelFilterData.selectedChannelIds = channels.map(channel => channel.id);
-    }
-    
-    channelFilterData.allChannels = channels;
-    channelFilterData.filteredChannels = channels;
+            // 初始加载时不默认选择任何频道，除非通过 DataTable 获取
+            if (!channelFilterData.selectedChannelIds || channelFilterData.selectedChannelIds.length === 0) {
+                channelFilterData.selectedChannelIds = [];
+            }
+        }
+        
+        channelFilterData.allChannels = channels;
+        channelFilterData.filteredChannels = channels;
 
-    populateCategoryFilterOptions();
+        populateCategoryFilterOptions();
 
-    if (loadingEl) loadingEl.style.display = 'none';
+        if (loadingEl) loadingEl.style.display = 'none';
 
-    filterChannelList();
-    updateSelectedChannelCount();
+        filterChannelList();
+        updateSelectedChannelCount();
         
     } catch (error) {
         console.error('加载频道列表失败:', error);
@@ -659,8 +661,8 @@ function renderChannelFilterList() {
                 <div class="flex items-center gap-3">
                     <div class="flex-shrink-0">
                         <input type="checkbox" ${isSelected ? 'checked' : ''} 
-                               class="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-500"
-                               onclick="event.stopPropagation();">
+                               class="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-500 pointer-events-none"
+                               readonly>
                     </div>
                     <div class="flex-1 min-w-0">
                         <div class="font-medium ${isActive ? 'text-gray-900' : 'text-gray-500'} truncate">
@@ -766,13 +768,8 @@ function selectAllChannels() {
 
 // 清空选择
 function clearAllChannels() {
-    const { filteredChannels } = channelFilterData;
-    filteredChannels.forEach(channel => {
-        const index = channelFilterData.selectedChannelIds.indexOf(channel.id);
-        if (index > -1) {
-            channelFilterData.selectedChannelIds.splice(index, 1);
-        }
-    });
+    // 改为清空所有选择，而不仅仅是过滤后的
+    channelFilterData.selectedChannelIds = [];
     
     renderChannelFilterList();
     updateSelectedChannelCount();
@@ -807,22 +804,27 @@ function updateSelectedChannelCount() {
 function applyChannelFilter() {
     const { selectedChannelIds } = channelFilterData;
     
-    if (selectedChannelIds.length === 0) {
-        showToast('请至少选择一个频道', 'warning');
-        return;
-    }
-    
     // 应用筛选到DataTable
     if (dataTableInstance) {
         dataTableInstance.setSelectedChannels(selectedChannelIds);
-        showToast(`已筛选 ${selectedChannelIds.length} 个频道`, 'success');
+        
+        if (selectedChannelIds.length === 0) {
+            showToast('已重置为显示全部频道', 'success');
+        } else {
+            showToast(`已筛选 ${selectedChannelIds.length} 个频道`, 'success');
+        }
     } else {
         // 尝试初始化
         const dataTableElement = document.getElementById('data-table');
         if (dataTableElement) {
             dataTableInstance = new DataTable();
             dataTableInstance.setSelectedChannels(selectedChannelIds);
-            showToast(`已筛选 ${selectedChannelIds.length} 个频道`, 'success');
+            
+            if (selectedChannelIds.length === 0) {
+                showToast('已重置为显示全部频道', 'success');
+            } else {
+                showToast(`已筛选 ${selectedChannelIds.length} 个频道`, 'success');
+            }
         } else {
             showToast('数据表格元素未找到', 'error');
         }

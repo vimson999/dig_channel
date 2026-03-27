@@ -329,8 +329,11 @@ def get_chart_data(current_user):
         # 解析频道ID列表
         channel_ids = []
         if channel_ids_str:
-            channel_ids = [cid.strip() for cid in channel_ids_str.split(',') if cid.strip()]
-        
+            try:
+                channel_ids = [int(cid.strip()) for cid in channel_ids_str.split(',') if cid.strip()]
+            except ValueError:
+                return handle_api_error(400, "频道ID格式错误")
+
         # 获取图表数据（只获取当前用户的数据）
         result = DataService.get_chart_data(
             chart_type=chart_type,
@@ -340,6 +343,7 @@ def get_chart_data(current_user):
             group=group,
             months=months
         )
+
         
         if result['success']:
             return jsonify({

@@ -15,6 +15,7 @@ class YouTubeDataApp {
         this.channels = [];
         this.chartData = {};
         this.chartMeta = {};
+        this.selectedChartChannelIds = []; // 选中的图表频道ID
         this.channelCategories = [];
         this.channelCategoryDefaults = {};
         this.defaultChannelCpm = 2.5;
@@ -283,6 +284,219 @@ class YouTubeDataApp {
             yAxis: { type: 'value' },
             series: []
         });
+    }
+
+    // 打开图表频道筛选弹层
+    async openChartChannelFilter() {
+        const modal = document.getElementById('channelFilterModal');
+        const content = document.getElementById('channelFilterContent');
+
+        if (modal && content) {
+            // 设置当前筛选模式为图表
+            this.channelFilterMode = 'chart';
+            
+            // 显示弹层
+            modal.classList.remove('hidden');
+            setTimeout(() => {
+                content.classList.remove('scale-95', 'opacity-0');
+                content.classList.add('scale-100', 'opacity-100');
+            }, 10);
+
+            // 初始化筛选数据（如果还没有的话）
+            if (!this.allChannelsForFilter || this.allChannelsForFilter.length === 0) {
+                const response = await api.getChannels({ include_inactive: true, per_page: 1000 });
+                this.allChannelsForFilter = response.data.channels || [];
+            }
+            
+            // 同步当前选中的频道 (如果为空则代表全选，我们不再默认全选，而是从空开始)
+            this.tempSelectedIds = [...(this.selectedChartChannelIds || [])];
+            
+            this.filterSearchTerm = '';
+            this.filterSelectedCategory = '';
+            this.filterSelectedStatus = 'active';
+
+            // 渲染列表
+            this.renderFilterList();
+            this.updateFilterCount();
+            
+            // 绑定弹层内特有的临时事件
+            this.bindFilterModalEvents();
+        }
+    }
+
+    // 绑定筛选弹层事件
+    bindFilterModalEvents() {
+        const searchInput = document.getElementById('channelFilterSearch');
+        if (searchInput) {
+            searchInput.value = '';
+            // 移除旧的监听器并添加新的
+            const newSearchInput = searchInput.cloneNode(true);
+            searchInput.parentNode.replaceChild(newSearchInput, searchInput);
+            newSearchInput.addEventListener('input', (e) => {
+                this.filterSearchTerm = e.target.value.toLowerCase();
+                this.renderFilterList();
+            });
+        }
+
+        const categorySelect = document.getElementById('categoryFilter');
+        if (categorySelect) {
+            categorySelect.value = '';
+            const newCategorySelect = categorySelect.cloneNode(true);
+            categorySelect.parentNode.replaceChild(newCategorySelect, categorySelect);
+            newCategorySelect.addEventListener('change', (e) => {
+                this.filterSelectedCategory = e.target.value;
+                this.renderFilterList();
+            });
+        }
+
+        const statusSelect = document.getElementById('statusFilter');
+        if (statusSelect) {
+            statusSelect.value = 'active';
+            const newStatusSelect = statusSelect.cloneNode(true);
+            statusSelect.parentNode.replaceChild(newStatusSelect, statusSelect);
+            newStatusSelect.addEventListener('change', (e) => {
+                this.filterSelectedStatus = e.target.value;
+                this.renderFilterList();
+            });
+        }
+
+        // 覆盖全局函数，重定向到当前实例的方法
+        window.selectAllChannels = () => this.filterSelectAll();
+        window.clearAllChannels = () => this.filterClearAll();
+        window.toggleAllChannelSelection = () => this.filterToggleAll();
+        window.toggleChannelSelection = (id) => this.filterToggleItem(id);
+        window.applyChannelFilter = () => this.applyChartChannelFilter();
+        window.closeChannelFilterModal = () => this.closeFilterModal();
+    }
+
+    // 渲染筛选列表
+    renderFilterList() {
+        const listEl = document.getElementById('channelFilterList');
+        if (!listEl) return;
+
+        const filtered = this.allChannelsForFilter.filter(channel => {
+            const name = (channel.name || channel.channel_name || '').toLowerCase();
+            const category = channel.category || '';
+            const isActive = channel.is_active;
+
+            const matchesSearch = !this.filterSearchTerm || name.includes(this.filterSearchTerm);
+            const matchesCategory = !this.filterSelectedCategory || category === this.filterSelectedCategory;
+            const matchesStatus = !this.filterSelectedStatus || 
+                (this.filterSelectedStatus === 'active' && isActive) ||
+                (this.filterSelectedStatus === 'inactive' && !isActive);
+
+            return matchesSearch && matchesCategory && matchesStatus;
+        });
+
+        if (filtered.length === 0) {
+            listEl.innerHTML = '<div class="p-8 text-center text-gray-500">没有找到匹配的频道</div>';
+            return;
+        }
+
+        this.currentFilteredIds = filtered.map(c => c.id);
+
+        const html = filtered.map(channel => {
+            const isSelected = this.tempSelectedIds.includes(channel.id);
+            const isActive = channel.is_active;
+            return `
+                <div class="p-4 hover:bg-gray-50 transition-colors cursor-pointer ${!isActive ? 'opacity-75' : ''}" onclick="toggleChannelSelection(${channel.id})">
+                    <div class="flex items-center gap-3">
+                        <div class="flex-shrink-0">
+                            <input type="checkbox" ${isSelected ? 'checked' : ''} 
+                                   class="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-500 pointer-events-none"
+                                   readonly>
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <div class="font-medium ${isActive ? 'text-gray-900' : 'text-gray-500'} truncate">
+                                ${channel.name || channel.channel_name}
+                                ${!isActive ? '<span class="text-xs text-gray-400 ml-2">(已暂停)</span>' : ''}
+                            </div>
+                            <div class="text-sm text-gray-500 flex items-center gap-2">
+                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${isActive ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}">
+                                    ${isActive ? '活跃' : '暂停'} • ${channel.category || '未分类'}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        listEl.innerHTML = html;
+    }
+
+    filterToggleItem(id) {
+        const index = this.tempSelectedIds.indexOf(id);
+        if (index > -1) {
+            this.tempSelectedIds.splice(index, 1);
+        } else {
+            this.tempSelectedIds.push(id);
+        }
+        this.renderFilterList();
+        this.updateFilterCount();
+    }
+
+    filterSelectAll() {
+        this.currentFilteredIds.forEach(id => {
+            if (!this.tempSelectedIds.includes(id)) {
+                this.tempSelectedIds.push(id);
+            }
+        });
+        this.renderFilterList();
+        this.updateFilterCount();
+    }
+
+    filterClearAll() {
+        this.tempSelectedIds = [];
+        this.renderFilterList();
+        this.updateFilterCount();
+    }
+
+    filterToggleAll() {
+        this.currentFilteredIds.forEach(id => {
+            const index = this.tempSelectedIds.indexOf(id);
+            if (index > -1) {
+                this.tempSelectedIds.splice(index, 1);
+            } else {
+                this.tempSelectedIds.push(id);
+            }
+        });
+        this.renderFilterList();
+        this.updateFilterCount();
+    }
+
+    updateFilterCount() {
+        const countEl = document.getElementById('selectedChannelCount');
+        if (countEl) {
+            countEl.textContent = this.tempSelectedIds.length;
+        }
+    }
+
+    closeFilterModal() {
+        const modal = document.getElementById('channelFilterModal');
+        const content = document.getElementById('channelFilterContent');
+        if (modal && content) {
+            content.classList.remove('scale-100', 'opacity-100');
+            content.classList.add('scale-95', 'opacity-0');
+            setTimeout(() => modal.classList.add('hidden'), 300);
+        }
+        
+        // 恢复 data-table.js 可能需要的全局函数（如果它们存在）
+        // 这里我们可以选择不恢复，因为 data-table.js 在打开弹窗时会重新绑定它们
+    }
+
+    async applyChartChannelFilter() {
+        this.selectedChartChannelIds = [...this.tempSelectedIds];
+        this.showLoading('正在更新图表...');
+        try {
+            await this.loadChartData();
+            this.hideLoading();
+            this.showToast(this.selectedChartChannelIds.length === 0 ? '已重置为显示全部频道' : `已筛选 ${this.selectedChartChannelIds.length} 个频道`, 'success');
+            this.closeFilterModal();
+        } catch (error) {
+            this.hideLoading();
+            console.error('更新图表失败:', error);
+        }
     }
 
     async loadInitialData() {
@@ -744,6 +958,11 @@ class YouTubeDataApp {
             if (this.chartGranularity === 'monthly') {
                 params.months = this.currentMonthRange;
             }
+            
+            // 如果有选中的频道，则加入筛选参数
+            if (this.selectedChartChannelIds && this.selectedChartChannelIds.length > 0) {
+                params.channel_ids = this.selectedChartChannelIds.join(',');
+            }
 
             const response = await api.getChartData(this.chartMetric, params);
 
@@ -752,10 +971,15 @@ class YouTubeDataApp {
                 this.chartData = chartData || {};
                 this.chartMeta = meta || {};
                 this.refreshChart();
+            } else {
+                this.chartData = { dates: [], series: [] };
+                this.refreshChart();
             }
         } catch (error) {
             console.error('加载图表数据失败:', error);
-            this.showToast('加载图表数据失败', 'error');
+            this.chartData = { dates: [], series: [] };
+            this.refreshChart();
+            this.showToast('加载图表数据失败: ' + (error.message || '服务器内部错误'), 'error');
         }
     }
 
@@ -1130,8 +1354,9 @@ class YouTubeDataApp {
     // 工具方法
     updateChart(option) {
         if (this.chart) {
-            this.chart.setOption(option);
-        }
+            this.chart.setOption(option, true);
+            }
+
     }
 
     showLoading(message = '正在加载...') {

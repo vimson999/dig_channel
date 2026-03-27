@@ -347,7 +347,12 @@ margin: 0;
         </button>
         </div>
         <div class="flex items-center gap-2">
+            <button onclick="app.openChartChannelFilter()" class="flex items-center gap-2 bg-white border border-gray-300 text-gray-700 px-3 py-2 rounded-button font-medium hover:bg-gray-50 transition-all duration-200" title="筛选显示的频道">
+                <i class="fas fa-filter text-xs text-purple-500"></i>
+                <span>筛选频道</span>
+            </button>
             <div class="flex items-center gap-1 bg-gray-50 rounded-button p-1 border border-gray-200">
+
                 <button id="granularity-daily" class="px-3 py-2 text-primary-600 bg-white border border-primary-200 rounded-md font-medium shadow-sm hover:bg-primary-50 transition-all duration-200" onclick="switchGranularity('daily')" title="按天展示">
                     <i class="fas fa-calendar-day"></i>
                 </button>
