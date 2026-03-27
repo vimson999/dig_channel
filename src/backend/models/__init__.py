@@ -12,6 +12,7 @@ from .indie_navigator import OpportunitySignal, UserOpportunityInteraction, Coll
 from .task import PublicationTask
 from .download_task import DownloadTask
 from .system_config import SystemConfig
+from .tts import TTSArticle, TTSSegment
 
 __all__ = [
     'db', 
@@ -24,5 +25,7 @@ __all__ = [
     'OpportunitySignal',
     'PublicationTask',
     'DownloadTask',
-    'SystemConfig'
+    'SystemConfig',
+    'TTSArticle',
+    'TTSSegment'
 ]

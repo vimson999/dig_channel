@@ -321,7 +321,7 @@ class VideoEditorService:
             # 3. 合成正文
             self._synthesize_ffmpeg_direct(
                 image_file=image_file, audio_file=temp_audio, output_path=temp_body,
-                subtitles=adjusted_subs, cta_image_path=cta_img, cta_pos=cta_pos,
+                subtitles=global_subs, cta_image_path=cta_img, cta_pos=cta_pos,
                 audio_start=audio_start, audio_duration=body_duration,
                 transform=transform
             )

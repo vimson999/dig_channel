@@ -1,4 +1,6 @@
 
+const FONT_STACK = '"PingFang SC", "PingFang TC", "Source Han Sans SC", "Source Han Sans CN", "Microsoft YaHei", sans-serif';
+
 /**
  * CanvasRenderer - 专门负责发布工作台的视觉渲染
  */
@@ -39,7 +41,7 @@ const CanvasRenderer = {
             } else {
                 // 截图模式占位：深蓝色顶部 + 提示文字
                 ctx.fillStyle = '#002140'; ctx.fillRect(0, 0, w, h * 0.45);
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.2)'; ctx.textAlign = 'center'; ctx.font = 'bold 40px sans-serif';
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.2)'; ctx.textAlign = 'center'; ctx.font = 'bold 40px ${FONT_STACK}';
                 ctx.fillText('等待上传研报截图...', w/2, h * 0.22);
                 ctx.textAlign = 'left'; // 恢复对齐
             }
@@ -57,7 +59,7 @@ const CanvasRenderer = {
         
         // 2. 标签渲染
         if (!isScreenshot) {
-            ctx.font = `900 30px sans-serif`;
+            ctx.font = `30px ${FONT_STACK}`;
             const tm = ctx.measureText(config.tagText);
             ctx.save(); ctx.beginPath(); ctx.roundRect(leftMargin - 24, currentY - 12, tm.width + 48, 30 + 24, 4); ctx.fillStyle = "#FFFFFF"; ctx.fill(); ctx.restore();
             ctx.fillStyle = '#333'; ctx.textBaseline = 'top'; ctx.fillText(config.tagText, leftMargin, currentY); 
@@ -66,26 +68,26 @@ const CanvasRenderer = {
 
         // 3. 主副标题渲染
         const mainFontSize = 110;
-        ctx.font = `900 ${mainFontSize}px sans-serif`;
+        ctx.font = `${mainFontSize}px ${FONT_STACK}`;
         const mainColor = isScreenshot ? '#FFD700' : this.themes.main;
         config.mainTitle.split('\n').forEach(l => {
             if (!l.trim()) return;
             if (isScreenshot) { ctx.fillStyle = mainColor; ctx.textBaseline = 'top'; ctx.fillText(l, leftMargin, currentY); }
-            else { this.drawHaloText(ctx, l, leftMargin, currentY, mainColor, this.themes.stroke, mainFontSize); }
+            else { this.drawHaloText(ctx, l, leftMargin, currentY, mainColor, this.themes.stroke, mainFontSize, "normal"); }
             currentY += mainFontSize * 1.3; 
         });
 
         if (config.subTitle) {
             const subColor = isScreenshot ? '#FFFFFF' : this.themes.sub;
-            if (isScreenshot) { ctx.font = `700 56px sans-serif`; ctx.fillStyle = subColor; ctx.fillText(config.subTitle, leftMargin, currentY + 15); }
-            else { this.drawHaloText(ctx, config.subTitle, leftMargin, currentY + 15, subColor, this.themes.stroke, 56, "700"); }
+            if (isScreenshot) { ctx.font = `56px ${FONT_STACK}`; ctx.fillStyle = subColor; ctx.fillText(config.subTitle, leftMargin, currentY + 15); }
+            else { this.drawHaloText(ctx, config.subTitle, leftMargin, currentY + 15, subColor, this.themes.stroke, 56, "normal"); }
         }
 
         // 4. 页脚日期
         const footerY = h - 100;
         const footerColor = isScreenshot ? 'rgba(200, 200, 200, 0.8)' : this.themes.date;
         ctx.save(); ctx.beginPath(); ctx.moveTo(leftMargin, footerY - 47); ctx.lineTo(leftMargin + 60, footerY - 47); ctx.strokeStyle = footerColor; ctx.lineWidth = 2; ctx.stroke();
-        ctx.font = `600 32px sans-serif`; ctx.fillStyle = footerColor; ctx.fillText(config.dateText, leftMargin, footerY - 32); ctx.restore();
+        ctx.font = `600 32px ${FONT_STACK}`; ctx.fillStyle = footerColor; ctx.fillText(config.dateText, leftMargin, footerY - 32); ctx.restore();
     },
 
     /**
@@ -132,7 +134,7 @@ const CanvasRenderer = {
             ctx.fillStyle = '#F8F9FA';
             ctx.fillRect(40, 40, w - 80, splitY - 80);
             ctx.fillStyle = '#DEE2E6';
-            ctx.textAlign = 'center'; ctx.font = 'bold 30px sans-serif';
+            ctx.textAlign = 'center'; ctx.font = 'bold 30px ${FONT_STACK}';
             ctx.fillText('等待上传研报截图...', w / 2, splitY / 2);
         }
 
@@ -144,7 +146,7 @@ const CanvasRenderer = {
         // 主标题绘制 (亮黄色 #FFD700)
         let mainFs = 95;
         if (config.mainTitle.length > 25) mainFs = 82;
-        ctx.font = `900 ${mainFs}px sans-serif`;
+        ctx.font = `900 ${mainFs}px ${FONT_STACK}`;
         ctx.fillStyle = '#FFD700';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
@@ -158,7 +160,7 @@ const CanvasRenderer = {
         // 副标题绘制 (纯白 #FFFFFF)
         currentY += 40;
         const subFs = 55;
-        ctx.font = `500 ${subFs}px sans-serif`;
+        ctx.font = `500 ${subFs}px ${FONT_STACK}`;
         ctx.fillStyle = '#FFFFFF';
         const subLines = this._wrapText(ctx, config.subTitle, maxTextW).slice(0, 3);
         subLines.forEach(line => {
@@ -172,7 +174,7 @@ const CanvasRenderer = {
         // 精致短横线 (位于文字上方 15px)
         ctx.fillRect(leftPadding, brandY - 45, 100, 2);
         // 品牌文字
-        ctx.font = '500 38px sans-serif';
+        ctx.font = '500 38px ${FONT_STACK}';
         ctx.fillText(config.dateText, leftPadding, brandY - 30);
     },
 
@@ -251,10 +253,10 @@ const CanvasRenderer = {
 
         const hMargin = 100; const centerY = barY + (barHeight / 2);
         ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-        ctx.font = `500 42px sans-serif`; ctx.fillStyle = s.text;
+        ctx.font = `500 42px ${FONT_STACK}`; ctx.fillStyle = s.text;
         ctx.fillText(lines[0], hMargin, centerY);
 
-        ctx.textAlign = 'right'; ctx.font = `600 48px sans-serif`; ctx.fillStyle = s.action;
+        ctx.textAlign = 'right'; ctx.font = `600 48px ${FONT_STACK}`; ctx.fillStyle = s.action;
         const actionTxt = lines[1] || lines[0];
         const displayTxt = (actionTxt.startsWith('↓') || actionTxt.includes('PDF')) ? actionTxt : "↓ " + actionTxt;
         ctx.fillText(displayTxt, w - hMargin, centerY);
@@ -267,7 +269,7 @@ const CanvasRenderer = {
             else if (i === lines.length - 1 && lines.length > 1) { 
                 fs = 48; fw = '600'; color = s.action; 
             } 
-            ctx.font = `${fw} ${fs}px sans-serif`;
+            ctx.font = `${fw} ${fs}px ${FONT_STACK}`;
             return { text: line, width: ctx.measureText(line).width, height: fs, fw, color };
         });
 
@@ -289,7 +291,7 @@ const CanvasRenderer = {
         ctx.shadowColor = 'transparent'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
         let currY = by + paddingV;
         metrics.forEach((m, i) => {
-            ctx.font = `${m.fw} ${m.height}px sans-serif`; ctx.fillStyle = m.color;
+            ctx.font = `${m.fw} ${m.height}px ${FONT_STACK}`; ctx.fillStyle = m.color;
             let txt = m.text;
             if (i === metrics.length - 1 && lines.length > 1 && !txt.startsWith('↓') && !txt.includes('PDF')) txt = "↓ " + txt;
             ctx.fillText(txt, bx + boxW / 2, currY); currY += m.height + lineSpacing;
@@ -300,7 +302,7 @@ const CanvasRenderer = {
      * 工具：Halo 文字
      */
     drawHaloText(ctx, text, x, y, color, strokeColor, fontSize, fontWeight = "900") {
-        ctx.save(); ctx.font = `${fontWeight} ${fontSize}px sans-serif`; ctx.textBaseline = 'top';
+        ctx.save(); ctx.font = `${fontWeight} ${fontSize}px ${FONT_STACK}`; ctx.textBaseline = 'top';
         ctx.strokeStyle = strokeColor; ctx.lineWidth = fontSize * 0.04; ctx.lineJoin = 'round'; ctx.strokeText(text, x, y);
         ctx.fillStyle = color; ctx.fillText(text, x, y); ctx.restore();
     },

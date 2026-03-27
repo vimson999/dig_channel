@@ -13,6 +13,10 @@ def register_all_apis(app):
     # 注册水印工具 (独立模块)
     from .watermark import watermark_bp
     app.register_blueprint(watermark_bp)
+
+    # 注册TTS V2模块
+    from api.tts_v2 import tts_v2_bp
+    app.register_blueprint(tts_v2_bp)
     
     # 创建API信息端点
     @app.route('/api', methods=['GET'])

@@ -70,7 +70,7 @@ class ThumbnailService:
         self.output_dir = os.path.join(project_root, 'data', 'generated_thumbnails')
         if not os.path.exists(self.output_dir): os.makedirs(self.output_dir, exist_ok=True)
         self.font_path = self._find_font()
-        logger.info(f"Using font: {self.font_path}")
+        logger.info(f"🎨 [Font Discovery] Selected font: {self.font_path}")
 
     def _find_font(self):
         candidates = [
@@ -79,8 +79,12 @@ class ThumbnailService:
             '/usr/share/fonts/truetype/source-han-sans/SourceHanSansSC-Heavy.otf',
             'C:\\Windows\\Fonts\\msyhbd.ttc'
         ]
+        # 添加日志以确定最终选用的字体，但不修改逻辑
         for path in candidates:
-            if os.path.exists(path): return path
+            if os.path.exists(path):
+                logger.info(f"✅ [Font Selection Check] Final font path: {path}")
+                return path
+        logger.warning("⚠️ [Font Selection Check] No premium fonts found, falling back to default.")
         return None 
 
     def _parse_rgba(self, rgba_str: str) -> Tuple[int, int, int, int]:

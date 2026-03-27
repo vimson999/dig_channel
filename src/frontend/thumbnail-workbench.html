@@ -81,6 +81,9 @@
                     <select id="formatSelect" class="w-full bg-white border border-gray-200 rounded-xl p-3 text-gray-700 focus:ring-2 focus:ring-primary-500 outline-none shadow-sm cursor-pointer transition-all">
                         <option value="horizontal">💻 横版封面 (文字在左)</option>
                         <option value="horizontal_reverse">💻 横版封面 (文字在右)</option>
+                        <option value="horizontal_v2">💻 横版封面 (V2 霓虹研报)</option>
+                        <option value="horizontal_stack">💻 横版封面 (上下分层)</option>
+                        <option value="horizontal_diagonal">💻 横版封面 (斜线对角)</option>
                         <option value="vertical">📱 竖版视频 (9:16)</option>
                         <option value="wx_cover">🟢 视频号封面 (3:4)</option>
                         <option value="podcast">🎙️ 播客封面 (1:1)</option>
@@ -111,7 +114,14 @@
                 <!-- 情绪配色 -->
                 <div>
                     <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">市场情绪 (主色调)</label>
-                    <div class="grid grid-cols-3 gap-3">
+                    <div class="grid grid-cols-4 gap-2">
+                        <label class="cursor-pointer">
+                            <input type="radio" name="emotion" value="pro" class="peer sr-only" checked>
+                            <div class="text-center p-2 rounded-xl bg-white border border-gray-100 peer-checked:border-amber-600 peer-checked:bg-amber-50 transition-all shadow-sm">
+                                <div class="w-full h-1.5 bg-amber-600 rounded-full mb-2"></div>
+                                <span class="text-[10px] font-bold text-gray-500 font-mono tracking-tighter">专业 PRO</span>
+                            </div>
+                        </label>
                         <label class="cursor-pointer">
                             <input type="radio" name="emotion" value="macro" class="peer sr-only">
                             <div class="text-center p-2 rounded-xl bg-white border border-gray-100 peer-checked:border-yellow-400 peer-checked:bg-yellow-50 transition-all shadow-sm">
@@ -120,7 +130,7 @@
                             </div>
                         </label>
                         <label class="cursor-pointer">
-                            <input type="radio" name="emotion" value="bull" class="peer sr-only" checked>
+                            <input type="radio" name="emotion" value="bull" class="peer sr-only">
                             <div class="text-center p-2 rounded-xl bg-white border border-gray-100 peer-checked:border-green-400 peer-checked:bg-green-50 transition-all shadow-sm">
                                 <div class="w-full h-1.5 bg-green-400 rounded-full mb-2"></div>
                                 <span class="text-[10px] font-bold text-gray-500">看多</span>
