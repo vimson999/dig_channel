@@ -27,7 +27,11 @@ const CanvasRenderer = {
     drawCover(ctx, canvas, images, config) {
         if (!ctx) return;
         const w = canvas.width, h = canvas.height;
-        const isScreenshot = (config.mode === 'screenshot');
+        const mode = config.mode || 'preset';
+        const isScreenshot = (mode === 'screenshot');
+        const isPodcast = (mode === 'podcast');
+        const isScreenshotStyle = isScreenshot || isPodcast;
+
         ctx.clearRect(0, 0, w, h);
         
         // 1. 背景渲染
@@ -41,11 +45,25 @@ const CanvasRenderer = {
             } else {
                 // 截图模式占位：深蓝色顶部 + 提示文字
                 ctx.fillStyle = '#002140'; ctx.fillRect(0, 0, w, h * 0.45);
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.2)'; ctx.textAlign = 'center'; ctx.font = 'bold 40px ${FONT_STACK}';
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.2)'; ctx.textAlign = 'center'; ctx.font = `bold 40px ${FONT_STACK}`;
                 ctx.fillText('等待上传研报截图...', w/2, h * 0.22);
-                ctx.textAlign = 'left'; // 恢复对齐
+                ctx.textAlign = 'left';
             }
             ctx.fillStyle = '#001529'; ctx.fillRect(0, h * 0.45, w, h * 0.55);
+        } else if (isPodcast) {
+            if (images.custom.src && images.custom.complete && images.custom.naturalWidth > 0) {
+                const trans = config.transform || { x: 0, y: 0, scale: 1 };
+                this.drawImageCover(ctx, images.custom, 0, 0, w, h, trans.x, trans.y, trans.scale);
+                // 播客模式全屏遮罩：左侧深色渐变 (更深一点以增加对比度)
+                const maskGradient = ctx.createLinearGradient(0, 0, w * 0.8, 0);
+                maskGradient.addColorStop(0, 'rgba(10, 10, 10, 0.92)');
+                maskGradient.addColorStop(0.4, 'rgba(10, 10, 10, 0.6)');
+                maskGradient.addColorStop(1, 'rgba(10, 10, 10, 0)');
+                ctx.fillStyle = maskGradient; ctx.fillRect(0, 0, w, h);
+            } else {
+                ctx.fillStyle = '#111111'; ctx.fillRect(0, 0, w, h);
+                // 彻底移除占位提示文字
+            }
         } else if (images.bg.complete && images.bg.naturalWidth > 0) {
             this.drawImageCover(ctx, images.bg, 0, 0, w, h);
             const opacity = config.overlayOpacity || 0.5; // 使用动态透明度
@@ -55,10 +73,35 @@ const CanvasRenderer = {
         } else { ctx.fillStyle = this.themes.bg; ctx.fillRect(0, 0, w, h); }
 
         const leftMargin = 120;
-        let currentY = isScreenshot ? 520 : 180;
+
+        // --- 播客模式新增：顶部身份标签栏 (包裹文字的小标签) ---
+        if (isPodcast) {
+            const tagTop = 320; // 整体下移，使内容垂直居中
+            const barHeight = 100; // 增加高度以适应 62px 大字体
+            const tagPadding = 48; // 增加内边距
+            ctx.save();
+            ctx.font = `bold 62px ${FONT_STACK}`; // 字体放大至 62px
+            const tagText = '内资机构 · 闭门会';
+            const textWidth = ctx.measureText(tagText).width;
+            const tagWidth = textWidth + tagPadding * 2;
+            
+            // 绘制金色实心背景小标签 (对齐 leftMargin)
+            ctx.fillStyle = '#FFD700';
+            ctx.beginPath();
+            ctx.roundRect(leftMargin, tagTop, tagWidth, barHeight, 10); // 圆角调至 10px
+            ctx.fill();
+            
+            ctx.fillStyle = '#000000'; 
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(tagText, leftMargin + tagWidth / 2, tagTop + barHeight / 2 + 5); // 垂直微调
+            ctx.restore();
+        }
+
+        let currentY = isScreenshot ? 520 : (isPodcast ? 475 : 180); // 播客模式下移至 475px 以适应更大的标签
         
         // 2. 标签渲染
-        if (!isScreenshot) {
+        if (!isScreenshotStyle) {
             ctx.font = `30px ${FONT_STACK}`;
             const tm = ctx.measureText(config.tagText);
             ctx.save(); ctx.beginPath(); ctx.roundRect(leftMargin - 24, currentY - 12, tm.width + 48, 30 + 24, 4); ctx.fillStyle = "#FFFFFF"; ctx.fill(); ctx.restore();
@@ -69,25 +112,70 @@ const CanvasRenderer = {
         // 3. 主副标题渲染
         const mainFontSize = 110;
         ctx.font = `${mainFontSize}px ${FONT_STACK}`;
-        const mainColor = isScreenshot ? '#FFD700' : this.themes.main;
+        const mainColor = isScreenshotStyle ? '#FFD700' : this.themes.main;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+
         config.mainTitle.split('\n').forEach(l => {
             if (!l.trim()) return;
-            if (isScreenshot) { ctx.fillStyle = mainColor; ctx.textBaseline = 'top'; ctx.fillText(l, leftMargin, currentY); }
-            else { this.drawHaloText(ctx, l, leftMargin, currentY, mainColor, this.themes.stroke, mainFontSize, "normal"); }
+            if (isScreenshotStyle) { 
+                ctx.fillStyle = mainColor; 
+                ctx.fillText(l, leftMargin, currentY); 
+            }
+            else { 
+                this.drawHaloText(ctx, l, leftMargin, currentY, mainColor, this.themes.stroke, mainFontSize, "normal"); 
+            }
             currentY += mainFontSize * 1.3; 
         });
 
         if (config.subTitle) {
-            const subColor = isScreenshot ? '#FFFFFF' : this.themes.sub;
-            if (isScreenshot) { ctx.font = `56px ${FONT_STACK}`; ctx.fillStyle = subColor; ctx.fillText(config.subTitle, leftMargin, currentY + 15); }
-            else { this.drawHaloText(ctx, config.subTitle, leftMargin, currentY + 15, subColor, this.themes.stroke, 56, "normal"); }
+            currentY += 15; 
+            const subColor = isScreenshotStyle ? '#FFFFFF' : this.themes.sub;
+            const subFontSize = 56;
+            ctx.font = `${subFontSize}px ${FONT_STACK}`;
+            if (isScreenshotStyle) { 
+                ctx.fillStyle = subColor; 
+                ctx.fillText(config.subTitle, leftMargin, currentY); 
+            }
+            else { 
+                this.drawHaloText(ctx, config.subTitle, leftMargin, currentY, subColor, this.themes.stroke, subFontSize, "normal"); 
+            }
         }
 
         // 4. 页脚日期
         const footerY = h - 100;
-        const footerColor = isScreenshot ? 'rgba(200, 200, 200, 0.8)' : this.themes.date;
-        ctx.save(); ctx.beginPath(); ctx.moveTo(leftMargin, footerY - 47); ctx.lineTo(leftMargin + 60, footerY - 47); ctx.strokeStyle = footerColor; ctx.lineWidth = 2; ctx.stroke();
-        ctx.font = `600 32px ${FONT_STACK}`; ctx.fillStyle = footerColor; ctx.fillText(config.dateText, leftMargin, footerY - 32); ctx.restore();
+        const footerColor = isScreenshotStyle ? 'rgba(255, 255, 255, 0.8)' : this.themes.date;
+        ctx.save(); 
+        
+        if (isPodcast) {
+            // 进阶：绘制小图标
+            ctx.fillStyle = footerColor;
+            const iconSize = 28;
+            this._drawCalendarIcon(ctx, leftMargin, footerY - 33, iconSize);
+            
+            ctx.font = `600 32px ${FONT_STACK}`;
+            ctx.fillText(config.dateText, leftMargin + iconSize + 15, footerY - 32);
+        } else {
+            ctx.beginPath(); ctx.moveTo(leftMargin, footerY - 47); ctx.lineTo(leftMargin + 60, footerY - 47); ctx.strokeStyle = footerColor; ctx.lineWidth = 2; ctx.stroke();
+            ctx.font = `600 32px ${FONT_STACK}`; ctx.fillStyle = footerColor; ctx.fillText(config.dateText, leftMargin, footerY - 32); 
+        }
+        ctx.restore();
+    },
+
+    /**
+     * 内部工具：绘制极简日历图标
+     */
+    _drawCalendarIcon(ctx, x, y, size) {
+        ctx.save();
+        ctx.strokeStyle = ctx.fillStyle;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y + size*0.2, size, size * 0.8);
+        ctx.beginPath();
+        ctx.moveTo(x, y + size*0.45); ctx.lineTo(x + size, y + size*0.45);
+        ctx.moveTo(x + size*0.25, y); ctx.lineTo(x + size*0.25, y + size*0.3);
+        ctx.moveTo(x + size*0.75, y); ctx.lineTo(x + size*0.75, y + size*0.3);
+        ctx.stroke();
+        ctx.restore();
     },
 
     /**

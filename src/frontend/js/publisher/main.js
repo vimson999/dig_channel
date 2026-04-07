@@ -222,7 +222,7 @@ function bindEvents() {
     document.getElementById('thumb_bg_mode')?.addEventListener('change', () => {
         const mode = document.getElementById('thumb_bg_mode').value;
         document.getElementById('preset_bg_area')?.classList.toggle('hidden', mode !== 'preset');
-        document.getElementById('screenshot_bg_area')?.classList.toggle('hidden', mode !== 'screenshot');
+        document.getElementById('screenshot_bg_area')?.classList.toggle('hidden', mode === 'preset');
         refreshPreviews();
     });
 

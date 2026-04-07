@@ -71,7 +71,7 @@ class YouTubeDataApp {
                 try {
                     await Promise.all([
                         this.loadChartData(),
-                        this.loadTableData()
+                        window.dataTableInstance ? window.dataTableInstance.setRange(this.currentTimeRange) : Promise.resolve()
                     ]);
                     this.hideLoading();
                 } catch (error) {
@@ -510,7 +510,6 @@ class YouTubeDataApp {
             ]);
 
             if (channelsResult) {
-                await this.loadTableData();
                 await this.loadChartData();
             }
 
@@ -816,136 +815,6 @@ class YouTubeDataApp {
         }).join('');
 
         container.innerHTML = `<div class="space-y-3">${html}</div>`;
-    }
-
-    async loadTableData() {
-        try {
-            // 计算日期范围 - 默认从本月1日开始
-            const endDate = new Date();
-            const startDate = new Date();
-            
-            // 如果是默认的7天，改为本月1日到今天
-            if (this.currentTimeRange === 7) {
-                startDate.setDate(1); // 本月1日
-            } else {
-                startDate.setDate(endDate.getDate() - this.currentTimeRange);
-            }
-            
-            const response = await api.getTableData({
-                active_only: true,
-                start_date: this.formatDate(startDate),
-                end_date: this.formatDate(endDate),
-                per_page: 100  // 增加每页返回数量
-            });
-
-            if (response.success) {
-                // 调试输出
-                console.log('=== 首页数据表格调试信息 ===');
-                console.log('当前时间范围:', this.currentTimeRange);
-                console.log('API响应:', response);
-                console.log('表格数据:', response.data);
-                
-                this.renderTable(response.data);
-            }
-        } catch (error) {
-            console.error('加载表格数据失败:', error);
-        }
-    }
-    
-    formatDate(date) {
-        return date.toISOString().split('T')[0];
-    }
-
-    renderTable(data) {
-        const table = document.getElementById('data-table');
-        if (!table) return;
-
-        const thead = table.querySelector('thead');
-        const tbody = table.querySelector('tbody');
-
-        // 生成表头
-        let headerHtml = `
-            <tr class="bg-gray-50">
-                <th class="sticky left-0 bg-gray-50 px-6 py-4 border-b border-gray-200 font-medium text-gray-500 text-left" rowspan="2">日期</th>
-        `;
-
-        data.channels.forEach((channel, index) => {
-            const channelClass = index % 2 === 0 ? 'channel-group-even' : 'channel-group-odd';
-            headerHtml += `
-                <th class="px-6 py-4 border-b border-gray-200 font-medium text-gray-700 text-center ${channelClass} channel-divider" colspan="7">
-                    ${channel.channel_name} (CPM: ${channel.cpm})
-                </th>
-            `;
-        });
-
-        headerHtml += '</tr><tr class="bg-gray-50">';
-
-        data.channels.forEach((channel, index) => {
-            const channelClass = index % 2 === 0 ? 'channel-group-even' : 'channel-group-odd';
-            headerHtml += `
-                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} channel-divider whitespace-nowrap min-w-[100px]">订阅数</th>
-                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[110px]">总浏览量</th>
-                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[100px]">视频总量</th>
-                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[100px]">新增订阅</th>
-                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[100px]">新增浏览</th>
-                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[100px]">新增视频</th>
-                <th class="px-3 py-4 border-b border-gray-200 font-medium text-gray-500 text-right ${channelClass} whitespace-nowrap min-w-[100px]">预估收入</th>
-            `;
-        });
-
-        headerHtml += '</tr>';
-        thead.innerHTML = headerHtml;
-
-        // 生成数据行
-        let bodyHtml = '';
-        data.rows.forEach(row => {
-            bodyHtml += `
-                <tr>
-                    <td class="sticky left-0 bg-white px-6 py-4 border-b border-gray-200 text-gray-900">
-                        ${Utils.formatDate(row.date)}
-                    </td>
-            `;
-
-            row.channels_data.forEach((channelData, channelIndex) => {
-                const subsciberChange = channelData.subscriber_change || 0;
-                const viewChange = channelData.view_change || 0;
-                const videoChange = channelData.video_change || 0;
-                
-                // 使用API返回的预估收入
-                const estimatedRevenue = channelData.estimated_revenue || 0;
-                
-                // 频道区分样式
-                const channelClass = channelIndex % 2 === 0 ? 'channel-group-even' : 'channel-group-odd';
-
-                bodyHtml += `
-                    <td class="px-3 py-4 border-b border-gray-200 text-gray-900 text-right ${channelClass} channel-divider whitespace-nowrap min-w-[100px]">
-                        ${Utils.formatNumber(channelData.subscribers)}
-                    </td>
-                    <td class="px-3 py-4 border-b border-gray-200 text-gray-900 text-right ${channelClass} whitespace-nowrap min-w-[110px]">
-                        ${Utils.formatNumber(channelData.total_views)}
-                    </td>
-                    <td class="px-3 py-4 border-b border-gray-200 text-gray-900 text-right ${channelClass} whitespace-nowrap min-w-[100px]">
-                        ${channelData.video_count || 0}
-                    </td>
-                    <td class="px-3 py-4 border-b border-gray-200 ${subsciberChange > 0 ? 'text-green-600' : 'text-gray-900'} text-right ${channelClass} whitespace-nowrap min-w-[100px]">
-                        ${Utils.formatChange(subsciberChange, true)}
-                    </td>
-                    <td class="px-3 py-4 border-b border-gray-200 ${viewChange > 0 ? 'text-green-600' : 'text-gray-900'} text-right ${channelClass} whitespace-nowrap min-w-[100px]">
-                        ${Utils.formatChange(viewChange, true)}
-                    </td>
-                    <td class="px-3 py-4 border-b border-gray-200 ${videoChange > 0 ? 'text-green-600' : 'text-gray-900'} text-right ${channelClass} whitespace-nowrap min-w-[100px]">
-                        ${Utils.formatChange(videoChange, true)}
-                    </td>
-                    <td class="px-3 py-4 border-b border-gray-200 ${estimatedRevenue > 0 ? 'text-blue-600 font-medium' : 'text-gray-900'} text-right ${channelClass} whitespace-nowrap min-w-[100px]">
-                        ${estimatedRevenue > 0 ? Utils.formatCurrency(estimatedRevenue) : '-'}
-                    </td>
-                `;
-            });
-
-            bodyHtml += '</tr>';
-        });
-
-        tbody.innerHTML = bodyHtml;
     }
 
     async loadChartData() {

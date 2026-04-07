@@ -334,8 +334,7 @@ class DataTable {
         
         if (statusBar && statusText) {
             statusText.textContent = message;
-            statusBar.classList.remove('d-none', 'alert-danger');
-            statusBar.classList.add('alert-info');
+            statusBar.classList.remove('hidden');
         }
     }
 
@@ -343,7 +342,7 @@ class DataTable {
     hideLoading() {
         const statusBar = document.getElementById('status-bar');
         if (statusBar) {
-            statusBar.classList.add('d-none');
+            statusBar.classList.add('hidden');
         }
     }
 
@@ -354,8 +353,7 @@ class DataTable {
         
         if (statusBar && statusText) {
             statusText.textContent = message;
-            statusBar.classList.remove('d-none', 'alert-info');
-            statusBar.classList.add('alert-danger');
+            statusBar.classList.remove('hidden');
             
             setTimeout(() => {
                 this.hideLoading();
@@ -378,6 +376,26 @@ class DataTable {
             console.error('加载频道列表失败:', error);
             return [];
         }
+    }
+
+    // 设置日期范围（从今天往前推指定天数）
+    setRange(days) {
+        console.log(`📊 [DataTable] 设置日期范围: ${days} 天`);
+        const endDate = new Date();
+        const startDate = new Date();
+        
+        if (days === 7) {
+            // 特殊逻辑：最近 7 天默认为本月 1 日到今天，保持与 new-main.js 一致
+            startDate.setDate(1);
+        } else {
+            startDate.setDate(endDate.getDate() - parseInt(days, 10));
+        }
+        
+        this.startDate = Utils.formatDate(startDate);
+        this.endDate = Utils.formatDate(endDate);
+        this.currentPage = 1; // 重置到第一页
+        
+        return this.loadTableData();
     }
 
     // 设置选中的频道
@@ -563,6 +581,14 @@ async function openChannelFilterModal() {
     const content = document.getElementById('channelFilterContent');
     
     if (modal && content) {
+        // 显式绑定全局函数，确保不会被 new-main.js 的绑定覆盖
+        window.selectAllChannels = selectAllChannels;
+        window.clearAllChannels = clearAllChannels;
+        window.toggleAllChannelSelection = toggleAllChannelSelection;
+        window.toggleChannelSelection = toggleChannelSelection;
+        window.applyChannelFilter = applyChannelFilter;
+        window.closeChannelFilterModal = closeChannelFilterModal;
+
         // 显示弹层
         modal.classList.remove('hidden');
         setTimeout(() => {
@@ -692,7 +718,11 @@ function bindChannelFilterEvents() {
     // 搜索框事件
     const searchInput = document.getElementById('channelFilterSearch');
     if (searchInput) {
-        searchInput.addEventListener('input', (e) => {
+        // 克隆节点以移除旧的事件监听器（防止与 new-main.js 冲突）
+        const newSearchInput = searchInput.cloneNode(true);
+        searchInput.parentNode.replaceChild(newSearchInput, searchInput);
+        newSearchInput.value = channelFilterData.searchTerm || '';
+        newSearchInput.addEventListener('input', (e) => {
             channelFilterData.searchTerm = e.target.value.toLowerCase();
             filterChannelList();
         });
@@ -701,7 +731,10 @@ function bindChannelFilterEvents() {
     // 分类筛选事件
     const categorySelect = document.getElementById('categoryFilter');
     if (categorySelect) {
-        categorySelect.addEventListener('change', (e) => {
+        const newCategorySelect = categorySelect.cloneNode(true);
+        categorySelect.parentNode.replaceChild(newCategorySelect, categorySelect);
+        newCategorySelect.value = channelFilterData.selectedCategory || '';
+        newCategorySelect.addEventListener('change', (e) => {
             channelFilterData.selectedCategory = e.target.value;
             filterChannelList();
         });
@@ -710,7 +743,10 @@ function bindChannelFilterEvents() {
     // 状态筛选事件
     const statusSelect = document.getElementById('statusFilter');
     if (statusSelect) {
-        statusSelect.addEventListener('change', (e) => {
+        const newStatusSelect = statusSelect.cloneNode(true);
+        statusSelect.parentNode.replaceChild(newStatusSelect, statusSelect);
+        newStatusSelect.value = channelFilterData.selectedStatus || 'active';
+        newStatusSelect.addEventListener('change', (e) => {
             channelFilterData.selectedStatus = e.target.value;
             filterChannelList();
         });

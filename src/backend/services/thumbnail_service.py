@@ -108,21 +108,38 @@ class ThumbnailService:
             actual_stroke_width = max(2, int(round(stroke_width)))
             draw.text((x, y), text, font=font, fill=fill_color, stroke_width=actual_stroke_width, stroke_fill=stroke_color)
 
+    def _draw_calendar_icon(self, draw, x, y, size, color):
+        # 绘制极简日历图标
+        # 外框
+        draw.rectangle([x, y + size*0.2, x + size, y + size], outline=color, width=2)
+        # 横线
+        draw.line([x, y + size*0.45, x + size, y + size*0.45], fill=color, width=2)
+        # 两个小竖线 (提手)
+        draw.line([x + size*0.25, y, x + size*0.25, y + size*0.3], fill=color, width=2)
+        draw.line([x + size*0.75, y, x + size*0.75, y + size*0.3], fill=color, width=2)
+
     def generate_thumbnail(self, main_title: str, sub_title: str = "", date_text: str = "", tag_text: str = "",
                           bg_preset_index: int = 0, layout: str = 'left', output_filename: str = None,
-                          custom_bg_path: str = None, overlay_opacity: float = 0.5, transform: dict = None) -> str:
+                          custom_bg_path: str = None, overlay_opacity: float = 0.5, transform: dict = None,
+                          mode: str = 'preset') -> str:
         try:
             if bg_preset_index < 0 or bg_preset_index >= len(BACKGROUNDS): bg_preset_index = 0
             bg_config = BACKGROUNDS[bg_preset_index]
             theme = PRESETS.get(bg_config['config']['scheme'], PRESETS['morgan'])
-            is_custom = bool(custom_bg_path and os.path.exists(custom_bg_path))
             
-            if is_custom:
+            is_screenshot = (mode == 'screenshot')
+            is_podcast = (mode == 'podcast')
+            is_custom_bg = bool(custom_bg_path and os.path.exists(custom_bg_path))
+            
+            # 判断是否应用特定视觉标识 (VI)
+            is_screenshot_style = is_screenshot or is_podcast
+
+            if is_screenshot_style and is_custom_bg:
+                # 实现与前端一致的 drawImageCover 逻辑 (带变换)
                 img = Image.new('RGBA', (1920, 1080), (0, 21, 41, 255)) 
                 screenshot = Image.open(custom_bg_path).convert('RGBA')
                 
-                # 实现与前端一致的 drawImageCover 逻辑 (带变换)
-                target_w, target_h = 1920, 486
+                target_w, target_h = 1920, (486 if is_screenshot else 1080)
                 sw_orig, sh_orig = screenshot.size
                 r = sw_orig / sh_orig
                 cr = target_w / target_h
@@ -136,9 +153,9 @@ class ThumbnailService:
                 
                 # 应用变换
                 trans = transform or {'x': 0, 'y': 0, 'scale': 1.0}
-                scale = trans.get('scale', 1.0)
-                offset_x = trans.get('x', 0)
-                offset_y = trans.get('y', 0)
+                scale = float(trans.get('scale', 1.0))
+                offset_x = float(trans.get('x', 0))
+                offset_y = float(trans.get('y', 0))
                 
                 sw = int(rw * scale)
                 sh = int(rh * scale)
@@ -151,40 +168,69 @@ class ThumbnailService:
                 
                 screenshot_resized = screenshot.resize((sw, sh), Image.Resampling.LANCZOS)
                 
-                # 创建一个裁剪层
-                paste_layer = Image.new('RGBA', (1920, 1080), (0, 0, 0, 0))
-                paste_layer.paste(screenshot_resized, (final_x, final_y))
-                
-                # 裁剪到顶部区域
-                mask = Image.new('L', (1920, 1080), 0)
-                mask_draw = ImageDraw.Draw(mask)
-                mask_draw.rectangle([0, 0, 1920, 486], fill=255)
-                
-                img.paste(paste_layer, (0, 0), mask)
-            else:
-                bg_path_default = os.path.join(self.asset_dir, 'default', bg_config['file'])
-                bg_path_root = os.path.join(self.asset_dir, bg_config['file'])
-                bg_path = bg_path_default if os.path.exists(bg_path_default) else (bg_path_root if os.path.exists(bg_path_root) else None)
-                img = Image.open(bg_path).convert('RGBA') if bg_path else Image.new('RGB', (1920, 1080), theme['bg']).convert('RGBA')
-                img = ImageOps.fit(img, (1920, 1080), method=Image.Resampling.LANCZOS)
-                blur_amount = bg_config['config'].get('blur', 0)
-                if blur_amount > 0: img = img.filter(ImageFilter.GaussianBlur(radius=blur_amount))
-                mask_alpha = bg_config['config'].get('mask', 40) / 100.0
-                if mask_alpha > 0:
+                if is_screenshot:
+                    # 截图模式：裁剪到顶部 45% 区域，底部为深蓝色
+                    paste_layer = Image.new('RGBA', (1920, 1080), (0, 0, 0, 0))
+                    paste_layer.paste(screenshot_resized, (final_x, final_y))
+                    mask = Image.new('L', (1920, 1080), 0)
+                    mask_draw = ImageDraw.Draw(mask)
+                    mask_draw.rectangle([0, 0, 1920, 486], fill=255)
+                    img.paste(paste_layer, (0, 0), mask)
+                    
+                    # 底部背景深蓝色
+                    draw_bg = ImageDraw.Draw(img)
+                    draw_bg.rectangle([0, 486, 1920, 1080], fill=(0, 21, 41, 255))
+                else:
+                    # 播客模式：全屏图片 + 遮罩
+                    img.paste(screenshot_resized, (final_x, final_y))
+                    # 播客全屏遮罩：左侧深色渐变 (匹配前端更深的渐变)
                     mask_layer = Image.new('L', (1920, 1080), 0)
                     mask_draw = ImageDraw.Draw(mask_layer)
-                    base_color = (0, 0, 0) if theme['isDark'] else (0, 15, 30)
-                    grad_w = int(1920 * 0.7)
+                    grad_w = int(1920 * 0.8)
                     for x in range(grad_w):
-                        alpha = int(255 * mask_alpha * (1 - x / grad_w))
-                        line_x = x if layout == 'left' else (1919 - x)
-                        mask_draw.line((line_x, 0, line_x, 1080), fill=alpha)
-                    img.paste(Image.new('RGBA', (1920, 1080), base_color + (255,)), (0, 0), mask_layer)
+                        ratio = x / grad_w
+                        if ratio < 0.4:
+                            alpha_ratio = 0.92 - (ratio / 0.4) * 0.32
+                        else:
+                            alpha_ratio = 0.6 - ((ratio - 0.4) / 0.6) * 0.6
+                        alpha = int(255 * max(0, alpha_ratio))
+                        mask_draw.line((x, 0, x, 1080), fill=alpha)
+                    img.paste(Image.new('RGBA', (1920, 1080), (10, 10, 10, 255)), (0, 0), mask_layer)
+            else:
+                # 预设模式或未上传截图
+                if is_podcast:
+                    img = Image.new('RGBA', (1920, 1080), (17, 17, 17, 255)) # #111111
+                else:
+                    bg_path_default = os.path.join(self.asset_dir, 'default', bg_config['file'])
+                    bg_path_root = os.path.join(self.asset_dir, bg_config['file'])
+                    bg_path = bg_path_default if os.path.exists(bg_path_default) else (bg_path_root if os.path.exists(bg_path_root) else None)
+                    
+                    if bg_path:
+                        img = Image.open(bg_path).convert('RGBA')
+                    else:
+                        img = Image.new('RGB', (1920, 1080), theme['bg']).convert('RGBA')
+                    
+                    img = ImageOps.fit(img, (1920, 1080), method=Image.Resampling.LANCZOS)
+                    blur_amount = bg_config['config'].get('blur', 0)
+                    if blur_amount > 0: img = img.filter(ImageFilter.GaussianBlur(radius=blur_amount))
+                    
+                    mask_alpha = bg_config['config'].get('mask', 40) / 100.0
+                    if mask_alpha > 0:
+                        mask_layer = Image.new('L', (1920, 1080), 0)
+                        mask_draw = ImageDraw.Draw(mask_layer)
+                        base_color = (0, 0, 0) if theme['isDark'] else (0, 15, 30)
+                        grad_w = int(1920 * 0.7)
+                        for x in range(grad_w):
+                            alpha = int(255 * mask_alpha * (1 - x / grad_w))
+                            line_x = x if layout == 'left' else (1919 - x)
+                            mask_draw.line((line_x, 0, line_x, 1080), fill=alpha)
+                        img.paste(Image.new('RGBA', (1920, 1080), base_color + (255,)), (0, 0), mask_layer)
 
             draw = ImageDraw.Draw(img)
             base_x = 120
-            # 最终重心上移至 520px
-            current_y = 520 if is_custom else 180
+            # 垂直重心位置：截图模式 520, 播客模式 420, 预设模式 180
+            current_y = 520 if is_screenshot else (420 if is_podcast else 180)
+            
             try:
                 main_size = 110
                 font_main = ImageFont.truetype(self.font_path, main_size)
@@ -193,32 +239,62 @@ class ThumbnailService:
                 font_tag = ImageFont.truetype(self.font_path, 30)
             except: font_main = font_sub = font_date = font_tag = ImageFont.load_default()
 
-            if tag_text and not is_custom:
+            # --- 播客模式新增：顶部身份标签栏 (包裹文字的小标签) ---
+            if is_podcast:
+                tag_top = 320
+                bar_h = 100
+                tag_padding = 48
+                try:
+                    font_id_tag = ImageFont.truetype(self.font_path, 62)
+                except:
+                    font_id_tag = font_tag
+                
+                tag_content = "内资机构 · 闭门会"
+                l, t, r, b = draw.textbbox((0, 0), tag_content, font=font_id_tag)
+                text_w = r - l
+                tag_w = text_w + tag_padding * 2
+                
+                # 绘制金色实心背景小标签 (与主标题对齐)
+                draw.rounded_rectangle([base_x, tag_top, base_x + tag_w, tag_top + bar_h], radius=10, fill=(255, 215, 0))
+                
+                # 计算文字居中位置
+                text_x = base_x + (tag_w - text_w) // 2 - l
+                text_y = tag_top + (bar_h - (b - t)) // 2 - t + 5
+                draw.text((text_x, text_y), tag_content, font=font_id_tag, fill=(0, 0, 0))
+
+
+            if tag_text and not is_screenshot_style:
                 l, t, r, b = draw.textbbox((0, 0), tag_text, font=font_tag)
                 draw.rounded_rectangle((base_x-24, current_y-12, base_x+(r-l)+24, current_y+(b-t)+12), radius=4, fill='white')
                 draw.text((base_x, current_y), tag_text, font=font_tag, fill='#333333')
                 current_y += 130
 
             if main_title:
-                main_color = '#FFD700' if is_custom else theme['main']
-                stroke_color = None if is_custom else self._parse_rgba(theme['stroke'])
+                main_color = '#FFD700' if is_screenshot_style else theme['main']
+                stroke_color = None if is_screenshot_style else self._parse_rgba(theme['stroke'])
                 for line in main_title.split('\n'):
                     if not line.strip(): continue
                     self._draw_halo_text(draw, line, (base_x, current_y), font_main, main_color, stroke_color, main_size * 0.04)
-                    current_y += main_size * 1.3
+                    current_y += int(main_size * 1.3)
                 current_y += 15
 
             if sub_title:
-                sub_color = '#FFFFFF' if is_custom else theme['sub']
-                self._draw_halo_text(draw, sub_title, (base_x, current_y), font_sub, sub_color, None if is_custom else self._parse_rgba(theme['stroke']), 56 * 0.04)
+                sub_color = '#FFFFFF' if is_screenshot_style else theme['sub']
+                self._draw_halo_text(draw, sub_title, (base_x, current_y), font_sub, sub_color, None if is_screenshot_style else self._parse_rgba(theme['stroke']), 56 * 0.04)
 
-            # 落款回归左下角，加装饰线，色调浅灰
+            # 落款回归左下角
             if date_text:
                 date_y = 1080 - 100
-                f_color = (200, 200, 200, 200) if is_custom else theme['date']
-                # 加线
-                draw.line((base_x, date_y - 47, base_x + 60, date_y - 47), fill=f_color, width=2)
-                self._draw_halo_text(draw, date_text, (base_x, date_y-32), font_date, f_color, None, 0)
+                f_color = (255, 255, 255, 204) if is_screenshot_style else theme['date']
+                
+                # Podcast 模式下对齐主标题，增加日历图标
+                if (is_podcast):
+                    icon_size = 28
+                    self._draw_calendar_icon(draw, base_x, date_y - 33, icon_size, f_color)
+                    self._draw_halo_text(draw, date_text, (base_x + icon_size + 15, date_y - 32), font_date, f_color, None, 0)
+                else:
+                    draw.line((base_x, date_y - 47, base_x + 60, date_y - 47), fill=f_color, width=2)
+                    self._draw_halo_text(draw, date_text, (base_x, date_y-32), font_date, f_color, None, 0)
 
             if not output_filename:
                 import uuid
@@ -233,3 +309,4 @@ class ThumbnailService:
             raise e
 
 thumbnail_service = ThumbnailService()
+
