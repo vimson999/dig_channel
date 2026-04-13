@@ -61,8 +61,13 @@ const CanvasRenderer = {
                 maskGradient.addColorStop(1, 'rgba(10, 10, 10, 0)');
                 ctx.fillStyle = maskGradient; ctx.fillRect(0, 0, w, h);
             } else {
-                ctx.fillStyle = '#111111'; ctx.fillRect(0, 0, w, h);
-                // 彻底移除占位提示文字
+                // 【重构】：径向渐变背景 (营造空间深度)
+                // 中心点位于标题附近的 (w/2, h*0.4)，扩散半径设为宽度的 80% 以确保过渡平滑
+                const bgGrad = ctx.createRadialGradient(w/2, h * 0.4, 0, w/2, h * 0.4, w * 0.8);
+                bgGrad.addColorStop(0, '#1C1916'); // 中心：温润的极暗金灰
+                bgGrad.addColorStop(1, '#0A0A0A'); // 边缘：深邃近黑
+                ctx.fillStyle = bgGrad;
+                ctx.fillRect(0, 0, w, h);
             }
         } else if (images.bg.complete && images.bg.naturalWidth > 0) {
             this.drawImageCover(ctx, images.bg, 0, 0, w, h);
@@ -73,32 +78,55 @@ const CanvasRenderer = {
         } else { ctx.fillStyle = this.themes.bg; ctx.fillRect(0, 0, w, h); }
 
         const leftMargin = 120;
+        const centerX = w / 2; // 定义中轴线
 
-        // --- 播客模式新增：顶部身份标签栏 (包裹文字的小标签) ---
+        // 2. 【重构】：播客模式标签“皇冠化” (顶级金融徽章质感)
         if (isPodcast) {
-            const tagTop = 320; // 整体下移，使内容垂直居中
-            const barHeight = 100; // 增加高度以适应 62px 大字体
-            const tagPadding = 48; // 增加内边距
+            const tagTop = 180; 
+            const barHeight = 90; 
+            const tagPadding = 50;
             ctx.save();
-            ctx.font = `bold 62px ${FONT_STACK}`; // 字体放大至 62px
+            ctx.font = `bold 54px ${FONT_STACK}`; 
             const tagText = '内资机构 · 闭门会';
             const textWidth = ctx.measureText(tagText).width;
             const tagWidth = textWidth + tagPadding * 2;
+            const tagX = centerX - tagWidth / 2; 
+
+            // --- 1. 强化外部晕影 (专属圈层氛围) ---
+            ctx.shadowColor = 'rgba(212, 175, 55, 0.3)';
+            ctx.shadowBlur = 15;
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = 0;
             
-            // 绘制金色实心背景小标签 (对齐 leftMargin)
-            ctx.fillStyle = '#FFD700';
+            // --- 2. 标签表面质感升级 (金属线性渐变) ---
+            const tagGrad = ctx.createLinearGradient(tagX, tagTop, tagX + tagWidth, tagTop + barHeight);
+            tagGrad.addColorStop(0, '#F0C420'); // 左上：亮金色
+            tagGrad.addColorStop(1, '#D4AF37'); // 右下：标准机构金
+            
+            ctx.fillStyle = tagGrad;
             ctx.beginPath();
-            ctx.roundRect(leftMargin, tagTop, tagWidth, barHeight, 10); // 圆角调至 10px
+            ctx.roundRect(tagX, tagTop, tagWidth, barHeight, 12);
             ctx.fill();
-            
-            ctx.fillStyle = '#000000'; 
+
+            // --- 3. 微小表面光泽扫掠 (精致感增强) ---
+            ctx.shadowColor = 'transparent'; // 关闭阴影避免污染细线
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+            ctx.lineWidth = 0.5;
+            ctx.beginPath();
+            ctx.moveTo(tagX + 5, tagTop + barHeight * 0.25);
+            ctx.lineTo(tagX + tagWidth - 5, tagTop + barHeight * 0.25);
+            ctx.stroke();
+
+            // --- 4. 文本颜色微调 (深金色提升层次) ---
+            ctx.fillStyle = '#705010'; 
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(tagText, leftMargin + tagWidth / 2, tagTop + barHeight / 2 + 5); // 垂直微调
+            ctx.fillText(tagText, centerX, tagTop + barHeight / 2 + 4);
             ctx.restore();
         }
 
-        let currentY = isScreenshot ? 520 : (isPodcast ? 475 : 180); // 播客模式下移至 475px 以适应更大的标签
+        // 重新分配 Y 轴空间：播客模式主标题从 380px 开始
+        let currentY = isScreenshot ? 520 : (isPodcast ? 380 : 180);
         
         // 2. 标签渲染
         if (!isScreenshotStyle) {
@@ -112,50 +140,71 @@ const CanvasRenderer = {
         // 3. 主副标题渲染
         const mainFontSize = 110;
         ctx.font = `${mainFontSize}px ${FONT_STACK}`;
-        const mainColor = isScreenshotStyle ? '#FFD700' : this.themes.main;
+        
+        // 【隔离逻辑】：仅播客模式使用机构金，截图模式保留原样 #FFD700
+        const mainColor = isPodcast ? '#D4AF37' : (isScreenshot ? '#FFD700' : this.themes.main);
+        
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
 
         config.mainTitle.split('\n').forEach(l => {
             if (!l.trim()) return;
+            // 【居中优化】：播客模式采用居中对齐
+            const targetX = isPodcast ? centerX : leftMargin;
+            const textAlign = isPodcast ? 'center' : 'left';
+            ctx.textAlign = textAlign;
+
             if (isScreenshotStyle) { 
                 ctx.fillStyle = mainColor; 
-                ctx.fillText(l, leftMargin, currentY); 
+                ctx.fillText(l, targetX, currentY); 
             }
             else { 
-                this.drawHaloText(ctx, l, leftMargin, currentY, mainColor, this.themes.stroke, mainFontSize, "normal"); 
+                this.drawHaloText(ctx, l, targetX, currentY, mainColor, this.themes.stroke, mainFontSize, "normal"); 
             }
-            currentY += mainFontSize * 1.3; 
+            // 【行距优化】：播客模式拉大行距至 1.55x，提升呼吸感
+            currentY += mainFontSize * (isPodcast ? 1.55 : 1.3); 
         });
 
         if (config.subTitle) {
-            currentY += 15; 
+            // 【段距优化】：播客模式显著增加主副标题间距
+            currentY += (isPodcast ? 60 : 15); 
+            const targetX = isPodcast ? centerX : leftMargin;
+            const textAlign = isPodcast ? 'center' : 'left';
+            ctx.textAlign = textAlign;
+
             const subColor = isScreenshotStyle ? '#FFFFFF' : this.themes.sub;
             const subFontSize = 56;
             ctx.font = `${subFontSize}px ${FONT_STACK}`;
             if (isScreenshotStyle) { 
                 ctx.fillStyle = subColor; 
-                ctx.fillText(config.subTitle, leftMargin, currentY); 
+                ctx.fillText(config.subTitle, targetX, currentY); 
             }
             else { 
-                this.drawHaloText(ctx, config.subTitle, leftMargin, currentY, subColor, this.themes.stroke, subFontSize, "normal"); 
+                this.drawHaloText(ctx, config.subTitle, targetX, currentY, subColor, this.themes.stroke, subFontSize, "normal"); 
             }
         }
 
         // 4. 页脚日期
-        const footerY = h - 100;
+        const footerY = h - (isPodcast ? 80 : 100);
         const footerColor = isScreenshotStyle ? 'rgba(255, 255, 255, 0.8)' : this.themes.date;
         ctx.save(); 
         
         if (isPodcast) {
-            // 进阶：绘制小图标
+            // 【页脚居中】：播客模式页脚整体居中
             ctx.fillStyle = footerColor;
-            const iconSize = 28;
-            this._drawCalendarIcon(ctx, leftMargin, footerY - 33, iconSize);
-            
             ctx.font = `600 32px ${FONT_STACK}`;
-            ctx.fillText(config.dateText, leftMargin + iconSize + 15, footerY - 32);
+            ctx.textAlign = 'center';
+            
+            const iconSize = 28;
+            const dateText = config.dateText;
+            const textWidth = ctx.measureText(dateText).width;
+            const totalFooterW = iconSize + 15 + textWidth;
+            const footerStartX = centerX - totalFooterW / 2;
+
+            this._drawCalendarIcon(ctx, footerStartX, footerY - 33, iconSize);
+            ctx.fillText(dateText, footerStartX + iconSize + 15 + textWidth / 2, footerY - 32);
         } else {
+            ctx.textAlign = 'left';
             ctx.beginPath(); ctx.moveTo(leftMargin, footerY - 47); ctx.lineTo(leftMargin + 60, footerY - 47); ctx.strokeStyle = footerColor; ctx.lineWidth = 2; ctx.stroke();
             ctx.font = `600 32px ${FONT_STACK}`; ctx.fillStyle = footerColor; ctx.fillText(config.dateText, leftMargin, footerY - 32); 
         }
