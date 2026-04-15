@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>金融类视频封面生成器 - Shioa</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700;900&display=swap');
+        body {
+            font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+            background-color: #f3f4f6;
+        }
+        /* 自定义滚动条 */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
+
+        /* 适配顶部导航栏 */
+        .app-container {
+            height: calc(100vh - 73px); /* 减去导航栏高度 */
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen overflow-hidden">
+    <!-- 导航栏将由 shared-navigation.js 自动注入 -->
+
+    <main class="flex app-container overflow-hidden">
+        <!-- 左侧控制面板 -->
+        <div class="w-96 bg-white shadow-xl flex flex-col h-full z-10 border-r border-gray-200">
+            <div class="p-6 bg-blue-600 text-white">
+                <h1 class="text-xl font-bold flex items-center gap-2">
+                    <i class="fas fa-chart-pie"></i>
+                    封面生成器
+                </h1>
+                <p class="text-sm text-blue-200 mt-1">实时编辑，一键下载</p>
+            </div>
+
+            <div class="p-6 flex-1 overflow-y-auto space-y-5">
+                <!-- 背景设置 -->
+                <div class="space-y-2">
+                    <label class="block text-sm font-bold text-gray-700">背景图 (可选)</label>
+                    <div class="flex items-center justify-center w-full">
+                        <label class="flex flex-col items-center justify-center w-full h-24 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100">
+                            <div class="flex flex-col items-center justify-center pt-5 pb-6">
+                                <svg class="w-6 h-6 mb-2 text-gray-500" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 16">
+                                    <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 13h3a3 3 0 0 0 0-6h-.025A5.56 5.56 0 0 0 16 6.5 5.5 5.5 0 0 0 5.207 5.021C5.137 5.017 5.071 5 5 5a4 4 0 0 0 0 8h2.167M10 15V6m0 0L8 8m2-2 2 2"/>
+                                </svg>
+                                <p class="text-xs text-gray-500"><span class="font-semibold">点击上传图片</span> 或拖拽至此</p>
+                            </div>
+                            <input id="bgUpload" type="file" class="hidden" accept="image/*" />
+                        </label>
+                    </div>
+                    <button id="clearBgBtn" class="text-xs text-red-500 hover:text-red-700 hidden">清除自定义背景，使用默认渲染底图</button>
+                </div>
+
+                <hr class="border-gray-200">
+
+                <!-- 文本输入区 -->
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-bold text-gray-700 mb-1">主标题</label>
+                        <input type="text" id="mainTitle" value="内资闭门会议" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-bold text-gray-700 mb-1">副标题 (支持换行)</label>
+                        <textarea id="subTitle" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm">地产股翻倍逻辑已现
+| PB从0.4到0.8，年
+底前看到修复</textarea>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-bold text-gray-700 mb-1">日期</label>
+                        <input type="text" id="dateText" value="2026.4.15" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-bold text-gray-700 mb-1">底部免责声明</label>
+                        <textarea id="disclaimer" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-xs">本内容只供交流学习，不作为任何投资建议。理财有风险，投资需谨慎。</textarea>
+                    </div>
+                </div>
+
+                <hr class="border-gray-200">
+                
+                <!-- 颜色设置 -->
+                <div class="space-y-3">
+                    <label class="block text-sm font-bold text-gray-700">颜色微调</label>
+                    <div class="flex items-center justify-between">
+                        <span class="text-sm text-gray-600">主标题颜色</span>
+                        <input type="color" id="mainColor" value="#ffffff" class="w-8 h-8 rounded cursor-pointer border-0">
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span class="text-sm text-gray-600">副标题颜色</span>
+                        <input type="color" id="subColor" value="#FFE900" class="w-8 h-8 rounded cursor-pointer border-0">
+                    </div>
+                </div>
+            </div>
+
+            <div class="p-6 bg-gray-50 border-t border-gray-200">
+                <button id="downloadBtn" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg shadow-md transition duration-200 flex justify-center items-center gap-2">
+                    <i class="fas fa-download"></i>
+                    下载高清封面图
+                </button>
+            </div>
+        </div>
+
+        <!-- 右侧 Canvas 预览区 -->
+        <div class="flex-1 bg-gray-800 flex items-center justify-center p-8 overflow-auto">
+            <div class="relative shadow-2xl rounded-lg overflow-hidden" style="max-width: 100%; max-height: 100%; aspect-ratio: 16/9;">
+                <!-- 真实的Canvas，内部尺寸 1280x720，通过CSS自适应缩放 -->
+                <canvas id="posterCanvas" width="1280" height="720" class="w-full h-full block bg-black"></canvas>
+            </div>
+        </div>
+    </main>
+
+    <script src="js/shared-navigation.js"></script>
+    <script>
+        const canvas = document.getElementById('posterCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // 状态
+        let customBgImage = null;
+
+        // 获取DOM元素
+        const inputs = {
+            mainTitle: document.getElementById('mainTitle'),
+            subTitle: document.getElementById('subTitle'),
+            dateText: document.getElementById('dateText'),
+            disclaimer: document.getElementById('disclaimer'),
+            mainColor: document.getElementById('mainColor'),
+            subColor: document.getElementById('subColor'),
+        };
+
+        // 监听输入变化
+        Object.values(inputs).forEach(input => {
+            input.addEventListener('input', draw);
+        });
+
+        // 监听图片上传
+        const bgUpload = document.getElementById('bgUpload');
+        const clearBgBtn = document.getElementById('clearBgBtn');
+
+        bgUpload.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(event) {
+                    const img = new Image();
+                    img.onload = function() {
+                        customBgImage = img;
+                        clearBgBtn.classList.remove('hidden');
+                        draw();
+                    }
+                    img.src = event.target.result;
+                }
+                reader.readAsDataURL(file);
+            }
+        });
+
+        clearBgBtn.addEventListener('click', () => {
+            customBgImage = null;
+            bgUpload.value = '';
+            clearBgBtn.classList.add('hidden');
+            draw();
+        });
+
+        // 下载功能
+        document.getElementById('downloadBtn').addEventListener('click', () => {
+            const link = document.createElement('a');
+            link.download = `封面图_${new Date().getTime()}.jpg`;
+            link.href = canvas.toDataURL('image/jpeg', 0.95); // 导出高质量JPG
+            link.click();
+        });
+
+        // --- 核心绘制逻辑 ---
+        function draw() {
+            // 1. 绘制背景
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (customBgImage) {
+                // 有自定义背景，自适应填满
+                drawCoverImage(ctx, customBgImage, 0, 0, canvas.width, canvas.height);
+            } else {
+                // 没有自定义背景，生成类似原图的深蓝金融背景
+                drawGeneratedBackground(ctx);
+            }
+
+            // 2. 绘制文字
+            drawTexts(ctx);
+        }
+
+        function drawCoverImage(ctx, img, x, y, w, h) {
+            // 实现类似 object-fit: cover 的效果
+            const imgRatio = img.width / img.height;
+            const canvasRatio = w / h;
+            let drawWidth = w;
+            let drawHeight = h;
+            let offsetX = 0;
+            let offsetY = 0;
+
+            if (imgRatio > canvasRatio) {
+                drawWidth = h * imgRatio;
+                offsetX = (w - drawWidth) / 2;
+            } else {
+                drawHeight = w / imgRatio;
+                offsetY = (h - drawHeight) / 2;
+            }
+            ctx.drawImage(img, x + offsetX, y + offsetY, drawWidth, drawHeight);
+        }
+
+        function drawGeneratedBackground(ctx) {
+            const width = canvas.width;
+            const height = canvas.height;
+
+            // 基础深蓝渐变
+            const bgGradient = ctx.createLinearGradient(0, 0, width, height);
+            bgGradient.addColorStop(0, '#0a1429'); // 深海蓝
+            bgGradient.addColorStop(1, '#152b52'); // 稍亮一点的深蓝
+            ctx.fillStyle = bgGradient;
+            ctx.fillRect(0, 0, width, height);
+
+            // 绘制微弱的网格线
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let i = 0; i < width; i += 60) {
+                ctx.moveTo(i, 0); ctx.lineTo(i, height);
+            }
+            for (let j = 0; j < height; j += 60) {
+                ctx.moveTo(0, j); ctx.lineTo(width, j);
+            }
+            ctx.stroke();
+
+            // 绘制右侧城市建筑剪影 (简约方块)
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+            const buildings = [
+                {x: 700, w: 40, h: 200}, {x: 750, w: 60, h: 350}, {x: 820, w: 50, h: 280},
+                {x: 880, w: 80, h: 450}, {x: 970, w: 45, h: 320}, {x: 1020, w: 70, h: 500},
+                {x: 1100, w: 60, h: 380}, {x: 1170, w: 90, h: 550}
+            ];
+            buildings.forEach(b => {
+                ctx.fillRect(b.x, height - b.h, b.w, b.h);
+                // 建筑高光边
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+                ctx.fillRect(b.x, height - b.h, 5, b.h);
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+            });
+
+            // 绘制金融走势发光金线
+            ctx.beginPath();
+            ctx.moveTo(500, height);
+            // 三次贝塞尔曲线模拟走势
+            ctx.bezierCurveTo(700, 500, 800, 600, 950, 300);
+            ctx.bezierCurveTo(1050, 100, 1150, 200, 1280, 50);
+            
+            // 曲线下方区域的发光渐变
+            ctx.lineTo(1280, height);
+            ctx.lineTo(500, height);
+            const fillGradient = ctx.createLinearGradient(0, 0, 0, height);
+            fillGradient.addColorStop(0, 'rgba(212, 175, 55, 0.3)'); // 金色半透明
+            fillGradient.addColorStop(1, 'rgba(212, 175, 55, 0)');
+            ctx.fillStyle = fillGradient;
+            ctx.fill();
+
+            // 绘制曲线本线
+            ctx.beginPath();
+            ctx.moveTo(500, height);
+            ctx.bezierCurveTo(700, 500, 800, 600, 950, 300);
+            ctx.bezierCurveTo(1050, 100, 1150, 200, 1280, 50);
+            
+            ctx.strokeStyle = '#e6c25a'; // 金黄色
+            ctx.lineWidth = 5;
+            ctx.shadowColor = 'rgba(230, 194, 90, 0.8)';
+            ctx.shadowBlur = 15;
+            ctx.stroke();
+
+            // 重置阴影，防止影响后续文字绘制
+            ctx.shadowBlur = 0; 
+        }
+
+        function drawTexts(ctx) {
+            const fontBase = '"Noto Sans SC", "Microsoft YaHei", sans-serif';
+            const startX = 80;
+
+            // 1. 主标题
+            ctx.fillStyle = inputs.mainColor.value;
+            ctx.font = `900 110px ${fontBase}`;
+            ctx.textBaseline = 'top';
+            ctx.fillText(inputs.mainTitle.value, startX, 120);
+
+            // 2. 副标题 (处理多行)
+            ctx.fillStyle = inputs.subColor.value;
+            ctx.font = `900 75px ${fontBase}`;
+            const subLines = inputs.subTitle.value.split('\n');
+            let subY = 280;
+            subLines.forEach((line, index) => {
+                ctx.fillText(line, startX, subY + (index * 95)); // 95是行高
+            });
+
+            // 3. 日期
+            // 动态计算日期所在的 Y 坐标，避免被长的副标题遮挡
+            const dateY = Math.max(550, subY + (subLines.length * 95) + 40);
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `400 45px ${fontBase}`;
+            ctx.fillText(inputs.dateText.value, startX, dateY);
+
+            // 4. 免责声明
+            ctx.fillStyle = '#a0a5b5'; // 灰白色
+            ctx.font = `400 22px ${fontBase}`;
+            const disclaimerLines = inputs.disclaimer.value.split('\n');
+            let discY = 660; // 底部固定位置附近
+            disclaimerLines.forEach((line, index) => {
+                ctx.fillText(line, startX, discY + (index * 30));
+            });
+        }
+
+        // 初始化加载字体可能需要时间，延迟绘制一次确保字体生效，并默认执行一次
+        document.fonts.ready.then(() => {
+            draw();
+        });
+        draw(); // 立即执行一次
+
+    </script>
+</body>
+</html>

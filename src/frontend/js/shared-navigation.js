@@ -46,6 +46,8 @@ class SharedNavigation {
             return 'gemini-test';
         } else if (filename === 'thumbnail-generator.html') {
             return 'thumbnail-generator';
+        } else if (filename === 'finance-cover-generator.html') {
+            return 'finance-cover-generator';
         } else if (filename === 'thumbnail-workbench.html') {
             return 'thumbnail-workbench';
         } else if (filename === 'thumbnail-generator-classic.html') {
@@ -77,6 +79,7 @@ class SharedNavigation {
             'gemini-test': 'Gemini AI 测试台',
             'thumbnail-workbench': '听见资本封面工作台',
             'thumbnail-generator': '研报封面生成器',
+            'finance-cover-generator': '金融类视频封面生成器',
             'thumbnail-generator-classic': '经典研报封面生成器',
             'video-auto-generator': 'AI 视频自动生成',
             'publisher': '一键智能发布台',
@@ -297,6 +300,12 @@ class SharedNavigation {
                         name: '通用封面生成 (V6)',
                         icon: 'fas fa-image',
                         href: 'thumbnail-generator.html'
+                    },
+                    {
+                        id: 'finance-cover-generator',
+                        name: '金融类视频封面',
+                        icon: 'fas fa-chart-pie',
+                        href: 'finance-cover-generator.html'
                     },
                     {
                         id: 'video-auto-generator',
