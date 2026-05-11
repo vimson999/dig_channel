@@ -27,5 +27,20 @@ This document defines the architectural standards and development discipline for
 - **Launcher Scripts**: Root-level `.sh` files act as convenient entry points for users.
 - **Logic Entry Points**: Implementation entry points (e.g., `run_scheduler.py`) reside in `src/backend/` but must follow the Path Resolution Standards defined in section 2.
 
+## 5. Log File Conventions
+
+All runtime logs are stored in `/logs/` at the project root. Key files:
+
+- **`app.log`** — Main application log (Flask backend, rotated daily with `.YYYY-MM-DD` suffix)
+- **`celery_worker.log`** — Celery task worker output (video synthesis, publishing tasks)
+- **`error.log`** — Aggregated errors only
+- **`tts.log`** — TTS service specific logs
+- **`scheduler.log`** — Periodic scheduler task logs
+- **`youtube.log`** / **`bilibili.log`** — Platform-specific upload/publish logs
+- **`security.log`** — Auth/security events
+- **`performance.log`** / **`slow_query.log`** — Performance monitoring
+
+When debugging a task (e.g., video synthesis), always check `celery_worker.log` first, then `app.log`. Do **not** grep the source tree for log output.
+
 ---
 *Note: This document takes precedence over general instructions. If an automated task or agent identifies a violation of these rules, it must be corrected immediately before proceeding with feature development.*

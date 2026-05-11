@@ -1,6 +1,10 @@
 import os
 import sys
 from celery import Celery
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env'))
 
 # Ensure backend directory is in sys.path
 backend_dir = os.path.dirname(os.path.abspath(__file__))
@@ -9,11 +13,13 @@ if backend_dir not in sys.path:
 
 def make_celery(app_name=__name__):
     redis_url = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+    broker_url = os.environ.get('CELERY_BROKER_URL', redis_url)
+    backend_url = os.environ.get('CELERY_RESULT_BACKEND', redis_url)
     
     celery = Celery(
         app_name,
-        backend=redis_url,
-        broker=redis_url,
+        backend=backend_url,
+        broker=broker_url,
         include=['tasks.publisher', 'tasks.downloader'] # Auto-discover tasks
     )
     

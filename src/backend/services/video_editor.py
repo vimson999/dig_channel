@@ -57,6 +57,51 @@ class VideoEditorService:
             except: continue
         return srt_content
 
+    def _generate_ass(self, srt_content, alignment, margin_v, font_size, play_res_x, play_res_y):
+        """Convert SRT content to ASS with explicit PlayRes = video dimensions for exact pixel-level positioning."""
+        import re
+
+        def srt_time_to_ass(t):
+            # "HH:MM:SS,mmm" → "H:MM:SS.cc"
+            t = t.strip().replace(',', '.')
+            parts = t.split(':')
+            h, m, rest = parts[0], parts[1], parts[2]
+            s, ms = rest.split('.')
+            cs = int(ms[:3]) // 10
+            return f"{int(h)}:{int(m):02d}:{int(s):02d}.{cs:02d}"
+
+        header = (
+            f"[Script Info]\n"
+            f"ScriptType: v4.00+\n"
+            f"PlayResX: {play_res_x}\n"
+            f"PlayResY: {play_res_y}\n"
+            f"ScaledBorderAndShadow: yes\n\n"
+            f"[V4+ Styles]\n"
+            f"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+            f"Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+            f"Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            f"Style: Default,PingFang SC,{font_size},&H0000FFFF,&H000000FF,&H00000000,&H00000000,"
+            f"-1,0,0,0,100,100,0,0,1,2,0,{alignment},10,10,{margin_v},1\n\n"
+            f"[Events]\n"
+            f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        )
+
+        events = []
+        blocks = re.split(r'\n\s*\n', srt_content.strip())
+        for block in blocks:
+            lines = [l for l in block.strip().split('\n') if l.strip()]
+            if len(lines) < 3:
+                continue
+            # lines[0]=seq, lines[1]=time, lines[2:]=text
+            time_line = lines[1]
+            if ' --> ' not in time_line:
+                continue
+            start_t, end_t = time_line.split(' --> ', 1)
+            text = r'\N'.join(lines[2:])
+            events.append(f"Dialogue: 0,{srt_time_to_ass(start_t)},{srt_time_to_ass(end_t)},Default,,0,0,0,,{text}")
+
+        return header + '\n'.join(events) + '\n'
+
     def _extract_global_subtitles(self, subtitles, audio_paths, audio_start=0):
         """统一提取并计算带偏移量的全局字幕列表，支持开头偏移量纠正"""
         global_subs = []
@@ -103,136 +148,184 @@ class VideoEditorService:
             curr_offset += duration
 
         return global_subs
-    def _create_cta_image(self, text, style='premium_dark', position='bottom_bar', video_w=1920):
-        """Create a multi-line CTA image with transparency and layout support."""
+    def _create_cta_image(self, text, style='premium_dark', position='bottom_bar', video_w=1920, video_h=1080):
+        """Create a multi-line CTA image with transparency and layout support, scaled to video resolution."""
         styles = {
             'premium_dark': {'bg': (25, 28, 36, 217), 'text': (255, 255, 255, 242), 'action': (255, 255, 255, 255), 'border': (255, 255, 255, 38)},
             'nomura_red': {'bg': (184, 20, 33, 230), 'text': (255, 255, 255, 255), 'action': (255, 255, 255, 255), 'border': (255, 255, 255, 50)},
+            'police_yellow': {'bg': (255, 204, 0, 240), 'text': (0, 0, 0, 255), 'action': (0, 0, 0, 255), 'border': (0, 0, 0, 80)},
             'glass_dark': {'bg': (0, 0, 0, 160), 'text': (255, 255, 255, 230), 'action': (255, 255, 255, 255), 'border': (255, 255, 255, 30)}
         }
         theme = styles.get(style, styles['premium_dark'])
         text_color = theme['text']
         
+        # 根据分辨率缩放基础尺寸
+        scale_factor = video_h / 1080.0
         is_bar = 'bar' in position
-        img_w = video_w if is_bar else 600
-        img_h = 140 if is_bar else 280
         
+        img_w = video_w if is_bar else int(600 * (video_w / 1920.0))
+        img_h = int(140 * scale_factor) if is_bar else int(280 * scale_factor)
+        
+        # 避免尺寸过小
+        img_w = max(10, img_w)
+        img_h = max(10, img_h)
+
         img = Image.new('RGBA', (img_w, img_h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         
         if is_bar:
             draw.rectangle([0, 0, img_w, img_h], fill=theme['bg'])
-            draw.line([0, 0, img_w, 0], fill=theme['border'], width=1)
+            draw.line([0, 0, img_w, 0], fill=theme['border'], width=max(1, int(1 * scale_factor)))
         else:
-            draw.rounded_rectangle([0, 0, img_w, img_h], radius=20, fill=theme['bg'], outline=theme['border'], width=2)
+            draw.rounded_rectangle([0, 0, img_w, img_h], radius=int(20 * scale_factor), fill=theme['bg'], outline=theme['border'], width=max(1, int(2 * scale_factor)))
 
         try:
             font_path = "/System/Library/Fonts/PingFang.ttc"
-            font_main = ImageFont.truetype(font_path, 32 if is_bar else 38)
+            # 缩放字体
+            font_size = int((32 if is_bar else 38) * scale_factor)
+            font_main = ImageFont.truetype(font_path, max(12, font_size))
         except:
             font_main = ImageFont.load_default()
 
         lines = text.split('\n')
-        total_text_h = len(lines) * 45
+        line_h = int(45 * scale_factor)
+        total_text_h = len(lines) * line_h
         curr_y = (img_h - total_text_h) / 2
         
         for line in lines:
             bbox = font_main.getbbox(line)
             lw = bbox[2] - bbox[0]
             draw.text(((img_w - lw)/2, curr_y), line, font=font_main, fill=text_color)
-            curr_y += 45
+            curr_y += line_h
 
         temp_path = os.path.join(self.upload_folder, f"cta_{uuid.uuid4().hex[:6]}.png")
         img.save(temp_path)
         return temp_path
 
-    def _synthesize_ffmpeg_direct(self, image_file, audio_file, output_path, subtitles=None, cta_image_path=None, cta_pos=(0,0), is_vertical=False, audio_start=0, audio_duration=None, transform=None, margin_v_override=None):
-        """High-performance synthesis using direct FFmpeg command."""
+    def _compute_subtitle_params(self, is_vertical, margin_v_override=None, subtitle_position=None, canvas_h=1080, subtitle_size='normal'):
+        """
+        Returns (alignment, margin_v, font_size) for ASS subtitle styling.
+        Priority: margin_v_override > subtitle_position > defaults
+        """
+        size_multiplier = {'small': 0.8, 'normal': 1.0, 'large': 1.25, 'xlarge': 1.5}.get(subtitle_size, 1.0)
+        
+        # 增加字号，之前太小了。基于高度等比缩放
+        if is_vertical:
+            font_size = int(56 * (canvas_h / 1920.0) * size_multiplier)
+        else:
+            font_size = int(48 * (canvas_h / 1080.0) * size_multiplier)
+        font_size = max(16, font_size)
+        
+        logger.info(f"📐 [SUBTITLE_PARAMS] layout={'vertical' if is_vertical else 'horizontal'} | canvas_h={canvas_h} | size={subtitle_size} | margin_v_override={margin_v_override} | subtitle_position={subtitle_position}")
+
+        if margin_v_override is not None:
+            # 强制居中底部对齐
+            return 2, int(margin_v_override), font_size
+
+        if subtitle_position is not None:
+            y_pct = max(0.0, min(1.0, float(subtitle_position.get('y_pct', 0.9))))
+            # Alignment=2（底部居中），MarginV = 从底部到文字底边的距离
+            alignment = 2
+            # 为了让文字“中心”对齐拖动条，减去半个字号的高度
+            margin_v = int((1.0 - y_pct) * canvas_h - (font_size / 2.0))
+            margin_v = max(0, margin_v)
+            logger.info(f"📐 [SUBTITLE_PARAMS] → branch=subtitle_position | y_pct={y_pct:.4f} | alignment={alignment} | margin_v={margin_v} | canvas_h={canvas_h}")
+            return alignment, margin_v, font_size
+
+        # 默认值
+        alignment, margin_v = (2, int(canvas_h * 0.15)) if is_vertical else (2, int(canvas_h * 0.08))
+        logger.info(f"📐 [SUBTITLE_PARAMS] → branch=default | alignment={alignment} | margin_v={margin_v}")
+        return alignment, margin_v, font_size
+
+    def _synthesize_ffmpeg_direct(self, image_file, audio_file, output_path, subtitles=None, cta_image_path=None, cta_pos=(0,0), is_vertical=False, audio_start=0, audio_duration=None, transform=None, margin_v_override=None, subtitle_position=None, subtitle_size='normal', export_params=None):
+        """High-performance synthesis using direct FFmpeg command with customizable export parameters."""
         import time
         s_t = time.time()
-        srt_path = None
-        
+        sub_path = None
+
         try:
-            # 1. 准备字幕 SRT
-            # ... (rest of SRT prep unchanged) ...
+            # 1. 解析导出参数
+            export_params = export_params or {}
+            res_key = export_params.get('resolution', '1080p').lower()
+            
+            # 分辨率配置
+            if is_vertical:
+                res_map = {'480p': (480, 854), '720p': (720, 1280), '1080p': (1080, 1920)}
+            else:
+                res_map = {'480p': (854, 480), '720p': (1280, 720), '1080p': (1920, 1080)}
+            
+            target_w, target_h = res_map.get(res_key, (1080, 1920) if is_vertical else (1920, 1080))
+            target_res = f"{target_w}:{target_h}"
+            
+            # 码率配置
+            bitrate_map = {'low': '1500k', 'medium': '4000k', 'high': '8000k'}
+            v_bitrate = bitrate_map.get(export_params.get('bitrate', 'medium').lower(), '4000k')
+            
+            # 帧率
+            fps = int(export_params.get('fps', 30))
+
+            logger.info(f"⚙️ [EXPORT_CONFIG] Res={target_res} | Bitrate={v_bitrate} | FPS={fps}")
+
+            # 2. 准备字幕 (直接生成带绝对坐标系的 ASS，解决错位问题)
             if subtitles:
                 srt_content = self._generate_srt(subtitles, 0)
                 if srt_content:
-                    srt_path = os.path.join(self.upload_folder, f"temp_{uuid.uuid4().hex[:6]}.srt")
-                    with open(srt_path, 'w', encoding='utf-8') as f:
-                        f.write(srt_content)
-                    logger.info(f"📝 [FFMPEG] Generated SRT with {srt_content.count('-->')} segments")
+                    alignment, margin_v, font_size = self._compute_subtitle_params(
+                        is_vertical, margin_v_override, subtitle_position, canvas_h=target_h, subtitle_size=subtitle_size
+                    )
+                    ass_content = self._generate_ass(srt_content, alignment, margin_v, font_size, target_w, target_h)
+                    sub_path = os.path.join(self.upload_folder, f"temp_{uuid.uuid4().hex[:6]}.ass")
+                    with open(sub_path, 'w', encoding='utf-8') as f:
+                        f.write(ass_content)
+                    logger.info(f"📝 [FFMPEG] Generated ASS with PlayRes {target_w}x{target_h} and MarginV {margin_v}")
 
-            # 2. 获取视频时长
+            # 3. 获取视频时长
             if not audio_duration:
                 from moviepy import AudioFileClip
                 temp_a = AudioFileClip(audio_file)
                 audio_duration = temp_a.duration - audio_start
                 temp_a.close()
 
-            # 3. 构建底图滤镜链 (支持平移与缩放)
-            target_w, target_h = (1080, 1920) if is_vertical else (1920, 1080)
-            target_res = f"{target_w}:{target_h}"
-            
+            # 4. 构建底图滤镜链
             if transform:
                 scale = transform.get('scale', 1.0)
                 off_x = transform.get('x', 0)
                 off_y = transform.get('y', 0)
-                
-                # 复杂的滤镜链实现：先 scale 成覆盖态，再应用用户自定义缩放，最后用带偏移量的 crop
                 vf_chain = f"loop=loop=-1:size=1:start=0,scale={target_res}:force_original_aspect_ratio=increase"
                 vf_chain += f",scale=iw*{scale}:ih*{scale}"
                 vf_chain += f",crop={target_w}:{target_h}:(iw-{target_w})/2-{off_x}:(ih-{target_h})/2-{off_y},setsar=1"
             else:
-                # 默认逻辑优化：
-                # 竖版视频 (is_vertical=True) 通常是截图，使用 force_original_aspect_ratio=decrease 防止裁剪
-                # 横屏视频 (is_vertical=False) 通常是背景，使用 force_original_aspect_ratio=increase 确保填满
-                fit_mode = "decrease" if is_vertical else "increase"
-                vf_chain = f"loop=loop=-1:size=1:start=0,scale={target_res}:force_original_aspect_ratio={fit_mode}"
-                if is_vertical:
-                    # 如果是缩小适配，需要补黑边居中
-                    vf_chain += f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
-                else:
-                    # 如果是放大适配，需要裁剪
-                    vf_chain += f",crop={target_res}"
-                vf_chain += ",setsar=1"
+                vf_chain = (
+                    f"loop=loop=-1:size=1:start=0,"
+                    f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                    f"crop={target_w}:{target_h}:(iw-ow)/2:0,"
+                    f"setsar=1"
+                )
 
-            if srt_path:
-                # 针对 Mac 优化路径转义：使用双引号并转义冒号
-                safe_srt_path = srt_path.replace(":", "\\:").replace("'", "'\\\\''")
-                
-                if is_vertical:
-                    # 📱 竖屏样式：黄色 Bold 加粗，位置进一步下移 (MarginV 198, 从顶向下)
-                    font_size = 10
-                    margin_v = margin_v_override if margin_v_override is not None else 198
-                    alignment = 6
-                    # PrimaryColour: &H0000FFFF (纯黄)
-                    style = f"FontName=PingFang SC,FontSize={font_size},PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment={alignment},MarginV={margin_v},Bold=1"
-                else:
-                    # 🖥️ 横屏样式：纯黄 Bold (去掉底框)，位置下移 (MarginV 38, 从底向上)
-                    # BorderStyle=1 (无底框), PrimaryColour=&H0000FFFF (纯黄)
-                    font_size = 20
-                    margin_v = margin_v_override if margin_v_override is not None else 38
-                    alignment = 2
-                    style = f"FontName=PingFang SC,FontSize={font_size},PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment={alignment},MarginV={margin_v},Bold=1"
-                
-                vf_chain += f",subtitles='{safe_srt_path}':force_style='{style}'"
+            if sub_path:
+                safe_sub_path = sub_path.replace(":", "\\:").replace("'", "'\\\\''")
+                # 使用 ass 滤镜直接加载我们生成的完美 ASS 文件
+                vf_chain += f",ass='{safe_sub_path}'"
 
-            # 4. 输入与参数
+            # 5. 输入与参数
             audio_args = f"-ss {audio_start} -t {audio_duration}"
             inputs = [f"-loop 1 -t {audio_duration} -i \"{image_file}\"", f"{audio_args} -i \"{audio_file}\""]
+            
+            aspect_ratio = "9:16" if is_vertical else "16:9"
+            res_flag = f"-video_size {target_w}x{target_h} -r {fps}"
             
             if cta_image_path:
                 inputs.append(f"-i \"{cta_image_path}\"")
                 cta_idx = len(inputs) - 1
                 vf_chain += f" [bg]; [{cta_idx}:v] format=rgba [cta]; [bg][cta] overlay={cta_pos[0]}:{cta_pos[1]}"
 
-            cmd = f"ffmpeg -y " + " ".join(inputs) + f" -filter_complex \"{vf_chain}\" -c:v {self.video_codec} -b:v 6000k -c:a aac -shortest \"{output_path}\""
+            cmd = f"ffmpeg -y " + " ".join(inputs) + f" -filter_complex \"{vf_chain}\" -aspect {aspect_ratio} {res_flag} -c:v {self.video_codec} -b:v {v_bitrate} -c:a aac -shortest \"{output_path}\""
             
-            logger.info(f"🚀 [FFMPEG_DIRECT] Executing: {cmd}")
-            # 使用 check=True 确保报错能被捕获
+            logger.info(f"🎬 [FFMPEG_EXEC] Mode: {'Vertical' if is_vertical else 'Horizontal'} | Aspect: {aspect_ratio} | Res: {target_w}x{target_h}")
+            logger.info(f"🎬 [FFMPEG_EXEC] Command: {cmd}")
+            
             subprocess.run(cmd, shell=True, check=True, capture_output=True)
-            logger.info(f"✅ [FFMPEG_DIRECT] Synthesis success in {time.time()-s_t:.2f}s")
+            logger.info(f"✅ [FFMPEG_EXEC] Success: {os.path.basename(output_path)}")
             return output_path
 
         except Exception as e:
@@ -241,9 +334,9 @@ class VideoEditorService:
                 logger.error(f"FFmpeg Stderr: {e.stderr.decode()}")
             return None
         finally:
-            if srt_path and os.path.exists(srt_path): os.remove(srt_path)
+            if sub_path and os.path.exists(sub_path): os.remove(sub_path)
 
-    def process_vertical_video(self, image_file, audio_files, subtitles=None, output_filename=None, transform=None, margin_v_override=None):
+    def process_vertical_video(self, image_file, audio_files, subtitles=None, output_filename=None, transform=None, margin_v_override=None, subtitle_position=None, subtitle_size='normal', export_params=None):
         """Synthesize a 9:16 vertical video with correct sequential subtitles."""
         logger.info(f"🎥 [VIDEO_EDITOR] Starting Vertical Production: {os.path.basename(image_file)}")
         
@@ -275,16 +368,25 @@ class VideoEditorService:
                 subtitles=global_subs,
                 is_vertical=True,
                 transform=transform,
-                margin_v_override=margin_v_override
+                margin_v_override=margin_v_override,
+                subtitle_position=subtitle_position,
+                subtitle_size=subtitle_size,
+                export_params=export_params
             )
         finally:
             if os.path.exists(temp_audio): os.remove(temp_audio)
 
-    def process_mixed_content(self, video_file, image_file, audio_file, video_c_path=None, audio_c_path=None, audio_start=7.0, audio_end_offset=10.0, output_filename=None, cta_config=None, subtitles=None, transform=None):
+    def process_mixed_content(self, video_file, image_file, audio_file, video_c_path=None, audio_c_path=None, audio_start=7.0, audio_end_offset=10.0, output_filename=None, cta_config=None, subtitles=None, transform=None, subtitle_position=None, subtitle_size='normal', export_params=None):
         """Synthesize horizontal video with intro/outro and sequential subtitles."""
         logger.info(f"🎥 [VIDEO_EDITOR] Starting Horizontal Production: {os.path.basename(image_file)}")
         
+        # 默认分辨率用于预览和 CTA 计算，实际合成会参考 export_params
         target_w, target_h = 1920, 1080
+        if export_params and export_params.get('resolution') == '480p':
+            target_w, target_h = 854, 480
+        elif export_params and export_params.get('resolution') == '720p':
+            target_w, target_h = 1280, 720
+
         temp_audio = os.path.join(self.upload_folder, f"temp_h_a_{uuid.uuid4().hex[:6]}.mp3")
         temp_body = os.path.join(self.upload_folder, f"temp_h_body_{uuid.uuid4().hex[:6]}.mp4")
         cta_img = None
@@ -309,43 +411,52 @@ class VideoEditorService:
             # 2. 准备 CTA
             cta_pos = (0, 0)
             if cta_config and cta_config.get('text'):
-                cta_img = self._create_cta_image(cta_config['text'], cta_config.get('style', 'premium_dark'), cta_config.get('position', 'bottom_bar'), video_w=target_w)
+                cta_img = self._create_cta_image(cta_config['text'], cta_config.get('style', 'premium_dark'), cta_config.get('position', 'bottom_bar'), video_w=target_w, video_h=target_h)
                 pos_val = cta_config.get('position', 'bottom_bar')
-                cta_h = 140 if 'bar' in pos_val else 280 
-                cta_w = target_w if 'bar' in pos_val else 600
+                cta_h = int(140 * (target_h / 1080)) if 'bar' in pos_val else int(280 * (target_h / 1080))
+                cta_w = target_w if 'bar' in pos_val else int(600 * (target_w / 1920))
                 if 'bar' in pos_val: cta_pos = (0, (target_h - cta_h) if 'bottom' in pos_val else 0)
                 else:
-                    if pos_val == 'right_center': cta_pos = (target_w - cta_w - 120, (target_h - cta_h) / 2)
-                    else: cta_pos = (target_w - cta_w - 120, target_h - cta_h - 220)
+                    if pos_val == 'right_center': cta_pos = (target_w - cta_w - int(120*(target_w/1920)), (target_h - cta_h) / 2)
+                    else: cta_pos = (target_w - cta_w - int(120*(target_w/1920)), target_h - cta_h - int(220*(target_h/1080)))
 
             # 3. 合成正文
             self._synthesize_ffmpeg_direct(
                 image_file=image_file, audio_file=temp_audio, output_path=temp_body,
                 subtitles=global_subs, cta_image_path=cta_img, cta_pos=cta_pos,
                 audio_start=audio_start, audio_duration=body_duration,
-                transform=transform
+                transform=transform, subtitle_position=subtitle_position,
+                subtitle_size=subtitle_size,
+                export_params=export_params
             )
 
             # 4. 拼接
             final_clips = []
             if video_file and os.path.exists(video_file):
                 v_in = VideoFileClip(video_file)
-                final_clips.append(v_in.resized(new_size=(target_w, target_h)) if v_in.w != target_w else v_in)
+                final_clips.append(v_in.resize(newsize=(target_w, target_h)) if v_in.w != target_w else v_in)
             
             final_clips.append(VideoFileClip(temp_body))
             
             if video_c_path and os.path.exists(video_c_path):
                 v_out = VideoFileClip(video_c_path)
-                final_clips.append(v_out.resized(new_size=(target_w, target_h)) if v_out.w != target_w else v_out)
+                final_clips.append(v_out.resize(newsize=(target_w, target_h)) if v_out.w != target_w else v_out)
 
             final_path = os.path.join(self.output_folder, output_filename or f"video_{uuid.uuid4().hex[:8]}.mp4")
-            if len(final_clips) > 1:
-                concat = concatenate_videoclips(final_clips)
-                concat.write_videofile(final_path, codec=self.video_codec, audio_codec='aac', logger=None)
-                for c in final_clips: c.close()
-            else:
-                import shutil
-                shutil.move(temp_body, final_path)
+            
+            if len(final_clips) > 0:
+                concat = concatenate_videoclips(final_clips) if len(final_clips) > 1 else final_clips[0]
+                # 这里也应用码率和帧率控制
+                fps = int(export_params.get('fps', 30)) if export_params else 30
+                bitrate_map = {'low': '1500k', 'medium': '4000k', 'high': '8000k'}
+                v_bitrate = bitrate_map.get(export_params.get('bitrate', 'medium').lower(), '4000k') if export_params else '4000k'
+                
+                concat.write_videofile(final_path, codec=self.video_codec, audio_codec='aac', fps=fps, bitrate=v_bitrate, logger=None)
+                
+                if len(final_clips) > 1:
+                    for c in final_clips: c.close()
+                else:
+                    final_clips[0].close()
             
             return final_path
 

@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pro Editor - 高级剪辑工作台</title>
+    
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // 增加安全检查，防止 CDN 加载失败导致脚本崩溃
+        if (typeof tailwind !== 'undefined') {
+            tailwind.config = {
+                theme: {
+                    extend: {
+                        colors: {
+                            editor: {
+                                bg: '#121214',
+                                sidebar: '#1e1e20',
+                                track: '#2a2a2e',
+                                accent: '#10b981'
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            console.error('⚠️ Tailwind CSS 加载失败，页面样式可能受影响。请检查网络或更换 CDN。');
+            // 基础兜底样式，保证页面核心容器可用
+            const style = document.createElement('style');
+            style.textContent = `
+                #editor-shell { display: flex !important; height: 100vh !important; }
+                aside { width: 320px !important; flex-shrink: 0 !important; }
+                section { flex: 1 !important; position: relative !important; }
+                .hidden { display: none !important; }
+            `;
+            document.head.appendChild(style);
+        }
+    </script>
+    <style>
+        body { background-color: #121214; color: #e4e4e7; margin: 0; padding: 0; }
+        header, .nav-container { background-color: #ffffff !important; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        header a, header span, header button { color: #374151 !important; }
+        
+        #editor-shell { height: calc(100vh - 64px); margin-top: 64px; display: flex; flex-direction: column; overflow: hidden; }
+        .custom-scrollbar::-webkit-scrollbar { height: 4px; width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #1e1e20; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 10px; }
+        .timeline-track { background-image: linear-gradient(90deg, #2a2a2e 1px, transparent 1px); background-size: 50px 100%; }
+        .clip-active { border-color: #10b981 !important; box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.3); }
+        input[type="number"]::-webkit-inner-spin-button { display: none; }
+        
+        .btn-tool { @apply flex items-center px-3 py-1.5 rounded bg-zinc-800 text-[10px] font-black text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100 transition-all uppercase tracking-wider; }
+        
+        /* 任务列表特定样式 */
+        .task-card { border-left: 3px solid #3f3f46; transition: all 0.3s; }
+        .task-card.processing { border-left-color: #3b82f6; background: rgba(59, 130, 246, 0.05); }
+        .task-card.completed { border-left-color: #10b981; background: rgba(16, 185, 129, 0.05); }
+        .task-card.failed { border-left-color: #ef4444; background: rgba(239, 68, 68, 0.05); }
+    </style>
+</head>
+<body>
+
+    <div id="editor-shell">
+        <div class="flex-1 flex min-h-0 border-b border-zinc-800">
+            
+            <!-- 左侧：资源与属性 -->
+            <aside class="w-80 flex flex-col border-r border-zinc-800 bg-editor-sidebar">
+                <div class="p-5 border-b border-zinc-700 flex flex-col gap-4 shrink-0 bg-zinc-900/50">
+                    <div>
+                        <label class="text-[9px] font-black uppercase tracking-[0.2em] text-zinc-400 mb-2 block">Video Project Title</label>
+                        <input type="text" id="video-title" class="bg-zinc-900 border border-zinc-600 rounded-lg p-3 text-sm text-white placeholder:text-zinc-400 focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 outline-none w-full transition-all" placeholder="给你的视频起个标题...">
+                    </div>
+
+                    <div class="flex items-center justify-between gap-3">
+                        <div class="flex-1">
+                            <label class="text-[8px] font-black uppercase text-zinc-400 mb-1 block">ASR Engine</label>
+                            <select id="asr-model" class="w-full bg-zinc-700 text-[10px] text-zinc-200 font-bold rounded-md px-2 py-1.5 outline-none border border-zinc-600 focus:border-emerald-500/30">
+                                <option value="base">Base (Fast)</option>
+                                <option value="small">Small</option>
+                                <option value="medium">Medium</option>
+                                <option value="large-v3" selected>Large (Best)</option>
+                            </select>
+                        </div>
+                        <div class="flex-1">
+                            <label class="text-[8px] font-black uppercase text-zinc-400 mb-1 block">Format</label>
+                            <select id="project-ratio" class="w-full bg-zinc-700 text-[10px] text-emerald-300 font-bold rounded-md px-2 py-1.5 outline-none border border-zinc-600 focus:border-emerald-500/30" onchange="changeProjectRatio(this.value)">
+                                <option value="16:9">Wide 16:9</option>
+                                <option value="9:16">Shorts 9:16</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="flex-1 overflow-y-auto custom-scrollbar">
+                    <div class="p-4 grid grid-cols-2 gap-3 border-b border-zinc-700/50">
+                        <label class="flex flex-col items-center justify-center p-3 border border-dashed border-zinc-600 rounded-xl hover:border-emerald-500 hover:bg-emerald-500/5 transition-all cursor-pointer group text-center">
+                            <input type="file" id="audio-upload" accept="audio/*" multiple class="hidden">
+                            <i class="fas fa-music text-zinc-400 group-hover:text-emerald-500 mb-2"></i>
+                            <span class="text-[9px] font-black text-zinc-300 uppercase">Audio+</span>
+                        </label>
+                        <label class="flex flex-col items-center justify-center p-3 border border-dashed border-zinc-600 rounded-xl hover:border-blue-500 hover:bg-blue-500/5 transition-all cursor-pointer group text-center">
+                            <input type="file" id="image-upload" accept="image/*" class="hidden">
+                            <i class="fas fa-image text-zinc-400 group-hover:text-blue-500 mb-2"></i>
+                            <span class="text-[9px] font-black text-zinc-300 uppercase">Image+</span>
+                        </label>
+                    </div>
+
+                    <div class="p-5 space-y-4 border-b border-zinc-700/50 bg-zinc-900/20">
+                        <div class="flex items-center justify-between">
+                            <span class="text-[10px] font-black uppercase tracking-widest text-zinc-300">CTA Enhancement</span>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="cta-enabled" class="sr-only peer">
+                                <div class="w-8 h-4 bg-zinc-600 rounded-full peer peer-checked:bg-emerald-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-full"></div>
+                            </label>
+                        </div>
+                        <textarea id="cta-text" class="w-full bg-zinc-900 border border-zinc-600 rounded-lg p-3 text-[11px] text-zinc-200 focus:border-emerald-500/30 outline-none resize-none h-24" placeholder="引导文案...">会员空间获取研报&#10;解锁精选研报独家分析</textarea>
+                        <div class="grid grid-cols-1 gap-2">
+                            <select id="cta-position" class="w-full bg-zinc-800 border border-zinc-600 rounded-md p-2 text-[10px] text-zinc-200 outline-none" onchange="updatePreview()">
+                                <option value="bottom_bar">底部·全宽横条</option>
+                                <option value="right_center">右侧·居中卡片</option>
+                                <option value="bottom_right" selected>右下角·悬浮卡片</option>
+                            </select>
+                            <select id="cta-style" class="w-full bg-zinc-800 border border-zinc-600 rounded-md p-2 text-[10px] text-zinc-200 outline-none" onchange="updatePreview()">
+                                <option value="police_yellow" selected>核心·明警黄</option>
+                                <option value="nomura_red">投行·暗酒红</option>
+                                <option value="premium_dark">高级·深邃灰</option>
+                                <option value="aurora_cyan">焦点·极光青</option>
+                                <option value="institutional_blue">机构·深海蓝</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- 片段设置 -->
+                    <div id="clip-settings" class="p-5 space-y-4 border-b border-zinc-700/50 bg-zinc-900/40 hidden">
+                        <div class="flex items-center justify-between">
+                            <span class="text-[10px] font-black uppercase tracking-widest text-emerald-500">Clip Settings</span>
+                            <span id="active-clip-name" class="text-[9px] text-zinc-500 truncate max-w-[120px]">未选择片段</span>
+                        </div>
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="text-[8px] font-black uppercase text-zinc-400 mb-1 block">Start (MM:SS)</label>
+                                <input type="text" id="clip-start" class="w-full bg-zinc-800 border border-zinc-600 rounded-md p-2 text-[10px] text-zinc-200 outline-none focus:border-emerald-500/50" placeholder="00:00.0">
+                            </div>
+                            <div>
+                                <label class="text-[8px] font-black uppercase text-zinc-400 mb-1 block">End (MM:SS)</label>
+                                <input type="text" id="clip-end" class="w-full bg-zinc-800 border border-zinc-600 rounded-md p-2 text-[10px] text-zinc-200 outline-none focus:border-emerald-500/50" placeholder="00:00.0">
+                            </div>
+                        </div>
+                        <div class="flex items-center justify-between text-[8px] text-zinc-500 font-mono">
+                            <span>Duration: <span id="clip-duration-val">0.0</span>s</span>
+                            <span>Total: <span id="clip-total-val">0.0</span>s</span>
+                        </div>
+                    </div>
+
+                    <!-- 导出参数 & 字幕 -->
+                    <div class="p-5 space-y-4 border-b border-zinc-700/50 bg-zinc-900/20">
+                        <span class="text-[10px] font-black uppercase tracking-widest text-zinc-300">Export & Subtitle</span>
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="text-[7px] font-black uppercase text-zinc-500 mb-1 block">Resolution</label>
+                                <select id="export-res" class="w-full bg-zinc-800 border border-zinc-700 rounded-md p-1.5 text-[9px] text-zinc-300 outline-none focus:border-emerald-500/30">
+                                    <option value="480p" selected>480P</option>
+                                    <option value="720p">720P</option>
+                                    <option value="1080p">1080P</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-[7px] font-black uppercase text-zinc-500 mb-1 block">Bitrate</label>
+                                <select id="export-bitrate" class="w-full bg-zinc-800 border border-zinc-700 rounded-md p-1.5 text-[9px] text-zinc-300 outline-none focus:border-emerald-500/30">
+                                    <option value="low" selected>Low</option>
+                                    <option value="medium">Med</option>
+                                    <option value="high">High</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-[7px] font-black uppercase text-zinc-500 mb-1 block">FPS</label>
+                                <select id="export-fps" class="w-full bg-zinc-800 border border-zinc-700 rounded-md p-1.5 text-[9px] text-zinc-300 outline-none focus:border-emerald-500/30">
+                                    <option value="30" selected>30</option>
+                                    <option value="60">60</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-[7px] font-black uppercase text-zinc-500 mb-1 block">Subtitle Size</label>
+                                <select id="subtitle-size" class="w-full bg-zinc-800 border border-zinc-700 rounded-md p-1.5 text-[9px] text-zinc-300 outline-none focus:border-emerald-500/30">
+                                    <option value="small">Small</option>
+                                    <option value="normal" selected>Normal</option>
+                                    <option value="large">Large</option>
+                                    <option value="xlarge">X-Large</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="media-list" class="p-4 space-y-2"></div>
+                </div>
+
+                <div class="p-4 border-t border-zinc-800 bg-zinc-900 shrink-0">
+                    <button id="submit-task-btn" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-black py-3 rounded-lg transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95">
+                        <i class="fas fa-rocket"></i> 提交合成任务
+                    </button>
+                </div>
+            </aside>
+
+            <!-- 中间：预览 -->
+            <section class="flex-1 flex flex-col bg-editor-bg relative overflow-hidden">
+                <!-- 任务列表切换按钮 (悬浮) -->
+                <button onclick="toggleRightPanel()" class="absolute top-4 right-4 z-50 w-10 h-10 bg-zinc-800/80 backdrop-blur-sm border border-zinc-700 rounded-full flex items-center justify-center text-zinc-400 hover:text-emerald-500 hover:border-emerald-500/50 transition-all shadow-xl group" title="切换任务面板">
+                    <i class="fas fa-list-check text-xs group-hover:scale-110 transition-transform"></i>
+                </button>
+
+                <div class="flex-1 flex items-center justify-center p-12 min-h-0">
+                    <div class="aspect-video w-full max-h-full bg-black rounded shadow-2xl overflow-hidden border border-zinc-800/50 relative">
+                        <canvas id="preview-canvas" width="1920" height="1080" class="w-full h-full object-contain"></canvas>
+                        <div id="preview-overlay" class="absolute inset-0 flex flex-col items-center justify-center bg-black/60 text-zinc-700 backdrop-blur-sm transition-all duration-700">
+                            <i class="fas fa-film text-3xl mb-3 opacity-10"></i>
+                            <p class="text-[9px] font-black uppercase tracking-[0.4em] opacity-30 text-emerald-500">Live Monitor</p>
+                        </div>
+                        <!-- 字幕位置拖动浮层 -->
+                        <div id="subtitle-drag-overlay" class="absolute inset-0 pointer-events-none z-20">
+                            <div id="subtitle-handle"
+                                 class="absolute left-0 right-0 pointer-events-auto cursor-ns-resize group opacity-50 hover:opacity-100 transition-opacity duration-200"
+                                 style="top: 90%; transform: translateY(-50%);">
+                                <div class="absolute inset-x-0 h-px bg-yellow-400/40 group-hover:bg-yellow-400/90 transition-colors" style="top: 50%;"></div>
+                                <div class="flex justify-center relative py-1">
+                                    <div class="bg-black/80 border border-yellow-400/40 group-hover:border-yellow-400/80 text-yellow-300 text-[10px] font-bold px-3 py-0.5 rounded-sm select-none flex items-center gap-2 transition-colors">
+                                        <i class="fas fa-grip-lines text-[8px] opacity-60"></i>
+                                        字幕位置
+                                        <i class="fas fa-grip-lines text-[8px] opacity-60"></i>
+                                    </div>
+                                </div>
+                                <div id="subtitle-pos-hint" class="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-mono text-yellow-400/60 bg-black/50 px-1.5 py-0.5 rounded select-none">90%</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 右侧：任务面板 (带折叠过渡) -->
+            <aside id="right-panel" class="w-80 flex flex-col border-l border-zinc-800 bg-editor-sidebar transition-all duration-300 overflow-hidden shrink-0">
+                <div class="p-4 border-b border-zinc-800 flex justify-between items-center shrink-0 min-w-[320px]">
+                    <h2 class="text-[10px] font-black uppercase tracking-widest text-zinc-500">Recent Tasks</h2>
+                    <button onclick="refreshTaskList()" class="text-zinc-600 hover:text-emerald-500 transition-colors"><i class="fas fa-sync-alt text-[10px]"></i></button>
+                </div>
+                <div id="task-list" class="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar min-w-[320px]">
+                    <div class="flex flex-col items-center justify-center h-full text-zinc-700">
+                        <i class="fas fa-tasks text-xl mb-2 opacity-20"></i>
+                        <p class="text-[9px] font-bold uppercase tracking-widest">No active tasks</p>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <!-- 下部：时间轴 -->
+        <div class="h-64 bg-zinc-950 flex flex-col shrink-0">
+            <div class="h-10 border-b border-zinc-900 flex items-center px-4 gap-6 bg-editor-sidebar shrink-0">
+                <div class="flex items-center gap-4 border-r border-zinc-800 pr-6">
+                    <button id="play-btn" class="w-7 h-7 flex items-center justify-center rounded-full bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500 hover:text-white transition-all"><i class="fas fa-play text-[10px]"></i></button>
+                    <div class="flex items-center gap-2 min-w-[110px]">
+                        <span id="current-time" class="text-[11px] font-mono text-emerald-500 font-bold">00:00</span>
+                        <span class="text-zinc-800 text-[10px]">/</span>
+                        <span id="total-time" class="text-[11px] font-mono text-zinc-600">00:00</span>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button id="split-btn" class="btn-tool"><i class="fas fa-scissors"></i> 分割</button>
+                    <button id="trim-start-btn" class="btn-tool"><i class="fas fa-arrow-left"></i> 删左</button>
+                    <button id="trim-end-btn" class="btn-tool"><i class="fas fa-arrow-right"></i> 删右</button>
+                </div>
+                <!-- 缩放控制 -->
+                <div class="flex items-center gap-2 bg-zinc-900 px-3 py-1 rounded-full border border-zinc-800">
+                    <button id="zoom-out-btn" class="w-5 h-5 flex items-center justify-center text-zinc-500 hover:text-emerald-400 transition-colors" title="缩小 (减小缩放)">
+                        <i class="fas fa-magnifying-glass-minus text-[10px]"></i>
+                    </button>
+                    <input type="range" id="timeline-zoom-slider" min="0" max="100" value="61" step="1" class="w-24 h-1 accent-emerald-500 bg-zinc-800 rounded-lg appearance-none cursor-pointer">
+                    <button id="zoom-in-btn" class="w-5 h-5 flex items-center justify-center text-zinc-500 hover:text-emerald-400 transition-colors" title="放大 (增大缩放)">
+                        <i class="fas fa-magnifying-glass-plus text-[10px]"></i>
+                    </button>
+                    <span id="zoom-label" class="text-[9px] font-mono text-zinc-500 min-w-[28px] text-right">1×</span>
+                </div>
+                <div class="ml-auto flex items-center gap-3">
+                    <div class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                    <span class="text-[9px] font-black uppercase tracking-widest text-zinc-600">Sync Engine v2</span>
+                </div>
+            </div>
+            <div id="timeline-scroll" class="flex-1 overflow-x-auto overflow-y-hidden relative custom-scrollbar">
+                <div id="timeline-ruler" class="h-6 w-max border-b border-zinc-900/30 flex items-end px-2 text-[8px] text-zinc-700 font-mono relative"></div>
+                <div class="relative w-max min-w-full">
+                    <div id="audio-track" class="h-24 timeline-track border-b border-zinc-900/20 flex items-center px-0 relative"></div>
+                    <div id="playhead" class="absolute top-0 bottom-0 w-[2px] bg-red-600 z-[100] pointer-events-none">
+                        <div class="absolute -top-1 -left-[4px] w-0 h-0 border-l-[5px] border-l-transparent border-r-[5px] border-r-transparent border-t-[8px] border-t-red-600"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/config.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/shared-navigation.js"></script>
+    <script src="js/publisher/services.js"></script>
+    <script src="js/video-editor/main.js"></script>
+</body>
+</html>

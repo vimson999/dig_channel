@@ -56,6 +56,8 @@ class SharedNavigation {
             return 'video-auto-generator';
         } else if (filename === 'publisher.html') {
             return 'publisher';
+        } else if (filename === 'video-editor.html') {
+            return 'video-editor';
         } else if (filename === 'downloads.html') {
             return 'downloads';
         }
@@ -83,6 +85,7 @@ class SharedNavigation {
             'thumbnail-generator-classic': '经典研报封面生成器',
             'video-auto-generator': 'AI 视频自动生成',
             'publisher': '一键智能发布台',
+            'video-editor': '高级剪辑工作台',
             'downloads': '素材下载中心'
         };
         return titles[this.currentPage] || '智能数据分析平台';
@@ -240,6 +243,12 @@ class SharedNavigation {
                         name: '一键发布台',
                         icon: 'fas fa-rocket',
                         href: 'publisher.html'
+                    },
+                    {
+                        id: 'video-editor',
+                        name: '高级剪辑版',
+                        icon: 'fas fa-scissors',
+                        href: 'video-editor.html'
                     },
                     {
                         id: 'downloads',
