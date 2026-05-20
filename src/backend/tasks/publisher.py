@@ -57,6 +57,19 @@ def sanitize_filename(name):
     name = name.replace(" ", "_")
     return name.strip()
 
+def has_usable_subtitles(value):
+    """Return True only when subtitle payload contains real subtitle text."""
+    if not value:
+        return False
+    if isinstance(value, str):
+        stripped = value.strip()
+        return bool(stripped and stripped not in {"识别中...", "识别失败"})
+    if isinstance(value, dict):
+        return has_usable_subtitles(value.get("text"))
+    if isinstance(value, list):
+        return any(has_usable_subtitles(item) for item in value)
+    return False
+
 @celery_app.task(bind=True)
 def run_publication_pipeline(self, task_id):
     """
@@ -177,7 +190,7 @@ def run_publication_pipeline(self, task_id):
             
             # --- 智能 ASR 补偿逻辑 ---
             # 改进：如果开启了字幕烧录 (sub_burn_enabled) 且当前字幕为空，强制触发 ASR
-            should_trigger_asr = asr_enabled or (sub_burn_enabled and (not subtitles or all(not s for s in (subtitles if isinstance(subtitles, list) else [subtitles]))))
+            should_trigger_asr = asr_enabled or (sub_burn_enabled and not has_usable_subtitles(subtitles))
             
             if audio_path_abs and should_trigger_asr:
                 from services.asr_service import asr_service
@@ -220,15 +233,17 @@ def run_publication_pipeline(self, task_id):
                             
                         except Exception as e:
                             logger.error(f"❌ [TASK] 第 {i+1} 个片段 ASR 识别失败: {e}")
-                            s_data = "识别失败"
+                            s_data = ""
                     processed_subs.append(s_data)
                 subtitles = processed_subs
                 logger.info(f"✅ [TASK] ASR 流程完成")
             
             # If sub_burn_enabled is False, we clear subtitles so synthesis methods don't render them
-            final_subtitles = subtitles if sub_burn_enabled else None
+            final_subtitles = subtitles if sub_burn_enabled and has_usable_subtitles(subtitles) else None
             if final_subtitles:
                 logger.info(f"📝 [TASK] 最终参与烧录的字幕条数: {len(final_subtitles)}")
+            elif sub_burn_enabled:
+                logger.warning("⚠️ [TASK] 字幕烧录已开启，但没有可用字幕，跳过字幕烧录")
     
             # --- Step 1: Video Synthesis Routing based on Aspect Ratio ---
             # 新版编辑器通过 aspect_ratio 参数显式指定比例，而将所有参数都放在 video 对象中

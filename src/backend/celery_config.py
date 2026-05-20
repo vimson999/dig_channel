@@ -20,7 +20,7 @@ def make_celery(app_name=__name__):
         app_name,
         backend=backend_url,
         broker=broker_url,
-        include=['tasks.publisher', 'tasks.downloader'] # Auto-discover tasks
+        include=['tasks.publisher', 'tasks.downloader', 'tasks.podcast_visualizer'] # Auto-discover tasks
     )
     
     celery.conf.update(

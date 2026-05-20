@@ -49,4 +49,4 @@
 ## 🛠️ 环境变动记录
 - 虚拟环境已安装：`mlx-whisper`, `mlx`, `mlx-metal`。
 - 本地已缓存模型：`mlx-community/whisper-large-v3-mlx-8bit`。
-- **注意**：下次启动需确保 `run-celery.sh` 对应的终端已加载新依赖。
+- **注意**：下次启动需确保 `scripts/dev/run-celery.sh` 对应的终端已加载新依赖。

@@ -27,9 +27,8 @@ export FLASK_ENV=development
 export FLASK_DEBUG=1
 export PYTHONUNBUFFERED=1
 
-# 设置PostgreSQL数据库连接
-export DATABASE_TYPE=postgresql
-export DATABASE_URL=postgresql://cappa_rw:RWcappaDb!!!2025@101.35.56.140:5432/show_ytb_data
+# 数据库连接从 .env 或当前环境变量读取，避免在脚本中写死凭据
+export DATABASE_TYPE=${DATABASE_TYPE:-postgresql}
 
 echo "💾 数据库类型: PostgreSQL"
 echo "🔗 数据库连接: show_ytb_data"
@@ -45,10 +44,6 @@ echo "   按 Ctrl+C 停止服务器"
 echo ""
 echo "📋 服务器日志:"
 echo "=========================================="
-
-# 设置PostgreSQL数据库连接
-export DATABASE_TYPE=postgresql
-export DATABASE_URL=postgresql://cappa_rw:RWcappaDb!!!2025@101.35.56.140:5432/show_ytb_data
 
 # 启动开发服务器
 python app.py

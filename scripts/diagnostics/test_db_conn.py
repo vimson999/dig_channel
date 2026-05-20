@@ -1,9 +1,12 @@
 import psycopg2
 import os
 
-url = os.environ.get("DATABASE_URL", "postgresql://cappa_rw:RWcappaDb!!!2025@101.35.56.140:5432/show_ytb_data")
+url = os.environ.get("DATABASE_URL")
+if not url:
+    raise SystemExit("DATABASE_URL is required")
+
 try:
-    print(f"Connecting to {url}...")
+    print("Connecting to DATABASE_URL...")
     conn = psycopg2.connect(url, connect_timeout=5)
     print("Connection successful!")
     conn.close()

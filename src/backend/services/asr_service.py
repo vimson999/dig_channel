@@ -2,6 +2,7 @@ import os
 import logging
 import platform
 import torch
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ except ImportError:
     HAS_FASTER_WHISPER = False
 
 class ASRService:
-    def __init__(self, model_size="base"):
+    def __init__(self, model_size="medium"):
         """
         Initialize the ASR service with a specific Whisper model size.
         Sizes: tiny, base, small, medium, large-v3
@@ -36,6 +37,53 @@ class ASRService:
         self.base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
         self.model_path = os.path.join(self.base_dir, 'data', 'models', 'whisper')
         os.makedirs(self.model_path, exist_ok=True)
+
+    def _get_mlx_repo_name(self, size=None):
+        model_size = size or self.model_size
+        return f"mlx-community/whisper-{model_size}-mlx-8bit"
+
+    def _resolve_local_mlx_model_path(self, repo_name):
+        """
+        Resolve an already-cached HuggingFace model snapshot.
+        Passing the local snapshot path prevents mlx-whisper from contacting
+        huggingface.co just to resolve the repo revision.
+        """
+        repo_cache_name = f"models--{repo_name.replace('/', '--')}"
+        cache_roots = []
+
+        hf_home = os.environ.get("HF_HOME")
+        if hf_home:
+            cache_roots.append(Path(hf_home) / "hub")
+
+        hf_hub_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+        if hf_hub_cache:
+            cache_roots.append(Path(hf_hub_cache))
+
+        cache_roots.append(Path.home() / ".cache" / "huggingface" / "hub")
+
+        for cache_root in cache_roots:
+            model_root = cache_root / repo_cache_name
+            ref_path = model_root / "refs" / "main"
+            snapshots_dir = model_root / "snapshots"
+            candidates = []
+
+            if ref_path.exists():
+                revision = ref_path.read_text(encoding="utf-8").strip()
+                if revision:
+                    candidates.append(snapshots_dir / revision)
+
+            if snapshots_dir.exists():
+                candidates.extend(sorted(snapshots_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True))
+
+            for candidate in candidates:
+                if not candidate.is_dir():
+                    continue
+                has_config = (candidate / "config.json").exists()
+                has_weights = (candidate / "weights.npz").exists() or (candidate / "weights.safetensors").exists()
+                if has_config and has_weights:
+                    return str(candidate)
+
+        return None
 
     def set_model_size(self, size):
         """Change the model size for the next transcription."""
@@ -51,8 +99,12 @@ class ASRService:
         if self.model is None:
             if self.use_mlx:
                 # mlx-whisper uses specific model names from HuggingFace
-                self.mlx_model_name = f"mlx-community/whisper-{self.model_size}-mlx-8bit"
-                logger.info(f"🚀 [ASR] Loading MLX-Whisper model: {self.mlx_model_name}")
+                self.mlx_model_name = self._get_mlx_repo_name()
+                self.mlx_model_path = self._resolve_local_mlx_model_path(self.mlx_model_name)
+                if self.mlx_model_path:
+                    logger.info(f"🚀 [ASR] Loading local MLX-Whisper model: {self.mlx_model_path}")
+                else:
+                    logger.warning(f"⚠️ [ASR] 本地未找到模型缓存，将尝试从 HuggingFace 解析: {self.mlx_model_name}")
                 self.model = "MLX_ACTIVE" 
                 self.current_loaded_size = self.model_size
             elif HAS_FASTER_WHISPER:
@@ -107,7 +159,7 @@ class ASRService:
                 # 开启 word_timestamps 以获得每个字的精确时间
                 result = mlx_whisper.transcribe(
                     audio_path, 
-                    path_or_hf_repo=self.mlx_model_name,
+                    path_or_hf_repo=self.mlx_model_path or self.mlx_model_name,
                     language="zh",
                     initial_prompt=SIMPLIFIED_PROMPT,
                     word_timestamps=True 
@@ -216,6 +268,6 @@ class ASRService:
         return full_text
 
 # Singleton instance
-# 默认使用 base 模型以提升初始化和普通任务速度
-# 任务开始时可根据参数动态切换至 large-v3
-asr_service = ASRService(model_size="base")
+# 默认使用 medium，兼顾中文转写质量和本地推理成本。
+# 任务开始时可根据参数动态切换至其他模型。
+asr_service = ASRService(model_size="medium")

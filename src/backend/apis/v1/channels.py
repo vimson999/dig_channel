@@ -17,6 +17,7 @@ bp = Blueprint('channels', __name__, url_prefix='/api/v1/channels')
 
 # 初始化服务
 youtube_sync = YouTubeSyncService()
+optimized_sync = OptimizedChannelSyncService()
 
 @bp.route('', methods=['GET'])
 @require_login
@@ -364,8 +365,7 @@ def sync_all_channels():
         active_only = data.get('active_only', True)
 
         if use_parallel:
-            optimized_service = OptimizedChannelSyncService()
-            result = optimized_service.sync_all_channels_parallel(
+            result = optimized_sync.sync_all_channels_parallel(
                 target_date=target_date,
                 max_workers=max_workers,
                 active_only=bool(active_only)

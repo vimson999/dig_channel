@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>播客视觉化 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; }
+        .drop-zone.dragover { border-color: #b9895e; background: #fff8ed; }
+        .template-stage { aspect-ratio: 16 / 9; container-type: inline-size; }
+    </style>
+</head>
+<body class="min-h-screen bg-stone-50 text-slate-900">
+    <div class="max-w-[1440px] mx-auto px-6 py-4">
+        <nav class="flex items-center gap-2 text-sm text-slate-500">
+            <a href="index.html" class="hover:text-blue-600 transition-colors"><i class="fas fa-home"></i></a>
+            <span>/</span>
+            <span class="text-slate-700">播客视觉化</span>
+        </nav>
+    </div>
+
+    <main class="max-w-[1440px] mx-auto px-6 pb-10">
+        <div class="grid grid-cols-1 xl:grid-cols-[440px_1fr] gap-6">
+            <section class="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                <div class="p-6 border-b border-stone-100">
+                    <div class="w-12 h-12 bg-amber-50 rounded-xl flex items-center justify-center mb-4">
+                        <i class="fas fa-podcast text-[#b9895e] text-xl"></i>
+                    </div>
+                    <h1 class="text-2xl font-extrabold text-slate-900">播客视觉化</h1>
+                    <p class="text-sm text-slate-500 mt-2">使用现代极简模板，把纯音频生成带标题、波形和进度线的 MP4。</p>
+                </div>
+
+                <form id="podcast-form" class="p-6 space-y-5">
+                    <div id="drop-zone" class="drop-zone rounded-xl border-2 border-dashed border-stone-300 bg-stone-50 p-7 text-center transition-colors">
+                        <input id="audio-input" type="file" class="hidden" accept=".mp3,.m4a,.wav,.aac,.flac,.ogg,audio/*">
+                        <i class="fas fa-cloud-upload-alt text-4xl text-stone-400"></i>
+                        <div class="mt-4 text-base font-bold text-slate-800">拖拽音频文件到这里</div>
+                        <div class="mt-1 text-sm text-slate-500">支持 mp3、m4a、wav、aac、flac、ogg</div>
+                        <button type="button" id="pick-audio-btn" class="mt-5 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-bold text-white hover:bg-slate-800 transition-colors">
+                            <i class="fas fa-folder-open mr-2"></i>选择音频
+                        </button>
+                    </div>
+
+                    <div id="audio-card" class="hidden rounded-xl border border-stone-200 bg-white p-4">
+                        <div class="flex items-start gap-3">
+                            <div class="w-10 h-10 rounded-lg bg-amber-50 text-[#b9895e] flex items-center justify-center">
+                                <i class="fas fa-file-audio"></i>
+                            </div>
+                            <div class="min-w-0 flex-1">
+                                <div id="audio-name" class="truncate text-sm font-bold text-slate-900"></div>
+                                <div id="audio-size" class="mt-1 text-xs text-slate-500"></div>
+                            </div>
+                            <button type="button" id="clear-audio-btn" class="text-slate-400 hover:text-slate-700" title="移除音频">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label for="title-input" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">视频标题</label>
+                        <textarea id="title-input" rows="2" class="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-[#b9895e]" placeholder="盘点鲍威尔八年功与过，他给美联储留下了什么？">盘点鲍威尔八年功与过，他给美联储留下了什么？</textarea>
+                    </div>
+
+                    <div>
+                        <label for="headline-subtitle-input" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">副标题</label>
+                        <input id="headline-subtitle-input" type="text" value="本期一句话预告" class="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-[#b9895e]" placeholder="本期一句话预告">
+                    </div>
+
+                    <div>
+                        <label for="subtitle-input" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">时间标签</label>
+                        <input id="subtitle-input" type="text" value="2026-05-19 / 精选片段" class="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-[#b9895e]" placeholder="2026-05-19 / 精选片段">
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label for="brand-input" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">品牌/频道名</label>
+                            <input id="brand-input" type="text" value="胶囊播客" class="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-[#b9895e]">
+                        </div>
+                        <div>
+                            <label for="asr-model-select" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">ASR 模型</label>
+                            <select id="asr-model-select" class="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-[#b9895e]">
+                                <option value="base">base</option>
+                                <option value="small">small</option>
+                                <option value="medium" selected>medium</option>
+                                <option value="large-v3">large-v3</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label for="srt-input" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">SRT 字幕文件</label>
+                        <input id="srt-input" type="file" accept=".srt" class="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-amber-50 file:px-3 file:py-1.5 file:text-[#9b7049] file:font-bold focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-[#b9895e]">
+                        <label class="mt-3 flex items-center gap-2 text-sm text-slate-600">
+                            <input id="auto-asr-input" type="checkbox" class="h-4 w-4 rounded border-stone-300 text-[#b9895e] focus:ring-[#b9895e]">
+                            未上传 SRT 时使用本地 MLX-Whisper 自动提取字幕
+                        </label>
+                    </div>
+
+                    <div>
+                        <label for="caption-input" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">无 SRT 时的字幕占位</label>
+                        <textarea id="caption-input" rows="2" class="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-[#b9895e]" placeholder="这里显示当前音频文案或字幕句子">美债收益率持续高企，意味着市场正在重新定价长期资金成本。</textarea>
+                    </div>
+
+                    <div class="grid grid-cols-3 gap-3">
+                        <div>
+                            <label for="orientation-select" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">画幅</label>
+                            <select id="orientation-select" class="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-[#b9895e]">
+                                <option value="landscape" selected>横屏</option>
+                                <option value="portrait">竖屏</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="fps-select" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">帧率</label>
+                            <select id="fps-select" class="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-[#b9895e]">
+                                <option value="24">24</option>
+                                <option value="30" selected>30</option>
+                                <option value="60">60</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="crf-select" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">质量</label>
+                            <select id="crf-select" class="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-[#b9895e]">
+                                <option value="18">高</option>
+                                <option value="20" selected>标准</option>
+                                <option value="24">小</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="message" class="hidden rounded-lg border px-4 py-3 text-sm"></div>
+
+                    <div>
+                        <div class="flex items-center justify-between text-xs font-bold text-slate-500 mb-2">
+                            <span id="progress-text">等待音频</span>
+                            <span id="progress-label">0%</span>
+                        </div>
+                        <div class="h-2 rounded-full bg-stone-100 overflow-hidden">
+                            <div id="progress-bar" class="h-full w-0 rounded-full bg-[#b9895e] transition-all duration-300"></div>
+                        </div>
+                    </div>
+
+                    <button type="submit" id="generate-btn" class="w-full rounded-lg bg-slate-900 px-4 py-3 text-sm font-extrabold text-white hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                        <i class="fas fa-video mr-2"></i>生成播客视频
+                    </button>
+                </form>
+            </section>
+
+            <section class="space-y-6">
+                <div class="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                    <div class="p-6 border-b border-stone-100 flex items-center justify-between gap-4">
+                        <div>
+                            <h2 class="text-lg font-extrabold text-slate-900">模板预览</h2>
+                            <p class="text-sm text-slate-500 mt-1">左上为标题/副标题，中间为歌词式字幕，右侧转盘显示品牌名。</p>
+                        </div>
+                        <span class="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-bold text-[#9b7049]">modern_minimalist</span>
+                    </div>
+                    <div class="p-6">
+                        <div class="template-stage relative overflow-hidden rounded-xl bg-stone-100 shadow-sm">
+                            <img id="server-preview-image" class="h-full w-full object-cover" alt="播客视觉化服务端预览">
+                            <div id="server-preview-status" class="absolute inset-0 flex items-center justify-center bg-white/75 text-sm font-bold text-slate-500 backdrop-blur-sm">
+                                <i class="fas fa-spinner fa-spin mr-2"></i>正在渲染预览
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden min-h-[360px]">
+                    <div class="p-6 border-b border-stone-100 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                        <div>
+                            <h2 class="text-lg font-extrabold text-slate-900">生成结果</h2>
+                            <p id="result-meta" class="text-sm text-slate-500 mt-1">生成后会显示 MP4 预览和下载按钮</p>
+                        </div>
+                        <a id="download-link" href="#" download class="hidden rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 transition-colors">
+                            <i class="fas fa-download mr-2"></i>下载 MP4
+                        </a>
+                    </div>
+
+                    <div id="empty-state" class="px-6 py-16 text-center text-slate-400">
+                        <i class="fas fa-film text-4xl block mb-4"></i>
+                        <div class="text-sm">还没有生成视频</div>
+                    </div>
+
+                    <div id="preview-wrap" class="hidden p-6">
+                        <div class="overflow-auto rounded-xl border border-stone-200 bg-slate-950 p-4">
+                            <video id="preview-video" class="mx-auto max-w-full max-h-[620px] rounded-lg" controls></video>
+                        </div>
+                    </div>
+
+                    <div class="border-t border-stone-100 p-6">
+                        <div class="mb-4 flex items-center justify-between gap-3">
+                            <div>
+                                <h3 class="text-base font-extrabold text-slate-900">任务列表</h3>
+                                <p class="text-xs text-slate-500 mt-1">最近 30 个播客视觉化任务</p>
+                            </div>
+                            <button type="button" id="refresh-tasks-btn" class="rounded-lg border border-stone-300 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-stone-50">
+                                <i class="fas fa-sync-alt mr-1"></i>刷新
+                            </button>
+                        </div>
+                        <div class="overflow-x-auto rounded-xl border border-stone-200">
+                            <table class="min-w-full divide-y divide-stone-200 text-sm">
+                                <thead class="bg-stone-50 text-xs font-bold text-slate-500">
+                                    <tr>
+                                        <th class="px-4 py-3 text-left">标题</th>
+                                        <th class="px-4 py-3 text-left">状态</th>
+                                        <th class="px-4 py-3 text-left">进度</th>
+                                        <th class="px-4 py-3 text-left">字幕</th>
+                                        <th class="px-4 py-3 text-left">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="task-list-body" class="divide-y divide-stone-100 bg-white">
+                                    <tr>
+                                        <td colspan="5" class="px-4 py-8 text-center text-slate-400">暂无任务</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20260519-001"></script>
+    <script src="js/podcast-visualizer.js?v=20260520-002"></script>
+</body>
+</html>

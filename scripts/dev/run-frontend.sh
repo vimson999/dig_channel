@@ -2,7 +2,8 @@
 
 # YouTube Analytics 前端启动脚本
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
 
 echo "🎨 正在启动前端服务器..."
 
@@ -14,5 +15,5 @@ else
     exit 1
 fi
 
-cd src/frontend
+cd "$PROJECT_ROOT/src/frontend"
 python server.py

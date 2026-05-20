@@ -147,6 +147,18 @@ data/uploads/
 src/backend/data/uploads/
 .gemini/
 
+# Prevent root-level generated media artifacts
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.webp
+/*.mp4
+/*.mov
+/*.mp3
+/*.wav
+/*.pdf
+
 # Prevent media files in backend source directory
 src/backend/**/*.png
 src/backend/**/*.jpg

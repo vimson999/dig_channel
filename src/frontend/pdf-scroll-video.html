@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF 滚动视频 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; }
+        .drop-zone.dragover { border-color: #2563eb; background: #eff6ff; }
+        .video-frame { max-height: 720px; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-900">
+    <div class="max-w-[1440px] mx-auto px-6 py-4">
+        <nav class="flex items-center gap-2 text-sm text-slate-500">
+            <a href="index.html" class="hover:text-blue-600 transition-colors"><i class="fas fa-home"></i></a>
+            <span>/</span>
+            <span class="text-slate-700">PDF 滚动视频</span>
+        </nav>
+    </div>
+
+    <main class="max-w-[1440px] mx-auto px-6 pb-10">
+        <div class="grid grid-cols-1 xl:grid-cols-[440px_1fr] gap-6">
+            <section class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+                <div class="p-6 border-b border-slate-100">
+                    <div class="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center mb-4">
+                        <i class="fas fa-file-video text-blue-600 text-xl"></i>
+                    </div>
+                    <h1 class="text-2xl font-extrabold text-slate-900">PDF 滚动视频</h1>
+                    <p class="text-sm text-slate-500 mt-2">把 PDF 渲染成长图，用 FFmpeg 生成匀速滚动 MP4。</p>
+                </div>
+
+                <form id="pdf-video-form" class="p-6 space-y-5">
+                    <div id="drop-zone" class="drop-zone rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 p-7 text-center transition-colors">
+                        <input id="file-input" type="file" class="hidden" accept=".pdf">
+                        <i class="fas fa-cloud-upload-alt text-4xl text-slate-400"></i>
+                        <div class="mt-4 text-base font-bold text-slate-800">拖拽 PDF 文件到这里</div>
+                        <div class="mt-1 text-sm text-slate-500">也可以在下方填写 PDF 链接</div>
+                        <button type="button" id="pick-file-btn" class="mt-5 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-700 transition-colors">
+                            <i class="fas fa-folder-open mr-2"></i>选择 PDF
+                        </button>
+                    </div>
+
+                    <div id="file-card" class="hidden rounded-xl border border-slate-200 bg-white p-4">
+                        <div class="flex items-start gap-3">
+                            <div class="w-10 h-10 rounded-lg bg-red-50 text-red-600 flex items-center justify-center">
+                                <i class="fas fa-file-pdf"></i>
+                            </div>
+                            <div class="min-w-0 flex-1">
+                                <div id="file-name" class="truncate text-sm font-bold text-slate-900"></div>
+                                <div id="file-size" class="mt-1 text-xs text-slate-500"></div>
+                            </div>
+                            <button type="button" id="clear-file-btn" class="text-slate-400 hover:text-slate-700" title="移除文件">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label for="pdf-url" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">PDF 链接</label>
+                        <input id="pdf-url" type="url" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500" placeholder="https://example.com/report.pdf">
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label for="preset-select" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">画布预设</label>
+                            <select id="preset-select" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                                <option value="1080x1920" selected>竖屏 1080x1920</option>
+                                <option value="1920x1080">横屏 1920x1080</option>
+                                <option value="1440x1920">高清竖屏 1440x1920</option>
+                                <option value="1080x1080">方形 1080x1080</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="duration-input" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">总时长</label>
+                            <input id="duration-input" type="number" min="3" max="600" value="30" step="1" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label for="start-hold-input" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">开头停留</label>
+                            <input id="start-hold-input" type="number" min="0" max="30" value="1" step="0.5" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label for="end-hold-input" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">结尾停留</label>
+                            <input id="end-hold-input" type="number" min="0" max="30" value="1" step="0.5" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label for="fps-select" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">帧率</label>
+                            <select id="fps-select" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                                <option value="24">24 fps</option>
+                                <option value="30" selected>30 fps</option>
+                                <option value="60">60 fps</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="crf-select" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">压缩质量</label>
+                            <select id="crf-select" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                                <option value="18">高质量</option>
+                                <option value="20" selected>标准</option>
+                                <option value="24">小文件</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="message" class="hidden rounded-lg border px-4 py-3 text-sm"></div>
+
+                    <div>
+                        <div class="flex items-center justify-between text-xs font-bold text-slate-500 mb-2">
+                            <span id="progress-text">等待 PDF</span>
+                            <span id="progress-label">0%</span>
+                        </div>
+                        <div class="h-2 rounded-full bg-slate-100 overflow-hidden">
+                            <div id="progress-bar" class="h-full w-0 rounded-full bg-blue-600 transition-all duration-300"></div>
+                        </div>
+                    </div>
+
+                    <button type="submit" id="convert-btn" class="w-full rounded-lg bg-blue-600 px-4 py-3 text-sm font-extrabold text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                        <i class="fas fa-video mr-2"></i>生成 MP4
+                    </button>
+                </form>
+            </section>
+
+            <section class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden min-h-[640px]">
+                <div class="p-6 border-b border-slate-100 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                    <div>
+                        <h2 class="text-lg font-extrabold text-slate-900">视频预览</h2>
+                        <p id="result-meta" class="text-sm text-slate-500 mt-1">生成后会显示 MP4 预览和下载按钮</p>
+                    </div>
+                    <a id="download-link" href="#" download class="hidden rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 transition-colors">
+                        <i class="fas fa-download mr-2"></i>下载 MP4
+                    </a>
+                </div>
+
+                <div id="empty-state" class="px-6 py-20 text-center text-slate-400">
+                    <i class="fas fa-film text-4xl block mb-4"></i>
+                    <div class="text-sm">还没有生成视频</div>
+                </div>
+
+                <div id="preview-wrap" class="hidden p-6">
+                    <div class="video-frame overflow-auto rounded-xl border border-slate-200 bg-slate-950 p-4">
+                        <video id="preview-video" class="mx-auto max-w-full max-h-[680px] rounded-lg" controls></video>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20260518-002"></script>
+    <script src="js/pdf-scroll-video.js?v=20260518-001"></script>
+</body>
+</html>

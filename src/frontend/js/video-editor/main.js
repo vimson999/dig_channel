@@ -4,6 +4,10 @@
 
 // 缩放对数映射：slider(0-100) ↔ zoom(0.1-10000px/s)
 const ZOOM_MIN = 0.1, ZOOM_MAX = 10000, ZOOM_DEFAULT = 50;
+const DEFAULT_SUBTITLE_Y_BY_RATIO = {
+    '16:9': 0.90,
+    '9:16': 0.72
+};
 function sliderToZoom(v) { return ZOOM_MIN * Math.pow(ZOOM_MAX / ZOOM_MIN, v / 100); }
 function zoomToSlider(z) { return Math.round(Math.log(z / ZOOM_MIN) / Math.log(ZOOM_MAX / ZOOM_MIN) * 100); }
 function updateZoomLabel(zoom) {
@@ -23,7 +27,10 @@ function applyZoom(sliderVal) {
 const state = {
     audio_segments: [],
     image_path: null,
+    video_path: null,
+    background_type: null,
     previewImage: (() => { const img = new Image(); img.crossOrigin = "anonymous"; return img; })(),
+    previewVideo: (() => { const video = document.createElement('video'); video.crossOrigin = "anonymous"; video.muted = true; video.playsInline = true; video.preload = "metadata"; return video; })(),
     current_time: 0,
     total_duration: 0,
     zoom: ZOOM_DEFAULT,
@@ -33,7 +40,7 @@ const state = {
     current_audio_instance: null,
     aspect_ratio: '16:9',
     tasks: [],
-    subtitle_y_pct: null  // null = 使用后端默认值
+    subtitle_y_pct: DEFAULT_SUBTITLE_Y_BY_RATIO['16:9']
 };
 
 const elements = {
@@ -68,19 +75,10 @@ document.addEventListener('DOMContentLoaded', () => {
 function initSubtitleDrag() {
     const overlay = document.getElementById('subtitle-drag-overlay');
     const handle = document.getElementById('subtitle-handle');
-    const hint = document.getElementById('subtitle-pos-hint');
     if (!overlay || !handle) return;
 
     let dragging = false;
-    let displayPct = 0.90;  // 初始显示位置，不写入 state（保持 null = 用后端默认值）
-
-    function setHandleDisplay(pct) {
-        displayPct = Math.max(0.03, Math.min(0.97, pct));
-        handle.style.top = `${displayPct * 100}%`;
-        if (hint) hint.textContent = `${Math.round(displayPct * 100)}%`;
-    }
-
-    setHandleDisplay(displayPct);
+    setSubtitlePosition(state.subtitle_y_pct);
 
     handle.addEventListener('mousedown', (e) => {
         dragging = true;
@@ -91,18 +89,29 @@ function initSubtitleDrag() {
         if (!dragging) return;
         const rect = overlay.getBoundingClientRect();
         const pct = (e.clientY - rect.top) / rect.height;
-        setHandleDisplay(pct);
-        state.subtitle_y_pct = displayPct;
-        console.log(`📍 [Subtitle Drag] y_pct: ${displayPct.toFixed(4)}`);
+        setSubtitlePosition(pct);
+        console.log(`📍 [Subtitle Drag] y_pct: ${state.subtitle_y_pct.toFixed(4)}`);
     });
 
     window.addEventListener('mouseup', () => { dragging = false; });
 
-    // 双击重置为后端默认（清空 state）
+    // 双击重置为当前画幅默认位置
     handle.addEventListener('dblclick', () => {
-        state.subtitle_y_pct = null;
-        setHandleDisplay(0.90);
+        setSubtitlePosition(getDefaultSubtitleY(state.aspect_ratio));
     });
+}
+
+function getDefaultSubtitleY(ratio) {
+    return DEFAULT_SUBTITLE_Y_BY_RATIO[ratio] ?? 0.90;
+}
+
+function setSubtitlePosition(pct) {
+    const handle = document.getElementById('subtitle-handle');
+    const hint = document.getElementById('subtitle-pos-hint');
+    const nextPct = Math.max(0.03, Math.min(0.97, Number(pct)));
+    state.subtitle_y_pct = nextPct;
+    if (handle) handle.style.top = `${nextPct * 100}%`;
+    if (hint) hint.textContent = `${Math.round(nextPct * 100)}%`;
 }
 
 function initEventListeners() {
@@ -130,10 +139,36 @@ function initEventListeners() {
         const data = await uploadFile(file);
         if (data.success) {
             state.image_path = data.path;
+            state.video_path = null;
+            state.background_type = 'image';
             const viewUrl = `${PublisherService.API_BASE}/resources/view?path=${encodeURIComponent(data.path)}&_t=${Date.now()}`;
             state.previewImage.onload = () => updatePreview();
             state.previewImage.onerror = () => console.error('❌ 预览图加载失败:', viewUrl);
             state.previewImage.src = viewUrl;
+            updateMediaStatus(file.name, '图片背景');
+        }
+    });
+
+    document.getElementById('video-upload')?.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const data = await uploadFile(file);
+        if (data.success) {
+            state.video_path = data.path;
+            state.image_path = null;
+            state.background_type = 'video';
+            const viewUrl = `${PublisherService.API_BASE}/resources/view?path=${encodeURIComponent(data.path)}&_t=${Date.now()}`;
+            state.previewVideo.onloadeddata = () => {
+                try {
+                    state.previewVideo.currentTime = Math.min(0.2, state.previewVideo.duration || 0);
+                } catch (err) {
+                    updatePreview();
+                }
+            };
+            state.previewVideo.onseeked = () => updatePreview();
+            state.previewVideo.onerror = () => console.error('❌ 预览视频加载失败:', viewUrl);
+            state.previewVideo.src = viewUrl;
+            updateMediaStatus(file.name, '视频背景');
         }
     });
 
@@ -156,6 +191,13 @@ function initEventListeners() {
     });
     document.getElementById('zoom-out-btn')?.addEventListener('click', () => {
         applyZoom(parseInt(document.getElementById('timeline-zoom-slider').value) - 10);
+    });
+
+    elements.taskList?.addEventListener('click', (e) => {
+        const applyBtn = e.target.closest('[data-apply-task-id]');
+        if (!applyBtn) return;
+        e.preventDefault();
+        applyTaskConfig(applyBtn.dataset.applyTaskId);
     });
 
     // 片段设置面板事件
@@ -202,7 +244,18 @@ async function uploadFile(file) {
     catch (err) { return { success: false }; }
 }
 
-function addAudioSegment(name, path) {
+function updateMediaStatus(fileName, label) {
+    const mediaList = document.getElementById('media-list');
+    if (!mediaList) return;
+    mediaList.innerHTML = `
+        <div class="rounded-lg border border-zinc-700 bg-zinc-900/70 p-3">
+            <div class="text-[8px] font-black uppercase tracking-widest text-zinc-500">${label}</div>
+            <div class="mt-1 truncate text-[10px] font-bold text-zinc-200">${fileName}</div>
+        </div>
+    `;
+}
+
+function addAudioSegment(name, path, options = {}) {
     const viewUrl = `${PublisherService.API_BASE}/resources/view?path=${encodeURIComponent(path)}`;
     const audio = new Audio(viewUrl);
     audio.onloadedmetadata = () => {
@@ -211,16 +264,17 @@ function addAudioSegment(name, path) {
             name: name,
             path: path,
             duration: audio.duration,
-            start: 0,
-            end_offset: 0,
-            speed: 1.0,
-            subtitle: "",
+            start: Number(options.start || 0),
+            end_offset: Number(options.end_offset || 0),
+            speed: Number(options.speed || 1.0),
+            subtitle: options.subtitle || "",
             audio_instance: audio
         };
         state.audio_segments.push(segment);
         renderTimeline();
         updateTotalDuration();
     };
+    audio.onerror = () => showToast(`音频无法加载：${name}`, 'error');
 }
 
 function renderTimeline() {
@@ -552,6 +606,7 @@ function renderTaskList() {
     }
     elements.taskList.innerHTML = state.tasks.map(task => {
         const isCompleted = task.status === 'completed';
+        const hasReusableConfig = !!task.params?.video || Array.isArray(task.params?.audio_segments);
         return `
             <div class="task-card bg-zinc-900 border border-zinc-800 p-3 rounded-lg ${task.status === 'failed' ? 'border-l-red-500' : (isCompleted ? 'border-l-emerald-500' : 'border-l-blue-500')}">
                 <div class="flex justify-between items-start">
@@ -563,10 +618,126 @@ function renderTaskList() {
                 <div class="h-1 bg-zinc-800 rounded-full mt-2 overflow-hidden">
                     <div class="h-full bg-emerald-500 transition-all" style="width: ${task.progress}%"></div>
                 </div>
+                ${hasReusableConfig ? `<button type="button" data-apply-task-id="${task.id || task._id}" class="mt-2 mr-2 rounded bg-zinc-800 px-2 py-1 text-[8px] font-black uppercase text-zinc-300 hover:bg-zinc-700">套用配置</button>` : ''}
                 ${isCompleted ? `<a href="${PublisherService.API_BASE}/resources/view?path=${encodeURIComponent(task.result.video_path)}" target="_blank" class="block mt-2 text-[8px] font-black text-emerald-500 uppercase hover:underline">Download Video</a>` : ''}
             </div>
         `;
     }).join('');
+}
+
+function applyTaskConfig(taskId) {
+    const task = state.tasks.find(item => String(item.id || item._id) === String(taskId));
+    const params = task?.params;
+    if (!task || !params) {
+        showToast('没有找到可套用的历史配置', 'error');
+        return;
+    }
+
+    const videoParams = params.video || {};
+    const exportParams = params.export_params || {};
+    const cta = videoParams.cta || null;
+    const title = params.bilibili?.title || params.thumbnail?.main_title || task.title || '';
+    const ratio = params.aspect_ratio || state.aspect_ratio || '16:9';
+
+    document.getElementById('project-ratio').value = ratio;
+    changeProjectRatio(ratio);
+
+    if (params.asr_model) document.getElementById('asr-model').value = params.asr_model;
+    if (exportParams.resolution) document.getElementById('export-res').value = exportParams.resolution;
+    if (exportParams.bitrate) document.getElementById('export-bitrate').value = exportParams.bitrate;
+    if (exportParams.fps) document.getElementById('export-fps').value = String(exportParams.fps);
+    if (videoParams.subtitle_size) document.getElementById('subtitle-size').value = videoParams.subtitle_size;
+    if (videoParams.subtitle_position?.y_pct !== undefined) {
+        setSubtitlePosition(videoParams.subtitle_position.y_pct);
+    }
+    if (title) elements.videoTitle.value = title;
+
+    const ctaEnabled = document.getElementById('cta-enabled');
+    ctaEnabled.checked = !!cta;
+    if (cta) {
+        if (cta.text !== undefined) document.getElementById('cta-text').value = cta.text;
+        if (cta.position) document.getElementById('cta-position').value = cta.position;
+        if (cta.style) document.getElementById('cta-style').value = cta.style;
+    }
+
+    loadBackgroundFromParams(videoParams);
+    loadAudioSegmentsFromParams(params.audio_segments || []);
+    updatePreview();
+    showToast('已套用历史任务配置，可继续调整后重新提交', 'success');
+}
+
+function loadBackgroundFromParams(videoParams) {
+    const backgroundPath = videoParams.image_path || videoParams.video_path;
+    if (!backgroundPath) {
+        state.image_path = null;
+        state.video_path = null;
+        state.background_type = null;
+        updateMediaStatus('历史配置未包含背景素材', '缺少背景');
+        return;
+    }
+
+    const mediaType = videoParams.media_type || (isVideoPath(backgroundPath) ? 'video' : 'image');
+    const viewUrl = `${PublisherService.API_BASE}/resources/view?path=${encodeURIComponent(backgroundPath)}&_t=${Date.now()}`;
+
+    if (mediaType === 'video') {
+        state.video_path = backgroundPath;
+        state.image_path = null;
+        state.background_type = 'video';
+        state.previewVideo.onloadeddata = () => {
+            try {
+                state.previewVideo.currentTime = Math.min(0.2, state.previewVideo.duration || 0);
+            } catch (err) {
+                updatePreview();
+            }
+        };
+        state.previewVideo.onseeked = () => updatePreview();
+        state.previewVideo.onerror = () => showToast('历史视频背景无法加载，可能文件已被移动', 'error');
+        state.previewVideo.src = viewUrl;
+        updateMediaStatus(getFileName(backgroundPath), '视频背景');
+    } else {
+        state.image_path = backgroundPath;
+        state.video_path = null;
+        state.background_type = 'image';
+        state.previewImage.onload = () => updatePreview();
+        state.previewImage.onerror = () => showToast('历史图片背景无法加载，可能文件已被移动', 'error');
+        state.previewImage.src = viewUrl;
+        updateMediaStatus(getFileName(backgroundPath), '图片背景');
+    }
+}
+
+function loadAudioSegmentsFromParams(audioSegments) {
+    state.audio_segments.forEach(seg => {
+        try { seg.audio_instance?.pause(); } catch (err) {}
+    });
+    state.audio_segments = [];
+    state.active_index = -1;
+    updateClipSettingsPanel();
+    renderTimeline();
+    updateTotalDuration();
+
+    if (!Array.isArray(audioSegments) || audioSegments.length === 0) {
+        showToast('历史配置未包含音频轨道', 'error');
+        return;
+    }
+
+    audioSegments.forEach((seg) => {
+        if (!seg?.path) return;
+        addAudioSegment(getFileName(seg.path), seg.path, {
+            start: seg.start,
+            end_offset: seg.end_offset,
+            speed: seg.speed,
+            subtitle: seg.subtitle
+        });
+    });
+}
+
+function isVideoPath(path) {
+    return /\.(mp4|mov|avi|mkv|webm|m4v)$/i.test(String(path || '').split('?')[0]);
+}
+
+function getFileName(path) {
+    const cleanPath = String(path || '').split('?')[0];
+    return decodeURIComponent(cleanPath.split('/').pop() || cleanPath || '未命名素材');
 }
 
 // --- 其他工具 ---
@@ -614,6 +785,7 @@ window.changeProjectRatio = (value) => {
     const canvas = elements.previewCanvas;
     if (value === '16:9') { canvas.width = 1920; canvas.height = 1080; } 
     else { canvas.width = 1080; canvas.height = 1920; }
+    setSubtitlePosition(getDefaultSubtitleY(value));
     updatePreview();
 };
 
@@ -630,7 +802,8 @@ window.toggleRightPanel = () => {
 
 async function handleSubmit() {
     if (state.audio_segments.length === 0) return alert("请添加音频");
-    if (!state.image_path) return alert("请添加背景图");
+    const backgroundPath = state.video_path || state.image_path;
+    if (!backgroundPath) return alert("请添加背景图片或背景视频");
     elements.submitBtn.disabled = true;
     elements.submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 提交中...';
     const finalTitle = elements.videoTitle.value.trim() || state.audio_segments[0].name.split('.')[0] + " (Pro Edit)";
@@ -647,14 +820,15 @@ async function handleSubmit() {
         thumbnail: { main_title: finalTitle },
         video: {
             enabled: true,
-            image_path: state.image_path,
+            image_path: backgroundPath,
+            media_type: state.background_type || 'image',
             sub_burn_enabled: true,
             cta: document.getElementById('cta-enabled').checked ? {
                 text: document.getElementById('cta-text').value,
                 position: document.getElementById('cta-position').value,
                 style: document.getElementById('cta-style').value
             } : null,
-            subtitle_position: state.subtitle_y_pct !== null ? { y_pct: state.subtitle_y_pct } : null,
+            subtitle_position: { y_pct: state.subtitle_y_pct },
             subtitle_size: document.getElementById('subtitle-size').value
         }
     };
@@ -672,8 +846,12 @@ function updatePreview() {
     const ctx = canvas.getContext('2d');
     const overlay = document.getElementById('preview-overlay');
     const img = state.previewImage;
+    const video = state.previewVideo;
 
-    if (!img.src || !img.complete || img.naturalWidth === 0) {
+    const hasImage = state.background_type === 'image' && img.src && img.complete && img.naturalWidth > 0;
+    const hasVideo = state.background_type === 'video' && video.src && video.readyState >= 2 && video.videoWidth > 0;
+
+    if (!hasImage && !hasVideo) {
         overlay?.classList.remove('opacity-0', 'pointer-events-none');
         return;
     }
@@ -682,7 +860,11 @@ function updatePreview() {
 
     const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
-    drawImageCover(ctx, img, 0, 0, w, h);
+    if (hasVideo) {
+        drawImageCover(ctx, video, 0, 0, w, h);
+    } else {
+        drawImageCover(ctx, img, 0, 0, w, h);
+    }
 
     if (document.getElementById('cta-enabled').checked) {
         const text = document.getElementById('cta-text').value || "";
@@ -711,8 +893,10 @@ function updatePreview() {
 }
 
 function drawImageCover(ctx, img, x, y, w, h) {
-    if (!img.naturalWidth) return;
-    const r = img.naturalWidth / img.naturalHeight, cr = w / h;
+    const sourceW = img.naturalWidth || img.videoWidth;
+    const sourceH = img.naturalHeight || img.videoHeight;
+    if (!sourceW || !sourceH) return;
+    const r = sourceW / sourceH, cr = w / h;
     let rw, rh, rx, ry;
     if (r > cr) {
         rh = h; rw = h * r;

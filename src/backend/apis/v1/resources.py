@@ -3,7 +3,6 @@ import time
 from flask import Blueprint, request, jsonify, send_from_directory, make_response
 from werkzeug.utils import secure_filename
 from pathlib import Path
-from services.asr_service import asr_service
 
 bp = Blueprint('resources', __name__, url_prefix='/api/v1/resources')
 
@@ -138,6 +137,8 @@ def transcribe_audio_api():
         return jsonify({'success': False, 'error': f'File not found: {file_path}'}), 404
         
     try:
+        from services.asr_service import asr_service
+
         text = asr_service.transcribe(abs_path)
         return jsonify({
             'success': True,
@@ -148,4 +149,3 @@ def transcribe_audio_api():
             'success': False,
             'error': str(e)
         }), 500
-

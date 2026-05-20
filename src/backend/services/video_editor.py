@@ -12,6 +12,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
+VIDEO_MEDIA_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
+
 class VideoEditorService:
     def __init__(self):
         self.base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -237,6 +239,29 @@ class VideoEditorService:
         logger.info(f"📐 [SUBTITLE_PARAMS] → branch=default | alignment={alignment} | margin_v={margin_v}")
         return alignment, margin_v, font_size
 
+    def _probe_media_duration(self, media_path):
+        """Return media duration in seconds using ffprobe."""
+        try:
+            result = subprocess.run(
+                [
+                    'ffprobe',
+                    '-v',
+                    'error',
+                    '-show_entries',
+                    'format=duration',
+                    '-of',
+                    'default=noprint_wrappers=1:nokey=1',
+                    media_path,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return float(result.stdout.strip())
+        except Exception as exc:
+            logger.warning(f"⚠️ [FFPROBE] 无法读取媒体时长: {media_path} | {exc}")
+            return 0
+
     def _synthesize_ffmpeg_direct(self, image_file, audio_file, output_path, subtitles=None, cta_image_path=None, cta_pos=(0,0), is_vertical=False, audio_start=0, audio_duration=None, transform=None, margin_v_override=None, subtitle_position=None, subtitle_size='normal', export_params=None):
         """High-performance synthesis using direct FFmpeg command with customizable export parameters."""
         import time
@@ -296,7 +321,6 @@ class VideoEditorService:
                 vf_chain += f",crop={target_w}:{target_h}:(iw-{target_w})/2-{off_x}:(ih-{target_h})/2-{off_y},setsar=1"
             else:
                 vf_chain = (
-                    f"loop=loop=-1:size=1:start=0,"
                     f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
                     f"crop={target_w}:{target_h}:(iw-ow)/2:0,"
                     f"setsar=1"
@@ -309,7 +333,27 @@ class VideoEditorService:
 
             # 5. 输入与参数
             audio_args = f"-ss {audio_start} -t {audio_duration}"
-            inputs = [f"-loop 1 -t {audio_duration} -i \"{image_file}\"", f"{audio_args} -i \"{audio_file}\""]
+            media_ext = os.path.splitext(str(image_file or ''))[1].lower()
+            is_video_background = media_ext in VIDEO_MEDIA_EXTENSIONS
+            if is_video_background:
+                media_duration = self._probe_media_duration(image_file)
+                if media_duration > 0:
+                    speed_ratio = audio_duration / media_duration
+                    media_input = f"-i \"{image_file}\""
+                    vf_chain = f"setpts={speed_ratio:.8f}*PTS,{vf_chain}"
+                    logger.info(
+                        f"🎞️ [FFMPEG_EXEC] Background media mode: video fit-to-audio | "
+                        f"source={media_duration:.2f}s target={audio_duration:.2f}s setpts={speed_ratio:.6f}"
+                    )
+                else:
+                    media_input = f"-stream_loop -1 -t {audio_duration} -i \"{image_file}\""
+                    logger.info(f"🎞️ [FFMPEG_EXEC] Background media mode: video loop fallback ({os.path.basename(image_file)})")
+            else:
+                media_input = f"-loop 1 -t {audio_duration} -i \"{image_file}\""
+                vf_chain = f"loop=loop=-1:size=1:start=0,{vf_chain}"
+                logger.info(f"🖼️ [FFMPEG_EXEC] Background media mode: image ({os.path.basename(image_file)})")
+
+            inputs = [media_input, f"{audio_args} -i \"{audio_file}\""]
             
             aspect_ratio = "9:16" if is_vertical else "16:9"
             res_flag = f"-video_size {target_w}x{target_h} -r {fps}"
@@ -324,7 +368,16 @@ class VideoEditorService:
             logger.info(f"🎬 [FFMPEG_EXEC] Mode: {'Vertical' if is_vertical else 'Horizontal'} | Aspect: {aspect_ratio} | Res: {target_w}x{target_h}")
             logger.info(f"🎬 [FFMPEG_EXEC] Command: {cmd}")
             
-            subprocess.run(cmd, shell=True, check=True, capture_output=True)
+            try:
+                subprocess.run(cmd, shell=True, check=True, capture_output=True)
+            except subprocess.CalledProcessError as e:
+                stderr = e.stderr.decode(errors='ignore') if e.stderr else ''
+                if self.video_codec == 'h264_videotoolbox' and 'h264_videotoolbox' in stderr:
+                    fallback_cmd = cmd.replace('-c:v h264_videotoolbox', '-c:v libx264 -preset medium')
+                    logger.warning("⚠️ [FFMPEG_EXEC] Hardware encoder unavailable, retrying with libx264")
+                    subprocess.run(fallback_cmd, shell=True, check=True, capture_output=True)
+                else:
+                    raise
             logger.info(f"✅ [FFMPEG_EXEC] Success: {os.path.basename(output_path)}")
             return output_path
 

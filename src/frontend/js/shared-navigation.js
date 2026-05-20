@@ -20,6 +20,8 @@ class SharedNavigation {
         
         if (filename === 'index.html' || filename === '' || filename === '/') {
             return 'dashboard';
+        } else if (filename === 'channels.html') {
+            return 'channels';
         } else if (filename === 'videos.html') {
             return 'videos';
         } else if (filename === 'trending-radar.html') {
@@ -28,6 +30,10 @@ class SharedNavigation {
             return 'trending';
         } else if (filename === 'document-converter.html') {
             return 'document-converter';
+        } else if (filename === 'word-long-image.html') {
+            return 'word-long-image';
+        } else if (filename === 'pdf-scroll-video.html') {
+            return 'pdf-scroll-video';
         } else if (filename === 'tts.html') {
             return 'tts';
         } else if (filename === 'mhtml-pdf.html') {
@@ -54,10 +60,14 @@ class SharedNavigation {
             return 'thumbnail-generator-classic';
         } else if (filename === 'video-auto-generator.html') {
             return 'video-auto-generator';
+        } else if (filename === 'podcast-visualizer.html') {
+            return 'podcast-visualizer';
         } else if (filename === 'publisher.html') {
             return 'publisher';
         } else if (filename === 'video-editor.html') {
             return 'video-editor';
+        } else if (filename === 'batch-transcription.html') {
+            return 'batch-transcription';
         } else if (filename === 'downloads.html') {
             return 'downloads';
         }
@@ -67,10 +77,13 @@ class SharedNavigation {
     getPageTitle() {
         const titles = {
             'dashboard': '智能数据分析平台',
+            'channels': '频道管理',
             'videos': '视频管理中心',
             'trending-radar': '趋势雷达监控',
             'trending': '爆款视频搜索',
             'document-converter': '文档转换工具',
+            'word-long-image': 'Word 转长图',
+            'pdf-scroll-video': 'PDF 滚动视频',
             'tts': 'AI语音合成服务',
             'mhtml-pdf': 'MHTML转PDF工具',
             'watermark': 'PDF智能去水印',
@@ -84,25 +97,35 @@ class SharedNavigation {
             'finance-cover-generator': '金融类视频封面生成器',
             'thumbnail-generator-classic': '经典研报封面生成器',
             'video-auto-generator': 'AI 视频自动生成',
+            'podcast-visualizer': '播客视觉化',
             'publisher': '一键智能发布台',
             'video-editor': '高级剪辑工作台',
+            'batch-transcription': '批量音频转文案',
             'downloads': '素材下载中心'
         };
         return titles[this.currentPage] || '智能数据分析平台';
     }
     
     getNavigationHTML() {
-        return `
+        const hasStatusBar = Boolean(document.getElementById('status-bar'));
+        const hasToastContainer = Boolean(document.getElementById('toast-container'));
+        const statusBarHTML = hasStatusBar ? '' : `
         <!-- 状态提示栏 -->
-        <div id="status-bar" class="hidden fixed top-0 left-0 right-0 z-50 bg-blue-500 text-white p-3 text-center">
-            <div class="flex items-center justify-center">
-                <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+        <div id="status-bar" class="hidden fixed top-20 right-6 z-[9999] max-w-[min(360px,calc(100vw-2rem))] rounded-full bg-white/95 border border-blue-100 text-blue-700 px-4 py-2.5 text-sm shadow-lg backdrop-blur">
+            <div class="flex items-center justify-center whitespace-nowrap">
+                <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
                 <span id="status-text">正在加载...</span>
             </div>
         </div>
-
+        `;
+        const toastContainerHTML = hasToastContainer ? '' : `
         <!-- Toast 容器 -->
         <div id="toast-container" class="fixed top-4 right-4 z-[9999] space-y-2"></div>
+        `;
+
+        return `
+        ${statusBarHTML}
+        ${toastContainerHTML}
 
         <!-- 主导航栏 -->
         <header class="bg-white/80 backdrop-blur-lg border-b border-gray-200/50 sticky top-0 z-40" role="banner">
@@ -120,7 +143,7 @@ class SharedNavigation {
                     </div>
                     
                     <!-- 桌面导航菜单 -->
-                    <nav class="hidden md:flex items-center gap-6" role="navigation" aria-label="主导航">
+                    <nav class="hidden md:flex items-center gap-3" role="navigation" aria-label="主导航">
                         ${this.getMenuItems()}
                     </nav>
                     
@@ -199,7 +222,6 @@ class SharedNavigation {
     
     getMenuStructure() {
         return [
-            // 核心功能
             {
                 id: 'dashboard',
                 name: '首页',
@@ -207,11 +229,10 @@ class SharedNavigation {
                 href: 'index.html',
                 standalone: true
             },
-            // 内容中心
             {
-                id: 'content',
-                name: '内容中心',
-                icon: 'fas fa-video',
+                id: 'data',
+                name: '数据中心',
+                icon: 'fas fa-database',
                 dropdown: true,
                 items: [
                     {
@@ -231,37 +252,12 @@ class SharedNavigation {
                         name: '我的收藏',
                         icon: 'fas fa-heart',
                         href: 'favorites.html'
-                    },
-                    {
-                        id: 'bilibili-publisher',
-                        name: '发布工作台',
-                        icon: 'fab fa-bilibili',
-                        href: 'bilibili-publisher.html'
-                    },
-                    {
-                        id: 'publisher',
-                        name: '一键发布台',
-                        icon: 'fas fa-rocket',
-                        href: 'publisher.html'
-                    },
-                    {
-                        id: 'video-editor',
-                        name: '高级剪辑版',
-                        icon: 'fas fa-scissors',
-                        href: 'video-editor.html'
-                    },
-                    {
-                        id: 'downloads',
-                        name: '素材下载中心',
-                        icon: 'fas fa-download',
-                        href: 'downloads.html'
                     }
                 ]
             },
-            // 洞察与商机
             {
-                id: 'analytics',
-                name: '洞察与商机',
+                id: 'insights',
+                name: '选题洞察',
                 icon: 'fas fa-chart-line',
                 dropdown: true,
                 items: [
@@ -279,42 +275,55 @@ class SharedNavigation {
                     },
                     {
                         id: 'indie-navigator',
-                        name: '独立领航员',
+                        name: '商机发现',
                         icon: 'fas fa-compass',
                         href: 'indie-navigator.html'
                     },
                 ]
             },
-            // 创意工坊 (新核心生产力)
             {
-                id: 'creative',
-                name: '创意工坊',
-                icon: 'fas fa-paint-brush',
+                id: 'production',
+                name: '生产发布',
+                icon: 'fas fa-rocket',
                 dropdown: true,
                 items: [
                     {
-                        id: 'thumbnail-workbench',
-                        name: '封面工作台 (3合1)',
-                        icon: 'fas fa-magic',
-                        href: 'thumbnail-workbench.html'
+                        id: 'publisher',
+                        name: '一键发布台',
+                        icon: 'fas fa-rocket',
+                        href: 'publisher.html'
                     },
                     {
-                        id: 'thumbnail-generator-classic',
-                        name: '经典研报封面 (V7)',
-                        icon: 'fas fa-file-image',
-                        href: 'thumbnail-generator-classic.html'
+                        id: 'video-editor',
+                        name: '高级剪辑',
+                        icon: 'fas fa-scissors',
+                        href: 'video-editor.html'
                     },
                     {
-                        id: 'thumbnail-generator',
-                        name: '通用封面生成 (V6)',
-                        icon: 'fas fa-image',
-                        href: 'thumbnail-generator.html'
+                        id: 'bilibili-publisher',
+                        name: 'B站发布',
+                        icon: 'fab fa-bilibili',
+                        href: 'bilibili-publisher.html'
                     },
                     {
-                        id: 'finance-cover-generator',
-                        name: '金融类视频封面',
-                        icon: 'fas fa-chart-pie',
-                        href: 'finance-cover-generator.html'
+                        id: 'downloads',
+                        name: '素材下载',
+                        icon: 'fas fa-download',
+                        href: 'downloads.html'
+                    }
+                ]
+            },
+            {
+                id: 'ai-creation',
+                name: 'AI创作',
+                icon: 'fas fa-wand-magic-sparkles',
+                dropdown: true,
+                items: [
+                    {
+                        id: 'batch-transcription',
+                        name: '音频转文案',
+                        icon: 'fas fa-file-audio',
+                        href: 'batch-transcription.html'
                     },
                     {
                         id: 'video-auto-generator',
@@ -323,43 +332,84 @@ class SharedNavigation {
                         href: 'video-auto-generator.html'
                     },
                     {
+                        id: 'podcast-visualizer',
+                        name: '播客视觉化',
+                        icon: 'fas fa-podcast',
+                        href: 'podcast-visualizer.html'
+                    },
+                    {
                         id: 'tts',
-                        name: '语音合成 (TTS)',
+                        name: '语音合成',
                         icon: 'fas fa-microphone',
                         href: 'tts.html'
                     },
                     {
+                        id: 'thumbnail-workbench',
+                        name: '封面工作台',
+                        icon: 'fas fa-magic',
+                        href: 'thumbnail-workbench.html'
+                    },
+                    {
+                        id: 'finance-cover-generator',
+                        name: '金融封面',
+                        icon: 'fas fa-chart-pie',
+                        href: 'finance-cover-generator.html'
+                    }
+                ]
+            },
+            {
+                id: 'tools',
+                name: '工具箱',
+                icon: 'fas fa-toolbox',
+                dropdown: true,
+                items: [
+                    {
                         id: 'document-converter',
-                        name: '文档转换器',
+                        name: '文档转换',
                         icon: 'fas fa-file-exchange',
                         href: 'document-converter.html'
                     },
                     {
-                        id: 'watermark',
-                        name: 'PDF 工具箱',
-                        icon: 'fas fa-tint',
-                        href: 'watermark.html'
+                        id: 'word-long-image',
+                        name: 'Word 转长图',
+                        icon: 'fas fa-file-word',
+                        href: 'word-long-image.html'
+                    },
+                    {
+                        id: 'pdf-scroll-video',
+                        name: 'PDF 滚动视频',
+                        icon: 'fas fa-file-video',
+                        href: 'pdf-scroll-video.html'
                     },
                     {
                         id: 'mhtml-pdf',
                         name: 'MHTML 转 PDF',
                         icon: 'fas fa-file-pdf',
                         href: 'mhtml-pdf.html'
-                    }
-                ]
-            },
-            // 更多工具
-            {
-                id: 'tools',
-                name: '更多工具',
-                icon: 'fas fa-toolbox',
-                dropdown: true,
-                items: [
+                    },
+                    {
+                        id: 'watermark',
+                        name: 'PDF 去水印',
+                        icon: 'fas fa-tint',
+                        href: 'watermark.html'
+                    },
                     {
                         id: 'student-id-generator',
                         name: '学生证生成',
                         icon: 'fas fa-id-card',
                         href: 'student-id-generator.html'
+                    },
+                    {
+                        id: 'thumbnail-generator',
+                        name: '通用封面旧版',
+                        icon: 'fas fa-image',
+                        href: 'thumbnail-generator.html'
+                    },
+                    {
+                        id: 'thumbnail-generator-classic',
+                        name: '经典封面旧版',
+                        icon: 'fas fa-file-image',
+                        href: 'thumbnail-generator-classic.html'
                     },
                     {
                         id: 'gemini-test',
@@ -412,7 +462,7 @@ class SharedNavigation {
                             <i class="${section.icon} mr-2"></i>${section.name}
                             <i class="fas fa-chevron-down ml-1 text-xs transition-transform group-hover:rotate-180"></i>
                         </button>
-                        <div class="absolute top-full left-0 mt-1 w-48 bg-white rounded-lg shadow-lg border border-gray-200 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 z-50">
+                        <div class="absolute top-full left-0 mt-1 w-56 bg-white rounded-lg shadow-lg border border-gray-200 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 z-50">
                             <div class="py-2">
                                 ${dropdownItems}
                             </div>

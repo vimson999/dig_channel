@@ -2,7 +2,8 @@
 
 # YouTube Analytics 后端启动脚本
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
 
 echo "🚀 正在启动后端服务器 (Flask)..."
 
@@ -18,8 +19,7 @@ fi
 export FLASK_ENV=development
 export FLASK_DEBUG=1
 export PYTHONUNBUFFERED=1
-export DATABASE_TYPE=postgresql
-export DATABASE_URL=${DATABASE_URL:-"postgresql://cappa_rw:RWcappaDb!!!2025@101.35.56.140:5432/show_ytb_data"}
+export DATABASE_TYPE=${DATABASE_TYPE:-postgresql}
 
-cd src/backend
+cd "$PROJECT_ROOT/src/backend"
 python app.py

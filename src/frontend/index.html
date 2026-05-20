@@ -161,7 +161,16 @@ margin: 0;
     <!-- 状态提示栏 -->
     <style>
         .toast-container { position: fixed; top: 1rem; right: 1rem; z-index: 9999; }
-        .status-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 50; }
+        .status-bar {
+            position: fixed;
+            top: 5rem;
+            right: 1.5rem;
+            z-index: 9999;
+            width: auto;
+            max-width: min(360px, calc(100vw - 2rem));
+            border-radius: 9999px;
+            box-shadow: 0 10px 30px rgba(37, 99, 235, 0.18);
+        }
         
         /* 表格频道分组样式 */
         .channel-group-even {
@@ -195,9 +204,9 @@ margin: 0;
 </head>
 <body class="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen font-sans">
     <!-- 状态提示栏 -->
-    <div id="status-bar" class="hidden status-bar bg-blue-500 text-white p-3 text-center">
-        <div class="flex items-center justify-center">
-            <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+    <div id="status-bar" class="hidden status-bar bg-white/95 border border-blue-100 text-blue-700 px-4 py-2.5 text-sm backdrop-blur">
+        <div class="flex items-center justify-center whitespace-nowrap">
+            <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
             <span id="status-text">正在加载...</span>
         </div>
     </div>
@@ -445,7 +454,7 @@ margin: 0;
 <button onclick="refreshData()" class="px-4 py-2 text-gray-600 hover:text-primary-600 hover:bg-primary-50 rounded-button transition-all duration-200 border border-gray-200 hover:border-primary-200" title="刷新数据">
 <i class="fas fa-sync-alt mr-2"></i>刷新
 </button>
-<button onclick="syncAllChannels()" class="px-4 py-2 text-info hover:text-blue-700 hover:bg-blue-50 rounded-button transition-all duration-200 border border-blue-200 hover:border-blue-300" title="立即同步所有频道">
+<button id="sync-all-btn" onclick="syncAllChannels()" class="px-4 py-2 text-info hover:text-blue-700 hover:bg-blue-50 rounded-button transition-all duration-200 border border-blue-200 hover:border-blue-300" title="同步频道数据">
 <i class="fas fa-cloud-download-alt mr-2"></i>同步
 </button>
 <button onclick="exportData()" class="px-4 py-2 text-success hover:text-green-700 hover:bg-green-50 rounded-button transition-all duration-200 border border-green-200 hover:border-green-300" title="导出数据">
@@ -1078,14 +1087,15 @@ chart.setOption(option);
 <script>
 // 设置全局API配置
 window.API_BASE_URL = API_BASE_URL;
+window.DEFER_DATA_TABLE_INIT = true;
 </script>
 <script src="js/config.js?v=20250110-001"></script>
 <script src="js/utils.js?v=20250110-001"></script>
 <script src="js/api.js?v=20250110-002"></script>
-<script src="js/data-table.js?v=20250110-006"></script>
+<script src="js/data-table.js?v=20260516-002"></script>
 <script src="js/dashboard.js?v=20250110-001"></script>
-<script src="js/new-main.js?v=20250110-002"></script>
+<script src="js/new-main.js?v=20260516-002"></script>
 <script src="js/channel-management.js?v=20250110-003"></script>
-<script src="js/shared-navigation.js"></script>
+<script src="js/shared-navigation.js?v=20260516-003"></script>
 </body>
 </html>

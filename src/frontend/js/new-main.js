@@ -19,6 +19,7 @@ class YouTubeDataApp {
         this.channelCategories = [];
         this.channelCategoryDefaults = {};
         this.defaultChannelCpm = 2.5;
+        this.loadingCount = 0;
 
         this.init();
     }
@@ -55,6 +56,10 @@ class YouTubeDataApp {
         
         // 加载初始数据
         await this.loadInitialData();
+
+        if (typeof initializeDataTable === 'function') {
+            initializeDataTable();
+        }
         
         console.log('✅ 应用初始化完成');
     }
@@ -1181,22 +1186,110 @@ class YouTubeDataApp {
 
     // 同步所有频道数据
     async syncAllChannels() {
-        if (!confirm('确定要立即同步所有频道的数据吗？这将从YouTube获取最新数据。')) {
-            return;
+        this.openSyncOptionsModal();
+    }
+
+    openSyncOptionsModal() {
+        const today = new Date().toISOString().slice(0, 10);
+        const existing = document.getElementById('syncOptionsModal');
+        if (existing) {
+            existing.remove();
         }
 
+        const modal = document.createElement('div');
+        modal.id = 'syncOptionsModal';
+        modal.className = 'fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4';
+        modal.innerHTML = `
+            <div class="bg-white rounded-2xl shadow-strong max-w-lg w-full overflow-hidden">
+                <div class="p-6 border-b border-gray-100 bg-gradient-to-r from-blue-50 to-white">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 bg-blue-100 text-blue-600 rounded-xl flex items-center justify-center">
+                                <i class="fas fa-cloud-download-alt"></i>
+                            </div>
+                            <div>
+                                <h3 class="text-lg font-bold text-gray-900">同步频道数据</h3>
+                                <p class="text-sm text-gray-500">从 YouTube 获取频道最新快照</p>
+                            </div>
+                        </div>
+                        <button type="button" onclick="document.getElementById('syncOptionsModal').remove()" class="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-white">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="p-6 space-y-5">
+                    <div>
+                        <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">同步日期</label>
+                        <input id="sync-target-date" type="date" value="${today}" class="w-full px-3 py-2.5 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 outline-none">
+                    </div>
+                    <div>
+                        <div class="flex items-center justify-between mb-2">
+                            <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide">并行线程</label>
+                            <span id="sync-workers-label" class="text-xs font-bold text-blue-600">5 线程</span>
+                        </div>
+                        <input id="sync-max-workers" type="range" min="1" max="10" value="5" class="w-full" oninput="document.getElementById('sync-workers-label').textContent = this.value + ' 线程'">
+                        <p class="mt-2 text-xs text-gray-500">线程越高越快，但会更集中消耗 YouTube API 配额。</p>
+                    </div>
+                    <label class="flex items-center gap-3 p-3 bg-gray-50 rounded-xl border border-gray-100 cursor-pointer">
+                        <input id="sync-active-only" type="checkbox" checked class="w-4 h-4 text-blue-600 rounded">
+                        <div>
+                            <div class="text-sm font-bold text-gray-800">只同步启用频道</div>
+                            <div class="text-xs text-gray-500">跳过已禁用频道，减少无效请求</div>
+                        </div>
+                    </label>
+                    <div class="rounded-xl bg-amber-50 border border-amber-100 p-3 text-xs text-amber-700">
+                        同步会写入当天频道数据。若今天已经同步过，会更新对应日期的数据。
+                    </div>
+                </div>
+                <div class="px-6 py-4 bg-gray-50 flex justify-end gap-3">
+                    <button type="button" onclick="document.getElementById('syncOptionsModal').remove()" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-button font-medium">取消</button>
+                    <button type="button" onclick="app.runChannelSyncFromModal()" class="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-button font-bold shadow-sm">
+                        开始同步
+                    </button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+        modal.addEventListener('click', (event) => {
+            if (event.target.id === 'syncOptionsModal') {
+                modal.remove();
+            }
+        });
+    }
+
+    async runChannelSyncFromModal() {
+        const modal = document.getElementById('syncOptionsModal');
+        const targetDate = document.getElementById('sync-target-date')?.value;
+        const maxWorkers = parseInt(document.getElementById('sync-max-workers')?.value || '5', 10);
+        const activeOnly = document.getElementById('sync-active-only')?.checked !== false;
+        if (modal) {
+            modal.remove();
+        }
+
+        await this.executeChannelSync({
+            date: targetDate,
+            max_workers: maxWorkers,
+            active_only: activeOnly
+        });
+    }
+
+    async executeChannelSync(options = {}) {
         try {
-            const defaultWorkers = 5;
-            const input = prompt('请输入并行线程数 (1-10)', String(defaultWorkers));
-            if (input === null) {
-                return;
+            const syncButton = document.getElementById('sync-all-btn');
+            if (syncButton) {
+                syncButton.disabled = true;
+                syncButton.classList.add('opacity-60', 'cursor-not-allowed');
+                syncButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>同步中';
             }
 
-            const parsed = parseInt(input, 10);
-            const maxWorkers = Math.min(10, Math.max(1, Number.isNaN(parsed) ? defaultWorkers : parsed));
-
-            this.showLoading(`正在使用 ${maxWorkers} 线程同步所有频道数据...`);
-            const response = await api.syncAllChannels({ use_parallel: true, max_workers: maxWorkers });
+            this.showLoading(`正在使用 ${options.max_workers || 5} 线程同步频道数据...`);
+            const response = await api.syncAllChannels({
+                use_parallel: true,
+                max_workers: options.max_workers || 5,
+                active_only: options.active_only !== false,
+                date: options.date || undefined
+            });
             
             if (response.success) {
                 const data = response.data || {};
@@ -1206,6 +1299,7 @@ class YouTubeDataApp {
                     `同步完成${workerInfo}！成功: ${data.success_count || 0}, 失败: ${data.failed_count || 0}${duration}`, 
                     (data.failed_count || 0) > 0 ? 'warning' : 'success'
                 );
+                this.showSyncResultModal(data);
                 
                 // 自动刷新页面数据
                 await this.loadInitialData();
@@ -1217,7 +1311,93 @@ class YouTubeDataApp {
         } catch (error) {
             this.hideLoading();
             this.showToast('同步失败: ' + error.message, 'error');
+        } finally {
+            const syncButton = document.getElementById('sync-all-btn');
+            if (syncButton) {
+                syncButton.disabled = false;
+                syncButton.classList.remove('opacity-60', 'cursor-not-allowed');
+                syncButton.innerHTML = '<i class="fas fa-cloud-download-alt mr-2"></i>同步';
+            }
         }
+    }
+
+    showSyncResultModal(data = {}) {
+        const existing = document.getElementById('syncResultModal');
+        if (existing) {
+            existing.remove();
+        }
+
+        const results = Array.isArray(data.results) ? data.results : [];
+        const failedResults = results.filter(item => !item.success);
+        const successResults = results.filter(item => item.success);
+        const detailRows = (failedResults.length > 0 ? failedResults : successResults.slice(0, 8)).map(item => `
+            <div class="flex items-start justify-between gap-3 py-2 border-b border-gray-100 last:border-0">
+                <div class="min-w-0">
+                    <div class="text-sm font-semibold text-gray-800 truncate">${this.escapeHtml(item.channel_name || '未知频道')}</div>
+                    <div class="text-xs text-gray-500 mt-1">${this.escapeHtml(item.message || '-')}</div>
+                </div>
+                <span class="shrink-0 text-xs font-bold px-2 py-1 rounded-full ${item.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}">
+                    ${item.success ? '成功' : '失败'}
+                </span>
+            </div>
+        `).join('');
+
+        const modal = document.createElement('div');
+        modal.id = 'syncResultModal';
+        modal.className = 'fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4';
+        modal.innerHTML = `
+            <div class="bg-white rounded-2xl shadow-strong max-w-2xl w-full overflow-hidden">
+                <div class="p-6 border-b border-gray-100">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <h3 class="text-lg font-bold text-gray-900">同步结果</h3>
+                            <p class="text-sm text-gray-500 mt-1">共 ${data.total_channels || 0} 个频道，成功 ${data.success_count || 0} 个，失败 ${data.failed_count || 0} 个</p>
+                        </div>
+                        <button onclick="document.getElementById('syncResultModal').remove()" class="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-50">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="p-6">
+                    <div class="grid grid-cols-3 gap-3 mb-5">
+                        <div class="rounded-xl bg-blue-50 p-4">
+                            <div class="text-xs font-bold text-blue-500">总频道</div>
+                            <div class="text-2xl font-black text-blue-700">${data.total_channels || 0}</div>
+                        </div>
+                        <div class="rounded-xl bg-green-50 p-4">
+                            <div class="text-xs font-bold text-green-500">成功</div>
+                            <div class="text-2xl font-black text-green-700">${data.success_count || 0}</div>
+                        </div>
+                        <div class="rounded-xl bg-red-50 p-4">
+                            <div class="text-xs font-bold text-red-500">失败</div>
+                            <div class="text-2xl font-black text-red-700">${data.failed_count || 0}</div>
+                        </div>
+                    </div>
+                    <div class="rounded-xl border border-gray-100 overflow-hidden">
+                        <div class="px-4 py-3 bg-gray-50 text-xs font-bold text-gray-500">
+                            ${failedResults.length > 0 ? '失败明细' : '成功样例'}
+                        </div>
+                        <div class="px-4 max-h-72 overflow-y-auto">
+                            ${detailRows || '<div class="py-6 text-center text-gray-400 text-sm">暂无明细</div>'}
+                        </div>
+                    </div>
+                </div>
+                <div class="px-6 py-4 bg-gray-50 flex justify-end">
+                    <button onclick="document.getElementById('syncResultModal').remove()" class="px-5 py-2 bg-gray-900 text-white rounded-button font-bold">知道了</button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+    }
+
+    escapeHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     // 工具方法
@@ -1233,6 +1413,7 @@ class YouTubeDataApp {
         const statusText = document.getElementById('status-text');
         
         if (statusBar && statusText) {
+            this.loadingCount += 1;
             statusText.textContent = message;
             statusBar.classList.remove('hidden');
         }
@@ -1241,7 +1422,10 @@ class YouTubeDataApp {
     hideLoading() {
         const statusBar = document.getElementById('status-bar');
         if (statusBar) {
-            statusBar.classList.add('hidden');
+            this.loadingCount = Math.max(0, this.loadingCount - 1);
+            if (this.loadingCount === 0) {
+                statusBar.classList.add('hidden');
+            }
         }
     }
 

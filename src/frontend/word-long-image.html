@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Word 转长图 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; }
+        .drop-zone.dragover { border-color: #2563eb; background: #eff6ff; }
+        .preview-frame { max-height: 720px; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-900">
+    <div class="max-w-[1440px] mx-auto px-6 py-4">
+        <nav class="flex items-center gap-2 text-sm text-slate-500">
+            <a href="index.html" class="hover:text-blue-600 transition-colors"><i class="fas fa-home"></i></a>
+            <span>/</span>
+            <span class="text-slate-700">Word 转长图</span>
+        </nav>
+    </div>
+
+    <main class="max-w-[1440px] mx-auto px-6 pb-10">
+        <div class="grid grid-cols-1 xl:grid-cols-[420px_1fr] gap-6">
+            <section class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+                <div class="p-6 border-b border-slate-100">
+                    <div class="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center mb-4">
+                        <i class="fas fa-file-word text-blue-600 text-xl"></i>
+                    </div>
+                    <h1 class="text-2xl font-extrabold text-slate-900">Word 转长图</h1>
+                    <p class="text-sm text-slate-500 mt-2">保留 Word 排版，先转 PDF，再按页面纵向拼接成一张图片。</p>
+                </div>
+
+                <form id="word-image-form" class="p-6 space-y-5">
+                    <div id="drop-zone" class="drop-zone rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 p-8 text-center transition-colors">
+                        <input id="file-input" type="file" class="hidden" accept=".doc,.docx">
+                        <i class="fas fa-cloud-upload-alt text-4xl text-slate-400"></i>
+                        <div class="mt-4 text-base font-bold text-slate-800">拖拽 Word 文件到这里</div>
+                        <div class="mt-1 text-sm text-slate-500">支持 .docx / .doc，最大 50MB</div>
+                        <button type="button" id="pick-file-btn" class="mt-5 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-700 transition-colors">
+                            <i class="fas fa-folder-open mr-2"></i>选择文件
+                        </button>
+                    </div>
+
+                    <div id="file-card" class="hidden rounded-xl border border-slate-200 bg-white p-4">
+                        <div class="flex items-start gap-3">
+                            <div class="w-10 h-10 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
+                                <i class="fas fa-file-word"></i>
+                            </div>
+                            <div class="min-w-0 flex-1">
+                                <div id="file-name" class="truncate text-sm font-bold text-slate-900"></div>
+                                <div id="file-size" class="mt-1 text-xs text-slate-500"></div>
+                            </div>
+                            <button type="button" id="clear-file-btn" class="text-slate-400 hover:text-slate-700" title="移除文件">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label for="format-select" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">输出格式</label>
+                            <select id="format-select" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                                <option value="png">PNG 清晰</option>
+                                <option value="jpg">JPG 较小</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="width-select" class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">图片宽度</label>
+                            <select id="width-select" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                                <option value="1080">1080 px</option>
+                                <option value="1440" selected>1440 px</option>
+                                <option value="1920">1920 px</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="quality-row">
+                        <div class="flex items-center justify-between mb-2">
+                            <label for="quality-range" class="block text-xs font-bold text-slate-500 uppercase tracking-wide">JPG 质量</label>
+                            <span id="quality-label" class="text-xs font-bold text-blue-600">92</span>
+                        </div>
+                        <input id="quality-range" type="range" min="60" max="100" value="92" class="w-full">
+                    </div>
+
+                    <div id="message" class="hidden rounded-lg border px-4 py-3 text-sm"></div>
+
+                    <div>
+                        <div class="flex items-center justify-between text-xs font-bold text-slate-500 mb-2">
+                            <span id="progress-text">等待文件</span>
+                            <span id="progress-label">0%</span>
+                        </div>
+                        <div class="h-2 rounded-full bg-slate-100 overflow-hidden">
+                            <div id="progress-bar" class="h-full w-0 rounded-full bg-blue-600 transition-all duration-300"></div>
+                        </div>
+                    </div>
+
+                    <button type="submit" id="convert-btn" disabled class="w-full rounded-lg bg-blue-600 px-4 py-3 text-sm font-extrabold text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                        <i class="fas fa-wand-magic-sparkles mr-2"></i>生成长图
+                    </button>
+                </form>
+            </section>
+
+            <section class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden min-h-[640px]">
+                <div class="p-6 border-b border-slate-100 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                    <div>
+                        <h2 class="text-lg font-extrabold text-slate-900">结果预览</h2>
+                        <p id="result-meta" class="text-sm text-slate-500 mt-1">生成后会显示长图预览和下载按钮</p>
+                    </div>
+                    <a id="download-link" href="#" download class="hidden rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 transition-colors">
+                        <i class="fas fa-download mr-2"></i>下载长图
+                    </a>
+                </div>
+
+                <div id="empty-state" class="px-6 py-20 text-center text-slate-400">
+                    <i class="fas fa-image text-4xl block mb-4"></i>
+                    <div class="text-sm">还没有生成结果</div>
+                </div>
+
+                <div id="preview-wrap" class="hidden p-6">
+                    <div class="preview-frame overflow-auto rounded-xl border border-slate-200 bg-slate-100 p-4">
+                        <img id="preview-image" alt="Word 长图预览" class="mx-auto max-w-full shadow-sm">
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20260518-001"></script>
+    <script src="js/word-long-image.js?v=20260518-001"></script>
+</body>
+</html>

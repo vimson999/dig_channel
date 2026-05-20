@@ -20,9 +20,8 @@ sleep 2
 echo "🔧 激活虚拟环境..."
 source venv/bin/activate
 
-# 设置PostgreSQL数据库连接
-export DATABASE_TYPE=postgresql
-export DATABASE_URL=postgresql://cappa_rw:RWcappaDb!!!2025@101.35.56.140:5432/show_ytb_data
+# 数据库连接从 .env 或当前环境变量读取，避免在脚本中写死凭据
+export DATABASE_TYPE=${DATABASE_TYPE:-postgresql}
 
 echo "💾 数据库类型: PostgreSQL"
 echo "🔗 数据库连接: show_ytb_data"

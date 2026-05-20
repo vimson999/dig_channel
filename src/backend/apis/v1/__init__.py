@@ -8,6 +8,7 @@ from .trending import bp as trending_bp
 from .favorites import bp as favorites_bp
 from .documents import bp as documents_bp
 from .gemini import bp as gemini_bp
+from .batch_transcription import bp as batch_transcription_bp
 
 def register_blueprints(app):
     """注册所有API蓝图
@@ -24,6 +25,7 @@ def register_blueprints(app):
     app.register_blueprint(favorites_bp)
     app.register_blueprint(documents_bp)
     app.register_blueprint(gemini_bp)
+    app.register_blueprint(batch_transcription_bp)
     
     # 注册视频API
     from api.videos import videos_bp

@@ -2,7 +2,8 @@
 
 # YouTube Analytics 调度器启动脚本
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
 
 echo "⏰ 正在启动任务调度器..."
 
@@ -14,9 +15,8 @@ else
     exit 1
 fi
 
-export PYTHONPATH=$SCRIPT_DIR/src/backend
-export DATABASE_TYPE=postgresql
-export DATABASE_URL=${DATABASE_URL:-"postgresql://cappa_rw:RWcappaDb!!!2025@101.35.56.140:5432/show_ytb_data"}
+export PYTHONPATH=$PROJECT_ROOT/src/backend
+export DATABASE_TYPE=${DATABASE_TYPE:-postgresql}
 
-cd src/backend
+cd "$PROJECT_ROOT/src/backend"
 python run_scheduler.py
