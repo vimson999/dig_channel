@@ -3,356 +3,198 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TTS 语音合成 - Shioa 智能数据分析平台</title>
+    <title>豆包语音 V3 - Shioa</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
             theme: {
                 extend: {
                     colors: {
-                        primary: { 50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd', 400: '#60a5fa', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8', 800: '#1e40af', 900: '#1e3a8a' },
-                        accent: { green: '#10b981', purple: '#8b5cf6', orange: '#f59e0b', red: '#ef4444' }
+                        primary: { 50: '#eff6ff', 100: '#dbeafe', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8' }
                     }
                 }
             }
         }
     </script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>
-        .glass-morphism {
-            background: rgba(255, 255, 255, 0.7);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-        .segment-item:hover .segment-actions { opacity: 1; }
-        .segment-actions { opacity: 0; transition: opacity 0.2s; }
-    </style>
 </head>
-<body class="bg-slate-50 min-h-screen">
+<body class="bg-slate-50 min-h-screen text-slate-900">
     <div id="nav-container"></div>
 
-    <main class="max-w-6xl mx-auto px-6 py-8">
-        <div class="flex items-center justify-between mb-8">
-            <div class="flex items-center gap-4">
-                <div class="w-12 h-12 bg-primary-600 rounded-2xl flex items-center justify-center shadow-lg shadow-primary-200">
-                    <i class="fas fa-microphone-alt text-white text-xl"></i>
+    <main class="max-w-[1440px] mx-auto px-6 py-6">
+        <section class="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+            <div class="px-6 py-5 border-b border-slate-100 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div class="w-11 h-11 rounded-xl bg-blue-600 text-white flex items-center justify-center">
+                        <i class="fas fa-wave-square"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-xl font-bold">豆包语音 WebSocket V3</h1>
+                        <p class="text-sm text-slate-500">文本转语音，支持音色、语速、音量和字幕时间戳。</p>
+                    </div>
                 </div>
-                <div>
-                    <h1 class="text-2xl font-bold text-gray-800">TTS 长文本语音合成</h1>
-                    <p class="text-gray-500 text-sm">调用火山引擎 API，支持长文章分段异步合成</p>
-                </div>
+                <span id="provider-status" class="px-3 py-1.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-500">检查配置中</span>
             </div>
-            
-            <div class="flex gap-2 p-1 bg-gray-200/50 rounded-xl">
-                <button onclick="switchTab('create')" id="btn-tab-create" class="px-6 py-2 rounded-lg font-bold transition-all bg-white text-primary-600 shadow-sm">提交任务</button>
-                <button onclick="switchTab('history')" id="btn-tab-history" class="px-6 py-2 rounded-lg font-bold transition-all text-gray-500 hover:text-gray-700">历史记录</button>
-            </div>
-        </div>
 
-        <!-- 提交任务面板 -->
-        <section id="tab-create" class="space-y-6">
-            <div class="bg-white rounded-3xl shadow-sm border border-gray-100 p-8">
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-                    <!-- 左侧配置 -->
-                    <div class="md:col-span-1 space-y-6">
+            <div class="grid grid-cols-1 xl:grid-cols-[420px_minmax(0,1fr)]">
+                <aside class="border-r border-slate-100 p-6 space-y-5">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-2">任务标题</label>
+                        <input id="task-title" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="例如：最新市场观点配音">
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
                         <div>
-                            <label class="block text-sm font-bold text-gray-700 mb-2">文章标题</label>
-                            <input type="text" id="article-title" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-primary-500 outline-none" placeholder="例如：2026年半导体行业深度研报">
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-bold text-gray-700 mb-2">音色选择 (火山引擎)</label>
-                            <select id="voice-type" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-primary-500 outline-none">
-                                <option value="bv001_streaming">标准男声 (推荐)</option>
-                                <option value="bv002_streaming">标准女声</option>
-                                <option value="bv005_streaming">温柔女声</option>
-                                <option value="bv007_streaming">阳光男声</option>
-                                <option value="bv011_streaming">严肃男声</option>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">资源模型</label>
+                            <select id="resource-id" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg">
+                                <option value="seed-tts-2.0">seed-tts-2.0</option>
+                                <option value="seed-tts-1.0">seed-tts-1.0</option>
+                                <option value="seed-icl-2.0">seed-icl-2.0</option>
                             </select>
                         </div>
-
                         <div>
-                            <label class="block text-sm font-bold text-gray-700 mb-2">语速调节</label>
-                            <div class="flex items-center gap-4">
-                                <input type="range" id="voice-speed" min="0.5" max="2.0" step="0.1" value="1.0" class="flex-1">
-                                <span id="speed-val" class="text-sm font-mono font-bold text-primary-600">1.0x</span>
-                            </div>
-                        </div>
-
-                        <div class="pt-4 border-t border-dashed border-gray-100">
-                            <p class="text-xs text-gray-400 mb-4">
-                                <i class="fas fa-info-circle mr-1"></i> 注意：系统将严格串行处理每一段，确保遵守 API 并发限制。
-                            </p>
-                            <button onclick="submitAll()" class="w-full py-4 bg-primary-600 hover:bg-primary-700 text-white rounded-2xl font-bold shadow-lg shadow-primary-200 transition-all flex items-center justify-center gap-2">
-                                <i class="fas fa-paper-plane"></i> 立即提交后台处理
-                            </button>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">表现模型</label>
+                            <select id="model" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg">
+                                <option value="seed-tts-2.0-standard">standard</option>
+                                <option value="seed-tts-2.0-expressive">expressive</option>
+                            </select>
                         </div>
                     </div>
 
-                    <!-- 右侧段落编辑 -->
-                    <div class="md:col-span-2">
-                        <div class="flex items-center justify-between mb-4">
-                            <label class="block text-sm font-bold text-gray-700">段落内容</label>
-                            <button onclick="addSegment()" class="text-sm text-primary-600 font-bold hover:underline">
-                                <i class="fas fa-plus-circle mr-1"></i> 添加下一段
-                            </button>
+                    <div class="grid grid-cols-1 gap-3">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">预置音色</label>
+                            <select id="voice-preset" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg">
+                                <option value="zh_female_mizai_uranus_bigtts">黑猫 / zh_female_mizai_uranus_bigtts</option>
+                                <option value="zh_female_qingchezizi_uranus_bigtts">清澈 / zh_female_qingchezizi_uranus_bigtts</option>
+                                <option value="zh_male_liufei_uranus_bigtts">刘飞 / zh_male_liufei_uranus_bigtts</option>
+                                <option value="zh_male_dayi_uranus_bigtts">大台 / zh_male_dayi_uranus_bigtts</option>
+                                <option value="custom">手动填写其他音色 ID</option>
+                            </select>
                         </div>
-                        
-                        <div id="segments-container" class="space-y-4 max-h-[600px] overflow-y-auto pr-2">
-                            <!-- 动态段落 -->
-                            <div class="segment-item relative group bg-slate-50 rounded-2xl p-4 border border-gray-100">
-                                <div class="flex items-center gap-3 mb-2">
-                                    <span class="w-6 h-6 bg-gray-200 rounded-full flex items-center justify-center text-[10px] font-bold text-gray-500">1</span>
-                                    <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">段落 A</span>
-                                </div>
-                                <textarea rows="4" class="segment-text w-full bg-transparent border-none focus:ring-0 text-gray-700 text-sm resize-none" placeholder="输入本段落文案内容..."></textarea>
-                            </div>
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">音色 ID</label>
+                            <input id="voice-type" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg" value="zh_female_mizai_uranus_bigtts">
+                            <p class="mt-1 text-xs text-slate-400">选择预置音色会自动填入，也可手动改成控制台里的音色 ID。</p>
                         </div>
                     </div>
-                </div>
-            </div>
-        </section>
 
-        <!-- 历史记录面板 -->
-        <section id="tab-history" class="hidden">
-            <div id="history-list" class="grid grid-cols-1 gap-4">
-                <!-- 历史条目加载中... -->
-                <div class="flex flex-col items-center justify-center py-20 text-gray-400">
-                    <i class="fas fa-circle-notch fa-spin text-3xl mb-4"></i>
-                    <p>正在拉取历史任务...</p>
-                </div>
+                    <div class="grid grid-cols-3 gap-3">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">格式</label>
+                            <select id="audio-format" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg">
+                                <option value="mp3">mp3</option>
+                                <option value="ogg_opus">ogg_opus</option>
+                                <option value="pcm">pcm</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">采样率</label>
+                            <select id="sample-rate" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg">
+                                <option value="24000">24000</option>
+                                <option value="32000">32000</option>
+                                <option value="44100">44100</option>
+                                <option value="48000">48000</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">码率</label>
+                            <select id="bit-rate" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg">
+                                <option value="128000">128k</option>
+                                <option value="96000">96k</option>
+                                <option value="64000">64k</option>
+                                <option value="160000">160k</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">语速 <span id="speed-label" class="text-blue-600">1.0x</span></label>
+                            <input id="speed" type="range" min="0.5" max="2" step="0.1" value="1" class="w-full">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">音量 <span id="loudness-label" class="text-blue-600">1.0x</span></label>
+                            <input id="loudness" type="range" min="0.5" max="2" step="0.1" value="1" class="w-full">
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">情绪</label>
+                            <input id="emotion" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg" placeholder="angry / happy，可空">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">情绪值</label>
+                            <select id="emotion-scale" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg">
+                                <option value="4">4</option>
+                                <option value="1">1</option>
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                                <option value="5">5</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <label class="flex items-center gap-2 text-sm text-slate-700">
+                        <input id="enable-subtitle" type="checkbox" checked class="rounded border-slate-300">
+                        返回字幕时间戳并生成 SRT
+                    </label>
+
+                    <button id="submit-btn" class="w-full h-11 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2">
+                        <i class="fas fa-paper-plane"></i>
+                        提交合成任务
+                    </button>
+                    <div id="form-message" class="hidden text-sm rounded-lg px-3 py-2"></div>
+                </aside>
+
+                <section class="p-6 space-y-5">
+                    <div>
+                        <div class="flex items-center justify-between mb-2">
+                            <label class="text-sm font-semibold text-slate-700">合成文本</label>
+                            <div class="flex items-center gap-2">
+                                <button id="split-btn" class="px-3 py-1.5 rounded-lg border border-slate-200 text-sm text-slate-600 hover:bg-slate-50">按空行拆段</button>
+                                <span id="char-count" class="text-xs text-slate-400">0 字</span>
+                            </div>
+                        </div>
+                        <textarea id="text-input" rows="12" class="w-full px-4 py-3 border border-slate-200 rounded-xl leading-7 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="把需要配音的文案放在这里。可以用空行分段，系统会串行生成每段音频。"></textarea>
+                    </div>
+
+                    <div>
+                        <div class="flex items-center justify-between mb-3">
+                            <div>
+                                <h2 class="font-bold">任务列表</h2>
+                                <p class="text-sm text-slate-500">使用现有 TTS 任务表，刷新后可以查看每段状态和下载音频。</p>
+                            </div>
+                            <button id="refresh-btn" class="px-3 py-2 rounded-lg border border-slate-200 text-sm text-slate-600 hover:bg-slate-50">
+                                <i class="fas fa-sync-alt mr-1"></i>刷新
+                            </button>
+                        </div>
+                        <div id="task-list" class="space-y-3"></div>
+                    </div>
+                </section>
             </div>
         </section>
     </main>
 
-    <!-- 详情弹窗 -->
-    <div id="detail-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-6">
-        <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" onclick="closeDetail()"></div>
-        <div class="relative bg-white w-full max-w-4xl max-h-[85vh] rounded-3xl shadow-2xl overflow-hidden flex flex-col">
-            <div class="p-6 border-b border-gray-100 flex items-center justify-between">
+    <div id="detail-modal" class="fixed inset-0 z-50 hidden">
+        <div class="absolute inset-0 bg-slate-900/40" data-close-detail></div>
+        <div class="absolute right-0 top-0 h-full w-full max-w-3xl bg-white shadow-2xl flex flex-col">
+            <div class="p-5 border-b border-slate-100 flex items-center justify-between">
                 <div>
-                    <h3 id="modal-title" class="text-xl font-bold text-gray-800">任务详情</h3>
-                    <p id="modal-status" class="text-xs text-gray-500 mt-1 uppercase tracking-widest font-bold"></p>
+                    <h3 id="detail-title" class="text-lg font-bold">任务详情</h3>
+                    <p id="detail-meta" class="text-sm text-slate-500"></p>
                 </div>
-                <button onclick="closeDetail()" class="w-10 h-10 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors">
-                    <i class="fas fa-times text-gray-400"></i>
+                <button data-close-detail class="w-9 h-9 rounded-lg hover:bg-slate-100 text-slate-500">
+                    <i class="fas fa-times"></i>
                 </button>
             </div>
-            <div id="modal-body" class="p-6 overflow-y-auto flex-1 space-y-4">
-                <!-- 段落执行明细 -->
-            </div>
+            <div id="detail-body" class="p-5 overflow-y-auto space-y-3"></div>
         </div>
     </div>
 
-    <!-- JS 逻辑 -->
     <script src="js/env.js"></script>
-    <script src="js/utils.js"></script>
-    <script src="js/api.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script>
-        let segmentCount = 1;
-
-        document.addEventListener('DOMContentLoaded', () => {
-            // 初始化语速数值显示
-            document.getElementById('voice-speed').addEventListener('input', (e) => {
-                document.getElementById('speed-val').innerText = e.target.value + 'x';
-            });
-        });
-
-        function switchTab(tab) {
-            const tabs = ['create', 'history'];
-            tabs.forEach(t => {
-                document.getElementById(`tab-${t}`).classList.toggle('hidden', t !== tab);
-                const btn = document.getElementById(`btn-tab-${t}`);
-                if (t === tab) {
-                    btn.className = "px-6 py-2 rounded-lg font-bold transition-all bg-white text-primary-600 shadow-sm";
-                } else {
-                    btn.className = "px-6 py-2 rounded-lg font-bold transition-all text-gray-500 hover:text-gray-700";
-                }
-            });
-            if (tab === 'history') loadHistory();
-        }
-
-        function addSegment() {
-            segmentCount++;
-            const container = document.getElementById('segments-container');
-            const div = document.createElement('div');
-            div.className = "segment-item relative group bg-slate-50 rounded-2xl p-4 border border-gray-100 animate-fade-in";
-            div.innerHTML = `
-                <div class="flex items-center justify-between mb-2">
-                    <div class="flex items-center gap-3">
-                        <span class="w-6 h-6 bg-gray-200 rounded-full flex items-center justify-center text-[10px] font-bold text-gray-500">${segmentCount}</span>
-                        <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">段落 ${String.fromCharCode(64 + segmentCount)}</span>
-                    </div>
-                    <button onclick="removeSegment(this)" class="segment-actions text-red-400 hover:text-red-600 text-xs font-bold transition-all">
-                        <i class="fas fa-trash-alt mr-1"></i> 移除本段
-                    </button>
-                </div>
-                <textarea rows="4" class="segment-text w-full bg-transparent border-none focus:ring-0 text-gray-700 text-sm resize-none" placeholder="输入本段落文案内容..."></textarea>
-            `;
-            container.appendChild(div);
-            div.scrollIntoView({ behavior: 'smooth' });
-        }
-
-        function removeSegment(btn) {
-            btn.closest('.segment-item').remove();
-            reindexSegments();
-        }
-
-        function reindexSegments() {
-            const items = document.querySelectorAll('.segment-item');
-            segmentCount = items.length;
-            items.forEach((item, index) => {
-                const label = item.querySelector('.text-[10px]');
-                const name = item.querySelector('.tracking-widest');
-                label.innerText = index + 1;
-                name.innerText = `段落 ${String.fromCharCode(65 + index)}`;
-            });
-        }
-
-        async function submitAll() {
-            const title = document.getElementById('article-title').value.trim();
-            const voiceType = document.getElementById('voice-type').value;
-            const speed = parseFloat(document.getElementById('voice-speed').value);
-            const textareas = document.querySelectorAll('.segment-text');
-            const segments = Array.from(textareas).map(t => t.value.trim()).filter(t => t !== '');
-
-            if (!title) return alert('请输入文章标题');
-            if (segments.length === 0) return alert('至少需要输入一个有效的段落');
-
-            try {
-                const resp = await fetch('/api/v2/tts/submit', {
-                    method: 'POST',
-                    headers: { 
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${localStorage.getItem('token')}`
-                    },
-                    body: JSON.stringify({
-                        title,
-                        segments,
-                        config: { voice_type: voiceType, speed }
-                    })
-                });
-                const result = await resp.json();
-                if (result.success) {
-                    alert('任务提交成功！请在历史记录中查看进度');
-                    switchTab('history');
-                } else {
-                    alert('提交失败: ' + result.message);
-                }
-            } catch (e) {
-                alert('系统请求错误: ' + e);
-            }
-        }
-
-        async function loadHistory() {
-            const list = document.getElementById('history-list');
-            try {
-                const resp = await fetch('/api/v2/tts/history', {
-                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-                });
-                const result = await resp.json();
-                if (result.success) {
-                    if (result.data.items.length === 0) {
-                        list.innerHTML = '<div class="py-20 text-center text-gray-400">暂无历史任务</div>';
-                        return;
-                    }
-                    list.innerHTML = result.data.items.map(item => {
-                        const statusColors = {
-                            'pending': 'bg-gray-100 text-gray-500',
-                            'processing': 'bg-blue-100 text-primary-600 animate-pulse',
-                            'completed': 'bg-green-100 text-accent-green',
-                            'failed': 'bg-red-100 text-accent-red',
-                            'partial_failed': 'bg-orange-100 text-accent-orange'
-                        };
-                        const statusNames = {
-                            'pending': '排队中', 'processing': '处理中', 'completed': '已完成', 'failed': '失败', 'partial_failed': '部分成功'
-                        };
-                        return `
-                            <div onclick="showDetail('${item.id}')" class="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm hover:shadow-md transition-all cursor-pointer flex items-center justify-between group">
-                                <div class="flex items-center gap-4">
-                                    <div class="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-gray-400 group-hover:bg-primary-50 group-hover:text-primary-500 transition-colors">
-                                        <i class="fas fa-file-audio"></i>
-                                    </div>
-                                    <div>
-                                        <h4 class="font-bold text-gray-800">${item.title}</h4>
-                                        <p class="text-xs text-gray-400 mt-1">${new Date(item.created_at).toLocaleString()} · ${item.segment_count} 个段落</p>
-                                    </div>
-                                </div>
-                                <div class="flex items-center gap-4">
-                                    <span class="px-3 py-1 rounded-lg text-[10px] font-black uppercase ${statusColors[item.status]}">${statusNames[item.status]}</span>
-                                    <i class="fas fa-chevron-right text-gray-200 group-hover:text-gray-400 transition-colors"></i>
-                                </div>
-                            </div>
-                        `;
-                    }).join('');
-                }
-            } catch (e) {
-                list.innerHTML = `<div class="py-20 text-center text-red-400">加载失败: ${e}</div>`;
-            }
-        }
-
-        async function showDetail(id) {
-            const modal = document.getElementById('detail-modal');
-            const body = document.getElementById('modal-body');
-            modal.classList.remove('hidden');
-            body.innerHTML = '<div class="text-center py-10"><i class="fas fa-spinner fa-spin text-2xl text-primary-500"></i></div>';
-
-            try {
-                const resp = await fetch(`/api/v2/tts/article/${id}`, {
-                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-                });
-                const result = await resp.json();
-                if (result.success) {
-                    const a = result.data;
-                    document.getElementById('modal-title').innerText = a.title;
-                    document.getElementById('modal-status').innerText = a.status;
-                    
-                    body.innerHTML = a.segments.map(s => {
-                        let statusIcon = '<i class="fas fa-circle-notch fa-spin text-blue-500"></i>';
-                        let audioControl = '';
-                        let logArea = '';
-
-                        if (s.status === 'success') {
-                            statusIcon = '<i class="fas fa-check-circle text-green-500"></i>';
-                            audioControl = `
-                                <div class="mt-3 flex items-center gap-3 bg-white p-3 rounded-xl border border-gray-100">
-                                    <audio controls class="h-8 flex-1"><source src="/${s.audio_path}" type="audio/mpeg"></audio>
-                                    <a href="/${s.audio_path}" download class="text-xs text-primary-600 font-bold hover:underline">下载</a>
-                                </div>
-                            `;
-                        } else if (s.status === 'failed') {
-                            statusIcon = '<i class="fas fa-exclamation-circle text-red-500"></i>';
-                            logArea = `<div class="mt-2 text-xs bg-red-50 p-3 rounded-xl text-red-600 font-mono">错误日志：${s.error_log || '未知错误'}</div>`;
-                        } else if (s.status === 'waiting') {
-                            statusIcon = '<i class="far fa-clock text-gray-300"></i>';
-                        }
-
-                        return `
-                            <div class="bg-slate-50/50 rounded-2xl p-5 border border-gray-100">
-                                <div class="flex items-start justify-between">
-                                    <div class="flex-1 pr-4">
-                                        <div class="flex items-center gap-2 mb-2">
-                                            <span class="text-xs font-bold text-gray-400">段落 ${s.sequence}</span>
-                                            ${statusIcon}
-                                        </div>
-                                        <p class="text-sm text-gray-600 leading-relaxed">${s.text}</p>
-                                    </div>
-                                </div>
-                                ${audioControl}
-                                ${logArea}
-                            </div>
-                        `;
-                    }).join('');
-                }
-            } catch (e) {
-                body.innerHTML = `<div class="text-red-500">加载明细失败: ${e}</div>`;
-            }
-        }
-
-        function closeDetail() {
-            document.getElementById('detail-modal').classList.add('hidden');
-        }
-    </script>
+    <script src="js/doubao-tts.js?v=20260521-001"></script>
 </body>
 </html>

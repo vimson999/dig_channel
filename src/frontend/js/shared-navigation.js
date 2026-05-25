@@ -28,6 +28,8 @@ class SharedNavigation {
             return 'trending-radar';
         } else if (filename === 'trending.html') {
             return 'trending';
+        } else if (filename === 'zsxq-lab.html') {
+            return 'zsxq-lab';
         } else if (filename === 'document-converter.html') {
             return 'document-converter';
         } else if (filename === 'word-long-image.html') {
@@ -81,10 +83,11 @@ class SharedNavigation {
             'videos': '视频管理中心',
             'trending-radar': '趋势雷达监控',
             'trending': '爆款视频搜索',
+            'zsxq-lab': '知识星球实验台',
             'document-converter': '文档转换工具',
             'word-long-image': 'Word 转长图',
             'pdf-scroll-video': 'PDF 滚动视频',
-            'tts': 'AI语音合成服务',
+            'tts': '豆包语音 V3',
             'mhtml-pdf': 'MHTML转PDF工具',
             'watermark': 'PDF智能去水印',
             'student-id-generator': '学生证生成器',
@@ -99,6 +102,7 @@ class SharedNavigation {
             'video-auto-generator': 'AI 视频自动生成',
             'podcast-visualizer': '播客视觉化',
             'publisher': '一键智能发布台',
+            'external-batch': '批量任务台',
             'video-editor': '高级剪辑工作台',
             'batch-transcription': '批量音频转文案',
             'downloads': '素材下载中心'
@@ -279,6 +283,12 @@ class SharedNavigation {
                         icon: 'fas fa-compass',
                         href: 'indie-navigator.html'
                     },
+                    {
+                        id: 'zsxq-lab',
+                        name: '知识星球实验台',
+                        icon: 'fas fa-circle-nodes',
+                        href: 'zsxq-lab.html'
+                    },
                 ]
             },
             {
@@ -298,6 +308,13 @@ class SharedNavigation {
                         name: '高级剪辑',
                         icon: 'fas fa-scissors',
                         href: 'video-editor.html'
+                    },
+                    {
+                        id: 'external-batch',
+                        name: '批量任务台',
+                        icon: 'fas fa-list-check',
+                        href: 'http://127.0.0.1:5005/batch',
+                        external: true
                     },
                     {
                         id: 'bilibili-publisher',
@@ -421,6 +438,23 @@ class SharedNavigation {
             }
         ];
     }
+
+    getLinkAttributes(item) {
+        if (!item.external) {
+            return '';
+        }
+
+        const title = `${item.name}（外部工具）`;
+        return ` target="_blank" rel="noopener noreferrer" title="${title}"`;
+    }
+
+    getExternalIndicator(item) {
+        if (!item.external) {
+            return '';
+        }
+
+        return '<i class="fas fa-arrow-up-right-from-square ml-2 text-[10px] opacity-60"></i>';
+    }
     
     getMenuItems() {
         const menuStructure = this.getMenuStructure();
@@ -434,8 +468,8 @@ class SharedNavigation {
                     : 'text-gray-600 hover:text-primary-600 hover:bg-gray-50';
                 
                 return `
-                    <a href="${section.href}" class="nav-link ${activeClass} px-3 py-2 rounded-lg transition-colors">
-                        <i class="${section.icon} mr-2"></i>${section.name}
+                    <a href="${section.href}" class="nav-link ${activeClass} px-3 py-2 rounded-lg transition-colors"${this.getLinkAttributes(section)}>
+                        <i class="${section.icon} mr-2"></i>${section.name}${this.getExternalIndicator(section)}
                     </a>
                 `;
             } else if (section.dropdown) {
@@ -450,8 +484,8 @@ class SharedNavigation {
                     const itemActiveClass = isActive ? 'bg-primary-50 text-primary-600' : 'text-gray-700 hover:bg-gray-50';
                     
                     return `
-                        <a href="${item.href}" class="block px-4 py-2 text-sm ${itemActiveClass} transition-colors rounded-md">
-                            <i class="${item.icon} mr-2"></i>${item.name}
+                        <a href="${item.href}" class="block px-4 py-2 text-sm ${itemActiveClass} transition-colors rounded-md"${this.getLinkAttributes(item)}>
+                            <i class="${item.icon} mr-2"></i>${item.name}${this.getExternalIndicator(item)}
                         </a>
                     `;
                 }).join('');
@@ -482,8 +516,8 @@ class SharedNavigation {
                 const activeClass = isActive ? 'bg-primary-50 text-primary-600' : 'text-gray-700 hover:bg-gray-50';
                 
                 return `
-                    <a href="${section.href}" class="block px-4 py-3 rounded-lg ${activeClass} transition-colors">
-                        <i class="${section.icon} mr-3"></i>${section.name}
+                    <a href="${section.href}" class="block px-4 py-3 rounded-lg ${activeClass} transition-colors"${this.getLinkAttributes(section)}>
+                        <i class="${section.icon} mr-3"></i>${section.name}${this.getExternalIndicator(section)}
                     </a>
                 `;
             } else if (section.dropdown) {
@@ -493,8 +527,8 @@ class SharedNavigation {
                     const itemActiveClass = isActive ? 'bg-primary-50 text-primary-600' : 'text-gray-600 hover:bg-gray-50';
                     
                     return `
-                        <a href="${item.href}" class="block px-6 py-2 text-sm rounded-md ${itemActiveClass} transition-colors">
-                            <i class="${item.icon} mr-2"></i>${item.name}
+                        <a href="${item.href}" class="block px-6 py-2 text-sm rounded-md ${itemActiveClass} transition-colors"${this.getLinkAttributes(item)}>
+                            <i class="${item.icon} mr-2"></i>${item.name}${this.getExternalIndicator(item)}
                         </a>
                     `;
                 }).join('');

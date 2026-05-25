@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# 停止豆包 TTS 专用 Celery Worker
+
+echo "🔍 正在查找 cloud_tts Celery Worker..."
+
+PIDS=$(ps aux | grep 'celery' | grep 'cloud_tts' | grep -v grep | awk '{print $2}')
+
+if [ -z "$PIDS" ]; then
+    echo "✅ 没有发现正在运行的 cloud_tts Worker。"
+    exit 0
+fi
+
+echo "⚠️ 发现 cloud_tts Worker: $PIDS"
+echo "🚀 正在停止..."
+echo $PIDS | xargs kill
+sleep 1
+
+LEFTOVER=$(ps aux | grep 'celery' | grep 'cloud_tts' | grep -v grep | awk '{print $2}')
+if [ ! -z "$LEFTOVER" ]; then
+    echo "⚠️ 仍有残留进程: $LEFTOVER，正在强制清理..."
+    echo $LEFTOVER | xargs kill -9
+fi
+
+echo "✨ cloud_tts Worker 已停止。"

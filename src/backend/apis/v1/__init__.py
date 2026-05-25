@@ -83,6 +83,10 @@ def register_blueprints(app):
     from .downloader import bp as downloader_bp
     app.register_blueprint(downloader_bp)
 
+    # 注册知识星球试验 API
+    from .zsxq import bp as zsxq_bp
+    app.register_blueprint(zsxq_bp)
+
 __all__ = [
     'auth_bp',
     'channels_bp',

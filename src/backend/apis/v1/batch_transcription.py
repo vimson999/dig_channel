@@ -133,11 +133,10 @@ def _run_batch_task(task_id):
             )
 
             try:
-                from services.asr_service import asr_service
+                from services.asr_cache_service import transcribe_with_cache
 
-                segments = asr_service.transcribe(
+                segments = transcribe_with_cache(
                     source_path,
-                    return_segments=True,
                     model_size=model_size,
                 )
                 elapsed_seconds = round(time.time() - start_time, 2)

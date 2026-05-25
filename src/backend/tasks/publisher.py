@@ -3,7 +3,6 @@ import os
 import sys
 import logging
 import json
-import hashlib
 import subprocess
 from datetime import datetime
 
@@ -131,6 +130,7 @@ def run_publication_pipeline(self, task_id):
             # --- Step 0: Pre-process Audio & Subtitles (Shared for H and V) ---
             audio_segments_raw = params.get('audio_segments', [])
             audio_path_abs = []
+            asr_request_specs = []
             subtitles = []
 
             # 1. 尝试从新页面的“时间轴轨道”获取数据
@@ -142,11 +142,22 @@ def run_publication_pipeline(self, task_id):
                     
                     speed = float(seg.get('speed', 1.0))
                     start_offset = float(seg.get('start', 0))
+                    end_offset = float(seg.get('end_offset', 0))
+                    source_duration = 0
+                    end_seconds = None
+                    if end_offset > 0:
+                        try:
+                            from services.asr_cache_service import probe_media_duration
+                            source_duration = probe_media_duration(raw_path)
+                            if source_duration > 0:
+                                end_seconds = max(start_offset + 0.1, source_duration - end_offset)
+                        except Exception as exc:
+                            logger.warning(f"⚠️ [TASK] 无法读取音频片段时长，跳过 end_offset 裁切: {exc}")
                     
                     # 生成物理剪辑后的临时文件
                     file_dir, file_name = os.path.split(raw_path)
                     name_part, ext_part = os.path.splitext(file_name)
-                    edit_path = os.path.join(file_dir, f"{name_part}_edit_s{speed}_st{start_offset}{ext_part}")
+                    edit_path = os.path.join(file_dir, f"{name_part}_edit_s{speed}_st{start_offset}_eo{end_offset}{ext_part}")
                     
                     # 检查临时文件是否需要重新生成（不存在，或原始文件更新）
                     need_rebuild = not os.path.exists(edit_path)
@@ -156,14 +167,30 @@ def run_publication_pipeline(self, task_id):
                             need_rebuild = True
 
                     if need_rebuild:
-                        cmd = ["ffmpeg", "-y", "-ss", str(start_offset), "-i", raw_path, "-filter:a", f"atempo={speed}", "-vn", edit_path]
+                        cmd = ["ffmpeg", "-y", "-ss", str(start_offset), "-i", raw_path]
+                        if end_seconds is not None:
+                            cmd.extend(["-t", str(max(0.1, end_seconds - start_offset))])
+                        if abs(speed - 1.0) >= 0.001:
+                            cmd.extend(["-filter:a", f"atempo={speed}"])
+                        cmd.extend(["-vn", edit_path])
                         try:
                             subprocess.run(cmd, check=True, capture_output=True)
                             audio_path_abs.append(edit_path)
-                        except: audio_path_abs.append(raw_path)
+                            prepared_audio_path = edit_path
+                        except:
+                            audio_path_abs.append(raw_path)
+                            prepared_audio_path = None
                     else:
                         audio_path_abs.append(edit_path)
+                        prepared_audio_path = edit_path
                     
+                    asr_request_specs.append({
+                        'source_path': raw_path,
+                        'start_seconds': start_offset,
+                        'end_seconds': end_seconds,
+                        'speed': speed,
+                        'prepared_audio_path': prepared_audio_path,
+                    })
                     subtitles.append(seg.get('subtitle', ''))
 
             # 2. 如果没传轨道数据，则回退到旧页面的“全局模式”
@@ -193,10 +220,12 @@ def run_publication_pipeline(self, task_id):
             should_trigger_asr = asr_enabled or (sub_burn_enabled and not has_usable_subtitles(subtitles))
             
             if audio_path_abs and should_trigger_asr:
-                from services.asr_service import asr_service
+                from services.asr_cache_service import transcribe_with_cache
                 logger.info(f"🔄 [TASK] 触发自动 ASR 识别 (模型: {asr_model_size})")
                 processed_subs = []
                 audio_list = audio_path_abs if isinstance(audio_path_abs, list) else [audio_path_abs]
+                if not asr_request_specs:
+                    asr_request_specs = [{'source_path': path} for path in audio_list]
                 
                 # 确保 subtitles 列表长度与音频列表一致
                 if not subtitles: 
@@ -208,28 +237,16 @@ def run_publication_pipeline(self, task_id):
                     s_data = subtitles[i] if i < len(subtitles) else ""
                     if not s_data or s_data in ["识别中...", "识别失败"]:
                         try:
-                            # --- ASR 缓存逻辑 ---
-                            # 使用文件路径、大小、修改时间以及模型大小生成唯一缓存 Key
-                            # 这样可以确保：1. 同文件不同倍速（路径不同）缓存分离 2. 原始文件被替换（mtime/size不同）缓存失效
-                            f_stat = os.stat(a_p)
-                            cache_payload = f"{a_p}_{f_stat.st_size}_{f_stat.st_mtime}_{asr_model_size}"
-                            cache_key = hashlib.md5(cache_payload.encode()).hexdigest()
-                            cache_path = os.path.join(PROJECT_ROOT, "data/processed/asr_cache", f"{cache_key}.json")
-                            
-                            if os.path.exists(cache_path):
-                                logger.info(f"  - ⚡️ [CACHE] 命中识别缓存: {os.path.basename(a_p)}")
-                                with open(cache_path, 'r', encoding='utf-8') as f:
-                                    s_data = json.load(f)
-                            else:
-                                logger.info(f"  - 🎙️ 正在识别第 {i+1}/{len(audio_list)} 个片段: {os.path.basename(a_p)}")
-                                s_data = asr_service.transcribe(a_p, return_segments=True, model_size=asr_model_size)
-                                
-                                # 确保目录存在
-                                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                                # 写入缓存
-                                with open(cache_path, 'w', encoding='utf-8') as f:
-                                    json.dump(s_data, f, ensure_ascii=False, indent=2)
-                                logger.info(f"  - ✅ 识别完成并存入缓存: {cache_key[:8]}")
+                            spec = asr_request_specs[i] if i < len(asr_request_specs) else {'source_path': a_p}
+                            logger.info(f"  - 🎙️ 正在读取/生成第 {i+1}/{len(audio_list)} 个片段字幕: {os.path.basename(a_p)}")
+                            s_data = transcribe_with_cache(
+                                spec.get('source_path') or a_p,
+                                model_size=asr_model_size,
+                                start_seconds=spec.get('start_seconds'),
+                                end_seconds=spec.get('end_seconds'),
+                                speed=spec.get('speed', 1.0),
+                                prepared_audio_path=spec.get('prepared_audio_path'),
+                            )
                             
                         except Exception as e:
                             logger.error(f"❌ [TASK] 第 {i+1} 个片段 ASR 识别失败: {e}")

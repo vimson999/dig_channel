@@ -1,111 +1,246 @@
-from flask import Blueprint, request, jsonify, current_app
-from datetime import datetime
 import logging
+import os
+
+from flask import Blueprint, jsonify, request, send_file
 
 from models import db
-from models.tts import TTSArticle, TTSSegment
-from tasks.tts import process_tts_article
+from models.task import PublicationTask
+from services.doubao_tts_ws import is_configured as is_doubao_tts_configured
+from tasks.tts import process_doubao_tts_task
 from utils.auth_utils import require_login
 
 logger = logging.getLogger("TTS_V2_API")
 
 tts_v2_bp = Blueprint('tts_v2', __name__, url_prefix='/api/v2/tts')
 
+
+def _is_tts_task(task):
+    return bool(task.params and task.params.get('feature') == 'doubao_tts')
+
+
+def _task_title(task):
+    return (task.params or {}).get('tts', {}).get('title') or '豆包语音合成'
+
+
+def _task_config(task):
+    return (task.params or {}).get('tts', {}).get('config') or {}
+
+
+def _task_segments(task):
+    source_segments = (task.params or {}).get('tts', {}).get('segments') or []
+    result_segments = (task.result or {}).get('segments') or []
+    if result_segments:
+        return result_segments
+    return [
+        {
+            'sequence': index + 1,
+            'text': text,
+            'status': 'waiting',
+            'audio_path': None,
+            'subtitle_path': None,
+            'error_log': None,
+        }
+        for index, text in enumerate(source_segments)
+    ]
+
+
+def _task_to_list_item(task):
+    segments = _task_segments(task)
+    successful_segments = [
+        _segment_to_public(task.id, segment)
+        for segment in segments
+        if segment.get('status') == 'success' and segment.get('audio_path')
+    ]
+    return {
+        'id': task.id,
+        'title': _task_title(task),
+        'status': task.status,
+        'config': _task_config(task),
+        'created_at': task.created_at.isoformat() if task.created_at else None,
+        'updated_at': task.updated_at.isoformat() if task.updated_at else None,
+        'segment_count': len((task.params or {}).get('tts', {}).get('segments') or []),
+        'success_count': len(successful_segments),
+        'first_audio_segment': successful_segments[0] if successful_segments else None,
+    }
+
+
+def _segment_to_public(task_id, segment):
+    item = dict(segment)
+    sequence = item.get('sequence')
+    if item.get('audio_path'):
+        item['audio_url'] = f'/api/v2/tts/task/{task_id}/segment/{sequence}/audio'
+    if item.get('subtitle_path'):
+        item['subtitle_url'] = f'/api/v2/tts/task/{task_id}/segment/{sequence}/subtitle'
+    item.pop('audio_path', None)
+    item.pop('subtitle_path', None)
+    return item
+
+
+@tts_v2_bp.route('/status', methods=['GET'])
+@require_login
+def get_tts_status(current_user):
+    """获取TTS服务配置状态"""
+    return jsonify({
+        'success': True,
+        'data': {
+            'providers': [
+                {
+                    'id': 'doubao_ws_v3',
+                    'name': '豆包语音 WebSocket V3',
+                    'configured': is_doubao_tts_configured(),
+                    'resource_id': 'seed-tts-2.0',
+                    'formats': ['mp3', 'ogg_opus', 'pcm']
+                }
+            ]
+        }
+    })
+
+
 @tts_v2_bp.route('/submit', methods=['POST'])
 @require_login
 def submit_tts_task(current_user):
-    """提交TTS合成任务"""
+    """提交豆包TTS合成任务，复用 publication_tasks。"""
     try:
         data = request.get_json()
         if not data:
             return jsonify({'success': False, 'message': '请求数据缺失'}), 400
-        
-        title = data.get('title', '').strip()
-        segments_text = data.get('segments', []) # 文本数组
-        config = data.get('config', {}) # 包含 voice_type, speed 等
-        
+
+        title = (data.get('title') or '').strip()
+        segments_text = [
+            str(item).strip()
+            for item in data.get('segments', [])
+            if str(item).strip()
+        ]
+        config = data.get('config', {})
+        if not isinstance(config, dict):
+            config = {}
+        config['provider'] = 'doubao_ws_v3'
+
         if not title:
             return jsonify({'success': False, 'message': '标题不能为空'}), 400
         if not segments_text:
             return jsonify({'success': False, 'message': '段落内容不能为空'}), 400
+        if not is_doubao_tts_configured() and not config.get('api_key'):
+            return jsonify({'success': False, 'message': '豆包 TTS API Key 未配置'}), 400
 
-        # 1. 创建文章记录
-        article = TTSArticle(
-            title=title,
-            user_id=current_user.id,
+        task = PublicationTask(
             status='pending',
-            config=config
+            current_step='init',
+            progress=0,
+            params={
+                'feature': 'doubao_tts',
+                'user_id': current_user.id,
+                'tts': {
+                    'title': title,
+                    'segments': segments_text,
+                    'config': config,
+                },
+            },
+            result={
+                'segments': [
+                    {
+                        'sequence': index + 1,
+                        'text': text,
+                        'status': 'waiting',
+                        'audio_path': None,
+                        'subtitle_path': None,
+                        'error_log': None,
+                    }
+                    for index, text in enumerate(segments_text)
+                ]
+            },
         )
-        db.session.add(article)
-        db.session.flush() # 获取 article.id
-
-        # 2. 创建段落记录
-        for i, text in enumerate(segments_text):
-            segment = TTSSegment(
-                article_id=article.id,
-                sequence=i + 1,
-                text=text.strip(),
-                status='waiting'
-            )
-            db.session.add(segment)
-        
+        db.session.add(task)
         db.session.commit()
 
-        # 3. 异步触发Celery任务
-        process_tts_article.delay(article.id)
+        celery_task = process_doubao_tts_task.apply_async(args=[task.id], queue='cloud_tts')
+        task.celery_task_id = celery_task.id
+        db.session.commit()
 
         return jsonify({
             'success': True,
             'message': '任务已提交，正在后台排队处理',
-            'data': {'article_id': article.id}
+            'data': {'article_id': task.id, 'task_id': task.id, 'celery_id': celery_task.id}
         })
 
-    except Exception as e:
+    except Exception as exc:
         db.session.rollback()
-        logger.error(f"提交TTS任务失败: {str(e)}")
-        return jsonify({'success': False, 'message': f'系统错误: {str(e)}'}), 500
+        logger.error("提交TTS任务失败: %s", exc, exc_info=True)
+        return jsonify({'success': False, 'message': f'系统错误: {exc}'}), 500
+
 
 @tts_v2_bp.route('/history', methods=['GET'])
 @require_login
 def get_history(current_user):
     """获取历史任务列表"""
     try:
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('per_page', 10, type=int)
-        
-        articles = TTSArticle.query.filter_by(user_id=current_user.id)\
-            .order_by(TTSArticle.created_at.desc())\
-            .paginate(page=page, per_page=per_page)
-        
+        page = max(1, request.args.get('page', 1, type=int))
+        per_page = min(50, max(1, request.args.get('per_page', 10, type=int)))
+
+        query = PublicationTask.query.filter(
+            PublicationTask.params['feature'].as_string() == 'doubao_tts',
+            PublicationTask.params['user_id'].as_string() == str(current_user.id),
+        ).order_by(PublicationTask.created_at.desc())
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+
         return jsonify({
             'success': True,
             'data': {
-                'items': [a.to_dict() for a in articles.items],
-                'total': articles.total,
-                'pages': articles.pages,
-                'current_page': articles.page
+                'items': [_task_to_list_item(task) for task in pagination.items],
+                'total': pagination.total,
+                'pages': pagination.pages,
+                'current_page': pagination.page
             }
         })
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
+    except Exception as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 500
 
-@tts_v2_bp.route('/article/<article_id>', methods=['GET'])
+
+@tts_v2_bp.route('/article/<task_id>', methods=['GET'])
 @require_login
-def get_article_detail(current_user, article_id):
-    """获取文章详情及所有段落状态"""
+def get_article_detail(current_user, task_id):
+    """获取任务详情及所有段落状态"""
     try:
-        article = TTSArticle.query.filter_by(id=article_id, user_id=current_user.id).first()
-        if not article:
+        task = PublicationTask.query.get(task_id)
+        if not task or not _is_tts_task(task) or str((task.params or {}).get('user_id')) != str(current_user.id):
             return jsonify({'success': False, 'message': '未找到该任务'}), 404
-        
-        segments = TTSSegment.query.filter_by(article_id=article_id).order_by(TTSSegment.sequence).all()
-        
-        data = article.to_dict()
-        data['segments'] = [s.to_dict() for s in segments]
-        
-        return jsonify({
-            'success': True,
-            'data': data
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
+
+        data = _task_to_list_item(task)
+        data['segments'] = [_segment_to_public(task.id, segment) for segment in _task_segments(task)]
+        return jsonify({'success': True, 'data': data})
+    except Exception as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 500
+
+
+def _find_segment(task_id, sequence):
+    task = PublicationTask.query.get(task_id)
+    if not task or not _is_tts_task(task):
+        return None, None
+    for segment in _task_segments(task):
+        if int(segment.get('sequence') or 0) == int(sequence):
+            return task, segment
+    return task, None
+
+
+@tts_v2_bp.route('/task/<task_id>/segment/<int:sequence>/audio', methods=['GET'])
+@require_login
+def download_segment_audio(current_user, task_id, sequence):
+    task, segment = _find_segment(task_id, sequence)
+    if not task or not segment or str((task.params or {}).get('user_id')) != str(current_user.id):
+        return jsonify({'success': False, 'message': '未找到音频'}), 404
+    audio_path = segment.get('audio_path')
+    if not audio_path or not os.path.exists(audio_path):
+        return jsonify({'success': False, 'message': '音频文件不存在'}), 404
+    return send_file(audio_path, as_attachment=True)
+
+
+@tts_v2_bp.route('/task/<task_id>/segment/<int:sequence>/subtitle', methods=['GET'])
+@require_login
+def download_segment_subtitle(current_user, task_id, sequence):
+    task, segment = _find_segment(task_id, sequence)
+    if not task or not segment or str((task.params or {}).get('user_id')) != str(current_user.id):
+        return jsonify({'success': False, 'message': '未找到字幕'}), 404
+    subtitle_path = segment.get('subtitle_path')
+    if not subtitle_path or not os.path.exists(subtitle_path):
+        return jsonify({'success': False, 'message': '字幕文件不存在'}), 404
+    return send_file(subtitle_path, as_attachment=True, mimetype='text/plain')

@@ -1,6 +1,6 @@
 class PodcastVisualizerTool {
     constructor() {
-        this.rendererVersion = '20260520-header-scale-v8';
+        this.rendererVersion = '20260520-audio-controls-v9';
         this.audio = null;
         this.downloadUrl = null;
         this.currentTaskId = null;
@@ -9,6 +9,10 @@ class PodcastVisualizerTool {
         this.previewAbortController = null;
         this.previewObjectUrl = null;
         this.currentPreviewPayloadKey = '';
+        this.audioPreview = new Audio();
+        this.audioPreviewUrl = null;
+        this.currentTaskPage = 1;
+        this.tasksPerPage = 20;
         this.init();
     }
 
@@ -27,6 +31,12 @@ class PodcastVisualizerTool {
         this.audioCard = document.getElementById('audio-card');
         this.audioName = document.getElementById('audio-name');
         this.audioSize = document.getElementById('audio-size');
+        this.audioStartInput = document.getElementById('audio-start-input');
+        this.audioEndInput = document.getElementById('audio-end-input');
+        this.audioSpeedSelect = document.getElementById('audio-speed-select');
+        this.audioPreviewBtn = document.getElementById('audio-preview-btn');
+        this.audioPreviewStopBtn = document.getElementById('audio-preview-stop-btn');
+        this.audioPreviewStatus = document.getElementById('audio-preview-status');
         this.titleInput = document.getElementById('title-input');
         this.headlineSubtitleInput = document.getElementById('headline-subtitle-input');
         this.subtitleInput = document.getElementById('subtitle-input');
@@ -52,6 +62,10 @@ class PodcastVisualizerTool {
         this.resultMeta = document.getElementById('result-meta');
         this.refreshTasksBtn = document.getElementById('refresh-tasks-btn');
         this.taskListBody = document.getElementById('task-list-body');
+        this.taskPagination = document.getElementById('task-pagination');
+        this.taskPrevPageBtn = document.getElementById('task-prev-page-btn');
+        this.taskNextPageBtn = document.getElementById('task-next-page-btn');
+        this.taskPageInfo = document.getElementById('task-page-info');
     }
 
     bindEvents() {
@@ -68,7 +82,18 @@ class PodcastVisualizerTool {
         });
         this.orientationSelect.addEventListener('change', () => this.syncPreview());
         this.srtInput.addEventListener('change', () => this.handleSrtSelection());
-        this.refreshTasksBtn.addEventListener('click', () => this.loadTasks());
+        [this.audioStartInput, this.audioEndInput, this.audioSpeedSelect].forEach((input) => {
+            input.addEventListener('input', () => this.updateAudioPreviewStatus());
+            input.addEventListener('change', () => this.updateAudioPreviewStatus());
+        });
+        this.audioPreviewBtn?.addEventListener('click', () => this.playAudioPreview());
+        this.audioPreviewStopBtn?.addEventListener('click', () => this.stopAudioPreview());
+        this.audioPreview.addEventListener('timeupdate', () => this.enforceAudioPreviewEnd());
+        this.audioPreview.addEventListener('ended', () => this.stopAudioPreview(false));
+        this.audioPreview.addEventListener('loadedmetadata', () => this.updateAudioPreviewStatus());
+        this.refreshTasksBtn.addEventListener('click', () => this.loadTasks(this.currentTaskPage));
+        this.taskPrevPageBtn?.addEventListener('click', () => this.loadTasks(this.currentTaskPage - 1));
+        this.taskNextPageBtn?.addEventListener('click', () => this.loadTasks(this.currentTaskPage + 1));
         this.loadTasks();
 
         ['dragenter', 'dragover'].forEach((eventName) => {
@@ -108,20 +133,153 @@ class PodcastVisualizerTool {
         }
 
         this.audio = file;
+        this.stopAudioPreview(false);
+        if (this.audioPreviewUrl) {
+            URL.revokeObjectURL(this.audioPreviewUrl);
+        }
+        this.audioPreviewUrl = URL.createObjectURL(file);
+        this.audioPreview.src = this.audioPreviewUrl;
+        this.audioPreview.preload = 'metadata';
         this.audioName.textContent = file.name;
         this.audioSize.textContent = this.formatFileSize(file.size);
         this.audioCard.classList.remove('hidden');
+        this.audioPreviewBtn.disabled = false;
+        this.audioPreviewStopBtn.disabled = true;
+        this.updateAudioPreviewStatus();
         this.setProgress(0, '准备生成');
 
         this.syncPreview();
     }
 
     clearAudio() {
+        this.stopAudioPreview(false);
         this.audio = null;
         this.audioInput.value = '';
         this.audioCard.classList.add('hidden');
+        if (this.audioPreviewUrl) {
+            URL.revokeObjectURL(this.audioPreviewUrl);
+            this.audioPreviewUrl = null;
+        }
+        this.audioPreview.removeAttribute('src');
+        this.audioPreviewBtn.disabled = true;
+        this.audioPreviewStopBtn.disabled = true;
+        this.audioPreviewStatus.textContent = '选择音频后可试听裁切和倍速效果';
         this.setProgress(0, '等待音频');
         this.hideMessage();
+    }
+
+    parsePreviewTimecode(value) {
+        const text = String(value || '').trim();
+        if (!text) return null;
+        if (/^\d+(\.\d+)?$/.test(text)) {
+            return Number(text);
+        }
+        const parts = text.split(':').map((part) => Number(part));
+        if ((parts.length !== 2 && parts.length !== 3) || parts.some((part) => Number.isNaN(part))) {
+            throw new Error('时间格式请填写秒数、MM:SS 或 HH:MM:SS');
+        }
+        if (parts.length === 2) {
+            return parts[0] * 60 + parts[1];
+        }
+        return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    }
+
+    getAudioPreviewRange() {
+        const duration = Number.isFinite(this.audioPreview.duration) ? this.audioPreview.duration : 0;
+        const speed = Number(this.audioSpeedSelect.value || 1);
+        const start = Math.max(0, this.parsePreviewTimecode(this.audioStartInput.value) ?? 0);
+        const rawEnd = this.parsePreviewTimecode(this.audioEndInput.value);
+        if (rawEnd === null && duration <= 0) {
+            throw new Error('正在读取音频时长');
+        }
+        const end = rawEnd === null ? duration : Math.min(rawEnd, duration || rawEnd);
+        if (speed <= 0) {
+            throw new Error('倍速必须大于 0');
+        }
+        if (end <= start) {
+            throw new Error('截止时间必须晚于开始时间');
+        }
+        return { start, end, speed, duration, playDuration: (end - start) / speed };
+    }
+
+    updateAudioPreviewStatus() {
+        if (!this.audioPreviewStatus) return;
+        if (!this.audio) {
+            this.audioPreviewStatus.textContent = '选择音频后可试听裁切和倍速效果';
+            return;
+        }
+        try {
+            const range = this.getAudioPreviewRange();
+            this.audioPreviewStatus.textContent = `试听 ${this.formatSeconds(range.start)} - ${this.formatSeconds(range.end)}，实际播放约 ${range.playDuration.toFixed(1)}s`;
+        } catch (error) {
+            this.audioPreviewStatus.textContent = error.message;
+        }
+    }
+
+    async playAudioPreview() {
+        if (!this.audio || !this.audioPreview.src) {
+            this.showMessage('请先选择音频文件', 'error');
+            return;
+        }
+        try {
+            await this.ensureAudioPreviewMetadata();
+            const range = this.getAudioPreviewRange();
+            this.audioPreview.pause();
+            this.audioPreview.playbackRate = range.speed;
+            this.audioPreview.currentTime = range.start;
+            await this.audioPreview.play();
+            this.audioPreviewBtn.disabled = true;
+            this.audioPreviewStopBtn.disabled = false;
+            this.audioPreviewStatus.textContent = `正在试听 ${this.formatSeconds(range.start)} - ${this.formatSeconds(range.end)}，${range.speed}x`;
+        } catch (error) {
+            this.stopAudioPreview(false);
+            this.showMessage(error.message || '音频试听失败', 'error');
+            this.updateAudioPreviewStatus();
+        }
+    }
+
+    ensureAudioPreviewMetadata() {
+        if (Number.isFinite(this.audioPreview.duration) && this.audioPreview.duration > 0) {
+            return Promise.resolve();
+        }
+        return new Promise((resolve, reject) => {
+            const cleanup = () => {
+                this.audioPreview.removeEventListener('loadedmetadata', handleLoaded);
+                this.audioPreview.removeEventListener('error', handleError);
+            };
+            const handleLoaded = () => {
+                cleanup();
+                resolve();
+            };
+            const handleError = () => {
+                cleanup();
+                reject(new Error('音频元数据读取失败'));
+            };
+            this.audioPreview.addEventListener('loadedmetadata', handleLoaded);
+            this.audioPreview.addEventListener('error', handleError);
+            this.audioPreview.load();
+        });
+    }
+
+    enforceAudioPreviewEnd() {
+        if (!this.audio || this.audioPreview.paused) return;
+        try {
+            const range = this.getAudioPreviewRange();
+            if (this.audioPreview.currentTime >= range.end) {
+                this.stopAudioPreview();
+            }
+        } catch (error) {
+            this.stopAudioPreview(false);
+        }
+    }
+
+    stopAudioPreview(updateStatus = true) {
+        this.audioPreview.pause();
+        this.audioPreviewBtn.disabled = !this.audio;
+        this.audioPreviewStopBtn.disabled = true;
+        if (updateStatus) {
+            this.updateAudioPreviewStatus();
+        }
     }
 
     syncPreview() {
@@ -234,6 +392,10 @@ class PodcastVisualizerTool {
             this.showMessage('请先选择音频文件', 'error');
             return;
         }
+        if (!this.srtInput.files[0] && !this.autoAsrInput.checked && !this.captionInput.value.trim()) {
+            this.showMessage('没有字幕来源：请上传 SRT、开启本地 ASR，或填写手动字幕兜底', 'error');
+            return;
+        }
 
         this.revokeDownloadUrl();
         this.hideMessage();
@@ -250,6 +412,9 @@ class PodcastVisualizerTool {
         formData.append('subtitle', this.subtitleInput.value.trim() || '2026-05-19 / 精选片段');
         formData.append('brand_text', this.brandInput.value.trim() || '胶囊播客');
         formData.append('caption_text', this.captionInput.value.trim());
+        formData.append('audio_start', this.audioStartInput.value.trim());
+        formData.append('audio_end', this.audioEndInput.value.trim());
+        formData.append('audio_speed', this.audioSpeedSelect.value);
         if (this.srtInput.files[0]) {
             formData.append('srt', this.srtInput.files[0]);
         }
@@ -285,9 +450,10 @@ class PodcastVisualizerTool {
                 throw new Error(data.message || '提交任务失败');
             }
             this.currentTaskId = data.task_id;
+            this.currentTaskPage = 1;
             this.setProgress(8, '任务已提交');
             this.showMessage('播客视频任务已提交，生成完成后会出现在列表里', 'success');
-            await this.loadTasks();
+            await this.loadTasks(1);
             this.startPolling(data.task_id);
         } catch (error) {
             clearInterval(progressTimer);
@@ -314,7 +480,7 @@ class PodcastVisualizerTool {
             if (!data.success) return;
             const task = data.data;
             this.setProgress(task.progress || 0, this.getTaskStepText(task));
-            await this.loadTasks();
+            await this.loadTasks(this.currentTaskPage);
             if (task.status === 'completed') {
                 clearInterval(this.pollTimer);
                 this.pollTimer = null;
@@ -346,20 +512,23 @@ class PodcastVisualizerTool {
         }
     }
 
-    async loadTasks() {
+    async loadTasks(page = this.currentTaskPage) {
         try {
-            const response = await fetch(`${API_BASE_URL}/documents/podcast-visualizer/tasks`);
+            const nextPage = Math.max(1, Number(page) || 1);
+            const response = await fetch(`${API_BASE_URL}/documents/podcast-visualizer/tasks?page=${nextPage}&per_page=${this.tasksPerPage}`);
             const data = await response.json();
             if (!data.success) return;
-            this.renderTasks(data.data || []);
+            this.currentTaskPage = data.pagination?.page || nextPage;
+            this.renderTasks(data.data || [], data.pagination || null);
         } catch (error) {
             console.warn('load tasks failed', error);
         }
     }
 
-    renderTasks(tasks) {
+    renderTasks(tasks, pagination = null) {
         if (!tasks.length) {
             this.taskListBody.innerHTML = '<tr><td colspan="5" class="px-4 py-8 text-center text-slate-400">暂无任务</td></tr>';
+            this.renderTaskPagination(pagination);
             return;
         }
 
@@ -399,6 +568,22 @@ class PodcastVisualizerTool {
                 </tr>
             `;
         }).join('');
+        this.renderTaskPagination(pagination);
+    }
+
+    renderTaskPagination(pagination) {
+        if (!this.taskPagination || !pagination) {
+            return;
+        }
+
+        const total = Number(pagination.total || 0);
+        const page = Number(pagination.page || 1);
+        const totalPages = Math.max(1, Number(pagination.total_pages || 1));
+        this.taskPagination.classList.toggle('hidden', total <= this.tasksPerPage);
+        this.taskPagination.classList.toggle('flex', total > this.tasksPerPage);
+        this.taskPrevPageBtn.disabled = page <= 1;
+        this.taskNextPageBtn.disabled = page >= totalPages;
+        this.taskPageInfo.textContent = `第 ${page} / ${totalPages} 页，共 ${total} 个任务`;
     }
 
     getTaskStepText(task) {
@@ -491,6 +676,16 @@ class PodcastVisualizerTool {
         const units = ['B', 'KB', 'MB', 'GB'];
         const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
         return `${(bytes / Math.pow(1024, index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+    }
+
+    formatSeconds(seconds) {
+        const totalSeconds = Math.max(0, Number(seconds) || 0);
+        const wholeSeconds = Math.floor(totalSeconds);
+        const minutes = Math.floor(wholeSeconds / 60);
+        const secs = wholeSeconds % 60;
+        const tenths = Math.floor((totalSeconds - wholeSeconds) * 10);
+        const suffix = tenths > 0 ? `.${tenths}` : '';
+        return `${minutes}:${String(secs).padStart(2, '0')}${suffix}`;
     }
 
     escapeHtml(value) {

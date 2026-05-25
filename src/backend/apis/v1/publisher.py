@@ -27,7 +27,7 @@ def submit_task():
         db.session.commit()
         
         # Trigger Celery Task
-        celery_task = run_publication_pipeline.delay(task.id)
+        celery_task = run_publication_pipeline.apply_async(args=[task.id], queue='render')
         
         # Update DB with Celery ID
         task.celery_task_id = celery_task.id
@@ -62,7 +62,7 @@ def retry_task(task_id):
         db.session.commit()
         
         # Trigger Celery
-        celery_task = run_publication_pipeline.delay(new_task.id)
+        celery_task = run_publication_pipeline.apply_async(args=[new_task.id], queue='render')
         
         new_task.celery_task_id = celery_task.id
         db.session.commit()
@@ -94,7 +94,7 @@ def post_to_youtube(task_id):
             return jsonify({'error': 'No video file found for this task. It must be completed first.'}), 400
             
         # Trigger Celery
-        celery_task = run_youtube_upload_only.delay(task.id)
+        celery_task = run_youtube_upload_only.apply_async(args=[task.id], queue='render')
         
         return jsonify({
             'success': True,

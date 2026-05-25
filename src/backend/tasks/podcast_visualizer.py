@@ -22,10 +22,12 @@ def run_podcast_visualizer_task(self, task_id):
     from apis.v1.documents import (
         PODCAST_TEMPLATE_PATH,
         _parse_srt_content,
+        _prepare_podcast_audio,
         _probe_media_duration,
         PODCAST_VISUALIZER_RENDERER_VERSION,
         _render_podcast_text_overlay,
-        _segments_from_asr,
+        _retime_segments_for_audio,
+        _segments_from_cached_asr,
         _write_podcast_lyrics_ass,
         _generate_podcast_visualizer_video,
     )
@@ -58,16 +60,28 @@ def run_podcast_visualizer_task(self, task_id):
             headline_subtitle = podcast.get('headline_subtitle') or ''
             brand_text = podcast.get('brand_text') or '胶囊播客'
             caption_text = podcast.get('caption_text') or ''
+            audio_start = podcast.get('audio_start')
+            audio_end = podcast.get('audio_end')
+            audio_speed = podcast.get('audio_speed') or 1
             srt_path = podcast.get('srt_path')
             auto_asr = bool(podcast.get('auto_asr'))
             asr_model = podcast.get('asr_model') or 'medium'
 
-            duration = _probe_media_duration(audio_path)
             work_dir = os.path.join(PROJECT_ROOT, 'data', 'processed', 'podcast_visualizer', task_id)
             os.makedirs(work_dir, exist_ok=True)
+            processed_audio_path = os.path.join(work_dir, 'processed_audio.wav')
             overlay_path = os.path.join(work_dir, 'overlay.png')
             ass_path = os.path.join(work_dir, 'lyrics.ass')
             output_path = os.path.join(work_dir, f'{task_id}.mp4')
+
+            audio_meta = _prepare_podcast_audio(
+                input_path=audio_path,
+                output_path=processed_audio_path,
+                start_seconds=audio_start,
+                end_seconds=audio_end,
+                speed=audio_speed,
+            )
+            duration = audio_meta['processed_duration']
 
             task.current_step = 'lyrics'
             task.progress = 18
@@ -76,11 +90,29 @@ def run_podcast_visualizer_task(self, task_id):
             lyrics_segments = []
             if srt_path and os.path.exists(srt_path):
                 with open(srt_path, 'r', encoding='utf-8-sig', errors='ignore') as file:
-                    lyrics_segments = _parse_srt_content(file.read())
+                    lyrics_segments = _retime_segments_for_audio(
+                        _parse_srt_content(file.read()),
+                        start_seconds=audio_meta['start_seconds'],
+                        end_seconds=audio_meta['end_seconds'],
+                        speed=audio_meta['speed'],
+                    )
             elif auto_asr:
-                lyrics_segments = _segments_from_asr(audio_path, model_size=asr_model)
+                lyrics_segments = _segments_from_cached_asr(
+                    audio_path,
+                    model_size=asr_model,
+                    start_seconds=audio_meta['start_seconds'],
+                    end_seconds=audio_meta['end_seconds'],
+                    speed=audio_meta['speed'],
+                    prepared_audio_path=processed_audio_path,
+                )
             elif caption_text:
                 lyrics_segments = [{'start': 0, 'end': min(duration, 6), 'text': caption_text}]
+
+            if not lyrics_segments:
+                if auto_asr:
+                    raise RuntimeError('本地 ASR 没有提取到有效字幕，已停止生成视频')
+                raise RuntimeError('没有可用字幕：请上传 SRT、开启本地 ASR，或填写手动字幕')
+
             _write_podcast_lyrics_ass(lyrics_segments, ass_path, width, height)
 
             task.current_step = 'render'
@@ -106,7 +138,7 @@ def run_podcast_visualizer_task(self, task_id):
             _generate_podcast_visualizer_video(
                 background_path=str(PODCAST_TEMPLATE_PATH),
                 overlay_path=overlay_path,
-                audio_path=audio_path,
+                audio_path=processed_audio_path,
                 output_path=output_path,
                 width=width,
                 height=height,
@@ -125,6 +157,10 @@ def run_podcast_visualizer_task(self, task_id):
                 'video_path': output_path,
                 'download_url': f'/api/v1/documents/podcast-visualizer/task/{task_id}/download',
                 'duration': duration,
+                'source_duration': audio_meta.get('source_duration'),
+                'audio_start': audio_meta.get('start_seconds'),
+                'audio_end': audio_meta.get('end_seconds'),
+                'audio_speed': audio_meta.get('speed'),
                 'lyrics_count': len(lyrics_segments),
                 'renderer_version': PODCAST_VISUALIZER_RENDERER_VERSION,
             }

@@ -6,7 +6,9 @@
 import os
 import hashlib
 import json
+import math
 import re
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -46,7 +48,7 @@ PODCAST_TEMPLATE_PATH = (
     / 'podcast'
     / 'modern_minimalist_podcast_player.png'
 )
-PODCAST_VISUALIZER_RENDERER_VERSION = '20260520-header-scale-v8'
+PODCAST_VISUALIZER_RENDERER_VERSION = '20260520-audio-controls-v9'
 PODCAST_PREVIEW_CACHE_DIR = Path(tempfile.gettempdir()) / 'shioa_podcast_preview_cache'
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
@@ -299,6 +301,108 @@ def _probe_media_duration(media_path):
     )
     return max(0.1, float(result.stdout.strip()))
 
+def _parse_timecode(value):
+    value = str(value or '').strip()
+    if not value:
+        return None
+    if re.fullmatch(r'\d+(\.\d+)?', value):
+        seconds = float(value)
+    else:
+        parts = value.split(':')
+        if len(parts) not in {2, 3}:
+            raise ValueError('时间格式请填写秒数、MM:SS 或 HH:MM:SS')
+        try:
+            numeric_parts = [float(part) for part in parts]
+        except ValueError as exc:
+            raise ValueError('时间格式请填写秒数、MM:SS 或 HH:MM:SS') from exc
+        if len(parts) == 2:
+            minutes, seconds_part = numeric_parts
+            seconds = minutes * 60 + seconds_part
+        else:
+            hours, minutes, seconds_part = numeric_parts
+            seconds = hours * 3600 + minutes * 60 + seconds_part
+    if seconds < 0:
+        raise ValueError('时间戳不能小于 0')
+    return seconds
+
+def _parse_audio_speed(value):
+    try:
+        speed = float(value or 1)
+    except ValueError as exc:
+        raise ValueError('倍速必须是数字') from exc
+    if speed < 0.5 or speed > 2.0:
+        raise ValueError('音频倍速支持 0.5 到 2.0')
+    return speed
+
+def _atempo_filter(speed):
+    speed = float(speed or 1)
+    if abs(speed - 1) < 0.001:
+        return None
+    return f'atempo={speed:.6f}'.rstrip('0').rstrip('.')
+
+def _prepare_podcast_audio(input_path, output_path, start_seconds=None, end_seconds=None, speed=1.0):
+    original_duration = _probe_media_duration(input_path)
+    start_seconds = 0.0 if start_seconds is None else float(start_seconds)
+    end_seconds = original_duration if end_seconds is None else min(float(end_seconds), original_duration)
+    speed = _parse_audio_speed(speed)
+
+    if start_seconds >= original_duration:
+        raise ValueError('开始时间不能晚于音频总时长')
+    if end_seconds <= start_seconds:
+        raise ValueError('截止时间必须晚于开始时间')
+
+    trim_duration = end_seconds - start_seconds
+    cmd = ['ffmpeg', '-y']
+    if start_seconds > 0:
+        cmd.extend(['-ss', f'{start_seconds:.3f}'])
+    cmd.extend(['-i', input_path])
+    cmd.extend(['-t', f'{trim_duration:.3f}'])
+    audio_filter = _atempo_filter(speed)
+    if audio_filter:
+        cmd.extend(['-filter:a', audio_filter])
+    cmd.extend(['-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', output_path])
+    subprocess.run(
+        cmd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=max(120, int(trim_duration * 4)),
+    )
+    processed_duration = _probe_media_duration(output_path)
+    return {
+        'source_duration': original_duration,
+        'start_seconds': start_seconds,
+        'end_seconds': end_seconds,
+        'speed': speed,
+        'processed_duration': processed_duration,
+    }
+
+def _retime_segments_for_audio(segments, start_seconds=0.0, end_seconds=None, speed=1.0):
+    if not segments:
+        return []
+    start_seconds = float(start_seconds or 0)
+    end_seconds = None if end_seconds is None else float(end_seconds)
+    speed = float(speed or 1)
+    retimed = []
+    for segment in segments:
+        source_start = float(segment.get('start', 0))
+        source_end = float(segment.get('end', source_start + 1))
+        if end_seconds is not None and source_start >= end_seconds:
+            continue
+        if source_end <= start_seconds:
+            continue
+        clipped_start = max(source_start, start_seconds)
+        clipped_end = min(source_end, end_seconds) if end_seconds is not None else source_end
+        if clipped_end <= clipped_start:
+            continue
+        retimed.append({
+            'start': (clipped_start - start_seconds) / speed,
+            'end': (clipped_end - start_seconds) / speed,
+            'text': segment.get('text', ''),
+        })
+    return retimed
+
 def _fit_text_to_width(draw, text, font_path, start_size, max_width, min_size=24):
     from PIL import ImageFont
 
@@ -310,7 +414,7 @@ def _fit_text_to_width(draw, text, font_path, start_size, max_width, min_size=24
         size -= 2
     return ImageFont.truetype(font_path, size=min_size)
 
-def _wrap_text(draw, text, font, max_width, max_lines=3, max_chars_per_line=15):
+def _wrap_text(draw, text, font, max_width, max_lines=3, max_chars_per_line=15, add_ellipsis=True):
     if not text:
         return []
 
@@ -324,19 +428,48 @@ def _wrap_text(draw, text, font, max_width, max_lines=3, max_chars_per_line=15):
         else:
             lines.append(current)
             current = char
-            if len(lines) >= max_lines - 1:
+            if len(lines) >= max_lines:
                 break
 
     if current and len(lines) < max_lines:
         lines.append(current)
 
     consumed = ''.join(lines)
-    if len(consumed) < len(text) and lines:
+    if add_ellipsis and len(consumed) < len(text) and lines:
         while draw.textbbox((0, 0), f'{lines[-1]}...', font=font)[2] > max_width and lines[-1]:
             lines[-1] = lines[-1][:-1]
         lines[-1] = f'{lines[-1]}...'
 
     return lines
+
+def _fit_wrapped_text(draw, text, font_path, start_size, max_width, max_lines=3, max_chars_per_line=18, min_size=28):
+    from PIL import ImageFont
+
+    for size in range(start_size, min_size - 1, -2):
+        font = ImageFont.truetype(font_path, size=size)
+        lines = _wrap_text(
+            draw,
+            text,
+            font,
+            max_width,
+            max_lines=max_lines,
+            max_chars_per_line=max_chars_per_line,
+            add_ellipsis=False,
+        )
+        if ''.join(lines) == text:
+            return font, lines
+
+    font = ImageFont.truetype(font_path, size=min_size)
+    lines = _wrap_text(
+        draw,
+        text,
+        font,
+        max_width,
+        max_lines=max_lines,
+        max_chars_per_line=max_chars_per_line,
+        add_ellipsis=True,
+    )
+    return font, lines
 
 def _render_podcast_text_overlay(output_path, width, height, title, subtitle, brand_text, series_text, accent_color, caption_text=''):
     from PIL import Image, ImageDraw, ImageFont
@@ -354,11 +487,19 @@ def _render_podcast_text_overlay(output_path, width, height, title, subtitle, br
 
     x = int(width * 0.08)
     max_text_width = int(width * 0.445)
-    title_font = ImageFont.truetype(font_path, size=int(width * 0.031))
     series_font = ImageFont.truetype(font_path, size=int(width * 0.018))
     subtitle_font = ImageFont.truetype(font_path, size=int(width * 0.0135))
 
-    lines = _wrap_text(draw, title, title_font, max_text_width, max_lines=3, max_chars_per_line=15)
+    title_font, lines = _fit_wrapped_text(
+        draw,
+        title,
+        font_path,
+        start_size=int(width * 0.031),
+        max_width=max_text_width,
+        max_lines=3,
+        max_chars_per_line=20,
+        min_size=int(width * 0.024),
+    )
     title_y = int(height * 0.098)
     line_height = int(title_font.size * 1.16)
     for index, line in enumerate(lines):
@@ -497,8 +638,19 @@ def _parse_srt_content(content):
     return segments
 
 def _segments_from_asr(audio_path, model_size='medium'):
-    from services.asr_service import asr_service
-    return asr_service.transcribe(audio_path, return_segments=True, model_size=model_size)
+    from services.asr_cache_service import transcribe_with_cache
+    return transcribe_with_cache(audio_path, model_size=model_size)
+
+def _segments_from_cached_asr(source_path, model_size='medium', start_seconds=None, end_seconds=None, speed=1.0, prepared_audio_path=None):
+    from services.asr_cache_service import transcribe_with_cache
+    return transcribe_with_cache(
+        source_path,
+        model_size=model_size,
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+        speed=speed,
+        prepared_audio_path=prepared_audio_path,
+    )
 
 def _ass_time(seconds):
     seconds = max(0, float(seconds or 0))
@@ -541,9 +693,6 @@ Style: Future2,{font_name},28,&HBB75685C,&H000000FF,&H22FFFFFF,&H00000000,0,0,0,
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events = []
-    if not segments:
-        segments = [{'start': 0, 'end': 4, 'text': '这里显示当前音频文案或字幕句子'}]
-
     for index, segment in enumerate(segments):
         start = float(segment.get('start', 0))
         end = float(segment.get('end', start + 2))
@@ -626,6 +775,47 @@ def _podcast_preview_cache_path(payload):
     ).hexdigest()
     return PODCAST_PREVIEW_CACHE_DIR / f'{digest}.png'
 
+def _podcast_visualizer_video_bitrate(crf):
+    crf = int(crf or 20)
+    if crf <= 18:
+        return '8000k'
+    if crf <= 20:
+        return '6000k'
+    if crf <= 24:
+        return '3500k'
+    return '2500k'
+
+def _podcast_visualizer_encoder_args(crf):
+    if platform.system() == 'Darwin':
+        return [
+            '-c:v',
+            'h264_videotoolbox',
+            '-allow_sw',
+            '1',
+            '-b:v',
+            _podcast_visualizer_video_bitrate(crf),
+            '-tag:v',
+            'avc1',
+        ], True
+    return [
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        str(crf),
+    ], False
+
+def _podcast_visualizer_fallback_encoder_args(crf):
+    return [
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        str(crf),
+    ]
+
 def _generate_podcast_visualizer_video(background_path, overlay_path, audio_path, output_path, width, height, duration, fps, crf, brand_text='胶囊播客', lyrics_ass_path=None):
     temp_dir = os.path.dirname(output_path)
     layout = _podcast_visualizer_layout(width, height)
@@ -639,6 +829,7 @@ def _generate_podcast_visualizer_video(background_path, overlay_path, audio_path
         lyrics_ass_path=lyrics_ass_path,
         output_format='yuv420p',
     )
+    encoder_args, uses_hardware_encoder = _podcast_visualizer_encoder_args(crf)
     cmd = [
         'ffmpeg',
         '-y',
@@ -666,12 +857,9 @@ def _generate_podcast_visualizer_video(background_path, overlay_path, audio_path
         f'{duration:.3f}',
         '-r',
         str(fps),
-        '-c:v',
-        'libx264',
-        '-preset',
-        'medium',
-        '-crf',
-        str(crf),
+        *encoder_args,
+        '-pix_fmt',
+        'yuv420p',
         '-c:a',
         'aac',
         '-b:a',
@@ -680,14 +868,42 @@ def _generate_podcast_visualizer_video(background_path, overlay_path, audio_path
         '+faststart',
         output_path,
     ]
-    subprocess.run(
-        cmd,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=max(180, int(duration * 10)),
-    )
+    try:
+        logger.info(
+            "🎬 [PODCAST_RENDER] encoder=%s duration=%.2fs fps=%s crf=%s",
+            encoder_args[1],
+            duration,
+            fps,
+            crf,
+        )
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=max(180, int(duration * 10)),
+        )
+    except subprocess.CalledProcessError as exc:
+        if not uses_hardware_encoder:
+            raise
+        logger.warning("⚠️ [PODCAST_RENDER] h264_videotoolbox 不可用，回退到 libx264: %s", exc.stderr[-500:] if exc.stderr else exc)
+        fallback_args = _podcast_visualizer_fallback_encoder_args(crf)
+        fallback_cmd = [
+            *cmd[:cmd.index('-c:v')],
+            *fallback_args,
+            '-pix_fmt',
+            'yuv420p',
+            *cmd[cmd.index('-c:a'):],
+        ]
+        subprocess.run(
+            fallback_cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=max(180, int(duration * 10)),
+        )
 
 def _generate_podcast_visualizer_preview_frame(background_path, overlay_path, output_path, width, height, brand_text='胶囊播客', lyrics_ass_path=None):
     temp_dir = os.path.dirname(output_path)
@@ -1212,8 +1428,11 @@ def generate_podcast_visualizer():
         try:
             fps = int(request.form.get('fps', '30'))
             crf = int(request.form.get('crf', '20'))
+            audio_start = _parse_timecode(request.form.get('audio_start', ''))
+            audio_end = _parse_timecode(request.form.get('audio_end', ''))
+            audio_speed = _parse_audio_speed(request.form.get('audio_speed', '1'))
         except ValueError:
-            return jsonify({'success': False, 'message': '视频参数格式不正确'}), 400
+            return jsonify({'success': False, 'message': '视频或音频参数格式不正确'}), 400
 
         fps = max(12, min(60, fps))
         crf = max(16, min(32, crf))
@@ -1237,8 +1456,16 @@ def generate_podcast_visualizer():
             safe_audio_name = f'{safe_audio_name}{audio_ext}'
         audio_path = os.path.join(temp_dir, safe_audio_name)
         audio.save(audio_path)
+        processed_audio_path = os.path.join(temp_dir, 'processed_audio.wav')
+        audio_meta = _prepare_podcast_audio(
+            input_path=audio_path,
+            output_path=processed_audio_path,
+            start_seconds=audio_start,
+            end_seconds=audio_end,
+            speed=audio_speed,
+        )
 
-        duration = _probe_media_duration(audio_path)
+        duration = audio_meta['processed_duration']
         overlay_path = os.path.join(temp_dir, 'overlay.png')
         lyrics_ass_path = os.path.join(temp_dir, 'lyrics.ass')
         output_path = os.path.join(temp_dir, 'output.mp4')
@@ -1256,16 +1483,33 @@ def generate_podcast_visualizer():
             if srt_size > 5 * 1024 * 1024:
                 return jsonify({'success': False, 'message': 'SRT 文件过大，最大支持 5MB'}), 400
             srt_content = srt_file.read().decode('utf-8-sig', errors='ignore')
-            lyrics_segments = _parse_srt_content(srt_content)
+            lyrics_segments = _retime_segments_for_audio(
+                _parse_srt_content(srt_content),
+                start_seconds=audio_meta['start_seconds'],
+                end_seconds=audio_meta['end_seconds'],
+                speed=audio_meta['speed'],
+            )
             if not lyrics_segments:
                 return jsonify({'success': False, 'message': 'SRT 文件没有解析到有效字幕'}), 400
         elif auto_asr:
             logger.info(f"🎙️ 使用本地 ASR 生成播客字幕: model={asr_model}")
-            lyrics_segments = _segments_from_asr(audio_path, model_size=asr_model)
+            lyrics_segments = _segments_from_cached_asr(
+                audio_path,
+                model_size=asr_model,
+                start_seconds=audio_meta['start_seconds'],
+                end_seconds=audio_meta['end_seconds'],
+                speed=audio_meta['speed'],
+                prepared_audio_path=processed_audio_path,
+            )
         else:
             fallback_caption = request.form.get('caption_text', '').strip()
             if fallback_caption:
                 lyrics_segments = [{'start': 0, 'end': min(duration, 6), 'text': fallback_caption}]
+
+        if not lyrics_segments:
+            if auto_asr:
+                return jsonify({'success': False, 'message': '本地 ASR 没有提取到有效字幕，已停止生成视频'}), 422
+            return jsonify({'success': False, 'message': '没有可用字幕：请上传 SRT、开启本地 ASR，或填写手动字幕'}), 400
 
         _write_podcast_lyrics_ass(lyrics_segments, lyrics_ass_path, width, height)
 
@@ -1286,7 +1530,7 @@ def generate_podcast_visualizer():
         _generate_podcast_visualizer_video(
             background_path=background_path,
             overlay_path=overlay_path,
-            audio_path=audio_path,
+            audio_path=processed_audio_path,
             output_path=output_path,
             width=width,
             height=height,
@@ -1345,22 +1589,33 @@ def submit_podcast_visualizer_task():
         if srt_file and srt_file.filename and os.path.splitext(srt_file.filename.lower())[1] != '.srt':
             return jsonify({'success': False, 'message': '字幕文件只支持 .srt'}), 400
 
-        params = {
-            'feature': 'podcast_visualizer',
-            'podcast_visualizer': {
-                'title': request.form.get('title', '').strip() or '播客标题',
-                'subtitle': request.form.get('subtitle', '').strip(),
-                'headline_subtitle': request.form.get('headline_subtitle', '').strip(),
-                'brand_text': request.form.get('brand_text', '').strip() or '胶囊播客',
-                'caption_text': request.form.get('caption_text', '').strip(),
-                'orientation': request.form.get('orientation', 'landscape').strip(),
-                'fps': int(request.form.get('fps', '30')),
-                'crf': int(request.form.get('crf', '20')),
-                'auto_asr': request.form.get('auto_asr', '').strip().lower() in {'1', 'true', 'yes', 'on'},
-                'asr_model': request.form.get('asr_model', 'medium').strip() or 'medium',
-                'renderer_version': PODCAST_VISUALIZER_RENDERER_VERSION,
+        try:
+            audio_start = _parse_timecode(request.form.get('audio_start', ''))
+            audio_end = _parse_timecode(request.form.get('audio_end', ''))
+            audio_speed = _parse_audio_speed(request.form.get('audio_speed', '1'))
+            if audio_start is not None and audio_end is not None and audio_end <= audio_start:
+                raise ValueError('截止时间必须晚于开始时间')
+            params = {
+                'feature': 'podcast_visualizer',
+                'podcast_visualizer': {
+                    'title': request.form.get('title', '').strip() or '播客标题',
+                    'subtitle': request.form.get('subtitle', '').strip(),
+                    'headline_subtitle': request.form.get('headline_subtitle', '').strip(),
+                    'brand_text': request.form.get('brand_text', '').strip() or '胶囊播客',
+                    'caption_text': request.form.get('caption_text', '').strip(),
+                    'audio_start': audio_start,
+                    'audio_end': audio_end,
+                    'audio_speed': audio_speed,
+                    'orientation': request.form.get('orientation', 'landscape').strip(),
+                    'fps': int(request.form.get('fps', '30')),
+                    'crf': int(request.form.get('crf', '20')),
+                    'auto_asr': request.form.get('auto_asr', '').strip().lower() in {'1', 'true', 'yes', 'on'},
+                    'asr_model': request.form.get('asr_model', 'medium').strip() or 'medium',
+                    'renderer_version': PODCAST_VISUALIZER_RENDERER_VERSION,
+                }
             }
-        }
+        except ValueError as exc:
+            return jsonify({'success': False, 'message': str(exc)}), 400
 
         task = PublicationTask(params=params)
         db.session.add(task)
@@ -1381,7 +1636,7 @@ def submit_podcast_visualizer_task():
         task.params = params
         flag_modified(task, 'params')
         db.session.commit()
-        celery_task = run_podcast_visualizer_task.delay(task.id)
+        celery_task = run_podcast_visualizer_task.apply_async(args=[task.id], queue='render')
         task.celery_task_id = celery_task.id
         db.session.commit()
 
@@ -1510,9 +1765,32 @@ def preview_podcast_visualizer_frame():
 def list_podcast_visualizer_tasks():
     from models.task import PublicationTask
 
-    recent_tasks = PublicationTask.query.order_by(PublicationTask.created_at.desc()).limit(100).all()
-    tasks = [task for task in recent_tasks if task.params and task.params.get('feature') == 'podcast_visualizer'][:30]
-    return jsonify({'success': True, 'data': [task.to_dict() for task in tasks]})
+    page = max(1, request.args.get('page', default=1, type=int) or 1)
+    per_page = request.args.get('per_page', default=20, type=int) or 20
+    per_page = min(50, max(1, per_page))
+
+    recent_tasks = PublicationTask.query.order_by(PublicationTask.created_at.desc()).limit(1000).all()
+    tasks = [
+        task for task in recent_tasks
+        if task.params and task.params.get('feature') == 'podcast_visualizer'
+    ]
+    total = len(tasks)
+    total_pages = max(1, math.ceil(total / per_page))
+    page = min(page, total_pages)
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_tasks = tasks[start:end]
+
+    return jsonify({
+        'success': True,
+        'data': [task.to_dict() for task in page_tasks],
+        'pagination': {
+            'page': page,
+            'per_page': per_page,
+            'total': total,
+            'total_pages': total_pages,
+        },
+    })
 
 @bp.route('/podcast-visualizer/task/<task_id>', methods=['GET'])
 def get_podcast_visualizer_task(task_id):

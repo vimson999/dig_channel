@@ -23,7 +23,7 @@ def submit_download():
         db.session.commit()
         
         # Trigger Celery task
-        celery_task = download_video_task.delay(task.id, url)
+        celery_task = download_video_task.apply_async(args=[task.id, url], queue='render')
         
         # Update with Celery ID
         task.celery_task_id = celery_task.id

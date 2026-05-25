@@ -53,6 +53,13 @@ class TTSSegment(db.Model):
     processed_at = db.Column(db.DateTime, nullable=True)
 
     def to_dict(self):
+        subtitle_path = None
+        if self.audio_path:
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            candidate = os.path.splitext(os.path.join(project_root, self.audio_path))[0] + '.srt'
+            if os.path.exists(candidate):
+                subtitle_path = os.path.relpath(candidate, project_root).replace(os.sep, '/')
+
         return {
             'id': self.id,
             'article_id': self.article_id,
@@ -60,6 +67,7 @@ class TTSSegment(db.Model):
             'text': self.text,
             'status': self.status,
             'audio_path': self.audio_path,
+            'subtitle_path': subtitle_path,
             'error_log': self.error_log,
             'processed_at': self.processed_at.isoformat() if self.processed_at else None
         }
