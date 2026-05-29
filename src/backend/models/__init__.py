@@ -13,6 +13,7 @@ from .task import PublicationTask
 from .download_task import DownloadTask
 from .system_config import SystemConfig
 from .tts import TTSArticle, TTSSegment
+from .zsxq_sync import ZsxqSyncRun, ZsxqTopic, ZsxqAttachment, ZsxqSyncCursor
 
 __all__ = [
     'db', 
@@ -27,5 +28,9 @@ __all__ = [
     'DownloadTask',
     'SystemConfig',
     'TTSArticle',
-    'TTSSegment'
+    'TTSSegment',
+    'ZsxqSyncRun',
+    'ZsxqTopic',
+    'ZsxqAttachment',
+    'ZsxqSyncCursor'
 ]

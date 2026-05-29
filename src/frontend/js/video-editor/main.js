@@ -911,6 +911,7 @@ function drawImageCover(ctx, img, x, y, w, h) {
 const FONT_STACK = '"PingFang SC", "PingFang TC", "Microsoft YaHei", sans-serif';
 
 function renderFullBar(ctx, w, h, lines, position, s) {
+    lines = normalizeCtaLines(lines);
     const scaleFactor = h / 1080;
     const barHeight = Math.max(10, 140 * scaleFactor); 
     const barY = h - barHeight;
@@ -929,17 +930,31 @@ function renderFullBar(ctx, w, h, lines, position, s) {
         let fs = 32 * scaleFactor;
         ctx.font = `500 ${fs}px ${FONT_STACK}`; 
         ctx.fillStyle = (i === lines.length - 1 && lines.length > 1) ? s.action : s.text;
-        let txt = line;
-        if (i === lines.length - 1 && lines.length > 1 && !txt.startsWith('↓')) txt = "↓ " + txt;
-        ctx.fillText(txt, w / 2, currY); 
+        ctx.fillText(line, w / 2, currY);
         currY += lineSpacing;
     });
 }
 
 function renderFloatingCard(ctx, w, h, lines, position, s) {
+    lines = normalizeCtaLines(lines);
     const scaleFactor = h / 1080;
-    const boxW = Math.max(10, 600 * (w / 1920));
-    const boxH = Math.max(10, 280 * scaleFactor);
+    const paddingH = 60 * (w / 1920);
+    const paddingV = 54 * scaleFactor;
+    const lineSpacing = 22 * scaleFactor;
+    const maxTextW = Math.min(760 * (w / 1920), w * 0.42);
+    const metrics = lines.map((line, index) => {
+        let fs = (index === 0 ? 42 : 34) * scaleFactor;
+        const fw = '700';
+        ctx.font = `${fw} ${fs}px ${FONT_STACK}`;
+        while (fs > 24 * scaleFactor && ctx.measureText(line).width > maxTextW) {
+            fs -= 2 * scaleFactor;
+            ctx.font = `${fw} ${fs}px ${FONT_STACK}`;
+        }
+        return { text: line, width: ctx.measureText(line).width, fs, fw };
+    });
+    const maxLineW = Math.max(...metrics.map(item => item.width), 520 * (w / 1920));
+    const boxW = Math.max(10, maxLineW + paddingH * 2);
+    const boxH = Math.max(10, metrics.reduce((sum, item) => sum + item.fs, 0) + (metrics.length - 1) * lineSpacing + paddingV * 2);
     
     let bx = w - boxW - (120 * (w / 1920));
     let by = (position === 'right_center') ? (h - boxH) / 2 : (h - boxH - (220 * scaleFactor));
@@ -948,19 +963,19 @@ function renderFloatingCard(ctx, w, h, lines, position, s) {
     ctx.fillStyle = s.bg; ctx.beginPath(); ctx.roundRect(bx, by, boxW, boxH, 20 * scaleFactor); ctx.fill();
     ctx.shadowColor = 'transparent';
     
-    // 文字渲染
-    const lineSpacing = 45 * scaleFactor;
-    const totalTextH = lines.length * lineSpacing;
-    let currY = by + (boxH - totalTextH) / 2;
+    let currY = by + paddingV;
     
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    lines.forEach((line, i) => {
-        let fs = (i === 0) ? 38 * scaleFactor : 38 * scaleFactor;
-        ctx.font = `500 ${fs}px ${FONT_STACK}`; 
-        ctx.fillStyle = (i === lines.length - 1 && lines.length > 1) ? s.action : s.text;
-        let txt = line;
-        if (i === lines.length - 1 && lines.length > 1 && !txt.startsWith('↓')) txt = "↓ " + txt;
-        ctx.fillText(txt, bx + boxW / 2, currY); 
-        currY += lineSpacing;
+    metrics.forEach((item, i) => {
+        ctx.font = `${item.fw} ${item.fs}px ${FONT_STACK}`;
+        ctx.fillStyle = (i === 0) ? s.text : s.action;
+        ctx.fillText(item.text, bx + boxW / 2, currY);
+        currY += item.fs + lineSpacing;
     });
+}
+
+function normalizeCtaLines(lines) {
+    const clean = lines.map(line => String(line || '').trim()).filter(Boolean);
+    if (clean.length <= 3) return clean;
+    return [clean[0], clean[1], clean.slice(2).join('')];
 }

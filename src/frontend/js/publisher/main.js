@@ -452,7 +452,7 @@ async function handleTaskSubmit() {
             cta: document.getElementById('cta_enabled')?.checked ? { 
                 text: fd.get('cta_text') || "", 
                 position: fd.get('cta_position') || "bottom_bar", 
-                style: fd.get('cta_style') || "premium_dark" 
+                style: fd.get('cta_style') || "police_yellow"
             } : null
         },
         vertical_video: {
@@ -588,7 +588,7 @@ function refreshPreviews() {
         enabled: document.getElementById('cta_enabled')?.checked || false,
         text: document.getElementById('cta_text')?.value || "",
         position: document.getElementById('cta_position')?.value || "bottom_bar",
-        style: document.getElementById('cta_style')?.value || "premium_dark",
+        style: document.getElementById('cta_style')?.value || "police_yellow",
         transform: state.transforms.video
     };
     const verticalConfig = {

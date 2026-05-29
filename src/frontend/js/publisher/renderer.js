@@ -17,6 +17,7 @@ const CanvasRenderer = {
     ctaStyles: {
         'premium_dark': { bg: 'rgba(25, 28, 36, 0.85)', text: 'rgba(255,255,255,0.95)', action: '#ffffff', border: 'rgba(255,255,255,0.15)' },
         'nomura_red': { bg: 'rgba(128, 20, 30, 0.88)', text: 'rgba(255,255,255,0.95)', action: '#ffffff', border: 'rgba(255,255,255,0.2)' },
+        'police_yellow': { bg: 'rgba(255, 204, 0, 0.95)', text: '#000000', action: '#000000', border: 'rgba(0,0,0,0.2)' },
         'institutional_blue': { bg: 'rgba(30, 64, 175, 0.85)', text: 'rgba(255,255,255,0.95)', action: '#ffffff', border: 'rgba(255,255,255,0.2)' },
         'investment_gold': { bg: 'rgba(212, 175, 55, 0.85)', text: 'rgba(25, 30, 40, 0.95)', action: '#000000', border: 'rgba(0,0,0,0.1)' }
     },
@@ -380,6 +381,7 @@ const CanvasRenderer = {
     },
 
     _renderFullBar(ctx, w, h, lines, position, s) {
+        lines = this._normalizeCtaLines(lines);
         const barHeight = 140; 
         const barY = (position === 'bottom_bar') ? (h - barHeight) : 0;
         ctx.fillStyle = s.bg; ctx.fillRect(0, barY, w, barHeight);
@@ -395,26 +397,35 @@ const CanvasRenderer = {
 
         ctx.textAlign = 'right'; ctx.font = `600 48px ${FONT_STACK}`; ctx.fillStyle = s.action;
         const actionTxt = lines[1] || lines[0];
-        const displayTxt = (actionTxt.startsWith('↓') || actionTxt.includes('PDF')) ? actionTxt : "↓ " + actionTxt;
-        ctx.fillText(displayTxt, w - hMargin, centerY);
+        ctx.fillText(actionTxt, w - hMargin, centerY);
     },
 
     _renderFloatingCard(ctx, w, h, lines, position, s) {
+        lines = this._normalizeCtaLines(lines);
+        const scale = Math.min(w / 1920, h / 1080);
+        const paddingH = 60 * scale;
+        const paddingV = 54 * scale;
+        const lineSpacing = 22 * scale;
+        const maxTextW = Math.min(760 * scale, w * 0.42);
         const metrics = lines.map((line, i) => {
-            let fs = 32, fw = '400', color = s.text;
-            if (i === 0) { fs = 48; fw = '500'; } 
-            else if (i === lines.length - 1 && lines.length > 1) { 
-                fs = 48; fw = '600'; color = s.action; 
-            } 
+            const baseFs = i === 0 ? 42 * scale : 34 * scale;
+            let fs = baseFs;
+            const fw = '700';
+            const color = i === 0 ? s.text : s.action;
+            ctx.font = `${fw} ${fs}px ${FONT_STACK}`;
+            while (fs > 24 * scale && ctx.measureText(line).width > maxTextW) {
+                fs -= 2 * scale;
+                ctx.font = `${fw} ${fs}px ${FONT_STACK}`;
+            }
             ctx.font = `${fw} ${fs}px ${FONT_STACK}`;
             return { text: line, width: ctx.measureText(line).width, height: fs, fw, color };
         });
 
-        const maxW = Math.max(...metrics.map(m => m.width));
-        const lineSpacing = 25; const totalTextH = metrics.reduce((sum, m) => sum + m.height, 0) + (metrics.length - 1) * lineSpacing;
-        const paddingH = 80, paddingV = 60;
-        const boxW = maxW + paddingH * 2; const boxH = totalTextH + paddingV * 2;
-        const safeR = 120, safeB = 220; 
+        const maxW = Math.max(...metrics.map(m => m.width), 520 * scale);
+        const totalTextH = metrics.reduce((sum, m) => sum + m.height, 0) + (metrics.length - 1) * lineSpacing;
+        const boxW = maxW + paddingH * 2;
+        const boxH = totalTextH + paddingV * 2;
+        const safeR = 120 * scale, safeB = 220 * scale;
         
         let bx = w - boxW - safeR;
         let by = (position === 'right_center') ? (h - boxH) / 2 : (h - boxH - safeB);
@@ -429,10 +440,14 @@ const CanvasRenderer = {
         let currY = by + paddingV;
         metrics.forEach((m, i) => {
             ctx.font = `${m.fw} ${m.height}px ${FONT_STACK}`; ctx.fillStyle = m.color;
-            let txt = m.text;
-            if (i === metrics.length - 1 && lines.length > 1 && !txt.startsWith('↓') && !txt.includes('PDF')) txt = "↓ " + txt;
-            ctx.fillText(txt, bx + boxW / 2, currY); currY += m.height + lineSpacing;
+            ctx.fillText(m.text, bx + boxW / 2, currY); currY += m.height + lineSpacing;
         });
+    },
+
+    _normalizeCtaLines(lines) {
+        const clean = lines.map(line => String(line || '').trim()).filter(Boolean);
+        if (clean.length <= 3) return clean;
+        return [clean[0], clean[1], clean.slice(2).join('')];
     },
 
     /**

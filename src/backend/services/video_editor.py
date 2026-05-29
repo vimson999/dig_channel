@@ -150,7 +150,7 @@ class VideoEditorService:
             curr_offset += duration
 
         return global_subs
-    def _create_cta_image(self, text, style='premium_dark', position='bottom_bar', video_w=1920, video_h=1080):
+    def _create_cta_image(self, text, style='police_yellow', position='bottom_bar', video_w=1920, video_h=1080):
         """Create a multi-line CTA image with transparency and layout support, scaled to video resolution."""
         styles = {
             'premium_dark': {'bg': (25, 28, 36, 217), 'text': (255, 255, 255, 242), 'action': (255, 255, 255, 255), 'border': (255, 255, 255, 38)},
@@ -158,19 +158,71 @@ class VideoEditorService:
             'police_yellow': {'bg': (255, 204, 0, 240), 'text': (0, 0, 0, 255), 'action': (0, 0, 0, 255), 'border': (0, 0, 0, 80)},
             'glass_dark': {'bg': (0, 0, 0, 160), 'text': (255, 255, 255, 230), 'action': (255, 255, 255, 255), 'border': (255, 255, 255, 30)}
         }
-        theme = styles.get(style, styles['premium_dark'])
+        theme = styles.get(style, styles['police_yellow'])
         text_color = theme['text']
         
         # 根据分辨率缩放基础尺寸
         scale_factor = video_h / 1080.0
         is_bar = 'bar' in position
-        
-        img_w = video_w if is_bar else int(600 * (video_w / 1920.0))
-        img_h = int(140 * scale_factor) if is_bar else int(280 * scale_factor)
-        
-        # 避免尺寸过小
-        img_w = max(10, img_w)
-        img_h = max(10, img_h)
+
+        raw_lines = [line.strip() for line in text.split('\n') if line.strip()]
+        if len(raw_lines) > 3:
+            lines = [raw_lines[0], raw_lines[1], ''.join(raw_lines[2:])]
+        else:
+            lines = raw_lines or [text.strip()]
+
+        try:
+            font_path = "/System/Library/Fonts/PingFang.ttc"
+            def load_font(size):
+                return ImageFont.truetype(font_path, max(12, int(size)))
+        except:
+            def load_font(size):
+                return ImageFont.load_default()
+
+        def text_width(font, line):
+            bbox = font.getbbox(line)
+            return bbox[2] - bbox[0]
+
+        metrics = []
+        if is_bar:
+            img_w = video_w
+            img_h = max(10, int(140 * scale_factor))
+            font_size = int(38 * scale_factor)
+            font_main = load_font(font_size)
+            line_h = int(45 * scale_factor)
+            metrics = [
+                {
+                    'line': line,
+                    'font': font_main,
+                    'width': text_width(font_main, line),
+                    'height': font_size,
+                    'fill': text_color if index == 0 else theme['action'],
+                }
+                for index, line in enumerate(lines)
+            ]
+        else:
+            max_text_w = min(int(760 * (video_w / 1920.0)), int(video_w * 0.42))
+            for index, line in enumerate(lines):
+                font_size = int((42 if index == 0 else 34) * scale_factor)
+                font = load_font(font_size)
+                while font_size > int(24 * scale_factor) and text_width(font, line) > max_text_w:
+                    font_size -= max(1, int(2 * scale_factor))
+                    font = load_font(font_size)
+                metrics.append({
+                    'line': line,
+                    'font': font,
+                    'width': text_width(font, line),
+                    'height': font_size,
+                    'fill': text_color if index == 0 else theme['action'],
+                })
+
+            padding_h = int(60 * (video_w / 1920.0))
+            padding_v = int(54 * scale_factor)
+            line_gap = int(22 * scale_factor)
+            max_line_w = max([item['width'] for item in metrics] + [int(520 * (video_w / 1920.0))])
+            total_text_h = sum(item['height'] for item in metrics) + max(0, len(metrics) - 1) * line_gap
+            img_w = max(10, max_line_w + padding_h * 2)
+            img_h = max(10, total_text_h + padding_v * 2)
 
         img = Image.new('RGBA', (img_w, img_h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
@@ -178,27 +230,17 @@ class VideoEditorService:
         if is_bar:
             draw.rectangle([0, 0, img_w, img_h], fill=theme['bg'])
             draw.line([0, 0, img_w, 0], fill=theme['border'], width=max(1, int(1 * scale_factor)))
+            line_gap = int(45 * scale_factor)
+            total_text_h = len(metrics) * line_gap
+            curr_y = (img_h - total_text_h) / 2
         else:
             draw.rounded_rectangle([0, 0, img_w, img_h], radius=int(20 * scale_factor), fill=theme['bg'], outline=theme['border'], width=max(1, int(2 * scale_factor)))
-
-        try:
-            font_path = "/System/Library/Fonts/PingFang.ttc"
-            # 缩放字体
-            font_size = int((32 if is_bar else 38) * scale_factor)
-            font_main = ImageFont.truetype(font_path, max(12, font_size))
-        except:
-            font_main = ImageFont.load_default()
-
-        lines = text.split('\n')
-        line_h = int(45 * scale_factor)
-        total_text_h = len(lines) * line_h
-        curr_y = (img_h - total_text_h) / 2
+            line_gap = int(22 * scale_factor)
+            curr_y = int(54 * scale_factor)
         
-        for line in lines:
-            bbox = font_main.getbbox(line)
-            lw = bbox[2] - bbox[0]
-            draw.text(((img_w - lw)/2, curr_y), line, font=font_main, fill=text_color)
-            curr_y += line_h
+        for item in metrics:
+            draw.text(((img_w - item['width']) / 2, curr_y), item['line'], font=item['font'], fill=item['fill'])
+            curr_y += item['height'] + line_gap
 
         temp_path = os.path.join(self.upload_folder, f"cta_{uuid.uuid4().hex[:6]}.png")
         img.save(temp_path)
@@ -338,13 +380,20 @@ class VideoEditorService:
             if is_video_background:
                 media_duration = self._probe_media_duration(image_file)
                 if media_duration > 0:
-                    speed_ratio = audio_duration / media_duration
-                    media_input = f"-i \"{image_file}\""
-                    vf_chain = f"setpts={speed_ratio:.8f}*PTS,{vf_chain}"
-                    logger.info(
-                        f"🎞️ [FFMPEG_EXEC] Background media mode: video fit-to-audio | "
-                        f"source={media_duration:.2f}s target={audio_duration:.2f}s setpts={speed_ratio:.6f}"
-                    )
+                    if media_duration < audio_duration:
+                        media_input = f"-stream_loop -1 -t {audio_duration} -i \"{image_file}\""
+                        logger.info(
+                            f"🎞️ [FFMPEG_EXEC] Background media mode: video loop-to-audio | "
+                            f"source={media_duration:.2f}s target={audio_duration:.2f}s"
+                        )
+                    else:
+                        speed_ratio = audio_duration / media_duration
+                        media_input = f"-i \"{image_file}\""
+                        vf_chain = f"setpts={speed_ratio:.8f}*PTS,{vf_chain}"
+                        logger.info(
+                            f"🎞️ [FFMPEG_EXEC] Background media mode: video fit-to-audio | "
+                            f"source={media_duration:.2f}s target={audio_duration:.2f}s setpts={speed_ratio:.6f}"
+                        )
                 else:
                     media_input = f"-stream_loop -1 -t {audio_duration} -i \"{image_file}\""
                     logger.info(f"🎞️ [FFMPEG_EXEC] Background media mode: video loop fallback ({os.path.basename(image_file)})")
@@ -464,10 +513,10 @@ class VideoEditorService:
             # 2. 准备 CTA
             cta_pos = (0, 0)
             if cta_config and cta_config.get('text'):
-                cta_img = self._create_cta_image(cta_config['text'], cta_config.get('style', 'premium_dark'), cta_config.get('position', 'bottom_bar'), video_w=target_w, video_h=target_h)
+                cta_img = self._create_cta_image(cta_config['text'], cta_config.get('style', 'police_yellow'), cta_config.get('position', 'bottom_bar'), video_w=target_w, video_h=target_h)
                 pos_val = cta_config.get('position', 'bottom_bar')
-                cta_h = int(140 * (target_h / 1080)) if 'bar' in pos_val else int(280 * (target_h / 1080))
-                cta_w = target_w if 'bar' in pos_val else int(600 * (target_w / 1920))
+                with Image.open(cta_img) as cta_probe:
+                    cta_w, cta_h = cta_probe.size
                 if 'bar' in pos_val: cta_pos = (0, (target_h - cta_h) if 'bottom' in pos_val else 0)
                 else:
                     if pos_val == 'right_center': cta_pos = (target_w - cta_w - int(120*(target_w/1920)), (target_h - cta_h) / 2)

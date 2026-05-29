@@ -4,23 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>知识星球实验台 - Shioa</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: {
-                        primary: {
-                            50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd',
-                            400: '#60a5fa', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8',
-                            800: '#1e40af', 900: '#1e3a8a'
-                        }
-                    }
-                }
-            }
-        }
-    </script>
+    <link href="css/zsxq-lab.css" rel="stylesheet">
     <style>
         .line-clamp-2 {
             display: -webkit-box;
@@ -31,28 +15,55 @@
     </style>
 </head>
 <body class="min-h-screen bg-slate-50 text-slate-900 overflow-x-hidden">
-    <main class="max-w-[1440px] mx-auto px-4 sm:px-6 py-8 space-y-6">
-        <section class="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
+    <main class="zsxq-page-shell max-w-[1440px] mx-auto px-4 sm:px-6 py-8 space-y-6">
+        <section class="zsxq-page-header flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
             <div>
                 <h2 class="text-3xl font-black tracking-tight">知识星球实验台</h2>
                 <p class="text-sm text-slate-500 mt-1">低频验证移动端 API，可获取星球列表和主题内容；Cookie 仅保存在当前浏览器本地。</p>
             </div>
-            <div class="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+            <div class="zsxq-safety-note flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
                 <i class="fas fa-triangle-exclamation"></i>
                 <span>仅用于个人授权账号验证，不做批量抓取。</span>
             </div>
         </section>
 
-        <section class="grid grid-cols-1 xl:grid-cols-[420px_minmax(0,1fr)] gap-6 min-w-0">
-            <aside class="bg-white border border-slate-200 rounded-lg shadow-sm p-5 space-y-5">
-                <div>
-                    <label class="text-xs font-bold text-slate-600 uppercase tracking-wider">Cookie</label>
-                    <textarea id="cookie-input" rows="7" class="mt-2 w-full rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm font-mono outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="支持两种格式：完整 Cookie 请求头，或浏览器导出的 Cookie JSON 数组"></textarea>
-                    <p class="mt-2 text-xs text-slate-400">不会写入后端日志或数据库。会保存在当前浏览器，过期后可直接修改或清空。</p>
+        <section class="zsxq-workbench grid grid-cols-1 gap-6 min-w-0">
+            <aside class="zsxq-left-panel bg-white border border-slate-200 rounded-lg shadow-sm p-5 space-y-5">
+                <div class="zsxq-panel-section">
+                    <div class="zsxq-section-head flex items-center justify-between gap-3">
+                        <label class="text-xs font-bold text-slate-600 uppercase tracking-wider">Cookie</label>
+                        <button id="toggle-cookie-btn" class="rounded-md border border-slate-300 px-2.5 py-1 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors">
+                            修改
+                        </button>
+                    </div>
+                    <div class="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                        <select id="cookie-profile-select" class="min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                            <option value="">未保存 Cookie</option>
+                        </select>
+                        <button id="new-cookie-btn" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors">
+                            新增
+                        </button>
+                    </div>
+                    <div id="cookie-summary" class="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                        未保存 Cookie
+                    </div>
+                    <div id="cookie-editor" class="mt-2 space-y-2">
+                        <input id="cookie-name-input" type="text" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="Cookie 名称，例如：主账号 / 备用账号">
+                        <textarea id="cookie-input" rows="5" class="w-full rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm font-mono outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="支持两种格式：完整 Cookie 请求头，或浏览器导出的 Cookie JSON 数组"></textarea>
+                        <div class="flex gap-2">
+                            <button id="save-cookie-btn" class="flex-1 rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-900 transition-colors">
+                                保存当前 Cookie
+                            </button>
+                            <button id="delete-cookie-btn" class="rounded-lg border border-red-200 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 transition-colors">
+                                删除
+                            </button>
+                        </div>
+                    </div>
+                    <p class="mt-2 text-xs text-slate-400">Cookie 保存在当前浏览器本地。可保存多个账号，通过下拉框切换。</p>
                     <p id="cookie-format-hint" class="mt-2 hidden text-xs text-blue-600"></p>
                 </div>
 
-                <div class="grid grid-cols-2 gap-3">
+                <div class="zsxq-panel-section grid grid-cols-2 gap-3">
                     <div>
                         <label class="text-xs font-bold text-slate-600">主题数量</label>
                         <input id="count-input" type="number" min="1" max="50" value="20" class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
@@ -61,12 +72,14 @@
                         <label class="text-xs font-bold text-slate-600">范围</label>
                         <select id="scope-select" class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
                             <option value="all">全部</option>
-                            <option value="digg">精华</option>
+                            <option value="with_files">文件</option>
+                            <option value="with_images">图片</option>
+                            <option value="digests">精华</option>
                         </select>
                     </div>
                 </div>
 
-                <div class="flex gap-3">
+                <div class="zsxq-panel-section flex gap-3">
                     <button id="load-groups-btn" class="flex-1 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-700 transition-colors">
                         <i class="fas fa-satellite-dish mr-2"></i>获取星球
                     </button>
@@ -75,21 +88,29 @@
                     </button>
                 </div>
 
-                <div>
-                    <label class="text-xs font-bold text-slate-600 uppercase tracking-wider">星球列表</label>
+                <div class="zsxq-panel-section">
+                    <label class="zsxq-section-label text-xs font-bold text-slate-600 uppercase tracking-wider">星球列表</label>
                     <div id="groups-list" class="mt-2 max-h-[420px] overflow-y-auto rounded-lg border border-slate-200 divide-y divide-slate-100 bg-white">
                         <div class="p-4 text-sm text-slate-400">等待获取...</div>
                     </div>
                 </div>
             </aside>
 
-            <section class="bg-white border border-slate-200 rounded-lg shadow-sm min-h-[720px] flex flex-col min-w-0">
-                <div class="border-b border-slate-200 p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+            <section class="zsxq-main-panel bg-white border border-slate-200 rounded-lg shadow-sm min-h-[720px] flex flex-col min-w-0">
+                <div class="zsxq-topic-toolbar border-b border-slate-200 p-5 flex flex-col gap-3">
                     <div class="min-w-0">
                         <h3 id="topics-title" class="text-xl font-black">最新主题</h3>
                         <p id="topics-subtitle" class="text-sm text-slate-500 mt-1">选择一个星球后查看主题内容。</p>
                     </div>
-                    <div class="flex flex-wrap items-center gap-2 shrink-0">
+                    <div class="zsxq-action-row flex flex-wrap items-center gap-2">
+                        <label id="attachment-type-control" class="hidden inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-600">
+                            <span class="text-xs text-slate-400">附件类型</span>
+                            <select id="attachment-type-select" class="bg-transparent text-sm font-bold outline-none">
+                                <option value="pdf">只下载 PDF</option>
+                                <option value="mp3">只下载 MP3</option>
+                                <option value="all">全部附件</option>
+                            </select>
+                        </label>
                         <button id="select-all-topics-btn" class="hidden rounded-lg border border-slate-300 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50 transition-colors">
                             <i class="fas fa-check-double mr-2"></i>全选主题
                         </button>
@@ -102,6 +123,12 @@
                         <button id="refresh-topics-btn" class="hidden rounded-lg border border-slate-300 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50 transition-colors">
                             <i class="fas fa-rotate mr-2"></i>刷新主题
                         </button>
+                        <button id="sync-current-tab-btn" class="hidden rounded-lg bg-slate-800 px-4 py-2 text-sm font-bold text-white hover:bg-slate-900 transition-colors">
+                            <i class="fas fa-cloud-arrow-down mr-2"></i>同步当前 Tab
+                        </button>
+                        <button id="sync-all-tabs-btn" class="hidden rounded-lg border border-slate-300 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50 transition-colors">
+                            <i class="fas fa-arrows-rotate mr-2"></i>同步全部 Tab
+                        </button>
                     </div>
                 </div>
                 <div id="topics-tabs" class="hidden border-b border-slate-200 px-5 py-3 overflow-x-hidden"></div>
@@ -111,6 +138,29 @@
                     </div>
                 </div>
             </section>
+
+            <aside class="zsxq-right-panel space-y-4">
+                <div id="sync-status" class="hidden"></div>
+                <div id="publish-panel" class="hidden bg-white border border-slate-200 rounded-lg shadow-sm px-5 py-4">
+                    <div class="zsxq-side-title">发布</div>
+                    <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px] gap-3">
+                        <div class="min-w-0">
+                            <textarea id="publish-text-input" rows="3" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="发布正文。切到某个标签页时，可自动带上当前标签。"></textarea>
+                            <label class="mt-2 inline-flex items-center gap-2 text-xs font-bold text-slate-600">
+                                <input id="publish-current-tab-checkbox" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600" checked>
+                                <span id="publish-current-tab-label">发布到当前标签</span>
+                            </label>
+                        </div>
+                        <div class="space-y-2">
+                            <input id="publish-files-input" type="file" multiple class="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-slate-600 hover:file:bg-slate-200">
+                            <button id="publish-topic-btn" class="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-700 transition-colors">
+                                <i class="fas fa-cloud-arrow-up mr-2"></i>上传并发布
+                            </button>
+                            <div id="publish-status" class="min-h-5 text-xs text-slate-500"></div>
+                        </div>
+                    </div>
+                </div>
+            </aside>
         </section>
     </main>
 

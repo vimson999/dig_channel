@@ -144,6 +144,7 @@ node_modules/
 data/generated_thumbnails/
 data/processed/
 data/uploads/
+data/zsxq/
 src/backend/data/uploads/
 .gemini/
 

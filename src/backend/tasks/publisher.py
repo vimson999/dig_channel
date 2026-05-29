@@ -26,6 +26,42 @@ from config import get_config
 
 logger = logging.getLogger(__name__)
 
+def update_task_record(task_id, retries=3, **fields):
+    """Persist task state in a short transaction with rollback/retry.
+
+    Long media synthesis can outlive a cloud PostgreSQL connection. Keeping task
+    updates isolated prevents a transient DB timeout from poisoning the worker
+    session and hiding the real task state behind PendingRollbackError.
+    """
+    import time
+
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            db.session.rollback()
+            task = PublicationTask.query.get(task_id)
+            if not task:
+                raise ValueError(f"Task {task_id} not found")
+            for key, value in fields.items():
+                setattr(task, key, value)
+            db.session.commit()
+            return task
+        except Exception as exc:
+            last_error = exc
+            db.session.rollback()
+            logger.warning(
+                "Task %s DB update failed (%s/%s) fields=%s error=%s",
+                task_id,
+                attempt,
+                retries,
+                ",".join(fields.keys()),
+                exc,
+                exc_info=attempt == retries,
+            )
+            if attempt < retries:
+                time.sleep(min(2 * attempt, 5))
+    raise last_error
+
 def to_abs_path(rel_path):
     """Helper to convert path to absolute, staying robust regardless of current working directory."""
     if not rel_path: return None
@@ -95,6 +131,7 @@ def run_publication_pipeline(self, task_id):
         try:
             overall_start = time.time()
             params = task.params
+            result_state = dict(task.result or {})
 
             # 🚀 [DEBUG LOG] 记录输入原始参数
             logger.info(f"🔍 [TASK] 任务启动参数详情: {json.dumps(params, ensure_ascii=False, indent=2)}")
@@ -275,10 +312,13 @@ def run_publication_pipeline(self, task_id):
             vertical_enabled = v_vid_params.get('enabled', False) or (vid_params.get('enabled', False) and is_explicit_vertical)
 
             if landscape_enabled:
-                task.status = 'processing'
-                task.current_step = 'synthesis'
-                task.progress = 10
-                db.session.commit()
+                task = update_task_record(
+                    task_id,
+                    status='processing',
+                    current_step='synthesis',
+                    progress=10,
+                    result=result_state,
+                )
                 
                 video_path = to_abs_path(vid_params.get('video_path'))
                 image_path = to_abs_path(vid_params.get('image_path'))
@@ -315,13 +355,18 @@ def run_publication_pipeline(self, task_id):
                     export_params=export_params
                 )
                 logger.info(f"  - ✅ Landscape Done: {final_video_path}")
-                task.result = {**(task.result or {}), 'video_path': final_video_path}
+                result_state['video_path'] = final_video_path
+                task = update_task_record(task_id, result=result_state)
 
             # --- Step 1.5: Vertical Synthesis ---
             if vertical_enabled:
-                task.current_step = 'v_synthesis'
-                task.progress = 30
-                db.session.commit()
+                task = update_task_record(
+                    task_id,
+                    status='processing',
+                    current_step='v_synthesis',
+                    progress=30,
+                    result=result_state,
+                )
 
                 # 如果是显式指定竖屏，则参数从 vid_params 取；否则从 v_vid_params 取
                 active_v_params = vid_params if is_explicit_vertical else v_vid_params
@@ -351,17 +396,17 @@ def run_publication_pipeline(self, task_id):
                 logger.info(f"  - ✅ Vertical Done: {v_video_path}")
                 
                 # 如果这是唯一的合成任务，把它也放到主 video_path 里方便前端下载
-                res_dict = {**(task.result or {}), 'vertical_video_path': v_video_path}
+                res_dict = {**result_state, 'vertical_video_path': v_video_path}
                 if is_explicit_vertical:
                     res_dict['video_path'] = v_video_path
                     
-                task.result = res_dict
+                result_state = res_dict
+                task = update_task_record(task_id, result=result_state)
             
             # --- Step 1.6: Alternative Vertical Synthesis (Vertical Video 2) ---
             v_vid_2_params = params.get('vertical_video_2', {})
             if v_vid_2_params.get('enabled', False):
-                task.current_step = 'v_synthesis_2'
-                db.session.commit()
+                task = update_task_record(task_id, current_step='v_synthesis_2', result=result_state)
                 
                 logger.info(f"Task {task_id}: Starting alternative vertical video synthesis...")
                 
@@ -374,18 +419,17 @@ def run_publication_pipeline(self, task_id):
                         output_filename=f"v2_{base_name}.mp4",
                         margin_v_override=200
                     )
-                    task.result = {**(task.result or {}), 'vertical_video_2_path': v2_video_path}
+                    result_state = {**result_state, 'vertical_video_2_path': v2_video_path}
+                    task = update_task_record(task_id, result=result_state)
                 else:
                     logger.warning(f"Task {task_id}: Skipping vertical_video_2, image path missing or invalid.")
             
-            task.progress = 50
-            db.session.commit()
+            task = update_task_record(task_id, progress=50, result=result_state)
     
             # --- Step 2: Thumbnail ---
             final_cover_path = None
             if thumb_params:
-                task.current_step = 'thumbnail'
-                db.session.commit()
+                task = update_task_record(task_id, current_step='thumbnail', result=result_state)
                 
                 logger.info(f"Task {task_id}: Generating thumbnail...")
                 
@@ -402,17 +446,14 @@ def run_publication_pipeline(self, task_id):
                     transform=thumb_params.get('transform')
                 )
                 
-                task.result = {**(task.result or {}), 'cover_path': final_cover_path}
-                task.progress = 70
-                db.session.commit()
+                result_state = {**result_state, 'cover_path': final_cover_path}
+                task = update_task_record(task_id, result=result_state, progress=70)
             else:
-                task.progress = 70
-                db.session.commit()
+                task = update_task_record(task_id, progress=70, result=result_state)
     
             # --- Step 3: Upload ---
             if bili_params.get('enabled', False):
-                task.current_step = 'upload'
-                db.session.commit()
+                task = update_task_record(task_id, current_step='upload', result=result_state)
                 
                 # 智能选择上传文件：如果没开横屏开了竖屏，就传竖屏；否则传横屏
                 upload_path = final_video_path
@@ -447,18 +488,16 @@ def run_publication_pipeline(self, task_id):
                 
                 upload_result = asyncio.run(_do_upload())
                 
-                task.result = {**(task.result or {}), 'bilibili_result': upload_result}
-                db.session.commit()
+                result_state = {**result_state, 'bilibili_result': upload_result}
+                task = update_task_record(task_id, result=result_state)
             else:
                 logger.info(f"Task {task_id}: Skipping Bilibili upload (disabled or not enabled).")
-                task.progress = 90
-                db.session.commit()
+                task = update_task_record(task_id, progress=90, result=result_state)
     
             # --- Step 4: YouTube Upload ---
             yt_params = params.get('youtube', {})
             if yt_params and yt_params.get('enabled', False):
-                task.current_step = 'upload_youtube'
-                db.session.commit()
+                task = update_task_record(task_id, current_step='upload_youtube', result=result_state)
                 
                 # 智能选择上传文件
                 upload_path_yt = final_video_path
@@ -477,27 +516,42 @@ def run_publication_pipeline(self, task_id):
                         privacy_status=yt_params.get('privacy', 'private'),
                         thumbnail_path=final_cover_path
                     )
-                    task.result = {**(task.result or {}), 'youtube_result': yt_response}
+                    result_state = {**result_state, 'youtube_result': yt_response}
                 except Exception as ye:
                     logger.error(f"YouTube upload failed for task {task_id}: {ye}", exc_info=True)
-                    task.result = {**(task.result or {}), 'youtube_error': str(ye)}
+                    result_state = {**result_state, 'youtube_error': str(ye)}
                 
-                db.session.commit()
+                task = update_task_record(task_id, result=result_state)
     
-            task.status = 'completed'
-            task.current_step = 'done'
-            task.progress = 100
-            task.completed_at = datetime.utcnow()
-            db.session.commit()
+            task = update_task_record(
+                task_id,
+                status='completed',
+                current_step='done',
+                progress=100,
+                result=result_state,
+                completed_at=datetime.utcnow(),
+            )
             
             total_duration = time.time() - overall_start
             logger.info(f"✨ [TASK] 任务 {task_id} 全部处理完成! 总耗时: {total_duration:.2f}s")
     
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-            task.status = 'failed'
-            task.error_message = str(e)
-            db.session.commit()
+            try:
+                update_task_record(
+                    task_id,
+                    status='failed',
+                    error_message=str(e),
+                    completed_at=datetime.utcnow(),
+                )
+            except Exception as persist_error:
+                logger.error(
+                    "Task %s failed and failed-state persistence also failed: %s",
+                    task_id,
+                    persist_error,
+                    exc_info=True,
+                )
+            raise
 
 @celery_app.task(bind=True)
 def run_youtube_upload_only(self, task_id):

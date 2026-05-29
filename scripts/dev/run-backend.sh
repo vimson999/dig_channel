@@ -18,6 +18,7 @@ fi
 # 设置环境变量
 export FLASK_ENV=development
 export FLASK_DEBUG=1
+export FLASK_USE_RELOADER=${FLASK_USE_RELOADER:-0}
 export PYTHONUNBUFFERED=1
 export DATABASE_TYPE=${DATABASE_TYPE:-postgresql}
 

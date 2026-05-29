@@ -5,6 +5,7 @@ from urllib.parse import quote
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from services.zsxq_service import zsxq_service
+from services.zsxq_sync_service import zsxq_sync_service
 from utils.api_utils import handle_api_error
 
 
@@ -91,6 +92,24 @@ def topics():
         return handle_api_error(502, _safe_error(e))
 
 
+@bp.route("/menus", methods=["POST"])
+def menus():
+    """Fetch official ZSXQ group menus/tabs."""
+    try:
+        data, cookie = _payload()
+        group_id = data.get("group_id")
+        if not group_id:
+            return handle_api_error(400, "group_id 不能为空")
+
+        result = zsxq_service.get_menus(cookie, group_id)
+        _assert_upstream_success(result)
+        return jsonify({"success": True, "data": result})
+    except ValueError as e:
+        return handle_api_error(400, str(e))
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
 @bp.route("/topic", methods=["POST"])
 def topic():
     """Fetch one topic detail."""
@@ -125,6 +144,16 @@ def download():
             or file_info.get("title")
             or file_info.get("file_name")
         )
+        try:
+            zsxq_sync_service.mark_browser_download(
+                group_id=data.get("group_id"),
+                tab_id=data.get("tab_id"),
+                topic_id=data.get("topic_id"),
+                file_info=file_info,
+                filename=filename,
+            )
+        except Exception as exc:
+            logger.warning("[ZSXQ_DOWNLOAD] mark browser download failed: %s", exc)
 
         content_type = upstream.headers.get("Content-Type", "application/octet-stream")
         headers = {
@@ -141,5 +170,117 @@ def download():
         )
     except ValueError as e:
         return handle_api_error(400, str(e))
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/publish", methods=["POST"])
+def publish():
+    """Upload files/images and publish one topic to the selected ZSXQ group."""
+    try:
+        cookie = (request.form.get("cookie") or "").strip()
+        group_id = (request.form.get("group_id") or "").strip()
+        text = request.form.get("text") or ""
+        hashtag_id = (request.form.get("hashtag_id") or "").strip() or None
+        hashtag_title = (request.form.get("hashtag_title") or "").strip() or None
+
+        if not cookie:
+            return handle_api_error(400, "请先填写知识星球 Cookie")
+        if not group_id:
+            return handle_api_error(400, "group_id 不能为空")
+
+        uploaded_files = []
+        for file_storage in request.files.getlist("files"):
+            filename = _safe_filename(file_storage.filename)
+            content = file_storage.read()
+            if not content:
+                continue
+            uploaded_files.append(
+                {
+                    "filename": filename,
+                    "content": content,
+                    "content_type": file_storage.mimetype,
+                }
+            )
+
+        result = zsxq_service.upload_and_publish_topic(
+            cookie=cookie,
+            group_id=group_id,
+            text=text,
+            uploaded_files=uploaded_files,
+            hashtag_id=hashtag_id,
+            hashtag_title=hashtag_title,
+        )
+        publish_result = result.get("publish") or {}
+        _assert_upstream_success(publish_result)
+
+        return jsonify({"success": True, "data": result})
+    except ValueError as e:
+        return handle_api_error(400, str(e))
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/sync", methods=["POST"])
+def sync():
+    """Manually sync selected ZSXQ tabs into local DB and data/zsxq."""
+    try:
+        data, cookie = _payload()
+        group_id = data.get("group_id")
+        if not group_id:
+            return handle_api_error(400, "group_id 不能为空")
+
+        result = zsxq_sync_service.sync_tabs(
+            cookie=cookie,
+            group_id=group_id,
+            group_name=data.get("group_name"),
+            tabs=data.get("tabs"),
+            count=data.get("count", 20),
+            max_pages=data.get("max_pages", 1),
+            stop_on_existing=data.get("stop_on_existing", True),
+            download_attachments=data.get("download_attachments", True),
+            download_pdf_only=data.get("download_pdf_only", True),
+            download_file_types=data.get("download_file_types"),
+            mode=data.get("mode", "manual"),
+        )
+        return jsonify({"success": True, "data": result})
+    except ValueError as e:
+        return handle_api_error(400, str(e))
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/sync/runs", methods=["POST"])
+def sync_runs():
+    """List recent ZSXQ sync runs."""
+    try:
+        data = request.get_json(silent=True) or {}
+        result = zsxq_sync_service.list_runs(
+            group_id=data.get("group_id"),
+            limit=data.get("limit", 20),
+        )
+        return jsonify({"success": True, "data": {"runs": result}})
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/attachments/status", methods=["POST"])
+def attachment_status():
+    """Batch-read local download status for visible topic attachments."""
+    try:
+        data = request.get_json(silent=True) or {}
+        group_id = data.get("group_id")
+        tab_id = data.get("tab_id")
+        if not group_id:
+            return handle_api_error(400, "group_id 不能为空")
+        if not tab_id:
+            return handle_api_error(400, "tab_id 不能为空")
+
+        result = zsxq_sync_service.get_attachment_statuses(
+            group_id=group_id,
+            tab_id=tab_id,
+            topic_ids=data.get("topic_ids") or [],
+        )
+        return jsonify({"success": True, "data": {"statuses": result}})
     except Exception as e:
         return handle_api_error(502, _safe_error(e))

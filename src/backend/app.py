@@ -138,4 +138,6 @@ if __name__ == '__main__':
     logger.info("访问地址: http://localhost:5001")
     logger.info("按 Ctrl+C 停止服务器")
     
-    app.run(debug=True, host='0.0.0.0', port=5001, use_reloader=True, reloader_type='stat')
+    debug_enabled = os.environ.get("FLASK_DEBUG", "1").lower() in {"1", "true", "yes", "on"}
+    use_reloader = os.environ.get("FLASK_USE_RELOADER", "0").lower() in {"1", "true", "yes", "on"}
+    app.run(debug=debug_enabled, host='0.0.0.0', port=5001, use_reloader=use_reloader, reloader_type='stat')
