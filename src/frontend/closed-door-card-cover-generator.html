@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>闭门会卡片封面生成器 - Shioa</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&display=swap');
+        body {
+            font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+            background-color: #f3f4f6;
+        }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
+        .app-container {
+            height: calc(100vh - 73px);
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen overflow-hidden">
+    <!-- 导航栏将由 shared-navigation.js 自动注入 -->
+
+    <main class="flex app-container overflow-hidden">
+        <div class="w-96 bg-white shadow-xl flex flex-col h-full z-10 border-r border-gray-200">
+            <div class="p-6 bg-slate-900 text-white">
+                <h1 class="text-xl font-bold flex items-center gap-2">
+                    <i class="fas fa-layer-group"></i>
+                    闭门会卡片封面
+                </h1>
+                <p class="text-sm text-slate-300 mt-1">第二频道 VI · 实时编辑</p>
+            </div>
+
+            <div class="p-6 flex-1 overflow-y-auto space-y-5">
+                <div class="space-y-2">
+                    <label class="block text-sm font-bold text-gray-700">资料区图片 (可选)</label>
+                    <div class="flex items-center justify-center w-full">
+                        <label class="flex flex-col items-center justify-center w-full h-24 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100">
+                            <div class="flex flex-col items-center justify-center pt-5 pb-6">
+                                <svg class="w-6 h-6 mb-2 text-gray-500" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 16">
+                                    <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 13h3a3 3 0 0 0 0-6h-.025A5.56 5.56 0 0 0 16 6.5 5.5 5.5 0 0 0 5.207 5.021C5.137 5.017 5.071 5 5 5a4 4 0 0 0 0 8h2.167M10 15V6m0 0L8 8m2-2 2 2"/>
+                                </svg>
+                                <p class="text-xs text-gray-500"><span class="font-semibold">点击上传图片</span> 或拖拽至此</p>
+                            </div>
+                            <input id="bgUpload" type="file" class="hidden" accept="image/*" />
+                        </label>
+                    </div>
+                    <button id="clearBgBtn" class="text-xs text-red-500 hover:text-red-700 hidden">清除自定义图片，使用默认资料底图</button>
+                </div>
+
+                <hr class="border-gray-200">
+
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-bold text-gray-700 mb-1">主标题</label>
+                        <input type="text" id="mainTitle" value="内资闭门会议" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-700">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-bold text-gray-700 mb-1">副标题 (支持换行)</label>
+                        <textarea id="subTitle" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-700 font-mono text-sm">地产股翻倍逻辑已现
+PB从0.4到0.8，年底前看到修复</textarea>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-bold text-gray-700 mb-1">日期</label>
+                        <input type="text" id="dateText" value="2026.5.1" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-700">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-bold text-gray-700 mb-1">底部免责声明</label>
+                        <textarea id="disclaimer" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-700 text-xs">本内容只供交流学习，不作为任何投资建议。理财有风险，投资需谨慎。</textarea>
+                    </div>
+                </div>
+
+                <hr class="border-gray-200">
+
+                <div class="space-y-3">
+                    <label class="block text-sm font-bold text-gray-700">颜色微调</label>
+                    <div class="flex items-center justify-between">
+                        <span class="text-sm text-gray-600">主标题颜色</span>
+                        <input type="color" id="mainColor" value="#FFFFFF" class="w-8 h-8 rounded cursor-pointer border-0">
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span class="text-sm text-gray-600">高亮条颜色</span>
+                        <input type="color" id="subColor" value="#FFE900" class="w-8 h-8 rounded cursor-pointer border-0">
+                    </div>
+                </div>
+            </div>
+
+            <div class="p-6 bg-gray-50 border-t border-gray-200">
+                <button id="downloadBtn" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 px-4 rounded-lg shadow-md transition duration-200 flex justify-center items-center gap-2">
+                    <i class="fas fa-download"></i>
+                    下载高清封面图
+                </button>
+            </div>
+        </div>
+
+        <div class="flex-1 bg-slate-800 flex items-center justify-center p-8 overflow-auto">
+            <div class="relative shadow-2xl rounded-lg overflow-hidden" style="max-width: 100%; max-height: 100%; aspect-ratio: 16/9;">
+                <canvas id="posterCanvas" width="1280" height="720" class="w-full h-full block bg-black"></canvas>
+            </div>
+        </div>
+    </main>
+
+    <script src="js/shared-navigation.js?v=closed-door-cover"></script>
+    <script>
+        const canvas = document.getElementById('posterCanvas');
+        const ctx = canvas.getContext('2d');
+        let customBgImage = null;
+        let referenceBgImage = null;
+
+        const inputs = {
+            mainTitle: document.getElementById('mainTitle'),
+            subTitle: document.getElementById('subTitle'),
+            dateText: document.getElementById('dateText'),
+            disclaimer: document.getElementById('disclaimer'),
+            mainColor: document.getElementById('mainColor'),
+            subColor: document.getElementById('subColor'),
+        };
+
+        Object.values(inputs).forEach(input => input.addEventListener('input', draw));
+
+        const bgUpload = document.getElementById('bgUpload');
+        const clearBgBtn = document.getElementById('clearBgBtn');
+        const referenceBg = new Image();
+        referenceBg.onload = function() {
+            referenceBgImage = referenceBg;
+            draw();
+        };
+        referenceBg.src = 'assets/cover/default/closed-door-reference-bg.png';
+
+        bgUpload.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const img = new Image();
+                img.onload = function() {
+                    customBgImage = img;
+                    clearBgBtn.classList.remove('hidden');
+                    draw();
+                };
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        clearBgBtn.addEventListener('click', () => {
+            customBgImage = null;
+            bgUpload.value = '';
+            clearBgBtn.classList.add('hidden');
+            draw();
+        });
+
+        document.getElementById('downloadBtn').addEventListener('click', () => {
+            const link = document.createElement('a');
+            link.download = `闭门会封面_${new Date().getTime()}.jpg`;
+            link.href = canvas.toDataURL('image/jpeg', 0.95);
+            link.click();
+        });
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            drawHeroBackground(ctx);
+            drawTexts(ctx);
+        }
+
+        function drawHeroBackground(ctx) {
+            if (customBgImage) {
+                drawCoverImage(ctx, customBgImage, 0, 0, canvas.width, canvas.height);
+            } else if (referenceBgImage) {
+                drawCoverImage(ctx, referenceBgImage, 0, 0, canvas.width, canvas.height);
+            } else {
+                drawGeneratedMarketBackground(ctx);
+            }
+
+            const shade = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+            shade.addColorStop(0, 'rgba(2, 13, 28, 0.24)');
+            shade.addColorStop(0.42, 'rgba(5, 24, 48, 0.14)');
+            shade.addColorStop(1, 'rgba(2, 9, 19, 0.36)');
+            ctx.fillStyle = shade;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.42)';
+            ctx.lineWidth = 4;
+            roundRect(ctx, 4, 4, canvas.width - 8, canvas.height - 8, 10, false, true);
+
+        }
+
+        function drawTexts(ctx) {
+            const fontBase = '"Noto Sans SC", "Microsoft YaHei", sans-serif';
+            const centerX = canvas.width / 2;
+            const maxTitleWidth = 1010;
+            const highlightW = 836;
+            const highlightH = 180;
+            const highlightX = (canvas.width - highlightW) / 2;
+            const highlightY = 338;
+
+            ctx.textAlign = 'center';
+
+            ctx.fillStyle = inputs.mainColor.value;
+            ctx.textBaseline = 'top';
+            ctx.font = `900 126px ${fontBase}`;
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.56)';
+            ctx.shadowBlur = 10;
+            ctx.shadowOffsetY = 4;
+            drawCenteredWrappedText(ctx, inputs.mainTitle.value, centerX, 172, maxTitleWidth, 130, 2);
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetY = 0;
+
+            ctx.save();
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.34)';
+            ctx.shadowBlur = 18;
+            ctx.shadowOffsetY = 8;
+            ctx.fillStyle = inputs.subColor.value;
+            roundRect(ctx, highlightX, highlightY, highlightW, highlightH, 0, true, false);
+            ctx.restore();
+
+            ctx.fillStyle = '#071423';
+            ctx.font = `900 44px ${fontBase}`;
+            const subLines = inputs.subTitle.value.split('\n').flatMap(line => wrapLine(ctx, line, highlightW - 70));
+            subLines.slice(0, 2).forEach((line, index) => {
+                ctx.fillText(line, centerX, highlightY + 34 + index * 56);
+            });
+
+            drawDatePill(ctx, centerX, 568);
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.76)';
+            ctx.font = `500 18px ${fontBase}`;
+            ctx.fillText(inputs.disclaimer.value.split('\n')[0], centerX, 654);
+
+            ctx.textAlign = 'left';
+        }
+
+        function drawGeneratedMarketBackground(ctx) {
+            const bg = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+            bg.addColorStop(0, '#06182c');
+            bg.addColorStop(0.42, '#0d2948');
+            bg.addColorStop(1, '#020915');
+            ctx.fillStyle = bg;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            drawAmbientPanels(ctx);
+            ctx.save();
+            ctx.globalAlpha = 0.38;
+            ctx.translate(170, 30);
+            ctx.rotate(-0.015);
+            drawTerminalSurface(ctx, 0, 0, 860, 600);
+            ctx.restore();
+            drawQuoteBoard(ctx, 54, 42, 388, 612);
+            drawChartPanel(ctx, 635, 44, 590, 285, '#eef4fb', '#d4af37', 'SH Composite 000001');
+            drawChartPanel(ctx, 725, 394, 475, 230, '#d9e6f2', '#57d2a3', 'Property Index 886043');
+
+            ctx.save();
+            ctx.globalAlpha = 0.20;
+            ctx.fillStyle = '#79a9ce';
+            for (let x = 0; x < canvas.width; x += 54) {
+                ctx.fillRect(x, 0, 1, canvas.height);
+            }
+            ctx.restore();
+        }
+
+        function drawAmbientPanels(ctx) {
+            ctx.save();
+            ctx.globalAlpha = 0.72;
+
+            const leftGlow = ctx.createLinearGradient(0, 0, 390, 0);
+            leftGlow.addColorStop(0, 'rgba(8, 34, 66, 0.92)');
+            leftGlow.addColorStop(1, 'rgba(8, 34, 66, 0)');
+            ctx.fillStyle = leftGlow;
+            ctx.fillRect(0, 0, 430, canvas.height);
+
+            const topSheen = ctx.createLinearGradient(280, 0, 1180, 0);
+            topSheen.addColorStop(0, 'rgba(190, 214, 232, 0.08)');
+            topSheen.addColorStop(0.58, 'rgba(190, 214, 232, 0.20)');
+            topSheen.addColorStop(1, 'rgba(190, 214, 232, 0.02)');
+            ctx.fillStyle = topSheen;
+            ctx.fillRect(290, 18, 860, 58);
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.fillRect(940, 0, 286, canvas.height);
+
+            ctx.restore();
+        }
+
+        function drawTerminalSurface(ctx, x, y, w, h) {
+            ctx.fillStyle = 'rgba(4, 18, 35, 0.36)';
+            ctx.fillRect(x, y, w, h);
+
+            ctx.strokeStyle = 'rgba(230, 238, 247, 0.09)';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 11; i++) {
+                const gx = x + i * w / 11;
+                ctx.beginPath();
+                ctx.moveTo(gx, y);
+                ctx.lineTo(gx, y + h);
+                ctx.stroke();
+            }
+            for (let i = 0; i <= 9; i++) {
+                const gy = y + i * h / 9;
+                ctx.beginPath();
+                ctx.moveTo(x, gy);
+                ctx.lineTo(x + w, gy);
+                ctx.stroke();
+            }
+        }
+
+        function drawQuoteBoard(ctx, x, y, w, h) {
+            ctx.save();
+            ctx.globalAlpha = 0.68;
+            ctx.fillStyle = 'rgba(4, 18, 35, 0.58)';
+            ctx.fillRect(x, y, w, h);
+
+            ctx.strokeStyle = 'rgba(210, 224, 238, 0.18)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x, y, w, h);
+
+            ctx.fillStyle = 'rgba(226, 235, 244, 0.58)';
+            ctx.font = '600 17px Arial, sans-serif';
+            ctx.fillText('CODE', x + 22, y + 34);
+            ctx.fillText('LAST', x + 126, y + 34);
+            ctx.fillText('CHG%', x + 226, y + 34);
+            ctx.fillText('VOL', x + 318, y + 34);
+
+            const rows = [
+                ['600519', '1688.40', '+1.26', '34.8M'],
+                ['000001', '12.74', '-0.42', '89.1M'],
+                ['300750', '214.63', '+2.18', '51.6M'],
+                ['600036', '39.82', '+0.77', '62.4M'],
+                ['000333', '72.35', '-0.15', '28.2M'],
+                ['601318', '46.90', '+1.04', '70.5M'],
+                ['002594', '241.10', '+3.62', '44.7M'],
+                ['000858', '154.25', '-0.58', '19.8M'],
+                ['601012', '21.48', '+4.11', '96.3M'],
+                ['600030', '19.06', '+0.36', '118M'],
+                ['300059', '16.88', '-1.23', '142M'],
+                ['510300', '3.924', '+0.81', '1.8B'],
+            ];
+
+            rows.forEach((row, index) => {
+                const ry = y + 66 + index * 42;
+                ctx.fillStyle = index % 2 ? 'rgba(255, 255, 255, 0.035)' : 'rgba(255, 255, 255, 0.065)';
+                ctx.fillRect(x + 10, ry - 24, w - 20, 32);
+
+                ctx.fillStyle = 'rgba(235, 243, 250, 0.58)';
+                ctx.font = '600 19px Arial, sans-serif';
+                ctx.fillText(row[0], x + 22, ry);
+                ctx.fillText(row[1], x + 126, ry);
+                ctx.fillStyle = row[2].startsWith('+') ? 'rgba(255, 104, 104, 0.72)' : 'rgba(80, 220, 160, 0.72)';
+                ctx.fillText(row[2], x + 226, ry);
+                ctx.fillStyle = 'rgba(208, 220, 232, 0.48)';
+                ctx.fillText(row[3], x + 318, ry);
+            });
+            ctx.restore();
+        }
+
+        function drawChartPanel(ctx, x, y, w, h, lineColor, accentColor, title) {
+            ctx.save();
+            ctx.globalAlpha = 0.78;
+            ctx.fillStyle = 'rgba(5, 17, 31, 0.52)';
+            ctx.fillRect(x, y, w, h);
+
+            ctx.strokeStyle = 'rgba(210, 224, 238, 0.20)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x, y, w, h);
+
+            ctx.strokeStyle = 'rgba(210, 224, 238, 0.16)';
+            for (let i = 1; i < 8; i++) {
+                const gx = x + i * w / 8;
+                ctx.beginPath();
+                ctx.moveTo(gx, y);
+                ctx.lineTo(gx, y + h);
+                ctx.stroke();
+            }
+            for (let i = 1; i < 6; i++) {
+                const gy = y + i * h / 6;
+                ctx.beginPath();
+                ctx.moveTo(x, gy);
+                ctx.lineTo(x + w, gy);
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = 'rgba(232, 241, 249, 0.60)';
+            ctx.font = '700 17px Arial, sans-serif';
+            ctx.fillText(title, x + 18, y + 28);
+
+            ctx.fillStyle = 'rgba(230, 238, 247, 0.56)';
+            ctx.font = '600 16px Arial, sans-serif';
+            ['38.00', '37.60', '37.20', '36.80', '36.40'].forEach((label, index) => {
+                ctx.fillText(label, x + w - 54, y + 28 + index * ((h - 56) / 4));
+            });
+            ['10:30', '11:00', '13:30', '14:00', '14:30'].forEach((label, index) => {
+                ctx.fillText(label, x + 22 + index * ((w - 128) / 4), y + h - 14);
+            });
+
+            ctx.beginPath();
+            const points = [
+                [0.04, 0.74], [0.12, 0.60], [0.18, 0.66], [0.24, 0.50],
+                [0.33, 0.57], [0.40, 0.34], [0.48, 0.42], [0.56, 0.22],
+                [0.63, 0.28], [0.70, 0.16], [0.78, 0.54], [0.85, 0.30],
+                [0.92, 0.12], [0.97, 0.26],
+            ];
+            points.forEach(([px, py], index) => {
+                const sx = x + px * w;
+                const sy = y + py * h;
+                if (index === 0) ctx.moveTo(sx, sy);
+                else ctx.lineTo(sx, sy);
+            });
+            ctx.strokeStyle = lineColor;
+            ctx.lineWidth = 4;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(x + w * 0.05, y + h * 0.78);
+            ctx.bezierCurveTo(x + w * 0.20, y + h * 0.66, x + w * 0.31, y + h * 0.82, x + w * 0.48, y + h * 0.62);
+            ctx.bezierCurveTo(x + w * 0.64, y + h * 0.46, x + w * 0.78, y + h * 0.70, x + w * 0.96, y + h * 0.42);
+            ctx.strokeStyle = accentColor;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        function drawTerminalGrid(ctx, x, y, w, h) {
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.11)';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 8; i++) {
+                const gx = x + i * w / 8;
+                ctx.beginPath();
+                ctx.moveTo(gx, y);
+                ctx.lineTo(gx, y + h);
+                ctx.stroke();
+            }
+            for (let i = 0; i <= 6; i++) {
+                const gy = y + i * h / 6;
+                ctx.beginPath();
+                ctx.moveTo(x, gy);
+                ctx.lineTo(x + w, gy);
+                ctx.stroke();
+            }
+
+            ctx.beginPath();
+            ctx.moveTo(x + 18, y + h * 0.66);
+            ctx.bezierCurveTo(x + w * 0.16, y + h * 0.50, x + w * 0.24, y + h * 0.78, x + w * 0.36, y + h * 0.52);
+            ctx.bezierCurveTo(x + w * 0.48, y + h * 0.24, x + w * 0.58, y + h * 0.40, x + w * 0.70, y + h * 0.22);
+            ctx.bezierCurveTo(x + w * 0.82, y + h * 0.06, x + w * 0.90, y + h * 0.32, x + w - 24, y + h * 0.14);
+            ctx.strokeStyle = 'rgba(230, 238, 247, 0.72)';
+            ctx.lineWidth = 4;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(x + 20, y + h * 0.78);
+            ctx.bezierCurveTo(x + w * 0.20, y + h * 0.64, x + w * 0.32, y + h * 0.84, x + w * 0.48, y + h * 0.68);
+            ctx.bezierCurveTo(x + w * 0.62, y + h * 0.52, x + w * 0.78, y + h * 0.72, x + w - 26, y + h * 0.48);
+            ctx.strokeStyle = 'rgba(212, 175, 55, 0.56)';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+
+        function drawDatePill(ctx, centerX, y) {
+            const text = inputs.dateText.value;
+            ctx.font = '900 34px "Noto Sans SC", "Microsoft YaHei", sans-serif';
+            const w = Math.max(246, ctx.measureText(text).width + 64);
+            const x = centerX - w / 2;
+
+            ctx.fillStyle = '#f5f7fb';
+            roundRect(ctx, x, y, w, 62, 31, true, false);
+            ctx.fillStyle = '#0b1f36';
+            ctx.fillText(text, centerX, y + 14);
+        }
+
+        function drawCoverImage(ctx, img, x, y, w, h) {
+            const imgRatio = img.width / img.height;
+            const boxRatio = w / h;
+            let drawWidth = w;
+            let drawHeight = h;
+            let offsetX = 0;
+            let offsetY = 0;
+
+            if (imgRatio > boxRatio) {
+                drawWidth = h * imgRatio;
+                offsetX = (w - drawWidth) / 2;
+            } else {
+                drawHeight = w / imgRatio;
+                offsetY = (h - drawHeight) / 2;
+            }
+            ctx.drawImage(img, x + offsetX, y + offsetY, drawWidth, drawHeight);
+        }
+
+        function drawWrappedText(ctx, text, x, y, maxWidth, lineHeight, maxLines) {
+            const lines = wrapLine(ctx, text, maxWidth).slice(0, maxLines);
+            lines.forEach((line, index) => ctx.fillText(line, x, y + index * lineHeight));
+        }
+
+        function drawCenteredWrappedText(ctx, text, centerX, y, maxWidth, lineHeight, maxLines) {
+            const lines = wrapLine(ctx, text, maxWidth).slice(0, maxLines);
+            lines.forEach((line, index) => ctx.fillText(line, centerX, y + index * lineHeight));
+        }
+
+        function wrapLine(ctx, text, maxWidth) {
+            const chars = Array.from(text || '');
+            const lines = [];
+            let current = '';
+
+            chars.forEach(char => {
+                const test = current + char;
+                if (ctx.measureText(test).width > maxWidth && current) {
+                    lines.push(current);
+                    current = char;
+                } else {
+                    current = test;
+                }
+            });
+
+            if (current) lines.push(current);
+            return lines.length ? lines : [''];
+        }
+
+        function roundRect(ctx, x, y, width, height, radius, fill, stroke) {
+            ctx.beginPath();
+            ctx.moveTo(x + radius, y);
+            ctx.lineTo(x + width - radius, y);
+            ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+            ctx.lineTo(x + width, y + height - radius);
+            ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+            ctx.lineTo(x + radius, y + height);
+            ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+            ctx.lineTo(x, y + radius);
+            ctx.quadraticCurveTo(x, y, x + radius, y);
+            ctx.closePath();
+            if (fill) ctx.fill();
+            if (stroke) ctx.stroke();
+        }
+
+        document.fonts.ready.then(draw);
+        draw();
+    </script>
+</body>
+</html>

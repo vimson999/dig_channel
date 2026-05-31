@@ -56,6 +56,8 @@ class SharedNavigation {
             return 'thumbnail-generator';
         } else if (filename === 'finance-cover-generator.html') {
             return 'finance-cover-generator';
+        } else if (filename === 'closed-door-card-cover-generator.html') {
+            return 'closed-door-card-cover-generator';
         } else if (filename === 'thumbnail-workbench.html') {
             return 'thumbnail-workbench';
         } else if (filename === 'thumbnail-generator-classic.html') {
@@ -98,6 +100,7 @@ class SharedNavigation {
             'thumbnail-workbench': '听见资本封面工作台',
             'thumbnail-generator': '研报封面生成器',
             'finance-cover-generator': '金融类视频封面生成器',
+            'closed-door-card-cover-generator': '内资闭门会封面生成器',
             'thumbnail-generator-classic': '经典研报封面生成器',
             'video-auto-generator': 'AI 视频自动生成',
             'podcast-visualizer': '播客视觉化',
@@ -371,6 +374,12 @@ class SharedNavigation {
                         name: '金融封面',
                         icon: 'fas fa-chart-pie',
                         href: 'finance-cover-generator.html'
+                    },
+                    {
+                        id: 'closed-door-card-cover-generator',
+                        name: '闭门会封面',
+                        icon: 'fas fa-chart-line',
+                        href: 'closed-door-card-cover-generator.html'
                     }
                 ]
             },
