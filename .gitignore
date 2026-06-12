@@ -139,12 +139,15 @@ node_modules/
 *.temp
 .tmp/
 .temp/venv-3.11/
+/tmp/
+/runtime/
 
 # Project Data
 data/generated_thumbnails/
 data/processed/
 data/uploads/
 data/zsxq/
+data/tasks/
 src/backend/data/uploads/
 .gemini/
 

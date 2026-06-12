@@ -40,6 +40,10 @@ const state = {
     current_audio_instance: null,
     aspect_ratio: '16:9',
     tasks: [],
+    renderWorker: null,
+    renderIdleSince: null,
+    renderWakeInFlight: false,
+    lastRenderWakeAt: 0,
     subtitle_y_pct: DEFAULT_SUBTITLE_Y_BY_RATIO['16:9']
 };
 
@@ -59,7 +63,11 @@ const elements = {
     clipEndInput: document.getElementById('clip-end'),
     activeClipName: document.getElementById('active-clip-name'),
     clipDurationVal: document.getElementById('clip-duration-val'),
-    clipTotalVal: document.getElementById('clip-total-val')
+    clipTotalVal: document.getElementById('clip-total-val'),
+    podcastEnabled: document.getElementById('podcast-visualizer-enabled'),
+    podcastOptions: document.getElementById('podcast-visualizer-options'),
+    podcastHeadlineSubtitle: document.getElementById('podcast-headline-subtitle'),
+    podcastTimeLabel: document.getElementById('podcast-time-label')
 };
 
 // --- 初始化 ---
@@ -192,13 +200,27 @@ function initEventListeners() {
     document.getElementById('zoom-out-btn')?.addEventListener('click', () => {
         applyZoom(parseInt(document.getElementById('timeline-zoom-slider').value) - 10);
     });
+    elements.podcastEnabled?.addEventListener('change', () => {
+        elements.podcastOptions?.classList.toggle('hidden', !elements.podcastEnabled.checked);
+        if (elements.podcastEnabled.checked && elements.podcastTimeLabel && !elements.podcastTimeLabel.value.trim()) {
+            elements.podcastTimeLabel.value = defaultPodcastTimeLabel();
+        }
+    });
 
     elements.taskList?.addEventListener('click', (e) => {
+        const requeueBtn = e.target.closest('[data-requeue-task-id]');
+        if (requeueBtn) {
+            e.preventDefault();
+            requeueTask(requeueBtn.dataset.requeueTaskId);
+            return;
+        }
+
         const applyBtn = e.target.closest('[data-apply-task-id]');
         if (!applyBtn) return;
         e.preventDefault();
         applyTaskConfig(applyBtn.dataset.applyTaskId);
     });
+    document.getElementById('recover-pending-btn')?.addEventListener('click', recoverPendingTasks);
 
     // 片段设置面板事件
     elements.clipStartInput?.addEventListener('change', (e) => {
@@ -526,9 +548,24 @@ let previousTaskStatuses = {};
 
 async function refreshTaskList() {
     try {
-        const res = await PublisherService.fetchTasks();
+        const [taskResult, celeryResult] = await Promise.allSettled([
+            PublisherService.fetchTasks(),
+            PublisherService.fetchCeleryStatus()
+        ]);
+
+        if (celeryResult.status === 'fulfilled' && celeryResult.value?.success) {
+            const services = celeryResult.value.data?.services || [];
+            state.renderWorker = services.find(item => item.id === 'render') || null;
+        }
+
+        if (taskResult.status === 'rejected') {
+            throw taskResult.reason;
+        }
+
+        const res = taskResult.value;
         const tasks = Array.isArray(res) ? res : (res.data || res.tasks || []);
-        const newTasks = tasks.slice(0, 10);
+        const videoTasks = tasks.filter(isVideoEditorTask);
+        const newTasks = videoTasks.slice(0, 10);
         
         let playNotification = false;
         let completedTaskTitle = "";
@@ -551,8 +588,15 @@ async function refreshTaskList() {
         }
 
         state.tasks = newTasks;
+        maybeAutoWakeRenderWorker();
         renderTaskList();
     } catch (err) { console.warn("Task fetch error", err); }
+}
+
+function isVideoEditorTask(task) {
+    const params = task?.params || {};
+    if (params.feature && params.feature !== 'publisher') return false;
+    return !!params.video || Array.isArray(params.audio_segments) || !!params.bilibili || !!params.thumbnail;
 }
 
 function playCompletionSound() {
@@ -604,9 +648,15 @@ function renderTaskList() {
         elements.taskList.innerHTML = `<div class="text-center p-10 opacity-20 text-[9px] uppercase font-black">No Tasks</div>`;
         return;
     }
+    const worker = getRenderWorkerSnapshot();
     elements.taskList.innerHTML = state.tasks.map(task => {
         const isCompleted = task.status === 'completed';
+        const errorMessage = task.error_message || '';
+        const invalidAssetError = /No valid audio clips|音频文件不存在|缺少音频配置/.test(errorMessage);
+        const canRequeue = !isCompleted && !invalidAssetError;
         const hasReusableConfig = !!task.params?.video || Array.isArray(task.params?.audio_segments);
+        const pendingMinutes = getTaskPendingMinutes(task);
+        const pendingNotice = getPendingNotice(task, pendingMinutes, worker);
         return `
             <div class="task-card bg-zinc-900 border border-zinc-800 p-3 rounded-lg ${task.status === 'failed' ? 'border-l-red-500' : (isCompleted ? 'border-l-emerald-500' : 'border-l-blue-500')}">
                 <div class="flex justify-between items-start">
@@ -615,14 +665,204 @@ function renderTaskList() {
                         <p class="text-[8px] text-zinc-500 font-mono mt-0.5">${task.status} | ${task.progress}%</p>
                     </div>
                 </div>
+                ${pendingNotice ? `<div class="mt-2 rounded border ${pendingNotice.className} px-2 py-1 text-[8px] font-bold">${pendingNotice.text}</div>` : ''}
+                ${errorMessage ? `<div class="mt-2 rounded border border-red-500/25 bg-red-500/10 px-2 py-1 text-[8px] font-bold text-red-300">失败：${escapeHtml(errorMessage)}</div>` : ''}
                 <div class="h-1 bg-zinc-800 rounded-full mt-2 overflow-hidden">
                     <div class="h-full bg-emerald-500 transition-all" style="width: ${task.progress}%"></div>
                 </div>
+                ${canRequeue ? `<button type="button" data-requeue-task-id="${task.id || task._id}" class="mt-2 mr-2 rounded bg-blue-600 px-2 py-1 text-[8px] font-black uppercase text-white hover:bg-blue-500">重新入队</button>` : ''}
                 ${hasReusableConfig ? `<button type="button" data-apply-task-id="${task.id || task._id}" class="mt-2 mr-2 rounded bg-zinc-800 px-2 py-1 text-[8px] font-black uppercase text-zinc-300 hover:bg-zinc-700">套用配置</button>` : ''}
                 ${isCompleted ? `<a href="${PublisherService.API_BASE}/resources/view?path=${encodeURIComponent(task.result.video_path)}" target="_blank" class="block mt-2 text-[8px] font-black text-emerald-500 uppercase hover:underline">Download Video</a>` : ''}
             </div>
         `;
     }).join('');
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function getRenderWorkerSnapshot() {
+    const render = state.renderWorker;
+    if (!render) {
+        return {
+            known: false,
+            running: false,
+            queueLength: 0,
+            active: 0,
+            reserved: 0,
+            scheduled: 0,
+            idle: true
+        };
+    }
+    const active = Number(render.active_count || 0);
+    const reserved = Number(render.reserved_count || 0);
+    const scheduled = Number(render.scheduled_count || 0);
+    return {
+        known: true,
+        running: !!render.running,
+        queueLength: Number(render.queue_length || 0),
+        active,
+        reserved,
+        scheduled,
+        idle: active === 0 && reserved === 0 && scheduled === 0
+    };
+}
+
+function getPendingNotice(task, pendingMinutes, worker) {
+    if (task.status !== 'pending' || pendingMinutes < 2) return null;
+
+    const minutes = Math.round(pendingMinutes);
+    if (!worker.known) {
+        return {
+            text: `pending ${minutes} 分钟，正在读取 worker 状态`,
+            className: 'border-zinc-700 bg-zinc-800/70 text-zinc-300'
+        };
+    }
+
+    if (!worker.running) {
+        return {
+            text: `pending ${minutes} 分钟，render worker 离线，可点“恢复”启动`,
+            className: 'border-red-500/30 bg-red-500/10 text-red-300'
+        };
+    }
+
+    if (worker.queueLength > 0 && worker.idle) {
+        return {
+            text: `队列有 ${worker.queueLength} 个任务但 worker 空闲，页面正在自动唤醒`,
+            className: 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+        };
+    }
+
+    if (worker.queueLength > 0) {
+        return {
+            text: `正常排队中：render 队列剩余 ${worker.queueLength} 个，当前执行 ${worker.active} 个`,
+            className: 'border-blue-500/30 bg-blue-500/10 text-blue-300'
+        };
+    }
+
+    return {
+        text: `pending ${minutes} 分钟，队列未发现该任务，可点“重新入队”`,
+        className: 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+    };
+}
+
+function getTaskPendingMinutes(task) {
+    const rawTime = task.updated_at || task.created_at;
+    if (!rawTime) return 0;
+    const ts = Date.parse(rawTime);
+    if (!Number.isFinite(ts)) return 0;
+    return Math.max(0, (Date.now() - ts) / 60000);
+}
+
+async function requeueTask(taskId) {
+    try {
+        const res = await PublisherService.requeueTask(taskId);
+        if (!res.success) {
+            throw new Error(res.error || res.message || '重新入队失败');
+        }
+        showToast('任务已重新入队', 'success');
+        await refreshTaskList();
+    } catch (err) {
+        console.error('Requeue task failed', err);
+        showToast(err.message || '重新入队失败', 'error');
+    }
+}
+
+async function recoverPendingTasks() {
+    const btn = document.getElementById('recover-pending-btn');
+    try {
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '处理中';
+            btn.classList.add('opacity-60');
+        }
+        const res = await PublisherService.recoverPendingTasks({ max_age_minutes: 2, limit: 10 });
+        if (!res.success) {
+            throw new Error(res.error || res.message || '恢复失败');
+        }
+        const data = res.data || {};
+        const recovered = Array.isArray(data.recovered) ? data.recovered.length : 0;
+        const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
+        const failed = Array.isArray(data.failed) ? data.failed.length : 0;
+        const wakeResult = await wakeRenderWorkerIfIdle();
+        const wakeText = wakeResult.restarted ? '，已唤醒 worker' : '';
+        showToast(`恢复 ${recovered} 个，队列中 ${skipped} 个，失败 ${failed} 个${wakeText}`, failed ? 'error' : 'success');
+        await refreshTaskList();
+    } catch (err) {
+        console.error('Recover pending tasks failed', err);
+        showToast(err.message || '恢复失败', 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '恢复';
+            btn.classList.remove('opacity-60');
+        }
+    }
+}
+
+async function wakeRenderWorkerIfIdle() {
+    const status = await PublisherService.fetchCeleryStatus();
+    if (!status.success) return { restarted: false };
+
+    const services = status.data?.services || [];
+    const render = services.find(item => item.id === 'render');
+    if (!render) return { restarted: false };
+
+    const hasBacklog = Number(render.queue_length || 0) > 0;
+    const idle = Number(render.active_count || 0) === 0
+        && Number(render.reserved_count || 0) === 0
+        && Number(render.scheduled_count || 0) === 0;
+
+    if (!render.running || !hasBacklog || !idle) {
+        return { restarted: false };
+    }
+
+    const restarted = await PublisherService.restartRenderWorker();
+    if (!restarted.success) {
+        throw new Error(restarted.message || restarted.error || 'worker 唤醒失败');
+    }
+    return { restarted: true };
+}
+
+async function maybeAutoWakeRenderWorker() {
+    const worker = getRenderWorkerSnapshot();
+    const shouldWake = worker.known && worker.running && worker.queueLength > 0 && worker.idle;
+    if (!shouldWake) {
+        state.renderIdleSince = null;
+        return;
+    }
+
+    const now = Date.now();
+    if (!state.renderIdleSince) {
+        state.renderIdleSince = now;
+        return;
+    }
+
+    if (now - state.renderIdleSince < 15000) return;
+    if (state.renderWakeInFlight || now - state.lastRenderWakeAt < 60000) return;
+
+    state.renderWakeInFlight = true;
+    state.lastRenderWakeAt = now;
+    try {
+        showToast('render 队列有积压，正在自动唤醒 worker', 'info');
+        const restarted = await PublisherService.restartRenderWorker();
+        if (!restarted.success) {
+            throw new Error(restarted.message || restarted.error || 'worker 自动唤醒失败');
+        }
+        showToast('render worker 已自动重启', 'success');
+        state.renderIdleSince = null;
+    } catch (err) {
+        console.error('Auto wake render worker failed', err);
+        showToast(err.message || 'worker 自动唤醒失败', 'error');
+    } finally {
+        state.renderWakeInFlight = false;
+    }
 }
 
 function applyTaskConfig(taskId) {
@@ -835,10 +1075,60 @@ async function handleSubmit() {
     console.log("🚀 [Task Submit] Payload:", payload);
     try {
         const res = await PublisherService.submitTask(payload);
-        if (res.success) { refreshTaskList(); elements.videoTitle.value = ""; }
+        if (res.success) {
+            if (elements.podcastEnabled?.checked) {
+                try {
+                    await submitPodcastVisualizerTask(finalTitle);
+                } catch (podcastError) {
+                    alert(`主视频任务已提交，但播客视觉化任务提交失败：${podcastError.message || podcastError}`);
+                }
+            }
+            refreshTaskList();
+            elements.videoTitle.value = "";
+        }
         else alert("错误: " + res.error);
-    } catch (err) { alert("提交失败"); }
+    } catch (err) { alert(`提交失败：${err.message || err}`); }
     finally { elements.submitBtn.disabled = false; elements.submitBtn.innerText = "提交合成任务"; }
+}
+
+async function submitPodcastVisualizerTask(title) {
+    const segment = state.audio_segments[0];
+    if (!segment?.path) throw new Error("播客视觉化缺少可用音频片段");
+    const payload = {
+        audio_path: segment.path,
+        title,
+        headline_subtitle: elements.podcastHeadlineSubtitle?.value.trim() || "",
+        subtitle: elements.podcastTimeLabel?.value.trim() || defaultPodcastTimeLabel(),
+        brand_text: "胶囊播客",
+        caption_text: "",
+        audio_start: segment.start ?? 0,
+        audio_end: Math.max((segment.start ?? 0) + 0.1, segment.duration - (segment.end_offset ?? 0)),
+        audio_speed: segment.speed || 1,
+        auto_asr: true,
+        asr_model: document.getElementById('asr-model').value,
+        fps: 30,
+        crf: 20
+    };
+    const response = await fetch(`${PublisherService.API_BASE}/documents/podcast-visualizer/submit-from-path`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+        throw new Error(data.message || data.error?.message || "播客视觉化任务提交失败");
+    }
+    return data;
+}
+
+function defaultPodcastTimeLabel() {
+    const formatter = new Intl.DateTimeFormat('sv-SE', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    });
+    return `${formatter.format(new Date())} / 精选片段`;
 }
 
 function updatePreview() {

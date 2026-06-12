@@ -103,6 +103,14 @@
                         <p id="topics-subtitle" class="text-sm text-slate-500 mt-1">选择一个星球后查看主题内容。</p>
                     </div>
                     <div class="zsxq-action-row flex flex-wrap items-center gap-2">
+                        <label id="attachment-view-filter-control" class="hidden inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-600">
+                            <span class="text-xs text-slate-400">列表筛选</span>
+                            <select id="attachment-view-filter-select" class="bg-transparent text-sm font-bold outline-none">
+                                <option value="all">显示全部</option>
+                                <option value="mp3">只看 MP3</option>
+                                <option value="pdf">只看 PDF</option>
+                            </select>
+                        </label>
                         <label id="attachment-type-control" class="hidden inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-600">
                             <span class="text-xs text-slate-400">附件类型</span>
                             <select id="attachment-type-select" class="bg-transparent text-sm font-bold outline-none">
@@ -129,6 +137,15 @@
                         <button id="sync-all-tabs-btn" class="hidden rounded-lg border border-slate-300 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50 transition-colors">
                             <i class="fas fa-arrows-rotate mr-2"></i>同步全部 Tab
                         </button>
+                        <button id="auto-sync-test-btn" class="hidden rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-bold text-amber-700 hover:bg-amber-100 transition-colors">
+                            <i class="fas fa-clock mr-2"></i>自动测试 3 轮
+                        </button>
+                        <button id="auto-sync-memo-test-btn" class="hidden rounded-lg border border-sky-300 bg-sky-50 px-4 py-2 text-sm font-bold text-sky-700 hover:bg-sky-100 transition-colors">
+                            <i class="fas fa-music mr-2"></i>调研纪要测试 3 轮
+                        </button>
+                        <button id="system-sync-test-config-btn" class="hidden rounded-lg border border-violet-300 bg-violet-50 px-4 py-2 text-sm font-bold text-violet-700 hover:bg-violet-100 transition-colors">
+                            <i class="fas fa-calendar-check mr-2"></i>保存系统计划配置
+                        </button>
                     </div>
                 </div>
                 <div id="topics-tabs" class="hidden border-b border-slate-200 px-5 py-3 overflow-x-hidden"></div>
@@ -140,7 +157,58 @@
             </section>
 
             <aside class="zsxq-right-panel space-y-4">
+                <div id="hot-rank-panel" class="bg-white border border-slate-200 rounded-lg shadow-sm px-5 py-4">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <div class="zsxq-side-title">热度排行</div>
+                            <p id="hot-rank-subtitle" class="text-xs text-slate-400">按当前列表附件下载次数排序</p>
+                        </div>
+                        <span id="hot-rank-count" class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-500">0</span>
+                    </div>
+                    <div id="hot-rank-list" class="mt-3 space-y-2">
+                        <div class="rounded-lg border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">暂无排行数据</div>
+                    </div>
+                </div>
                 <div id="sync-status" class="hidden"></div>
+                <div id="sync-batches-panel" class="hidden bg-white border border-slate-200 rounded-lg shadow-sm px-5 py-4"></div>
+                <div id="system-sync-scheduler-panel" class="hidden bg-white border border-slate-200 rounded-lg shadow-sm px-5 py-4 space-y-3">
+                    <div class="flex items-center justify-between gap-2">
+                        <div>
+                            <div class="zsxq-side-title">系统计划任务</div>
+                            <p class="text-xs text-slate-400">绑定当前配置后，可直接在此查看运行状态并控制执行。</p>
+                        </div>
+                        <span id="system-scheduler-status-badge" class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-500">未运行</span>
+                    </div>
+                    <div id="system-scheduler-content" class="text-xs text-slate-500">正在加载计划任务状态...</div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <label class="block">
+                            <span class="text-[11px] text-slate-500">间隔（分钟）</span>
+                            <input id="system-sync-interval-input" type="number" min="1" max="1440" step="1" value="5" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                        </label>
+                        <label class="block">
+                            <span class="text-[11px] text-slate-500">执行轮次（0 为持续）</span>
+                            <input id="system-sync-max-rounds-input" type="number" min="0" step="1" value="3" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                        </label>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <button id="system-sync-scheduler-run-once-btn" class="rounded-lg border border-sky-300 bg-sky-50 px-3 py-2 text-xs font-bold text-sky-700 hover:bg-sky-100 transition-colors">
+                            <i class="fas fa-play mr-2"></i>立即执行一次
+                        </button>
+                        <button id="system-sync-scheduler-start-btn" class="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 transition-colors">
+                            <i class="fas fa-forward mr-2"></i>启动计划任务
+                        </button>
+                        <button id="system-sync-scheduler-stop-btn" class="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs font-bold text-red-700 hover:bg-red-100 transition-colors">
+                            <i class="fas fa-stop mr-2"></i>停止计划任务
+                        </button>
+                        <button id="system-sync-scheduler-refresh-btn" class="rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors">
+                            <i class="fas fa-rotate mr-2"></i>刷新状态
+                        </button>
+                    </div>
+                    <button id="system-sync-scheduler-open-logs-btn" class="mt-1 hidden w-full rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-2 text-xs font-bold text-cyan-700 hover:bg-cyan-100 transition-colors">
+                        <i class="fas fa-list-ul mr-2"></i>查看最近日志
+                    </button>
+                    <pre id="system-sync-scheduler-logs" class="mt-2 hidden max-h-44 overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] leading-relaxed text-slate-500"></pre>
+                </div>
                 <div id="publish-panel" class="hidden bg-white border border-slate-200 rounded-lg shadow-sm px-5 py-4">
                     <div class="zsxq-side-title">发布</div>
                     <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px] gap-3">
@@ -167,6 +235,6 @@
     <script src="js/env.js"></script>
     <script src="js/config.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/zsxq-lab.js"></script>
+    <script src="js/zsxq-lab.js?v=20260609-system-sync-test-v5"></script>
 </body>
 </html>

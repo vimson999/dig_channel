@@ -16,12 +16,24 @@ def make_celery(app_name=__name__):
     redis_url = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
     broker_url = os.environ.get('CELERY_BROKER_URL', redis_url)
     backend_url = os.environ.get('CELERY_RESULT_BACKEND', redis_url)
+    broker_socket_timeout = int(os.environ.get('CELERY_BROKER_SOCKET_TIMEOUT', '30'))
+    broker_connect_timeout = int(os.environ.get('CELERY_BROKER_CONNECT_TIMEOUT', '5'))
+    broker_health_check_interval = int(os.environ.get('CELERY_BROKER_HEALTH_CHECK_INTERVAL', '30'))
+    broker_visibility_timeout = int(os.environ.get('CELERY_BROKER_VISIBILITY_TIMEOUT', '3600'))
     
     celery = Celery(
         app_name,
         backend=backend_url,
         broker=broker_url,
-        include=['tasks.publisher', 'tasks.downloader', 'tasks.podcast_visualizer', 'tasks.tts'] # Auto-discover tasks
+        include=[
+            'tasks.publisher',
+            'tasks.downloader',
+            'tasks.podcast_visualizer',
+            'tasks.tts',
+            'tasks.zsxq_sync',
+            'tasks.report_video',
+            'tasks.content_pipeline',
+        ] # Auto-discover tasks
     )
     
     celery.conf.update(
@@ -31,17 +43,60 @@ def make_celery(app_name=__name__):
         result_serializer='json',
         timezone='Asia/Shanghai',
         enable_utc=True,
+        # Business task state is stored in PostgreSQL. Avoid writing Celery
+        # result metadata to remote Redis after long-running jobs, because
+        # backend socket timeouts can make completed tasks look failed.
+        task_ignore_result=True,
+        task_store_errors_even_if_ignored=False,
+        result_backend_transport_options={
+            'socket_connect_timeout': 5,
+            'socket_timeout': 5,
+            'retry_on_timeout': False,
+        },
+        # These jobs are long-running and tracked in PostgreSQL. A worker may
+        # crash or be killed during FFmpeg/ASR work, so do not ack a task until
+        # it actually finishes. Also avoid prefetching multiple long jobs.
+        task_acks_late=True,
+        task_reject_on_worker_lost=True,
+        worker_cancel_long_running_tasks_on_connection_loss=False,
+        worker_prefetch_multiplier=1,
+        broker_connection_timeout=broker_connect_timeout,
+        broker_connection_retry=True,
+        broker_connection_retry_on_startup=True,
+        broker_transport_options={
+            'socket_connect_timeout': broker_connect_timeout,
+            'socket_timeout': broker_socket_timeout,
+            'retry_on_timeout': True,
+            'health_check_interval': broker_health_check_interval,
+            'visibility_timeout': broker_visibility_timeout,
+        },
+        task_publish_retry=False,
         task_default_queue='render',
         task_queues=(
             Queue('render', Exchange('render'), routing_key='render'),
             Queue('cloud_tts', Exchange('cloud_tts'), routing_key='cloud_tts'),
+            Queue('zsxq_sync', Exchange('zsxq_sync'), routing_key='zsxq_sync'),
+            Queue('podcast_visualizer', Exchange('podcast_visualizer'), routing_key='podcast_visualizer'),
+            Queue('report_video', Exchange('report_video'), routing_key='report_video'),
+            Queue('content_pipeline', Exchange('content_pipeline'), routing_key='content_pipeline'),
         ),
         task_routes={
             'tts.process_doubao_publication': {'queue': 'cloud_tts'},
             'tts.process_article': {'queue': 'cloud_tts'},
+            'tasks.zsxq_sync.run_zsxq_sync': {'queue': 'zsxq_sync'},
+            'tasks.report_video.parse_report_pdf_task': {'queue': 'report_video'},
+            'tasks.report_video.generate_ai_scripts_task': {'queue': 'report_video'},
+            'tasks.report_video.generate_videos_task': {'queue': 'report_video'},
+            'tasks.report_video.generate_topic_cards_task': {'queue': 'report_video'},
+            'tasks.report_video.generate_topic_clusters_task': {'queue': 'report_video'},
+            'tasks.report_video.generate_topic_video_script_task': {'queue': 'report_video'},
+            'tasks.report_video.process_audio_timeline_task': {'queue': 'report_video'},
+            'tasks.report_video.auto_process_report_task': {'queue': 'report_video'},
+            'tasks.report_video.scan_report_video_folder_task': {'queue': 'report_video'},
+            'tasks.content_pipeline.run_pdf_clean_task': {'queue': 'content_pipeline'},
             'tasks.publisher.run_publication_pipeline': {'queue': 'render'},
             'tasks.publisher.run_youtube_upload_only': {'queue': 'render'},
-            'tasks.podcast_visualizer.run_podcast_visualizer_task': {'queue': 'render'},
+            'tasks.podcast_visualizer.run_podcast_visualizer_task': {'queue': 'podcast_visualizer'},
             'tasks.downloader.download_video_task': {'queue': 'render'},
         },
     )

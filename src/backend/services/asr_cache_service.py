@@ -69,12 +69,18 @@ def _audio_source_fingerprint(file_path):
     }
 
 
-def _cache_key(source_path, model_size, start_seconds=None, end_seconds=None, speed=1.0):
+def _prompt_fingerprint(initial_prompt):
+    if not initial_prompt:
+        return None
+    return hashlib.sha256(str(initial_prompt).strip().encode('utf-8')).hexdigest()[:16]
+
+
+def _cache_key(source_path, model_size, start_seconds=None, end_seconds=None, speed=1.0, initial_prompt=None):
     fingerprint = _audio_source_fingerprint(source_path)
-    return _cache_key_for_fingerprint(fingerprint, model_size, start_seconds, end_seconds, speed)
+    return _cache_key_for_fingerprint(fingerprint, model_size, start_seconds, end_seconds, speed, initial_prompt)
 
 
-def _cache_key_for_fingerprint(fingerprint, model_size, start_seconds=None, end_seconds=None, speed=1.0):
+def _cache_key_for_fingerprint(fingerprint, model_size, start_seconds=None, end_seconds=None, speed=1.0, initial_prompt=None):
     payload = {
         'source': fingerprint,
         'start_seconds': _normalize_float(start_seconds, 0.0),
@@ -83,11 +89,14 @@ def _cache_key_for_fingerprint(fingerprint, model_size, start_seconds=None, end_
         'model_size': str(model_size or 'medium'),
         'segment_version': ASR_SEGMENT_VERSION,
     }
+    prompt_hash = _prompt_fingerprint(initial_prompt)
+    if prompt_hash:
+        payload['initial_prompt_hash'] = prompt_hash
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _cache_key_variants(source_path, model_size, start_seconds=None, end_seconds=None, speed=1.0):
+def _cache_key_variants(source_path, model_size, start_seconds=None, end_seconds=None, speed=1.0, initial_prompt=None):
     fingerprint = _audio_source_fingerprint(source_path)
     variants = []
     seen = set()
@@ -109,6 +118,7 @@ def _cache_key_variants(source_path, model_size, start_seconds=None, end_seconds
                 start_seconds=start_value,
                 end_seconds=end_value,
                 speed=speed,
+                initial_prompt=initial_prompt,
             )
             if key in seen:
                 continue
@@ -158,6 +168,8 @@ def transcribe_with_cache(
     end_seconds=None,
     speed=1.0,
     prepared_audio_path=None,
+    initial_prompt=None,
+    include_metadata=False,
 ):
     source_path = os.path.abspath(str(source_path))
     if not os.path.exists(source_path):
@@ -172,6 +184,7 @@ def transcribe_with_cache(
         start_seconds=start_seconds,
         end_seconds=end_seconds,
         speed=speed,
+        initial_prompt=initial_prompt,
     )
     key = key_variants[0]
     cache_path = ASR_CACHE_DIR / f'{key}.json'
@@ -184,7 +197,26 @@ def transcribe_with_cache(
         else:
             logger.info("⚡️ [ASR_CACHE] 命中字幕缓存别名: %s -> %s", candidate_key[:10], key[:10])
         with open(candidate_path, 'r', encoding='utf-8') as file:
-            return json.load(file)
+            segments = json.load(file)
+        if include_metadata:
+            return {
+                'segments': segments,
+                'metadata': {
+                    'cache_hit': True,
+                    'cache_key': key,
+                    'matched_cache_key': candidate_key,
+                    'cache_key_prefix': key[:10],
+                    'matched_cache_key_prefix': candidate_key[:10],
+                    'model_size': str(model_size or 'medium'),
+                    'start_seconds': _normalize_float(start_seconds, 0.0),
+                    'end_seconds': _normalize_float(end_seconds),
+                    'speed': _normalize_float(speed, 1.0),
+                    'initial_prompt_hash': _prompt_fingerprint(initial_prompt),
+                    'segment_version': ASR_SEGMENT_VERSION,
+                    'cache_path': str(candidate_path),
+                },
+            }
+        return segments
 
     start_seconds = _normalize_float(start_seconds, 0.0) or 0.0
     end_seconds = _normalize_float(end_seconds)
@@ -211,7 +243,12 @@ def transcribe_with_cache(
     )
     from services.asr_service import asr_service
 
-    segments = asr_service.transcribe(str(transcribe_path), return_segments=True, model_size=model_size)
+    segments = asr_service.transcribe(
+        str(transcribe_path),
+        return_segments=True,
+        model_size=model_size,
+        initial_prompt=initial_prompt,
+    )
 
     fd, temp_path = tempfile.mkstemp(prefix=f'{key}.', suffix='.tmp', dir=str(ASR_CACHE_DIR))
     try:
@@ -230,4 +267,22 @@ def transcribe_with_cache(
             os.remove(temp_path)
 
     logger.info("✅ [ASR_CACHE] 字幕缓存已写入: %s", key[:10])
+    if include_metadata:
+        return {
+            'segments': segments,
+            'metadata': {
+                'cache_hit': False,
+                'cache_key': key,
+                'matched_cache_key': key,
+                'cache_key_prefix': key[:10],
+                'matched_cache_key_prefix': key[:10],
+                'model_size': str(model_size or 'medium'),
+                'start_seconds': start_seconds,
+                'end_seconds': end_seconds,
+                'speed': speed,
+                'initial_prompt_hash': _prompt_fingerprint(initial_prompt),
+                'segment_version': ASR_SEGMENT_VERSION,
+                'cache_path': str(cache_path),
+            },
+        }
     return segments

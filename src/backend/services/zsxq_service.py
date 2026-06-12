@@ -391,10 +391,17 @@ class ZsxqService:
     def get_groups(self, cookie, count=50):
         return self.request(cookie, "/v2/groups", {"count": min(int(count), 50)})
 
+    HASHTAG_TOPICS_MAX_COUNT = 20
+
     def get_topics(self, cookie, group_id, count=20, scope="all", end_time=None, extra_params=None):
         hashtag_id = (extra_params or {}).get("hashtag_id")
         if hashtag_id:
-            return self.get_hashtag_topics(cookie, hashtag_id, count=count, end_time=end_time)
+            return self.get_hashtag_topics(
+                cookie,
+                hashtag_id,
+                count=min(max(int(count), 1), self.HASHTAG_TOPICS_MAX_COUNT),
+                end_time=end_time,
+            )
 
         path = f"/v2/groups/{group_id}/topics"
         params = {
@@ -428,7 +435,7 @@ class ZsxqService:
     def get_hashtag_topics(self, cookie, hashtag_id, count=20, end_time=None):
         path = f"/v2/hashtags/{hashtag_id}/topics"
         params = {
-            "count": min(max(int(count), 1), 50),
+            "count": min(max(int(count), 1), self.HASHTAG_TOPICS_MAX_COUNT),
         }
         if end_time:
             params["end_time"] = end_time

@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>研报导图视频工厂 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="css/report-video-factory.css?v=20260609-topic-flow" rel="stylesheet">
+</head>
+<body>
+    <main class="rv-shell">
+        <section class="rv-header">
+            <div>
+                <h1>研报导图视频工厂</h1>
+                <p>上传研报 PDF，可走单篇解读或批量主题策划；主题脚本应用后可直接进入音频匹配和视频生成。</p>
+            </div>
+            <div class="rv-phase-badge">PDF → AI → Video</div>
+        </section>
+
+        <section class="rv-layout">
+            <aside class="rv-sidebar">
+                <div class="rv-card">
+                    <div class="rv-card-head">
+                        <h2>新建任务</h2>
+                    </div>
+                    <form id="task-form" class="rv-form">
+                        <label>
+                            <span>任务名称</span>
+                            <input id="task-name" required placeholder="例如：2026-06-05 外资研报解读">
+                        </label>
+                        <div class="rv-grid-2">
+                            <label>
+                                <span>视频类型</span>
+                                <select id="video-type">
+                                    <option value="daily_digest">每日快报</option>
+                                    <option value="single_report">单篇解读</option>
+                                    <option value="topic_mix">主题串烧</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>默认段数</span>
+                                <select id="segment-count">
+                                    <option value="3">3 段</option>
+                                    <option value="4" selected>4 段</option>
+                                    <option value="5">5 段</option>
+                                </select>
+                            </label>
+                        </div>
+                        <label>
+                            <span>视频风格</span>
+                            <select id="video-style">
+                                <option value="professional_finance">专业财经</option>
+                                <option value="clean_feed">简洁信息流</option>
+                                <option value="knowledge_course">知识课件</option>
+                            </select>
+                        </label>
+                        <div>
+                            <span class="rv-label">输出比例</span>
+                            <div class="rv-check-row">
+                                <label><input type="checkbox" name="ratio" value="16:9" checked> 16:9</label>
+                                <label><input type="checkbox" name="ratio" value="9:16" checked> 9:16</label>
+                            </div>
+                        </div>
+                        <label class="rv-inline-check">
+                            <input id="generate-subtitles" type="checkbox" checked>
+                            <span>生成字幕</span>
+                        </label>
+                        <button class="rv-primary" type="submit">创建任务</button>
+                    </form>
+                </div>
+
+                <div class="rv-card rv-task-list-card">
+                    <div class="rv-card-head">
+                        <h2>任务列表</h2>
+                        <button id="refresh-tasks" class="rv-ghost" type="button">刷新</button>
+                    </div>
+                    <div id="task-list" class="rv-task-list">
+                        <div class="rv-empty">暂无任务</div>
+                    </div>
+                </div>
+            </aside>
+
+            <section class="rv-main">
+                <div id="empty-state" class="rv-empty-state">
+                    <div class="rv-empty-icon">PDF</div>
+                    <h2>选择或创建一个任务</h2>
+                    <p>先上传一个 PDF 完成解析，再继续生成文案、导图、音频和视频。</p>
+                </div>
+
+                <div id="task-workbench" class="rv-workbench hidden">
+                    <div class="rv-workbench-head">
+                        <div>
+                            <h2 id="active-task-name">任务名称</h2>
+                            <p id="active-task-meta">-</p>
+                        </div>
+                        <div id="active-task-status" class="rv-status">created</div>
+                    </div>
+
+                    <div class="rv-tabs">
+                        <button class="active" type="button" data-tab="reports">研报上传</button>
+                        <button type="button" data-tab="topics">主题策划</button>
+                        <button type="button" data-tab="scripts">单篇 AI 文案</button>
+                        <button type="button" data-tab="mindmap">思维导图</button>
+                        <button type="button" data-tab="audio">音频匹配</button>
+                        <button type="button" data-tab="video">视频生成</button>
+                        <button type="button" data-tab="automation">自动扫描</button>
+                        <button type="button" data-tab="prompts">AI 提示词</button>
+                    </div>
+
+                    <section id="tab-reports" class="rv-tab-panel">
+                        <div class="rv-upload-panel">
+                            <div>
+                                <h3>上传研报 PDF</h3>
+                                <p>文本型 PDF 直接抽取，扫描版或图片型 PDF 自动 OCR；大文件解析会稍慢。</p>
+                            </div>
+                            <div class="rv-upload-actions">
+                                <label class="rv-file-picker">
+                                    <input id="pdf-input" type="file" multiple accept="application/pdf,.pdf">
+                                    <span class="rv-file-picker-btn">选择 PDF</span>
+                                    <span id="pdf-file-summary" class="rv-file-summary">未选择文件</span>
+                                </label>
+                                <button id="upload-pdf-btn" class="rv-primary" type="button">上传并解析</button>
+                            </div>
+                        </div>
+
+                        <div class="rv-report-toolbar">
+                            <h3>研报列表</h3>
+                            <span id="report-summary">0 篇</span>
+                        </div>
+                        <div id="report-list" class="rv-report-list">
+                            <div class="rv-empty">还没有上传 PDF。</div>
+                        </div>
+                    </section>
+
+                    <section id="tab-topics" class="rv-tab-panel hidden">
+                        <div class="rv-topic-hero">
+                            <div>
+                                <h3>批量研报主题策划</h3>
+                                <p>先为每份研报生成摘要卡，再聚类出今日主题榜。外部热搜接口暂时预留，不伪造实时热度。</p>
+                            </div>
+                            <div class="rv-toolbar-actions">
+                                <button id="generate-topic-cards-btn" class="rv-primary small" type="button">生成摘要卡</button>
+                                <button id="generate-topic-clusters-btn" class="rv-primary small" type="button">生成主题榜</button>
+                            </div>
+                        </div>
+
+                        <div class="rv-topic-grid">
+                            <section class="rv-topic-section">
+                                <div class="rv-report-toolbar">
+                                    <h3>研报摘要卡</h3>
+                                    <span id="topic-card-summary">0 张</span>
+                                </div>
+                                <div id="topic-card-list" class="rv-topic-card-list">
+                                    <div class="rv-empty">还没有生成摘要卡。</div>
+                                </div>
+                            </section>
+
+                            <section class="rv-topic-section">
+                                <div class="rv-report-toolbar">
+                                    <h3>今日主题榜</h3>
+                                    <span id="topic-rank-summary">0 个主题</span>
+                                </div>
+                                <div id="topic-rank-list" class="rv-topic-rank-list">
+                                    <div class="rv-empty">生成主题榜后会显示可制作主题。</div>
+                                </div>
+                            </section>
+                        </div>
+
+                        <section class="rv-topic-detail">
+                            <div class="rv-report-toolbar">
+                                <div>
+                                    <h3>主题详情</h3>
+                                    <p id="topic-detail-summary">选择主题后生成主题脚本；应用脚本后可直接进入音频匹配，不需要再生成单篇 AI 文案。</p>
+                                </div>
+                                <div class="rv-toolbar-actions">
+                                    <button id="generate-topic-script-btn" class="rv-primary small" type="button" disabled>生成主题脚本</button>
+                                    <button id="apply-topic-script-btn" class="rv-ghost small" type="button" disabled>应用为视频脚本</button>
+                                </div>
+                            </div>
+                            <div id="topic-detail-panel" class="rv-topic-detail-panel">
+                                <div class="rv-empty">请先在主题榜里选择一个主题。</div>
+                            </div>
+                        </section>
+                    </section>
+
+                    <section id="tab-scripts" class="rv-tab-panel hidden">
+                        <div class="rv-ai-panel">
+                            <div>
+                                <h3>单篇 AI 文案生成</h3>
+                                <p>仅用于“单篇解读/逐篇研报”链路。若你已经在“主题策划”生成并应用主题脚本，可直接进入音频匹配。</p>
+                            </div>
+                            <button id="generate-ai-btn" class="rv-primary" type="button">生成 AI 文案</button>
+                        </div>
+                        <div class="rv-report-toolbar">
+                            <h3>文案结果</h3>
+                            <span id="script-summary">0 篇就绪</span>
+                        </div>
+                        <div id="script-list" class="rv-script-list">
+                            <div class="rv-empty">还没有生成文案。</div>
+                        </div>
+                    </section>
+
+                    <section id="tab-mindmap" class="rv-tab-panel hidden">
+                        <div class="rv-report-toolbar">
+                            <h3>思维导图预览</h3>
+                            <span id="mindmap-summary">0 个导图</span>
+                        </div>
+                        <div id="mindmap-list" class="rv-mindmap-list">
+                            <div class="rv-empty">生成 AI 文案后会显示导图节点。</div>
+                        </div>
+                    </section>
+
+                    <section id="tab-audio" class="rv-tab-panel hidden">
+                        <div class="rv-report-toolbar">
+                            <div>
+                                <h3>TTS 文案</h3>
+                                <p>先按下面的段落生成音频；文件名建议使用推荐名称，上传后会自动匹配。</p>
+                            </div>
+                            <div class="rv-toolbar-actions">
+                                <span id="tts-script-summary">0 段</span>
+                                <button id="copy-all-tts-btn" class="rv-primary small" type="button">复制视频口播稿</button>
+                                <button id="copy-tts-manifest-btn" class="rv-ghost" type="button">复制制作清单</button>
+                            </div>
+                        </div>
+                        <div id="tts-script-list" class="rv-tts-list">
+                            <div class="rv-empty">生成 AI 文案后会显示可用于 TTS 的口播稿。</div>
+                        </div>
+
+                        <div class="rv-upload-panel">
+                            <div>
+                                <h3>音频匹配</h3>
+                                <p>分段音频可按文件名匹配；整片音频优先使用上传 SRT/时间轴。未上传 SRT 时默认整片 ASR 生成真实字幕，再用于画面节点匹配。</p>
+                            </div>
+                            <div class="rv-upload-actions">
+                                <div class="rv-audio-mode">
+                                    <label>
+                                        <input type="radio" name="audio-mode" value="segments" checked>
+                                        分段音频
+                                    </label>
+                                    <label>
+                                        <input type="radio" name="audio-mode" value="full_audio_srt">
+                                        整片音频 + 时间轴
+                                    </label>
+                                </div>
+                                <label class="rv-file-picker">
+                                    <input id="audio-input" type="file" multiple accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg">
+                                    <span class="rv-file-picker-btn">选择音频</span>
+                                    <span id="audio-file-summary" class="rv-file-summary">未选择文件</span>
+                                </label>
+                                <label class="rv-file-picker rv-timeline-picker">
+                                    <input id="timeline-input" type="file" accept=".srt,.txt,text/plain">
+                                    <span class="rv-file-picker-btn">选择 SRT/时间轴</span>
+                                    <span id="timeline-file-summary" class="rv-file-summary">未选择文件</span>
+                                </label>
+                                <label class="rv-audio-option rv-force-asr-option">
+                                    <input id="force-asr-timeline" type="checkbox" checked>
+                                    <span>
+                                        <strong>无 SRT 时使用 ASR 生成真实字幕</strong>
+                                        <small>默认开启；关闭后才允许按口播稿时长推算。</small>
+                                    </span>
+                                </label>
+                                <label class="rv-audio-option rv-speed-option">
+                                    <span>
+                                        <strong>整片音频语速</strong>
+                                        <small>先变速，再基于最终音频做 ASR/字幕匹配。</small>
+                                    </span>
+                                    <select id="audio-speed-select" class="rv-select">
+                                        <option value="1.0">原速 1.0x</option>
+                                        <option value="1.2" selected>推荐 1.2x</option>
+                                        <option value="1.3">偏快 1.3x</option>
+                                    </select>
+                                </label>
+                                <div class="rv-timeline-paste">
+                                    <div class="rv-timeline-paste-head">
+                                        <strong>时间轴文本</strong>
+                                        <span>可粘贴 00:00-00:10 格式内容；留空时按上方选项生成</span>
+                                    </div>
+                                    <textarea id="timeline-text-input" class="rv-timeline-text" rows="6" placeholder="00:00-00:10 | 大家好，今天快速看 3 份研报的核心观点。&#10;00:10-00:27 | 第一份，日本利率策略：10年期日本国债能反弹多少？"></textarea>
+                                </div>
+                                <button id="upload-audio-btn" class="rv-primary" type="button">上传并匹配</button>
+                            </div>
+                        </div>
+                        <div class="rv-report-toolbar">
+                            <h3>音频列表</h3>
+                            <span id="audio-summary">0 个音频</span>
+                        </div>
+                        <div id="audio-list" class="rv-audio-list">
+                            <div class="rv-empty">还没有上传音频。</div>
+                        </div>
+                    </section>
+
+                    <section id="tab-video" class="rv-tab-panel hidden">
+                        <div class="rv-ai-panel">
+                            <div>
+                                <h3>视频生成</h3>
+                                <p>横屏生成导图聚焦画面，竖屏生成节点卡片。没有音频时按 segment 预估时长生成静音测试视频。</p>
+                            </div>
+                            <button id="generate-video-btn" class="rv-primary" type="button">生成视频</button>
+                        </div>
+                        <div class="rv-report-toolbar">
+                            <h3>输出列表</h3>
+                            <span id="video-summary">0 个视频</span>
+                        </div>
+                        <div id="video-output-list" class="rv-output-list">
+                            <div class="rv-empty">还没有生成视频。</div>
+                        </div>
+                    </section>
+
+                    <section id="tab-automation" class="rv-tab-panel hidden">
+                        <div class="rv-ai-panel">
+                            <div>
+                                <h3>自动扫描制作</h3>
+                                <p>定时扫描指定文件夹，新 PDF 会自动创建单篇研报视频任务；已生成过视频或正在处理的 PDF 会跳过。</p>
+                            </div>
+                            <div class="rv-toolbar-actions">
+                                <button id="preview-auto-scan-btn" class="rv-ghost" type="button">扫描预览</button>
+                                <button id="run-auto-scan-btn" class="rv-primary" type="button">立即扫描入队</button>
+                            </div>
+                        </div>
+
+                        <div class="rv-auto-grid">
+                            <section class="rv-auto-config">
+                                <label class="rv-inline-check">
+                                    <input id="auto-scan-enabled" type="checkbox">
+                                    <span>启用计划任务</span>
+                                </label>
+                                <label>
+                                    <span>扫描文件夹</span>
+                                    <input id="auto-scan-dir" placeholder="伯恩斯坦">
+                                </label>
+                                <div class="rv-grid-2">
+                                    <label>
+                                        <span>每天执行时间</span>
+                                        <input id="auto-scan-time" type="time" value="00:00">
+                                    </label>
+                                    <label>
+                                        <span>测试间隔分钟</span>
+                                        <input id="auto-scan-interval" type="number" min="0" placeholder="留空则按每天时间">
+                                    </label>
+                                </div>
+                                <div class="rv-grid-2">
+                                    <label>
+                                        <span>单次最多处理</span>
+                                        <input id="auto-scan-max-files" type="number" min="1" value="2">
+                                    </label>
+                                    <label>
+                                        <span>默认段数</span>
+                                        <select id="auto-scan-segment-count">
+                                            <option value="3">3 段</option>
+                                            <option value="4" selected>4 段</option>
+                                            <option value="5">5 段</option>
+                                        </select>
+                                    </label>
+                                </div>
+                                <div>
+                                    <span class="rv-label">输出比例</span>
+                                    <div class="rv-check-row">
+                                        <label><input id="auto-scan-ratio-16" type="checkbox" value="16:9" checked> 16:9</label>
+                                        <label><input id="auto-scan-ratio-9" type="checkbox" value="9:16"> 9:16</label>
+                                    </div>
+                                </div>
+                                <button id="save-auto-scan-btn" class="rv-primary" type="button">保存计划配置</button>
+                                <p class="rv-muted">调度进程使用 <code>./scripts/dev/run-report-video-auto-scheduler.sh</code> 启动；页面的“立即扫描入队”不依赖等待计划时间。</p>
+                            </section>
+
+                            <section class="rv-auto-preview">
+                                <div class="rv-report-toolbar">
+                                    <h3>扫描结果</h3>
+                                    <span id="auto-scan-summary">尚未扫描</span>
+                                </div>
+                                <div id="auto-scan-list" class="rv-auto-list">
+                                    <div class="rv-empty">点击“扫描预览”查看文件夹里的 PDF 状态。</div>
+                                </div>
+                            </section>
+                        </div>
+                    </section>
+
+                    <section id="tab-prompts" class="rv-tab-panel hidden">
+                        <div class="rv-ai-panel">
+                            <div>
+                                <h3>AI 提示词</h3>
+                                <p>这里集中管理研报视频链路里会让 AI 或 ASR 介入的提示词，修改后下一次任务会使用新版本。</p>
+                            </div>
+                            <button id="refresh-prompts-btn" class="rv-ghost" type="button">刷新提示词</button>
+                        </div>
+                        <div class="rv-prompt-grid">
+                            <div id="prompt-list" class="rv-prompt-list">
+                                <div class="rv-empty">加载中...</div>
+                            </div>
+                            <div class="rv-prompt-editor">
+                                <div class="rv-report-toolbar">
+                                    <div>
+                                        <h3 id="prompt-editor-title">选择一个提示词</h3>
+                                        <p id="prompt-editor-meta">可查看用途、系统提示词和用户提示词。</p>
+                                    </div>
+                                    <div class="rv-toolbar-actions">
+                                        <button id="reset-prompt-btn" class="rv-ghost" type="button" disabled>恢复默认</button>
+                                        <button id="save-prompt-btn" class="rv-primary small" type="button" disabled>保存提示词</button>
+                                    </div>
+                                </div>
+                                <label>
+                                    <span>System Prompt</span>
+                                    <textarea id="prompt-system-input" rows="5" placeholder="部分环节可能为空"></textarea>
+                                </label>
+                                <label>
+                                    <span>User Prompt</span>
+                                    <textarea id="prompt-user-input" rows="18" placeholder="选择左侧提示词后编辑"></textarea>
+                                </label>
+                                <p class="rv-muted">模板变量使用 <code>$text</code>、<code>$file_name</code>、<code>$cards_json</code> 这类格式；保存后无需重启前端。</p>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </section>
+        </section>
+    </main>
+
+    <div id="text-modal" class="rv-modal hidden">
+        <div class="rv-modal-panel">
+            <div class="rv-modal-head">
+                <div>
+                    <h3 id="text-modal-title">正文预览</h3>
+                    <p id="text-modal-meta">cleaned_text</p>
+                </div>
+                <button id="close-text-modal" type="button">关闭</button>
+            </div>
+            <pre id="text-modal-body"></pre>
+        </div>
+    </div>
+
+    <script src="js/config.js"></script>
+    <script src="js/env.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/shared-navigation.js"></script>
+    <script src="js/report-video-factory.js?v=20260609-topic-flow"></script>
+</body>
+</html>

@@ -41,6 +41,7 @@ PODCAST_AUDIO_MAX_FILE_SIZE = 300 * 1024 * 1024
 PODCAST_TEMPLATE_MAX_FILE_SIZE = 30 * 1024 * 1024
 LONG_IMAGE_MAX_PAGES = 80
 LONG_IMAGE_MAX_PIXELS = 180_000_000
+PODCAST_AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.flac', '.ogg'}
 PODCAST_TEMPLATE_PATH = (
     Path(__file__).resolve().parents[3]
     / 'frontend'
@@ -51,6 +52,39 @@ PODCAST_TEMPLATE_PATH = (
 PODCAST_VISUALIZER_RENDERER_VERSION = '20260520-audio-controls-v9'
 PODCAST_PREVIEW_CACHE_DIR = Path(tempfile.gettempdir()) / 'shioa_podcast_preview_cache'
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
+def _is_podcast_visualizer_task(task):
+    params = task.params if isinstance(task.params, dict) else {}
+    return params.get('feature') == 'podcast_visualizer'
+
+def _enqueue_podcast_visualizer_task(task):
+    from models import db
+    from tasks.podcast_visualizer import run_podcast_visualizer_task
+
+    try:
+        celery_task = run_podcast_visualizer_task.apply_async(
+            args=[task.id],
+            queue='podcast_visualizer',
+            retry=False,
+        )
+    except Exception as exc:
+        logger.exception("Podcast visualizer task enqueue failed: %s", task.id)
+        task.status = 'failed'
+        task.current_step = 'failed'
+        task.progress = 0
+        task.error_message = f'播客任务入队失败: {exc}'
+        task.completed_at = datetime.utcnow()
+        db.session.commit()
+        raise
+
+    task.celery_task_id = celery_task.id
+    task.status = 'pending'
+    task.current_step = 'init'
+    task.progress = 0
+    task.error_message = None
+    task.completed_at = None
+    db.session.commit()
+    return celery_task
 
 def allowed_file(filename, source_format):
     """检查文件扩展名是否被允许"""
@@ -300,6 +334,15 @@ def _probe_media_duration(media_path):
         timeout=30,
     )
     return max(0.1, float(result.stdout.strip()))
+
+def _is_supported_podcast_audio_path(path_obj):
+    if path_obj.suffix.lower() in PODCAST_AUDIO_EXTENSIONS:
+        return True
+    try:
+        _probe_media_duration(str(path_obj))
+        return True
+    except Exception:
+        return False
 
 def _parse_timecode(value):
     value = str(value or '').strip()
@@ -1397,7 +1440,7 @@ def generate_podcast_visualizer():
             return jsonify({'success': False, 'message': '请选择音频文件'}), 400
 
         audio_ext = os.path.splitext(audio.filename.lower())[1]
-        if audio_ext not in {'.mp3', '.m4a', '.wav', '.aac', '.flac', '.ogg'}:
+        if audio_ext not in PODCAST_AUDIO_EXTENSIONS:
             return jsonify({'success': False, 'message': '音频格式仅支持 mp3、m4a、wav、aac、flac、ogg'}), 400
 
         audio.seek(0, 2)
@@ -1573,7 +1616,6 @@ def generate_podcast_visualizer():
 def submit_podcast_visualizer_task():
     from models import db
     from models.task import PublicationTask
-    from tasks.podcast_visualizer import run_podcast_visualizer_task
     from sqlalchemy.orm.attributes import flag_modified
 
     try:
@@ -1582,7 +1624,7 @@ def submit_podcast_visualizer_task():
             return jsonify({'success': False, 'message': '请选择音频文件'}), 400
 
         audio_ext = os.path.splitext(audio.filename.lower())[1]
-        if audio_ext not in {'.mp3', '.m4a', '.wav', '.aac', '.flac', '.ogg'}:
+        if audio_ext not in PODCAST_AUDIO_EXTENSIONS:
             return jsonify({'success': False, 'message': '音频格式仅支持 mp3、m4a、wav、aac、flac、ogg'}), 400
 
         srt_file = request.files.get('srt')
@@ -1636,9 +1678,10 @@ def submit_podcast_visualizer_task():
         task.params = params
         flag_modified(task, 'params')
         db.session.commit()
-        celery_task = run_podcast_visualizer_task.apply_async(args=[task.id], queue='render')
-        task.celery_task_id = celery_task.id
-        db.session.commit()
+        try:
+            celery_task = _enqueue_podcast_visualizer_task(task)
+        except Exception:
+            return jsonify({'success': False, 'message': task.error_message}), 502
 
         return jsonify({
             'success': True,
@@ -1648,6 +1691,80 @@ def submit_podcast_visualizer_task():
         })
     except Exception as exc:
         logger.error(f"提交播客视觉化任务失败: {exc}", exc_info=True)
+        return jsonify({'success': False, 'message': str(exc)}), 500
+
+@bp.route('/podcast-visualizer/submit-from-path', methods=['POST'])
+def submit_podcast_visualizer_task_from_path():
+    from models import db
+    from models.task import PublicationTask
+
+    try:
+        data = request.get_json(silent=True) or {}
+        audio_path = str(data.get('audio_path') or '').strip()
+        if not audio_path:
+            return jsonify({'success': False, 'message': 'audio_path 不能为空'}), 400
+
+        path_obj = Path(audio_path)
+        if not path_obj.is_absolute():
+            path_obj = PROJECT_ROOT / path_obj
+        path_obj = path_obj.resolve()
+        project_root = PROJECT_ROOT.resolve()
+        try:
+            path_obj.relative_to(project_root)
+        except ValueError:
+            return jsonify({'success': False, 'message': '音频路径必须位于项目目录内'}), 400
+
+        if not path_obj.exists() or not path_obj.is_file():
+            return jsonify({'success': False, 'message': '音频文件不存在'}), 400
+        if not _is_supported_podcast_audio_path(path_obj):
+            return jsonify({'success': False, 'message': '音频格式仅支持 mp3、m4a、wav、aac、flac、ogg'}), 400
+
+        try:
+            audio_start = _parse_timecode(data.get('audio_start'))
+            audio_end = _parse_timecode(data.get('audio_end'))
+            audio_speed = _parse_audio_speed(data.get('audio_speed', 1))
+            if audio_start is not None and audio_end is not None and audio_end <= audio_start:
+                raise ValueError('截止时间必须晚于开始时间')
+            params = {
+                'feature': 'podcast_visualizer',
+                'podcast_visualizer': {
+                    'title': str(data.get('title') or '').strip() or '播客标题',
+                    'subtitle': str(data.get('subtitle') or '').strip(),
+                    'headline_subtitle': str(data.get('headline_subtitle') or '').strip(),
+                    'brand_text': str(data.get('brand_text') or '').strip() or '胶囊播客',
+                    'caption_text': str(data.get('caption_text') or '').strip(),
+                    'audio_start': audio_start,
+                    'audio_end': audio_end,
+                    'audio_speed': audio_speed,
+                    'orientation': 'landscape',
+                    'fps': int(data.get('fps') or 30),
+                    'crf': int(data.get('crf') or 20),
+                    'auto_asr': bool(data.get('auto_asr', True)),
+                    'asr_model': str(data.get('asr_model') or 'medium').strip() or 'medium',
+                    'renderer_version': PODCAST_VISUALIZER_RENDERER_VERSION,
+                    'audio_path': str(path_obj),
+                    'source': 'video_editor',
+                }
+            }
+        except ValueError as exc:
+            return jsonify({'success': False, 'message': str(exc)}), 400
+
+        task = PublicationTask(params=params)
+        db.session.add(task)
+        db.session.commit()
+        try:
+            celery_task = _enqueue_podcast_visualizer_task(task)
+        except Exception:
+            return jsonify({'success': False, 'message': task.error_message}), 502
+
+        return jsonify({
+            'success': True,
+            'task_id': task.id,
+            'celery_id': celery_task.id,
+            'message': '播客视频任务已提交'
+        })
+    except Exception as exc:
+        logger.error(f"从音频路径提交播客视觉化任务失败: {exc}", exc_info=True)
         return jsonify({'success': False, 'message': str(exc)}), 500
 
 @bp.route('/podcast-visualizer/preview-frame', methods=['POST'])
@@ -1791,6 +1908,41 @@ def list_podcast_visualizer_tasks():
             'total_pages': total_pages,
         },
     })
+
+@bp.route('/podcast-visualizer/requeue/<task_id>', methods=['POST'])
+def requeue_podcast_visualizer_task(task_id):
+    from models import db
+    from models.task import PublicationTask
+
+    try:
+        task = PublicationTask.query.get(task_id)
+        if not task:
+            return jsonify({'success': False, 'message': '任务不存在'}), 404
+        if not _is_podcast_visualizer_task(task):
+            return jsonify({'success': False, 'message': '只能重新入队播客视觉化任务'}), 400
+
+        task.result = {}
+        task.status = 'pending'
+        task.current_step = 'init'
+        task.progress = 0
+        task.error_message = None
+        task.completed_at = None
+        db.session.commit()
+
+        try:
+            celery_task = _enqueue_podcast_visualizer_task(task)
+        except Exception:
+            return jsonify({'success': False, 'message': task.error_message}), 502
+
+        return jsonify({
+            'success': True,
+            'message': '播客任务已重新入队',
+            'task_id': task.id,
+            'celery_id': celery_task.id,
+        })
+    except Exception as exc:
+        logger.error(f"播客任务重新入队失败: {exc}", exc_info=True)
+        return jsonify({'success': False, 'message': str(exc)}), 500
 
 @bp.route('/podcast-visualizer/task/<task_id>', methods=['GET'])
 def get_podcast_visualizer_task(task_id):

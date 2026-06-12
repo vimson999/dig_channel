@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF 工具平台 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <main class="mx-auto max-w-[1280px] px-6 py-6">
+        <div class="mb-5 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+            <div>
+                <nav class="mb-2 flex items-center gap-2 text-sm text-slate-500">
+                    <a href="index.html" class="hover:text-blue-600">首页</a>
+                    <i class="fas fa-chevron-right text-xs"></i>
+                    <span>工具箱</span>
+                    <i class="fas fa-chevron-right text-xs"></i>
+                    <span class="text-slate-700">PDF 工具平台</span>
+                </nav>
+                <h1 class="text-2xl font-black tracking-tight">PDF 工具平台</h1>
+                <p class="mt-1 text-sm text-slate-500">集成外部 PDF 智能清洗、解析、批量处理与音频裁剪能力。</p>
+            </div>
+            <div id="service-status" class="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-500">
+                <i class="fas fa-circle-notch fa-spin mr-2"></i>检查服务中
+            </div>
+        </div>
+
+        <section class="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+            <div class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                    <div>
+                        <h2 class="text-lg font-black">PDF Smart Tool</h2>
+                        <p class="mt-1 text-sm text-slate-500">外部服务地址：<span class="font-mono text-slate-700">http://127.0.0.1:5005</span></p>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        <a href="http://127.0.0.1:5005" target="_blank" class="rounded-lg bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800">
+                            <i class="fas fa-arrow-up-right-from-square mr-2"></i>打开平台
+                        </a>
+                        <button id="refresh-status-btn" class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                            <i class="fas fa-rotate mr-2"></i>刷新状态
+                        </button>
+                    </div>
+                </div>
+
+                <div class="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <a href="http://127.0.0.1:5005" target="_blank" class="rounded-lg border border-slate-200 bg-slate-50 p-4 hover:border-blue-300 hover:bg-blue-50">
+                        <div class="flex items-center gap-3">
+                            <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100 text-blue-700"><i class="fas fa-droplet"></i></span>
+                            <div>
+                                <div class="font-black">智能清洗</div>
+                                <div class="mt-1 text-xs text-slate-500">PDF 去水印、漂白、OCR 文字层重构。</div>
+                            </div>
+                        </div>
+                    </a>
+                    <a href="http://127.0.0.1:5005/analyzer" target="_blank" class="rounded-lg border border-slate-200 bg-slate-50 p-4 hover:border-blue-300 hover:bg-blue-50">
+                        <div class="flex items-center gap-3">
+                            <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-100 text-violet-700"><i class="fas fa-magnifying-glass-chart"></i></span>
+                            <div>
+                                <div class="font-black">深度解析</div>
+                                <div class="mt-1 text-xs text-slate-500">分析 PDF 类型、水印结构和处理建议。</div>
+                            </div>
+                        </div>
+                    </a>
+                    <a href="http://127.0.0.1:5005/batch" target="_blank" class="rounded-lg border border-slate-200 bg-slate-50 p-4 hover:border-blue-300 hover:bg-blue-50">
+                        <div class="flex items-center gap-3">
+                            <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700"><i class="fas fa-folder-check"></i></span>
+                            <div>
+                                <div class="font-black">批量清洗</div>
+                                <div class="mt-1 text-xs text-slate-500">对本地目录内 PDF 批量处理并输出结果。</div>
+                            </div>
+                        </div>
+                    </a>
+                    <a href="http://127.0.0.1:5005/toolbox" target="_blank" class="rounded-lg border border-slate-200 bg-slate-50 p-4 hover:border-blue-300 hover:bg-blue-50">
+                        <div class="flex items-center gap-3">
+                            <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-100 text-amber-700"><i class="fas fa-screwdriver-wrench"></i></span>
+                            <div>
+                                <div class="font-black">工具箱</div>
+                                <div class="mt-1 text-xs text-slate-500">PDF 拆分、保护、转换等辅助能力。</div>
+                            </div>
+                        </div>
+                    </a>
+                    <a href="http://127.0.0.1:5005/audio" target="_blank" class="rounded-lg border border-slate-200 bg-slate-50 p-4 hover:border-blue-300 hover:bg-blue-50">
+                        <div class="flex items-center gap-3">
+                            <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-100 text-cyan-700"><i class="fas fa-wave-square"></i></span>
+                            <div>
+                                <div class="font-black">音频裁剪</div>
+                                <div class="mt-1 text-xs text-slate-500">本地音频文件裁剪与整理。</div>
+                            </div>
+                        </div>
+                    </a>
+                    <a href="http://127.0.0.1:5005/dashboard" target="_blank" class="rounded-lg border border-slate-200 bg-slate-50 p-4 hover:border-blue-300 hover:bg-blue-50">
+                        <div class="flex items-center gap-3">
+                            <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-rose-100 text-rose-700"><i class="fas fa-gauge-high"></i></span>
+                            <div>
+                                <div class="font-black">审计仪表盘</div>
+                                <div class="mt-1 text-xs text-slate-500">查看处理日志、批量任务和运行记录。</div>
+                            </div>
+                        </div>
+                    </a>
+                </div>
+            </div>
+
+            <aside class="space-y-4">
+                <div class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                    <h2 class="text-base font-black">启动方式</h2>
+                    <div class="mt-3 space-y-2 text-sm text-slate-600">
+                        <div class="rounded-md bg-slate-50 px-3 py-2 font-mono text-xs">cd /Users/v9/Documents/3---work/06---dev---python/pytest</div>
+                        <div class="rounded-md bg-slate-50 px-3 py-2 font-mono text-xs">source venv/bin/activate</div>
+                        <div class="rounded-md bg-slate-50 px-3 py-2 font-mono text-xs">python run.py</div>
+                    </div>
+                    <p class="mt-3 text-xs leading-5 text-slate-500">如果需要异步处理大 PDF，还要按该项目 README 启动 Redis 和 Celery worker。</p>
+                </div>
+
+                <div class="rounded-lg border border-amber-200 bg-amber-50 p-5 text-sm text-amber-800">
+                    <div class="font-black"><i class="fas fa-triangle-exclamation mr-2"></i>集成边界</div>
+                    <p class="mt-2 leading-6">当前是菜单级轻集成，不迁移代码、不共享队列、不写入外部项目。后续深度集成时需要把 Redis 地址改为环境变量，并给 PDF 任务独立队列。</p>
+                </div>
+            </aside>
+        </section>
+    </main>
+
+    <script src="js/shared-navigation.js?v=20260603-pdf-tools"></script>
+    <script src="js/pdf-tools.js?v=20260603-001"></script>
+</body>
+</html>

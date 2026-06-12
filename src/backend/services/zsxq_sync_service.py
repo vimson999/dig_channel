@@ -1,13 +1,15 @@
 import json
 import logging
+import os
 import random
 import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from flask import current_app
-from sqlalchemy import inspect
+import requests
+from flask import current_app, has_app_context
+from sqlalchemy import and_, inspect, or_
 
 from models import db
 from models.zsxq_sync import ZsxqAttachment, ZsxqSyncCursor, ZsxqSyncRun, ZsxqTopic
@@ -15,6 +17,18 @@ from services.zsxq_service import zsxq_service
 
 
 logger = logging.getLogger(__name__)
+
+
+TRANSIENT_UPSTREAM_CODES = {"1059"}
+
+
+class ZsxqTransientUpstreamError(ValueError):
+    """Raised when ZSXQ returns a retryable upstream failure."""
+
+    def __init__(self, code, message, payload=None):
+        self.code = str(code or "UNKNOWN")
+        self.payload = payload
+        super().__init__(f"知识星球接口返回失败 code={self.code}: {message}")
 
 
 class ZsxqSyncService:
@@ -38,7 +52,7 @@ class ZsxqSyncService:
             "zsxq_sync_cursors",
         }
         inspector = inspect(db.engine)
-        existing_tables = set(inspector.get_table_names(schema="public"))
+        existing_tables = self._table_names(inspector)
         missing_tables = sorted(required_tables - existing_tables)
         if missing_tables:
             raise ValueError(
@@ -46,13 +60,30 @@ class ZsxqSyncService:
                 "docs/sql/zsxq_sync_tables.sql；缺失表："
                 + ", ".join(missing_tables)
             )
-        attachment_columns = {item["name"] for item in inspector.get_columns("zsxq_attachments", schema="public")}
+        attachment_columns = {
+            item["name"]
+            for item in self._get_columns(inspector, "zsxq_attachments")
+        }
         if "error_message" not in attachment_columns:
             raise ValueError(
                 "知识星球同步表结构需要更新，请执行 docs/sql/zsxq_sync_tables.sql 中的 "
                 "ALTER TABLE public.zsxq_attachments ADD COLUMN IF NOT EXISTS error_message text;"
             )
         self._schema_checked = True
+
+    def _table_names(self, inspector):
+        """Return table names with compatibility for different SQL dialects."""
+        try:
+            return set(inspector.get_table_names(schema="public"))
+        except Exception:
+            return set(inspector.get_table_names())
+
+    def _get_columns(self, inspector, table_name):
+        """Read columns with fallback when schema argument is unsupported."""
+        try:
+            return inspector.get_columns(table_name, schema="public")
+        except Exception:
+            return inspector.get_columns(table_name)
 
     def sync_tabs(
         self,
@@ -66,7 +97,11 @@ class ZsxqSyncService:
         download_attachments=True,
         download_pdf_only=True,
         download_file_types=None,
+        download_file_types_by_tab=None,
+        max_download_files=None,
         mode="manual",
+        run_id=None,
+        sync_meta=None,
     ):
         self.ensure_schema()
         tabs = self._normalize_tabs(tabs)
@@ -74,21 +109,42 @@ class ZsxqSyncService:
             raise ValueError("tabs 不能为空")
 
         group_id = str(group_id)
+        mode = self._normalize_mode(mode)
         count = min(max(int(count or 20), 1), 50)
         max_pages = min(max(int(max_pages or 1), 1), 20)
         download_file_types = self._normalize_download_file_types(download_file_types, download_pdf_only)
+        download_file_types_by_tab = self._normalize_download_file_types_by_tab(download_file_types_by_tab)
+        max_download_files = self._normalize_max_download_files(max_download_files)
+        sync_meta = sync_meta if isinstance(sync_meta, dict) else {}
+        running_result = {"running": True}
+        if sync_meta:
+            running_result["system_sync"] = sync_meta
 
-        run = ZsxqSyncRun(
-            group_id=group_id,
-            group_name=group_name,
-            tab_id=tabs[0]["id"] if len(tabs) == 1 else None,
-            tab_label=tabs[0]["label"] if len(tabs) == 1 else None,
-            mode=mode,
-            status="running",
-            requested_tabs=[self._public_tab(tab) for tab in tabs],
-            result={},
-        )
-        db.session.add(run)
+        if run_id:
+            run = ZsxqSyncRun.query.get(str(run_id))
+            if not run:
+                raise ValueError(f"同步任务不存在: {run_id}")
+            run.status = "running"
+            run.error_message = None
+            run.result = running_result
+            run.group_id = group_id
+            run.group_name = group_name
+            run.tab_id = tabs[0]["id"] if len(tabs) == 1 else None
+            run.tab_label = tabs[0]["label"] if len(tabs) == 1 else None
+            run.mode = mode
+            run.requested_tabs = [self._public_tab(tab) for tab in tabs]
+        else:
+            run = ZsxqSyncRun(
+                group_id=group_id,
+                group_name=group_name,
+                tab_id=tabs[0]["id"] if len(tabs) == 1 else None,
+                tab_label=tabs[0]["label"] if len(tabs) == 1 else None,
+                mode=mode,
+                status="running",
+                requested_tabs=[self._public_tab(tab) for tab in tabs],
+                result=running_result,
+            )
+            db.session.add(run)
         db.session.commit()
 
         result = {
@@ -103,13 +159,20 @@ class ZsxqSyncService:
             "attachments_downloaded": 0,
             "attachments_failed": 0,
             "attachments_skipped": 0,
+            "downloaded_files": [],
+            "downloaded_pdf_files": [],
+            "max_download_files": max_download_files,
+            "download_limit_reached": False,
             "tabs": [],
         }
+        if sync_meta:
+            result["system_sync"] = sync_meta
 
         try:
             for index, tab in enumerate(tabs):
                 if index > 0:
                     self._human_pause()
+                tab_download_file_types = download_file_types_by_tab.get(tab["id"], download_file_types)
                 tab_result = self._sync_one_tab(
                     cookie=cookie,
                     group_id=group_id,
@@ -120,7 +183,8 @@ class ZsxqSyncService:
                     max_pages=max_pages,
                     stop_on_existing=stop_on_existing,
                     download_attachments=download_attachments,
-                    download_file_types=download_file_types,
+                    download_file_types=tab_download_file_types,
+                    max_download_files=max_download_files,
                 )
                 result["tabs"].append(tab_result)
                 result["topics_fetched"] += tab_result["topics_fetched"]
@@ -131,6 +195,9 @@ class ZsxqSyncService:
                 result["attachments_downloaded"] += tab_result["attachments_downloaded"]
                 result["attachments_failed"] += tab_result["attachments_failed"]
                 result["attachments_skipped"] += tab_result["attachments_skipped"]
+                self._merge_downloaded_file_entries(result, tab_result)
+                if tab_result.get("download_limit_reached") or tab_result.get("stopped_by_download_limit"):
+                    result["download_limit_reached"] = True
 
             run.status = "completed"
             run.completed_at = datetime.utcnow()
@@ -151,6 +218,38 @@ class ZsxqSyncService:
             logger.warning("[ZSXQ_SYNC] sync failed | run_id=%s | error=%s", run.id, exc, exc_info=True)
             raise
 
+    def create_sync_run(
+        self,
+        group_id,
+        group_name=None,
+        tabs=None,
+        mode="manual",
+        initial_result=None,
+    ):
+        self.ensure_schema()
+        tabs = self._normalize_tabs(tabs)
+        if not tabs:
+            raise ValueError("tabs 不能为空")
+        mode = self._normalize_mode(mode)
+
+        run = ZsxqSyncRun(
+            group_id=str(group_id),
+            group_name=group_name,
+            tab_id=tabs[0]["id"] if len(tabs) == 1 else None,
+            tab_label=tabs[0]["label"] if len(tabs) == 1 else None,
+            mode=mode,
+            status="queued",
+            requested_tabs=[self._public_tab(tab) for tab in tabs],
+            result=initial_result if isinstance(initial_result, dict) else {"queued": True},
+        )
+        db.session.add(run)
+        db.session.commit()
+        return run.to_dict()
+
+    def _normalize_mode(self, mode):
+        value = str(mode or "manual").strip() or "manual"
+        return value[:20]
+
     def list_runs(self, group_id=None, limit=20):
         self.ensure_schema()
         self._mark_stale_runs_failed(group_id=group_id)
@@ -159,7 +258,361 @@ class ZsxqSyncService:
             query = query.filter(ZsxqSyncRun.group_id == str(group_id))
         return [item.to_dict() for item in query.limit(min(max(int(limit or 20), 1), 100)).all()]
 
-    def get_attachment_statuses(self, group_id, tab_id, topic_ids):
+    def list_system_sync_batches(self, group_id=None, limit=10, batch_id=None):
+        self.ensure_schema()
+        self._mark_stale_runs_failed(group_id=group_id)
+        query = ZsxqSyncRun.query.filter(ZsxqSyncRun.mode.like("sys%")).order_by(ZsxqSyncRun.created_at.desc())
+        if group_id:
+            query = query.filter(ZsxqSyncRun.group_id == str(group_id))
+
+        batches = {}
+        target_batch_id = str(batch_id or "").strip()
+        query_limit = 500 if target_batch_id else 120
+        for run in query.limit(query_limit).all():
+            run_payload = run.to_dict()
+            result = run_payload.get("result") or {}
+            meta = result.get("system_sync") if isinstance(result, dict) else None
+            meta = meta if isinstance(meta, dict) else {}
+            current_batch_id = meta.get("batch_id") or self._legacy_system_batch_id(run.mode)
+            if not current_batch_id:
+                continue
+            if target_batch_id and target_batch_id not in {str(current_batch_id), str(meta.get("attempt_id") or "")}:
+                continue
+
+            batch = batches.setdefault(current_batch_id, {
+                "batch_id": current_batch_id,
+                "attempt_id": meta.get("attempt_id") or current_batch_id,
+                "group_id": run_payload.get("group_id"),
+                "group_name": run_payload.get("group_name"),
+                "round": meta.get("round"),
+                "max_rounds": meta.get("max_rounds"),
+                "trigger": meta.get("trigger"),
+                "queued_at": meta.get("queued_at"),
+                "max_download_files": meta.get("max_download_files"),
+                "jobs": meta.get("jobs") or [],
+                "created_at": run_payload.get("created_at"),
+                "completed_at": run_payload.get("completed_at"),
+                "status": "completed",
+                "runs": [],
+                "topics": [],
+                "topics_truncated": False,
+                "summary": {
+                    "runs_total": 0,
+                    "runs_completed": 0,
+                    "runs_failed": 0,
+                    "runs_active": 0,
+                    "topics_fetched": 0,
+                    "topics_new": 0,
+                    "topics_updated": 0,
+                    "topics_existing": 0,
+                    "attachments_seen": 0,
+                    "attachments_downloaded": 0,
+                    "attachments_failed": 0,
+                    "attachments_skipped": 0,
+                    "download_limit_reached": False,
+                },
+            })
+            batch["created_at"] = min(filter(None, [batch.get("created_at"), run_payload.get("created_at")]), default=run_payload.get("created_at"))
+            batch["completed_at"] = max(filter(None, [batch.get("completed_at"), run_payload.get("completed_at")]), default=run_payload.get("completed_at"))
+
+            topic_detail = self._topics_for_run(run)
+            run_payload["failed_attachments"] = self._failed_attachments_for_run(run)
+            run_payload["topics"] = topic_detail["topics"]
+            run_payload["topics_truncated"] = topic_detail["truncated"]
+            batch["runs"].append(run_payload)
+            batch["topics"].extend(run_payload["topics"])
+            batch["topics_truncated"] = batch["topics_truncated"] or run_payload["topics_truncated"]
+            self._merge_batch_summary(batch, run_payload)
+
+        ordered = sorted(
+            batches.values(),
+            key=lambda item: item.get("created_at") or "",
+            reverse=True,
+        )
+        max_limit = min(max(int(limit or 10), 1), 30)
+        return ordered[:max_limit]
+
+    def get_system_sync_batch(self, batch_id, group_id=None):
+        batches = self.list_system_sync_batches(
+            group_id=group_id,
+            limit=1,
+            batch_id=batch_id,
+        )
+        return batches[0] if batches else None
+
+    def _topics_for_run(self, run, limit=80):
+        tab_ids = self._run_tab_ids(run)
+        query = ZsxqTopic.query.filter(
+            ZsxqTopic.group_id == run.group_id,
+            or_(
+                ZsxqTopic.first_sync_run_id == run.id,
+                ZsxqTopic.last_sync_run_id == run.id,
+            ),
+        )
+        if tab_ids:
+            query = query.filter(ZsxqTopic.tab_id.in_(tab_ids))
+
+        topics = query.order_by(ZsxqTopic.last_synced_at.desc()).limit(limit + 1).all()
+        truncated = len(topics) > limit
+        topics = topics[:limit]
+        attachments = self._attachments_by_topic(run.group_id, topics)
+        return {
+            "topics": [
+                self._public_run_topic(topic, run, attachments.get((topic.tab_id, topic.topic_id), []))
+                for topic in topics
+            ],
+            "truncated": truncated,
+        }
+
+    def _run_tab_ids(self, run):
+        tab_ids = []
+        if run.tab_id:
+            tab_ids.append(str(run.tab_id))
+        for tab in run.requested_tabs or []:
+            if isinstance(tab, dict) and tab.get("id"):
+                tab_ids.append(str(tab["id"]))
+        return sorted(set(tab_ids))
+
+    def _attachments_by_topic(self, group_id, topics):
+        if not topics:
+            return {}
+        topic_ids = sorted({item.topic_id for item in topics if item.topic_id})
+        tab_ids = sorted({item.tab_id for item in topics if item.tab_id})
+        if not topic_ids:
+            return {}
+
+        query = ZsxqAttachment.query.filter(
+            ZsxqAttachment.group_id == str(group_id),
+            ZsxqAttachment.topic_id.in_(topic_ids),
+        )
+        if tab_ids:
+            query = query.filter(ZsxqAttachment.tab_id.in_(tab_ids))
+
+        grouped = {}
+        for attachment in query.order_by(ZsxqAttachment.topic_id.asc(), ZsxqAttachment.created_at.asc()).all():
+            grouped.setdefault((attachment.tab_id, attachment.topic_id), []).append(attachment)
+        return grouped
+
+    def _public_run_topic(self, topic, run, attachments):
+        status = "new" if topic.first_sync_run_id == run.id else "touched"
+        return {
+            "topic_id": topic.topic_id,
+            "tab_id": topic.tab_id,
+            "tab_label": topic.tab_label,
+            "status": status,
+            "status_label": "新增" if status == "new" else "本轮处理",
+            "title": topic.title,
+            "author_name": topic.author_name,
+            "content": topic.content,
+            "create_time": topic.create_time,
+            "raw_json_path": topic.raw_json_path,
+            "first_sync_run_id": topic.first_sync_run_id,
+            "last_sync_run_id": topic.last_sync_run_id,
+            "attachments": [self._public_run_attachment(item) for item in attachments],
+        }
+
+    def _public_run_attachment(self, attachment):
+        payload = attachment.to_dict()
+        payload["file_type"] = self._attachment_file_type(attachment)
+        payload["is_reusable"] = self._download_record_is_reusable(attachment)
+        return payload
+
+    def _legacy_system_batch_id(self, mode):
+        value = str(mode or "")
+        if not value.startswith("sys"):
+            return None
+        parts = value.split("_")
+        if len(parts) >= 3:
+            return f"legacy-{parts[-1]}"
+        return value or None
+
+    def _failed_attachments_for_run(self, run):
+        query = ZsxqAttachment.query.filter(
+            ZsxqAttachment.group_id == run.group_id,
+            ZsxqAttachment.download_status == "failed",
+        )
+        tab_ids = []
+        if run.tab_id:
+            tab_ids.append(run.tab_id)
+        else:
+            for tab in run.requested_tabs or []:
+                if isinstance(tab, dict) and tab.get("id"):
+                    tab_ids.append(str(tab["id"]))
+        if tab_ids:
+            query = query.filter(ZsxqAttachment.tab_id.in_(tab_ids))
+        if run.started_at:
+            query = query.filter(ZsxqAttachment.updated_at >= run.started_at - timedelta(minutes=2))
+        if run.completed_at:
+            query = query.filter(ZsxqAttachment.updated_at <= run.completed_at + timedelta(minutes=2))
+        return [
+            item.to_dict()
+            for item in query.order_by(ZsxqAttachment.updated_at.desc()).limit(20).all()
+        ]
+
+    def _merge_batch_summary(self, batch, run):
+        summary = batch["summary"]
+        result = run.get("result") or {}
+        summary["runs_total"] += 1
+        if run.get("status") == "completed":
+            summary["runs_completed"] += 1
+        elif run.get("status") == "failed":
+            summary["runs_failed"] += 1
+        elif run.get("status") in {"queued", "running"}:
+            summary["runs_active"] += 1
+
+        if run.get("status") == "failed":
+            batch["status"] = "failed"
+        elif run.get("status") in {"queued", "running"} and batch["status"] != "failed":
+            batch["status"] = "running"
+
+        for key in (
+            "topics_fetched",
+            "topics_new",
+            "topics_updated",
+            "topics_existing",
+            "attachments_seen",
+            "attachments_downloaded",
+            "attachments_failed",
+            "attachments_skipped",
+        ):
+            summary[key] += int(result.get(key) or 0)
+        summary["download_limit_reached"] = (
+            summary["download_limit_reached"] or bool(result.get("download_limit_reached"))
+        )
+
+    def mark_run_failed(self, run_id, error_message, result_update=None):
+        self.ensure_schema()
+        run = ZsxqSyncRun.query.get(str(run_id))
+        if not run:
+            return None
+        result = dict(run.result) if isinstance(run.result, dict) else {}
+        if result_update:
+            result.update(result_update)
+        run.status = "failed"
+        run.completed_at = datetime.utcnow()
+        run.error_message = str(error_message)[:1000]
+        run.result = result
+        db.session.commit()
+        return run.to_dict()
+
+    def submit_pdf_clean_for_run(self, run_id, cleaner=None, trigger="zsxq_sync"):
+        """Submit downloaded PDFs from one sync run to the content pipeline."""
+        run = ZsxqSyncRun.query.get(str(run_id))
+        if not run:
+            raise ValueError(f"同步任务不存在: {run_id}")
+
+        cleanable = self.downloaded_pdf_files_for_run(run_id)
+        files = [item["path"] for item in cleanable["files"]]
+        if not files:
+            result = {
+                "queued": False,
+                "reason": "no_downloaded_pdf",
+                "files_count": 0,
+            }
+            self._merge_run_pipeline_result(run, result)
+            return result
+
+        from services.content_pipeline.pdf_clean_task_service import submit_pdf_clean_task
+
+        task = submit_pdf_clean_task(
+            title=f"知识星球 PDF 清洗 - {run.group_name or run.group_id}",
+            files=files,
+            source_root=cleanable.get("source_root"),
+            cleaner=cleaner,
+            trigger=trigger,
+            metadata={
+                "sync_run_id": run.id,
+                "group_id": run.group_id,
+                "group_name": run.group_name,
+                "mode": run.mode,
+                "files": cleanable["files"],
+            },
+        )
+        result = {
+            "queued": True,
+            "task_id": task["id"],
+            "celery_task_id": task.get("celery_task_id"),
+            "files_count": len(files),
+            "source_root": cleanable.get("source_root"),
+        }
+        self._merge_run_pipeline_result(run, result)
+        return result
+
+    def set_run_pdf_clean_result(self, run_id, pdf_clean_result):
+        run = ZsxqSyncRun.query.get(str(run_id))
+        if not run:
+            raise ValueError(f"同步任务不存在: {run_id}")
+        self._merge_run_pipeline_result(run, pdf_clean_result)
+        return run.to_dict()
+
+    def downloaded_pdf_files_for_run(self, run_id):
+        run = ZsxqSyncRun.query.get(str(run_id))
+        if not run:
+            raise ValueError(f"同步任务不存在: {run_id}")
+
+        return {
+            "files": self._downloaded_pdf_files_from_run_result(run),
+            "source_root": self._run_source_root(run),
+        }
+
+    def _downloaded_pdf_files_from_run_result(self, run):
+        result = run.result if isinstance(run.result, dict) else {}
+        raw_files = result.get("downloaded_pdf_files")
+        if raw_files is None:
+            raw_files = []
+            for tab in result.get("tabs") or []:
+                if isinstance(tab, dict):
+                    raw_files.extend(tab.get("downloaded_pdf_files") or [])
+
+        files = []
+        seen_paths = set()
+        for item in raw_files or []:
+            if isinstance(item, dict):
+                path_value = item.get("path") or item.get("local_path")
+                metadata = item
+            else:
+                path_value = item
+                metadata = {}
+            path = self._absolute_local_path(path_value)
+            if not path or path.suffix.lower() != ".pdf" or not path.exists() or not path.is_file():
+                continue
+            path_key = str(path)
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            files.append({
+                "path": path_key,
+                "name": metadata.get("name") or path.name,
+                "topic_id": metadata.get("topic_id"),
+                "tab_id": metadata.get("tab_id"),
+                "attachment_id": metadata.get("attachment_id"),
+            })
+        return files
+
+    def _merge_run_pipeline_result(self, run, pdf_clean_result):
+        result = dict(run.result) if isinstance(run.result, dict) else {}
+        content_pipeline = dict(result.get("content_pipeline") or {})
+        content_pipeline["pdf_clean"] = pdf_clean_result
+        result["content_pipeline"] = content_pipeline
+        run.result = result
+        db.session.commit()
+
+    def _run_source_root(self, run):
+        source_root = self._data_root() / str(run.group_id)
+        return str(source_root) if source_root.exists() else None
+
+    def _absolute_local_path(self, local_path):
+        if not local_path or str(local_path).startswith("browser-download:"):
+            return None
+        try:
+            path = Path(local_path)
+            if not path.is_absolute():
+                path = self._project_root() / path
+            return path.resolve()
+        except (TypeError, OSError, ValueError):
+            return None
+
+    def get_attachment_statuses(self, group_id, tab_id, topic_ids, attachment_refs=None):
         if not self._sync_tables_ready():
             return {}
 
@@ -178,34 +631,122 @@ class ZsxqSyncService:
         result = {}
         seen_keys = set()
 
-        def add_row(row):
-            key = (row.topic_id, row.attachment_key, row.tab_id)
+        def add_row(row, bucket_topic_id=None):
+            result_topic_id = str(bucket_topic_id or row.topic_id)
+            key = (result_topic_id, row.attachment_key, row.tab_id, row.id)
             if key in seen_keys:
                 return
             seen_keys.add(key)
-            result.setdefault(row.topic_id, []).append(row.to_dict())
+            result.setdefault(result_topic_id, []).append(row.to_dict())
 
         for row in rows:
             add_row(row)
 
-        downloaded_topic_ids = {
-            row.topic_id for row in rows if row.download_status == "downloaded"
+        terminal_status_topic_ids = {
+            row.topic_id for row in rows if row.download_status in {"downloaded", "failed"}
         }
         fallback_topic_ids = [
             topic_id for topic_id in topic_ids[:200]
-            if topic_id not in downloaded_topic_ids
+            if topic_id not in terminal_status_topic_ids
         ]
         if fallback_topic_ids:
             fallback_rows = ZsxqAttachment.query.filter(
                 ZsxqAttachment.group_id == group_id,
                 ZsxqAttachment.topic_id.in_(fallback_topic_ids),
-                ZsxqAttachment.download_status == "downloaded",
+                ZsxqAttachment.download_status.in_(["downloaded", "failed"]),
             ).all()
             for row in fallback_rows:
                 add_row(row)
+
+        self._add_attachment_ref_statuses(
+            result=result,
+            seen_keys=seen_keys,
+            group_id=group_id,
+            tab_id=tab_id,
+            attachment_refs=attachment_refs,
+        )
         return result
 
+    def _add_attachment_ref_statuses(self, result, seen_keys, group_id, tab_id, attachment_refs=None):
+        refs = []
+        for item in attachment_refs or []:
+            if not isinstance(item, dict):
+                continue
+            topic_id = str(item.get("topic_id") or "").strip()
+            if not topic_id:
+                continue
+            refs.append({
+                "topic_id": topic_id,
+                "attachment_key": str(item.get("attachment_key") or "").strip(),
+                "file_id": str(item.get("file_id") or "").strip(),
+                "name": str(item.get("name") or "").strip(),
+            })
+        if not refs:
+            return
+
+        file_ids = {item["file_id"] for item in refs if item["file_id"]}
+        attachment_keys = {item["attachment_key"] for item in refs if item["attachment_key"]}
+        names = {item["name"] for item in refs if item["name"]}
+        conditions = []
+        if file_ids:
+            conditions.append(ZsxqAttachment.file_id.in_(file_ids))
+        if attachment_keys:
+            conditions.append(ZsxqAttachment.attachment_key.in_(attachment_keys))
+        if names:
+            conditions.append(ZsxqAttachment.name.in_(names))
+        if not conditions:
+            return
+
+        rows = ZsxqAttachment.query.filter(
+            ZsxqAttachment.group_id == group_id,
+            ZsxqAttachment.tab_id == tab_id,
+            ZsxqAttachment.download_status.in_(["downloaded", "failed"]),
+            or_(*conditions),
+        ).all()
+        if not rows:
+            return
+
+        def add_row(row, bucket_topic_id):
+            key = (bucket_topic_id, row.attachment_key, row.tab_id, row.id)
+            if key in seen_keys:
+                return
+            seen_keys.add(key)
+            result.setdefault(bucket_topic_id, []).append(row.to_dict())
+
+        for ref in refs:
+            for row in rows:
+                if (
+                    (ref["file_id"] and row.file_id == ref["file_id"])
+                    or (ref["attachment_key"] and row.attachment_key == ref["attachment_key"])
+                    or (ref["name"] and row.name == ref["name"])
+                ):
+                    add_row(row, ref["topic_id"])
+
     def mark_browser_download(self, group_id, tab_id, topic_id, file_info, filename=None):
+        return self._mark_browser_download_status(
+            group_id=group_id,
+            tab_id=tab_id,
+            topic_id=topic_id,
+            file_info=file_info,
+            filename=filename,
+            download_status="downloaded",
+            local_path=f"browser-download:{filename or self._attachment_name(file_info, 'file')}" if isinstance(file_info, dict) else None,
+            error_message=None,
+        )
+
+    def mark_browser_download_failed(self, group_id, tab_id, topic_id, file_info, error_message, filename=None):
+        return self._mark_browser_download_status(
+            group_id=group_id,
+            tab_id=tab_id,
+            topic_id=topic_id,
+            file_info=file_info,
+            filename=filename,
+            download_status="failed",
+            local_path=None,
+            error_message=str(error_message)[:1000],
+        )
+
+    def _mark_browser_download_status(self, group_id, tab_id, topic_id, file_info, filename=None, download_status="pending", local_path=None, error_message=None):
         if not group_id or not tab_id or not topic_id or not isinstance(file_info, dict):
             return None
         if not self._sync_tables_ready():
@@ -230,9 +771,9 @@ class ZsxqSyncService:
             "name": filename or self._attachment_name(file_info, "file"),
             "file_id": self._attachment_file_id(file_info),
             "download_count": self._download_count(file_info),
-            "download_status": "downloaded",
-            "local_path": f"browser-download:{filename or self._attachment_name(file_info, 'file')}",
-            "error_message": None,
+            "download_status": download_status,
+            "local_path": local_path,
+            "error_message": error_message,
             "raw_payload": file_info,
         }
         if record:
@@ -252,13 +793,13 @@ class ZsxqSyncService:
             "zsxq_sync_cursors",
         }
         inspector = inspect(db.engine)
-        existing_tables = set(inspector.get_table_names(schema="public"))
+        existing_tables = self._table_names(inspector)
         if not required_tables.issubset(existing_tables):
             return False
-        columns = {item["name"] for item in inspector.get_columns("zsxq_attachments", schema="public")}
+        columns = {item["name"] for item in self._get_columns(inspector, "zsxq_attachments")}
         return "error_message" in columns
 
-    def _sync_one_tab(self, cookie, group_id, group_name, tab, run, count, max_pages, stop_on_existing, download_attachments, download_file_types):
+    def _sync_one_tab(self, cookie, group_id, group_name, tab, run, count, max_pages, stop_on_existing, download_attachments, download_file_types, max_download_files=None):
         tab_id = tab["id"]
         tab_label = tab["label"]
         end_time = None
@@ -274,7 +815,11 @@ class ZsxqSyncService:
             "attachments_downloaded": 0,
             "attachments_failed": 0,
             "attachments_skipped": 0,
+            "downloaded_files": [],
+            "downloaded_pdf_files": [],
             "stopped_by_existing": False,
+            "stopped_by_download_limit": False,
+            "download_limit_reached": False,
             "last_end_time": None,
         }
         newest_topic = None
@@ -283,15 +828,17 @@ class ZsxqSyncService:
         for _ in range(max_pages):
             if tab_result["pages"] > 0:
                 self._human_pause()
-            response = zsxq_service.get_topics(
+            response = self._get_topics_with_retry(
                 cookie=cookie,
                 group_id=group_id,
                 count=count,
                 scope=tab.get("scope") or "all",
                 end_time=end_time,
                 extra_params=self._tab_extra_params(tab),
+                tab_id=tab_id,
+                tab_label=tab_label,
+                page=tab_result["pages"] + 1,
             )
-            self._assert_upstream_success(response)
             topics = self._extract_topics(response)
             tab_result["pages"] += 1
             tab_result["topics_fetched"] += len(topics)
@@ -312,6 +859,7 @@ class ZsxqSyncService:
                     tab_result["topics_existing"] += 1
                     attachment_stats = self._upsert_attachments(group_id, tab, topic)
                     self._merge_attachment_stats(tab_result, attachment_stats)
+                    download_stats = {}
                     if download_attachments:
                         download_stats = self._download_topic_attachments(
                             cookie=cookie,
@@ -319,13 +867,16 @@ class ZsxqSyncService:
                             tab=tab,
                             topic=topic,
                             download_file_types=download_file_types,
+                            max_download_files=max_download_files,
                         )
                         self._merge_attachment_stats(tab_result, download_stats)
+                        if download_stats.get("download_limit_reached"):
+                            tab_result["download_limit_reached"] = True
                     has_pending_download_work = (
-                        tab_result["attachments_downloaded"] > 0
-                        or tab_result["attachments_failed"] > 0
+                        download_stats.get("attachments_downloaded", 0) > 0
+                        or download_stats.get("attachments_failed", 0) > 0
                     )
-                    if stop_on_existing and not has_pending_download_work:
+                    if stop_on_existing and not max_download_files and not has_pending_download_work:
                         tab_result["stopped_by_existing"] = True
                         break
                     changed = self._update_existing_topic(existing, topic, tab, run)
@@ -345,8 +896,11 @@ class ZsxqSyncService:
                         tab=tab,
                         topic=topic,
                         download_file_types=download_file_types,
+                        max_download_files=max_download_files,
                     )
                     self._merge_attachment_stats(tab_result, download_stats)
+                    if download_stats.get("download_limit_reached"):
+                        tab_result["download_limit_reached"] = True
                 tab_result["topics_new"] += 1
                 self._commit_running_progress(run, tab, topic_id, tab_result)
 
@@ -363,6 +917,37 @@ class ZsxqSyncService:
         db.session.commit()
         return tab_result
 
+    def _find_existing_downloaded_attachment(self, record):
+        conditions = []
+        if record.file_id:
+            conditions.append(ZsxqAttachment.file_id == record.file_id)
+        if record.attachment_key:
+            conditions.append(ZsxqAttachment.attachment_key == record.attachment_key)
+        if record.name:
+            conditions.append(and_(
+                ZsxqAttachment.topic_id == record.topic_id,
+                ZsxqAttachment.name == record.name,
+            ))
+        if not conditions:
+            return None
+
+        for same_tab_only in (True, False):
+            query = ZsxqAttachment.query.filter(
+                ZsxqAttachment.group_id == record.group_id,
+                ZsxqAttachment.download_status == "downloaded",
+                ZsxqAttachment.local_path.isnot(None),
+                or_(*conditions),
+            )
+            if same_tab_only:
+                query = query.filter(ZsxqAttachment.tab_id == record.tab_id)
+            if record.id:
+                query = query.filter(ZsxqAttachment.id != record.id)
+
+            for candidate in query.order_by(ZsxqAttachment.updated_at.desc()).limit(10).all():
+                if self._download_marker_exists(candidate.local_path):
+                    return candidate
+        return None
+
     def _commit_running_progress(self, run, tab, topic_id, tab_result):
         run.updated_at = datetime.utcnow()
         run.result = {
@@ -373,7 +958,7 @@ class ZsxqSyncService:
         }
         db.session.commit()
 
-    def _mark_stale_runs_failed(self, group_id=None, stale_minutes=15):
+    def _mark_stale_runs_failed(self, group_id=None, stale_minutes=120):
         cutoff = datetime.utcnow() - timedelta(minutes=stale_minutes)
         query = ZsxqSyncRun.query.filter(
             ZsxqSyncRun.status == "running",
@@ -388,8 +973,10 @@ class ZsxqSyncService:
 
         now = datetime.utcnow()
         for run in stale_runs:
-            result = run.result if isinstance(run.result, dict) else {}
+            result = dict(run.result) if isinstance(run.result, dict) else {}
             result["interrupted"] = True
+            result["queued"] = False
+            result["running"] = False
             run.status = "failed"
             run.completed_at = now
             run.error_message = "同步请求中断：后端重启、连接断开或长时间无进度，已自动标记失败。"
@@ -479,7 +1066,7 @@ class ZsxqSyncService:
             stats["attachments_seen"] += 1
         return stats
 
-    def _download_topic_attachments(self, cookie, group_id, tab, topic, download_file_types=None):
+    def _download_topic_attachments(self, cookie, group_id, tab, topic, download_file_types=None, max_download_files=None):
         topic_id = self._topic_id(topic)
         records = ZsxqAttachment.query.filter_by(
             group_id=group_id,
@@ -491,7 +1078,12 @@ class ZsxqSyncService:
             "attachments_downloaded": 0,
             "attachments_failed": 0,
             "attachments_skipped": 0,
+            "downloaded_files": [],
+            "downloaded_pdf_files": [],
+            "stopped_by_download_limit": False,
+            "download_limit_reached": False,
         }
+        remaining_downloads = int(max_download_files) if max_download_files else None
 
         for record in records:
             payload = record.raw_payload or {}
@@ -501,18 +1093,36 @@ class ZsxqSyncService:
                     record.error_message = f"非目标类型附件，跳过自动下载: {self._attachment_file_type(record)}"
                     stats["attachments_skipped"] += 1
                 continue
-            if record.local_path and self._path_exists(record.local_path):
+            if self._download_record_is_reusable(record):
                 record.download_status = "downloaded"
                 record.error_message = None
                 stats["attachments_skipped"] += 1
                 continue
+            existing_download = self._find_existing_downloaded_attachment(record)
+            if existing_download:
+                record.local_path = existing_download.local_path
+                record.download_status = "downloaded"
+                record.error_message = None
+                stats["attachments_skipped"] += 1
+                continue
+            if remaining_downloads is not None and remaining_downloads <= 0:
+                stats["stopped_by_download_limit"] = True
+                stats["download_limit_reached"] = True
+                break
             self._attachment_download_pause()
+            attempted_download = False
             try:
+                attempted_download = True
                 local_path = self._download_attachment_file(cookie, group_id, tab, topic_id, payload, record.name)
                 record.local_path = local_path
                 record.download_status = "downloaded"
                 record.error_message = None
                 stats["attachments_downloaded"] += 1
+                entry = self._downloaded_file_entry(record, local_path)
+                if entry:
+                    self._append_unique_file_entry(stats["downloaded_files"], entry)
+                    if entry["path"].lower().endswith(".pdf"):
+                        self._append_unique_file_entry(stats["downloaded_pdf_files"], entry)
             except Exception as exc:
                 record.download_status = "failed"
                 record.error_message = str(exc)[:1000]
@@ -526,6 +1136,8 @@ class ZsxqSyncService:
                     exc,
                 )
             finally:
+                if attempted_download and remaining_downloads is not None:
+                    remaining_downloads = max(0, remaining_downloads - 1)
                 db.session.flush()
         return stats
 
@@ -557,6 +1169,37 @@ class ZsxqSyncService:
     def _merge_attachment_stats(self, target, stats):
         for key in ("attachments_seen", "attachments_downloaded", "attachments_failed", "attachments_skipped"):
             target[key] = target.get(key, 0) + int((stats or {}).get(key, 0) or 0)
+        self._merge_downloaded_file_entries(target, stats)
+
+    def _merge_downloaded_file_entries(self, target, stats):
+        if not stats:
+            return
+        for key in ("downloaded_files", "downloaded_pdf_files"):
+            target.setdefault(key, [])
+            for item in stats.get(key) or []:
+                self._append_unique_file_entry(target[key], item)
+
+    def _append_unique_file_entry(self, items, item):
+        if not isinstance(item, dict):
+            return
+        path = item.get("path")
+        if not path:
+            return
+        if any(existing.get("path") == path for existing in items if isinstance(existing, dict)):
+            return
+        items.append(item)
+
+    def _downloaded_file_entry(self, record, local_path):
+        path = self._absolute_local_path(local_path)
+        if not path or not path.exists() or not path.is_file():
+            return None
+        return {
+            "path": str(path),
+            "name": record.name or path.name,
+            "topic_id": record.topic_id,
+            "tab_id": record.tab_id,
+            "attachment_id": record.id,
+        }
 
     def _upsert_cursor(self, group_id, tab, newest_topic, tab_result):
         cursor = ZsxqSyncCursor.query.filter_by(group_id=group_id, tab_id=tab["id"]).first()
@@ -610,11 +1253,102 @@ class ZsxqSyncService:
             params["hashtag_id"] = tab["hashtagId"]
         return params
 
+    def _get_topics_with_retry(
+        self,
+        cookie,
+        group_id,
+        count,
+        scope,
+        end_time,
+        extra_params,
+        tab_id,
+        tab_label,
+        page,
+    ):
+        attempts = self._sync_retry_attempts()
+        for attempt in range(1, attempts + 1):
+            try:
+                response = zsxq_service.get_topics(
+                    cookie=cookie,
+                    group_id=group_id,
+                    count=count,
+                    scope=scope,
+                    end_time=end_time,
+                    extra_params=extra_params,
+                )
+                self._assert_upstream_success(response)
+                if attempt > 1:
+                    logger.info(
+                        "[ZSXQ_SYNC] upstream retry recovered | group_id=%s tab_id=%s tab=%s page=%s attempt=%s/%s",
+                        group_id,
+                        tab_id,
+                        tab_label,
+                        page,
+                        attempt,
+                        attempts,
+                    )
+                return response
+            except (ZsxqTransientUpstreamError, requests.RequestException) as exc:
+                if attempt >= attempts:
+                    logger.warning(
+                        "[ZSXQ_SYNC] upstream retry exhausted | group_id=%s tab_id=%s tab=%s page=%s attempts=%s error=%s",
+                        group_id,
+                        tab_id,
+                        tab_label,
+                        page,
+                        attempts,
+                        exc,
+                    )
+                    raise
+
+                delay = self._sync_retry_delay_seconds(attempt)
+                logger.warning(
+                    "[ZSXQ_SYNC] upstream transient failure | group_id=%s tab_id=%s tab=%s page=%s attempt=%s/%s retry_in=%.1fs error=%s",
+                    group_id,
+                    tab_id,
+                    tab_label,
+                    page,
+                    attempt,
+                    attempts,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
+
+        raise RuntimeError("ZSXQ_SYNC_RETRY_LOOP_UNREACHABLE")
+
+    def _sync_retry_attempts(self):
+        config_value = current_app.config.get("ZSXQ_SYNC_RETRY_ATTEMPTS") if has_app_context() else None
+        value = (
+            config_value
+            or os.environ.get("ZSXQ_SYNC_RETRY_ATTEMPTS")
+            or 3
+        )
+        try:
+            return min(max(int(value), 1), 8)
+        except (TypeError, ValueError):
+            return 3
+
+    def _sync_retry_delay_seconds(self, attempt):
+        config_value = current_app.config.get("ZSXQ_SYNC_RETRY_BASE_DELAY_SECONDS") if has_app_context() else None
+        value = (
+            config_value
+            or os.environ.get("ZSXQ_SYNC_RETRY_BASE_DELAY_SECONDS")
+            or 5
+        )
+        try:
+            base_delay = max(float(value), 0.1)
+        except (TypeError, ValueError):
+            base_delay = 5.0
+        return min(base_delay * (2 ** max(attempt - 1, 0)), 60.0) + random.uniform(0, 1.5)
+
     def _assert_upstream_success(self, result):
         if not isinstance(result, dict) or result.get("succeeded") is not False:
             return
         code = result.get("code") or "UNKNOWN"
         message = result.get("error") or result.get("message") or result.get("resp_data") or result
+        if str(code) in TRANSIENT_UPSTREAM_CODES:
+            raise ZsxqTransientUpstreamError(code, message, result)
         raise ValueError(f"知识星球接口返回失败 code={code}: {message}")
 
     def _extract_topics(self, result):
@@ -776,10 +1510,26 @@ class ZsxqSyncService:
             return str(path)
 
     def _path_exists(self, local_path):
-        path = Path(local_path)
-        if not path.is_absolute():
-            path = self._project_root() / path
-        return path.exists() and path.stat().st_size > 0
+        try:
+            path = Path(local_path)
+            if not path.is_absolute():
+                path = self._project_root() / path
+            return path.exists() and path.stat().st_size > 0
+        except (TypeError, OSError, ValueError):
+            return False
+
+    def _download_record_is_reusable(self, record):
+        return (
+            record.download_status == "downloaded"
+            and self._download_marker_exists(record.local_path)
+        )
+
+    def _download_marker_exists(self, local_path):
+        if not local_path:
+            return False
+        if str(local_path).startswith("browser-download:"):
+            return True
+        return self._path_exists(local_path)
 
     def _unique_path(self, path):
         if not path.exists():
@@ -811,6 +1561,25 @@ class ZsxqSyncService:
         }
         normalized = {item for item in normalized if item in allowed}
         return normalized or ({"pdf"} if download_pdf_only else {"all"})
+
+    def _normalize_download_file_types_by_tab(self, value):
+        if not isinstance(value, dict):
+            return {}
+        result = {}
+        for tab_id, file_types in value.items():
+            key = str(tab_id or "").strip()
+            if not key:
+                continue
+            result[key] = self._normalize_download_file_types(file_types, download_pdf_only=True)
+        return result
+
+    def _normalize_max_download_files(self, max_download_files):
+        if max_download_files in (None, "", 0, "0"):
+            return None
+        try:
+            return min(max(int(max_download_files), 1), 100)
+        except (TypeError, ValueError):
+            raise ValueError("max_download_files 必须是正整数")
 
     def _should_download_attachment(self, record, download_file_types):
         if not download_file_types or "all" in download_file_types:

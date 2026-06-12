@@ -74,6 +74,14 @@ PB从0.4到0.8，年底前看到修复</textarea>
                         <label class="block text-sm font-bold text-gray-700 mb-1">底部免责声明</label>
                         <textarea id="disclaimer" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-700 text-xs">本内容只供交流学习，不作为任何投资建议。理财有风险，投资需谨慎。</textarea>
                     </div>
+
+                    <label class="flex items-start gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 cursor-pointer hover:bg-gray-100 transition-colors">
+                        <input id="subtitleSafeSpace" type="checkbox" class="mt-1 h-4 w-4 rounded border-gray-300 text-slate-900 focus:ring-slate-700">
+                        <span class="min-w-0">
+                            <span class="block text-sm font-bold text-gray-700">为底部字幕留空间</span>
+                            <span class="block text-xs text-gray-500 mt-0.5">选中后封面文字整体上移，底部留出字幕安全区。</span>
+                        </span>
+                    </label>
                 </div>
 
                 <hr class="border-gray-200">
@@ -118,6 +126,7 @@ PB从0.4到0.8，年底前看到修复</textarea>
             subTitle: document.getElementById('subTitle'),
             dateText: document.getElementById('dateText'),
             disclaimer: document.getElementById('disclaimer'),
+            subtitleSafeSpace: document.getElementById('subtitleSafeSpace'),
             mainColor: document.getElementById('mainColor'),
             subColor: document.getElementById('subColor'),
         };
@@ -199,12 +208,21 @@ PB从0.4到0.8，年底前看到修复</textarea>
         function drawTexts(ctx) {
             const fontBase = '"Noto Sans SC", "Microsoft YaHei", sans-serif';
             const centerX = canvas.width / 2;
+            const yShift = inputs.subtitleSafeSpace.checked ? -74 : 0;
             const maxTitleWidth = 1010;
             const highlightW = 836;
-            const highlightH = 180;
             const highlightX = (canvas.width - highlightW) / 2;
-            const highlightY = 338;
+            const rawSubLines = inputs.subTitle.value.split('\n').flatMap(line => wrapLine(ctx, line, highlightW - 70));
+            const subLines = rawSubLines.slice(0, 3);
+            const lineCount = Math.max(1, subLines.length);
+            const subFontSize = lineCount >= 3 ? 42 : 44;
+            const subLineHeight = lineCount >= 3 ? 58 : 56;
+            const highlightH = lineCount >= 3 ? 224 : 180;
+            const highlightY = lineCount >= 3 ? 314 : 338;
+            const subTextY = highlightY + Math.max(28, (highlightH - lineCount * subLineHeight) / 2 + 2);
 
+            ctx.save();
+            ctx.translate(0, yShift);
             ctx.textAlign = 'center';
 
             ctx.fillStyle = inputs.mainColor.value;
@@ -227,19 +245,19 @@ PB从0.4到0.8，年底前看到修复</textarea>
             ctx.restore();
 
             ctx.fillStyle = '#071423';
-            ctx.font = `900 44px ${fontBase}`;
-            const subLines = inputs.subTitle.value.split('\n').flatMap(line => wrapLine(ctx, line, highlightW - 70));
-            subLines.slice(0, 2).forEach((line, index) => {
-                ctx.fillText(line, centerX, highlightY + 34 + index * 56);
+            ctx.font = `900 ${subFontSize}px ${fontBase}`;
+            subLines.forEach((line, index) => {
+                ctx.fillText(line, centerX, subTextY + index * subLineHeight);
             });
 
-            drawDatePill(ctx, centerX, 568);
+            drawDatePill(ctx, centerX, lineCount >= 3 ? 564 : 568);
 
             ctx.fillStyle = 'rgba(255, 255, 255, 0.76)';
             ctx.font = `500 18px ${fontBase}`;
             ctx.fillText(inputs.disclaimer.value.split('\n')[0], centerX, 654);
 
             ctx.textAlign = 'left';
+            ctx.restore();
         }
 
         function drawGeneratedMarketBackground(ctx) {
@@ -467,7 +485,8 @@ PB从0.4到0.8，年底前看到修复</textarea>
         }
 
         function drawDatePill(ctx, centerX, y) {
-            const text = inputs.dateText.value;
+            const text = inputs.dateText.value.trim();
+            if (!text) return;
             ctx.font = '900 34px "Noto Sans SC", "Microsoft YaHei", sans-serif';
             const w = Math.max(246, ctx.measureText(text).width + 64);
             const x = centerX - w / 2;

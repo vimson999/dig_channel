@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Project-level scheduler for the ZSXQ sync test."""
+
+import argparse
+import json
+import logging
+import os
+import signal
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import schedule
+from typing import Tuple
+
+
+BACKEND_DIR = Path(__file__).resolve().parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+from app import create_app
+from services.zsxq_system_sync_test import config_status, queue_configured_jobs, _scheduler_interval_minutes
+
+DEFAULT_PROJECT_ROOT = BACKEND_DIR.parents[3]
+PROJECT_ROOT = Path(os.environ.get("ZSXQ_PROJECT_ROOT", str(DEFAULT_PROJECT_ROOT))).resolve()
+if not PROJECT_ROOT.exists():
+    PROJECT_ROOT = DEFAULT_PROJECT_ROOT
+
+
+def _resolve_log_path() -> Tuple[Path, Path]:
+    candidates = [
+        PROJECT_ROOT / "logs",
+        Path.cwd() / "logs",
+        DEFAULT_PROJECT_ROOT / "logs",
+        Path("/tmp"),
+    ]
+    for logs_dir in candidates:
+        try:
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            return logs_dir / "zsxq_auto_scheduler.log", logs_dir
+        except Exception:
+            continue
+    raise RuntimeError("ZSXQ_AUTO_SCHEDULER_LOG_PATH_UNAVAILABLE")
+
+
+LOG_PATH = _resolve_log_path()[0]
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_PATH),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger("zsxq_auto_scheduler")
+
+
+class ZsxqAutoScheduler:
+    def __init__(self):
+        self.app = create_app()
+        self.running = False
+        self.interval_minutes = self._interval_minutes()
+        self._scheduled_interval = None
+
+    def _interval_minutes(self):
+        status = config_status()
+        configured_interval = status.get("interval_minutes")
+        return _scheduler_interval_minutes(configured_interval)
+
+    def queue_once(self, trigger="scheduler"):
+        attempt_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+        started_at = time.monotonic()
+        status = None
+        logger.info(
+            "[ZSXQ_AUTO_SYNC] trigger_start | attempt_id=%s trigger=%s interval_minutes=%s",
+            attempt_id,
+            trigger,
+            self.interval_minutes,
+        )
+        try:
+            with self.app.app_context():
+                status = config_status()
+                if not status.get("exists"):
+                    logger.info(
+                        "[ZSXQ_AUTO_SYNC] trigger_skip | attempt_id=%s reason=missing_config path=%s elapsed=%.2fs",
+                        attempt_id,
+                        status.get("path"),
+                        time.monotonic() - started_at,
+                    )
+                    return {
+                        "queued": False,
+                        "skipped": True,
+                        "reason": "missing_config",
+                        "message": "未找到系统计划配置，请先保存配置。",
+                        "config": status,
+                    }
+                if not status.get("cookie_env_configured"):
+                    logger.info(
+                        "[ZSXQ_AUTO_SYNC] trigger_skip | attempt_id=%s reason=missing_cookie_env env=%s elapsed=%.2fs",
+                        attempt_id,
+                        status.get("cookie_env_name"),
+                        time.monotonic() - started_at,
+                    )
+                    return {
+                        "queued": False,
+                        "skipped": True,
+                        "reason": "missing_cookie_env",
+                        "message": f"未配置环境变量 {status.get('cookie_env_name')}，请先设置后再启动。",
+                        "config": status,
+                    }
+
+                result = queue_configured_jobs(trigger=trigger, attempt_id=attempt_id)
+                if result.get("skipped"):
+                    logger.info(
+                        "[ZSXQ_AUTO_SYNC] trigger_skip | attempt_id=%s reason=%s error=%s elapsed=%.2fs",
+                        attempt_id,
+                        result.get("reason") or "unknown",
+                        result.get("error") or "-",
+                        time.monotonic() - started_at,
+                    )
+                    if result.get("reason") in {"max_rounds_reached", "invalid_group", "missing_config"}:
+                        logger.info(
+                            "[ZSXQ_AUTO_SYNC] scheduler stopped by trigger_reason=%s | attempt_id=%s",
+                            result.get("reason") or "unknown",
+                            attempt_id,
+                        )
+                        self.stop()
+                    return {
+                        "queued": False,
+                        "skipped": True,
+                        "reason": result.get("reason") or "skip",
+                        "message": self._skip_message(result.get("reason"), attempt_id),
+                        "config": result.get("config") or status,
+                    }
+
+                queued = result.get("queued") or []
+                if result.get("reason") == "queue_failed" and result.get("error"):
+                    error_text = str(result.get("error"))[:200]
+                    if result.get("testing_complete") or result.get("reason") == "max_rounds_reached":
+                        logger.info(
+                            "[ZSXQ_AUTO_SYNC] max rounds reached after queue failure, stopping scheduler | attempt_id=%s round=%s/%s",
+                            attempt_id,
+                            result.get("round") or "-",
+                            result.get("max_rounds") or "-",
+                        )
+                        self.stop()
+                    return {
+                        "queued": False,
+                        "skipped": False,
+                        "round": result.get("round"),
+                        "max_rounds": result.get("max_rounds"),
+                        "batch_id": result.get("batch_id"),
+                        "testing_complete": bool(result.get("testing_complete")),
+                        "reason": "queue_failed",
+                        "error": result.get("error"),
+                        "message": f"第 {result.get('round', '-')} 轮入队失败：{error_text}",
+                        "config": result.get("config") or status,
+                        "queued_runs": queued,
+                    }
+                logger.info(
+                    "[ZSXQ_AUTO_SYNC] trigger_queued | attempt_id=%s batch_id=%s round=%s/%s queued_count=%s jobs=%s elapsed=%.2fs",
+                    attempt_id,
+                    result.get("batch_id") or "-",
+                    result.get("round") or "-",
+                    result.get("max_rounds") or "-",
+                    len(queued),
+                    queued,
+                    time.monotonic() - started_at,
+                )
+                if result.get("testing_complete") or result.get("reason") == "max_rounds_reached":
+                    logger.info("[ZSXQ_AUTO_SYNC] max rounds reached, stopping scheduler | attempt_id=%s", attempt_id)
+                    self.stop()
+                return {
+                    "queued": True,
+                    "skipped": False,
+                    "round": result.get("round"),
+                    "max_rounds": result.get("max_rounds"),
+                    "batch_id": result.get("batch_id"),
+                    "testing_complete": bool(result.get("testing_complete")),
+                    "reason": result.get("reason"),
+                    "config": result.get("config") or status,
+                    "queued_runs": queued,
+                    "message": f"已提交第 {result.get('round', '-')} 轮，batch={result.get('batch_id', '-')}",
+                }
+        except Exception as exc:
+            logger.exception(
+                "[ZSXQ_AUTO_SYNC] trigger_failed | attempt_id=%s trigger=%s elapsed=%.2fs error=%s",
+                attempt_id,
+                trigger,
+                time.monotonic() - started_at,
+                exc,
+            )
+            return {
+                "queued": False,
+                "skipped": True,
+                "reason": "error",
+                "error": str(exc),
+                "message": str(exc),
+                "config": locals().get("status"),
+            }
+
+    @staticmethod
+    def _skip_message(reason, attempt_id):
+        if reason == "max_rounds_reached":
+            return f"触发尝试 {attempt_id}：已到达最大轮次，不再继续。"
+        if reason == "missing_config":
+            return "未找到系统计划配置，请先保存配置。"
+        if reason == "missing_cookie_env":
+            return "缺失系统 Cookie 环境变量配置。"
+        if reason == "invalid_group":
+            return "星球配置无效（占位/已下线/权限不足），请重新保存有效 group_id 后再启动。"
+        if reason == "disabled":
+            return "当前配置已停用。"
+        if reason == "previous_run_pending":
+            return "上一轮系统同步仍在排队或执行中，本轮已跳过，避免重复入队。"
+        return f"触发尝试 {attempt_id}：已跳过（{reason}）。"
+
+    def refresh_schedule(self):
+        schedule.clear("zsxq-auto-sync-test")
+        self.interval_minutes = self._interval_minutes()
+        job = schedule.every(self.interval_minutes).minutes.do(self.queue_once).tag("zsxq-auto-sync-test")
+        logger.info(
+            "ZSXQ 自动同步计划已设置：每 %s 分钟执行一次 | next_run=%s",
+            self.interval_minutes,
+            self._format_next_run(job.next_run),
+        )
+
+    def start(self):
+        self.running = True
+        self.refresh_schedule()
+        self._scheduled_interval = self.interval_minutes
+        logger.info("ZSXQ 自动同步调度器启动")
+        try:
+            immediate_result = self.queue_once(trigger="scheduler_start")
+            logger.info(
+                "[ZSXQ_AUTO_SYNC] startup_trigger | queued=%s skipped=%s reason=%s round=%s/%s",
+                bool(immediate_result.get("queued")),
+                bool(immediate_result.get("skipped")),
+                immediate_result.get("reason") or "queued",
+                immediate_result.get("round") or "-",
+                immediate_result.get("max_rounds") or "-",
+            )
+        except Exception as exc:
+            logger.exception("[ZSXQ_AUTO_SYNC] startup_trigger_failed | error=%s", exc)
+
+        while self.running:
+            self.interval_minutes = self._interval_minutes()
+            if self._scheduled_interval != self.interval_minutes:
+                self.refresh_schedule()
+                self._scheduled_interval = self.interval_minutes
+            due_count = sum(1 for job in schedule.get_jobs("zsxq-auto-sync-test") if job.should_run)
+            schedule.run_pending()
+            if due_count:
+                logger.info(
+                    "[ZSXQ_AUTO_SYNC] scheduler_waiting | next_run=%s",
+                    self._format_next_run(self._next_run()),
+                )
+            time.sleep(30)
+
+    def stop(self):
+        self.running = False
+        schedule.clear("zsxq-auto-sync-test")
+        logger.info("ZSXQ 自动同步调度器停止")
+
+    def _next_run(self):
+        next_runs = [
+            job.next_run
+            for job in schedule.get_jobs("zsxq-auto-sync-test")
+            if job.next_run is not None
+        ]
+        return min(next_runs) if next_runs else None
+
+    def _format_next_run(self, value):
+        if not value:
+            return "-"
+        return value.isoformat(sep=" ", timespec="seconds")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ZSXQ 自动同步测试调度器")
+    parser.add_argument("command", choices=["start", "once", "status"], help="start: 启动调度；once: 立即投递一次；status: 查看配置")
+    args = parser.parse_args()
+
+    service = ZsxqAutoScheduler()
+
+    def signal_handler(signum, frame):
+        logger.info("收到信号 %s，准备停止", signum)
+        service.stop()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    if args.command == "start":
+        service.start()
+    elif args.command == "once":
+        result = service.queue_once(trigger="manual_cli")
+        print(json.dumps(result, ensure_ascii=False))
+    elif args.command == "status":
+        with service.app.app_context():
+            logger.info("ZSXQ 自动同步配置：%s", config_status())
+
+
+if __name__ == "__main__":
+    main()

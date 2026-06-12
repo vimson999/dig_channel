@@ -233,9 +233,10 @@ def _pick_directory(title, initial_dir=None):
 def select_batch_transcription_directory():
     data = request.get_json(silent=True) or {}
     purpose = str(data.get('purpose') or 'input').strip()
+    title_override = str(data.get('title') or '').strip()
     initial_dir_raw = str(data.get('initial_dir') or '').strip()
     initial_dir = os.path.abspath(os.path.expanduser(initial_dir_raw)) if initial_dir_raw else None
-    title = '选择音频输入目录' if purpose == 'input' else '选择文案输出目录'
+    title = title_override or ('选择音频输入目录' if purpose == 'input' else '选择文案输出目录')
 
     try:
         selected = _pick_directory(title, initial_dir)

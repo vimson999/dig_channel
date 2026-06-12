@@ -194,6 +194,7 @@ def _process_doubao_tts_task(task_id):
         task.status = 'completed' if success_count == total_count else ('failed' if success_count == 0 else 'partial_failed')
         task.current_step = 'done' if success_count else 'failed'
         task.progress = 100 if success_count else task.progress
+        task.completed_at = datetime.utcnow()
         task.result = {'segments': result_segments, 'success_count': success_count, 'total_count': total_count}
         flag_modified(task, 'result')
         db.session.commit()
@@ -202,6 +203,7 @@ def _process_doubao_tts_task(task_id):
     except Exception as exc:
         task.status = 'failed'
         task.current_step = 'failed'
+        task.completed_at = datetime.utcnow()
         task.error_message = str(exc)
         task.result = {'segments': result_segments, 'success_count': success_count, 'total_count': total_count}
         flag_modified(task, 'result')

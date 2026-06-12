@@ -1,0 +1,240 @@
+# 2026-06-05 工作归档
+
+## 研报口播文案 + 思维导图视频工厂第一阶段
+
+- 背景：
+  - 根据 PRD 新增“研报口播文案 + 思维导图视频半自动生成系统”模块。
+  - 新增需求要求视频生成阶段支持思维导图自动聚焦：每个 segment 必须绑定 `focus_node_id`，横屏走导图镜头漫游，竖屏走节点卡片。
+- 架构判断：
+  - 不照搬 PRD 中的 FastAPI / SQLite / React。
+  - 延续当前项目技术栈：Flask + 云端 PostgreSQL + SQLAlchemy + vanilla HTML/JS + FFmpeg。
+  - 第一阶段先做任务、PDF 上传解析和页面骨架；AI 生成、音频匹配和视频渲染留到后续阶段。
+- 后端新增：
+  - 新增模型文件 `src/backend/models/report_video.py`：
+    - `report_video_tasks`
+    - `report_video_reports`
+    - `report_video_analyses`
+    - `report_video_segments`
+    - `report_video_mindmaps`
+    - `report_video_audios`
+    - `report_video_outputs`
+  - `report_video_segments` 已正式包含 `focus_node_id` 字段，用于后续段落级导图聚焦。
+  - 更新 `src/backend/models/__init__.py` 注册新模型。
+  - 新增服务 `src/backend/services/report_video_service.py`：
+    - 创建任务数据目录 `data/tasks/{task_id}/...`
+    - 保存 PDF
+    - 使用 PyMuPDF 提取原始文本
+    - 生成 `raw_text.txt` 和 `cleaned_text.txt`
+    - 判断疑似扫描版 PDF
+  - 新增 API `src/backend/apis/v1/report_video.py`：
+    - `GET /api/v1/report-video/tasks`
+    - `POST /api/v1/report-video/tasks`
+    - `GET /api/v1/report-video/tasks/<task_id>`
+    - `DELETE /api/v1/report-video/tasks/<task_id>`
+    - `POST /api/v1/report-video/tasks/<task_id>/reports`
+    - `GET /api/v1/report-video/reports/<report_id>/text`
+    - `POST /api/v1/report-video/reports/<report_id>/reparse`
+  - 更新 `src/backend/apis/v1/__init__.py` 注册新 API 蓝图。
+- 数据库：
+  - 新增建表脚本 `docs/sql/report_video_tables.sql`。
+  - 由于云端 PostgreSQL 可能没有 schema create 权限，建表仍采用一次性 SQL 脚本方式，不在应用启动时自动建表。
+- 前端新增：
+  - 新增页面 `src/frontend/report-video-factory.html`。
+  - 新增样式 `src/frontend/css/report-video-factory.css`。
+  - 新增脚本 `src/frontend/js/report-video-factory.js`。
+  - 当前页面支持：
+    - 新建任务。
+    - 查看任务列表。
+    - 选择任务。
+    - 批量上传 PDF。
+    - 查看每篇研报解析状态、页数、清洗后字数、疑似扫描版标记。
+    - 查看 cleaned text / raw text。
+    - 单篇重新解析。
+  - AI 文案、思维导图、音频匹配、视频生成 Tab 先以占位方式保留。
+- 菜单集成：
+  - 更新 `src/frontend/js/shared-navigation.js`。
+  - 在 `AI创作` 菜单组新增 `研报导图视频工厂` 入口。
+- 数据安全：
+  - 更新 `.gitignore`，新增 `data/tasks/`，避免研报 PDF 和解析正文进入代码仓库。
+- 验证：
+  - `venv/bin/python -m py_compile src/backend/models/report_video.py src/backend/services/report_video_service.py src/backend/apis/v1/report_video.py src/backend/apis/v1/__init__.py`
+  - `node --check src/frontend/js/report-video-factory.js`
+  - `node --check src/frontend/js/shared-navigation.js`
+  - Flask test client 验证：
+    - 新 `/api/v1/report-video` 路由已注册。
+    - `/report-video-factory.html` 返回 200。
+
+## 样式修复
+
+- 修复 `report-video-factory.html` 首次打开时共享导航裸样式问题。
+- 原因：
+  - 新页面未引入 Tailwind 和 FontAwesome，而共享导航组件依赖 Tailwind class 和图标 class。
+  - 页面自身 `.hidden { display: none !important; }` 会压住导航的 `hidden md:flex`。
+- 处理：
+  - 给页面补齐 Tailwind CDN 和 FontAwesome CDN 引用。
+  - 在 `report-video-factory.css` 增加共享导航本地兜底样式，避免 CDN 失败时导航变成浏览器默认样式。
+  - 在桌面断点强制恢复共享导航 `nav[role="navigation"]` 为 `display: flex !important`。
+- 验证：
+  - `git diff --check src/frontend/report-video-factory.html src/frontend/css/report-video-factory.css`
+  - 浏览器实测：
+    - `header[role="banner"]` 存在。
+    - 桌面宽度下主导航 `display=flex`。
+    - 页面主体卡片样式正常。
+
+## 研报列表管理增强
+
+- 背景：
+  - `report-video-factory.html` 上传 PDF 区域仍使用浏览器原生文件选择控件，视觉突兀。
+  - 研报列表只能查看正文、原文和重解析，缺少删除和调整顺序能力。
+- 后端：
+  - 新增 `DELETE /api/v1/report-video/reports/<report_id>`。
+    - 删除单篇研报记录。
+    - 删除对应 `data/tasks/{task_id}/reports/{report_code}` 文件目录。
+    - 删除后自动重新编号为 `001/002/003...`。
+  - 新增 `POST /api/v1/report-video/tasks/<task_id>/reports/reorder`。
+    - 接收当前任务全部 `report_ids`。
+    - 使用 `report_code` 重新编号保存顺序，避免新增表字段和迁移。
+- 前端：
+  - 隐藏原生 file input，改为统一样式的 `选择 PDF` 控件，并显示文件名或文件数量。
+  - 研报列表增加：
+    - `上移`
+    - `下移`
+    - `删除`
+    - 拖拽排序
+  - 删除前增加确认，避免误删。
+  - 顺序调整后立即调用后端保存，后续 AI 文案和视频生成会按当前列表顺序取数。
+  - 拖拽实现：
+    - 单篇研报卡片支持 HTML5 drag/drop。
+    - 拖动后调用已有 `reports/reorder` 接口保存。
+    - 保留上移/下移按钮，便于精确微调。
+- 验证：
+  - `venv/bin/python -m py_compile src/backend/apis/v1/report_video.py`
+  - `node --check src/frontend/js/report-video-factory.js`
+  - `git diff --check src/backend/apis/v1/report_video.py src/frontend/report-video-factory.html src/frontend/js/report-video-factory.js src/frontend/css/report-video-factory.css`
+  - Flask 路由表确认：
+    - `DELETE /api/v1/report-video/reports/<report_id>`
+    - `POST /api/v1/report-video/tasks/<task_id>/reports/reorder`
+  - 浏览器确认：
+    - 自定义文件选择控件已渲染为 grid 结构。
+    - 文件选择按钮样式已替换原生控件。
+
+## 第二步 AI 文案基础闭环
+
+- 背景：
+  - `report-video-factory.html` 的 `AI 文案` 页签仍是占位，用户确认第二步尚未实现。
+- 后端：
+  - 新增 `src/backend/services/report_video_ai_service.py`。
+  - 新增 `POST /api/v1/report-video/tasks/<task_id>/ai-scripts`。
+  - 当前按任务批量处理所有 `parse_status=parsed` 的研报。
+  - 生成并落库：
+    - `report_video_analyses`
+    - `report_video_mindmaps`
+    - `report_video_segments`
+  - 每个 segment 必须写入 `focus_node_id`。
+  - 支持 DeepSeek/OpenAI-compatible 调用：
+    - `DEEPSEEK_API_KEY`
+    - `DEEPSEEK_BASE_URL`
+    - `DEEPSEEK_MODEL`
+  - API key 放置位置：
+    - 项目根目录 `.env`。
+    - 必填：`DEEPSEEK_API_KEY=你的_key`。
+    - 可选：`DEEPSEEK_BASE_URL=https://api.deepseek.com`。
+    - 可选：`DEEPSEEK_MODEL=deepseek-chat`。
+    - 修改后需要重启后端。
+  - 如果没有 API key 或调用失败，自动走本地抽取式 fallback，保证流程可测试，不再停留在空按钮。
+- 前端：
+  - `AI 文案` 页签增加 `生成 AI 文案` 按钮。
+  - 展示每篇研报的：
+    - 标题
+    - 主题
+    - 分数
+    - 核心观点
+    - 关键点
+    - 分段口播文案
+    - 每段绑定的 `focus_node_id`
+  - `思维导图` 页签不再是纯占位，展示中心主题和节点列表。
+- 验证：
+  - `venv/bin/python -m py_compile src/backend/models/report_video.py src/backend/services/report_video_ai_service.py src/backend/apis/v1/report_video.py`
+  - `node --check src/frontend/js/report-video-factory.js`
+  - `git diff --check src/backend/models/report_video.py src/backend/services/report_video_ai_service.py src/backend/apis/v1/report_video.py src/frontend/report-video-factory.html src/frontend/js/report-video-factory.js src/frontend/css/report-video-factory.css`
+  - `node --check src/frontend/js/report-video-factory.js`
+  - Flask 路由表确认：
+    - `POST /api/v1/report-video/tasks/<task_id>/ai-scripts`
+  - 浏览器确认：
+    - `生成 AI 文案` 按钮存在。
+    - `script-list` 和 `mindmap-list` 容器存在。
+
+## 后续阶段建议
+
+- 下一阶段：增强 AI 文案质量控制，包括按研报类型选择提示词、人工编辑 segment、人工修正 `focus_node_id`。
+- 再下一阶段：实现音频批量上传和 segment_id 自动匹配。
+- 视频阶段：新增独立 Celery 队列 `report_video`，实现横屏导图漫游和竖屏节点卡片视频渲染。
+
+## AI 文案生成错误修复
+
+- 现象：
+  - 用户配置 DeepSeek API key 后，点击 `生成 AI 文案`，页面提示 `AI 文案生成失败：[object Object]`。
+- 排查纪律：
+  - 先查看当日归档和模块说明，再检查项目日志与接口实现，没有全局乱搜日志。
+- 原因：
+  - 前端 `api()` 方法把后端结构化错误对象直接传给 `Error`，导致浏览器展示 `[object Object]`，真实错误不可读。
+  - 后端 AI 结果入库前对 LLM 返回字段缺少强类型收口，`video_value_score`、`recommended_duration_sec`、`segment_id`、标题长度、节点 id 等字段一旦返回非预期格式，容易触发 PostgreSQL 类型或长度错误。
+  - 额外发现上传接口里 `remaining_reports` 未定义，会影响上传后的任务状态更新。
+- 修复：
+  - `report-video-factory.js` 新增 `formatApiError()`，对象错误会格式化成可读 JSON 或 message。
+  - `report_video_ai_service.py` 增加入库前规范化：
+    - 分数字段统一转 0-100 整数。
+    - 推荐时长和段落时长统一转整数。
+    - DB varchar 字段统一截断到模型允许长度。
+    - `segment_id` 改为稳定的 `seg_001/seg_002...`。
+    - `focus_node_id` 和 mindmap node id 做安全化，保证每段仍绑定可找到的节点。
+  - DeepSeek HTTP 错误会保留状态码和响应前缀，便于后续排障。
+  - 修复上传接口未定义变量，状态计算改回基于 `task.reports`。
+- 验证：
+  - `venv/bin/python -m py_compile src/backend/services/report_video_ai_service.py src/backend/apis/v1/report_video.py`
+  - `node --check src/frontend/js/report-video-factory.js`
+  - `git diff --check src/backend/apis/v1/report_video.py src/backend/services/report_video_ai_service.py src/frontend/js/report-video-factory.js src/frontend/report-video-factory.html`
+  - DeepSeek 最小连通性验证：HTTP 200。
+  - Flask test client 实际调用最新任务 `test-2`：
+    - `POST /api/v1/report-video/tasks/<task_id>/ai-scripts`
+    - 返回 200。
+    - `generated=3`。
+    - `failed=[]`。
+    - 首篇 provider 为 `deepseek`。
+    - 每篇生成 4 个 segment。
+
+## 研报 PDF 正文解析修复
+
+- 现象：
+  - 用户在 `report-video-factory.html` 第一阶段点击 `正文` 和 `原文`，看到的内容都不对。
+  - 本地样本显示 13MB / 22 页 PDF 只抽出约 600 字，内容基本都是 `知识星球：前沿信息收录 / VX:FCCNN88` 水印。
+- 原因：
+  - 第一阶段只使用 PyMuPDF `page.get_text("text")`。
+  - 当前上传的研报正文实际是图片/扫描层，PDF 内可提取文本主要是水印。
+  - 原逻辑只用 `cleaned_text_chars < 100` 判断失败，导致水印文本被误判为解析成功，并进一步污染 AI 文案。
+- 修复：
+  - `report_video_service.py` 增加低质量提取判断：
+    - 按页平均字符过低。
+    - 重复行占比过高。
+    - 唯一行占比过低。
+    - 中文/英文可提取字符过少。
+  - 本机存在 `tesseract` 且语言包包含 `chi_sim`、`eng` 时，自动把 PDF 页面渲染为图片后执行 OCR。
+  - OCR 成功时：
+    - `raw_text.txt` 写入 OCR 原始文本。
+    - `cleaned_text.txt` 写入清洗后的 OCR 文本。
+    - `raw_meta.extraction_method=ocr`。
+  - 清洗阶段会剔除重复水印行和明显随机水印串。
+  - `report_video.py` 将解析成功阈值从 `100` 字提高到 `500` 字，并且低质量直接提取不能再进入 AI。
+  - 重新解析单篇研报时会删除旧的 analysis / mindmap / segments，避免旧 AI 文案继续显示。
+  - 前端研报列表增加解析方式标签：`PDF 文本` / `OCR 识别` / `低质量文本`。
+- 验证：
+  - `venv/bin/python -m py_compile src/backend/services/report_video_service.py src/backend/apis/v1/report_video.py`
+  - `node --check src/frontend/js/report-video-factory.js`
+  - `git diff --check src/backend/services/report_video_service.py src/backend/apis/v1/report_video.py src/frontend/js/report-video-factory.js src/frontend/report-video-factory.html`
+  - 使用当前最新任务 `test-2` 的 3 篇研报重新解析：
+    - 001：`parsed / ocr / cleaned_text_chars=138615`
+    - 002：`parsed / ocr / cleaned_text_chars=109731`
+    - 003：`parsed / ocr / cleaned_text_chars=138189`
+  - 抽查 001 `cleaned_text.txt`，已能看到 UBS Global Research / Hangzhou Changchuan Technology 正文，不再是水印文本。
+- 后续建议：
+  - OCR 单篇大 PDF 约 50-70 秒，应在下一步改成后台任务，避免前端请求长时间等待。

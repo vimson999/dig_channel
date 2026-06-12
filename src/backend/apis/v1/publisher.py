@@ -1,19 +1,193 @@
 from flask import Blueprint, request, jsonify
 from models.task import PublicationTask
 from models import db
+from sqlalchemy import or_
+from datetime import datetime, timedelta
+import base64
+import json
 import logging
+import os
+import redis
 
 bp = Blueprint('publisher', __name__, url_prefix='/api/v1/publisher')
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../..'))
+
+
+def _is_publisher_task(task):
+    params = task.params if isinstance(task.params, dict) else {}
+    feature = params.get('feature')
+    return feature in (None, 'publisher')
+
+
+def _abs_project_path(path):
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return path
+    return os.path.abspath(os.path.join(PROJECT_ROOT, str(path)))
+
+
+def _expand_path_value(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith('['):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [str(item) for item in parsed if item]
+            except Exception:
+                pass
+        return [stripped]
+    return []
+
+
+def _collect_audio_paths(params):
+    paths = []
+    audio_segments = params.get('audio_segments')
+    if isinstance(audio_segments, list):
+        for segment in audio_segments:
+            if isinstance(segment, dict) and segment.get('path'):
+                paths.append(str(segment.get('path')))
+
+    for key in ('video', 'vertical_video', 'vertical_video_2'):
+        block = params.get(key)
+        if isinstance(block, dict):
+            paths.extend(_expand_path_value(block.get('audio_path')))
+
+    seen = set()
+    unique = []
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
+
+
+def _validate_publication_assets(task):
+    params = task.params if isinstance(task.params, dict) else {}
+    has_video_work = any(
+        isinstance(params.get(key), dict) and params[key].get('enabled')
+        for key in ('video', 'vertical_video', 'vertical_video_2')
+    )
+    if not has_video_work:
+        return None
+
+    audio_paths = _collect_audio_paths(params)
+    if not audio_paths:
+        return '任务缺少音频配置，无法入队'
+
+    existing = [path for path in audio_paths if os.path.exists(_abs_project_path(path))]
+    if not existing:
+        sample = audio_paths[0]
+        return f'任务音频文件不存在，无法入队：{sample}'
+
+    return None
+
+
+def _enqueue_publication_task(task):
+    from tasks.publisher import run_publication_pipeline
+
+    asset_error = _validate_publication_assets(task)
+    if asset_error:
+        task.status = 'failed'
+        task.current_step = 'failed'
+        task.progress = 0
+        task.error_message = asset_error
+        task.completed_at = datetime.utcnow()
+        db.session.commit()
+        raise ValueError(asset_error)
+
+    try:
+        celery_task = run_publication_pipeline.apply_async(
+            args=[task.id],
+            queue='render',
+            retry=False,
+        )
+    except Exception as exc:
+        logger.exception("Publication task enqueue failed: %s", task.id)
+        task.status = 'failed'
+        task.current_step = 'failed'
+        task.progress = 0
+        task.error_message = f'视频任务入队失败: {exc}'
+        db.session.commit()
+        raise
+
+    task.celery_task_id = celery_task.id
+    task.status = 'pending'
+    task.current_step = 'init'
+    task.progress = 0
+    task.error_message = None
+    task.completed_at = None
+    db.session.commit()
+    return celery_task
+
+
+def _broker_url():
+    return os.environ.get('CELERY_BROKER_URL') or os.environ.get('REDIS_URL') or 'redis://localhost:6379/0'
+
+
+def _read_render_queue_refs(max_messages=1000):
+    """Read lightweight task refs from the Redis render queue.
+
+    Celery's Redis transport stores JSON envelopes. The DB publication task id
+    is the first positional argument in our publisher task messages.
+    """
+    refs = {
+        'queue_length': 0,
+        'celery_ids': set(),
+        'publication_task_ids': set(),
+    }
+    client = redis.Redis.from_url(
+        _broker_url(),
+        socket_connect_timeout=2,
+        socket_timeout=3,
+        retry_on_timeout=False,
+    )
+    raw_messages = client.lrange('render', 0, max(0, int(max_messages)) - 1)
+    refs['queue_length'] = int(client.llen('render'))
+
+    for raw in raw_messages:
+        try:
+            envelope = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
+        except Exception:
+            continue
+
+        headers = envelope.get('headers') if isinstance(envelope, dict) else None
+        if isinstance(headers, dict) and headers.get('id'):
+            refs['celery_ids'].add(str(headers['id']))
+
+        body = envelope.get('body') if isinstance(envelope, dict) else None
+        if not isinstance(body, str):
+            continue
+
+        try:
+            decoded = base64.b64decode(body)
+            payload = json.loads(decoded.decode('utf-8'))
+        except Exception:
+            continue
+
+        args = []
+        if isinstance(payload, list) and payload:
+            args = payload[0] if isinstance(payload[0], list) else []
+        elif isinstance(payload, dict):
+            args = payload.get('args') or []
+
+        if args:
+            refs['publication_task_ids'].add(str(args[0]))
+
+    return refs
+
 
 @bp.route('/submit', methods=['POST'])
 def submit_task():
     """
     Submit a new publication task.
     """
-    # 延迟导入以避免循环依赖
-    from tasks.publisher import run_publication_pipeline
-    
     try:
         data = request.get_json()
         if not data:
@@ -25,13 +199,11 @@ def submit_task():
         task = PublicationTask(params=data)
         db.session.add(task)
         db.session.commit()
-        
-        # Trigger Celery Task
-        celery_task = run_publication_pipeline.apply_async(args=[task.id], queue='render')
-        
-        # Update DB with Celery ID
-        task.celery_task_id = celery_task.id
-        db.session.commit()
+
+        try:
+            celery_task = _enqueue_publication_task(task)
+        except Exception:
+            return jsonify({'error': task.error_message}), 502
         
         return jsonify({
             'success': True,
@@ -49,23 +221,22 @@ def retry_task(task_id):
     """
     Retry an existing task by creating a new one with same params.
     """
-    from tasks.publisher import run_publication_pipeline
-    
     try:
         original_task = PublicationTask.query.get(task_id)
         if not original_task:
             return jsonify({'error': 'Task not found'}), 404
+        if not _is_publisher_task(original_task):
+            return jsonify({'error': 'Only publisher/video tasks can be retried here'}), 400
             
         # Create new task with same params
         new_task = PublicationTask(params=original_task.params)
         db.session.add(new_task)
         db.session.commit()
-        
-        # Trigger Celery
-        celery_task = run_publication_pipeline.apply_async(args=[new_task.id], queue='render')
-        
-        new_task.celery_task_id = celery_task.id
-        db.session.commit()
+
+        try:
+            celery_task = _enqueue_publication_task(new_task)
+        except Exception:
+            return jsonify({'error': new_task.error_message}), 502
         
         return jsonify({
             'success': True,
@@ -77,6 +248,118 @@ def retry_task(task_id):
     except Exception as e:
         logger.error(f"Retry task failed: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/requeue/<task_id>', methods=['POST'])
+def requeue_task(task_id):
+    """
+    Requeue the same publisher/video task in place.
+    Useful for tasks stuck in pending because the original Celery publish failed.
+    """
+    try:
+        task = PublicationTask.query.get(task_id)
+        if not task:
+            return jsonify({'error': 'Task not found'}), 404
+        if not _is_publisher_task(task):
+            return jsonify({'error': 'Only publisher/video tasks can be requeued here'}), 400
+
+        task.result = {}
+        task.status = 'pending'
+        task.current_step = 'init'
+        task.progress = 0
+        task.error_message = None
+        task.completed_at = None
+        db.session.commit()
+
+        try:
+            celery_task = _enqueue_publication_task(task)
+        except Exception:
+            return jsonify({'error': task.error_message}), 502
+
+        return jsonify({
+            'success': True,
+            'message': 'Task requeued successfully',
+            'task_id': task.id,
+            'celery_id': celery_task.id
+        })
+
+    except Exception as e:
+        logger.error(f"Requeue task failed: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/recover-pending', methods=['POST'])
+def recover_pending_tasks():
+    """
+    Recover stale pending publisher tasks without duplicating jobs already in Redis.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        max_age_minutes = float(data.get('max_age_minutes', 2))
+        limit = min(max(int(data.get('limit', 10)), 1), 50)
+        cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
+
+        queue_refs = _read_render_queue_refs()
+
+        feature = PublicationTask.params['feature'].as_string()
+        candidates = (
+            PublicationTask.query
+            .filter(or_(feature.is_(None), feature == 'publisher'))
+            .filter(PublicationTask.status == 'pending')
+            .filter(PublicationTask.updated_at <= cutoff)
+            .order_by(PublicationTask.updated_at.asc())
+            .limit(limit)
+            .all()
+        )
+
+        recovered = []
+        skipped = []
+        failed = []
+
+        for task in candidates:
+            celery_id = str(task.celery_task_id or '')
+            already_queued = (
+                celery_id in queue_refs['celery_ids']
+                or str(task.id) in queue_refs['publication_task_ids']
+            )
+            if already_queued:
+                skipped.append({
+                    'task_id': task.id,
+                    'celery_id': task.celery_task_id,
+                    'reason': 'already_in_render_queue',
+                })
+                continue
+
+            try:
+                old_celery_id = task.celery_task_id
+                celery_task = _enqueue_publication_task(task)
+                recovered.append({
+                    'task_id': task.id,
+                    'old_celery_id': old_celery_id,
+                    'new_celery_id': celery_task.id,
+                })
+            except Exception as exc:
+                db.session.rollback()
+                failed.append({
+                    'task_id': task.id,
+                    'error': str(exc),
+                })
+
+        return jsonify({
+            'success': True,
+            'data': {
+                'max_age_minutes': max_age_minutes,
+                'queue_length': queue_refs['queue_length'],
+                'checked': len(candidates),
+                'recovered': recovered,
+                'skipped': skipped,
+                'failed': failed,
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Recover pending tasks failed: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @bp.route('/post-youtube/<task_id>', methods=['POST'])
 def post_to_youtube(task_id):
@@ -124,9 +407,15 @@ def get_task_status(task_id):
 @bp.route('/tasks', methods=['GET'])
 def list_tasks():
     """
-    List recent tasks (pagination could be added).
+    List recent publisher/video tasks (pagination could be added).
     """
-    tasks = PublicationTask.query.order_by(PublicationTask.created_at.desc()).limit(20).all()
+    include_all = str(request.args.get('include_all', '')).lower() in ('1', 'true', 'yes')
+    query = PublicationTask.query
+    if not include_all:
+        feature = PublicationTask.params['feature'].as_string()
+        query = query.filter(or_(feature.is_(None), feature == 'publisher'))
+
+    tasks = query.order_by(PublicationTask.created_at.desc()).limit(20).all()
     return jsonify({
         'success': True,
         'data': [t.to_dict() for t in tasks]

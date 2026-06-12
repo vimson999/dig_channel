@@ -1,0 +1,80 @@
+# 2026-06-04 工作归档
+
+## 主视频合成 pending 任务频繁积压
+
+- 页面：`video-editor.html`。
+- 现象：
+  - 右侧任务列表频繁出现多个 `pending | 0%` 任务。
+  - 单个任务需要手动点 `重新入队`，处理效率低且容易遗漏。
+- 排查：
+  - `logs/celery/render.log` 多次出现云 Redis broker `Broken pipe`。
+  - worker 断线重连后会进入 `mingle: searching for neighbors`，历史日志里存在卡住十几分钟的情况。
+  - 该项目本地开发只有分队列 worker，不需要 Celery worker 间 gossip/mingle 集群握手。
+- 后端修复：
+  - 新增 `POST /api/v1/publisher/recover-pending`。
+  - 恢复逻辑会读取 Redis `render` 队列里的 Celery 消息。
+  - 只有数据库里 `pending` 超过阈值、且 Redis 队列中找不到对应 DB 任务 id / Celery id 的任务才会重新投递。
+  - 已在 Redis 队列里的 pending 任务会跳过，避免重复投递。
+- 前端修复：
+  - `video-editor.html` 右侧任务面板新增 `恢复` 按钮。
+  - `pending` 超过 2 分钟的任务会显示“可能未被 worker 领取”的提示。
+  - 点击 `恢复` 会批量调用后端恢复接口，默认检查 2 分钟以上、最多 10 个任务。
+  - `恢复` 按钮升级为两段式处理：
+    - 先补投 DB 中 stale pending、但 Redis 队列里不存在的任务。
+    - 再读取 Celery 状态；如果 `render` 队列有积压且 worker `active/reserved/scheduled` 都为 0，则自动重启 `render` worker。
+  - `video-editor.html` 的 `main.js` 版本号升级为 `20260604-pending-recovery`，避免浏览器缓存旧脚本。
+- Worker 稳定性调整：
+  - 四个 Celery 启动脚本均添加 `--without-gossip --without-mingle`：
+    - `scripts/dev/run-celery.sh`
+    - `scripts/dev/run-celery-tts.sh`
+    - `scripts/dev/run-celery-zsxq.sh`
+    - `scripts/dev/run-celery-podcast.sh`
+  - 目的：降低云 Redis 连接抖动后 worker 卡在集群握手的概率。
+- 实际处置：
+  - 重启 Flask 后端，使新恢复接口生效。
+  - 调用 `POST /api/v1/publisher/recover-pending`，实际恢复 10 个 stale pending 任务。
+  - 重启 `render` worker，使新启动参数生效。
+  - 新 `render` worker PID：`70994`。
+  - 新 worker 已连接云 Redis `101.35.56.140:6379/15`。
+  - 验证时 `render` 队列从 `14` 降到 `13`，`active_count=1`，正在执行任务 `729719e2-dd53-42a4-9b26-63a5ce20df96`。
+  - 二次反馈中确认 2 个任务已在 Redis 队列中，但 worker 出现“在线、队列有任务、active=0”的假空闲状态；已重启 `render` worker。
+  - 新 `render` worker PID：`89042`。
+  - 重启后 `active_count=1`，正在执行任务 `c044d091-1acc-4540-8ab6-3463762a8b7f`，队列从 `6` 降到 `5`。
+- 验证：
+  - `node --check src/frontend/js/video-editor/main.js`
+  - `node --check src/frontend/js/publisher/services.js`
+  - `venv/bin/python -m py_compile src/backend/apis/v1/publisher.py`
+  - `bash -n scripts/dev/run-celery.sh scripts/dev/run-celery-tts.sh scripts/dev/run-celery-zsxq.sh scripts/dev/run-celery-podcast.sh`
+  - `git diff --check`
+
+## 主视频合成积压二次修复
+
+- 反馈：
+  - `video-editor.html` 右侧任务从 2 个 pending 增长到 5 个。
+  - 页面提示“可能未被 worker 领取”，但用户无法判断是真卡住还是正常排队。
+- 排查：
+  - `logs/celery/render.log` 显示任务 `c044d091-1acc-4540-8ab6-3463762a8b7f` 实际已执行并完成，耗时约 444 秒。
+  - 随后任务 `455775f5-39bc-41ac-bd64-d03238eb765f` 被领取并完成，耗时约 120 秒。
+  - `GET /api/v1/celery/status` 曾出现 `render` worker 在线、`queue_length=4`、`active_count=0` 的假空闲状态。
+  - 队列中还存在旧任务引用了已不存在的音频文件，执行时报 `No valid audio clips.`。
+- 修复：
+  - `tasks.publisher.run_publication_pipeline` 在 worker 领取任务后立即把 DB 状态写为 `processing / prepare / 1%`，避免长时间显示 `pending 0%`。
+  - `video-editor.html` 任务列表接入 Celery render 队列状态：
+    - 正常排队时显示队列剩余数量。
+    - worker 离线时明确提示。
+    - 队列有积压但 worker 空闲时显示自动唤醒提示。
+  - 页面每次刷新任务列表时读取 `/api/v1/celery/status`。
+  - 如果连续 15 秒检测到 `render.queue_length > 0` 且 `active/reserved/scheduled` 都为 0，会自动调用 `/api/v1/celery/restart/render` 唤醒 worker，60 秒内最多自动唤醒一次。
+  - 入队前增加资源校验：
+    - 任务缺少音频配置时直接标记 failed。
+    - 音频文件已不存在时直接标记 failed。
+    - 这类无效任务不再进入 Celery 队列，避免反复制造积压。
+  - 失败任务在页面卡片中展示 `error_message`。
+  - 对缺音频/音频缺失的失败任务隐藏“重新入队”，保留“套用配置”方便重新编辑后提交。
+- 实际处置：
+  - 重启 `render` worker，当前 PID：`12148`。
+  - 重启 Flask 后端，使新入队校验生效。
+  - 验证当前 `render` 队列：`queue_length=0`，`active_count=0`，worker 在线。
+- 验证：
+  - `node --check src/frontend/js/video-editor/main.js`
+  - `venv/bin/python -m py_compile src/backend/apis/v1/publisher.py src/backend/tasks/publisher.py`

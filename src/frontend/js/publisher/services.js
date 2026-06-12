@@ -51,6 +51,30 @@ const PublisherService = {
         return await res.json();
     },
 
+    async requeueTask(taskId) {
+        const res = await fetch(`${this.API_BASE}/publisher/requeue/${taskId}`, { method: 'POST' });
+        return await res.json();
+    },
+
+    async recoverPendingTasks(payload = {}) {
+        const res = await fetch(`${this.API_BASE}/publisher/recover-pending`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        return await res.json();
+    },
+
+    async fetchCeleryStatus() {
+        const res = await fetch(`${this.API_BASE}/celery/status`);
+        return await res.json();
+    },
+
+    async restartRenderWorker() {
+        const res = await fetch(`${this.API_BASE}/celery/restart/render`, { method: 'POST' });
+        return await res.json();
+    },
+
     async postToYouTube(taskId) {
         const res = await fetch(`${this.API_BASE}/post-youtube/${taskId}`, { method: 'POST' });
         return await res.json();

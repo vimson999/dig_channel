@@ -6,6 +6,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_FINANCE_ASR_PROMPT = (
+    "这是一段专业财经研报解读音频，请使用简体中文输出。"
+    "请尽量准确识别公司名称、机构名称、行业术语、英文缩写和金融表达。"
+)
+
 # Try to import specialized libraries for Mac M-series
 HAS_MLX = False
 try:
@@ -125,7 +130,7 @@ class ASRService:
             
             logger.info(f"✅ [ASR] Whisper model ({self.model_size}) initialized.")
 
-    def transcribe(self, audio_path, return_segments=False, model_size=None):
+    def transcribe(self, audio_path, return_segments=False, model_size=None, initial_prompt=None):
         """
         Transcribe audio file to text.
         """
@@ -151,8 +156,8 @@ class ASRService:
         self._ensure_model_loaded()
         logger.info(f"🚀 [ASR] 开始识别任务 (开启词级时间戳)...")
 
-        # 强化提示词：包含金融研报背景，常见券商名，并强调简体中文输出
-        SIMPLIFIED_PROMPT = "这是一段专业的金融投资研报播客，包含大量的行业术语和公司名称。请务必使用简体中文输出。关键词：安克创新、美银证券、中信证券、研报分析、财报解读、降息路径、宏观展望、资产配置、听见资本、胶囊播客。"
+        prompt = (initial_prompt or DEFAULT_FINANCE_ASR_PROMPT).strip()
+        logger.info("🧭 [ASR] initial_prompt=%s", prompt[:180])
 
         if self.use_mlx:
             try:
@@ -161,7 +166,7 @@ class ASRService:
                     audio_path, 
                     path_or_hf_repo=self.mlx_model_path or self.mlx_model_name,
                     language="zh",
-                    initial_prompt=SIMPLIFIED_PROMPT,
+                    initial_prompt=prompt,
                     word_timestamps=True 
                 )
                 raw_segments = result.get('segments', [])
@@ -176,7 +181,7 @@ class ASRService:
                 audio_path, 
                 beam_size=5, 
                 language="zh", 
-                initial_prompt=SIMPLIFIED_PROMPT,
+                initial_prompt=prompt,
                 word_timestamps=True
             )
             raw_segments = []

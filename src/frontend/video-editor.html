@@ -201,6 +201,23 @@
                 </div>
 
                 <div class="p-4 border-t border-zinc-800 bg-zinc-900 shrink-0">
+                    <div class="mb-3 rounded-lg border border-zinc-700 bg-zinc-950/60 p-3 space-y-3">
+                        <label class="flex items-center gap-2 text-[10px] font-black text-zinc-200 cursor-pointer select-none">
+                            <input id="podcast-visualizer-enabled" type="checkbox" class="w-4 h-4 rounded border-zinc-600 bg-zinc-900 text-emerald-500 focus:ring-emerald-500">
+                            <span>同时生成播客视觉化视频</span>
+                        </label>
+                        <div id="podcast-visualizer-options" class="hidden space-y-2">
+                            <div>
+                                <label class="text-[7px] font-black uppercase text-zinc-500 mb-1 block">Podcast Subtitle</label>
+                                <input id="podcast-headline-subtitle" class="w-full bg-zinc-900 border border-zinc-700 rounded-md p-2 text-[10px] text-zinc-200 outline-none focus:border-emerald-500/50" placeholder="副标题，例如：外资研报精选">
+                            </div>
+                            <div>
+                                <label class="text-[7px] font-black uppercase text-zinc-500 mb-1 block">Time Label</label>
+                                <input id="podcast-time-label" class="w-full bg-zinc-900 border border-zinc-700 rounded-md p-2 text-[10px] text-zinc-200 outline-none focus:border-emerald-500/50">
+                            </div>
+                            <p class="text-[9px] leading-4 text-zinc-500">将使用第一个音频片段，固定生成横屏播客视频。</p>
+                        </div>
+                    </div>
                     <button id="submit-task-btn" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-black py-3 rounded-lg transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95">
                         <i class="fas fa-rocket"></i> 提交合成任务
                     </button>
@@ -245,7 +262,12 @@
             <aside id="right-panel" class="w-80 flex flex-col border-l border-zinc-800 bg-editor-sidebar transition-all duration-300 overflow-hidden shrink-0">
                 <div class="p-4 border-b border-zinc-800 flex justify-between items-center shrink-0 min-w-[320px]">
                     <h2 class="text-[10px] font-black uppercase tracking-widest text-zinc-500">Recent Tasks</h2>
-                    <button onclick="refreshTaskList()" class="text-zinc-600 hover:text-emerald-500 transition-colors"><i class="fas fa-sync-alt text-[10px]"></i></button>
+                    <div class="flex items-center gap-2">
+                        <button id="recover-pending-btn" class="rounded bg-blue-600/15 px-2 py-1 text-[8px] font-black uppercase tracking-widest text-blue-300 hover:bg-blue-600 hover:text-white transition-colors" title="恢复卡住的 pending 任务">
+                            恢复
+                        </button>
+                        <button onclick="refreshTaskList()" class="text-zinc-600 hover:text-emerald-500 transition-colors" title="刷新任务列表"><i class="fas fa-sync-alt text-[10px]"></i></button>
+                    </div>
                 </div>
                 <div id="task-list" class="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar min-w-[320px]">
                     <div class="flex flex-col items-center justify-center h-full text-zinc-700">
@@ -304,6 +326,6 @@
     <script src="js/api.js"></script>
     <script src="js/shared-navigation.js"></script>
     <script src="js/publisher/services.js"></script>
-    <script src="js/video-editor/main.js?v=20260520-001"></script>
+    <script src="js/video-editor/main.js?v=20260604-queue-autowake"></script>
 </body>
 </html>

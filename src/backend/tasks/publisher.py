@@ -133,6 +133,14 @@ def run_publication_pipeline(self, task_id):
             params = task.params
             result_state = dict(task.result or {})
 
+            task = update_task_record(
+                task_id,
+                status='processing',
+                current_step='prepare',
+                progress=max(int(task.progress or 0), 1),
+                result=result_state,
+            )
+
             # 🚀 [DEBUG LOG] 记录输入原始参数
             logger.info(f"🔍 [TASK] 任务启动参数详情: {json.dumps(params, ensure_ascii=False, indent=2)}")
 

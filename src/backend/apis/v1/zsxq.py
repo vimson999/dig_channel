@@ -5,6 +5,27 @@ from urllib.parse import quote
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from services.zsxq_service import zsxq_service
+from services.zsxq_auto_publish_service import (
+    config_status as auto_publish_config_status,
+    list_runs as auto_publish_list_runs,
+    preview_payload as auto_publish_preview_payload,
+    save_config as auto_publish_save_config,
+)
+from services.zsxq_auto_publish_scheduler import (
+    scheduler_log_tail as auto_publish_scheduler_log_tail,
+    scheduler_status as auto_publish_scheduler_status,
+    start_scheduler as start_auto_publish_scheduler,
+    stop_scheduler as stop_auto_publish_scheduler,
+    trigger_once as trigger_once_auto_publish_scheduler,
+)
+from services.zsxq_system_sync_test import config_status, save_config
+from services.zsxq_system_sync_scheduler import (
+    scheduler_status as system_sync_scheduler_status,
+    scheduler_log_tail,
+    start_scheduler as start_system_sync_scheduler,
+    stop_scheduler as stop_system_sync_scheduler,
+    trigger_once as trigger_once_system_sync_scheduler,
+)
 from services.zsxq_sync_service import zsxq_sync_service
 from utils.api_utils import handle_api_error
 
@@ -131,6 +152,9 @@ def topic():
 @bp.route("/download", methods=["POST"])
 def download():
     """Proxy-download one attachment from the topic payload."""
+    data = {}
+    file_info = None
+    filename = None
     try:
         data, cookie = _payload()
         file_info = data.get("file")
@@ -171,6 +195,18 @@ def download():
     except ValueError as e:
         return handle_api_error(400, str(e))
     except Exception as e:
+        if isinstance(file_info, dict):
+            try:
+                zsxq_sync_service.mark_browser_download_failed(
+                    group_id=data.get("group_id"),
+                    tab_id=data.get("tab_id"),
+                    topic_id=data.get("topic_id"),
+                    file_info=file_info,
+                    filename=filename,
+                    error_message=e,
+                )
+            except Exception as exc:
+                logger.warning("[ZSXQ_DOWNLOAD] mark browser download failed status failed: %s", exc)
         return handle_api_error(502, _safe_error(e))
 
 
@@ -223,31 +259,64 @@ def publish():
 
 @bp.route("/sync", methods=["POST"])
 def sync():
-    """Manually sync selected ZSXQ tabs into local DB and data/zsxq."""
+    """Queue selected ZSXQ tabs into the dedicated Celery sync worker."""
     try:
         data, cookie = _payload()
         group_id = data.get("group_id")
         if not group_id:
             return handle_api_error(400, "group_id 不能为空")
 
-        result = zsxq_sync_service.sync_tabs(
-            cookie=cookie,
+        from tasks.zsxq_sync import run_zsxq_sync
+
+        tabs = data.get("tabs")
+        mode = data.get("mode", "manual")
+        run = zsxq_sync_service.create_sync_run(
             group_id=group_id,
             group_name=data.get("group_name"),
-            tabs=data.get("tabs"),
-            count=data.get("count", 20),
-            max_pages=data.get("max_pages", 1),
-            stop_on_existing=data.get("stop_on_existing", True),
-            download_attachments=data.get("download_attachments", True),
-            download_pdf_only=data.get("download_pdf_only", True),
-            download_file_types=data.get("download_file_types"),
-            mode=data.get("mode", "manual"),
+            tabs=tabs,
+            mode=mode,
         )
+        payload = {
+            "cookie": cookie,
+            "group_id": group_id,
+            "group_name": data.get("group_name"),
+            "tabs": tabs,
+            "count": data.get("count", 20),
+            "max_pages": data.get("max_pages", 1),
+            "stop_on_existing": data.get("stop_on_existing", True),
+            "download_attachments": data.get("download_attachments", True),
+            "download_pdf_only": data.get("download_pdf_only", True),
+            "download_file_types": data.get("download_file_types"),
+            "max_download_files": data.get("max_download_files"),
+            "mode": mode,
+            "auto_pdf_clean": data.get("auto_pdf_clean", False),
+            "pdf_cleaner": data.get("pdf_cleaner") or {},
+        }
+        try:
+            async_result = run_zsxq_sync.apply_async(
+                args=[run["id"], payload],
+                queue="zsxq_sync",
+                retry=False,
+            )
+        except Exception as exc:
+            logger.exception("[ZSXQ_SYNC] queue publish failed | run_id=%s", run["id"])
+            zsxq_sync_service.mark_run_failed(
+                run["id"],
+                f"同步任务入队失败: {exc}",
+                {"queued": False, "running": False, "queue_publish_failed": True},
+            )
+            return handle_api_error(502, f"知识星球同步任务入队失败：{exc}")
+        result = {
+            "queued": True,
+            "run": run,
+            "celery_task_id": async_result.id,
+        }
         return jsonify({"success": True, "data": result})
     except ValueError as e:
         return handle_api_error(400, str(e))
     except Exception as e:
-        return handle_api_error(502, _safe_error(e))
+        logger.exception("[ZSXQ_SYNC] sync endpoint failed")
+        return handle_api_error(502, f"知识星球同步接口异常：{e}")
 
 
 @bp.route("/sync/runs", methods=["POST"])
@@ -280,7 +349,257 @@ def attachment_status():
             group_id=group_id,
             tab_id=tab_id,
             topic_ids=data.get("topic_ids") or [],
+            attachment_refs=data.get("attachments") or [],
         )
         return jsonify({"success": True, "data": {"statuses": result}})
     except Exception as e:
         return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/system-sync-test/config", methods=["GET", "POST"])
+def system_sync_test_config():
+    """Read or save the local system scheduled-sync test config."""
+    if request.method == "GET":
+        try:
+            return jsonify({"success": True, "data": {"config": config_status()}})
+        except Exception as e:
+            return handle_api_error(502, _safe_error(e))
+
+    try:
+        data = request.get_json(silent=True) or {}
+        cookie = (data.get("cookie") or "").strip()
+        logger.info(
+            "[ZSXQ_SYSTEM_SYNC_TEST] save config request | group=%s interval=%s count=%s max_rounds=%s max_files=%s jobs=%s",
+            data.get("group_id"),
+            data.get("interval_minutes"),
+            data.get("count"),
+            data.get("max_rounds"),
+            data.get("max_download_files"),
+            len(data.get("jobs") or []),
+        )
+        result = save_config(data, cookie)
+        return jsonify({"success": True, "data": {"config": result}})
+    except ValueError as e:
+        return handle_api_error(400, str(e))
+    except Exception as e:
+        logger.exception("[ZSXQ_SYSTEM_SYNC_TEST] save config failed")
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/system-sync-test/batches", methods=["POST"])
+def system_sync_test_batches():
+    """List project-scheduler sync batches with per-run attachment details."""
+    try:
+        data = request.get_json(silent=True) or {}
+        result = zsxq_sync_service.list_system_sync_batches(
+            group_id=data.get("group_id"),
+            limit=data.get("limit", 10),
+        )
+        return jsonify({"success": True, "data": {"batches": result}})
+    except Exception as e:
+        return jsonify({"success": True, "data": {"batches": [], "error": _safe_error(e)}})
+
+
+@bp.route("/system-sync-test/batch-detail", methods=["POST"])
+def system_sync_test_batch_detail():
+    """Read one project-scheduler sync batch with full review details."""
+    try:
+        data = request.get_json(silent=True) or {}
+        batch_id = str(data.get("batch_id") or "").strip()
+        if not batch_id:
+            return handle_api_error(400, "batch_id 不能为空")
+
+        result = zsxq_sync_service.get_system_sync_batch(
+            batch_id=batch_id,
+            group_id=data.get("group_id"),
+        )
+        if not result:
+            return handle_api_error(404, "未找到批次明细")
+        return jsonify({"success": True, "data": {"batch": result}})
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/system-sync-scheduler/status", methods=["GET"])
+def system_sync_scheduler_status_endpoint():
+    """Read system scheduler status (pid/running/next-run)."""
+    try:
+        return jsonify({"success": True, "data": {"scheduler": system_sync_scheduler_status()}})
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/system-sync-scheduler/start", methods=["POST"])
+def system_sync_scheduler_start():
+    """Start the long-running ZSXQ scheduler process."""
+    try:
+        data = request.get_json(silent=True) or {}
+        cookie = (data.get("cookie") or "").strip() or None
+        result = start_system_sync_scheduler(cookie_override=cookie)
+        return jsonify({"success": True, "data": {"scheduler": result}})
+    except Exception as e:
+        logger.exception("[ZSXQ_SYSTEM_SYNC_SCHEDULER] start failed")
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/system-sync-scheduler/stop", methods=["POST"])
+def system_sync_scheduler_stop():
+    """Stop the long-running ZSXQ scheduler process."""
+    try:
+        result = stop_system_sync_scheduler()
+        return jsonify({"success": True, "data": {"scheduler": result}})
+    except Exception as e:
+        logger.exception("[ZSXQ_SYSTEM_SYNC_SCHEDULER] stop failed")
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/system-sync-scheduler/run-once", methods=["POST"])
+def system_sync_scheduler_run_once():
+    """Trigger one scheduler round immediately (non-loop)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        cookie = (data.get("cookie") or "").strip() or None
+        result = trigger_once_system_sync_scheduler(cookie_override=cookie)
+        return jsonify({"success": True, "data": {"scheduler": result}})
+    except Exception as e:
+        logger.exception("[ZSXQ_SYSTEM_SYNC_SCHEDULER] run once failed")
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/system-sync-scheduler/logs", methods=["GET"])
+def system_sync_scheduler_logs():
+    """Read recent lines from system scheduler log file."""
+    try:
+        lines = request.args.get("lines", "200")
+        try:
+            parsed_lines = max(1, min(int(lines), 1000))
+        except (TypeError, ValueError):
+            parsed_lines = 200
+        content = scheduler_log_tail(lines=parsed_lines)
+        return jsonify({
+            "success": True,
+            "data": {
+                "lines": content,
+                "raw": "\n".join(content),
+            },
+        })
+    except Exception as e:
+        return handle_api_error(502, f"读取系统计划日志失败: {e}")
+
+
+@bp.route("/auto-publish/config", methods=["GET", "POST"])
+def auto_publish_config():
+    """Read or save ZSXQ auto publish strategy config."""
+    if request.method == "GET":
+        try:
+            return jsonify({"success": True, "data": {"config": auto_publish_config_status(include_secrets=True)}})
+        except Exception as e:
+            return handle_api_error(502, f"读取自动发帖配置失败: {e}")
+
+    try:
+        data = request.get_json(silent=True) or {}
+        cookie = (data.get("cookie") or "").strip() or None
+        result = auto_publish_save_config(data, cookie=cookie)
+        return jsonify({"success": True, "data": {"config": result}})
+    except ValueError as e:
+        return handle_api_error(400, str(e))
+    except Exception as e:
+        logger.exception("[ZSXQ_AUTO_PUBLISH] save config failed")
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/auto-publish/preview", methods=["POST"])
+def auto_publish_preview():
+    """Preview the next publish batch for current strategy payload."""
+    try:
+        data = request.get_json(silent=True) or {}
+        cookie = (data.get("cookie") or "").strip() or None
+        result = auto_publish_preview_payload(data, cookie=cookie)
+        return jsonify({"success": True, "data": result})
+    except ValueError as e:
+        return handle_api_error(400, str(e))
+    except Exception as e:
+        logger.exception("[ZSXQ_AUTO_PUBLISH] preview failed")
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/auto-publish/runs", methods=["GET"])
+def auto_publish_runs():
+    """List recent auto publish runs."""
+    try:
+        limit = request.args.get("limit", "20")
+        try:
+            parsed_limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            parsed_limit = 20
+        runs = auto_publish_list_runs(limit=parsed_limit)
+        return jsonify({"success": True, "data": {"runs": runs}})
+    except Exception as e:
+        return handle_api_error(502, f"读取自动发帖历史失败: {e}")
+
+
+@bp.route("/auto-publish/scheduler/status", methods=["GET"])
+def auto_publish_scheduler_status_endpoint():
+    """Read auto publish scheduler status."""
+    try:
+        return jsonify({"success": True, "data": {"scheduler": auto_publish_scheduler_status()}})
+    except Exception as e:
+        return handle_api_error(502, f"读取自动发帖调度状态失败: {e}")
+
+
+@bp.route("/auto-publish/scheduler/start", methods=["POST"])
+def auto_publish_scheduler_start():
+    """Start auto publish scheduler."""
+    try:
+        data = request.get_json(silent=True) or {}
+        cookie = (data.get("cookie") or "").strip() or None
+        result = start_auto_publish_scheduler(cookie_override=cookie)
+        return jsonify({"success": True, "data": {"scheduler": result}})
+    except Exception as e:
+        logger.exception("[ZSXQ_AUTO_PUBLISH] start scheduler failed")
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/auto-publish/scheduler/stop", methods=["POST"])
+def auto_publish_scheduler_stop():
+    """Stop auto publish scheduler."""
+    try:
+        result = stop_auto_publish_scheduler()
+        return jsonify({"success": True, "data": {"scheduler": result}})
+    except Exception as e:
+        logger.exception("[ZSXQ_AUTO_PUBLISH] stop scheduler failed")
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/auto-publish/scheduler/run-once", methods=["POST"])
+def auto_publish_scheduler_run_once():
+    """Trigger one background auto publish run."""
+    try:
+        data = request.get_json(silent=True) or {}
+        cookie = (data.get("cookie") or "").strip() or None
+        result = trigger_once_auto_publish_scheduler(cookie_override=cookie)
+        return jsonify({"success": True, "data": {"scheduler": result}})
+    except Exception as e:
+        logger.exception("[ZSXQ_AUTO_PUBLISH] run once failed")
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/auto-publish/scheduler/logs", methods=["GET"])
+def auto_publish_scheduler_logs():
+    """Read recent auto publish scheduler logs."""
+    try:
+        lines = request.args.get("lines", "200")
+        try:
+            parsed_lines = max(1, min(int(lines), 1000))
+        except (TypeError, ValueError):
+            parsed_lines = 200
+        content = auto_publish_scheduler_log_tail(lines=parsed_lines)
+        return jsonify({
+            "success": True,
+            "data": {
+                "lines": content,
+                "raw": "\n".join(content),
+            },
+        })
+    except Exception as e:
+        return handle_api_error(502, f"读取自动发帖日志失败: {e}")

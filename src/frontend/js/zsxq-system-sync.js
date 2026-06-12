@@ -1,0 +1,2683 @@
+const COOKIE_STORAGE_KEY = 'zsxq_cookie';
+const COOKIE_PROFILES_STORAGE_KEY = 'zsxq_cookie_profiles';
+const ACTIVE_COOKIE_ID_STORAGE_KEY = 'zsxq_active_cookie_id';
+const SYNC_ACTIVE_COOKIE_ID_STORAGE_KEY = 'zsxq_sync_active_cookie_id';
+const PUBLISH_ACTIVE_COOKIE_ID_STORAGE_KEY = 'zsxq_publish_active_cookie_id';
+const SYSTEM_SYNC_INTERVAL_MINUTES = 25;
+const SYSTEM_SYNC_MAX_ROUNDS = 0;
+const SYSTEM_SYNC_COUNT = 12;
+const SYSTEM_SYNC_MAX_DOWNLOAD_FILES = 9;
+const SYSTEM_SYNC_STATUS_POLL_MS = 15000;
+const SYSTEM_SYNC_LOG_LINES = 160;
+const AUTO_PUBLISH_LOG_LINES = 160;
+
+const state = {
+    cookieProfiles: [],
+    activeMode: 'sync',
+    contexts: {
+        sync: {
+            cookie: '',
+            draftName: '',
+            activeCookieId: localStorage.getItem(SYNC_ACTIVE_COOKIE_ID_STORAGE_KEY)
+                || localStorage.getItem(ACTIVE_COOKIE_ID_STORAGE_KEY)
+                || '',
+            groups: [],
+            selectedGroupId: '',
+            summaryText: '请先获取星球，系统会自动识别可用于同步的 tab。',
+        },
+        publish: {
+            cookie: '',
+            draftName: '',
+            activeCookieId: localStorage.getItem(PUBLISH_ACTIVE_COOKIE_ID_STORAGE_KEY) || '',
+            groups: [],
+            selectedGroupId: '',
+            summaryText: '请先获取星球，系统会自动识别可用 hashtag。',
+        },
+    },
+    selectedTabDefinitions: [],
+    syncConfig: null,
+    schedulerStatus: null,
+    batches: [],
+    batchesError: null,
+    schedulerPollTimer: null,
+    logsLoaded: false,
+    autoPublishConfig: null,
+    autoPublishScheduler: null,
+    autoPublishPreview: null,
+    autoPublishRuns: [],
+    autoPublishLogsRaw: '',
+    autoPublishTagOptions: [],
+    autoPublishCookieAccounts: [],
+    autoPublishEditingCookieAccountId: '',
+};
+
+const els = {
+    modeSyncBtn: document.getElementById('mode-sync-btn'),
+    modePublishBtn: document.getElementById('mode-publish-btn'),
+    systemSyncSection: document.getElementById('system-sync-section'),
+    autoPublishSection: document.getElementById('auto-publish-section'),
+    contextCardTitle: document.getElementById('context-card-title'),
+    contextCardSubtitle: document.getElementById('context-card-subtitle'),
+    groupBlockSubtitle: document.getElementById('group-block-subtitle'),
+    workspaceCookieStatus: document.getElementById('workspace-cookie-status'),
+    workspaceGroupStatus: document.getElementById('workspace-group-status'),
+    workspaceSyncStatus: document.getElementById('workspace-sync-status'),
+    workspacePublishStatus: document.getElementById('workspace-publish-status'),
+    workspaceSidebarGroup: document.getElementById('workspace-sidebar-group'),
+    workspaceSidebarSync: document.getElementById('workspace-sidebar-sync'),
+    workspaceSidebarPublish: document.getElementById('workspace-sidebar-publish'),
+    cookieInput: document.getElementById('cookie-input'),
+    cookieProfileSelect: document.getElementById('cookie-profile-select'),
+    cookieNameInput: document.getElementById('cookie-name-input'),
+    cookieEditor: document.getElementById('cookie-editor'),
+    cookieSummary: document.getElementById('cookie-summary'),
+    cookieFormatHint: document.getElementById('cookie-format-hint'),
+    saveCookieBtn: document.getElementById('save-cookie-btn'),
+    newCookieBtn: document.getElementById('new-cookie-btn'),
+    deleteCookieBtn: document.getElementById('delete-cookie-btn'),
+    toggleCookieBtn: document.getElementById('toggle-cookie-btn'),
+    loadGroupsBtn: document.getElementById('load-groups-btn'),
+    loadGroupsRefreshBtn: document.getElementById('load-groups-refresh-btn'),
+    groupsSelect: document.getElementById('groups-select'),
+    tabsSummary: document.getElementById('tabs-summary'),
+    configIntervalInput: document.getElementById('system-sync-interval-input'),
+    configMaxRoundsInput: document.getElementById('system-sync-max-rounds-input'),
+    configCountInput: document.getElementById('system-sync-count-input'),
+    configMaxDownloadFilesInput: document.getElementById('system-sync-max-download-files-input'),
+    saveConfigBtn: document.getElementById('system-sync-test-config-btn'),
+    pageMessage: document.getElementById('page-message'),
+    schedulerStatusBadge: document.getElementById('system-scheduler-status-badge'),
+    schedulerContent: document.getElementById('system-scheduler-content'),
+    runOnceBtn: document.getElementById('system-sync-scheduler-run-once-btn'),
+    startBtn: document.getElementById('system-sync-scheduler-start-btn'),
+    stopBtn: document.getElementById('system-sync-scheduler-stop-btn'),
+    refreshBtn: document.getElementById('system-sync-scheduler-refresh-btn'),
+    openLogsBtn: document.getElementById('system-sync-scheduler-open-logs-btn'),
+    logsPanel: document.getElementById('system-sync-scheduler-logs'),
+    configBadge: document.getElementById('config-status-badge'),
+    configSummary: document.getElementById('config-summary'),
+    configDetail: document.getElementById('config-detail'),
+    batchesMini: document.getElementById('system-sync-batches-mini'),
+    batchesPanel: document.getElementById('sync-batches-panel'),
+    batchCount: document.getElementById('batch-count'),
+    batchSectionSubtitle: document.getElementById('batch-section-subtitle'),
+    autoPublishCurrentGroup: document.getElementById('ap-current-group'),
+    autoPublishStrategyNameInput: document.getElementById('ap-strategy-name-input'),
+    autoPublishStrategyEnabledCheckbox: document.getElementById('ap-strategy-enabled-checkbox'),
+    autoPublishIntervalInput: document.getElementById('ap-interval-minutes-input'),
+    autoPublishMaxRoundsInput: document.getElementById('ap-max-rounds-input'),
+    autoPublishLoadTagsBtn: document.getElementById('ap-load-tags-btn'),
+    autoPublishSaveBtn: document.getElementById('ap-save-strategy-btn'),
+    autoPublishPreviewBtn: document.getElementById('ap-preview-btn'),
+    autoPublishRunOnceBtn: document.getElementById('ap-run-once-btn'),
+    autoPublishMessage: document.getElementById('ap-message'),
+    autoPublishAccountNameInput: document.getElementById('ap-account-name-input'),
+    autoPublishAccountCookieInput: document.getElementById('ap-account-cookie-input'),
+    autoPublishAccountGroupIdsInput: document.getElementById('ap-account-group-ids-input'),
+    autoPublishAccountNotesInput: document.getElementById('ap-account-notes-input'),
+    autoPublishAccountEnabledCheckbox: document.getElementById('ap-account-enabled-checkbox'),
+    autoPublishAccountCurrentGroupOnlyCheckbox: document.getElementById('ap-account-current-group-only-checkbox'),
+    autoPublishAccountFillCurrentCookieBtn: document.getElementById('ap-account-fill-current-cookie-btn'),
+    autoPublishAccountFillCurrentGroupBtn: document.getElementById('ap-account-fill-current-group-btn'),
+    autoPublishAccountSaveBtn: document.getElementById('ap-account-save-btn'),
+    autoPublishAccountResetBtn: document.getElementById('ap-account-reset-btn'),
+    autoPublishAccountList: document.getElementById('ap-account-list'),
+    autoPublishPdfEnabledCheckbox: document.getElementById('ap-pdf-enabled-checkbox'),
+    autoPublishPdfSourceDirInput: document.getElementById('ap-pdf-source-dir-input'),
+    autoPublishPdfSourceDirPickBtn: document.getElementById('ap-pdf-source-dir-pick-btn'),
+    autoPublishPdfExtensionsInput: document.getElementById('ap-pdf-extensions-input'),
+    autoPublishPdfBatchSizeInput: document.getElementById('ap-pdf-batch-size-input'),
+    autoPublishPdfUploadRetryInput: document.getElementById('ap-pdf-upload-retry-input'),
+    autoPublishPdfMaxAttemptsInput: document.getElementById('ap-pdf-max-attempts-input'),
+    autoPublishPdfTagSelect: document.getElementById('ap-pdf-tag-select'),
+    autoPublishPdfHashtagIdInput: document.getElementById('ap-pdf-hashtag-id-input'),
+    autoPublishPdfHashtagTitleInput: document.getElementById('ap-pdf-hashtag-title-input'),
+    autoPublishPdfMaxSizeInput: document.getElementById('ap-pdf-max-size-input'),
+    autoPublishPdfBodyPrefixInput: document.getElementById('ap-pdf-body-prefix-input'),
+    autoPublishPdfIncludeFilenamesCheckbox: document.getElementById('ap-pdf-include-filenames-checkbox'),
+    autoPublishPdfRecursiveCheckbox: document.getElementById('ap-pdf-recursive-checkbox'),
+    autoPublishAudioEnabledCheckbox: document.getElementById('ap-audio-enabled-checkbox'),
+    autoPublishAudioSourceDirInput: document.getElementById('ap-audio-source-dir-input'),
+    autoPublishAudioSourceDirPickBtn: document.getElementById('ap-audio-source-dir-pick-btn'),
+    autoPublishAudioExtensionsInput: document.getElementById('ap-audio-extensions-input'),
+    autoPublishAudioBatchSizeInput: document.getElementById('ap-audio-batch-size-input'),
+    autoPublishAudioUploadRetryInput: document.getElementById('ap-audio-upload-retry-input'),
+    autoPublishAudioMaxAttemptsInput: document.getElementById('ap-audio-max-attempts-input'),
+    autoPublishAudioTagSelect: document.getElementById('ap-audio-tag-select'),
+    autoPublishAudioHashtagIdInput: document.getElementById('ap-audio-hashtag-id-input'),
+    autoPublishAudioHashtagTitleInput: document.getElementById('ap-audio-hashtag-title-input'),
+    autoPublishAudioMaxSizeInput: document.getElementById('ap-audio-max-size-input'),
+    autoPublishAudioBodyPrefixInput: document.getElementById('ap-audio-body-prefix-input'),
+    autoPublishAudioIncludeFilenamesCheckbox: document.getElementById('ap-audio-include-filenames-checkbox'),
+    autoPublishAudioRecursiveCheckbox: document.getElementById('ap-audio-recursive-checkbox'),
+    autoPublishSchedulerStatusBadge: document.getElementById('ap-scheduler-status-badge'),
+    autoPublishSchedulerStatus: document.getElementById('ap-scheduler-status'),
+    autoPublishSchedulerRunOnceBtn: document.getElementById('ap-scheduler-run-once-btn'),
+    autoPublishSchedulerStartBtn: document.getElementById('ap-scheduler-start-btn'),
+    autoPublishSchedulerStopBtn: document.getElementById('ap-scheduler-stop-btn'),
+    autoPublishRefreshRuntimeBtn: document.getElementById('ap-refresh-runtime-btn'),
+    autoPublishRefreshPreviewBtn: document.getElementById('ap-refresh-preview-btn'),
+    autoPublishPreviewPanel: document.getElementById('ap-preview-panel'),
+    autoPublishRefreshRunsBtn: document.getElementById('ap-refresh-runs-btn'),
+    autoPublishRunsPanel: document.getElementById('ap-runs-panel'),
+    autoPublishRefreshLogsBtn: document.getElementById('ap-refresh-logs-btn'),
+    autoPublishLogsPanel: document.getElementById('ap-logs-panel'),
+};
+
+function currentModeKey() {
+    return state.activeMode === 'publish' ? 'publish' : 'sync';
+}
+
+function modeContext(mode = state.activeMode) {
+    return state.contexts[mode === 'publish' ? 'publish' : 'sync'];
+}
+
+function syncContext() {
+    return state.contexts.sync;
+}
+
+function publishContext() {
+    return state.contexts.publish;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    initializeCookieProfiles();
+    renderDefaultConfigSummary();
+    bindEvents();
+
+    if (els.configIntervalInput) {
+        els.configIntervalInput.value = String(SYSTEM_SYNC_INTERVAL_MINUTES);
+    }
+    if (els.configMaxRoundsInput) {
+        els.configMaxRoundsInput.value = String(SYSTEM_SYNC_MAX_ROUNDS);
+    }
+    if (els.configCountInput) {
+        els.configCountInput.value = String(SYSTEM_SYNC_COUNT);
+    }
+    if (els.configMaxDownloadFilesInput) {
+        els.configMaxDownloadFilesInput.value = String(SYSTEM_SYNC_MAX_DOWNLOAD_FILES);
+    }
+    if (els.autoPublishStrategyNameInput) {
+        els.autoPublishStrategyNameInput.value = '知识星球自动发帖策略';
+    }
+    if (els.autoPublishIntervalInput) {
+        els.autoPublishIntervalInput.value = '30';
+    }
+    if (els.autoPublishMaxRoundsInput) {
+        els.autoPublishMaxRoundsInput.value = '0';
+    }
+    resetAutoPublishCookieAccountForm();
+
+    setActiveMode(resolveModeFromHash(window.location.hash), { updateHash: false });
+    void loadSystemSyncSchedulerStatus({ render: false });
+    void loadSystemSyncBatches({ render: false });
+    void loadAutoPublishConfig({ render: false });
+    void loadAutoPublishSchedulerStatus({ render: false });
+    void loadAutoPublishRuns({ render: false });
+    void loadAutoPublishLogs({ render: false });
+    renderSyncSchedulerPanel();
+    renderBatchesPanel();
+    renderAutoPublishSchedulerPanel();
+    renderAutoPublishPreviewPanel();
+    renderAutoPublishRunsPanel();
+    renderAutoPublishLogsPanel();
+    renderWorkspaceSnapshot();
+    startSchedulerPolling();
+});
+
+function bindEvents() {
+    els.modeSyncBtn?.addEventListener('click', () => setActiveMode('sync'));
+    els.modePublishBtn?.addEventListener('click', () => setActiveMode('publish'));
+    els.cookieInput.addEventListener('input', () => {
+        const context = modeContext();
+        context.cookie = els.cookieInput.value.trim();
+        updateCookieFormatHint();
+        updateCookieSummary();
+    });
+    els.cookieNameInput.addEventListener('input', () => {
+        modeContext().draftName = (els.cookieNameInput.value || '').trim();
+        updateCookieSummary();
+    });
+    els.cookieProfileSelect.addEventListener('change', switchCookieProfile);
+    els.newCookieBtn.addEventListener('click', startNewCookieProfile);
+    els.saveCookieBtn.addEventListener('click', saveCookieProfile);
+    els.deleteCookieBtn.addEventListener('click', deleteCookieProfile);
+    els.toggleCookieBtn.addEventListener('click', () => setCookieEditorOpen(els.cookieEditor.classList.contains('hidden')));
+    els.loadGroupsBtn.addEventListener('click', () => loadGroups(currentModeKey()));
+    els.loadGroupsRefreshBtn.addEventListener('click', () => loadGroups(currentModeKey()));
+    els.groupsSelect.addEventListener('change', () => onGroupChange(currentModeKey()));
+    els.saveConfigBtn.addEventListener('click', saveSystemSyncConfig);
+    els.runOnceBtn.addEventListener('click', runSystemSyncOnce);
+    els.startBtn.addEventListener('click', startSystemSyncScheduler);
+    els.stopBtn.addEventListener('click', stopSystemSyncScheduler);
+    els.refreshBtn.addEventListener('click', () => loadSystemSyncSchedulerStatus());
+    els.openLogsBtn.addEventListener('click', toggleSchedulerLogs);
+    els.autoPublishLoadTagsBtn.addEventListener('click', loadAutoPublishTags);
+    els.autoPublishAccountFillCurrentCookieBtn?.addEventListener('click', fillAutoPublishAccountWithCurrentCookie);
+    els.autoPublishAccountFillCurrentGroupBtn?.addEventListener('click', fillAutoPublishAccountWithCurrentGroup);
+    els.autoPublishAccountSaveBtn?.addEventListener('click', saveAutoPublishCookieAccount);
+    els.autoPublishAccountResetBtn?.addEventListener('click', resetAutoPublishCookieAccountForm);
+    els.autoPublishPdfSourceDirPickBtn?.addEventListener('click', () => pickAutoPublishDirectory('pdf'));
+    els.autoPublishAudioSourceDirPickBtn?.addEventListener('click', () => pickAutoPublishDirectory('audio'));
+    els.autoPublishSaveBtn.addEventListener('click', saveAutoPublishConfig);
+    els.autoPublishPreviewBtn.addEventListener('click', previewAutoPublish);
+    els.autoPublishRefreshPreviewBtn.addEventListener('click', previewAutoPublish);
+    els.autoPublishRunOnceBtn.addEventListener('click', runAutoPublishOnce);
+    els.autoPublishSchedulerRunOnceBtn.addEventListener('click', runAutoPublishOnce);
+    els.autoPublishSchedulerStartBtn.addEventListener('click', startAutoPublishScheduler);
+    els.autoPublishSchedulerStopBtn.addEventListener('click', stopAutoPublishScheduler);
+    els.autoPublishRefreshRuntimeBtn.addEventListener('click', refreshAutoPublishRuntime);
+    els.autoPublishRefreshRunsBtn.addEventListener('click', () => loadAutoPublishRuns());
+    els.autoPublishRefreshLogsBtn.addEventListener('click', () => loadAutoPublishLogs());
+    els.autoPublishPdfTagSelect.addEventListener('change', () => applyAutoPublishSelectedTag('pdf'));
+    els.autoPublishAudioTagSelect.addEventListener('change', () => applyAutoPublishSelectedTag('audio'));
+
+    window.addEventListener('hashchange', handleHashChange);
+    window.addEventListener('beforeunload', stopSchedulerPolling);
+}
+
+function handleHashChange() {
+    setActiveMode(resolveModeFromHash(window.location.hash), { updateHash: false });
+}
+
+function resolveModeFromHash(hash = '') {
+    const normalized = String(hash || '').toLowerCase();
+    return normalized.includes('auto-publish') ? 'publish' : 'sync';
+}
+
+function setActiveMode(mode, options = {}) {
+    state.activeMode = mode === 'publish' ? 'publish' : 'sync';
+    const syncMode = state.activeMode === 'sync';
+
+    if (els.systemSyncSection) {
+        els.systemSyncSection.hidden = !syncMode;
+    }
+    if (els.autoPublishSection) {
+        els.autoPublishSection.hidden = syncMode;
+    }
+
+    syncModeButtons();
+
+    applyActiveCookieProfile(state.activeMode);
+    renderCookieProfiles();
+    renderGroups();
+    renderContextPanel();
+    updateCookieFormatHint();
+    updateCookieSummary();
+    setCookieEditorOpen(!currentCookieValue(state.activeMode));
+
+    if (options.updateHash === false) {
+        return;
+    }
+
+    const nextHash = syncMode ? '#system-sync-section' : '#auto-publish-section';
+    if (window.location.hash !== nextHash) {
+        history.replaceState(null, '', nextHash);
+    }
+}
+
+function syncModeButtons() {
+    const syncSelected = state.activeMode === 'sync';
+    if (els.modeSyncBtn) {
+        els.modeSyncBtn.classList.toggle('is-active', syncSelected);
+        els.modeSyncBtn.setAttribute('aria-selected', syncSelected ? 'true' : 'false');
+    }
+    if (els.modePublishBtn) {
+        els.modePublishBtn.classList.toggle('is-active', !syncSelected);
+        els.modePublishBtn.setAttribute('aria-selected', syncSelected ? 'false' : 'true');
+    }
+}
+
+function apiBaseUrl() {
+    return window.API_BASE_URL || window.CONFIG?.API_BASE_URL || 'http://localhost:5001/api/v1';
+}
+
+async function apiPost(endpoint, payload) {
+    const response = await fetch(`${apiBaseUrl()}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+        const message = data?.error?.message || data?.message || `HTTP ${response.status}`;
+        throw new Error(message);
+    }
+    return data.data;
+}
+
+async function apiGet(endpoint) {
+    const response = await fetch(`${apiBaseUrl()}${endpoint}`, { method: 'GET' });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+        const message = data?.error?.message || data?.message || `HTTP ${response.status}`;
+        throw new Error(message);
+    }
+    return data.data;
+}
+
+function defaultContextSummary(mode) {
+    return mode === 'publish'
+        ? '请先获取星球，系统会自动识别可用 hashtag。'
+        : '请先获取星球，系统会自动识别可用于同步的 tab。';
+}
+
+function initializeCookieProfiles() {
+    state.cookieProfiles = loadCookieProfiles();
+    const syncCtx = syncContext();
+    const publishCtx = publishContext();
+    const oldCookie = localStorage.getItem(COOKIE_STORAGE_KEY) || sessionStorage.getItem('zsxq_cookie') || '';
+    if (oldCookie && !state.cookieProfiles.length) {
+        const id = newCookieProfileId();
+        state.cookieProfiles = [{
+            id,
+            name: '默认 Cookie',
+            cookie: oldCookie,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+        }];
+        if (!syncCtx.activeCookieId) {
+            syncCtx.activeCookieId = id;
+        }
+        if (!publishCtx.activeCookieId) {
+            publishCtx.activeCookieId = id;
+        }
+        localStorage.removeItem(COOKIE_STORAGE_KEY);
+        sessionStorage.removeItem('zsxq_cookie');
+    }
+
+    [syncCtx, publishCtx].forEach((context, index) => {
+        if (!state.cookieProfiles.some(profile => profile.id === context.activeCookieId)) {
+            context.activeCookieId = '';
+        }
+        context.summaryText = context.summaryText || defaultContextSummary(index === 1 ? 'publish' : 'sync');
+    });
+
+    if (!syncCtx.activeCookieId && state.cookieProfiles.length) {
+        syncCtx.activeCookieId = state.cookieProfiles[0].id;
+    }
+
+    applyActiveCookieProfile('sync');
+    applyActiveCookieProfile('publish');
+    persistCookieProfiles();
+}
+
+function loadCookieProfiles() {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(COOKIE_PROFILES_STORAGE_KEY) || '[]');
+        return Array.isArray(parsed)
+            ? parsed.filter(profile => profile && profile.id && profile.cookie)
+            : [];
+    } catch {
+        return [];
+    }
+}
+
+function persistCookieProfiles() {
+    localStorage.setItem(COOKIE_PROFILES_STORAGE_KEY, JSON.stringify(state.cookieProfiles));
+    const syncActiveId = syncContext().activeCookieId;
+    const publishActiveId = publishContext().activeCookieId;
+
+    if (syncActiveId) {
+        localStorage.setItem(ACTIVE_COOKIE_ID_STORAGE_KEY, syncActiveId);
+    } else {
+        localStorage.removeItem(ACTIVE_COOKIE_ID_STORAGE_KEY);
+    }
+
+    if (syncActiveId) {
+        localStorage.setItem(SYNC_ACTIVE_COOKIE_ID_STORAGE_KEY, syncActiveId);
+    } else {
+        localStorage.removeItem(SYNC_ACTIVE_COOKIE_ID_STORAGE_KEY);
+    }
+
+    if (publishActiveId) {
+        localStorage.setItem(PUBLISH_ACTIVE_COOKIE_ID_STORAGE_KEY, publishActiveId);
+    } else {
+        localStorage.removeItem(PUBLISH_ACTIVE_COOKIE_ID_STORAGE_KEY);
+    }
+}
+
+function activeCookieProfile(mode = state.activeMode) {
+    const context = modeContext(mode);
+    return state.cookieProfiles.find(profile => profile.id === context.activeCookieId) || null;
+}
+
+function applyActiveCookieProfile(mode = state.activeMode) {
+    const context = modeContext(mode);
+    const profile = activeCookieProfile(mode);
+    if (profile) {
+        context.cookie = profile.cookie || '';
+        context.draftName = profile.name || '';
+    } else {
+        context.cookie = context.cookie || '';
+        context.draftName = context.draftName || '';
+    }
+
+    if (mode === currentModeKey()) {
+        if (els.cookieNameInput) {
+            els.cookieNameInput.value = context.draftName || '';
+        }
+        if (els.cookieInput) {
+            els.cookieInput.value = context.cookie || '';
+        }
+    }
+}
+
+function renderCookieProfiles() {
+    const emptyOption = '<option value="">新增/未保存 Cookie</option>';
+    if (!els.cookieProfileSelect) return;
+    if (!state.cookieProfiles.length) {
+        els.cookieProfileSelect.innerHTML = emptyOption;
+        els.cookieProfileSelect.value = '';
+        if (els.deleteCookieBtn) {
+            els.deleteCookieBtn.disabled = true;
+            els.deleteCookieBtn.classList.add('opacity-50');
+        }
+        return;
+    }
+
+    els.cookieProfileSelect.innerHTML = emptyOption + state.cookieProfiles.map(profile => {
+        const token = extractCookieToken(profile.cookie);
+        const label = `${profile.name || '未命名 Cookie'}${token ? ` (${maskToken(token)})` : ''}`;
+        return `<option value="${escapeHtml(profile.id)}">${escapeHtml(label)}</option>`;
+    }).join('');
+    els.cookieProfileSelect.value = modeContext().activeCookieId || '';
+    if (els.deleteCookieBtn) {
+        const deletable = Boolean(modeContext().activeCookieId);
+        els.deleteCookieBtn.disabled = !deletable;
+        els.deleteCookieBtn.classList.toggle('opacity-50', !deletable);
+    }
+}
+
+function switchCookieProfile() {
+    modeContext().activeCookieId = els.cookieProfileSelect.value;
+    applyActiveCookieProfile();
+    persistCookieProfiles();
+    updateCookieFormatHint();
+    updateCookieSummary();
+    setCookieEditorOpen(false);
+    resetWorkspaceForMode();
+}
+
+function startNewCookieProfile() {
+    const context = modeContext();
+    context.activeCookieId = '';
+    context.cookie = '';
+    context.draftName = '';
+    if (els.cookieProfileSelect) {
+        els.cookieProfileSelect.value = '';
+    }
+    if (els.cookieNameInput) {
+        els.cookieNameInput.value = '';
+    }
+    if (els.cookieInput) {
+        els.cookieInput.value = '';
+    }
+    persistCookieProfiles();
+    updateCookieFormatHint();
+    updateCookieSummary();
+    setCookieEditorOpen(true);
+    resetWorkspaceForMode();
+}
+
+function saveCookieProfile() {
+    const cookie = (els.cookieInput.value || '').trim();
+    if (!cookie) {
+        updateCookieSummary('请先填写 Cookie', 'error');
+        return;
+    }
+
+    const context = modeContext();
+    const now = new Date().toISOString();
+    const existing = activeCookieProfile();
+    const token = extractCookieToken(cookie);
+    const existingToken = extractCookieToken(existing?.cookie || '');
+    const sameTokenProfile = token
+        ? state.cookieProfiles.find(profile => extractCookieToken(profile.cookie) === token)
+        : null;
+    const name = (els.cookieNameInput.value || '').trim()
+        || (existing && (!token || token === existingToken) ? existing.name : '')
+        || context.draftName
+        || (token ? `Cookie ${maskToken(token)}` : '未命名 Cookie');
+
+    if (sameTokenProfile) {
+        sameTokenProfile.name = name;
+        sameTokenProfile.cookie = cookie;
+        sameTokenProfile.updated_at = now;
+        context.activeCookieId = sameTokenProfile.id;
+    } else if (existing && (!token || token === existingToken)) {
+        existing.name = name;
+        existing.cookie = cookie;
+        existing.updated_at = now;
+    } else {
+        const id = newCookieProfileId();
+        state.cookieProfiles.push({
+            id,
+            name,
+            cookie,
+            created_at: now,
+            updated_at: now,
+        });
+        context.activeCookieId = id;
+    }
+
+    context.cookie = cookie;
+    context.draftName = name;
+    persistCookieProfiles();
+    applyActiveCookieProfile();
+    renderCookieProfiles();
+    updateCookieSummary('已保存当前 Cookie', 'success');
+    setCookieEditorOpen(false);
+}
+
+function deleteCookieProfile() {
+    const currentId = modeContext().activeCookieId;
+    if (!currentId) {
+        return;
+    }
+
+    state.cookieProfiles = state.cookieProfiles.filter(profile => profile.id !== currentId);
+    const fallbackId = state.cookieProfiles[0]?.id || '';
+    Object.values(state.contexts).forEach((context) => {
+        if (context.activeCookieId === currentId) {
+            context.activeCookieId = fallbackId;
+            context.cookie = '';
+            context.draftName = '';
+        }
+    });
+    persistCookieProfiles();
+    applyActiveCookieProfile('sync');
+    applyActiveCookieProfile('publish');
+    renderCookieProfiles();
+    updateCookieFormatHint();
+    updateCookieSummary();
+    setCookieEditorOpen(!currentCookieValue());
+    resetWorkspaceForMode();
+}
+
+function newCookieProfileId() {
+    return `cookie_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function currentCookieValue(mode = state.activeMode) {
+    const context = modeContext(mode);
+    if (mode === currentModeKey()) {
+        const inputValue = (els.cookieInput?.value || '').trim();
+        if (inputValue) {
+            context.cookie = inputValue;
+        }
+        const draftName = (els.cookieNameInput?.value || '').trim();
+        if (draftName) {
+            context.draftName = draftName;
+        }
+    }
+    return String(context.cookie || activeCookieProfile(mode)?.cookie || '').trim();
+}
+
+function resolveContextCookieMeta(mode) {
+    const cookie = currentCookieValue(mode);
+    const context = modeContext(mode);
+    const profile = activeCookieProfile(mode);
+    const token = extractCookieToken(cookie);
+    const name = (mode === currentModeKey()
+        ? (els.cookieNameInput?.value || '').trim()
+        : context.draftName) || profile?.name || '';
+
+    return {
+        text: cookie ? (name || (token ? maskToken(token) : '已填写')) : '未准备',
+        tone: cookie ? 'success' : 'idle',
+    };
+}
+
+function resolveContextGroupMeta(mode) {
+    const context = modeContext(mode);
+    const fallbackConfig = mode === 'publish' ? state.autoPublishConfig : state.syncConfig;
+    const groupId = String(context.selectedGroupId || fallbackConfig?.group_id || '').trim();
+    const group = (context.groups || []).find(item => String(item.group_id) === groupId);
+    const groupName = group?.name || fallbackConfig?.group_name || '';
+    return {
+        id: groupId,
+        name: groupName,
+        text: groupId ? `${groupName || groupId}${groupName ? ` (${groupId})` : ''}` : '未选择',
+    };
+}
+
+function contextCardMeta(mode = state.activeMode) {
+    return mode === 'publish'
+        ? {
+            title: '自动发帖上下文',
+            subtitle: '当前侧栏只服务于自动发帖，可独立选择发帖账号和发帖星球。',
+            groupSubtitle: '选择自动发帖要使用的星球。',
+        }
+        : {
+            title: '系统同步上下文',
+            subtitle: '当前侧栏只服务于系统同步，不会再跟自动发帖共用同一组星球上下文。',
+            groupSubtitle: '选择系统同步要使用的星球。',
+        };
+}
+
+function renderContextPanel() {
+    const meta = contextCardMeta();
+    const context = modeContext();
+    if (els.contextCardTitle) {
+        els.contextCardTitle.textContent = meta.title;
+    }
+    if (els.contextCardSubtitle) {
+        els.contextCardSubtitle.textContent = meta.subtitle;
+    }
+    if (els.groupBlockSubtitle) {
+        els.groupBlockSubtitle.textContent = meta.groupSubtitle;
+    }
+    if (els.tabsSummary) {
+        els.tabsSummary.textContent = context.summaryText || defaultContextSummary(state.activeMode);
+    }
+}
+
+function currentSyncStatusMeta() {
+    const scheduler = state.schedulerStatus || {};
+    const config = scheduler.config || state.syncConfig || {};
+    if (scheduler.running) {
+        return {
+            text: `运行中 · ${config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES} 分钟`,
+            tone: 'success',
+        };
+    }
+    if (config.exists || config.group_id) {
+        return {
+            text: '已配置，待运行',
+            tone: config.cookie_env_configured ? 'success' : 'warning',
+        };
+    }
+    if (syncContext().selectedGroupId) {
+        return {
+            text: '待保存配置',
+            tone: 'warning',
+        };
+    }
+    return {
+        text: '未运行',
+        tone: 'idle',
+    };
+}
+
+function currentAutoPublishStatusMeta() {
+    const scheduler = state.autoPublishScheduler || {};
+    const config = scheduler.config || state.autoPublishConfig || {};
+    if (scheduler.running) {
+        return {
+            text: `运行中 · ${config.interval_minutes || 30} 分钟`,
+            tone: 'success',
+        };
+    }
+    if (config.exists || config.group_id || currentAutoPublishGroupId()) {
+        return {
+            text: config.cookie_pool_ready
+                ? `策略已保存 · ${config.active_cookie_account_count || 0} 个账号可用`
+                : '策略已保存',
+            tone: (config.cookie_pool_ready || config.cookie_env_configured) ? 'success' : 'warning',
+        };
+    }
+    return {
+        text: '未运行',
+        tone: 'idle',
+    };
+}
+
+function setWorkspaceStatusText(element, text, tone = 'idle') {
+    if (!element) return;
+    element.textContent = text;
+    element.dataset.tone = tone;
+}
+
+function renderWorkspaceSnapshot() {
+    const syncCookieMeta = resolveContextCookieMeta('sync');
+    const publishCookieMeta = resolveContextCookieMeta('publish');
+    const syncGroupMeta = resolveContextGroupMeta('sync');
+    const publishGroupMeta = resolveContextGroupMeta('publish');
+    const currentGroupMeta = resolveContextGroupMeta(state.activeMode);
+    const syncMeta = currentSyncStatusMeta();
+    const publishMeta = currentAutoPublishStatusMeta();
+
+    setWorkspaceStatusText(
+        els.workspaceCookieStatus,
+        `同步：${syncCookieMeta.text} / 发帖：${publishCookieMeta.text}`,
+        (syncCookieMeta.tone === 'success' || publishCookieMeta.tone === 'success') ? 'success' : 'idle',
+    );
+    setWorkspaceStatusText(
+        els.workspaceGroupStatus,
+        `同步：${syncGroupMeta.text} / 发帖：${publishGroupMeta.text}`,
+        (syncGroupMeta.id || publishGroupMeta.id) ? 'success' : 'idle',
+    );
+    setWorkspaceStatusText(els.workspaceSyncStatus, syncMeta.text, syncMeta.tone);
+    setWorkspaceStatusText(els.workspacePublishStatus, publishMeta.text, publishMeta.tone);
+    setWorkspaceStatusText(els.workspaceSidebarGroup, currentGroupMeta.text, currentGroupMeta.id ? 'success' : 'idle');
+    setWorkspaceStatusText(els.workspaceSidebarSync, syncMeta.text, syncMeta.tone);
+    setWorkspaceStatusText(els.workspaceSidebarPublish, publishMeta.text, publishMeta.tone);
+}
+
+function resetWorkspaceForMode(mode = state.activeMode) {
+    const context = modeContext(mode);
+    context.groups = [];
+    context.selectedGroupId = '';
+    context.summaryText = defaultContextSummary(mode);
+
+    if (mode === 'publish') {
+        clearAutoPublishTagOptions();
+        renderAutoPublishCurrentGroup();
+    } else {
+        state.selectedTabDefinitions = [];
+        state.syncConfig = null;
+        state.batches = [];
+        state.batchesError = null;
+        renderSyncOverviewCard();
+        renderBatchesPanel();
+    }
+
+    renderGroups();
+    renderContextPanel();
+    renderWorkspaceSnapshot();
+}
+
+function setCookieEditorOpen(open) {
+    if (!els.cookieEditor) return;
+    els.cookieEditor.classList.toggle('hidden', !open);
+    if (els.toggleCookieBtn) {
+        els.toggleCookieBtn.textContent = open ? '收起' : '修改';
+    }
+    if (open) {
+        updateCookieFormatHint();
+    } else if (els.cookieFormatHint) {
+        els.cookieFormatHint.classList.add('hidden');
+    }
+}
+
+function updateCookieSummary(message = '', type = '') {
+    const value = (els.cookieInput.value || '').trim();
+    if (message) {
+        const classByType = type === 'error'
+            ? 'border-red-200 bg-red-50 text-red-600'
+            : 'border-emerald-200 bg-emerald-50 text-emerald-700';
+        els.cookieSummary.className = `mt-2 rounded-lg border px-3 py-2 text-xs ${classByType}`;
+        els.cookieSummary.textContent = message;
+        renderWorkspaceSnapshot();
+        return;
+    }
+
+    if (!value) {
+        els.cookieSummary.className = 'mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500';
+        els.cookieSummary.textContent = '未保存 Cookie';
+        renderWorkspaceSnapshot();
+        return;
+    }
+
+    const token = extractCookieToken(value);
+    const name = (els.cookieNameInput.value || activeCookieProfile()?.name || '').trim();
+    els.cookieSummary.className = 'mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700';
+    els.cookieSummary.textContent = token
+        ? `${name ? `${name} · ` : ''}zsxq_access_token：${maskToken(token)}`
+        : '已保存 Cookie';
+    renderWorkspaceSnapshot();
+}
+
+function updateCookieFormatHint() {
+    const value = (els.cookieInput.value || '').trim();
+    if (!els.cookieFormatHint || !value) {
+        if (els.cookieFormatHint) {
+            els.cookieFormatHint.classList.add('hidden');
+            els.cookieFormatHint.textContent = '';
+        }
+        return;
+    }
+
+    if (value.startsWith('[') || value.startsWith('{')) {
+        els.cookieFormatHint.classList.remove('hidden');
+        els.cookieFormatHint.textContent = '检测到 Cookie JSON 导出格式，后端会自动转换。';
+        return;
+    }
+
+    els.cookieFormatHint.classList.remove('hidden');
+    els.cookieFormatHint.textContent = '检测到 Cookie 请求头格式。';
+}
+
+function extractCookieToken(value) {
+    if (!value) return '';
+    const trimmed = String(value).trim();
+
+    if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+        try {
+            const parsed = JSON.parse(trimmed);
+            const items = Array.isArray(parsed) ? parsed : [parsed];
+            const tokenItem = items.find(item => item?.name === 'zsxq_access_token');
+            return tokenItem?.value || '';
+        } catch {
+            return '';
+        }
+    }
+
+    const match = trimmed.match(/(?:^|;\s*)zsxq_access_token=([^;]+)/);
+    return match ? match[1] : '';
+}
+
+function maskToken(token) {
+    if (!token) return '未检测到';
+    return token.length <= 14 ? '****' : `${token.slice(0, 8)}...${token.slice(-6)}`;
+}
+
+async function loadGroups(mode = currentModeKey()) {
+    const context = modeContext(mode);
+    const cookie = getActiveCookieForRequest(mode);
+    if (!cookie) {
+        if (mode === 'publish') {
+            showAutoPublishMessage('warning', '无法获取星球', '请先填写 Cookie（或先配置环境变量）。');
+        } else {
+            renderMessage('warning', '请先填写 Cookie（或先配置环境变量）。');
+        }
+        return;
+    }
+
+    setLoading(els.loadGroupsBtn, true, '获取中...');
+    setLoading(els.loadGroupsRefreshBtn, true, '获取中...');
+    context.cookie = cookie;
+
+    try {
+        const result = await apiPost('/zsxq/groups', { cookie, count: 50 });
+        context.groups = result?.resp_data?.groups || [];
+        renderGroups();
+        if (context.groups.length) {
+            const preferredGroupId = String(
+                context.selectedGroupId
+                || (mode === 'publish' ? state.autoPublishConfig?.group_id : state.syncConfig?.group_id)
+                || context.groups[0]?.group_id
+                || ''
+            ).trim();
+            const matchedGroup = context.groups.find(item => String(item.group_id) === preferredGroupId) || context.groups[0];
+            if (matchedGroup?.group_id) {
+                context.selectedGroupId = String(matchedGroup.group_id);
+                els.groupsSelect.value = context.selectedGroupId;
+                await onGroupChange(mode);
+            }
+        }
+        if (mode === 'publish') {
+            showAutoPublishMessage('success', '星球已刷新', `已加载 ${context.groups.length} 个星球。`);
+        } else {
+            renderMessage('success', `已加载 ${context.groups.length} 个星球。`);
+        }
+    } catch (error) {
+        context.groups = [];
+        renderGroups();
+        if (mode === 'publish') {
+            showAutoPublishMessage('error', '获取星球失败', error.message);
+        } else {
+            renderMessage('error', `获取星球失败：${error.message}`);
+        }
+    } finally {
+        setLoading(els.loadGroupsBtn, false, '<i class="fas fa-satellite-dish mr-2"></i>获取星球');
+        setLoading(els.loadGroupsRefreshBtn, false, '<i class="fas fa-rotate mr-2"></i>刷新');
+    }
+}
+
+function getActiveCookieForRequest(mode = currentModeKey()) {
+    const context = modeContext(mode);
+    if (mode === currentModeKey()) {
+        context.cookie = (els.cookieInput.value || '').trim() || context.cookie;
+        context.draftName = (els.cookieNameInput.value || '').trim() || context.draftName;
+    }
+    return context.cookie || activeCookieProfile(mode)?.cookie || '';
+}
+
+function renderGroups() {
+    const mode = currentModeKey();
+    const context = modeContext(mode);
+    const fallbackConfig = mode === 'publish' ? state.autoPublishConfig : state.syncConfig;
+    if (!els.groupsSelect) return;
+    if (!context.groups.length) {
+        const fallbackId = String(context.selectedGroupId || fallbackConfig?.group_id || '').trim();
+        const fallbackName = fallbackConfig?.group_name || fallbackId;
+        els.groupsSelect.innerHTML = fallbackId
+            ? `<option value="${escapeHtml(fallbackId)}">${escapeHtml(fallbackName || fallbackId)} (${escapeHtml(fallbackId)})</option>`
+            : '<option value="">暂无星球，请先获取</option>';
+        els.groupsSelect.value = fallbackId;
+        renderAutoPublishCurrentGroup();
+        renderWorkspaceSnapshot();
+        return;
+    }
+
+    els.groupsSelect.innerHTML = '<option value="">请选择星球</option>' + context.groups
+        .map(group => `<option value="${escapeHtml(String(group.group_id))}">${escapeHtml(group.name || `星球 ${group.group_id}`)} (${escapeHtml(String(group.group_id))})</option>`)
+        .join('');
+    if (context.selectedGroupId) {
+        els.groupsSelect.value = String(context.selectedGroupId);
+    }
+    renderAutoPublishCurrentGroup();
+    renderWorkspaceSnapshot();
+}
+
+async function onGroupChange(mode = currentModeKey()) {
+    const context = modeContext(mode);
+    const groupId = String(els.groupsSelect.value || '').trim();
+    context.selectedGroupId = groupId;
+    context.summaryText = defaultContextSummary(mode);
+
+    if (mode === 'publish') {
+        clearAutoPublishTagOptions();
+    } else {
+        state.selectedTabDefinitions = [];
+        state.syncConfig = null;
+    }
+
+    if (!groupId) {
+        context.summaryText = '请先选择星球。';
+        renderContextPanel();
+        if (mode === 'sync') {
+            renderSyncOverviewCard();
+        }
+        renderAutoPublishCurrentGroup();
+        renderAutoPublishCookieAccounts();
+        renderWorkspaceSnapshot();
+        return;
+    }
+
+    const cookie = getActiveCookieForRequest(mode);
+    if (!cookie) {
+        context.summaryText = mode === 'publish'
+            ? '当前无 Cookie，无法加载标签菜单。可先保存/输入 Cookie 或使用环境变量先测试。'
+            : '当前无 Cookie，无法加载星球 tab。可先保存/输入 Cookie 或使用环境变量先测试。';
+        renderContextPanel();
+        renderAutoPublishCurrentGroup();
+        renderWorkspaceSnapshot();
+        return;
+    }
+
+    setLoading(els.saveConfigBtn, true, '检测中...');
+    try {
+        const menuResult = await apiPost('/zsxq/menus', {
+            cookie,
+            group_id: groupId,
+        });
+        const menus = menuResult?.resp_data?.menus || [];
+        if (mode === 'publish') {
+            hydrateAutoPublishTagsFromMenus(menus);
+            context.summaryText = state.autoPublishTagOptions.length
+                ? `已识别 ${state.autoPublishTagOptions.length} 个 hashtag，可直接给 PDF / 音频规则选择。`
+                : '当前星球菜单里没有识别到 hashtag 标签，可继续手动填写标签 ID / 名称。';
+        } else {
+            const tabs = buildOfficialMenuTabs(menus);
+            state.selectedTabDefinitions = tabs;
+            renderTabSummary(tabs, mode);
+
+            const jobs = buildSystemJobs(tabs);
+            context.summaryText = !jobs.length
+                ? '未检测到外资研报或调研纪要 Tab。请确认该星球是否包含目标 tab。'
+                : jobs
+                    .map(job => `${job.tab.label}（${job.fileType === 'pdf' ? 'PDF' : 'MP3'}）`)
+                    .join('；');
+        }
+        renderContextPanel();
+    } catch (error) {
+        context.summaryText = `读取星球菜单失败：${error.message}`;
+        renderContextPanel();
+        if (mode === 'publish') {
+            showAutoPublishMessage('warning', '读取星球菜单失败', error.message);
+        } else {
+            renderMessage('warning', `读取星球菜单失败：${error.message}`);
+        }
+    } finally {
+        setLoading(els.saveConfigBtn, false, '<i class="fas fa-floppy-disk mr-2"></i>保存系统同步配置');
+    }
+
+    if (mode === 'sync') {
+        await loadSystemSyncBatches(groupId, { render: false });
+        renderSyncOverviewCard();
+    }
+    renderAutoPublishCurrentGroup();
+    renderAutoPublishCookieAccounts();
+    renderWorkspaceSnapshot();
+}
+
+function buildOfficialMenuTabs(menus) {
+    return (menus || []).map(menu => {
+        const label = String(cleanMenuTitle(menu.title || menu.name || menu.label || '未命名')).trim();
+        const hashtagId = extractMenuHashtagId(menu);
+        if (hashtagId) {
+            return {
+                id: `hashtag:${hashtagId}`,
+                label,
+                scope: 'all',
+                hashtagId,
+            };
+        }
+
+        const presetType = extractMenuPresetType(menu);
+        if (presetType) {
+            return {
+                id: `preset:${presetType || menu.menu_id || 'unknown'}`,
+                label,
+                scope: normalizePresetScope(presetType),
+            };
+        }
+
+        return null;
+    }).filter(Boolean);
+}
+
+function cleanMenuTitle(title) {
+    return String(title || '').replace(/^#|#$/g, '').trim() || '未命名';
+}
+
+function extractMenuHashtagId(menu) {
+    return menu?.hashtag?.hashtag_id
+        || menu?.hashtag_id
+        || menu?.target?.hashtag_id
+        || menu?.target?.id
+        || (menu?.type === 'hashtag' ? menu.menu_id : null);
+}
+
+function extractMenuPresetType(menu) {
+    if (!menu?.preset && !menu?.preset_type && !menu?.type) return null;
+    return menu.preset_type || menu.type || menu.menu_id;
+}
+
+function normalizePresetScope(presetType) {
+    const map = {
+        all: 'all',
+        with_files: 'with_files',
+        with_images: 'with_images',
+        digests: 'digests',
+    };
+    return map[presetType] || presetType || 'all';
+}
+
+function renderTabSummary(tabs, mode = 'sync') {
+    const context = modeContext(mode);
+    if (!tabs.length) {
+        context.summaryText = '未找到可识别 tab。';
+        if (mode === currentModeKey()) {
+            els.tabsSummary.textContent = context.summaryText;
+        }
+        return;
+    }
+    const allNames = tabs.map(tab => tab.label).join('、');
+    context.summaryText = `检测到 ${tabs.length} 个 tab：${allNames}`;
+    if (mode === currentModeKey()) {
+        els.tabsSummary.textContent = context.summaryText;
+    }
+}
+
+function buildSystemJobs(tabs = state.selectedTabDefinitions) {
+    const foreignReportTab = tabs.find(tab => tab.label.includes('外资研报'));
+    const memoTab = tabs.find(tab => tab.label.includes('调研纪要'));
+    const jobs = [
+        foreignReportTab ? { key: 'foreign_report', modeCode: 'fr', tab: foreignReportTab, fileType: 'pdf' } : null,
+        memoTab ? { key: 'research_memo_mp3', modeCode: 'rm', tab: memoTab, fileType: 'mp3' } : null,
+    ].filter(Boolean);
+
+    if (!jobs.length && tabs.length >= 2) {
+        return [
+            { key: 'default_one', modeCode: 'all', tab: tabs[0], fileType: 'all' },
+            { key: 'default_two', modeCode: 'all', tab: tabs[1], fileType: 'all' },
+        ];
+    }
+
+    return jobs;
+}
+
+async function saveSystemSyncConfig() {
+    const context = syncContext();
+    if (!context.selectedGroupId) {
+        renderMessage('error', '请先选择星球。');
+        return;
+    }
+
+    const jobs = buildSystemJobs(state.selectedTabDefinitions);
+    if (!jobs.length) {
+        renderMessage('error', '未找到适用的目标 Tab（需至少有外资研报/调研纪要之一）。');
+        return;
+    }
+
+    const intervalMinutes = parsePositiveInt(els.configIntervalInput?.value, SYSTEM_SYNC_INTERVAL_MINUTES, 1);
+    const maxRoundsRaw = parsePositiveIntOrZero(els.configMaxRoundsInput?.value, SYSTEM_SYNC_MAX_ROUNDS, 0);
+    const countRaw = parseBoundedInt(
+        els.configCountInput?.value,
+        SYSTEM_SYNC_COUNT,
+        1,
+        50,
+    );
+    const maxDownloadFilesRaw = parseBoundedInt(
+        els.configMaxDownloadFilesInput?.value,
+        SYSTEM_SYNC_MAX_DOWNLOAD_FILES,
+        1,
+        10,
+    );
+    const group = selectedGroup('sync');
+    const cookie = getActiveCookieForRequest('sync');
+
+    const original = els.saveConfigBtn.innerHTML;
+    setLoading(els.saveConfigBtn, true, '保存中...');
+    renderMessage('loading', '正在保存系统同步配置...');
+
+    try {
+        const payload = {
+            group_id: context.selectedGroupId,
+            group_name: group?.name || '',
+            count: Number(countRaw),
+            max_pages: 1,
+            stop_on_existing: true,
+            download_attachments: true,
+            max_download_files: Number(maxDownloadFilesRaw),
+            interval_minutes: Number(intervalMinutes),
+            max_rounds: Number(maxRoundsRaw),
+            jobs: jobs.map(job => ({
+                key: job.key,
+                mode_code: job.modeCode,
+                file_type: job.fileType,
+                tab: job.tab,
+            })),
+        };
+        if (cookie) {
+            payload.cookie = cookie;
+        }
+
+        const result = await apiPost('/zsxq/system-sync-test/config', payload);
+        const config = result?.config || {};
+        state.syncConfig = config;
+        const serverInterval = Number(config.interval_minutes);
+        const serverCount = Number(config.count);
+        const serverMaxDownloadFiles = Number(config.max_download_files);
+        if (serverInterval && serverInterval !== Number(intervalMinutes)) {
+            renderMessage(
+                'warning',
+                `已保存但回读间隔为 ${serverInterval} 分钟（你输入的是 ${intervalMinutes}），请确认是否有外部进程覆盖配置。`,
+            );
+        } else {
+            renderMessage('success', `配置已保存。间隔 ${serverInterval || intervalMinutes} 分钟，每目标 Tab ${serverCount || countRaw} 条，每条最多 ${serverMaxDownloadFiles || maxDownloadFilesRaw} 个附件，任务轮次：${formatConfigMaxRounds(config.max_rounds)}。`);
+        }
+        if (Number.isFinite(serverCount)) {
+            els.configCountInput.value = String(serverCount);
+        }
+        if (Number.isFinite(serverMaxDownloadFiles)) {
+            els.configMaxDownloadFilesInput.value = String(serverMaxDownloadFiles);
+        }
+        hydrateSystemSyncRuntimeConfigInputs(config);
+        renderSyncOverviewCard();
+        await loadSystemSyncSchedulerStatus({ render: false });
+        await loadSystemSyncBatches(config.group_id, { render: false });
+        renderBatchesPanel();
+        renderSyncSchedulerPanel();
+    } catch (error) {
+        renderMessage('error', `保存失败：${error.message}`);
+    } finally {
+        setLoading(els.saveConfigBtn, false, original);
+    }
+}
+
+function selectedGroup(mode = currentModeKey()) {
+    const context = modeContext(mode);
+    return (context.groups || []).find(item => String(item.group_id) === String(context.selectedGroupId));
+}
+
+async function loadSystemSyncSchedulerStatus(options = {}) {
+    try {
+        const data = await apiGet('/zsxq/system-sync-scheduler/status');
+        state.schedulerStatus = data?.scheduler || null;
+        if (data?.scheduler?.config) {
+            state.syncConfig = data.scheduler.config;
+            if (!syncContext().selectedGroupId && state.syncConfig?.group_id) {
+                syncContext().selectedGroupId = String(state.syncConfig.group_id);
+            }
+            hydrateSystemSyncRuntimeConfigInputs(state.syncConfig);
+            if (state.activeMode === 'sync') {
+                renderGroups();
+                renderContextPanel();
+            }
+        }
+    } catch {
+        state.schedulerStatus = {
+            running: false,
+            exists: false,
+            message: '状态查询失败',
+        };
+    }
+
+    if (options.render !== false) {
+        renderSyncSchedulerPanel();
+        renderSyncOverviewCard();
+        renderContextPanel();
+    }
+}
+
+async function loadSystemSyncBatches(groupId = syncContext().selectedGroupId, options = {}) {
+    try {
+        const [batchResult, configResult] = await Promise.all([
+            apiPost('/zsxq/system-sync-test/batches', { group_id: groupId || null, limit: 10 }),
+            apiGet('/zsxq/system-sync-test/config'),
+        ]);
+        state.batches = batchResult?.batches || [];
+        state.batchesError = batchResult?.error || null;
+        state.syncConfig = configResult?.config || state.syncConfig;
+        if (configResult?.config) {
+            if (!syncContext().selectedGroupId && configResult.config.group_id) {
+                syncContext().selectedGroupId = String(configResult.config.group_id);
+            }
+            hydrateSystemSyncRuntimeConfigInputs(configResult.config);
+            if (state.activeMode === 'sync') {
+                renderGroups();
+                renderContextPanel();
+            }
+        }
+    } catch (error) {
+        state.batches = [];
+        state.batchesError = error.message || '获取系统批次失败';
+    }
+
+    if (options.render !== false) {
+        renderBatchesPanel();
+        renderSyncOverviewCard();
+        renderContextPanel();
+    }
+}
+
+async function startSystemSyncScheduler() {
+    const original = els.startBtn.innerHTML;
+    setLoading(els.startBtn, true, '启动中...');
+    try {
+        const result = await apiPost('/zsxq/system-sync-scheduler/start', {
+            cookie: getActiveCookieForRequest('sync') || '',
+        });
+        state.schedulerStatus = result?.scheduler || null;
+        renderMessage('success', result?.scheduler?.message || '启动请求已提交。');
+        await loadSystemSyncBatches(syncContext().selectedGroupId, { render: false });
+        renderBatchesPanel();
+    } catch (error) {
+        renderMessage('error', `启动失败：${error.message}`);
+    } finally {
+        setLoading(els.startBtn, false, original);
+        renderSyncSchedulerPanel();
+    }
+}
+
+async function stopSystemSyncScheduler() {
+    const original = els.stopBtn.innerHTML;
+    setLoading(els.stopBtn, true, '停止中...');
+    try {
+        const result = await apiPost('/zsxq/system-sync-scheduler/stop', {});
+        state.schedulerStatus = result?.scheduler || null;
+        renderMessage('success', result?.scheduler?.message || '停止请求已提交。');
+    } catch (error) {
+        renderMessage('error', `停止失败：${error.message}`);
+    } finally {
+        setLoading(els.stopBtn, false, original);
+        renderSyncSchedulerPanel();
+    }
+}
+
+async function runSystemSyncOnce() {
+    const original = els.runOnceBtn.innerHTML;
+    setLoading(els.runOnceBtn, true, '执行中...');
+    try {
+        const result = await apiPost('/zsxq/system-sync-scheduler/run-once', {
+            cookie: getActiveCookieForRequest('sync') || '',
+        });
+        const scheduler = result?.scheduler || {};
+        const statusText = scheduler.skipped ? `未提交（原因：${scheduler.reason || '系统跳过'}）` : '已触发';
+        renderMessage(scheduler.skipped ? 'muted' : 'success', scheduler.message || statusText);
+        state.schedulerStatus = scheduler;
+        if (!scheduler.skipped) {
+            await loadSystemSyncBatches(syncContext().selectedGroupId, { render: false });
+            renderBatchesPanel();
+        }
+    } catch (error) {
+        renderMessage('error', `立即执行失败：${error.message}`);
+    } finally {
+        setLoading(els.runOnceBtn, false, original);
+        renderSyncSchedulerPanel();
+    }
+}
+
+function startSchedulerPolling() {
+    stopSchedulerPolling();
+    state.schedulerPollTimer = setInterval(() => {
+        loadSystemSyncSchedulerStatus({ render: false }).then(() => {
+            renderSyncSchedulerPanel();
+            renderSyncOverviewCard();
+            renderAutoPublishCurrentGroup();
+            if (state.logsLoaded && !els.logsPanel.classList.contains('hidden')) {
+                loadSchedulerLogs().then((logs) => {
+                    if (state.logsLoaded && !els.logsPanel.classList.contains('hidden')) {
+                        els.logsPanel.textContent = logs;
+                    }
+                });
+            }
+        });
+        loadSystemSyncBatches(syncContext().selectedGroupId, { render: false }).then(renderBatchesPanel);
+        loadAutoPublishSchedulerStatus({ render: false }).then(renderAutoPublishSchedulerPanel);
+        loadAutoPublishRuns({ render: false }).then(renderAutoPublishRunsPanel);
+    }, SYSTEM_SYNC_STATUS_POLL_MS);
+}
+
+function stopSchedulerPolling() {
+    if (state.schedulerPollTimer) {
+        clearInterval(state.schedulerPollTimer);
+        state.schedulerPollTimer = null;
+    }
+}
+
+async function loadSchedulerLogs() {
+    try {
+        const response = await fetch(`${apiBaseUrl()}/zsxq/system-sync-scheduler/logs?lines=${SYSTEM_SYNC_LOG_LINES}`);
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        }
+        const raw = data?.data?.raw;
+        return sanitizeLogText(typeof raw === 'string' ? raw : '') || '（暂无日志）';
+    } catch (error) {
+        return `读取日志失败：${error.message}`;
+    }
+}
+
+async function toggleSchedulerLogs() {
+    if (els.logsPanel.classList.contains('hidden')) {
+        els.logsPanel.classList.remove('hidden');
+        els.openLogsBtn.disabled = true;
+        els.openLogsBtn.innerHTML = '<i class="fas fa-list-ul mr-2"></i>加载日志...';
+        els.logsPanel.textContent = '正在读取日志...';
+        state.logsLoaded = true;
+        const logs = await loadSchedulerLogs();
+        els.logsPanel.textContent = logs;
+        els.openLogsBtn.disabled = false;
+        els.openLogsBtn.innerHTML = '<i class="fas fa-list-ul mr-2"></i>隐藏最近日志';
+        return;
+    }
+
+    state.logsLoaded = false;
+    els.logsPanel.classList.add('hidden');
+    els.openLogsBtn.innerHTML = '<i class="fas fa-list-ul mr-2"></i>查看最近日志';
+}
+
+function renderSyncSchedulerPanel() {
+    const scheduler = state.schedulerStatus || {};
+    const config = scheduler.config || state.syncConfig || {};
+    const running = Boolean(scheduler.running);
+    const cookieMode = scheduler.cookie_source === 'page'
+        ? '当前运行实例使用页面 Cookie'
+        : (config.cookie_env_configured ? '环境变量已配置' : '环境变量未配置');
+
+    els.schedulerStatusBadge.textContent = running ? '运行中' : '未运行';
+    els.schedulerStatusBadge.className = `rounded-full px-2 py-1 text-[10px] font-black ${running ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`;
+    const interval = config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES;
+    const count = config.count || SYSTEM_SYNC_COUNT;
+    const maxFiles = config.max_download_files || SYSTEM_SYNC_MAX_DOWNLOAD_FILES;
+    const lastTrigger = formatZsxqTime(scheduler.last_trigger_at || config.last_trigger_at);
+    const nextRun = formatZsxqTime(scheduler.next_run);
+    const rounds = scheduler.continuous
+        ? `已运行 ${scheduler.rounds_completed || 0} 轮（持续）`
+        : `进度 ${scheduler.rounds_completed || 0}/${scheduler.max_rounds || 0} 轮`;
+
+    els.schedulerContent.innerHTML = `
+        <div class="space-y-1">
+            <div>进程状态：${escapeHtml(running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
+            <div>计划配置：${escapeHtml(String(interval))} 分钟一次 · 每目标 Tab ${escapeHtml(String(count))} 条 · 每条最多 ${escapeHtml(String(maxFiles))} 个附件</div>
+            <div>轮次：${escapeHtml(rounds)}</div>
+            <div>Cookie：${escapeHtml(cookieMode)}</div>
+            <div>上次触发：${escapeHtml(lastTrigger)} · 下一次：${escapeHtml(nextRun)}</div>
+            <div>日志：<span class="font-mono break-all">${escapeHtml(scheduler.log_path || (config.log_path || '-'))}</span></div>
+            <div class="text-slate-400">${escapeHtml(scheduler.message || config.group_id ? '' : '未检测到配置')}</div>
+        </div>
+    `;
+
+    const hasConfig = Boolean(config?.exists || config?.group_id || scheduler?.config?.group_id);
+    if (!hasConfig) {
+        els.startBtn.disabled = true;
+        els.stopBtn.disabled = true;
+        els.runOnceBtn.disabled = true;
+    } else {
+        els.startBtn.disabled = running;
+        els.stopBtn.disabled = !running;
+        els.runOnceBtn.disabled = false;
+    }
+
+    els.startBtn.classList.toggle('opacity-50', running);
+    els.stopBtn.classList.toggle('opacity-50', !running);
+    renderWorkspaceSnapshot();
+}
+
+function renderSyncOverviewCard() {
+    const config = state.syncConfig || {};
+    const scheduler = state.schedulerStatus || {};
+    const configured = Boolean(config && config.exists);
+    const hasGroup = Boolean(syncContext().selectedGroupId || config.group_id);
+
+    if (!configured) {
+        els.configBadge.textContent = hasGroup ? '未保存' : '未配置';
+        els.configBadge.className = 'rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-500';
+        els.configSummary.textContent = hasGroup ? '星球已选择，待保存配置。' : '尚未选择星球。';
+        const tabHint = state.selectedTabDefinitions.length
+            ? `检测到 ${state.selectedTabDefinitions.length} 个 Tab：${state.selectedTabDefinitions.map(tab => tab.label).join('、')}`
+            : '请先选择星球并加载配置。';
+        els.configDetail.textContent = tabHint;
+        renderWorkspaceSnapshot();
+        return;
+    }
+
+    const rounds = config.max_rounds
+        ? `${config.rounds_completed || 0}/${config.max_rounds} 轮`
+        : `持续模式（已运行 ${config.rounds_completed || 0} 轮）`;
+    const cookieSourceText = scheduler.cookie_source === 'page'
+        ? '页面 Cookie（当前运行）'
+        : (config.cookie_env_name || 'ZSXQ_SYNC_TEST_COOKIE');
+    const hasRuntimeCookie = scheduler.cookie_source === 'page' || config.cookie_env_configured;
+    els.configBadge.textContent = scheduler.cookie_source === 'page' ? '页面 Cookie' : (config.cookie_env_configured ? '已配置' : '缺少 Cookie');
+    els.configBadge.className = `rounded-full px-2 py-1 text-[10px] font-black ${hasRuntimeCookie ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`;
+    els.configSummary.textContent = `${config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES} 分钟一次 · 目标星球：${config.group_name || config.group_id || '-'} · ${rounds}`;
+    els.configDetail.textContent = `每条附件上限：${config.max_download_files || SYSTEM_SYNC_MAX_DOWNLOAD_FILES} · 每目标 Tab ${config.count || SYSTEM_SYNC_COUNT} 条 · 任务来源：${cookieSourceText}。`;
+    renderWorkspaceSnapshot();
+}
+
+function hydrateSystemSyncRuntimeConfigInputs(config = {}) {
+    if (els.configIntervalInput) {
+        const intervalMinutes = parseBoundedInt(
+            config.interval_minutes,
+            SYSTEM_SYNC_INTERVAL_MINUTES,
+            1,
+            1440,
+        );
+        els.configIntervalInput.value = String(intervalMinutes);
+    }
+
+    if (els.configCountInput) {
+        const count = parseBoundedInt(
+            config.count,
+            SYSTEM_SYNC_COUNT,
+            1,
+            50,
+        );
+        els.configCountInput.value = String(count);
+    }
+
+    if (els.configMaxDownloadFilesInput) {
+        const maxDownloadFiles = parseBoundedInt(
+            config.max_download_files,
+            SYSTEM_SYNC_MAX_DOWNLOAD_FILES,
+            1,
+            10,
+        );
+        els.configMaxDownloadFilesInput.value = String(maxDownloadFiles);
+    }
+
+    if (els.configMaxRoundsInput) {
+        const maxRounds = parsePositiveIntOrZero(
+            config.max_rounds,
+            SYSTEM_SYNC_MAX_ROUNDS,
+            0,
+        );
+        els.configMaxRoundsInput.value = String(maxRounds);
+    }
+}
+
+function renderDefaultConfigSummary() {
+    els.configSummary.textContent = '尚未读取系统配置。请先获取星球并保存。';
+    els.configDetail.textContent = '保存成功后，批次和日志将会自动同步回显。';
+    els.configBadge.textContent = '未配置';
+    els.batchSectionSubtitle.textContent = '请先完成配置保存后，系统会记录每次执行批次。';
+    if (els.batchesMini) {
+        els.batchesMini.textContent = '暂无系统批次摘要。';
+    }
+    renderWorkspaceSnapshot();
+}
+
+function renderBatchesPanel() {
+    if (!els.batchesPanel) return;
+    const batches = state.batches || [];
+    const batchError = state.batchesError;
+    els.batchSectionSubtitle.textContent = state.batchesError
+        ? `读取批次失败：${state.batchesError}`
+        : `最后 ${batches.length} 条批次（按时间倒序）`;
+    els.batchCount.textContent = String(batches.length);
+
+    if (!batches.length) {
+        els.batchesPanel.innerHTML = batchError
+            ? `<div class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">${escapeHtml(batchError)}</div>`
+            : '<div class="rounded-lg border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">暂无系统测试批次。</div>';
+        if (els.batchesMini) {
+            els.batchesMini.textContent = batchError
+                ? `批次读取失败：${batchError}`
+                : '暂无系统批次摘要。';
+        }
+        renderWorkspaceSnapshot();
+        return;
+    }
+
+    els.batchesPanel.innerHTML = (state.batches || []).map(renderSystemSyncBatchCard).join('');
+    const latest = batches[0];
+    if (els.batchesMini) {
+        els.batchesMini.textContent = latest
+            ? `最近批次 ${syncStatusLabel(latest.status)} · ${formatZsxqTime(latest.completed_at || latest.created_at)}`
+            : '暂无系统批次摘要。';
+    }
+    renderWorkspaceSnapshot();
+}
+
+function renderSystemSyncBatchCard(batch) {
+    const summary = batch.summary || {};
+    const topics = batch.topics || [];
+    const status = batchStatusMeta(batch.status);
+    const detailUrl = systemSyncBatchDetailUrl(batch);
+    const roundText = batch.round && batch.max_rounds
+        ? `第 ${batch.round}/${batch.max_rounds} 轮`
+        : batch.round && batch.continuous
+            ? `第 ${batch.round} 轮`
+            : '历史批次';
+    const completedText = formatZsxqTime(batch.completed_at || batch.created_at);
+
+    return `
+        <article class="zsxq-batch-card">
+            <div class="zsxq-batch-card__top">
+                <div class="min-w-0">
+                    <div class="zsxq-batch-card__title">${escapeHtml(roundText)}</div>
+                    <div class="zsxq-batch-card__meta">
+                        <span class="font-mono">${escapeHtml(batch.batch_id || batch.attempt_id || '-')}</span>
+                        <span>${escapeHtml(completedText)}</span>
+                    </div>
+                </div>
+                <span class="zsxq-batch-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
+            </div>
+
+            <div class="zsxq-batch-metrics">
+                ${renderBatchMetric('新增', summary.topics_new || 0, 'blue')}
+                ${renderBatchMetric('更新', summary.topics_updated || 0, 'violet')}
+                ${renderBatchMetric('下载', summary.attachments_downloaded || 0, 'emerald')}
+                ${renderBatchMetric('失败', summary.attachments_failed || 0, 'red')}
+            </div>
+
+            <a class="zsxq-batch-detail-link" href="${escapeHtml(detailUrl)}" target="_blank" rel="noopener">
+                <span>打开明细</span>
+                <strong>${escapeHtml(String(topics.length))} 条内容</strong>
+                ${batch.topics_truncated ? '<em>已截断</em>' : ''}
+                <i class="fas fa-up-right-from-square" aria-hidden="true"></i>
+            </a>
+        </article>
+    `;
+}
+
+function systemSyncBatchDetailUrl(batch) {
+    const params = new URLSearchParams();
+    params.set('batch_id', batch.batch_id || batch.attempt_id || '');
+    if (batch.group_id) {
+        params.set('group_id', batch.group_id);
+    }
+    return `zsxq-system-sync-detail.html?${params.toString()}`;
+}
+
+function renderBatchMetric(label, value, tone = 'slate') {
+    return `
+        <div class="zsxq-batch-metric" data-tone="${escapeHtml(tone)}">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(String(value || 0))}</strong>
+        </div>
+    `;
+}
+
+function renderSystemSyncTopicDetails(topics) {
+    return `
+        <div class="zsxq-topic-detail-list">
+            ${topics.map(topic => {
+                const attachments = topic.attachments || [];
+                return `
+                    <section class="zsxq-topic-detail">
+                        <div class="zsxq-topic-detail__head">
+                            <div class="min-w-0">
+                                <div class="zsxq-topic-detail__title">${escapeHtml(topic.title || topic.content || '无标题内容')}</div>
+                                <div class="zsxq-topic-detail__meta">
+                                    <span>${escapeHtml(topic.tab_label || topic.tab_id || '-')}</span>
+                                    <span>${escapeHtml(topicStatusLabel(topic.status))}</span>
+                                    <span>${escapeHtml(formatZsxqTime(topic.create_time || ''))}</span>
+                                    ${topic.author_name ? `<span>${escapeHtml(topic.author_name)}</span>` : ''}
+                                </div>
+                            </div>
+                            <span class="zsxq-topic-detail__count">${escapeHtml(String(attachments.length))} 附件</span>
+                        </div>
+                        ${topic.content ? `<div class="zsxq-topic-detail__content">${escapeHtml(topic.content)}</div>` : ''}
+                        ${topic.raw_json_path ? `<div class="zsxq-topic-detail__path">JSON：${escapeHtml(topic.raw_json_path)}</div>` : ''}
+                        ${attachments.length ? renderSystemSyncAttachmentDetails(attachments) : '<div class="mt-2 text-xs text-slate-400">无附件记录。</div>'}
+                    </section>
+                `;
+            }).join('')}
+        </div>
+    `;
+}
+
+function renderSystemSyncAttachmentDetails(attachments) {
+    return `
+        <div class="zsxq-attachment-detail-list">
+            ${attachments.map(item => {
+                const status = attachmentStatusMeta(item);
+                return `
+                    <div class="zsxq-attachment-detail">
+                        <div class="min-w-0">
+                            <div class="zsxq-attachment-detail__name">
+                                <span>${escapeHtml(String(item.file_type || item.attachment_type || 'file').toUpperCase())}</span>
+                                ${escapeHtml(item.name || item.file_id || item.attachment_key || '附件')}
+                            </div>
+                            ${item.local_path ? `<div class="zsxq-attachment-detail__path">${escapeHtml(item.local_path)}</div>` : ''}
+                            ${item.error_message ? `<div class="zsxq-attachment-detail__error">${escapeHtml(item.error_message)}</div>` : ''}
+                        </div>
+                        <span class="zsxq-attachment-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
+                    </div>
+                `;
+            }).join('')}
+        </div>
+    `;
+}
+
+async function loadAutoPublishConfig(options = {}) {
+    try {
+        const data = await apiGet('/zsxq/auto-publish/config');
+        state.autoPublishConfig = data?.config || null;
+        if (state.autoPublishConfig?.exists) {
+            if (!publishContext().selectedGroupId && state.autoPublishConfig?.group_id) {
+                publishContext().selectedGroupId = String(state.autoPublishConfig.group_id);
+            }
+            applyAutoPublishConfigToForm(state.autoPublishConfig);
+            if (state.activeMode === 'publish') {
+                renderGroups();
+                renderContextPanel();
+            }
+        }
+    } catch (error) {
+        state.autoPublishConfig = null;
+        showAutoPublishMessage('warning', '自动发帖配置读取失败', error.message);
+    }
+
+    if (options.render !== false) {
+        renderAutoPublishCurrentGroup();
+        renderAutoPublishSchedulerPanel();
+    }
+}
+
+async function loadAutoPublishSchedulerStatus(options = {}) {
+    try {
+        const data = await apiGet('/zsxq/auto-publish/scheduler/status');
+        state.autoPublishScheduler = data?.scheduler || null;
+        if (!state.autoPublishConfig && state.autoPublishScheduler?.config?.exists) {
+            state.autoPublishConfig = state.autoPublishScheduler.config;
+            if (!publishContext().selectedGroupId && state.autoPublishConfig?.group_id) {
+                publishContext().selectedGroupId = String(state.autoPublishConfig.group_id);
+            }
+            applyAutoPublishConfigToForm(state.autoPublishConfig);
+            if (state.activeMode === 'publish') {
+                renderGroups();
+                renderContextPanel();
+            }
+        }
+    } catch (error) {
+        state.autoPublishScheduler = {
+            running: false,
+            message: `状态查询失败：${error.message}`,
+        };
+    }
+
+    if (options.render !== false) {
+        renderAutoPublishCurrentGroup();
+        renderAutoPublishSchedulerPanel();
+    }
+}
+
+async function loadAutoPublishRuns(options = {}) {
+    try {
+        const data = await apiGet('/zsxq/auto-publish/runs?limit=20');
+        state.autoPublishRuns = data?.runs || [];
+    } catch (error) {
+        state.autoPublishRuns = [];
+        showAutoPublishMessage('warning', '自动发帖历史读取失败', error.message);
+    }
+
+    if (options.render !== false) {
+        renderAutoPublishRunsPanel();
+    }
+}
+
+async function loadAutoPublishLogs(options = {}) {
+    try {
+        const data = await apiGet(`/zsxq/auto-publish/scheduler/logs?lines=${AUTO_PUBLISH_LOG_LINES}`);
+        state.autoPublishLogsRaw = sanitizeLogText(data?.raw || '');
+    } catch (error) {
+        state.autoPublishLogsRaw = `读取日志失败：${error.message}`;
+    }
+
+    if (options.render !== false) {
+        renderAutoPublishLogsPanel();
+    }
+}
+
+async function refreshAutoPublishRuntime() {
+    await Promise.all([
+        loadAutoPublishSchedulerStatus({ render: false }),
+        loadAutoPublishRuns({ render: false }),
+        loadAutoPublishLogs({ render: false }),
+    ]);
+    renderAutoPublishCurrentGroup();
+    renderAutoPublishSchedulerPanel();
+    renderAutoPublishRunsPanel();
+    renderAutoPublishLogsPanel();
+}
+
+function currentAutoPublishGroupId() {
+    return String(publishContext().selectedGroupId || state.autoPublishConfig?.group_id || '').trim();
+}
+
+function currentAutoPublishGroupName() {
+    const id = currentAutoPublishGroupId();
+    const currentGroup = publishContext().groups.find(item => String(item.group_id) === id);
+    return currentGroup?.name || state.autoPublishConfig?.group_name || '';
+}
+
+function renderAutoPublishCurrentGroup() {
+    if (!els.autoPublishCurrentGroup) return;
+    const groupId = currentAutoPublishGroupId();
+    const groupName = currentAutoPublishGroupName();
+    els.autoPublishCurrentGroup.textContent = groupId
+        ? `${groupName || groupId} (${groupId})`
+        : '未选择';
+    renderWorkspaceSnapshot();
+}
+
+function showAutoPublishMessage(type, title, message) {
+    if (!els.autoPublishMessage) return;
+    const colorMap = {
+        loading: 'border-blue-200 bg-blue-50 text-blue-700',
+        success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+        error: 'border-red-200 bg-red-50 text-red-700',
+        warning: 'border-amber-200 bg-amber-50 text-amber-700',
+        muted: 'border-slate-200 bg-slate-50 text-slate-500',
+    };
+    els.autoPublishMessage.className = `rounded-lg border px-3 py-3 text-sm ${colorMap[type] || colorMap.muted}`;
+    els.autoPublishMessage.innerHTML = `
+        <div class="font-bold">${escapeHtml(title || '')}</div>
+        <div class="mt-1">${escapeHtml(message || '')}</div>
+    `;
+    els.autoPublishMessage.classList.remove('hidden');
+}
+
+async function pickAutoPublishDirectory(ruleType) {
+    const isPdf = ruleType === 'pdf';
+    const input = isPdf ? els.autoPublishPdfSourceDirInput : els.autoPublishAudioSourceDirInput;
+    const button = isPdf ? els.autoPublishPdfSourceDirPickBtn : els.autoPublishAudioSourceDirPickBtn;
+    if (!input || !button) return;
+
+    const original = button.innerHTML;
+    setLoading(button, true, '选择中...');
+    try {
+        const data = await apiPost('/batch-transcription/select-directory', {
+            purpose: 'input',
+            initial_dir: (input.value || '').trim(),
+            title: isPdf ? '选择 PDF 来源目录' : '选择音频来源目录',
+        });
+        input.value = data?.path || '';
+    } catch (error) {
+        if (error.message !== '未选择目录') {
+            showAutoPublishMessage('error', '目录选择失败', error.message);
+        }
+    } finally {
+        setLoading(button, false, original);
+    }
+}
+
+async function loadAutoPublishTags() {
+    const cookie = getActiveCookieForRequest('publish');
+    const groupId = currentAutoPublishGroupId();
+    if (!cookie) {
+        showAutoPublishMessage('warning', '无法读取标签', '请先准备 Cookie。');
+        return;
+    }
+    if (!groupId) {
+        showAutoPublishMessage('warning', '无法读取标签', '请先在左侧选择星球。');
+        return;
+    }
+
+    const original = els.autoPublishLoadTagsBtn.innerHTML;
+    setLoading(els.autoPublishLoadTagsBtn, true, '读取中...');
+    try {
+        const result = await apiPost('/zsxq/menus', {
+            cookie,
+            group_id: groupId,
+        });
+        const menus = result?.resp_data?.menus || result?.resp_data?.group_menus || [];
+        hydrateAutoPublishTagsFromMenus(menus);
+        publishContext().summaryText = state.autoPublishTagOptions.length
+            ? `已识别 ${state.autoPublishTagOptions.length} 个 hashtag，可直接给 PDF / 音频规则选择。`
+            : '当前星球菜单里没有识别到 hashtag 标签，可继续手动填写标签 ID / 名称。';
+        if (state.activeMode === 'publish') {
+            renderContextPanel();
+        }
+        showAutoPublishMessage(
+            'success',
+            '标签已刷新',
+            state.autoPublishTagOptions.length
+                ? `共识别到 ${state.autoPublishTagOptions.length} 个可用标签。`
+                : '当前星球菜单里没有识别到 hashtag 标签，可继续手动填写标签 ID / 名称。'
+        );
+    } catch (error) {
+        showAutoPublishMessage('error', '读取标签失败', error.message);
+    } finally {
+        setLoading(els.autoPublishLoadTagsBtn, false, original);
+    }
+}
+
+function clearAutoPublishTagOptions() {
+    state.autoPublishTagOptions = [];
+    renderAutoPublishTagOptions();
+}
+
+function hydrateAutoPublishTagsFromMenus(menus) {
+    state.autoPublishTagOptions = extractAutoPublishHashtagOptions(menus);
+    renderAutoPublishTagOptions();
+}
+
+function extractAutoPublishHashtagOptions(menus) {
+    const seen = new Set();
+    const output = [];
+    (menus || []).forEach((menu) => {
+        const hashtagId = menu?.hashtag?.hashtag_id
+            || menu?.hashtag_id
+            || menu?.target?.hashtag_id
+            || menu?.target?.id
+            || (menu?.type === 'hashtag' ? menu.menu_id : null);
+        if (!hashtagId) return;
+        const id = String(hashtagId).trim();
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        output.push({
+            id,
+            title: String(menu?.title || menu?.name || id).replace(/^#|#$/g, '').trim() || id,
+        });
+    });
+    return output;
+}
+
+function renderAutoPublishTagOptions() {
+    const renderSelect = (select, idInput, titleInput) => {
+        const current = select.value;
+        const fallbackId = (idInput?.value || '').trim();
+        select.innerHTML = `<option value="">不绑定标签</option>${state.autoPublishTagOptions.map((item) => `
+            <option value="${escapeHtml(item.id)}">${escapeHtml(item.title)} / ${escapeHtml(item.id)}</option>
+        `).join('')}`;
+        if (state.autoPublishTagOptions.some((item) => item.id === current)) {
+            select.value = current;
+            return;
+        }
+        if (fallbackId && state.autoPublishTagOptions.some((item) => item.id === fallbackId)) {
+            select.value = fallbackId;
+            if (titleInput && !titleInput.value.trim()) {
+                const matched = state.autoPublishTagOptions.find((item) => item.id === fallbackId);
+                if (matched) {
+                    titleInput.value = matched.title;
+                }
+            }
+        }
+    };
+
+    renderSelect(els.autoPublishPdfTagSelect, els.autoPublishPdfHashtagIdInput, els.autoPublishPdfHashtagTitleInput);
+    renderSelect(els.autoPublishAudioTagSelect, els.autoPublishAudioHashtagIdInput, els.autoPublishAudioHashtagTitleInput);
+}
+
+function applyAutoPublishSelectedTag(prefix) {
+    const isPdf = prefix === 'pdf';
+    const select = isPdf ? els.autoPublishPdfTagSelect : els.autoPublishAudioTagSelect;
+    const idInput = isPdf ? els.autoPublishPdfHashtagIdInput : els.autoPublishAudioHashtagIdInput;
+    const titleInput = isPdf ? els.autoPublishPdfHashtagTitleInput : els.autoPublishAudioHashtagTitleInput;
+    const selected = state.autoPublishTagOptions.find((item) => item.id === select.value);
+    if (!selected) {
+        idInput.value = '';
+        titleInput.value = '';
+        return;
+    }
+    idInput.value = selected.id;
+    titleInput.value = selected.title;
+}
+
+function parseGroupIds(raw = '') {
+    return String(raw || '')
+        .replace(/，/g, ',')
+        .split(',')
+        .map(item => item.trim())
+        .filter(Boolean)
+        .filter((item, index, arr) => arr.indexOf(item) === index);
+}
+
+function resetAutoPublishCookieAccountForm() {
+    state.autoPublishEditingCookieAccountId = '';
+    if (els.autoPublishAccountNameInput) {
+        els.autoPublishAccountNameInput.value = '';
+    }
+    if (els.autoPublishAccountCookieInput) {
+        els.autoPublishAccountCookieInput.value = '';
+    }
+    if (els.autoPublishAccountGroupIdsInput) {
+        els.autoPublishAccountGroupIdsInput.value = '';
+    }
+    if (els.autoPublishAccountNotesInput) {
+        els.autoPublishAccountNotesInput.value = '';
+    }
+    if (els.autoPublishAccountEnabledCheckbox) {
+        els.autoPublishAccountEnabledCheckbox.checked = true;
+    }
+    if (els.autoPublishAccountCurrentGroupOnlyCheckbox) {
+        els.autoPublishAccountCurrentGroupOnlyCheckbox.checked = true;
+    }
+    renderAutoPublishCookieAccounts();
+}
+
+function fillAutoPublishAccountWithCurrentCookie() {
+    const cookie = getActiveCookieForRequest('publish');
+    if (!cookie) {
+        showAutoPublishMessage('warning', '当前没有可填充的 Cookie', '请先在页面顶部准备好自动发帖用的 Cookie。');
+        return;
+    }
+    if (els.autoPublishAccountCookieInput) {
+        els.autoPublishAccountCookieInput.value = cookie;
+    }
+    if (els.autoPublishAccountNameInput && !els.autoPublishAccountNameInput.value.trim()) {
+        const profile = activeCookieProfile('publish');
+        els.autoPublishAccountNameInput.value = profile?.name || `发布账号 ${state.autoPublishCookieAccounts.length + 1}`;
+    }
+}
+
+function fillAutoPublishAccountWithCurrentGroup() {
+    const groupId = currentAutoPublishGroupId();
+    if (!groupId) {
+        showAutoPublishMessage('warning', '当前没有选中星球', '请先在左上角选择自动发帖目标星球。');
+        return;
+    }
+    if (els.autoPublishAccountCurrentGroupOnlyCheckbox) {
+        els.autoPublishAccountCurrentGroupOnlyCheckbox.checked = true;
+    }
+    if (els.autoPublishAccountGroupIdsInput) {
+        els.autoPublishAccountGroupIdsInput.value = groupId;
+    }
+}
+
+function collectAutoPublishCookieAccountDraft() {
+    const onlyCurrentGroup = Boolean(els.autoPublishAccountCurrentGroupOnlyCheckbox?.checked);
+    const currentGroupId = currentAutoPublishGroupId();
+    const groupIds = onlyCurrentGroup ? (currentGroupId ? [currentGroupId] : []) : parseGroupIds(els.autoPublishAccountGroupIdsInput?.value || '');
+
+    return {
+        id: state.autoPublishEditingCookieAccountId || `account_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+        name: (els.autoPublishAccountNameInput?.value || '').trim(),
+        cookie: (els.autoPublishAccountCookieInput?.value || '').trim(),
+        enabled: Boolean(els.autoPublishAccountEnabledCheckbox?.checked),
+        allowed_group_ids: groupIds,
+        notes: (els.autoPublishAccountNotesInput?.value || '').trim(),
+    };
+}
+
+function saveAutoPublishCookieAccount() {
+    const draft = collectAutoPublishCookieAccountDraft();
+    if (!draft.name) {
+        showAutoPublishMessage('warning', '账号名称不能为空', '请给这个管理员 Cookie 起一个便于识别的名字。');
+        return;
+    }
+    if (!draft.cookie) {
+        showAutoPublishMessage('warning', 'Cookie 不能为空', '请先填入该管理员的 Cookie。');
+        return;
+    }
+    if (!draft.allowed_group_ids.length) {
+        showAutoPublishMessage('warning', '缺少星球范围', '请至少绑定一个允许发布的星球，或者勾选“仅当前星球”。');
+        return;
+    }
+
+    const existingIndex = state.autoPublishCookieAccounts.findIndex(item => item.id === draft.id);
+    if (existingIndex >= 0) {
+        const previous = state.autoPublishCookieAccounts[existingIndex];
+        state.autoPublishCookieAccounts.splice(existingIndex, 1, {
+            ...previous,
+            ...draft,
+        });
+        showAutoPublishMessage('success', '账号已更新', `${draft.name} 已更新到自动发帖账号表。`);
+    } else {
+        state.autoPublishCookieAccounts.push({
+            ...draft,
+            quota_hit_count: 0,
+            last_limit_hit_at: '',
+            last_limit_error: '',
+            last_success_at: '',
+            last_used_at: '',
+        });
+        showAutoPublishMessage('success', '账号已加入', `${draft.name} 已加入自动发帖账号表。`);
+    }
+    resetAutoPublishCookieAccountForm();
+}
+
+function editAutoPublishCookieAccount(accountId) {
+    const account = state.autoPublishCookieAccounts.find(item => item.id === accountId);
+    if (!account) return;
+    state.autoPublishEditingCookieAccountId = account.id;
+    if (els.autoPublishAccountNameInput) {
+        els.autoPublishAccountNameInput.value = account.name || '';
+    }
+    if (els.autoPublishAccountCookieInput) {
+        els.autoPublishAccountCookieInput.value = account.cookie || '';
+    }
+    if (els.autoPublishAccountGroupIdsInput) {
+        els.autoPublishAccountGroupIdsInput.value = (account.allowed_group_ids || []).join(',');
+    }
+    if (els.autoPublishAccountNotesInput) {
+        els.autoPublishAccountNotesInput.value = account.notes || '';
+    }
+    if (els.autoPublishAccountEnabledCheckbox) {
+        els.autoPublishAccountEnabledCheckbox.checked = Boolean(account.enabled ?? true);
+    }
+    if (els.autoPublishAccountCurrentGroupOnlyCheckbox) {
+        const currentGroupId = currentAutoPublishGroupId();
+        const groupIds = account.allowed_group_ids || [];
+        els.autoPublishAccountCurrentGroupOnlyCheckbox.checked = Boolean(currentGroupId && groupIds.length === 1 && groupIds[0] === currentGroupId);
+    }
+    renderAutoPublishCookieAccounts();
+}
+
+function deleteAutoPublishCookieAccount(accountId) {
+    const account = state.autoPublishCookieAccounts.find(item => item.id === accountId);
+    if (!account) return;
+    state.autoPublishCookieAccounts = state.autoPublishCookieAccounts.filter(item => item.id !== accountId);
+    if (state.autoPublishEditingCookieAccountId === accountId) {
+        resetAutoPublishCookieAccountForm();
+    } else {
+        renderAutoPublishCookieAccounts();
+    }
+    showAutoPublishMessage('success', '账号已删除', `${account.name || accountId} 已从自动发帖账号表移除。`);
+}
+
+function moveAutoPublishCookieAccount(accountId, delta) {
+    const index = state.autoPublishCookieAccounts.findIndex(item => item.id === accountId);
+    if (index < 0) return;
+    const nextIndex = index + delta;
+    if (nextIndex < 0 || nextIndex >= state.autoPublishCookieAccounts.length) return;
+    const items = [...state.autoPublishCookieAccounts];
+    const [moved] = items.splice(index, 1);
+    items.splice(nextIndex, 0, moved);
+    state.autoPublishCookieAccounts = items;
+    renderAutoPublishCookieAccounts();
+}
+
+function renderAutoPublishCookieAccounts() {
+    if (!els.autoPublishAccountList) return;
+    const currentGroupId = currentAutoPublishGroupId();
+    const currentGroupName = currentAutoPublishGroupName();
+    const editingId = state.autoPublishEditingCookieAccountId;
+    const items = state.autoPublishCookieAccounts || [];
+
+    if (!items.length) {
+        els.autoPublishAccountList.innerHTML = '<div class="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-400">暂无发帖账号</div>';
+        return;
+    }
+
+    els.autoPublishAccountList.innerHTML = items.map((account, index) => {
+        const token = extractCookieToken(account.cookie || '');
+        const masked = token ? maskToken(token) : '未检测到 token';
+        const groupIds = account.allowed_group_ids || [];
+        const appliesToCurrentGroup = !groupIds.length || !currentGroupId || groupIds.includes(currentGroupId);
+        const currentGroupLabel = currentGroupId
+            ? (appliesToCurrentGroup ? `覆盖当前星球 ${currentGroupName || currentGroupId}` : `未授权当前星球 ${currentGroupName || currentGroupId}`)
+            : (groupIds.length ? `绑定 ${groupIds.length} 个星球` : '未限制星球');
+        const badgeClass = appliesToCurrentGroup
+            ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+            : 'border-amber-200 bg-amber-50 text-amber-700';
+        const selectedClass = editingId === account.id ? 'border-blue-300 ring-2 ring-blue-100' : 'border-slate-200';
+
+        return `
+            <article class="rounded-lg border ${selectedClass} bg-white p-4">
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div class="min-w-0">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <span class="inline-flex h-6 min-w-[1.5rem] items-center justify-center rounded-full bg-slate-900 px-2 text-[10px] font-black text-white">${escapeHtml(String(index + 1))}</span>
+                            <div class="text-sm font-black text-slate-800">${escapeHtml(account.name || `发布账号 ${index + 1}`)}</div>
+                            <span class="rounded-full border px-2 py-1 text-[10px] font-black ${account.enabled ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-slate-200 bg-slate-100 text-slate-500'}">${account.enabled ? '启用' : '停用'}</span>
+                        </div>
+                        <div class="mt-2 text-xs text-slate-500">Cookie：${escapeHtml(masked)}</div>
+                        <div class="mt-1 text-xs text-slate-500">${escapeHtml(currentGroupLabel)}</div>
+                        ${account.notes ? `<div class="mt-1 text-xs text-slate-400">${escapeHtml(account.notes)}</div>` : ''}
+                        <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-400">
+                            <span>成功：${escapeHtml(formatZsxqTime(account.last_success_at || '')) || '-'}</span>
+                            <span>限流：${escapeHtml(formatZsxqTime(account.last_limit_hit_at || '')) || '-'}</span>
+                            <span>累计：${escapeHtml(String(account.quota_hit_count || 0))}</span>
+                        </div>
+                    </div>
+
+                    <div class="flex flex-wrap gap-2">
+                        <span class="rounded-full border px-2 py-1 text-[10px] font-black ${badgeClass}">${escapeHtml(appliesToCurrentGroup ? '当前策略可用' : '当前策略不可用')}</span>
+                        <button type="button" data-ap-account-action="up" data-account-id="${escapeHtml(account.id)}" class="rounded-lg border border-slate-300 px-2.5 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-50">上移</button>
+                        <button type="button" data-ap-account-action="down" data-account-id="${escapeHtml(account.id)}" class="rounded-lg border border-slate-300 px-2.5 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-50">下移</button>
+                        <button type="button" data-ap-account-action="edit" data-account-id="${escapeHtml(account.id)}" class="rounded-lg border border-blue-300 px-2.5 py-1 text-[11px] font-bold text-blue-700 hover:bg-blue-50">编辑</button>
+                        <button type="button" data-ap-account-action="delete" data-account-id="${escapeHtml(account.id)}" class="rounded-lg border border-red-300 px-2.5 py-1 text-[11px] font-bold text-red-700 hover:bg-red-50">删除</button>
+                    </div>
+                </div>
+            </article>
+        `;
+    }).join('');
+
+    els.autoPublishAccountList.querySelectorAll('[data-ap-account-action]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const accountId = button.getAttribute('data-account-id') || '';
+            const action = button.getAttribute('data-ap-account-action') || '';
+            if (action === 'edit') {
+                editAutoPublishCookieAccount(accountId);
+            } else if (action === 'delete') {
+                deleteAutoPublishCookieAccount(accountId);
+            } else if (action === 'up') {
+                moveAutoPublishCookieAccount(accountId, -1);
+            } else if (action === 'down') {
+                moveAutoPublishCookieAccount(accountId, 1);
+            }
+        });
+    });
+}
+
+function collectAutoPublishPayload() {
+    const groupId = currentAutoPublishGroupId();
+    const groupName = currentAutoPublishGroupName();
+    return {
+        name: (els.autoPublishStrategyNameInput.value || '').trim() || '知识星球自动发帖策略',
+        enabled: Boolean(els.autoPublishStrategyEnabledCheckbox.checked),
+        group_id: groupId,
+        group_name: groupName,
+        interval_minutes: parseBoundedInt(els.autoPublishIntervalInput.value, 30, 1, 1440),
+        max_rounds: parsePositiveIntOrZero(els.autoPublishMaxRoundsInput.value, 0, 0),
+        cookie_accounts: (state.autoPublishCookieAccounts || []).map((account) => ({
+            id: account.id,
+            name: account.name,
+            cookie: account.cookie,
+            enabled: Boolean(account.enabled),
+            allowed_group_ids: [...(account.allowed_group_ids || [])],
+            notes: account.notes || '',
+            quota_hit_count: account.quota_hit_count || 0,
+            last_limit_hit_at: account.last_limit_hit_at || '',
+            last_limit_error: account.last_limit_error || '',
+            last_success_at: account.last_success_at || '',
+            last_used_at: account.last_used_at || '',
+        })),
+        rules: [
+            {
+                id: 'pdf',
+                label: 'PDF 批次',
+                enabled: Boolean(els.autoPublishPdfEnabledCheckbox.checked),
+                file_type: 'pdf',
+                source_dir: (els.autoPublishPdfSourceDirInput.value || '').trim(),
+                recursive: Boolean(els.autoPublishPdfRecursiveCheckbox.checked),
+                extensions: (els.autoPublishPdfExtensionsInput.value || '').trim(),
+                batch_size: parseBoundedInt(els.autoPublishPdfBatchSizeInput.value, 4, 1, 8),
+                upload_retry_count: parseBoundedInt(els.autoPublishPdfUploadRetryInput.value, 2, 0, 5),
+                max_run_attempts: parseBoundedInt(els.autoPublishPdfMaxAttemptsInput.value, 3, 1, 10),
+                max_file_size_mb: parseBoundedInt(els.autoPublishPdfMaxSizeInput.value, 100, 1, 1024),
+                body_prefix: (els.autoPublishPdfBodyPrefixInput.value || '').trim(),
+                include_filenames: Boolean(els.autoPublishPdfIncludeFilenamesCheckbox.checked),
+                hashtag_id: (els.autoPublishPdfHashtagIdInput.value || '').trim(),
+                hashtag_title: (els.autoPublishPdfHashtagTitleInput.value || '').trim(),
+            },
+            {
+                id: 'audio',
+                label: '音频批次',
+                enabled: Boolean(els.autoPublishAudioEnabledCheckbox.checked),
+                file_type: 'audio',
+                source_dir: (els.autoPublishAudioSourceDirInput.value || '').trim(),
+                recursive: Boolean(els.autoPublishAudioRecursiveCheckbox.checked),
+                extensions: (els.autoPublishAudioExtensionsInput.value || '').trim(),
+                batch_size: parseBoundedInt(els.autoPublishAudioBatchSizeInput.value, 4, 1, 8),
+                upload_retry_count: parseBoundedInt(els.autoPublishAudioUploadRetryInput.value, 2, 0, 5),
+                max_run_attempts: parseBoundedInt(els.autoPublishAudioMaxAttemptsInput.value, 3, 1, 10),
+                max_file_size_mb: parseBoundedInt(els.autoPublishAudioMaxSizeInput.value, 50, 1, 1024),
+                body_prefix: (els.autoPublishAudioBodyPrefixInput.value || '').trim(),
+                include_filenames: Boolean(els.autoPublishAudioIncludeFilenamesCheckbox.checked),
+                hashtag_id: (els.autoPublishAudioHashtagIdInput.value || '').trim(),
+                hashtag_title: (els.autoPublishAudioHashtagTitleInput.value || '').trim(),
+            },
+        ],
+    };
+}
+
+function applyAutoPublishConfigToForm(config = {}) {
+    state.autoPublishCookieAccounts = Array.isArray(config.cookie_accounts)
+        ? config.cookie_accounts.map((account) => ({
+            id: account.id,
+            name: account.name || '',
+            cookie: account.cookie || '',
+            enabled: Boolean(account.enabled ?? true),
+            allowed_group_ids: [...(account.allowed_group_ids || [])],
+            notes: account.notes || '',
+            quota_hit_count: account.quota_hit_count || 0,
+            last_limit_hit_at: account.last_limit_hit_at || '',
+            last_limit_error: account.last_limit_error || '',
+            last_success_at: account.last_success_at || '',
+            last_used_at: account.last_used_at || '',
+        }))
+        : [];
+    state.autoPublishEditingCookieAccountId = '';
+    if (els.autoPublishStrategyNameInput) {
+        els.autoPublishStrategyNameInput.value = config.name || '知识星球自动发帖策略';
+    }
+    if (els.autoPublishStrategyEnabledCheckbox) {
+        els.autoPublishStrategyEnabledCheckbox.checked = Boolean(config.enabled ?? true);
+    }
+    if (els.autoPublishIntervalInput) {
+        els.autoPublishIntervalInput.value = String(parseBoundedInt(config.interval_minutes, 30, 1, 1440));
+    }
+    if (els.autoPublishMaxRoundsInput) {
+        els.autoPublishMaxRoundsInput.value = String(parsePositiveIntOrZero(config.max_rounds, 0, 0));
+    }
+
+    const ruleMap = new Map((config.rules || []).map((rule) => [rule.id, rule]));
+    const pdf = ruleMap.get('pdf');
+    if (pdf) {
+        els.autoPublishPdfEnabledCheckbox.checked = Boolean(pdf.enabled ?? true);
+        els.autoPublishPdfSourceDirInput.value = pdf.source_dir || '';
+        els.autoPublishPdfExtensionsInput.value = (pdf.extensions || []).join(',');
+        els.autoPublishPdfBatchSizeInput.value = String(pdf.batch_size || 4);
+        els.autoPublishPdfUploadRetryInput.value = String(pdf.upload_retry_count || 2);
+        els.autoPublishPdfMaxAttemptsInput.value = String(pdf.max_run_attempts || 3);
+        els.autoPublishPdfHashtagIdInput.value = pdf.hashtag_id || '';
+        els.autoPublishPdfHashtagTitleInput.value = pdf.hashtag_title || '';
+        els.autoPublishPdfMaxSizeInput.value = String(pdf.max_file_size_mb || 100);
+        els.autoPublishPdfBodyPrefixInput.value = pdf.body_prefix || '';
+        els.autoPublishPdfIncludeFilenamesCheckbox.checked = Boolean(pdf.include_filenames ?? true);
+        els.autoPublishPdfRecursiveCheckbox.checked = Boolean(pdf.recursive ?? true);
+    }
+    const audio = ruleMap.get('audio');
+    if (audio) {
+        els.autoPublishAudioEnabledCheckbox.checked = Boolean(audio.enabled ?? true);
+        els.autoPublishAudioSourceDirInput.value = audio.source_dir || '';
+        els.autoPublishAudioExtensionsInput.value = (audio.extensions || []).join(',');
+        els.autoPublishAudioBatchSizeInput.value = String(audio.batch_size || 4);
+        els.autoPublishAudioUploadRetryInput.value = String(audio.upload_retry_count || 2);
+        els.autoPublishAudioMaxAttemptsInput.value = String(audio.max_run_attempts || 3);
+        els.autoPublishAudioHashtagIdInput.value = audio.hashtag_id || '';
+        els.autoPublishAudioHashtagTitleInput.value = audio.hashtag_title || '';
+        els.autoPublishAudioMaxSizeInput.value = String(audio.max_file_size_mb || 50);
+        els.autoPublishAudioBodyPrefixInput.value = audio.body_prefix || '';
+        els.autoPublishAudioIncludeFilenamesCheckbox.checked = Boolean(audio.include_filenames ?? true);
+        els.autoPublishAudioRecursiveCheckbox.checked = Boolean(audio.recursive ?? true);
+    }
+    renderAutoPublishTagOptions();
+    renderAutoPublishCurrentGroup();
+    renderAutoPublishCookieAccounts();
+    resetAutoPublishCookieAccountForm();
+}
+
+async function persistAutoPublishConfig() {
+    const payload = collectAutoPublishPayload();
+    payload.cookie = getActiveCookieForRequest('publish');
+    const result = await apiPost('/zsxq/auto-publish/config', payload);
+    state.autoPublishConfig = result?.config || null;
+    applyAutoPublishConfigToForm(state.autoPublishConfig || {});
+    renderGroups();
+    renderAutoPublishCurrentGroup();
+    return result;
+}
+
+async function saveAutoPublishConfig() {
+    const original = els.autoPublishSaveBtn.innerHTML;
+    setLoading(els.autoPublishSaveBtn, true, '保存中...');
+    try {
+        const result = await persistAutoPublishConfig();
+        showAutoPublishMessage(
+            'success',
+            '自动发帖策略已保存',
+            result?.config?.cookie_pool_ready
+                ? `配置已写入本地 runtime，当前策略已带 ${result?.config?.active_cookie_account_count || 0} 个可用发帖账号。`
+                : (
+                    result?.config?.cookie_env_configured
+                        ? '配置已写入本地 runtime。当前未配置账号池，持续调度会回退到后端环境变量 Cookie。'
+                        : `配置已保存。当前既没有可用账号池，也还没有检测到 ${result?.config?.cookie_env_name || 'ZSXQ_AUTO_PUBLISH_COOKIE'}，但你仍然可以在本页直接试跑，系统会临时使用页面里选中的 Cookie。`
+                )
+        );
+        await refreshAutoPublishRuntime();
+    } catch (error) {
+        showAutoPublishMessage('error', '保存失败', error.message);
+    } finally {
+        setLoading(els.autoPublishSaveBtn, false, original);
+    }
+}
+
+async function previewAutoPublish() {
+    const original = els.autoPublishPreviewBtn.innerHTML;
+    setLoading(els.autoPublishPreviewBtn, true, '预览中...');
+    try {
+        const payload = collectAutoPublishPayload();
+        payload.cookie = getActiveCookieForRequest('publish');
+        const result = await apiPost('/zsxq/auto-publish/preview', payload);
+        state.autoPublishPreview = result?.preview || null;
+        renderAutoPublishPreviewPanel();
+        showAutoPublishMessage('success', '预览已刷新', '页面已根据当前表单重新扫描下一批候选文件。');
+    } catch (error) {
+        showAutoPublishMessage('error', '预览失败', error.message);
+    } finally {
+        setLoading(els.autoPublishPreviewBtn, false, original);
+    }
+}
+
+async function runAutoPublishOnce() {
+    const original = els.autoPublishRunOnceBtn.innerHTML;
+    const originalSecondary = els.autoPublishSchedulerRunOnceBtn.innerHTML;
+    setLoading(els.autoPublishRunOnceBtn, true, '提交中...');
+    setLoading(els.autoPublishSchedulerRunOnceBtn, true, '提交中...');
+    try {
+        await persistAutoPublishConfig();
+        const result = await apiPost('/zsxq/auto-publish/scheduler/run-once', {
+            cookie: getActiveCookieForRequest('publish') || '',
+        });
+        showAutoPublishMessage('success', '试跑已提交', result?.scheduler?.message || '后台子进程已启动，请稍后刷新历史记录。');
+        await refreshAutoPublishRuntime();
+    } catch (error) {
+        showAutoPublishMessage('error', '试跑失败', error.message);
+    } finally {
+        setLoading(els.autoPublishRunOnceBtn, false, original);
+        setLoading(els.autoPublishSchedulerRunOnceBtn, false, originalSecondary);
+    }
+}
+
+async function startAutoPublishScheduler() {
+    const original = els.autoPublishSchedulerStartBtn.innerHTML;
+    setLoading(els.autoPublishSchedulerStartBtn, true, '启动中...');
+    try {
+        await persistAutoPublishConfig();
+        const result = await apiPost('/zsxq/auto-publish/scheduler/start', {
+            cookie: getActiveCookieForRequest('publish') || '',
+        });
+        showAutoPublishMessage('success', '调度器已处理', result?.scheduler?.message || '启动请求已提交。');
+        await refreshAutoPublishRuntime();
+    } catch (error) {
+        showAutoPublishMessage('error', '启动失败', error.message);
+    } finally {
+        setLoading(els.autoPublishSchedulerStartBtn, false, original);
+    }
+}
+
+async function stopAutoPublishScheduler() {
+    const original = els.autoPublishSchedulerStopBtn.innerHTML;
+    setLoading(els.autoPublishSchedulerStopBtn, true, '停止中...');
+    try {
+        const result = await apiPost('/zsxq/auto-publish/scheduler/stop', {});
+        showAutoPublishMessage('success', '调度器已处理', result?.scheduler?.message || '停止请求已提交。');
+        await refreshAutoPublishRuntime();
+    } catch (error) {
+        showAutoPublishMessage('error', '停止失败', error.message);
+    } finally {
+        setLoading(els.autoPublishSchedulerStopBtn, false, original);
+    }
+}
+
+function renderAutoPublishSchedulerPanel() {
+    const scheduler = state.autoPublishScheduler || {};
+    const config = scheduler.config || state.autoPublishConfig || {};
+    const running = Boolean(scheduler.running);
+    const cookieMode = scheduler.cookie_source === 'pool'
+        ? `策略账号池（${config.active_cookie_account_count || 0} 个可用）`
+        : scheduler.cookie_source === 'page'
+            ? '当前运行实例使用页面 Cookie'
+            : (config.cookie_env_configured ? '环境变量已配置' : '环境变量未配置');
+    if (els.autoPublishSchedulerStatusBadge) {
+        els.autoPublishSchedulerStatusBadge.textContent = running ? '运行中' : '未运行';
+        els.autoPublishSchedulerStatusBadge.className = `rounded-full px-2 py-1 text-[10px] font-black ${running ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`;
+    }
+    if (els.autoPublishSchedulerStatus) {
+        els.autoPublishSchedulerStatus.innerHTML = `
+            <div class="space-y-1">
+                <div>进程状态：${escapeHtml(running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
+                <div>策略：${escapeHtml(config.name || '未保存')}</div>
+                <div>星球：${escapeHtml(config.group_name || config.group_id || currentAutoPublishGroupName() || currentAutoPublishGroupId() || '未选择')}</div>
+                <div>间隔：${escapeHtml(String(config.interval_minutes || 30))} 分钟一次 · 轮次：${config.continuous ? '持续模式' : escapeHtml(String(config.max_rounds || 0))}</div>
+                <div>Cookie：${escapeHtml(cookieMode)}</div>
+                <div>账号池：${escapeHtml(String(config.cookie_account_count || 0))} 个账号 · 当前策略可用 ${escapeHtml(String(config.active_cookie_account_count || 0))} 个</div>
+                <div>日志：<span class="font-mono break-all">${escapeHtml(scheduler.log_path || '-')}</span></div>
+                <div class="text-slate-400">${escapeHtml(scheduler.message || '')}</div>
+            </div>
+        `;
+    }
+    const hasConfig = Boolean(config.exists || config.group_id || currentAutoPublishGroupId());
+    els.autoPublishSchedulerStartBtn.disabled = !hasConfig || running;
+    els.autoPublishSchedulerStopBtn.disabled = !running;
+    els.autoPublishSchedulerRunOnceBtn.disabled = !hasConfig;
+    els.autoPublishSchedulerStartBtn.classList.toggle('opacity-50', els.autoPublishSchedulerStartBtn.disabled);
+    els.autoPublishSchedulerStopBtn.classList.toggle('opacity-50', els.autoPublishSchedulerStopBtn.disabled);
+    renderWorkspaceSnapshot();
+}
+
+function renderAutoPublishPreviewPanel() {
+    const preview = state.autoPublishPreview;
+    if (!preview?.rules?.length) {
+        els.autoPublishPreviewPanel.innerHTML = '<div class="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-400">尚未生成预览</div>';
+        return;
+    }
+    els.autoPublishPreviewPanel.innerHTML = preview.rules.map((item) => {
+        const nextBatch = item.next_batch || [];
+        const reasons = Object.entries(item.skipped_reasons || {}).map(([key, value]) => `${key}:${value}`).join('，') || '无';
+        return `
+            <article class="rounded-lg border border-slate-200 bg-white p-4">
+                <div class="flex items-center justify-between gap-3">
+                    <div>
+                        <div class="font-black text-slate-800">${escapeHtml(item.rule?.label || item.rule?.id)}</div>
+                        <div class="text-xs text-slate-500 mt-1">候选 ${item.eligible_count || 0} 个；本批 ${nextBatch.length} 个；跳过 ${item.skipped_count || 0} 个</div>
+                    </div>
+                    <span class="auto-publish-badge auto-publish-badge-muted">${escapeHtml(item.rule?.file_type || '-')}</span>
+                </div>
+                <div class="text-xs text-slate-500 mt-2">跳过原因：${escapeHtml(reasons)}</div>
+                <div class="auto-publish-file-list mt-3 space-y-2">
+                    ${nextBatch.length ? nextBatch.map((file) => `
+                        <div class="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+                            <div class="font-bold text-slate-700 break-words">${escapeHtml(file.name)}</div>
+                            <div class="text-slate-500 mt-1">${escapeHtml(file.path)}</div>
+                            <div class="text-slate-400 mt-1">${escapeHtml(String(file.size_mb))} MB · 尝试 ${escapeHtml(String(file.attempts || 0))}</div>
+                        </div>
+                    `).join('') : '<div class="rounded-lg border border-dashed border-slate-200 p-3 text-xs text-slate-400">没有可发布的新文件</div>'}
+                </div>
+            </article>
+        `;
+    }).join('');
+}
+
+function renderAutoPublishRunsPanel() {
+    if (!state.autoPublishRuns.length) {
+        els.autoPublishRunsPanel.innerHTML = '<div class="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-400">暂无运行记录</div>';
+        return;
+    }
+    els.autoPublishRunsPanel.innerHTML = state.autoPublishRuns.map((run) => {
+        const badgeClass = run.status === 'success'
+            ? 'auto-publish-badge-success'
+            : run.status === 'partial'
+                ? 'auto-publish-badge-warning'
+                : run.status === 'failed'
+                    ? 'auto-publish-badge-danger'
+                    : 'auto-publish-badge-muted';
+        const rules = (run.rules || []).map((rule) => `
+            <div class="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+                <div class="flex items-center justify-between gap-2">
+                    <span class="font-bold text-slate-700">${escapeHtml(rule.label || rule.rule_id)}</span>
+                    <span>${escapeHtml(rule.status || '-')}</span>
+                </div>
+                <div class="mt-1 text-slate-500">${escapeHtml(rule.message || '')}</div>
+                ${rule.cookie_account_name ? `<div class="mt-1 text-slate-400">账号：${escapeHtml(rule.cookie_account_name)}</div>` : ''}
+                ${(rule.cookie_attempts || []).length ? `<div class="mt-1 text-slate-400">切换：${escapeHtml((rule.cookie_attempts || []).map(item => `${item.index}.${item.cookie_account_name}:${item.status}`).join('；'))}</div>` : ''}
+                ${rule.topic_id ? `<div class="mt-1 text-slate-400">topic_id=${escapeHtml(String(rule.topic_id))}</div>` : ''}
+            </div>
+        `).join('');
+        return `
+            <article class="auto-publish-history-item">
+                <div class="flex items-center justify-between gap-3">
+                    <div>
+                        <div class="font-black text-slate-800">${escapeHtml(run.name || '自动发帖批次')}</div>
+                        <div class="text-xs text-slate-500 mt-1">${escapeHtml(run.group_name || run.group_id || '-')} · ${escapeHtml(formatZsxqTime(run.started_at || ''))}</div>
+                        <div class="text-[11px] text-slate-400 mt-1">来源：${escapeHtml(run.cookie_source || '-')} · 账号数：${escapeHtml(String(run.cookie_account_count || 0))}</div>
+                    </div>
+                    <span class="auto-publish-badge ${badgeClass}">${escapeHtml(run.status || '-')}</span>
+                </div>
+                <div class="text-sm text-slate-600 mt-2">${escapeHtml(run.message || '')}</div>
+                <div class="mt-3 space-y-2">${rules || '<div class="text-xs text-slate-400">暂无规则结果</div>'}</div>
+            </article>
+        `;
+    }).join('');
+}
+
+function renderAutoPublishLogsPanel() {
+    els.autoPublishLogsPanel.textContent = state.autoPublishLogsRaw || '暂无日志';
+}
+
+function renderMessage(type, text) {
+    if (!els.pageMessage) return;
+    const colorMap = {
+        loading: 'border-blue-200 bg-blue-50 text-blue-700',
+        success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+        error: 'border-red-200 bg-red-50 text-red-700',
+        warning: 'border-amber-200 bg-amber-50 text-amber-700',
+        muted: 'border-slate-200 bg-slate-50 text-slate-500',
+    };
+    els.pageMessage.className = `rounded-lg border ${colorMap[type] || colorMap.muted}`;
+    els.pageMessage.textContent = text;
+    els.pageMessage.classList.remove('hidden');
+}
+
+function setLoading(button, isLoading, html) {
+    button.disabled = isLoading;
+    button.classList.toggle('opacity-60', isLoading);
+    button.innerHTML = isLoading ? `<i class="fas fa-circle-notch fa-spin mr-2"></i>${html}` : html;
+}
+
+function formatZsxqTime(value) {
+    if (!value) return '尚未触发';
+    let normalized = String(value).trim().replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+    if (/^\d{4}-\d{2}-\d{2}T/.test(normalized) && !/(Z|[+-]\d{2}:\d{2})$/.test(normalized)) {
+        normalized = `${normalized}Z`;
+    }
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) return String(value);
+
+    const parts = new Intl.DateTimeFormat('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+    }).formatToParts(date).reduce((acc, part) => {
+        acc[part.type] = part.value;
+        return acc;
+    }, {});
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
+function parsePositiveInt(value, fallback, minValue = 1) {
+    if (value === null || value === undefined) return fallback;
+    const text = String(value).trim();
+    if (text === '') return fallback;
+    const number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    return Math.max(minValue, Math.min(Math.round(number), 1440));
+}
+
+function parsePositiveIntOrZero(value, fallback, minValue = 0) {
+    if (value === null || value === undefined) return fallback;
+    const text = String(value).trim();
+    if (text === '') return 0;
+    const number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    const fixed = Math.round(number);
+    if (fixed <= minValue) return 0;
+    return Math.min(fixed, 100);
+}
+
+function parseBoundedInt(value, fallback, minValue, maxValue) {
+    if (value === null || value === undefined) return fallback;
+    const text = String(value).trim();
+    if (text === '') return fallback;
+    const number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    const fixed = Math.round(number);
+    return Math.max(minValue, Math.min(fixed, maxValue));
+}
+
+function sanitizeLogText(value) {
+    if (Array.isArray(value)) {
+        return value
+            .map(item => sanitizeLogText(item))
+            .filter(Boolean)
+            .join('\n');
+    }
+
+    const text = typeof value === 'string' ? value : String(value ?? '');
+    if (!text) {
+        return '';
+    }
+
+    return text
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+        .replace(/\x1b\][^\x07]*(\x07|$)/g, '')
+        .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+        .replace(/\u0000/g, '')
+        .replace(/\u2028|\u2029/g, '\n')
+        .replace(/\t/g, '    ')
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+        .trimEnd();
+}
+
+function formatConfigMaxRounds(value) {
+    if (!value || Number(value) <= 0) return '持续运行';
+    return `前 ${Number(value)} 轮`;
+}
+
+function syncStatusLabel(status) {
+    const map = {
+        queued: '排队中',
+        completed: '成功',
+        failed: '失败',
+        running: '进行中',
+    };
+    return map[status] || status || '未知';
+}
+
+function batchStatusMeta(status) {
+    if (status === 'completed') {
+        return { label: '成功', tone: 'success' };
+    }
+    if (status === 'failed') {
+        return { label: '失败', tone: 'danger' };
+    }
+    if (status === 'queued' || status === 'running') {
+        return { label: syncStatusLabel(status), tone: 'info' };
+    }
+    return { label: syncStatusLabel(status), tone: 'muted' };
+}
+
+function topicStatusLabel(status) {
+    const map = {
+        new: '新增',
+        touched: '本轮处理',
+    };
+    return map[status] || status || '本轮处理';
+}
+
+function attachmentStatusMeta(item) {
+    const status = item?.download_status || 'pending';
+    if (status === 'downloaded') {
+        const localPath = String(item.local_path || '');
+        return {
+            label: localPath.startsWith('browser-download:') ? '下载过' : '已归档',
+            tone: 'success',
+        };
+    }
+    if (status === 'failed') {
+        return { label: '失败', tone: 'danger' };
+    }
+    if (status === 'skipped') {
+        return { label: '已跳过', tone: 'muted' };
+    }
+    return { label: '待处理', tone: 'warning' };
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}

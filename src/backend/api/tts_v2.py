@@ -153,7 +153,16 @@ def submit_tts_task(current_user):
         db.session.add(task)
         db.session.commit()
 
-        celery_task = process_doubao_tts_task.apply_async(args=[task.id], queue='cloud_tts')
+        try:
+            celery_task = process_doubao_tts_task.apply_async(args=[task.id], queue='cloud_tts', retry=False)
+        except Exception as exc:
+            logger.exception("提交TTS任务入队失败: %s", task.id)
+            task.status = 'failed'
+            task.current_step = 'failed'
+            task.error_message = f'TTS任务入队失败: {exc}'
+            db.session.commit()
+            return jsonify({'success': False, 'message': task.error_message}), 502
+
         task.celery_task_id = celery_task.id
         db.session.commit()
 

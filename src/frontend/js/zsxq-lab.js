@@ -1,6 +1,14 @@
 const COOKIE_STORAGE_KEY = 'zsxq_cookie';
 const COOKIE_PROFILES_STORAGE_KEY = 'zsxq_cookie_profiles';
 const ACTIVE_COOKIE_ID_STORAGE_KEY = 'zsxq_active_cookie_id';
+const AUTO_SYNC_TEST_INTERVAL_MS = 5 * 60 * 1000;
+const AUTO_SYNC_TEST_ROUNDS = 3;
+const AUTO_SYNC_TEST_MAX_FILES = 5;
+const SYSTEM_SYNC_INTERVAL_MINUTES = 5;
+const SYSTEM_SYNC_COUNT = 50;
+const SYSTEM_SYNC_MAX_ROUNDS = 3;
+const SYSTEM_SYNC_STATUS_POLL_MS = 15000;
+const SYSTEM_SYNC_LOG_LINES = 120;
 
 const state = {
     cookie: '',
@@ -21,9 +29,20 @@ const state = {
     lastTopicsScope: 'all',
     isLoadingMore: false,
     isSyncing: false,
+    isAutoSyncTesting: false,
+    autoSyncTestScope: 'full',
+    autoSyncTestRound: 0,
+    autoSyncTestTimer: null,
+    syncPollTimer: null,
+    systemSyncSchedulerStatus: null,
+    systemSyncSchedulerPollTimer: null,
     syncRuns: [],
+    systemSyncBatches: [],
+    systemSyncBatchesError: null,
+    systemSyncConfig: null,
     attachmentStatusCache: new Map(),
     attachmentType: 'pdf',
+    attachmentViewFilter: 'all',
     lastTopicRequestAt: 0,
     topicCooldownUntil: 0,
 };
@@ -49,12 +68,29 @@ const els = {
     refreshTopicsBtn: document.getElementById('refresh-topics-btn'),
     selectAllTopicsBtn: document.getElementById('select-all-topics-btn'),
     batchDownloadBtn: document.getElementById('batch-download-btn'),
+    attachmentViewFilterControl: document.getElementById('attachment-view-filter-control'),
+    attachmentViewFilterSelect: document.getElementById('attachment-view-filter-select'),
     attachmentTypeControl: document.getElementById('attachment-type-control'),
     attachmentTypeSelect: document.getElementById('attachment-type-select'),
     copyTopicsJsonBtn: document.getElementById('copy-topics-json-btn'),
     syncCurrentTabBtn: document.getElementById('sync-current-tab-btn'),
     syncAllTabsBtn: document.getElementById('sync-all-tabs-btn'),
+    autoSyncTestBtn: document.getElementById('auto-sync-test-btn'),
+    autoSyncMemoTestBtn: document.getElementById('auto-sync-memo-test-btn'),
+    systemSyncTestConfigBtn: document.getElementById('system-sync-test-config-btn'),
+    systemSyncSchedulerPanel: document.getElementById('system-sync-scheduler-panel'),
+    systemSchedulerStatusBadge: document.getElementById('system-scheduler-status-badge'),
+    systemSchedulerContent: document.getElementById('system-scheduler-content'),
+    systemSyncSchedulerRunOnceBtn: document.getElementById('system-sync-scheduler-run-once-btn'),
+    systemSyncSchedulerStartBtn: document.getElementById('system-sync-scheduler-start-btn'),
+    systemSyncSchedulerStopBtn: document.getElementById('system-sync-scheduler-stop-btn'),
+    systemSyncSchedulerRefreshBtn: document.getElementById('system-sync-scheduler-refresh-btn'),
+    systemSyncSchedulerOpenLogsBtn: document.getElementById('system-sync-scheduler-open-logs-btn'),
+    systemSyncSchedulerLogs: document.getElementById('system-sync-scheduler-logs'),
+    systemSyncIntervalInput: document.getElementById('system-sync-interval-input'),
+    systemSyncMaxRoundsInput: document.getElementById('system-sync-max-rounds-input'),
     syncStatus: document.getElementById('sync-status'),
+    syncBatchesPanel: document.getElementById('sync-batches-panel'),
     publishPanel: document.getElementById('publish-panel'),
     publishTextInput: document.getElementById('publish-text-input'),
     publishCurrentTabCheckbox: document.getElementById('publish-current-tab-checkbox'),
@@ -62,6 +98,10 @@ const els = {
     publishFilesInput: document.getElementById('publish-files-input'),
     publishTopicBtn: document.getElementById('publish-topic-btn'),
     publishStatus: document.getElementById('publish-status'),
+    hotRankPanel: document.getElementById('hot-rank-panel'),
+    hotRankSubtitle: document.getElementById('hot-rank-subtitle'),
+    hotRankCount: document.getElementById('hot-rank-count'),
+    hotRankList: document.getElementById('hot-rank-list'),
     topicsTabs: document.getElementById('topics-tabs'),
     topicsList: document.getElementById('topics-list'),
 };
@@ -73,8 +113,44 @@ document.addEventListener('DOMContentLoaded', () => {
     renderCookieProfiles();
     updateCookieSummary();
     setCookieEditorOpen(!state.cookie);
+    if (els.systemSyncIntervalInput) {
+        els.systemSyncIntervalInput.value = String(SYSTEM_SYNC_INTERVAL_MINUTES);
+    }
+    if (els.systemSyncMaxRoundsInput) {
+        els.systemSyncMaxRoundsInput.value = String(SYSTEM_SYNC_MAX_ROUNDS);
+    }
     bindEvents();
+
+    loadSystemSyncSchedulerStatus({ render: false })
+        .then(() => loadSystemSyncSchedulerPanelsAfterBootstrap())
+        .catch(() => {
+            renderSystemSyncSchedulerPanel();
+            renderSystemSyncBatches();
+        });
 });
+
+function loadSystemSyncSchedulerPanelsAfterBootstrap() {
+    const groupId = getSystemSyncTargetGroupId();
+    return Promise.resolve()
+        .then(() => {
+            if (!groupId) {
+                return null;
+            }
+            return loadSystemSyncBatches(groupId, { render: false });
+        })
+        .then(() => {
+            renderSystemSyncBatches();
+            renderSystemSyncSchedulerPanel();
+        })
+        .catch(() => {
+            renderSystemSyncSchedulerPanel();
+            renderSystemSyncBatches();
+        });
+}
+
+function getSystemSyncTargetGroupId() {
+    return state.selectedGroup?.group_id || state.systemSyncConfig?.group_id || '';
+}
 
 function bindEvents() {
     els.cookieInput.addEventListener('input', () => {
@@ -108,12 +184,35 @@ function bindEvents() {
         updateBatchDownloadButton();
         renderSyncIntro();
     });
+    els.attachmentViewFilterSelect.addEventListener('change', () => {
+        state.attachmentViewFilter = els.attachmentViewFilterSelect.value || 'all';
+        if (['mp3', 'pdf'].includes(state.attachmentViewFilter) && els.attachmentTypeSelect) {
+            els.attachmentTypeSelect.value = state.attachmentViewFilter;
+            state.attachmentType = state.attachmentViewFilter;
+        }
+        state.selectedTopicKeys.clear();
+        renderTopics(state.currentTopics, activeTabState());
+        renderSyncIntro();
+    });
     els.copyTopicsJsonBtn.addEventListener('click', copyLastTopicsJson);
     els.syncCurrentTabBtn.addEventListener('click', () => syncTabs('current'));
     els.syncAllTabsBtn.addEventListener('click', () => syncTabs('all'));
+    els.autoSyncTestBtn.addEventListener('click', () => toggleAutoSyncTest('full'));
+    els.autoSyncMemoTestBtn.addEventListener('click', () => toggleAutoSyncTest('memo'));
+    els.systemSyncTestConfigBtn.addEventListener('click', saveSystemSyncTestConfig);
+    els.systemSyncSchedulerRunOnceBtn.addEventListener('click', runSystemSyncSchedulerOnce);
+    els.systemSyncSchedulerStartBtn.addEventListener('click', startSystemSyncScheduler);
+    els.systemSyncSchedulerStopBtn.addEventListener('click', stopSystemSyncScheduler);
+    els.systemSyncSchedulerRefreshBtn.addEventListener('click', () => loadSystemSyncSchedulerStatus());
+    els.systemSyncSchedulerOpenLogsBtn.addEventListener('click', toggleSystemSyncSchedulerLogs);
     els.publishTopicBtn.addEventListener('click', publishTopic);
     els.topicsList.addEventListener('scroll', handleTopicsScroll);
     els.clearBtn.addEventListener('click', clearAll);
+    els.hotRankList.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-rank-file-id]');
+        if (!button) return;
+        focusRankedFile(button.dataset.rankFileId);
+    });
 }
 
 function updateCookieFormatHint() {
@@ -296,6 +395,8 @@ function newCookieProfileId() {
 }
 
 function resetZsxqWorkspace() {
+    stopSyncPolling();
+    cancelAutoSyncTest(false);
     state.selectedGroup = null;
     state.groups = [];
     state.fileMap.clear();
@@ -304,7 +405,13 @@ function resetZsxqWorkspace() {
     state.currentTopics = [];
     state.officialMenus = [];
     state.tabStates.clear();
+    state.systemSyncSchedulerStatus = null;
+    stopSystemSyncSchedulerPolling();
     state.attachmentStatusCache.clear();
+    state.syncRuns = [];
+    state.systemSyncBatches = [];
+    state.systemSyncConfig = null;
+    state.systemSyncBatchesError = null;
     state.lastTopicsResponse = null;
     state.lastTopicsRequest = null;
     state.menuError = null;
@@ -319,10 +426,17 @@ function resetZsxqWorkspace() {
     els.copyTopicsJsonBtn.classList.add('hidden');
     els.syncCurrentTabBtn.classList.add('hidden');
     els.syncAllTabsBtn.classList.add('hidden');
+    els.autoSyncTestBtn.classList.add('hidden');
+    els.autoSyncMemoTestBtn.classList.add('hidden');
+    els.systemSyncTestConfigBtn.classList.add('hidden');
+    els.systemSyncSchedulerPanel.classList.add('hidden');
     els.syncStatus.classList.add('hidden');
     els.syncStatus.innerHTML = '';
+    els.syncBatchesPanel.classList.add('hidden');
+    els.syncBatchesPanel.innerHTML = '';
     els.topicsTabs.classList.add('hidden');
     els.topicsList.innerHTML = emptyCard('暂无数据');
+    renderHotRankList();
 }
 
 function setCookieEditorOpen(open) {
@@ -398,6 +512,19 @@ async function apiPost(endpoint, payload) {
     return data.data;
 }
 
+async function apiGet(endpoint) {
+    const response = await fetch(`${apiBaseUrl()}${endpoint}`, {
+        method: 'GET',
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+        const message = data?.error?.message || data?.message || `HTTP ${response.status}`;
+        console.warn('[ZSXQ] request failed', { endpoint, status: response.status, message });
+        throw new Error(message);
+    }
+    return data.data;
+}
+
 function apiBaseUrl() {
     return window.API_BASE_URL || window.CONFIG?.API_BASE_URL || 'http://localhost:5001/api/v1';
 }
@@ -435,6 +562,10 @@ async function loadTopics(group, options = {}) {
     els.publishPanel.classList.remove('hidden');
     els.syncCurrentTabBtn.classList.remove('hidden');
     els.syncAllTabsBtn.classList.remove('hidden');
+    els.autoSyncTestBtn.classList.remove('hidden');
+    els.autoSyncMemoTestBtn.classList.remove('hidden');
+    els.systemSyncTestConfigBtn.classList.remove('hidden');
+    els.systemSyncSchedulerPanel.classList.remove('hidden');
     els.copyTopicsJsonBtn.classList.add('hidden');
     els.topicsTitle.textContent = group.name || `星球 ${group.group_id}`;
     els.topicsSubtitle.textContent = `Group ID: ${group.group_id}`;
@@ -451,7 +582,12 @@ async function loadTopics(group, options = {}) {
         : (tabs[0]?.id || 'latest');
     renderTopicTabs();
     renderSyncIntro();
-    loadSyncRuns(group.group_id);
+    startSystemSyncSchedulerPolling();
+    await Promise.all([
+        loadSystemSyncSchedulerStatus(),
+        loadSyncRuns(group.group_id),
+    ]);
+    renderSystemSyncSchedulerPanel();
 
     await loadActiveTabPage({ reset: true });
 }
@@ -616,10 +752,16 @@ async function syncTabs(scope) {
             download_pdf_only: attachmentType === 'pdf',
             mode: scope === 'all' ? 'manual_all_tabs' : 'manual_current_tab',
         });
-        renderSyncResult(result);
+        if (result?.queued) {
+            renderSyncQueuedResult(result);
+            await loadSyncRuns(state.selectedGroup.group_id, { render: false });
+            startSyncPolling();
+        } else {
+            renderSyncResult(result);
+            await loadSyncRuns(state.selectedGroup.group_id, { render: false });
+        }
         state.attachmentStatusCache.clear();
         refreshAttachmentStatusBadges();
-        await loadSyncRuns(state.selectedGroup.group_id, { render: false });
     } catch (error) {
         renderSyncStatus({ type: 'error', message: `同步失败：${error.message}` });
     } finally {
@@ -630,13 +772,365 @@ async function syncTabs(scope) {
     }
 }
 
+async function toggleAutoSyncTest(scope = 'full') {
+    if (state.isAutoSyncTesting) {
+        cancelAutoSyncTest(true);
+        return;
+    }
+    await startAutoSyncTest(scope);
+}
+
+async function startAutoSyncTest(scope = 'full') {
+    state.cookie = els.cookieInput.value.trim();
+    if (!state.cookie) {
+        renderSyncStatus({ type: 'error', message: '请先选择或填写 Cookie。' });
+        return;
+    }
+    if (!state.selectedGroup) {
+        renderSyncStatus({ type: 'error', message: '请先选择一个星球。' });
+        return;
+    }
+    const jobs = buildAutoSyncTestJobs(scope);
+    if (!jobs.length || (scope === 'full' && jobs.length < 2)) {
+        const targetText = scope === 'memo' ? '「调研纪要」Tab' : '「外资研报」和「调研纪要」Tab';
+        renderSyncStatus({
+            type: 'error',
+            message: `没有找到${targetText}，无法启动自动测试。`,
+            details: `<div class="text-xs text-slate-500">当前可用 Tab：${escapeHtml(getTabDefinitions().map(tab => tab.label).join('、') || '无')}</div>`,
+        });
+        return;
+    }
+
+    state.isAutoSyncTesting = true;
+    state.autoSyncTestScope = scope;
+    state.autoSyncTestRound = 0;
+    updateAutoSyncTestButton();
+    await runAutoSyncTestRound();
+}
+
+function cancelAutoSyncTest(showMessage = true) {
+    if (state.autoSyncTestTimer) {
+        clearTimeout(state.autoSyncTestTimer);
+        state.autoSyncTestTimer = null;
+    }
+    const wasRunning = state.isAutoSyncTesting;
+    state.isAutoSyncTesting = false;
+    state.autoSyncTestScope = 'full';
+    state.autoSyncTestRound = 0;
+    updateAutoSyncTestButton();
+    if (showMessage && wasRunning) {
+        renderSyncStatus({ type: 'muted', message: '自动同步测试已停止。' });
+    }
+}
+
+async function runAutoSyncTestRound() {
+    if (!state.isAutoSyncTesting) return;
+    const scope = state.autoSyncTestScope || 'full';
+    const jobs = buildAutoSyncTestJobs(scope);
+    if (!jobs.length || (scope === 'full' && jobs.length < 2)) {
+        cancelAutoSyncTest(false);
+        renderSyncStatus({ type: 'error', message: '自动测试停止：目标 Tab 不完整。' });
+        return;
+    }
+
+    state.autoSyncTestRound += 1;
+    const round = state.autoSyncTestRound;
+    renderSyncStatus({
+        type: 'loading',
+        title: `${autoSyncScopeLabel(scope)} · 第 ${round}/${AUTO_SYNC_TEST_ROUNDS} 轮`,
+        message: `${autoSyncScopeSubmitText(scope)}同一条内容最多下载 ${AUTO_SYNC_TEST_MAX_FILES} 个附件。`,
+    });
+
+    try {
+        for (const job of jobs) {
+            await queueAutoSyncJob(job, round);
+            await sleep(800);
+        }
+        if (scope === 'memo' && jobs[0]?.tab?.id) {
+            await activateTopicTab(jobs[0].tab.id, { reset: true });
+        }
+        await loadSyncRuns(state.selectedGroup.group_id, { render: false });
+        startSyncPolling();
+
+        if (round >= AUTO_SYNC_TEST_ROUNDS) {
+            state.isAutoSyncTesting = false;
+            state.autoSyncTestScope = 'full';
+            updateAutoSyncTestButton();
+            renderSyncStatus({
+                type: 'loading',
+                title: `${autoSyncScopeLabel(scope)}已提交完成`,
+                message: `${AUTO_SYNC_TEST_ROUNDS} 轮任务都已加入队列。请在同步日志里观察 completed / failed，以及附件下载数量。`,
+            });
+            return;
+        }
+
+        const nextAt = new Date(Date.now() + AUTO_SYNC_TEST_INTERVAL_MS).toLocaleTimeString('zh-CN', { hour12: false });
+        renderSyncStatus({
+            type: 'loading',
+            title: `${autoSyncScopeLabel(scope)} · 第 ${round}/${AUTO_SYNC_TEST_ROUNDS} 轮已提交`,
+            message: `下一轮将在 ${nextAt} 提交。${autoSyncScopeNextText(scope)}`,
+        });
+        state.autoSyncTestTimer = setTimeout(runAutoSyncTestRound, AUTO_SYNC_TEST_INTERVAL_MS);
+    } catch (error) {
+        cancelAutoSyncTest(false);
+        renderSyncStatus({ type: 'error', message: `自动同步测试失败：${error.message}` });
+    }
+}
+
+async function queueAutoSyncJob(job, round, modePrefix = 'auto') {
+    return apiPost('/zsxq/sync', {
+        cookie: state.cookie,
+        group_id: state.selectedGroup.group_id,
+        group_name: state.selectedGroup.name,
+        tabs: [job.tab],
+        count: Number(els.countInput.value || 20),
+        max_pages: 1,
+        stop_on_existing: true,
+        download_attachments: true,
+        download_file_types: [job.fileType],
+        download_pdf_only: job.fileType === 'pdf',
+        max_download_files: AUTO_SYNC_TEST_MAX_FILES,
+        mode: `${modePrefix}_${job.modeCode}_${round}`,
+    });
+}
+
+async function saveSystemSyncTestConfig() {
+    if (!state.selectedGroup) {
+        renderSyncStatus({ type: 'error', message: '请先选择一个星球。' });
+        return;
+    }
+    const jobs = buildAutoSyncTestJobs('full');
+    if (jobs.length < 2) {
+        renderSyncStatus({
+            type: 'error',
+            message: '没有同时找到「外资研报」和「调研纪要」Tab，无法保存系统计划配置。',
+            details: `<div class="text-xs text-slate-500">当前可用 Tab：${escapeHtml(getTabDefinitions().map(tab => tab.label).join('、') || '无')}</div>`,
+        });
+        return;
+    }
+
+    const systemIntervalMinutes = parsePositiveInt(els.systemSyncIntervalInput?.value, SYSTEM_SYNC_INTERVAL_MINUTES, 1);
+    const maxRoundsRaw = parsePositiveIntOrZero(els.systemSyncMaxRoundsInput?.value, SYSTEM_SYNC_MAX_ROUNDS, 0);
+
+    const originalHTML = els.systemSyncTestConfigBtn.innerHTML;
+    setLoading(els.systemSyncTestConfigBtn, true, '保存中...');
+    renderSyncStatus({
+        type: 'loading',
+        title: '系统计划配置',
+        message: `正在保存本机系统计划任务配置。真实观察模式会每 ${systemIntervalMinutes} 分钟执行一次，每批获取 ${SYSTEM_SYNC_COUNT} 条主题，每条最多 ${AUTO_SYNC_TEST_MAX_FILES} 个附件。`,
+    });
+
+    try {
+        const payload = {
+            group_id: state.selectedGroup.group_id,
+            group_name: state.selectedGroup.name,
+            count: SYSTEM_SYNC_COUNT,
+            max_pages: 1,
+            stop_on_existing: true,
+            download_attachments: true,
+            max_download_files: AUTO_SYNC_TEST_MAX_FILES,
+            interval_minutes: systemIntervalMinutes,
+            max_rounds: maxRoundsRaw,
+            jobs: jobs.map(job => ({
+                key: job.key,
+                mode_code: job.modeCode,
+                file_type: job.fileType,
+                tab: job.tab,
+            })),
+        };
+        if (state.cookie) {
+            payload.cookie = state.cookie;
+        }
+        const result = await apiPost('/zsxq/system-sync-test/config', payload);
+        const config = result?.config || {};
+        renderSyncStatus({
+            type: 'success',
+            title: '系统计划配置已保存',
+            message: config.cookie_env_configured
+                ? '配置已写入本机 runtime。Cookie 将从环境变量读取，现在可以启动项目内 ZSXQ 调度器。'
+                : `配置已写入本机 runtime。请先在 .env 或系统环境里配置 ${config.cookie_env_name || 'ZSXQ_SYNC_TEST_COOKIE'}。`,
+            details: `
+                <div class="text-xs text-slate-500 leading-6">
+                    <div>配置文件：<span class="font-mono">${escapeHtml(config.path || '-')}</span></div>
+                    <div>Cookie 来源：<span class="font-mono">${escapeHtml(config.cookie_env_name || 'ZSXQ_SYNC_TEST_COOKIE')}</span>${config.cookie_env_configured ? ' · 已检测到' : ' · 未检测到'}</div>
+                    <div>任务范围：外资研报 PDF + 调研纪要 MP3；每 ${config.interval_minutes || systemIntervalMinutes} 分钟 1 批；每批获取 ${SYSTEM_SYNC_COUNT} 条主题；每条内容最多 ${AUTO_SYNC_TEST_MAX_FILES} 个附件。</div>
+                    <div>调度轮次：${formatConfigMaxRounds(config.max_rounds ?? maxRoundsRaw)}</div>
+                </div>
+            `,
+        });
+        state.systemSyncConfig = config;
+        state.systemSyncBatchesError = null;
+        applySystemSyncRuntimeConfig(config);
+        await loadSystemSyncSchedulerStatus({ render: false });
+        if (state.selectedGroup?.group_id) {
+            await loadSystemSyncBatches(state.selectedGroup.group_id, { render: false });
+        }
+        renderSystemSyncBatches();
+        renderSystemSyncSchedulerPanel();
+    } catch (error) {
+        renderSyncStatus({ type: 'error', message: `系统计划配置保存失败：${error.message}` });
+    } finally {
+        setLoading(els.systemSyncTestConfigBtn, false, originalHTML);
+    }
+}
+
+function parsePositiveInt(value, fallback, minValue = 1) {
+    if (value === null || value === undefined) {
+        return fallback;
+    }
+    const text = String(value).trim();
+    if (text === '') {
+        return fallback;
+    }
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+        return fallback;
+    }
+    return Math.max(minValue, Math.min(Math.round(number), 1440));
+}
+
+function parsePositiveIntOrZero(value, fallback, minValue = 0) {
+    if (value === null || value === undefined) {
+        return fallback;
+    }
+    const text = String(value).trim();
+    if (text === '') {
+        return 0;
+    }
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+        return fallback;
+    }
+    const fixed = Math.round(number);
+    if (fixed <= minValue) {
+        return 0;
+    }
+    return Math.min(fixed, 100);
+}
+
+function formatConfigMaxRounds(value) {
+    if (!value || Number(value) <= 0) {
+        return '持续运行';
+    }
+    return `前 ${Number(value)} 轮`;
+}
+
+function applySystemSyncRuntimeConfig(config = {}) {
+    if (!config || !els.systemSyncIntervalInput || !els.systemSyncMaxRoundsInput) {
+        return;
+    }
+    const interval = Number(config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES);
+    els.systemSyncIntervalInput.value = interval > 0 ? String(interval) : String(SYSTEM_SYNC_INTERVAL_MINUTES);
+    const maxRounds = config.max_rounds;
+    if (maxRounds === 0 || maxRounds === null || maxRounds === undefined) {
+        els.systemSyncMaxRoundsInput.value = '';
+    } else {
+        els.systemSyncMaxRoundsInput.value = String(maxRounds);
+    }
+}
+
+function buildAutoSyncTestJobs(scope = 'full') {
+    const tabs = getTabDefinitions();
+    const foreignReportTab = tabs.find(tab => tab.label.includes('外资研报'));
+    const researchMemoTab = tabs.find(tab => tab.label.includes('调研纪要'));
+    const jobs = [
+        foreignReportTab ? { key: 'foreign_report', modeCode: 'fr', tab: foreignReportTab, fileType: 'pdf' } : null,
+        researchMemoTab ? { key: 'research_memo_mp3', modeCode: 'rm', tab: researchMemoTab, fileType: 'mp3' } : null,
+    ].filter(Boolean);
+    return scope === 'memo' ? jobs.filter(job => job.key === 'research_memo_mp3') : jobs;
+}
+
+function autoSyncScopeLabel(scope) {
+    return scope === 'memo' ? '调研纪要小范围测试' : '自动同步测试';
+}
+
+function autoSyncScopeSubmitText(scope) {
+    return scope === 'memo'
+        ? '正在提交调研纪要 MP3，'
+        : '正在提交外资研报 PDF 与调研纪要 MP3，';
+}
+
+function autoSyncScopeNextText(scope) {
+    return scope === 'memo'
+        ? '当前测试仍会每轮只同步调研纪要 MP3。'
+        : '当前测试仍会每轮同步外资研报 PDF 和调研纪要 MP3。';
+}
+
+function updateAutoSyncTestButton() {
+    if (!els.autoSyncTestBtn || !els.autoSyncMemoTestBtn) return;
+    const activeScope = state.autoSyncTestScope || 'full';
+    els.autoSyncTestBtn.innerHTML = state.isAutoSyncTesting && activeScope === 'full'
+        ? '<i class="fas fa-stop mr-2"></i>停止自动测试'
+        : `<i class="fas fa-clock mr-2"></i>自动测试 ${AUTO_SYNC_TEST_ROUNDS} 轮`;
+    els.autoSyncMemoTestBtn.innerHTML = state.isAutoSyncTesting && activeScope === 'memo'
+        ? '<i class="fas fa-stop mr-2"></i>停止小范围测试'
+        : `<i class="fas fa-music mr-2"></i>调研纪要测试 ${AUTO_SYNC_TEST_ROUNDS} 轮`;
+    els.autoSyncTestBtn.classList.toggle('bg-red-50', state.isAutoSyncTesting && activeScope === 'full');
+    els.autoSyncTestBtn.classList.toggle('border-red-300', state.isAutoSyncTesting && activeScope === 'full');
+    els.autoSyncTestBtn.classList.toggle('text-red-700', state.isAutoSyncTesting && activeScope === 'full');
+    els.autoSyncTestBtn.classList.toggle('bg-amber-50', !state.isAutoSyncTesting || activeScope !== 'full');
+    els.autoSyncTestBtn.classList.toggle('border-amber-300', !state.isAutoSyncTesting || activeScope !== 'full');
+    els.autoSyncTestBtn.classList.toggle('text-amber-700', !state.isAutoSyncTesting || activeScope !== 'full');
+    els.autoSyncMemoTestBtn.disabled = state.isAutoSyncTesting && activeScope !== 'memo';
+    els.autoSyncTestBtn.disabled = state.isAutoSyncTesting && activeScope !== 'full';
+    els.autoSyncMemoTestBtn.classList.toggle('opacity-50', els.autoSyncMemoTestBtn.disabled);
+    els.autoSyncTestBtn.classList.toggle('opacity-50', els.autoSyncTestBtn.disabled);
+    els.autoSyncMemoTestBtn.classList.toggle('bg-red-50', state.isAutoSyncTesting && activeScope === 'memo');
+    els.autoSyncMemoTestBtn.classList.toggle('border-red-300', state.isAutoSyncTesting && activeScope === 'memo');
+    els.autoSyncMemoTestBtn.classList.toggle('text-red-700', state.isAutoSyncTesting && activeScope === 'memo');
+    els.autoSyncMemoTestBtn.classList.toggle('bg-sky-50', !state.isAutoSyncTesting || activeScope !== 'memo');
+    els.autoSyncMemoTestBtn.classList.toggle('border-sky-300', !state.isAutoSyncTesting || activeScope !== 'memo');
+    els.autoSyncMemoTestBtn.classList.toggle('text-sky-700', !state.isAutoSyncTesting || activeScope !== 'memo');
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function renderSyncQueuedResult(result) {
+    const run = result?.run || {};
+    renderSyncStatus({
+        type: 'loading',
+        title: '已加入同步队列',
+        message: `Run ID：${run.id || '-'} · 状态：${syncStatusLabel(run.status)}。后台 worker 会继续同步并下载附件，页面会自动刷新日志。`,
+        details: run.requested_tabs?.length
+            ? `<div class="text-xs text-slate-500">范围：${escapeHtml(run.requested_tabs.map(tab => tab.label || tab.id).join('、'))}</div>`
+            : '',
+    });
+}
+
+function startSyncPolling() {
+    stopSyncPolling();
+    if (!state.selectedGroup) return;
+    state.syncPollTimer = setInterval(async () => {
+        await loadSyncRuns(state.selectedGroup.group_id, { render: true });
+        const stillActive = state.syncRuns.some(run => ['queued', 'running'].includes(run.status));
+        if (!stillActive) {
+            stopSyncPolling();
+            state.attachmentStatusCache.clear();
+            refreshAttachmentStatusBadges();
+        }
+    }, 5000);
+}
+
+function stopSyncPolling() {
+    if (state.syncPollTimer) {
+        clearInterval(state.syncPollTimer);
+        state.syncPollTimer = null;
+    }
+}
+
 async function loadSyncRuns(groupId, options = {}) {
     try {
         const result = await apiPost('/zsxq/sync/runs', {
             group_id: groupId,
-            limit: 5,
+            limit: 20,
         });
         state.syncRuns = result?.runs || [];
+        await loadSystemSyncBatches(groupId, { render: false });
+        if (state.syncRuns.some(run => ['queued', 'running'].includes(run.status)) && !state.syncPollTimer) {
+            startSyncPolling();
+        }
         if (options.render === false) {
             return;
         }
@@ -647,10 +1141,265 @@ async function loadSyncRuns(groupId, options = {}) {
         }
     } catch {
         state.syncRuns = [];
+        state.systemSyncBatches = [];
         if (options.render === false) {
             return;
         }
         renderSyncIntro();
+        renderSystemSyncBatches();
+    }
+}
+
+async function loadSystemSyncBatches(groupId, options = {}) {
+    const targetGroupId = groupId || getSystemSyncTargetGroupId();
+    try {
+        const [batchResult, configResult] = await Promise.all([
+            apiPost('/zsxq/system-sync-test/batches', {
+                group_id: targetGroupId || null,
+                limit: 8,
+            }),
+            fetch(`${apiBaseUrl()}/zsxq/system-sync-test/config`).then(async response => {
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+                return data.data;
+            }),
+        ]);
+        state.systemSyncBatches = batchResult?.batches || [];
+        state.systemSyncBatchesError = batchResult?.error || null;
+        state.systemSyncConfig = configResult?.config || null;
+        applySystemSyncRuntimeConfig(state.systemSyncConfig);
+    } catch {
+        state.systemSyncBatches = [];
+        state.systemSyncConfig = null;
+        state.systemSyncBatchesError = '获取系统批次失败，请稍后重试。';
+    }
+    if (options.render !== false) {
+        renderSystemSyncBatches();
+    }
+}
+
+async function loadSystemSyncSchedulerStatus(options = {}) {
+    try {
+        const result = await apiGet('/zsxq/system-sync-scheduler/status');
+        state.systemSyncSchedulerStatus = result?.scheduler || null;
+        applySystemSyncRuntimeConfig(result?.scheduler?.config || null);
+        if (!state.systemSyncConfig && result?.scheduler?.config) {
+            state.systemSyncConfig = result.scheduler.config;
+        }
+        if (options.render !== false) {
+            renderSystemSyncSchedulerPanel();
+        }
+    } catch {
+        state.systemSyncSchedulerStatus = {
+            running: false,
+            exists: false,
+            message: '状态查询失败',
+        };
+        if (options.render !== false) {
+            renderSystemSyncSchedulerPanel();
+        }
+    }
+}
+
+async function startSystemSyncScheduler() {
+    const original = els.systemSyncSchedulerStartBtn.innerHTML;
+    setLoading(els.systemSyncSchedulerStartBtn, true, '启动中...');
+    try {
+        const result = await apiPost('/zsxq/system-sync-scheduler/start', {});
+        const scheduler = result?.scheduler || null;
+        state.systemSyncSchedulerStatus = scheduler;
+        renderSyncStatus({
+            type: scheduler?.started ? 'success' : 'muted',
+            title: '系统计划任务',
+            message: scheduler?.message || '启动请求已提交。',
+        });
+        await loadSystemSyncSchedulerStatus({ render: false });
+        const targetGroupId = getSystemSyncTargetGroupId();
+        if (targetGroupId) {
+            await loadSystemSyncBatches(targetGroupId, { render: false });
+            renderSystemSyncBatches();
+        }
+    } catch (error) {
+        renderSyncStatus({ type: 'error', message: `启动计划任务失败：${error.message}` });
+    } finally {
+        setLoading(els.systemSyncSchedulerStartBtn, false, original);
+        startSystemSyncSchedulerPolling();
+        renderSystemSyncSchedulerPanel();
+    }
+}
+
+async function stopSystemSyncScheduler() {
+    const original = els.systemSyncSchedulerStopBtn.innerHTML;
+    setLoading(els.systemSyncSchedulerStopBtn, true, '停止中...');
+    try {
+        const result = await apiPost('/zsxq/system-sync-scheduler/stop', {});
+        const scheduler = result?.scheduler || null;
+        const isStopped = Boolean(scheduler?.stopped);
+        const isRunning = Boolean(scheduler?.running);
+        const showType = isStopped || !isRunning ? 'success' : 'muted';
+        state.systemSyncSchedulerStatus = scheduler;
+        renderSyncStatus({
+            type: showType,
+            title: '系统计划任务',
+            message: scheduler?.message || '停止请求已提交。',
+        });
+        await loadSystemSyncSchedulerStatus({ render: false });
+        const targetGroupId = getSystemSyncTargetGroupId();
+        if (targetGroupId) {
+            await loadSystemSyncBatches(targetGroupId, { render: false });
+            renderSystemSyncBatches();
+        }
+    } catch (error) {
+        renderSyncStatus({ type: 'error', message: `停止计划任务失败：${error.message}` });
+    } finally {
+        setLoading(els.systemSyncSchedulerStopBtn, false, original);
+        renderSystemSyncSchedulerPanel();
+    }
+}
+
+async function runSystemSyncSchedulerOnce() {
+    const original = els.systemSyncSchedulerRunOnceBtn.innerHTML;
+    setLoading(els.systemSyncSchedulerRunOnceBtn, true, '执行中...');
+    try {
+        const result = await apiPost('/zsxq/system-sync-scheduler/run-once', {});
+        const scheduler = result?.scheduler || {};
+        const queued = Boolean(scheduler?.queued);
+        const skipped = Boolean(scheduler?.skipped);
+        const statusType = queued ? 'success' : (skipped ? 'muted' : 'muted');
+        const reasonLabel = skipped && scheduler.reason ? `（原因：${scheduler.reason}）` : '';
+        const title = queued ? '立即执行已触发' : (skipped ? '立即执行未提交' : '立即执行结果');
+        renderSyncStatus({
+            type: statusType,
+            title,
+            message: `${scheduler.message || '触发请求已提交。'}${reasonLabel}`,
+        });
+        await loadSystemSyncSchedulerStatus({ render: false });
+        const targetGroupId = getSystemSyncTargetGroupId();
+        if (targetGroupId) {
+            await loadSystemSyncBatches(targetGroupId, { render: false });
+            renderSystemSyncBatches();
+        }
+    } catch (error) {
+        renderSyncStatus({ type: 'error', message: `立即执行失败：${error.message}` });
+    } finally {
+        setLoading(els.systemSyncSchedulerRunOnceBtn, false, original);
+        renderSystemSyncSchedulerPanel();
+    }
+}
+
+function startSystemSyncSchedulerPolling() {
+    stopSystemSyncSchedulerPolling();
+    state.systemSyncSchedulerPollTimer = setInterval(() => {
+        if (!getSystemSyncTargetGroupId() && !state.systemSyncSchedulerStatus?.running) {
+            return;
+        }
+        loadSystemSyncSchedulerStatus({ render: false }).then(() => {
+            renderSystemSyncSchedulerPanel();
+            renderSystemSyncBatches();
+            if (els.systemSyncSchedulerLogs && !els.systemSyncSchedulerLogs.classList.contains('hidden')) {
+                loadSystemSyncSchedulerLogs().then(logs => {
+                    if (els.systemSyncSchedulerLogs && !els.systemSyncSchedulerLogs.classList.contains('hidden')) {
+                        els.systemSyncSchedulerLogs.textContent = logs;
+                    }
+                });
+            }
+        });
+    }, SYSTEM_SYNC_STATUS_POLL_MS);
+}
+
+async function loadSystemSyncSchedulerLogs() {
+    if (!els.systemSyncSchedulerLogs) {
+        return '（日志面板未挂载）';
+    }
+    try {
+        const response = await fetch(`${apiBaseUrl()}/zsxq/system-sync-scheduler/logs?lines=${SYSTEM_SYNC_LOG_LINES}`);
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        }
+        const raw = data?.data?.raw;
+        return typeof raw === 'string' && raw.trim().length > 0 ? raw : '（暂无日志）';
+    } catch (error) {
+        return `读取日志失败：${error.message}`;
+    }
+}
+
+async function toggleSystemSyncSchedulerLogs() {
+    if (!els.systemSyncSchedulerLogs || !els.systemSyncSchedulerOpenLogsBtn) {
+        return;
+    }
+    if (els.systemSyncSchedulerLogs.classList.contains('hidden')) {
+        els.systemSyncSchedulerLogs.classList.remove('hidden');
+        els.systemSyncSchedulerOpenLogsBtn.disabled = true;
+        els.systemSyncSchedulerOpenLogsBtn.innerHTML = '<i class="fas fa-list-ul mr-2"></i>加载日志...';
+        els.systemSyncSchedulerLogs.textContent = '正在读取日志...';
+        const logs = await loadSystemSyncSchedulerLogs();
+        els.systemSyncSchedulerLogs.textContent = logs;
+        els.systemSyncSchedulerOpenLogsBtn.innerHTML = '<i class="fas fa-list-ul mr-2"></i>隐藏最近日志';
+        els.systemSyncSchedulerOpenLogsBtn.disabled = false;
+        return;
+    }
+    els.systemSyncSchedulerLogs.classList.add('hidden');
+    els.systemSyncSchedulerOpenLogsBtn.innerHTML = '<i class="fas fa-list-ul mr-2"></i>查看最近日志';
+}
+
+function stopSystemSyncSchedulerPolling() {
+    if (state.systemSyncSchedulerPollTimer) {
+        clearInterval(state.systemSyncSchedulerPollTimer);
+        state.systemSyncSchedulerPollTimer = null;
+    }
+}
+
+function renderSystemSyncSchedulerPanel() {
+    if (!els.systemSyncSchedulerPanel) return;
+
+    const scheduler = state.systemSyncSchedulerStatus || {};
+    const config = scheduler.config || state.systemSyncConfig || {};
+    const running = Boolean(scheduler.running);
+    const hasConfig = Boolean(config?.exists || config?.group_id);
+
+    els.systemSyncSchedulerPanel.classList.remove('hidden');
+    els.systemSchedulerStatusBadge.textContent = running ? '运行中' : '未运行';
+    els.systemSchedulerStatusBadge.className = `rounded-full px-2 py-1 text-[10px] font-black ${running ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`;
+
+    if (!hasConfig) {
+        els.systemSyncSchedulerStartBtn.disabled = true;
+        els.systemSyncSchedulerStopBtn.disabled = true;
+        els.systemSyncSchedulerRunOnceBtn.disabled = true;
+        if (els.systemSyncSchedulerOpenLogsBtn) {
+            els.systemSyncSchedulerOpenLogsBtn.classList.add('hidden');
+        }
+        const detail = scheduler.message || '未检测到系统计划配置，请先点击“保存系统计划配置”。';
+        els.systemSchedulerContent.innerHTML = `<div>当前状态：${escapeHtml(detail)}</div>`;
+        return;
+    }
+
+    const interval = scheduler.interval_minutes || config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES;
+    const count = config.count || SYSTEM_SYNC_COUNT;
+    const maxFiles = config.max_download_files || AUTO_SYNC_TEST_MAX_FILES;
+    const lastTrigger = scheduler.last_trigger_at ? formatZsxqTime(scheduler.last_trigger_at) : '尚未触发';
+    const nextRun = scheduler.next_run ? formatZsxqTime(scheduler.next_run) : '尚未预测';
+    const roundsText = scheduler.continuous ? `已运行 ${scheduler.rounds_completed || 0} 轮 · 持续模式` : `进度 ${scheduler.rounds_completed || 0}/${scheduler.max_rounds || 0} 轮`;
+    els.systemSyncSchedulerStartBtn.disabled = running;
+    els.systemSyncSchedulerStopBtn.disabled = !running;
+    els.systemSyncSchedulerRunOnceBtn.disabled = false;
+    els.systemSyncSchedulerStartBtn.classList.toggle('opacity-50', running);
+    els.systemSyncSchedulerStopBtn.classList.toggle('opacity-50', !running);
+
+    els.systemSyncSchedulerPanel.classList.toggle('border-emerald-200', running);
+    els.systemSyncSchedulerPanel.classList.toggle('border-slate-200', !running);
+
+    els.systemSchedulerContent.innerHTML = `
+        <div class="space-y-1">
+            <div>进程状态：${escapeHtml(scheduler.running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
+            <div>调度配置：${escapeHtml(String(interval))} 分钟一次 · 每批 ${escapeHtml(String(count))} 条 · 每条最多 ${escapeHtml(String(maxFiles))} 个附件</div>
+            <div>本轮状态：${escapeHtml(roundsText)} · ${escapeHtml(scheduler.message || '')}</div>
+            <div>上次触发：${escapeHtml(lastTrigger)} · 下一次：${escapeHtml(nextRun)}</div>
+            <div>日志：<span class="font-mono break-all">${escapeHtml(scheduler.log_path || '-')}</span></div>
+        </div>
+    `;
+    if (els.systemSyncSchedulerOpenLogsBtn) {
+        els.systemSyncSchedulerOpenLogsBtn.classList.remove('hidden');
     }
 }
 
@@ -675,13 +1424,14 @@ function renderSyncResult(result) {
 function renderSyncRuns() {
     const latest = state.syncRuns[0];
     if (!latest) return;
-    const summary = latest.result || {};
+    const summary = latest.result?.partial || latest.result || {};
     renderSyncStatus({
         type: latest.status === 'failed' ? 'error' : 'muted',
         title: '同步日志',
         message: `最近一次：${formatZsxqTime(latest.completed_at || latest.created_at)} · ${syncStatusLabel(latest.status)} · 新增 ${summary.topics_new || 0} · 附件下载 ${summary.attachments_downloaded || 0}`,
         details: renderSyncRunsList(state.syncRuns.slice(0, 10)),
     });
+    renderSystemSyncBatches();
 }
 
 function renderSyncIntro() {
@@ -702,6 +1452,7 @@ function renderSyncIntro() {
             </div>
         `,
     });
+    renderSystemSyncBatches();
 }
 
 function renderSyncRunsList(runs) {
@@ -709,9 +1460,10 @@ function renderSyncRunsList(runs) {
     return `
         <div role="list" class="space-y-2">
             ${runs.map(run => {
-                const runSummary = run.result || {};
+                const runSummary = run.result?.partial || run.result || {};
                 const label = run.tab_label || (run.requested_tabs?.length ? `${run.requested_tabs.length} 个 tab` : '未知范围');
                 const statusClass = run.status === 'failed' ? 'text-red-600' : run.status === 'completed' ? 'text-emerald-700' : 'text-blue-600';
+                const limitReached = Boolean(runSummary.download_limit_reached);
                 return `
                     <div role="listitem" class="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
                         <div class="flex flex-wrap items-center justify-between gap-2">
@@ -722,10 +1474,132 @@ function renderSyncRunsList(runs) {
                             <span>${escapeHtml(label)}</span>
                             <span>新增 ${escapeHtml(String(runSummary.topics_new || 0))} · 更新 ${escapeHtml(String(runSummary.topics_updated || 0))} · 已存在 ${escapeHtml(String(runSummary.topics_existing || 0))} · 附件下载 ${escapeHtml(String(runSummary.attachments_downloaded || 0))} · 失败 ${escapeHtml(String(runSummary.attachments_failed || 0))}</span>
                         </div>
+                        ${limitReached ? '<div class="mt-1 text-amber-600">有内容达到单条附件上限。</div>' : ''}
                         ${run.error_message ? `<div class="mt-1 text-red-600">${escapeHtml(run.error_message)}</div>` : ''}
                     </div>
                 `;
             }).join('')}
+        </div>
+    `;
+}
+
+function renderSystemSyncBatches() {
+    if (!els.syncBatchesPanel) return;
+    const config = state.systemSyncConfig || {};
+    const batches = state.systemSyncBatches || [];
+    const batchError = state.systemSyncBatchesError;
+    els.syncBatchesPanel.classList.remove('hidden');
+    els.syncBatchesPanel.innerHTML = `
+        <div class="flex items-start justify-between gap-3">
+            <div>
+                <div class="zsxq-side-title">系统测试批次</div>
+                <p class="text-xs text-slate-400 mt-1">
+                    ${escapeHtml(systemSyncConfigSummary(config))}
+                </p>
+            </div>
+            <span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-500">${escapeHtml(String(batches.length))}</span>
+        </div>
+        ${batchError ? `<div class="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">${escapeHtml(batchError)}</div>` : ''}
+        <div class="mt-3 space-y-2">
+            ${batches.length ? batches.map(renderSystemSyncBatchCard).join('') : `
+                <div class="rounded-lg border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
+                    暂无系统计划批次。保存配置并启动调度器后会出现在这里。
+                </div>
+            `}
+        </div>
+    `;
+    if (els.systemSyncSchedulerPanel) {
+        renderSystemSyncSchedulerPanel();
+    }
+}
+
+function systemSyncConfigSummary(config) {
+    if (!config || !config.exists) return '未保存系统计划配置';
+    const maxFiles = config.max_download_files || AUTO_SYNC_TEST_MAX_FILES;
+    const interval = config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES;
+    const count = config.count || SYSTEM_SYNC_COUNT;
+    const maxRounds = config.max_rounds;
+    const done = config.rounds_completed || 0;
+    const roundsText = maxRounds ? `${done}/${maxRounds} 轮` : `已运行 ${done} 轮 · 持续运行`;
+    const cookie = config.cookie_env_configured ? 'Cookie 已配置' : 'Cookie 未配置';
+    const complete = config.testing_complete ? ' · 已达测试轮数' : '';
+    return `${interval} 分钟一次 · 每批 ${count} 条 · 每条最多 ${maxFiles} 个附件 · ${roundsText} · ${cookie}${complete}`;
+}
+
+function renderSystemSyncBatchCard(batch) {
+    const summary = batch.summary || {};
+    const statusClass = batch.status === 'failed'
+        ? 'text-red-600'
+        : batch.status === 'completed'
+            ? 'text-emerald-700'
+            : 'text-blue-600';
+    const roundText = batch.round && batch.max_rounds
+        ? `第 ${batch.round}/${batch.max_rounds} 轮`
+        : batch.round && batch.continuous
+            ? `第 ${batch.round} 轮`
+        : '历史批次';
+    const failedAttachments = (batch.runs || []).flatMap(run => run.failed_attachments || []);
+    return `
+        <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="font-black text-slate-800">${escapeHtml(roundText)}</div>
+                <div class="${statusClass} font-bold">${escapeHtml(syncStatusLabel(batch.status))}</div>
+            </div>
+            <div class="mt-1 text-slate-400 font-mono">${escapeHtml(batch.batch_id || batch.attempt_id || '-')}</div>
+            <div class="mt-2 grid grid-cols-2 gap-2">
+                <div class="rounded-md bg-white border border-slate-200 px-2 py-1">新增 ${escapeHtml(String(summary.topics_new || 0))}</div>
+                <div class="rounded-md bg-white border border-slate-200 px-2 py-1">更新 ${escapeHtml(String(summary.topics_updated || 0))}</div>
+                <div class="rounded-md bg-white border border-slate-200 px-2 py-1">下载 ${escapeHtml(String(summary.attachments_downloaded || 0))}</div>
+                <div class="rounded-md bg-white border border-slate-200 px-2 py-1">失败 ${escapeHtml(String(summary.attachments_failed || 0))}</div>
+            </div>
+            <div class="mt-2 text-slate-500">
+                ${escapeHtml(formatZsxqTime(batch.completed_at || batch.created_at))}
+                ${summary.download_limit_reached ? ' · 有内容达到单条附件上限' : ''}
+            </div>
+            ${renderSystemSyncBatchRuns(batch.runs || [])}
+            ${failedAttachments.length ? renderFailedAttachments(failedAttachments) : ''}
+        </div>
+    `;
+}
+
+function renderSystemSyncBatchRuns(runs) {
+    if (!runs.length) return '';
+    return `
+        <div class="mt-2 space-y-1">
+            ${runs.map(run => {
+                const result = run.result || {};
+                const tabs = run.requested_tabs || [];
+                const label = run.tab_label || tabs.map(tab => tab.label || tab.id).join(' + ') || '未知范围';
+                return `
+                    <div class="rounded-md border border-slate-200 bg-white px-2 py-1.5">
+                        <div class="flex flex-wrap items-center justify-between gap-2">
+                            <span class="font-bold">${escapeHtml(label)}</span>
+                            <span>${escapeHtml(syncStatusLabel(run.status))}</span>
+                        </div>
+                        <div class="mt-1 text-slate-500">
+                            Run ${escapeHtml(shortId(run.id))} · 附件 ${escapeHtml(String(result.attachments_seen || 0))}
+                            · 下载 ${escapeHtml(String(result.attachments_downloaded || 0))}
+                            · 失败 ${escapeHtml(String(result.attachments_failed || 0))}
+                        </div>
+                    </div>
+                `;
+            }).join('')}
+        </div>
+    `;
+}
+
+function renderFailedAttachments(items) {
+    return `
+        <div class="mt-2 rounded-md border border-red-200 bg-red-50 px-2 py-2 text-red-700">
+            <div class="font-black">失败附件</div>
+            <div class="mt-1 space-y-1">
+                ${items.slice(0, 6).map(item => `
+                    <div>
+                        <div class="font-bold">${escapeHtml(item.name || item.file_id || item.attachment_key || '未知附件')}</div>
+                        <div class="text-red-600">${escapeHtml(item.error_message || '未记录失败原因')}</div>
+                    </div>
+                `).join('')}
+            </div>
         </div>
     `;
 }
@@ -745,6 +1619,7 @@ function renderSyncTabsList(tabs) {
                         <span>已存在 ${escapeHtml(String(tab.topics_existing || 0))} · 附件 ${escapeHtml(String(tab.attachments_seen || 0))} · 附件下载 ${escapeHtml(String(tab.attachments_downloaded || 0))} · 失败 ${escapeHtml(String(tab.attachments_failed || 0))}</span>
                     </div>
                     ${tab.stopped_by_existing ? '<div class="mt-1 text-slate-400">遇到已同步主题，已提前停止。</div>' : ''}
+                    ${tab.download_limit_reached || tab.stopped_by_download_limit ? '<div class="mt-1 text-amber-600">有内容达到单条附件上限。</div>' : ''}
                 </div>
             `).join('')}
         </div>
@@ -753,11 +1628,17 @@ function renderSyncTabsList(tabs) {
 
 function syncStatusLabel(status) {
     const map = {
+        queued: '排队中',
         completed: '成功',
         failed: '失败',
         running: '进行中',
     };
     return map[status] || status || '未知';
+}
+
+function shortId(value) {
+    const text = String(value || '');
+    return text.length > 8 ? text.slice(0, 8) : (text || '-');
 }
 
 function renderSyncStatus({ type = 'muted', title = '同步日志', message = '', details = '' }) {
@@ -950,22 +1831,28 @@ function renderTopicTabs() {
         button.addEventListener('click', async () => {
             const tabId = button.dataset.tabId;
             if (tabId === state.activeTab) return;
-
-            state.activeTab = tabId;
-            const tab = getActiveTabConfig();
-            if (!tab.hashtagId) els.scopeSelect.value = tab.scope || 'all';
-            state.selectedTopicKeys.clear();
-
-            const tabState = getTabState(tabId);
-            if (!tabState.loaded) {
-                await loadActiveTabPage({ reset: true });
-            } else {
-                renderActiveTab();
-            }
-            updatePublishTabState();
+            await activateTopicTab(tabId);
         });
     });
     updatePublishTabState();
+}
+
+async function activateTopicTab(tabId, options = {}) {
+    const targetTab = getTabDefinitions().find(tab => tab.id === tabId);
+    if (!targetTab) return false;
+
+    state.activeTab = targetTab.id;
+    if (!targetTab.hashtagId) els.scopeSelect.value = targetTab.scope || 'all';
+    state.selectedTopicKeys.clear();
+
+    const tabState = getTabState(targetTab.id);
+    if (options.reset || !tabState.loaded) {
+        await loadActiveTabPage({ reset: true });
+    } else {
+        renderActiveTab();
+    }
+    updatePublishTabState();
+    return true;
 }
 
 function getTabDefinitions() {
@@ -1086,22 +1973,25 @@ function renderGroups(groups) {
 }
 
 function renderTopics(topics, tabState = null) {
-    if (!topics.length) {
+    const viewFilter = currentAttachmentViewFilter();
+    const visibleTopics = filterTopicsByAttachmentView(topics, viewFilter);
+    if (!visibleTopics.length) {
         const message = tabState?.loading
             ? '正在加载...'
-            : (tabState?.hasMore ? '当前页还没有匹配内容，继续下滑会尝试加载更多。' : '这个筛选下没有主题。');
+            : (tabState?.hasMore ? '当前页还没有匹配内容，继续下滑会尝试加载更多。' : attachmentViewEmptyText(viewFilter));
         els.topicsList.innerHTML = emptyCard(message, tabState?.loading ? 'muted' : 'warning') + renderLoadMoreFooter(tabState);
         state.fileMap.clear();
         state.topicMap.clear();
         updateBatchDownloadButton();
         updateSelectAllButton();
+        renderHotRankList();
         bindLoadMoreAction();
         return;
     }
 
     state.fileMap.clear();
     state.topicMap.clear();
-    els.topicsList.innerHTML = topics.map(topic => {
+    els.topicsList.innerHTML = visibleTopics.map(topic => {
         const topicKey = topicKeyForRender(topic);
         state.topicMap.set(topicKey, topic);
         const content = extractContent(topic);
@@ -1109,7 +1999,8 @@ function renderTopics(topics, tabState = null) {
         const author = topic?.owner?.name || topic?.talk?.owner?.name || '未知作者';
         const created = topic.create_time || topic?.talk?.create_time || '';
         const createdText = formatZsxqTime(created);
-        const files = topicFiles(topic);
+        const allFiles = topicFiles(topic);
+        const files = filterFilesByAttachmentView(allFiles, viewFilter);
         const images = topicImages(topic);
 
         return `
@@ -1139,7 +2030,12 @@ function renderTopics(topics, tabState = null) {
     bindTopicActions();
     bindLoadMoreAction();
     updateBatchDownloadButton();
+    renderHotRankList();
     refreshAttachmentStatusBadges();
+}
+
+function activeTabState() {
+    return state.tabStates.get(state.activeTab) || null;
 }
 
 function renderLoadMoreFooter(tabState) {
@@ -1187,6 +2083,30 @@ function topicFiles(topic) {
 
 function topicImages(topic) {
     return topic.images || topic?.talk?.images || topic?.article?.images || [];
+}
+
+function currentAttachmentViewFilter() {
+    state.attachmentViewFilter = els.attachmentViewFilterSelect?.value || state.attachmentViewFilter || 'all';
+    return state.attachmentViewFilter;
+}
+
+function filterTopicsByAttachmentView(topics, filter = currentAttachmentViewFilter()) {
+    if (filter === 'all') return topics;
+    return topics.filter(topic => topicFiles(topic).some(file => fileTypeForFile(file) === filter));
+}
+
+function filterFilesByAttachmentView(files, filter = currentAttachmentViewFilter()) {
+    if (filter === 'all') return files;
+    return files.filter(file => fileTypeForFile(file) === filter);
+}
+
+function attachmentViewEmptyText(filter = currentAttachmentViewFilter()) {
+    const map = {
+        mp3: '当前列表里没有 MP3 附件。',
+        pdf: '当前列表里没有 PDF 附件。',
+        all: '这个筛选下没有主题。',
+    };
+    return map[filter] || map.all;
 }
 
 function renderImages(images) {
@@ -1267,8 +2187,10 @@ function renderFiles(files, topicId, topicKey) {
                             <span class="shrink-0 text-[10px] font-black ${fileIcon}">${escapeHtml(fileTypeLabel)}</span>
                             <span class="break-words min-w-0">${escapeHtml(name)}</span>
                             <span class="downloaded-badge hidden shrink-0 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">下载过</span>
+                            <span class="download-failed-badge hidden shrink-0 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-bold text-red-600">下载失败</span>
                             </div>
                             ${downloadCount !== null ? `<div class="pl-6 text-xs text-slate-400">下载 ${escapeHtml(String(downloadCount))} 次</div>` : ''}
+                            <div class="download-error-text hidden pl-6 text-xs text-red-500"></div>
                         </div>
                         <div class="flex items-center gap-2 shrink-0">
                             <button class="copy-file-json-btn rounded-md border border-slate-300 px-2 py-1 text-xs font-bold text-slate-500 hover:bg-white" data-file-id="${escapeHtml(id)}">
@@ -1285,6 +2207,74 @@ function renderFiles(files, topicId, topicKey) {
     `;
 }
 
+function renderHotRankList() {
+    if (!els.hotRankList) return;
+    const entries = buildHotRankEntries();
+    const filter = currentAttachmentViewFilter();
+    const filterLabel = filter === 'all' ? '全部附件' : attachmentTypeText(filter);
+    els.hotRankSubtitle.textContent = `${filterLabel} · 按下载次数排序`;
+    els.hotRankCount.textContent = String(entries.length);
+
+    if (!entries.length) {
+        els.hotRankList.innerHTML = '<div class="rounded-lg border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">暂无排行数据</div>';
+        return;
+    }
+
+    els.hotRankList.innerHTML = entries.slice(0, 20).map((entry, index) => `
+        <button class="zsxq-hot-rank-item w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left hover:bg-blue-50 hover:border-blue-200 transition-colors" data-rank-file-id="${escapeHtml(entry.fileId)}">
+            <div class="flex items-start justify-between gap-2">
+                <div class="min-w-0 flex items-start gap-2">
+                    <span class="zsxq-rank-number shrink-0">${index + 1}</span>
+                    <div class="min-w-0">
+                        <div class="line-clamp-2 text-xs font-bold text-slate-700">${escapeHtml(entry.name)}</div>
+                        <div class="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-slate-400">
+                            <span class="${escapeHtml(fileIconClass(entry.type))} font-black">${escapeHtml(entry.type.toUpperCase())}</span>
+                            <span>${escapeHtml(entry.author)}</span>
+                            ${entry.createdText ? `<span>· ${escapeHtml(entry.createdText)}</span>` : ''}
+                        </div>
+                    </div>
+                </div>
+                <span class="shrink-0 rounded-full bg-white px-2 py-1 text-[10px] font-black text-slate-700">${escapeHtml(String(entry.downloadCount))}</span>
+            </div>
+            <div class="mt-1 line-clamp-2 pl-6 text-[10px] text-slate-500">${escapeHtml(entry.topicTitle)}</div>
+        </button>
+    `).join('');
+}
+
+function buildHotRankEntries() {
+    const entries = Array.from(state.fileMap.entries()).map(([fileId, entry]) => {
+        const topic = state.topicMap.get(entry.topicKey) || {};
+        const file = entry.file || {};
+        const downloadCount = getDownloadCount(file);
+        return {
+            fileId,
+            name: file.name || file.title || file.file_name || '附件',
+            type: fileTypeForFile(file),
+            downloadCount: Number(downloadCount || 0),
+            topicTitle: topic.title || topic?.talk?.text?.slice(0, 48) || topic?.article?.title || '无标题主题',
+            author: topic?.owner?.name || topic?.talk?.owner?.name || '未知作者',
+            createdText: formatZsxqTime(topic.create_time || topic?.talk?.create_time || ''),
+        };
+    });
+
+    return entries
+        .filter(entry => Number.isFinite(entry.downloadCount) && entry.downloadCount > 0)
+        .sort((a, b) => b.downloadCount - a.downloadCount || a.name.localeCompare(b.name, 'zh-CN'));
+}
+
+function focusRankedFile(fileId) {
+    const row = els.topicsList.querySelector(`.zsxq-file-row[data-file-id="${cssEscape(fileId)}"]`);
+    if (!row) return;
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    row.classList.add('zsxq-rank-focus');
+    setTimeout(() => row.classList.remove('zsxq-rank-focus'), 1600);
+}
+
+function cssEscape(value) {
+    if (window.CSS?.escape) return CSS.escape(value);
+    return String(value).replace(/["\\]/g, '\\$&');
+}
+
 async function refreshAttachmentStatusBadges() {
     if (!state.selectedGroup || !state.currentTopics.length) return;
     const tab = getActiveTabConfig();
@@ -1296,22 +2286,24 @@ async function refreshAttachmentStatusBadges() {
     if (!topicIds.length) return;
 
     const cachePrefix = `${state.selectedGroup.group_id}:${tab.id}:`;
-    const missingTopicIds = topicIds.filter(topicId => !state.attachmentStatusCache.has(`${cachePrefix}${topicId}`));
-    if (missingTopicIds.length) {
-        try {
-            const result = await apiPost('/zsxq/attachments/status', {
-                group_id: state.selectedGroup.group_id,
-                tab_id: tab.id,
-                topic_ids: missingTopicIds,
-            });
-            const statuses = result?.statuses || {};
-            missingTopicIds.forEach(topicId => {
-                state.attachmentStatusCache.set(`${cachePrefix}${topicId}`, statuses[topicId] || []);
-            });
-        } catch (error) {
-            console.warn('[ZSXQ] attachment status lookup failed', error);
-            return;
-        }
+    try {
+        const result = await apiPost('/zsxq/attachments/status', {
+            group_id: state.selectedGroup.group_id,
+            tab_id: tab.id,
+            topic_ids: topicIds,
+            attachments: visibleAttachmentRefs(),
+        });
+        const statuses = result?.statuses || {};
+        topicIds.forEach(topicId => {
+            const cacheKey = `${cachePrefix}${topicId}`;
+            const incoming = statuses[topicId] || [];
+            if (incoming.length || !state.attachmentStatusCache.has(cacheKey)) {
+                state.attachmentStatusCache.set(cacheKey, incoming);
+            }
+        });
+    } catch (error) {
+        console.warn('[ZSXQ] attachment status lookup failed', error);
+        return;
     }
 
     els.topicsList.querySelectorAll('.zsxq-file-row').forEach(row => {
@@ -1319,14 +2311,49 @@ async function refreshAttachmentStatusBadges() {
         if (!entry?.topicId) return;
         const records = state.attachmentStatusCache.get(`${cachePrefix}${entry.topicId}`) || [];
         const matched = matchAttachmentStatus(records, entry);
-        const badge = row.querySelector('.downloaded-badge');
-        if (!badge) return;
-        const downloaded = matched?.download_status === 'downloaded';
-        badge.classList.toggle('hidden', !downloaded);
-        if (downloaded) {
-            badge.title = matched.local_path || '已通过浏览器下载';
-        }
+        updateFileRowDownloadStatus(row, matched);
     });
+}
+
+function visibleAttachmentRefs() {
+    return Array.from(state.fileMap.values()).map(entry => ({
+        topic_id: String(entry.topicId || ''),
+        attachment_key: entry.attachmentKey || '',
+        file_id: entry.fileId || '',
+        name: entry.file?.name || entry.file?.title || entry.file?.file_name || '',
+    })).filter(item => item.topic_id && (item.attachment_key || item.file_id || item.name));
+}
+
+function updateFileRowDownloadStatus(row, matched) {
+    const downloadedBadge = row.querySelector('.downloaded-badge');
+    const failedBadge = row.querySelector('.download-failed-badge');
+    const errorText = row.querySelector('.download-error-text');
+    const button = row.querySelector('.download-file-btn');
+    const downloaded = matched?.download_status === 'downloaded';
+    const failed = matched?.download_status === 'failed';
+
+    if (downloadedBadge) {
+        downloadedBadge.classList.toggle('hidden', !downloaded);
+        downloadedBadge.title = downloaded ? (matched.local_path || '已通过浏览器下载') : '';
+    }
+    if (failedBadge) {
+        failedBadge.classList.toggle('hidden', !failed);
+        failedBadge.title = failed ? (matched.error_message || '上次下载失败，可以重新下载') : '';
+    }
+    if (errorText) {
+        const message = failed ? truncate(matched.error_message || '上次下载失败，可以重新下载。', 96) : '';
+        errorText.textContent = message;
+        errorText.classList.toggle('hidden', !message);
+    }
+    if (button && !button.disabled) {
+        if (failed) {
+            button.className = 'download-file-btn rounded-md bg-amber-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-700';
+            button.innerHTML = '<i class="fas fa-rotate-right mr-1"></i>重新下载';
+        } else {
+            button.className = 'download-file-btn rounded-md bg-blue-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-blue-700';
+            button.innerHTML = '<i class="fas fa-download mr-1"></i>下载';
+        }
+    }
 }
 
 function matchAttachmentStatus(records, entry) {
@@ -1530,9 +2557,11 @@ async function downloadFile(button) {
         URL.revokeObjectURL(url);
         markEntryDownloaded(entry, filename);
     } catch (error) {
+        markEntryDownloadFailed(entry, filename, error.message);
         alert(`下载失败：${error.message}`);
     } finally {
         setLoading(button, false, originalHTML);
+        await refreshAttachmentStatusBadges();
     }
 }
 
@@ -1616,6 +2645,12 @@ function updateBatchDownloadButton() {
     const selectedEntries = getSelectedFileEntries();
     const selectedTopics = Array.from(state.fileMap.values()).filter(entry => state.selectedTopicKeys.has(entry.topicKey));
     const typeLabel = attachmentTypeText(currentAttachmentType());
+    if (hasCurrentTopicAttachments()) {
+        els.attachmentViewFilterControl.classList.remove('hidden');
+    } else {
+        els.attachmentViewFilterControl.classList.add('hidden');
+    }
+
     if (state.fileMap.size > 0) {
         els.batchDownloadBtn.classList.remove('hidden');
         els.selectAllTopicsBtn.classList.remove('hidden');
@@ -1631,6 +2666,10 @@ function updateBatchDownloadButton() {
         els.selectAllTopicsBtn.classList.add('hidden');
         els.attachmentTypeControl.classList.add('hidden');
     }
+}
+
+function hasCurrentTopicAttachments() {
+    return state.currentTopics.some(topic => topicFiles(topic).length > 0);
 }
 
 function getSelectableTopicKeys() {
@@ -1783,6 +2822,31 @@ function markEntryDownloaded(entry, filename) {
         name: filename,
         download_status: 'downloaded',
         local_path: `browser-download:${filename}`,
+    };
+    if (existing) {
+        Object.assign(existing, record);
+    } else {
+        records.push(record);
+        state.attachmentStatusCache.set(cacheKey, records);
+    }
+    refreshAttachmentStatusBadges();
+}
+
+function markEntryDownloadFailed(entry, filename, errorMessage) {
+    const tab = getActiveTabConfig();
+    if (!state.selectedGroup || !tab || !entry?.topicId) return;
+    const cacheKey = `${state.selectedGroup.group_id}:${tab.id}:${entry.topicId}`;
+    const records = state.attachmentStatusCache.get(cacheKey) || [];
+    const existing = matchAttachmentStatus(records, entry);
+    const record = {
+        ...(existing || {}),
+        topic_id: String(entry.topicId),
+        attachment_key: entry.attachmentKey,
+        file_id: entry.fileId,
+        name: filename,
+        download_status: 'failed',
+        local_path: '',
+        error_message: errorMessage || '下载失败',
     };
     if (existing) {
         Object.assign(existing, record);

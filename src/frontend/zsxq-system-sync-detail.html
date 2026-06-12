@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>系统同步批次明细 - Shioa</title>
+    <link href="css/zsxq-lab.css" rel="stylesheet">
+    <link href="css/zsxq-system-sync.css?v=20260611-batch-failure-reason" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-900 overflow-x-hidden">
+    <main class="zsxq-page-shell zsxq-detail-page max-w-[1280px] mx-auto px-4 sm:px-6 py-8">
+        <section class="zsxq-detail-hero">
+            <div>
+                <h1>系统同步批次明细</h1>
+                <p id="detail-subtitle">正在读取批次信息...</p>
+            </div>
+            <div class="zsxq-detail-actions">
+                <a class="zsxq-detail-button" href="zsxq-system-sync.html#system-sync-section">
+                    <i class="fas fa-arrow-left"></i>
+                    <span>返回系统同步</span>
+                </a>
+                <button id="detail-refresh-btn" class="zsxq-detail-button zsxq-detail-button--primary" type="button">
+                    <i class="fas fa-rotate"></i>
+                    <span>手动刷新</span>
+                </button>
+            </div>
+        </section>
+
+        <section class="zsxq-detail-shell">
+            <section class="zsxq-detail-panel">
+                <div class="zsxq-detail-panel__head">
+                    <div>
+                        <h2 class="zsxq-detail-panel__title">批次概览</h2>
+                        <p id="detail-meta" class="zsxq-detail-panel__subtitle">等待数据返回。</p>
+                    </div>
+                    <span id="detail-status" class="zsxq-batch-status" data-tone="muted">读取中</span>
+                </div>
+                <div id="detail-summary" class="zsxq-detail-summary-grid"></div>
+            </section>
+
+            <section id="detail-failure-panel" class="zsxq-detail-panel zsxq-detail-failure-panel" hidden>
+                <div class="zsxq-detail-panel__head">
+                    <div>
+                        <h2 class="zsxq-detail-panel__title">失败原因</h2>
+                        <p id="detail-failure-subtitle" class="zsxq-detail-panel__subtitle">这里展示本批次直接记录到数据库里的错误。</p>
+                    </div>
+                </div>
+                <div id="detail-failure-list" class="zsxq-detail-failure-list"></div>
+            </section>
+
+            <section class="zsxq-detail-panel">
+                <div class="zsxq-detail-panel__head">
+                    <div>
+                        <h2 class="zsxq-detail-panel__title">内容明细</h2>
+                        <p id="detail-topics-subtitle" class="zsxq-detail-panel__subtitle">展示本批次关联到的内容和附件状态。</p>
+                    </div>
+                </div>
+                <div id="detail-topics" class="zsxq-detail-message">正在加载明细...</div>
+            </section>
+        </section>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/config.js"></script>
+    <script src="js/shared-navigation.js"></script>
+    <script src="js/zsxq-system-sync-detail.js?v=20260611-batch-failure-reason"></script>
+</body>
+</html>

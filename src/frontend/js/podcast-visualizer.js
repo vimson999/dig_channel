@@ -94,6 +94,11 @@ class PodcastVisualizerTool {
         this.refreshTasksBtn.addEventListener('click', () => this.loadTasks(this.currentTaskPage));
         this.taskPrevPageBtn?.addEventListener('click', () => this.loadTasks(this.currentTaskPage - 1));
         this.taskNextPageBtn?.addEventListener('click', () => this.loadTasks(this.currentTaskPage + 1));
+        this.taskListBody?.addEventListener('click', (event) => {
+            const button = event.target.closest('[data-requeue-task-id]');
+            if (!button) return;
+            this.requeueTask(button.dataset.requeueTaskId);
+        });
         this.loadTasks();
 
         ['dragenter', 'dragover'].forEach((eventName) => {
@@ -525,6 +530,24 @@ class PodcastVisualizerTool {
         }
     }
 
+    async requeueTask(taskId) {
+        if (!taskId) return;
+        this.hideMessage();
+        try {
+            const response = await fetch(`${API_BASE_URL}/documents/podcast-visualizer/requeue/${taskId}`, {
+                method: 'POST',
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data.success) {
+                throw new Error(data.message || `重新入队失败，状态码 ${response.status}`);
+            }
+            this.showMessage('播客任务已重新投递，请确认 podcast Celery 已启动', 'success');
+            await this.loadTasks(this.currentTaskPage);
+        } catch (error) {
+            this.showMessage(error.message || '重新投递失败', 'error');
+        }
+    }
+
     renderTasks(tasks, pagination = null) {
         if (!tasks.length) {
             this.taskListBody.innerHTML = '<tr><td colspan="5" class="px-4 py-8 text-center text-slate-400">暂无任务</td></tr>';
@@ -535,13 +558,25 @@ class PodcastVisualizerTool {
         this.taskListBody.innerHTML = tasks.map((task) => {
             const podcast = task.params?.podcast_visualizer || {};
             const result = task.result || {};
-            const downloadUrl = result.download_url ? `${window.location.origin}${result.download_url}` : '';
+            const downloadUrl = result.download_url
+                ? this.resolveApiDownloadUrl(result.download_url)
+                : '';
             const currentRenderer = this.isCurrentRenderer(task);
+            const isCompleted = task.status === 'completed';
+            const canRequeue = !isCompleted;
+            const enqueueHint = !task.celery_task_id && canRequeue
+                ? '<div class="mt-1 text-[11px] font-bold text-red-500">未入队</div>'
+                : '';
             const statusClass = task.status === 'completed'
                 ? 'text-emerald-600 bg-emerald-50'
                 : task.status === 'failed'
                     ? 'text-red-600 bg-red-50'
                     : 'text-amber-700 bg-amber-50';
+            const actionHtml = downloadUrl && isCompleted && currentRenderer
+                ? `<a class="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-700" href="${downloadUrl}" download>下载</a>`
+                : downloadUrl && isCompleted
+                    ? '<span class="rounded-lg bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-700">旧版本</span>'
+                    : `<button type="button" data-requeue-task-id="${this.escapeHtml(task.id)}" class="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-blue-700">重新投递</button>`;
             return `
                 <tr>
                     <td class="px-4 py-3">
@@ -550,6 +585,7 @@ class PodcastVisualizerTool {
                     </td>
                     <td class="px-4 py-3">
                         <span class="rounded-full px-2 py-1 text-xs font-bold ${statusClass}">${this.escapeHtml(task.status)}</span>
+                        ${enqueueHint}
                     </td>
                     <td class="px-4 py-3">
                         <div class="w-28 rounded-full bg-stone-100 h-2 overflow-hidden">
@@ -559,11 +595,7 @@ class PodcastVisualizerTool {
                     </td>
                     <td class="px-4 py-3 text-xs text-slate-500">${result.lyrics_count ?? '-'}</td>
                     <td class="px-4 py-3">
-                        ${downloadUrl && task.status === 'completed' && currentRenderer
-                            ? `<a class="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-700" href="${downloadUrl}" download>下载</a>`
-                            : downloadUrl && task.status === 'completed'
-                                ? '<span class="rounded-lg bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-700">旧版本</span>'
-                            : '<span class="text-xs text-slate-400">等待</span>'}
+                        ${actionHtml}
                     </td>
                 </tr>
             `;
@@ -610,6 +642,17 @@ class PodcastVisualizerTool {
     isCurrentRenderer(task) {
         return task?.result?.renderer_version === this.rendererVersion
             || task?.params?.podcast_visualizer?.renderer_version === this.rendererVersion && task.status !== 'completed';
+    }
+
+    resolveApiDownloadUrl(path) {
+        const value = String(path || '').trim();
+        if (!value) return '';
+        if (/^https?:\/\//i.test(value)) return value;
+        if (value.startsWith('/api/')) {
+            const apiRoot = String(API_BASE_URL || '').replace(/\/api\/v1\/?$/, '');
+            return `${apiRoot}${value}`;
+        }
+        return value.startsWith('/') ? `${window.location.origin}${value}` : value;
     }
 
     startSoftProgress() {

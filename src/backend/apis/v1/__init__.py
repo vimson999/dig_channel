@@ -87,6 +87,18 @@ def register_blueprints(app):
     from .zsxq import bp as zsxq_bp
     app.register_blueprint(zsxq_bp)
 
+    # 注册 Celery Worker 控制台 API
+    from .celery_monitor import bp as celery_monitor_bp
+    app.register_blueprint(celery_monitor_bp)
+
+    # 注册研报口播/导图视频工厂 API
+    from .report_video import bp as report_video_bp
+    app.register_blueprint(report_video_bp)
+
+    # 注册内容流水线 API
+    from .content_pipeline import bp as content_pipeline_bp
+    app.register_blueprint(content_pipeline_bp)
+
 __all__ = [
     'auth_bp',
     'channels_bp',

@@ -14,6 +14,15 @@ from .download_task import DownloadTask
 from .system_config import SystemConfig
 from .tts import TTSArticle, TTSSegment
 from .zsxq_sync import ZsxqSyncRun, ZsxqTopic, ZsxqAttachment, ZsxqSyncCursor
+from .report_video import (
+    ReportVideoTask,
+    ReportVideoReport,
+    ReportVideoAnalysis,
+    ReportVideoSegment,
+    ReportVideoMindmap,
+    ReportVideoAudio,
+    ReportVideoOutput,
+)
 
 __all__ = [
     'db', 
@@ -32,5 +41,12 @@ __all__ = [
     'ZsxqSyncRun',
     'ZsxqTopic',
     'ZsxqAttachment',
-    'ZsxqSyncCursor'
+    'ZsxqSyncCursor',
+    'ReportVideoTask',
+    'ReportVideoReport',
+    'ReportVideoAnalysis',
+    'ReportVideoSegment',
+    'ReportVideoMindmap',
+    'ReportVideoAudio',
+    'ReportVideoOutput'
 ]

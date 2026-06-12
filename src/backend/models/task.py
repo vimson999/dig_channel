@@ -47,6 +47,8 @@ class PublicationTask(db.Model):
                         parts.append(sub_title.strip())
                     
                     title = " | ".join(parts) if parts else "未命名任务"
+                if title == "未命名任务" and self.params.get('feature') == 'content_pdf_clean':
+                    title = self.params.get('content_pipeline', {}).get('title') or "PDF 清洗任务"
         
         return {
             'id': self.id,

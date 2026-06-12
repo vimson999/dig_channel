@@ -1,0 +1,2 @@
+"""Content pipeline service adapters."""
+

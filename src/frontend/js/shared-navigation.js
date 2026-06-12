@@ -30,6 +30,8 @@ class SharedNavigation {
             return 'trending';
         } else if (filename === 'zsxq-lab.html') {
             return 'zsxq-lab';
+        } else if (filename === 'zsxq-auto-publish.html') {
+            return 'zsxq-system-sync';
         } else if (filename === 'document-converter.html') {
             return 'document-converter';
         } else if (filename === 'word-long-image.html') {
@@ -40,6 +42,10 @@ class SharedNavigation {
             return 'tts';
         } else if (filename === 'mhtml-pdf.html') {
             return 'mhtml-pdf';
+        } else if (filename === 'pdf-tools.html') {
+            return 'pdf-tools';
+        } else if (filename === 'report-video-factory.html') {
+            return 'report-video-factory';
         } else if (filename === 'student-id-generator.html') {
             return 'student-id-generator';
         } else if (filename === 'indie-navigator.html') {
@@ -58,6 +64,8 @@ class SharedNavigation {
             return 'finance-cover-generator';
         } else if (filename === 'closed-door-card-cover-generator.html') {
             return 'closed-door-card-cover-generator';
+        } else if (filename === 'zsxq-system-sync.html') {
+            return 'zsxq-system-sync';
         } else if (filename === 'thumbnail-workbench.html') {
             return 'thumbnail-workbench';
         } else if (filename === 'thumbnail-generator-classic.html') {
@@ -86,11 +94,14 @@ class SharedNavigation {
             'trending-radar': '趋势雷达监控',
             'trending': '爆款视频搜索',
             'zsxq-lab': '知识星球实验台',
+            'zsxq-auto-publish': '知识星球任务策略',
             'document-converter': '文档转换工具',
             'word-long-image': 'Word 转长图',
             'pdf-scroll-video': 'PDF 滚动视频',
             'tts': '豆包语音 V3',
             'mhtml-pdf': 'MHTML转PDF工具',
+            'pdf-tools': 'PDF 工具平台',
+            'report-video-factory': '研报导图视频工厂',
             'watermark': 'PDF智能去水印',
             'student-id-generator': '学生证生成器',
             'indie-navigator': '商机发现平台',
@@ -101,6 +112,7 @@ class SharedNavigation {
             'thumbnail-generator': '研报封面生成器',
             'finance-cover-generator': '金融类视频封面生成器',
             'closed-door-card-cover-generator': '内资闭门会封面生成器',
+            'zsxq-system-sync': '知识星球任务策略',
             'thumbnail-generator-classic': '经典研报封面生成器',
             'video-auto-generator': 'AI 视频自动生成',
             'podcast-visualizer': '播客视觉化',
@@ -292,6 +304,12 @@ class SharedNavigation {
                         icon: 'fas fa-circle-nodes',
                         href: 'zsxq-lab.html'
                     },
+                    {
+                        id: 'zsxq-system-sync',
+                        name: '知识星球任务策略',
+                        icon: 'fas fa-clock-rotate-left',
+                        href: 'zsxq-system-sync.html'
+                    },
                 ]
             },
             {
@@ -358,6 +376,12 @@ class SharedNavigation {
                         href: 'podcast-visualizer.html'
                     },
                     {
+                        id: 'report-video-factory',
+                        name: '研报导图视频工厂',
+                        icon: 'fas fa-diagram-project',
+                        href: 'report-video-factory.html'
+                    },
+                    {
                         id: 'tts',
                         name: '语音合成',
                         icon: 'fas fa-microphone',
@@ -389,6 +413,18 @@ class SharedNavigation {
                 icon: 'fas fa-toolbox',
                 dropdown: true,
                 items: [
+                    {
+                        id: 'pdf-tools',
+                        name: 'PDF 工具平台',
+                        icon: 'fas fa-file-shield',
+                        href: 'pdf-tools.html'
+                    },
+                    {
+                        id: 'celery-monitor',
+                        name: 'Celery 控制台',
+                        icon: 'fas fa-gauge-high',
+                        href: 'celery-monitor.html'
+                    },
                     {
                         id: 'document-converter',
                         name: '文档转换',

@@ -6,6 +6,7 @@
 - `http://localhost:8888/podcast-visualizer.html`
 - `http://localhost:8888/tts.html`
 - `http://localhost:8888/pdf-scroll-video.html`
+- `http://localhost:8888/zsxq-auto-publish.html`
 
 默认后端地址：
 
@@ -564,6 +565,205 @@ curl -X POST http://127.0.0.1:5001/api/v1/documents/pdf-scroll-video \
 - 上传文件大小受后端 `PDF_VIDEO_MAX_FILE_SIZE` 限制。
 - 返回文件来自临时目录，响应关闭后临时目录会清理；Hermes 应立即保存响应体。
 
+## 5. 知识星球自动发帖
+
+页面：`zsxq-auto-publish.html`
+
+用途：配置 PDF / 音频附件自动发帖策略，支持预览下一批、手动试跑、启动独立调度器、查看运行记录与日志。
+
+### 5.1 读取当前策略
+
+```http
+GET /api/v1/zsxq/auto-publish/config
+```
+
+返回示例：
+
+```json
+{
+  "success": true,
+  "data": {
+    "config": {
+      "exists": true,
+      "name": "知识星球自动发帖策略",
+      "group_id": "123456789",
+      "group_name": "突突突快跑",
+      "enabled": true,
+      "interval_minutes": 30,
+      "max_rounds": 0,
+      "continuous": true,
+      "cookie_env_name": "ZSXQ_AUTO_PUBLISH_COOKIE",
+      "cookie_env_configured": false,
+      "rules": [
+        {
+          "id": "pdf",
+          "file_type": "pdf",
+          "source_dir": "/Users/you/Downloads/伯恩斯坦",
+          "batch_size": 4
+        }
+      ]
+    }
+  }
+}
+```
+
+### 5.2 保存自动发帖策略
+
+```http
+POST /api/v1/zsxq/auto-publish/config
+Content-Type: application/json
+```
+
+请求体示例：
+
+```json
+{
+  "cookie": "zsxq_access_token=...",
+  "name": "外资 PDF + 调研音频",
+  "group_id": "123456789",
+  "group_name": "突突突快跑",
+  "enabled": true,
+  "interval_minutes": 30,
+  "max_rounds": 0,
+  "rules": [
+    {
+      "id": "pdf",
+      "label": "PDF 批次",
+      "enabled": true,
+      "file_type": "pdf",
+      "source_dir": "/Users/you/Downloads/伯恩斯坦",
+      "recursive": true,
+      "extensions": ".pdf",
+      "batch_size": 4,
+      "upload_retry_count": 2,
+      "max_run_attempts": 3,
+      "max_file_size_mb": 100,
+      "body_prefix": "本批 PDF 如下：",
+      "include_filenames": true,
+      "hashtag_id": "123",
+      "hashtag_title": "测试标签"
+    },
+    {
+      "id": "audio",
+      "label": "音频批次",
+      "enabled": true,
+      "file_type": "audio",
+      "source_dir": "/Users/you/Downloads/MP3",
+      "recursive": true,
+      "extensions": ".mp3,.m4a,.wav",
+      "batch_size": 4,
+      "upload_retry_count": 2,
+      "max_run_attempts": 3,
+      "max_file_size_mb": 50,
+      "body_prefix": "本批音频如下：",
+      "include_filenames": true,
+      "hashtag_id": "456",
+      "hashtag_title": "调研"
+    }
+  ]
+}
+```
+
+说明：
+
+- `cookie` 只用于保存时校验当前 `group_id` 是否真的属于该账号可访问星球。
+- 持续调度真正执行时默认读取后端环境变量 `ZSXQ_AUTO_PUBLISH_COOKIE`。
+- `batch_size` 当前限制为 1 到 8，方便匹配知识星球附件发帖节奏。
+
+### 5.3 预览下一批候选文件
+
+```http
+POST /api/v1/zsxq/auto-publish/preview
+Content-Type: application/json
+```
+
+请求体与保存策略基本一致，返回会告诉 Hermes 当前规则下：
+
+- `eligible_count`: 当前可发布文件数量
+- `skipped_count`: 被跳过数量
+- `skipped_reasons`: 跳过原因统计
+- `next_batch`: 下一批即将发出的文件
+
+### 5.4 手动触发一次后台试跑
+
+```http
+POST /api/v1/zsxq/auto-publish/scheduler/run-once
+Content-Type: application/json
+```
+
+请求体：
+
+```json
+{
+  "cookie": "zsxq_access_token=..."
+}
+```
+
+说明：
+
+- 这里的 `cookie` 是可选的。
+- 页面试跑优先使用当前传入的 Cookie，不依赖环境变量。
+- 接口返回的是“试跑子进程已排队”，不是同步执行结果；真正结果要再查运行历史。
+
+### 5.5 查询最近运行历史
+
+```http
+GET /api/v1/zsxq/auto-publish/runs?limit=20
+```
+
+返回中每条 run 会带：
+
+- `status`: `running / success / partial / failed / skipped`
+- `message`: 本轮摘要
+- `rules`: 每条规则本轮结果
+- `topic_id`: 如果发布成功，会记录知识星球话题 ID
+
+### 5.6 查询调度器状态
+
+```http
+GET /api/v1/zsxq/auto-publish/scheduler/status
+```
+
+用于确认：
+
+- 独立调度器是否运行中
+- 当前 PID
+- 日志路径
+- 当前策略快照
+- Cookie 环境变量是否已配置
+
+### 5.7 启动 / 停止持续调度
+
+```http
+POST /api/v1/zsxq/auto-publish/scheduler/start
+POST /api/v1/zsxq/auto-publish/scheduler/stop
+```
+
+说明：
+
+- `start` 依赖已保存策略，且后端环境变量 `ZSXQ_AUTO_PUBLISH_COOKIE` 已配置。
+- `stop` 会优雅终止独立调度进程。
+
+### 5.8 读取最近日志
+
+```http
+GET /api/v1/zsxq/auto-publish/scheduler/logs?lines=160
+```
+
+返回：
+
+```json
+{
+  "success": true,
+  "data": {
+    "lines": ["..."],
+    "raw": "..."
+  }
+}
+```
+
+适合 Hermes 直接展示最近日志尾部。
+
 ## Hermes 推荐调用顺序
 
 ### TTS
@@ -595,6 +795,16 @@ GET  /api/v1/resources/view?path={video_path}
 
 ```text
 POST /api/v1/documents/pdf-scroll-video -> 直接保存 MP4 响应体
+```
+
+### 知识星球自动发帖
+
+```text
+POST /api/v1/zsxq/auto-publish/config
+POST /api/v1/zsxq/auto-publish/preview
+POST /api/v1/zsxq/auto-publish/scheduler/run-once
+GET  /api/v1/zsxq/auto-publish/runs
+GET  /api/v1/zsxq/auto-publish/scheduler/status
 ```
 
 ## 本地服务依赖
