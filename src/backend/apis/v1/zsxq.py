@@ -27,6 +27,8 @@ from services.zsxq_system_sync_scheduler import (
     trigger_once as trigger_once_system_sync_scheduler,
 )
 from services.zsxq_sync_service import zsxq_sync_service
+from services.zsxq_workflow_service import zsxq_workflow_service
+from services.workflow_notification_service import workflow_notification_service
 from utils.api_utils import handle_api_error
 
 
@@ -291,6 +293,9 @@ def sync():
             "mode": mode,
             "auto_pdf_clean": data.get("auto_pdf_clean", False),
             "pdf_cleaner": data.get("pdf_cleaner") or {},
+            "auto_audio_clean": data.get("auto_audio_clean", False),
+            "audio_cleaner": data.get("audio_cleaner") or {},
+            "auto_publish_after_clean": data.get("auto_publish_after_clean") or {},
         }
         try:
             async_result = run_zsxq_sync.apply_async(
@@ -418,6 +423,45 @@ def system_sync_test_batch_detail():
         return jsonify({"success": True, "data": {"batch": result}})
     except Exception as e:
         return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/workflows", methods=["POST"])
+def zsxq_workflows():
+    """List recent ZSXQ workflow runs."""
+    try:
+        data = request.get_json(silent=True) or {}
+        result = zsxq_workflow_service.list_runs(
+            group_id=data.get("group_id"),
+            limit=data.get("limit", 20),
+        )
+        return jsonify({"success": True, "data": {"workflows": result}})
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/workflows/<workflow_run_id>", methods=["GET"])
+def zsxq_workflow_detail(workflow_run_id):
+    """Read one ZSXQ workflow run."""
+    try:
+        result = zsxq_workflow_service.get_run(workflow_run_id)
+        if not result:
+            return handle_api_error(404, "未找到工作流记录")
+        return jsonify({"success": True, "data": {"workflow": result}})
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/workflow-notifications/test", methods=["POST"])
+def zsxq_workflow_notification_test():
+    """Send one test workflow notification through the configured provider."""
+    try:
+        result = workflow_notification_service.send_test_email()
+        if not result.get("sent"):
+            return handle_api_error(400, f"工作流通知未发送：{result}")
+        return jsonify({"success": True, "data": {"notification": result}})
+    except Exception as e:
+        logger.exception("[ZSXQ_WORKFLOW_NOTIFY] test email failed")
+        return handle_api_error(502, f"工作流测试邮件发送失败：{e}")
 
 
 @bp.route("/system-sync-scheduler/status", methods=["GET"])

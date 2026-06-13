@@ -6,6 +6,32 @@
     <title>Celery 控制台 - Shioa</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .celery-service-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(292px, 1fr));
+            gap: 16px;
+            align-items: stretch;
+        }
+
+        .celery-service-card {
+            min-width: 0;
+        }
+
+        .celery-service-desc {
+            min-height: 34px;
+            display: -webkit-box;
+            overflow: hidden;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 2;
+        }
+
+        @media (max-width: 720px) {
+            .celery-service-grid {
+                grid-template-columns: minmax(0, 1fr);
+            }
+        }
+    </style>
 </head>
 <body class="min-h-screen bg-slate-100 text-slate-900">
     <main class="mx-auto max-w-[1440px] px-6 py-6">
@@ -24,7 +50,9 @@
 
         <div id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm"></div>
 
-        <section id="service-grid" class="grid grid-cols-1 gap-4 xl:grid-cols-5"></section>
+        <section id="watchdog-card" class="mb-5"></section>
+
+        <section id="service-grid" class="space-y-5"></section>
 
         <section class="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
             <div class="rounded-lg border border-slate-200 bg-white p-4">
@@ -52,6 +80,6 @@
 
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260602-celery"></script>
-    <script src="js/celery-monitor.js?v=20260611-consumer-warning"></script>
+    <script src="js/celery-monitor.js?v=20260613-watchdog-timeout"></script>
 </body>
 </html>

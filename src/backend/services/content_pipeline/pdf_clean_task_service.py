@@ -15,12 +15,14 @@ def submit_pdf_clean_task(
     files,
     source_root=None,
     cleaner=None,
+    auto_publish=None,
     user_id=None,
     trigger="manual",
     metadata=None,
 ):
     """Create and enqueue a PDF clean task through the shared content pipeline."""
     cleaner = cleaner if isinstance(cleaner, dict) else {}
+    auto_publish = auto_publish if isinstance(auto_publish, dict) else {}
     metadata = metadata if isinstance(metadata, dict) else {}
     normalized_files = _normalize_pdf_files(files)
     if not normalized_files:
@@ -44,6 +46,7 @@ def submit_pdf_clean_task(
                 "title": (title or "PDF 清洗任务").strip() or "PDF 清洗任务",
                 "trigger": trigger,
                 "metadata": metadata,
+                "auto_publish": auto_publish,
                 "pdf_clean": {
                     "files": normalized_files,
                     "source_root": normalized_source_root,
@@ -52,6 +55,7 @@ def submit_pdf_clean_task(
                         "do_ocr": bool(cleaner.get("do_ocr", False)),
                         "overwrite": bool(cleaner.get("overwrite", False)),
                         "prefix": cleaner.get("prefix") or "",
+                        "engine": cleaner.get("engine") or "external",
                         "base_url": cleaner.get("base_url") or None,
                         "cleaner_project_dir": cleaner.get("cleaner_project_dir") or None,
                         "cleaner_batch_root": cleaner.get("cleaner_batch_root") or None,

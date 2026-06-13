@@ -14,6 +14,7 @@ from .download_task import DownloadTask
 from .system_config import SystemConfig
 from .tts import TTSArticle, TTSSegment
 from .zsxq_sync import ZsxqSyncRun, ZsxqTopic, ZsxqAttachment, ZsxqSyncCursor
+from .zsxq_workflow import ZsxqWorkflowRun
 from .report_video import (
     ReportVideoTask,
     ReportVideoReport,
@@ -42,6 +43,7 @@ __all__ = [
     'ZsxqTopic',
     'ZsxqAttachment',
     'ZsxqSyncCursor',
+    'ZsxqWorkflowRun',
     'ReportVideoTask',
     'ReportVideoReport',
     'ReportVideoAnalysis',

@@ -7,6 +7,9 @@ const SYSTEM_SYNC_INTERVAL_MINUTES = 25;
 const SYSTEM_SYNC_MAX_ROUNDS = 0;
 const SYSTEM_SYNC_COUNT = 12;
 const SYSTEM_SYNC_MAX_DOWNLOAD_FILES = 9;
+const SYSTEM_SYNC_AUTO_PDF_CLEAN = true;
+const SYSTEM_SYNC_AUTO_AUDIO_CLEAN = true;
+const SYSTEM_SYNC_AUTO_PUBLISH_AFTER_CLEAN = true;
 const SYSTEM_SYNC_STATUS_POLL_MS = 15000;
 const SYSTEM_SYNC_LOG_LINES = 160;
 const AUTO_PUBLISH_LOG_LINES = 160;
@@ -84,6 +87,9 @@ const els = {
     configMaxRoundsInput: document.getElementById('system-sync-max-rounds-input'),
     configCountInput: document.getElementById('system-sync-count-input'),
     configMaxDownloadFilesInput: document.getElementById('system-sync-max-download-files-input'),
+    configAutoPdfCleanCheckbox: document.getElementById('system-sync-auto-pdf-clean-checkbox'),
+    configAutoAudioCleanCheckbox: document.getElementById('system-sync-auto-audio-clean-checkbox'),
+    configAutoPublishAfterCleanCheckbox: document.getElementById('system-sync-auto-publish-after-clean-checkbox'),
     saveConfigBtn: document.getElementById('system-sync-test-config-btn'),
     pageMessage: document.getElementById('page-message'),
     schedulerStatusBadge: document.getElementById('system-scheduler-status-badge'),
@@ -197,6 +203,15 @@ document.addEventListener('DOMContentLoaded', () => {
     if (els.configMaxDownloadFilesInput) {
         els.configMaxDownloadFilesInput.value = String(SYSTEM_SYNC_MAX_DOWNLOAD_FILES);
     }
+    if (els.configAutoPdfCleanCheckbox) {
+        els.configAutoPdfCleanCheckbox.checked = SYSTEM_SYNC_AUTO_PDF_CLEAN;
+    }
+    if (els.configAutoAudioCleanCheckbox) {
+        els.configAutoAudioCleanCheckbox.checked = SYSTEM_SYNC_AUTO_AUDIO_CLEAN;
+    }
+    if (els.configAutoPublishAfterCleanCheckbox) {
+        els.configAutoPublishAfterCleanCheckbox.checked = SYSTEM_SYNC_AUTO_PUBLISH_AFTER_CLEAN;
+    }
     if (els.autoPublishStrategyNameInput) {
         els.autoPublishStrategyNameInput.value = '知识星球自动发帖策略';
     }
@@ -209,12 +224,14 @@ document.addEventListener('DOMContentLoaded', () => {
     resetAutoPublishCookieAccountForm();
 
     setActiveMode(resolveModeFromHash(window.location.hash), { updateHash: false });
-    void loadSystemSyncSchedulerStatus({ render: false });
-    void loadSystemSyncBatches({ render: false });
-    void loadAutoPublishConfig({ render: false });
-    void loadAutoPublishSchedulerStatus({ render: false });
-    void loadAutoPublishRuns({ render: false });
-    void loadAutoPublishLogs({ render: false });
+    const initialLoadTasks = [
+        loadSystemSyncSchedulerStatus({ render: false }),
+        loadSystemSyncBatches({ render: false }),
+        loadAutoPublishConfig({ render: false }),
+        loadAutoPublishSchedulerStatus({ render: false }),
+        loadAutoPublishRuns({ render: false }),
+        loadAutoPublishLogs({ render: false }),
+    ];
     renderSyncSchedulerPanel();
     renderBatchesPanel();
     renderAutoPublishSchedulerPanel();
@@ -222,6 +239,15 @@ document.addEventListener('DOMContentLoaded', () => {
     renderAutoPublishRunsPanel();
     renderAutoPublishLogsPanel();
     renderWorkspaceSnapshot();
+    void Promise.allSettled(initialLoadTasks).then(() => {
+        renderSyncSchedulerPanel();
+        renderBatchesPanel();
+        renderAutoPublishCurrentGroup();
+        renderAutoPublishSchedulerPanel();
+        renderAutoPublishRunsPanel();
+        renderAutoPublishLogsPanel();
+        renderWorkspaceSnapshot();
+    });
     startSchedulerPolling();
 });
 
@@ -1164,6 +1190,11 @@ async function saveSystemSyncConfig() {
             stop_on_existing: true,
             download_attachments: true,
             max_download_files: Number(maxDownloadFilesRaw),
+            auto_pdf_clean: Boolean(els.configAutoPdfCleanCheckbox?.checked),
+            auto_audio_clean: Boolean(els.configAutoAudioCleanCheckbox?.checked),
+            auto_publish_after_clean: {
+                enabled: Boolean(els.configAutoPublishAfterCleanCheckbox?.checked),
+            },
             interval_minutes: Number(intervalMinutes),
             max_rounds: Number(maxRoundsRaw),
             jobs: jobs.map(job => ({
@@ -1189,7 +1220,12 @@ async function saveSystemSyncConfig() {
                 `已保存但回读间隔为 ${serverInterval} 分钟（你输入的是 ${intervalMinutes}），请确认是否有外部进程覆盖配置。`,
             );
         } else {
-            renderMessage('success', `配置已保存。间隔 ${serverInterval || intervalMinutes} 分钟，每目标 Tab ${serverCount || countRaw} 条，每条最多 ${serverMaxDownloadFiles || maxDownloadFilesRaw} 个附件，任务轮次：${formatConfigMaxRounds(config.max_rounds)}。`);
+            const cleanParts = [
+                config.auto_pdf_clean !== false ? 'PDF清洗' : null,
+                config.auto_audio_clean !== false ? '音频清洗' : null,
+            ].filter(Boolean);
+            const workflowText = `同步${cleanParts.length ? ` → ${cleanParts.join('+')}` : ''}${cleanParts.length && config.auto_publish_after_clean?.enabled ? ' → 发布' : ''}`;
+            renderMessage('success', `配置已保存。${workflowText}；间隔 ${serverInterval || intervalMinutes} 分钟，每目标 Tab ${serverCount || countRaw} 条，每条最多 ${serverMaxDownloadFiles || maxDownloadFilesRaw} 个附件，任务轮次：${formatConfigMaxRounds(config.max_rounds)}。`);
         }
         if (Number.isFinite(serverCount)) {
             els.configCountInput.value = String(serverCount);
@@ -1407,6 +1443,15 @@ function renderSyncSchedulerPanel() {
     const interval = config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES;
     const count = config.count || SYSTEM_SYNC_COUNT;
     const maxFiles = config.max_download_files || SYSTEM_SYNC_MAX_DOWNLOAD_FILES;
+    const autoPdfClean = config.auto_pdf_clean !== false;
+    const autoAudioClean = config.auto_audio_clean !== false;
+    const autoPublishAfterClean = config.auto_publish_after_clean?.enabled !== false;
+    const cleanParts = [
+        autoPdfClean ? 'PDF' : null,
+        autoAudioClean ? '音频' : null,
+    ].filter(Boolean);
+    const cleanText = cleanParts.length ? `清洗 ${cleanParts.join(' + ')}` : '不清洗';
+    const publishEnabled = cleanParts.length > 0 && autoPublishAfterClean;
     const lastTrigger = formatZsxqTime(scheduler.last_trigger_at || config.last_trigger_at);
     const nextRun = formatZsxqTime(scheduler.next_run);
     const rounds = scheduler.continuous
@@ -1417,6 +1462,7 @@ function renderSyncSchedulerPanel() {
         <div class="space-y-1">
             <div>进程状态：${escapeHtml(running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
             <div>计划配置：${escapeHtml(String(interval))} 分钟一次 · 每目标 Tab ${escapeHtml(String(count))} 条 · 每条最多 ${escapeHtml(String(maxFiles))} 个附件</div>
+            <div>工作流：同步 → ${escapeHtml(cleanText)}${escapeHtml(publishEnabled ? ' → 发布' : '')}</div>
             <div>轮次：${escapeHtml(rounds)}</div>
             <div>Cookie：${escapeHtml(cookieMode)}</div>
             <div>上次触发：${escapeHtml(lastTrigger)} · 下一次：${escapeHtml(nextRun)}</div>
@@ -1469,7 +1515,15 @@ function renderSyncOverviewCard() {
     els.configBadge.textContent = scheduler.cookie_source === 'page' ? '页面 Cookie' : (config.cookie_env_configured ? '已配置' : '缺少 Cookie');
     els.configBadge.className = `rounded-full px-2 py-1 text-[10px] font-black ${hasRuntimeCookie ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`;
     els.configSummary.textContent = `${config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES} 分钟一次 · 目标星球：${config.group_name || config.group_id || '-'} · ${rounds}`;
-    els.configDetail.textContent = `每条附件上限：${config.max_download_files || SYSTEM_SYNC_MAX_DOWNLOAD_FILES} · 每目标 Tab ${config.count || SYSTEM_SYNC_COUNT} 条 · 任务来源：${cookieSourceText}。`;
+    const autoPdfClean = config.auto_pdf_clean !== false;
+    const autoAudioClean = config.auto_audio_clean !== false;
+    const cleanParts = [
+        autoPdfClean ? 'PDF 清洗' : null,
+        autoAudioClean ? '音频清洗' : null,
+    ].filter(Boolean);
+    const cleanText = cleanParts.length ? cleanParts.join(' + ') : '不清洗';
+    const autoPublishText = cleanParts.length && config.auto_publish_after_clean?.enabled !== false ? '清洗后自动发帖开启' : '不自动发帖';
+    els.configDetail.textContent = `每条附件上限：${config.max_download_files || SYSTEM_SYNC_MAX_DOWNLOAD_FILES} · 每目标 Tab ${config.count || SYSTEM_SYNC_COUNT} 条 · ${cleanText} · ${autoPublishText} · 任务来源：${cookieSourceText}。`;
     renderWorkspaceSnapshot();
 }
 
@@ -1511,6 +1565,18 @@ function hydrateSystemSyncRuntimeConfigInputs(config = {}) {
             0,
         );
         els.configMaxRoundsInput.value = String(maxRounds);
+    }
+
+    if (els.configAutoPdfCleanCheckbox) {
+        els.configAutoPdfCleanCheckbox.checked = config.auto_pdf_clean !== false;
+    }
+
+    if (els.configAutoAudioCleanCheckbox) {
+        els.configAutoAudioCleanCheckbox.checked = config.auto_audio_clean !== false;
+    }
+
+    if (els.configAutoPublishAfterCleanCheckbox) {
+        els.configAutoPublishAfterCleanCheckbox.checked = config.auto_publish_after_clean?.enabled !== false;
     }
 }
 
@@ -2207,7 +2273,7 @@ function collectAutoPublishPayload() {
                 batch_size: parseBoundedInt(els.autoPublishPdfBatchSizeInput.value, 4, 1, 8),
                 upload_retry_count: parseBoundedInt(els.autoPublishPdfUploadRetryInput.value, 2, 0, 5),
                 max_run_attempts: parseBoundedInt(els.autoPublishPdfMaxAttemptsInput.value, 3, 1, 10),
-                max_file_size_mb: parseBoundedInt(els.autoPublishPdfMaxSizeInput.value, 100, 1, 1024),
+                max_file_size_mb: parseBoundedInt(els.autoPublishPdfMaxSizeInput.value, 50, 1, 50),
                 body_prefix: (els.autoPublishPdfBodyPrefixInput.value || '').trim(),
                 include_filenames: Boolean(els.autoPublishPdfIncludeFilenamesCheckbox.checked),
                 hashtag_id: (els.autoPublishPdfHashtagIdInput.value || '').trim(),
@@ -2224,7 +2290,7 @@ function collectAutoPublishPayload() {
                 batch_size: parseBoundedInt(els.autoPublishAudioBatchSizeInput.value, 4, 1, 8),
                 upload_retry_count: parseBoundedInt(els.autoPublishAudioUploadRetryInput.value, 2, 0, 5),
                 max_run_attempts: parseBoundedInt(els.autoPublishAudioMaxAttemptsInput.value, 3, 1, 10),
-                max_file_size_mb: parseBoundedInt(els.autoPublishAudioMaxSizeInput.value, 50, 1, 1024),
+                max_file_size_mb: parseBoundedInt(els.autoPublishAudioMaxSizeInput.value, 50, 1, 50),
                 body_prefix: (els.autoPublishAudioBodyPrefixInput.value || '').trim(),
                 include_filenames: Boolean(els.autoPublishAudioIncludeFilenamesCheckbox.checked),
                 hashtag_id: (els.autoPublishAudioHashtagIdInput.value || '').trim(),
@@ -2275,7 +2341,7 @@ function applyAutoPublishConfigToForm(config = {}) {
         els.autoPublishPdfMaxAttemptsInput.value = String(pdf.max_run_attempts || 3);
         els.autoPublishPdfHashtagIdInput.value = pdf.hashtag_id || '';
         els.autoPublishPdfHashtagTitleInput.value = pdf.hashtag_title || '';
-        els.autoPublishPdfMaxSizeInput.value = String(pdf.max_file_size_mb || 100);
+        els.autoPublishPdfMaxSizeInput.value = String(Math.min(Number(pdf.max_file_size_mb || 50), 50));
         els.autoPublishPdfBodyPrefixInput.value = pdf.body_prefix || '';
         els.autoPublishPdfIncludeFilenamesCheckbox.checked = Boolean(pdf.include_filenames ?? true);
         els.autoPublishPdfRecursiveCheckbox.checked = Boolean(pdf.recursive ?? true);
@@ -2290,7 +2356,7 @@ function applyAutoPublishConfigToForm(config = {}) {
         els.autoPublishAudioMaxAttemptsInput.value = String(audio.max_run_attempts || 3);
         els.autoPublishAudioHashtagIdInput.value = audio.hashtag_id || '';
         els.autoPublishAudioHashtagTitleInput.value = audio.hashtag_title || '';
-        els.autoPublishAudioMaxSizeInput.value = String(audio.max_file_size_mb || 50);
+        els.autoPublishAudioMaxSizeInput.value = String(Math.min(Number(audio.max_file_size_mb || 50), 50));
         els.autoPublishAudioBodyPrefixInput.value = audio.body_prefix || '';
         els.autoPublishAudioIncludeFilenamesCheckbox.checked = Boolean(audio.include_filenames ?? true);
         els.autoPublishAudioRecursiveCheckbox.checked = Boolean(audio.recursive ?? true);
@@ -2473,31 +2539,64 @@ function renderAutoPublishPreviewPanel() {
     }).join('');
 }
 
+function autoPublishRuleMetrics(rule = {}) {
+    const files = Array.isArray(rule.files) ? rule.files : [];
+    const publishFailed = rule.status === 'failed' && (
+        Boolean(rule.publish_error) || String(rule.message || '').includes('发布失败')
+    );
+    const uploadedFromFiles = publishFailed
+        ? 0
+        : files.filter((item) => ['uploaded', 'published'].includes(String(item?.status || ''))).length;
+    const failedFromFiles = files.filter((item) => String(item?.status || '') === 'failed').length;
+    const selected = Number(rule.selected_count ?? files.length ?? 0) || 0;
+    const uploaded = publishFailed ? 0 : (Number(rule.uploaded_count ?? uploadedFromFiles) || 0);
+    const failed = publishFailed ? selected : (Number(rule.failed_count ?? failedFromFiles) || 0);
+    return { selected, uploaded, failed };
+}
+
+function effectiveAutoPublishRunStatus(run = {}) {
+    const rules = Array.isArray(run.rules) ? run.rules : [];
+    const hasFailed = rules.some((rule) => rule?.status === 'failed');
+    const hasPartial = rules.some((rule) => rule?.status === 'partial');
+    if (hasFailed && rules.some((rule) => ['success', 'partial'].includes(rule?.status))) {
+        return 'partial';
+    }
+    if (hasPartial) {
+        return 'partial';
+    }
+    return run.status || '-';
+}
+
 function renderAutoPublishRunsPanel() {
     if (!state.autoPublishRuns.length) {
         els.autoPublishRunsPanel.innerHTML = '<div class="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-400">暂无运行记录</div>';
         return;
     }
     els.autoPublishRunsPanel.innerHTML = state.autoPublishRuns.map((run) => {
-        const badgeClass = run.status === 'success'
+        const runStatus = effectiveAutoPublishRunStatus(run);
+        const badgeClass = runStatus === 'success'
             ? 'auto-publish-badge-success'
-            : run.status === 'partial'
+            : runStatus === 'partial'
                 ? 'auto-publish-badge-warning'
-                : run.status === 'failed'
+                : runStatus === 'failed'
                     ? 'auto-publish-badge-danger'
                     : 'auto-publish-badge-muted';
-        const rules = (run.rules || []).map((rule) => `
-            <div class="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
-                <div class="flex items-center justify-between gap-2">
-                    <span class="font-bold text-slate-700">${escapeHtml(rule.label || rule.rule_id)}</span>
-                    <span>${escapeHtml(rule.status || '-')}</span>
+        const rules = (run.rules || []).map((rule) => {
+            const metrics = autoPublishRuleMetrics(rule);
+            return `
+                <div class="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+                    <div class="flex items-center justify-between gap-2">
+                        <span class="font-bold text-slate-700">${escapeHtml(rule.label || rule.rule_id)}</span>
+                        <span>${escapeHtml(rule.status || '-')}</span>
+                    </div>
+                    <div class="mt-1 text-slate-500">${escapeHtml(rule.message || '')}</div>
+                    <div class="mt-1 text-slate-400">选中 ${escapeHtml(String(metrics.selected))} · 已发布 ${escapeHtml(String(metrics.uploaded))} · 失败 ${escapeHtml(String(metrics.failed))}</div>
+                    ${rule.cookie_account_name ? `<div class="mt-1 text-slate-400">账号：${escapeHtml(rule.cookie_account_name)}</div>` : ''}
+                    ${(rule.cookie_attempts || []).length ? `<div class="mt-1 text-slate-400">切换：${escapeHtml((rule.cookie_attempts || []).map(item => `${item.index}.${item.cookie_account_name}:${item.status}`).join('；'))}</div>` : ''}
+                    ${rule.topic_id ? `<div class="mt-1 text-slate-400">topic_id=${escapeHtml(String(rule.topic_id))}</div>` : ''}
                 </div>
-                <div class="mt-1 text-slate-500">${escapeHtml(rule.message || '')}</div>
-                ${rule.cookie_account_name ? `<div class="mt-1 text-slate-400">账号：${escapeHtml(rule.cookie_account_name)}</div>` : ''}
-                ${(rule.cookie_attempts || []).length ? `<div class="mt-1 text-slate-400">切换：${escapeHtml((rule.cookie_attempts || []).map(item => `${item.index}.${item.cookie_account_name}:${item.status}`).join('；'))}</div>` : ''}
-                ${rule.topic_id ? `<div class="mt-1 text-slate-400">topic_id=${escapeHtml(String(rule.topic_id))}</div>` : ''}
-            </div>
-        `).join('');
+            `;
+        }).join('');
         return `
             <article class="auto-publish-history-item">
                 <div class="flex items-center justify-between gap-3">
@@ -2506,7 +2605,7 @@ function renderAutoPublishRunsPanel() {
                         <div class="text-xs text-slate-500 mt-1">${escapeHtml(run.group_name || run.group_id || '-')} · ${escapeHtml(formatZsxqTime(run.started_at || ''))}</div>
                         <div class="text-[11px] text-slate-400 mt-1">来源：${escapeHtml(run.cookie_source || '-')} · 账号数：${escapeHtml(String(run.cookie_account_count || 0))}</div>
                     </div>
-                    <span class="auto-publish-badge ${badgeClass}">${escapeHtml(run.status || '-')}</span>
+                    <span class="auto-publish-badge ${badgeClass}">${escapeHtml(runStatus)}</span>
                 </div>
                 <div class="text-sm text-slate-600 mt-2">${escapeHtml(run.message || '')}</div>
                 <div class="mt-3 space-y-2">${rules || '<div class="text-xs text-slate-400">暂无规则结果</div>'}</div>

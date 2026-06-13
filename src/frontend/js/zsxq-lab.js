@@ -194,12 +194,12 @@ function bindEvents() {
         renderTopics(state.currentTopics, activeTabState());
         renderSyncIntro();
     });
-    els.copyTopicsJsonBtn.addEventListener('click', copyLastTopicsJson);
-    els.syncCurrentTabBtn.addEventListener('click', () => syncTabs('current'));
-    els.syncAllTabsBtn.addEventListener('click', () => syncTabs('all'));
-    els.autoSyncTestBtn.addEventListener('click', () => toggleAutoSyncTest('full'));
-    els.autoSyncMemoTestBtn.addEventListener('click', () => toggleAutoSyncTest('memo'));
-    els.systemSyncTestConfigBtn.addEventListener('click', saveSystemSyncTestConfig);
+    els.copyTopicsJsonBtn?.addEventListener('click', copyLastTopicsJson);
+    els.syncCurrentTabBtn?.addEventListener('click', () => syncTabs('current'));
+    els.syncAllTabsBtn?.addEventListener('click', () => syncTabs('all'));
+    els.autoSyncTestBtn?.addEventListener('click', () => toggleAutoSyncTest('full'));
+    els.autoSyncMemoTestBtn?.addEventListener('click', () => toggleAutoSyncTest('memo'));
+    els.systemSyncTestConfigBtn?.addEventListener('click', saveSystemSyncTestConfig);
     els.systemSyncSchedulerRunOnceBtn.addEventListener('click', runSystemSyncSchedulerOnce);
     els.systemSyncSchedulerStartBtn.addEventListener('click', startSystemSyncScheduler);
     els.systemSyncSchedulerStopBtn.addEventListener('click', stopSystemSyncScheduler);
@@ -423,12 +423,12 @@ function resetZsxqWorkspace() {
     els.selectAllTopicsBtn.classList.add('hidden');
     els.batchDownloadBtn.classList.add('hidden');
     els.attachmentTypeControl.classList.add('hidden');
-    els.copyTopicsJsonBtn.classList.add('hidden');
-    els.syncCurrentTabBtn.classList.add('hidden');
-    els.syncAllTabsBtn.classList.add('hidden');
-    els.autoSyncTestBtn.classList.add('hidden');
-    els.autoSyncMemoTestBtn.classList.add('hidden');
-    els.systemSyncTestConfigBtn.classList.add('hidden');
+    els.copyTopicsJsonBtn?.classList.add('hidden');
+    els.syncCurrentTabBtn?.classList.add('hidden');
+    els.syncAllTabsBtn?.classList.add('hidden');
+    els.autoSyncTestBtn?.classList.add('hidden');
+    els.autoSyncMemoTestBtn?.classList.add('hidden');
+    els.systemSyncTestConfigBtn?.classList.add('hidden');
     els.systemSyncSchedulerPanel.classList.add('hidden');
     els.syncStatus.classList.add('hidden');
     els.syncStatus.innerHTML = '';
@@ -560,13 +560,13 @@ async function loadTopics(group, options = {}) {
     renderGroups(state.groups);
     els.refreshTopicsBtn.classList.remove('hidden');
     els.publishPanel.classList.remove('hidden');
-    els.syncCurrentTabBtn.classList.remove('hidden');
-    els.syncAllTabsBtn.classList.remove('hidden');
-    els.autoSyncTestBtn.classList.remove('hidden');
-    els.autoSyncMemoTestBtn.classList.remove('hidden');
-    els.systemSyncTestConfigBtn.classList.remove('hidden');
+    els.syncCurrentTabBtn?.classList.remove('hidden');
+    els.syncAllTabsBtn?.classList.remove('hidden');
+    els.autoSyncTestBtn?.classList.remove('hidden');
+    els.autoSyncMemoTestBtn?.classList.remove('hidden');
+    els.systemSyncTestConfigBtn?.classList.remove('hidden');
     els.systemSyncSchedulerPanel.classList.remove('hidden');
-    els.copyTopicsJsonBtn.classList.add('hidden');
+    els.copyTopicsJsonBtn?.classList.add('hidden');
     els.topicsTitle.textContent = group.name || `星球 ${group.group_id}`;
     els.topicsSubtitle.textContent = `Group ID: ${group.group_id}`;
     els.topicsList.innerHTML = loadingCard('正在获取最新主题...');
@@ -642,7 +642,7 @@ async function loadActiveTabPage(options = {}) {
             state.lastTopicsRequest = withoutSensitiveCookie(requestPayload);
             state.lastTopicsResponse = result;
             state.lastTopicsScope = requestPayload.scope || 'all';
-            els.copyTopicsJsonBtn.classList.remove('hidden');
+            els.copyTopicsJsonBtn?.classList.remove('hidden');
 
             const pageTopics = extractTopicsFromResponse(result);
             appendTabTopics(tabState, tab, pageTopics);
@@ -699,6 +699,7 @@ async function copyLastTopicsJson() {
         request: state.lastTopicsRequest,
         response: state.lastTopicsResponse,
     }, null, 2));
+    if (!els.copyTopicsJsonBtn) return;
     const original = els.copyTopicsJsonBtn.innerHTML;
     els.copyTopicsJsonBtn.innerHTML = '<i class="fas fa-check mr-2"></i>已复制';
     setTimeout(() => { els.copyTopicsJsonBtn.innerHTML = original; }, 1200);
@@ -726,11 +727,11 @@ async function syncTabs(scope) {
     const attachmentType = currentAttachmentType();
     const attachmentTypeLabel = attachmentTypeText(attachmentType);
     const button = scope === 'all' ? els.syncAllTabsBtn : els.syncCurrentTabBtn;
-    const originalHTML = button.innerHTML;
+    const originalHTML = button?.innerHTML || '';
     state.isSyncing = true;
-    els.syncCurrentTabBtn.disabled = true;
-    els.syncAllTabsBtn.disabled = true;
-    setLoading(button, true, scope === 'all' ? '同步全部中...' : '同步中...');
+    if (els.syncCurrentTabBtn) els.syncCurrentTabBtn.disabled = true;
+    if (els.syncAllTabsBtn) els.syncAllTabsBtn.disabled = true;
+    if (button) setLoading(button, true, scope === 'all' ? '同步全部中...' : '同步中...');
     renderSyncStatus({
         type: 'loading',
         message: scope === 'all'
@@ -766,9 +767,9 @@ async function syncTabs(scope) {
         renderSyncStatus({ type: 'error', message: `同步失败：${error.message}` });
     } finally {
         state.isSyncing = false;
-        els.syncCurrentTabBtn.disabled = false;
-        els.syncAllTabsBtn.disabled = false;
-        setLoading(button, false, originalHTML);
+        if (els.syncCurrentTabBtn) els.syncCurrentTabBtn.disabled = false;
+        if (els.syncAllTabsBtn) els.syncAllTabsBtn.disabled = false;
+        if (button) setLoading(button, false, originalHTML);
     }
 }
 
@@ -912,8 +913,8 @@ async function saveSystemSyncTestConfig() {
     const systemIntervalMinutes = parsePositiveInt(els.systemSyncIntervalInput?.value, SYSTEM_SYNC_INTERVAL_MINUTES, 1);
     const maxRoundsRaw = parsePositiveIntOrZero(els.systemSyncMaxRoundsInput?.value, SYSTEM_SYNC_MAX_ROUNDS, 0);
 
-    const originalHTML = els.systemSyncTestConfigBtn.innerHTML;
-    setLoading(els.systemSyncTestConfigBtn, true, '保存中...');
+    const originalHTML = els.systemSyncTestConfigBtn?.innerHTML || '';
+    if (els.systemSyncTestConfigBtn) setLoading(els.systemSyncTestConfigBtn, true, '保存中...');
     renderSyncStatus({
         type: 'loading',
         title: '系统计划配置',
@@ -970,7 +971,7 @@ async function saveSystemSyncTestConfig() {
     } catch (error) {
         renderSyncStatus({ type: 'error', message: `系统计划配置保存失败：${error.message}` });
     } finally {
-        setLoading(els.systemSyncTestConfigBtn, false, originalHTML);
+        if (els.systemSyncTestConfigBtn) setLoading(els.systemSyncTestConfigBtn, false, originalHTML);
     }
 }
 

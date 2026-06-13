@@ -2,6 +2,8 @@
 
 本文档用于把 `/Users/v9/Documents/3---work/06---dev---python/pytest` 里的 PDF 清洗服务，接入 `dig_ytb_channel` 的自动同步、清洗、自动发布链路。
 
+> 当前文档记录的是第一阶段 external 接入方式。完整本地迁移与对比测试见 `docs/LOCAL_PDF_CLEANER_MIGRATION.md`。在对比测试通过前，工作流默认仍保持 external，不切换到 local。
+
 ## 当前结论
 
 `pytest` 项目已经有可调用接口：

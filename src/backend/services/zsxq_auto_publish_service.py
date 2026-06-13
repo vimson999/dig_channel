@@ -32,6 +32,7 @@ DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RUNS_LIMIT = 20
 MAX_HISTORY_RUNS = 200
 MAX_COOKIE_ACCOUNTS = 20
+PLATFORM_MAX_FILE_SIZE_MB = 50
 
 PDF_EXTENSIONS = [".pdf"]
 AUDIO_EXTENSIONS = [".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg"]
@@ -39,6 +40,8 @@ COOKIE_LIMIT_HINTS = [
     "达到上限",
     "次数上限",
     "今日上限",
+    "今日限额",
+    "文件数量已达今日限额",
     "操作太频繁",
     "频率限制",
     "稍后再试",
@@ -302,7 +305,10 @@ def _normalize_rule(item, index):
         "hashtag_title": hashtag_title,
         "upload_retry_count": _bounded_int(item.get("upload_retry_count"), default=DEFAULT_UPLOAD_RETRIES, lower=0, upper=5),
         "max_run_attempts": _bounded_int(item.get("max_run_attempts"), default=DEFAULT_MAX_ATTEMPTS, lower=1, upper=10),
-        "max_file_size_mb": _bounded_int(item.get("max_file_size_mb"), default=_default_max_file_size_mb(file_type), lower=1, upper=1024),
+        "max_file_size_mb": min(
+            _bounded_int(item.get("max_file_size_mb"), default=_default_max_file_size_mb(file_type), lower=1, upper=1024),
+            PLATFORM_MAX_FILE_SIZE_MB,
+        ),
         "sort_mode": "mtime_asc",
     }
     return rule
@@ -324,8 +330,19 @@ def _normalize_config(payload, previous=None):
         raise ValueError("至少需要启用一条自动发帖规则")
 
     now = _now_iso()
+    incoming_cookie_accounts = (
+        payload.get("cookie_accounts")
+        if "cookie_accounts" in payload
+        else previous.get("cookie_accounts")
+    )
+    if (
+        "cookie_accounts" in payload
+        and not payload.get("cookie_accounts")
+        and previous.get("cookie_accounts")
+    ):
+        incoming_cookie_accounts = previous.get("cookie_accounts")
     cookie_accounts = _normalize_cookie_accounts(
-        payload.get("cookie_accounts") if "cookie_accounts" in payload else previous.get("cookie_accounts"),
+        incoming_cookie_accounts,
         previous_accounts=previous.get("cookie_accounts") or [],
     )
     return {
@@ -666,18 +683,21 @@ def _scan_rule(rule, state):
             item["reason"] = "empty"
             skipped.append(item)
             continue
-        if size > int(rule.get("max_file_size_mb") or _default_max_file_size_mb(rule.get("file_type"))) * 1024 * 1024:
-            item["reason"] = "too_large"
+        effective_max_mb = _effective_max_file_size_mb(rule)
+        if size > effective_max_mb * 1024 * 1024:
+            item["reason"] = "too_large_platform" if effective_max_mb == PLATFORM_MAX_FILE_SIZE_MB else "too_large"
             skipped.append(item)
-            records.setdefault(identity, {
-                "path": item["path"],
-                "name": item["name"],
-                "size": size,
-                "status": "skipped",
-                "skip_reason": "too_large",
-                "updated_at": now,
-                "attempts": item["attempts"],
-            })
+            if record.get("status") != "published":
+                records[identity] = {
+                    "path": item["path"],
+                    "name": item["name"],
+                    "size": size,
+                    "status": "skipped",
+                    "skip_reason": item["reason"],
+                    "max_file_size_mb": effective_max_mb,
+                    "updated_at": now,
+                    "attempts": item["attempts"],
+                }
             continue
         if record.get("status") == "published":
             item["reason"] = "published"
@@ -744,6 +764,11 @@ def _mark_record(state, item, status, **extra):
     records[item["identity"]] = payload
 
 
+def _effective_max_file_size_mb(rule):
+    configured = int(rule.get("max_file_size_mb") or _default_max_file_size_mb(rule.get("file_type")))
+    return max(1, min(configured, PLATFORM_MAX_FILE_SIZE_MB))
+
+
 def _compose_topic_text(rule, file_names):
     parts = []
     prefix = str(rule.get("body_prefix") or "").strip()
@@ -782,6 +807,8 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
         "batch_size": rule.get("batch_size"),
         "eligible_count": len(batch),
         "selected_count": len(batch),
+        "uploaded_count": 0,
+        "failed_count": 0,
         "topic_id": None,
         "files": [],
         "cookie_account_id": cookie_account_id,
@@ -871,8 +898,9 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
     result["files"] = file_results
     if not uploaded_file_ids:
         _commit_deferred_marks(state, deferred_marks)
+        result["failed_count"] = sum(1 for item in file_results if item.get("status") == "failed")
         result["status"] = "failed"
-        result["message"] = "本批文件全部上传失败。"
+        result["message"] = f"选中 {len(batch)} 个，上传成功 0 个，失败 {result['failed_count']} 个。"
         return result
 
     topic_text = _compose_topic_text(rule, successful_names)
@@ -904,9 +932,15 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
         _mark_cookie_account_success(cookie_account)
         success_count = len(uploaded_assets)
         fail_count = sum(1 for item in file_results if item.get("status") == "failed")
+        result["uploaded_count"] = success_count
+        result["failed_count"] = fail_count
         result["topic_id"] = str(topic_id or "")
         result["status"] = "partial" if fail_count else "success"
-        result["message"] = f"已发布 {success_count} 个附件。"
+        result["message"] = (
+            f"选中 {len(batch)} 个，已发布 {success_count} 个，失败 {fail_count} 个。"
+            if fail_count
+            else f"已发布 {success_count} 个附件。"
+        )
         return result
     except Exception as exc:
         error_text = str(exc)
@@ -947,7 +981,9 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
             error=error_text,
         )
         result["status"] = "failed"
-        result["message"] = f"上传成功，但发布失败：{error_text}"
+        result["uploaded_count"] = 0
+        result["failed_count"] = len(batch)
+        result["message"] = f"选中 {len(batch)} 个，上传成功 {len(uploaded_assets)} 个，但发布失败：{error_text}"
         result["publish_error"] = error_text
         return result
 
@@ -964,6 +1000,8 @@ def _run_rule_batch(rule, config, cookie_accounts, state, run_id):
         "batch_size": rule.get("batch_size"),
         "eligible_count": len(scan["eligible"]),
         "selected_count": len(batch),
+        "uploaded_count": 0,
+        "failed_count": 0,
         "topic_id": None,
         "files": [],
         "cookie_attempts": [],
@@ -999,11 +1037,57 @@ def _run_rule_batch(rule, config, cookie_accounts, state, run_id):
     result["message"] = "当前账号池已全部触发限制或不可用，本批未发布。请根据 failure log 排查阈值标记。"
     if last_retry_result:
         result["files"] = last_retry_result.get("files") or []
+        result["uploaded_count"] = last_retry_result.get("uploaded_count") or 0
+        result["failed_count"] = last_retry_result.get("failed_count") or 0
     return result
 
 
-def run_configured_once(trigger="manual", cookie_override=None, requested_by="api"):
+def _persist_cookie_account_runtime_state(runtime_config):
+    """Persist cookie-account runtime counters without changing active rules."""
+    if not isinstance(runtime_config, dict):
+        return
+    runtime_accounts = {
+        str(item.get("id")): item
+        for item in (runtime_config.get("cookie_accounts") or [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    if not runtime_accounts:
+        return
+
     config = load_config(required=False)
+    if not isinstance(config, dict):
+        return
+
+    changed = False
+    runtime_fields = {
+        "quota_hit_count",
+        "last_limit_hit_at",
+        "last_limit_error",
+        "last_success_at",
+        "last_used_at",
+        "updated_at",
+    }
+    for account in config.get("cookie_accounts") or []:
+        runtime_account = runtime_accounts.get(str(account.get("id") or ""))
+        if not runtime_account:
+            continue
+        for field in runtime_fields:
+            if account.get(field) != runtime_account.get(field):
+                account[field] = runtime_account.get(field)
+                changed = True
+
+    if changed:
+        _write_json(CONFIG_PATH, config)
+
+
+def _run_once_for_config(
+    config,
+    *,
+    trigger="manual",
+    cookie_override=None,
+    requested_by="api",
+    persist_config=True,
+):
     if not config:
         return {
             "queued": False,
@@ -1066,13 +1150,16 @@ def run_configured_once(trigger="manual", cookie_override=None, requested_by="ap
             )
             results.append(_run_rule_batch(rule, config, cookie_accounts, state, run_id))
             _save_state(state)
-            _persist_runtime_config(config)
+            if persist_config:
+                _persist_runtime_config(config)
+            else:
+                _persist_cookie_account_runtime_state(config)
 
         success_rules = sum(1 for item in results if item.get("status") == "success")
         partial_rules = sum(1 for item in results if item.get("status") == "partial")
         failed_rules = sum(1 for item in results if item.get("status") == "failed")
         if success_rules or partial_rules:
-            run_status = "partial" if failed_rules else "success"
+            run_status = "partial" if (partial_rules or failed_rules) else "success"
             message = f"本轮完成：成功 {success_rules}，部分成功 {partial_rules}，失败 {failed_rules}。"
         elif all(item.get("status") == "skipped" for item in results):
             run_status = "skipped"
@@ -1114,3 +1201,27 @@ def run_configured_once(trigger="manual", cookie_override=None, requested_by="ap
         }
     finally:
         _release_lock(run_id)
+
+
+def run_configured_once(trigger="manual", cookie_override=None, requested_by="api"):
+    config = load_config(required=False)
+    return _run_once_for_config(
+        config,
+        trigger=trigger,
+        cookie_override=cookie_override,
+        requested_by=requested_by,
+        persist_config=True,
+    )
+
+
+def run_once_with_config(payload, trigger="manual", cookie_override=None, requested_by="api"):
+    """Run a one-off publish using a supplied config without rewriting rules."""
+    previous = load_config(required=False) or {}
+    config = _normalize_config(payload, previous=previous)
+    return _run_once_for_config(
+        config,
+        trigger=trigger,
+        cookie_override=cookie_override,
+        requested_by=requested_by,
+        persist_config=False,
+    )

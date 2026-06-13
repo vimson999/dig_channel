@@ -172,6 +172,7 @@ src/backend/**/*.mp4
 src/backend/**/*.mp3
 src/backend/**/*.wav
 src/backend/**/*.webp
+!src/backend/services/resources/watermarks/*.png
 *.safetensors
 youtube_token.pickle
 client_secrets.json

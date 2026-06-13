@@ -25,15 +25,15 @@ class PdfCleanOptions:
     prefix: str = ""
     poll_interval: float = 1.5
     timeout_seconds: int = 3600
+    engine: str = "external"
 
 
 class PdfCleanerAdapter:
-    """Adapter for the external pytest PDF cleaner service.
+    """Adapter for PDF cleaner engines used by the content pipeline.
 
-    The cleaner service only accepts directories under its own project root.
-    This adapter stages files into pytest/runtime/batches/<batch_id>/input,
-    starts the existing /api/batch-clean job, polls status, then copies the
-    cleaned PDFs back into this project's runtime/content_pipeline directory.
+    In external mode, this stages files into pytest/runtime/batches/<batch_id>,
+    calls the pytest /api/batch-clean service, then copies cleaned PDFs back.
+    In local mode, it runs the migrated PDFProcessor inside this project.
     """
 
     def __init__(
@@ -58,12 +58,30 @@ class PdfCleanerAdapter:
         self.session = requests.Session()
         self.session.trust_env = False
 
-    def check_service(self, timeout: float = 3.0) -> dict:
-        """Check whether the cleaner service is reachable.
+    def check_service(self, timeout: float = 3.0, engine: Optional[str] = None) -> dict:
+        """Check whether the configured PDF cleaner engine is reachable."""
+        engine_name = str(engine or os.getenv("PDF_CLEANER_ENGINE") or "external").strip().lower()
+        if engine_name == "local":
+            try:
+                from services.watermark.pdf_processor import PDFProcessor
 
-        pytest does not currently expose /api/health, so we first try it and
-        fall back to /api/folder-tree, which is already used by its batch page.
-        """
+                PDFProcessor(threshold=245)
+                return {
+                    "success": True,
+                    "mode": "local",
+                    "engine": "local",
+                    "message": "当前系统本地 PDF 清洗引擎可用",
+                }
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "mode": "local",
+                    "engine": "local",
+                    "error": str(exc),
+                }
+
+        # External pytest mode. pytest may not expose /api/health, so we first
+        # try it and fall back to /api/folder-tree, which its batch page uses.
         health_url = f"{self.base_url}/api/health"
         try:
             response = self.session.get(health_url, timeout=timeout)
@@ -71,6 +89,7 @@ class PdfCleanerAdapter:
                 return {
                     "success": True,
                     "mode": "health",
+                    "engine": "external",
                     "url": health_url,
                     "data": _safe_json(response),
                 }
@@ -85,6 +104,7 @@ class PdfCleanerAdapter:
                 return {
                     "success": True,
                     "mode": "folder-tree",
+                    "engine": "external",
                     "url": folder_tree_url,
                     "data": {
                         "success": data.get("success"),
@@ -94,6 +114,7 @@ class PdfCleanerAdapter:
             return {
                 "success": False,
                 "mode": "folder-tree",
+                "engine": "external",
                 "url": folder_tree_url,
                 "status_code": response.status_code,
                 "data": data,
@@ -102,6 +123,7 @@ class PdfCleanerAdapter:
             return {
                 "success": False,
                 "mode": "unreachable",
+                "engine": "external",
                 "url": folder_tree_url,
                 "error": str(exc),
             }
@@ -117,6 +139,16 @@ class PdfCleanerAdapter:
         reset_workspace: bool = True,
     ) -> dict:
         options = options or PdfCleanOptions()
+        if str(options.engine or "").strip().lower() == "local":
+            return self._run_local_batch(
+                batch_id=batch_id,
+                files=files,
+                source_root=source_root,
+                options=options,
+                progress_callback=progress_callback,
+                reset_workspace=reset_workspace,
+            )
+
         safe_batch_id = _safe_batch_id(batch_id)
         input_files = _resolve_pdf_files(files)
         if not input_files:
@@ -182,6 +214,143 @@ class PdfCleanerAdapter:
         }
         manifest["result"] = result
         _write_json(pytest_batch_dir / "manifest.json", manifest)
+        _write_json(local_batch_dir / "manifest.json", manifest)
+        return result
+
+    def _run_local_batch(
+        self,
+        *,
+        batch_id: str,
+        files: Iterable[str | Path],
+        source_root: Optional[str | Path] = None,
+        options: Optional[PdfCleanOptions] = None,
+        progress_callback: Optional[Callable[[dict], None]] = None,
+        reset_workspace: bool = True,
+    ) -> dict:
+        from services.watermark.pdf_processor import PDFProcessor
+
+        options = options or PdfCleanOptions(engine="local")
+        safe_batch_id = _safe_batch_id(batch_id)
+        input_files = _resolve_pdf_files(files)
+        if not input_files:
+            raise PdfCleanerError("没有可清洗的 PDF 文件")
+
+        local_batch_dir = self.output_root / safe_batch_id
+        local_output_dir = local_batch_dir / "pdf_cleaned"
+        if reset_workspace and local_batch_dir.exists():
+            _assert_inside(local_batch_dir, self.output_root)
+            shutil.rmtree(local_batch_dir)
+        local_output_dir.mkdir(parents=True, exist_ok=True)
+
+        source_base = Path(source_root).expanduser().resolve() if source_root else None
+        processor = PDFProcessor(threshold=int(options.threshold))
+        files_result = []
+        cleaned_files = []
+        failed_count = 0
+        skipped_count = 0
+        total = len(input_files)
+
+        for index, source in enumerate(input_files, start=1):
+            rel_path = _relative_source_path(source, source_base)
+            output_rel = _prefixed_pdf_path(rel_path, options.prefix)
+            target = (local_output_dir / output_rel).resolve()
+            _assert_inside(target, local_output_dir)
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+            if target.exists() and not options.overwrite:
+                item = {
+                    "source": rel_path.as_posix(),
+                    "status": "SKIPPED",
+                    "message": "输出文件已存在",
+                    "duration": 0,
+                    "output": output_rel.as_posix(),
+                    "cleaner_output_path": str(target),
+                    "path": str(target),
+                    "relative_path": output_rel.as_posix(),
+                }
+                skipped_count += 1
+                cleaned_files.append(item)
+                files_result.append(item)
+                continue
+
+            if progress_callback:
+                progress_callback({
+                    "phase": "local_cleaning",
+                    "progress": min(88, max(8, int((index - 1) / total * 80) + 8)),
+                    "message": f"本地 PDF 清洗 {index}/{total}",
+                })
+
+            started = time.time()
+            success, message = processor.remove_watermark(
+                str(source),
+                str(target),
+                do_header_clean=True,
+                do_ocr=bool(options.do_ocr),
+            )
+            duration = round(time.time() - started, 2)
+            if success and target.exists():
+                item = {
+                    "source": rel_path.as_posix(),
+                    "status": "SUCCESS",
+                    "message": message,
+                    "duration": duration,
+                    "output": output_rel.as_posix(),
+                    "cleaner_output_path": str(target),
+                    "path": str(target),
+                    "relative_path": output_rel.as_posix(),
+                }
+                cleaned_files.append(item)
+                files_result.append(item)
+            else:
+                failed_count += 1
+                files_result.append({
+                    "source": rel_path.as_posix(),
+                    "status": "FAILED",
+                    "message": message,
+                    "duration": duration,
+                    "output": "",
+                    "path": str(target),
+                    "relative_path": output_rel.as_posix(),
+                })
+
+        job = {
+            "state": "FINISHED",
+            "total": total,
+            "current": total,
+            "success": sum(1 for item in files_result if item.get("status") == "SUCCESS"),
+            "failed": failed_count,
+            "skipped": skipped_count,
+            "overall_percent": 100,
+            "message": "批量清洗完成",
+            "files": files_result,
+        }
+        result = {
+            "batch_id": safe_batch_id,
+            "engine": "local",
+            "local_workspace": str(local_batch_dir),
+            "local_output_dir": str(local_output_dir),
+            "job": job,
+            "files": files_result,
+            "cleaned_files": cleaned_files,
+            "success_count": len(cleaned_files),
+            "failed_count": failed_count,
+            "skipped_count": 0,
+        }
+        manifest = {
+            "batch_id": safe_batch_id,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "engine": "local",
+            "local_output_dir": str(local_output_dir),
+            "files": [{"source_path": str(path)} for path in input_files],
+            "options": {
+                "threshold": options.threshold,
+                "do_ocr": options.do_ocr,
+                "overwrite": options.overwrite,
+                "prefix": options.prefix,
+                "engine": "local",
+            },
+            "result": result,
+        }
         _write_json(local_batch_dir / "manifest.json", manifest)
         return result
 
@@ -349,6 +518,13 @@ def _relative_source_path(source: Path, source_base: Optional[Path]) -> Path:
         except ValueError:
             pass
     return Path(source.name)
+
+
+def _prefixed_pdf_path(rel_path: Path, prefix: str) -> Path:
+    clean_prefix = str(prefix or "").strip()
+    if not clean_prefix:
+        return rel_path
+    return rel_path.with_name(f"{clean_prefix}{rel_path.stem}.pdf")
 
 
 def _assert_inside(path: Path, root: Path) -> None:

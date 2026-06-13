@@ -49,6 +49,10 @@ class PublicationTask(db.Model):
                     title = " | ".join(parts) if parts else "未命名任务"
                 if title == "未命名任务" and self.params.get('feature') == 'content_pdf_clean':
                     title = self.params.get('content_pipeline', {}).get('title') or "PDF 清洗任务"
+                if title == "未命名任务" and self.params.get('feature') == 'content_audio_clean':
+                    title = self.params.get('content_pipeline', {}).get('title') or "音频清洗任务"
+                if title == "未命名任务" and self.params.get('feature') == 'zsxq_clean_output_publish':
+                    title = self.params.get('zsxq_publish', {}).get('title') or "知识星球发布任务"
         
         return {
             'id': self.id,

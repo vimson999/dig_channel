@@ -495,7 +495,7 @@ class ZsxqSyncService:
         db.session.commit()
         return run.to_dict()
 
-    def submit_pdf_clean_for_run(self, run_id, cleaner=None, trigger="zsxq_sync"):
+    def submit_pdf_clean_for_run(self, run_id, cleaner=None, trigger="zsxq_sync", auto_publish=None, workflow_run_id=None):
         """Submit downloaded PDFs from one sync run to the content pipeline."""
         run = ZsxqSyncRun.query.get(str(run_id))
         if not run:
@@ -519,9 +519,11 @@ class ZsxqSyncService:
             files=files,
             source_root=cleanable.get("source_root"),
             cleaner=cleaner,
+            auto_publish=auto_publish,
             trigger=trigger,
             metadata={
                 "sync_run_id": run.id,
+                "workflow_run_id": workflow_run_id,
                 "group_id": run.group_id,
                 "group_name": run.group_name,
                 "mode": run.mode,
@@ -545,6 +547,58 @@ class ZsxqSyncService:
         self._merge_run_pipeline_result(run, pdf_clean_result)
         return run.to_dict()
 
+    def submit_audio_clean_for_run(self, run_id, cleaner=None, trigger="zsxq_sync", auto_publish=None, workflow_run_id=None):
+        """Submit newly downloaded audio files from one sync run."""
+        run = ZsxqSyncRun.query.get(str(run_id))
+        if not run:
+            raise ValueError(f"同步任务不存在: {run_id}")
+
+        cleanable = self.downloaded_audio_files_for_run(run_id)
+        files = [item["path"] for item in cleanable["files"]]
+        if not files:
+            result = {
+                "queued": False,
+                "reason": "no_downloaded_audio",
+                "files_count": 0,
+            }
+            self._merge_run_content_pipeline_result(run, "audio_clean", result)
+            return result
+
+        from services.content_pipeline.audio_clean_task_service import submit_audio_clean_task
+
+        task = submit_audio_clean_task(
+            title=f"知识星球音频清洗 - {run.group_name or run.group_id}",
+            files=files,
+            source_root=cleanable.get("source_root"),
+            cleaner=cleaner,
+            auto_publish=auto_publish,
+            trigger=trigger,
+            metadata={
+                "sync_run_id": run.id,
+                "workflow_run_id": workflow_run_id,
+                "group_id": run.group_id,
+                "group_name": run.group_name,
+                "mode": run.mode,
+                "files": cleanable["files"],
+            },
+        )
+        result = {
+            "queued": True,
+            "task_id": task["id"],
+            "celery_task_id": task.get("celery_task_id"),
+            "files_count": len(files),
+            "source_root": cleanable.get("source_root"),
+        }
+        self._merge_run_content_pipeline_result(run, "audio_clean", result)
+        return result
+
+    def set_run_audio_clean_result(self, run_id, audio_clean_result):
+        run = ZsxqSyncRun.query.get(str(run_id))
+        if not run:
+            raise ValueError(f"同步任务不存在: {run_id}")
+        self._merge_run_content_pipeline_result(run, "audio_clean", audio_clean_result)
+        return run.to_dict()
+
     def downloaded_pdf_files_for_run(self, run_id):
         run = ZsxqSyncRun.query.get(str(run_id))
         if not run:
@@ -552,6 +606,16 @@ class ZsxqSyncService:
 
         return {
             "files": self._downloaded_pdf_files_from_run_result(run),
+            "source_root": self._run_source_root(run),
+        }
+
+    def downloaded_audio_files_for_run(self, run_id):
+        run = ZsxqSyncRun.query.get(str(run_id))
+        if not run:
+            raise ValueError(f"同步任务不存在: {run_id}")
+
+        return {
+            "files": self._downloaded_audio_files_from_run_result(run),
             "source_root": self._run_source_root(run),
         }
 
@@ -589,10 +653,48 @@ class ZsxqSyncService:
             })
         return files
 
+    def _downloaded_audio_files_from_run_result(self, run):
+        result = run.result if isinstance(run.result, dict) else {}
+        raw_files = result.get("downloaded_files")
+        if raw_files is None:
+            raw_files = []
+            for tab in result.get("tabs") or []:
+                if isinstance(tab, dict):
+                    raw_files.extend(tab.get("downloaded_files") or [])
+
+        files = []
+        seen_paths = set()
+        allowed = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg"}
+        for item in raw_files or []:
+            if isinstance(item, dict):
+                path_value = item.get("path") or item.get("local_path")
+                metadata = item
+            else:
+                path_value = item
+                metadata = {}
+            path = self._absolute_local_path(path_value)
+            if not path or path.suffix.lower() not in allowed or not path.exists() or not path.is_file():
+                continue
+            path_key = str(path)
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            files.append({
+                "path": path_key,
+                "name": metadata.get("name") or path.name,
+                "topic_id": metadata.get("topic_id"),
+                "tab_id": metadata.get("tab_id"),
+                "attachment_id": metadata.get("attachment_id"),
+            })
+        return files
+
     def _merge_run_pipeline_result(self, run, pdf_clean_result):
+        self._merge_run_content_pipeline_result(run, "pdf_clean", pdf_clean_result)
+
+    def _merge_run_content_pipeline_result(self, run, key, value):
         result = dict(run.result) if isinstance(run.result, dict) else {}
         content_pipeline = dict(result.get("content_pipeline") or {})
-        content_pipeline["pdf_clean"] = pdf_clean_result
+        content_pipeline[key] = value
         result["content_pipeline"] = content_pipeline
         run.result = result
         db.session.commit()

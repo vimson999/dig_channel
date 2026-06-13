@@ -66,6 +66,11 @@ def _snapshot_config(config):
         "max_pages": config.get("max_pages"),
         "max_download_files": config.get("max_download_files"),
         "auto_pdf_clean": bool(config.get("auto_pdf_clean", True)),
+        "auto_audio_clean": bool(config.get("auto_audio_clean", True)),
+        "auto_publish_after_clean": _normalize_auto_publish_after_clean(
+            config.get("auto_publish_after_clean"),
+            previous={"enabled": True},
+        ),
         "max_rounds": max_rounds,
         "continuous": max_rounds is None,
         "rounds_completed": rounds_completed,
@@ -73,6 +78,7 @@ def _snapshot_config(config):
         "last_batch_id": config.get("last_batch_id"),
         "last_trigger_at": config.get("last_trigger_at"),
         "last_queued_run_id": config.get("last_queued_run_id"),
+        "last_workflow_run_id": config.get("last_workflow_run_id"),
         "jobs": [
             {
                 "key": job.get("key"),
@@ -129,6 +135,15 @@ def save_config(payload, cookie):
             upper=10,
         ),
         "auto_pdf_clean": bool(payload.get("auto_pdf_clean", previous.get("auto_pdf_clean", True))),
+        "pdf_cleaner": payload.get("pdf_cleaner") if isinstance(payload.get("pdf_cleaner"), dict) else previous.get("pdf_cleaner", {}),
+        "auto_audio_clean": bool(payload.get("auto_audio_clean", previous.get("auto_audio_clean", True))),
+        "audio_cleaner": payload.get("audio_cleaner") if isinstance(payload.get("audio_cleaner"), dict) else previous.get("audio_cleaner", {}),
+        "auto_publish_after_clean": _normalize_auto_publish_after_clean(
+            payload.get("auto_publish_after_clean")
+            if "auto_publish_after_clean" in payload
+            else previous.get("auto_publish_after_clean"),
+            previous=previous.get("auto_publish_after_clean") or {"enabled": True},
+        ),
         "max_rounds": _normalize_max_rounds(
             payload["max_rounds"] if "max_rounds" in payload else DEFAULT_MAX_ROUNDS,
             default=DEFAULT_MAX_ROUNDS,
@@ -138,6 +153,7 @@ def save_config(payload, cookie):
         "last_batch_id": None,
         "last_trigger_at": None,
         "last_queued_run_id": None,
+        "last_workflow_run_id": None,
         "jobs": jobs,
     }
 
@@ -230,121 +246,100 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
             "config": _snapshot_config(config),
         }
 
-    from tasks.zsxq_sync import run_zsxq_sync
-
     batch_round = rounds_completed + 1
     queued_at = datetime.utcnow().isoformat() + "Z"
     batch_id = attempt_id or f"{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
-    stamp = datetime.utcnow().strftime("%H%M%S")
-    mode = f"sys{batch_round}_mix_{stamp}"
-    tabs = [job["tab"] for job in jobs]
-    download_file_types_by_tab = {
-        job["tab"]["id"]: [job["file_type"]]
-        for job in jobs
-    }
     max_download_files = _bounded_int(
         config.get("max_download_files"),
         default=DEFAULT_MAX_DOWNLOAD_FILES,
         lower=1,
         upper=10,
     )
-    batch_meta = {
-        "batch_id": batch_id,
-        "attempt_id": batch_id,
-        "round": batch_round,
-        "max_rounds": max_rounds,
-        "continuous": max_rounds is None,
-        "trigger": trigger,
-        "queued_at": queued_at,
-        "max_download_files": max_download_files,
-        "auto_pdf_clean": bool(config.get("auto_pdf_clean", True)),
-        "jobs": [
-            {
-                "key": job["key"],
-                "tab_label": job["tab"].get("label"),
-                "tab_id": job["tab"].get("id"),
-                "file_type": job["file_type"],
-            }
-            for job in jobs
-        ],
-    }
     queued = []
-    run = None
+    workflow = None
     queue_error = None
     try:
-        run = zsxq_sync_service.create_sync_run(
-            group_id=group_id,
-            group_name=config.get("group_name"),
-            tabs=tabs,
-            mode=mode,
-            initial_result={
-                "queued": True,
-                "system_sync": batch_meta,
-            },
+        from services.zsxq_workflow_service import zsxq_workflow_service
+
+        workflow = zsxq_workflow_service.create_system_workflow(
+            config=config,
+            trigger=trigger,
+            batch_id=batch_id,
+            batch_round=batch_round,
+            max_rounds=max_rounds,
+            max_download_files=max_download_files,
+            jobs=jobs,
         )
-        payload = {
-            "cookie": cookie,
-            "group_id": group_id,
-            "group_name": config.get("group_name"),
-            "tabs": tabs,
-            "count": config.get("count", DEFAULT_COUNT),
-            "max_pages": config.get("max_pages", 1),
-            "stop_on_existing": config.get("stop_on_existing", True),
-            "download_attachments": config.get("download_attachments", True),
-            "download_pdf_only": False,
-            "download_file_types": ["all"],
-            "download_file_types_by_tab": download_file_types_by_tab,
-            "max_download_files": max_download_files,
-            "mode": mode,
-            "trigger": trigger,
-            "sync_meta": batch_meta,
-            "auto_pdf_clean": bool(config.get("auto_pdf_clean", True)),
-            "pdf_cleaner": config.get("pdf_cleaner") or {},
-        }
-        async_result = run_zsxq_sync.apply_async(
-            args=[run["id"], payload],
-            queue="zsxq_sync",
-            retry=False,
+        queued_workflow = zsxq_workflow_service.enqueue_workflow_task(
+            workflow["id"],
+            cookie=cookie,
         )
         queued = [{
             "batch_id": batch_id,
             "round": batch_round,
             "max_rounds": max_rounds,
-            "run_id": run["id"],
-            "celery_task_id": async_result.id,
-            "mode": mode,
-            "jobs": batch_meta["jobs"],
+            "workflow_run_id": workflow["id"],
+            "celery_task_id": queued_workflow.get("celery_task_id"),
+            "mode": (workflow.get("config_snapshot") or {}).get("sync", {}).get("mode"),
+            "jobs": ((workflow.get("config_snapshot") or {}).get("system_sync") or {}).get("jobs") or [],
             "max_download_files": max_download_files,
         }]
     except Exception as exc:
         queue_error = str(exc)
+        if isinstance(workflow, dict) and workflow.get("id"):
+            try:
+                from services.zsxq_workflow_service import zsxq_workflow_service
+                zsxq_workflow_service.mark_failed_by_id(
+                    workflow["id"],
+                    f"工作流编排任务入队失败: {queue_error}",
+                    stage="workflow",
+                )
+            except Exception:
+                logger.exception("[ZSXQ_SYSTEM_SYNC_TEST] failed to mark workflow failed | workflow=%s", workflow.get("id"))
         logger.exception(
-            "[ZSXQ_SYSTEM_SYNC_TEST] queue failed | batch_id=%s round=%s run_id=%s error=%s",
+            "[ZSXQ_SYSTEM_SYNC_TEST] workflow queue failed | batch_id=%s round=%s workflow_id=%s error=%s",
             batch_id,
             batch_round,
-            run["id"] if isinstance(run, dict) and run.get("id") else "-",
+            workflow["id"] if isinstance(workflow, dict) and workflow.get("id") else "-",
             queue_error,
+        )
+        _notify_queue_failure(
+            batch_id=batch_id,
+            batch_round=batch_round,
+            trigger=trigger,
+            group_id=group_id,
+            group_name=config.get("group_name"),
+            error=queue_error,
         )
 
     logger.info(
-        "[ZSXQ_SYSTEM_SYNC_TEST] queued batch | batch_id=%s round=%s/%s run_id=%s queue_error=%s jobs=%s trigger=%s max_download_files=%s",
+        "[ZSXQ_SYSTEM_SYNC_TEST] queued workflow batch | batch_id=%s round=%s/%s workflow_id=%s queue_error=%s jobs=%s trigger=%s max_download_files=%s",
         batch_id,
         batch_round,
         max_rounds if max_rounds is not None else "continuous",
-        run.get("id") if isinstance(run, dict) and run.get("id") else "-",
+        workflow.get("id") if isinstance(workflow, dict) and workflow.get("id") else "-",
         bool(queue_error),
-        batch_meta["jobs"],
+        queued[0]["jobs"] if queued else [],
         trigger,
         max_download_files,
     )
 
-    config["rounds_completed"] = batch_round
     config["max_rounds"] = max_rounds
     config["max_download_files"] = max_download_files
-    config["last_batch_id"] = batch_id
-    config["last_trigger_at"] = queued_at
-    if isinstance(run, dict):
-        config["last_queued_run_id"] = run["id"]
+    config["last_queued_run_id"] = None
+    if queue_error:
+        config["last_queue_failed_at"] = queued_at
+        config["last_queue_error"] = queue_error
+        config["last_failed_batch_id"] = batch_id
+    else:
+        config["rounds_completed"] = batch_round
+        config["last_batch_id"] = batch_id
+        config["last_trigger_at"] = queued_at
+        config.pop("last_queue_failed_at", None)
+        config.pop("last_queue_error", None)
+        config.pop("last_failed_batch_id", None)
+    if isinstance(workflow, dict) and workflow.get("id"):
+        config["last_workflow_run_id"] = workflow["id"]
     config["updated_at"] = queued_at
     _write_config(config)
 
@@ -354,16 +349,36 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
         "batch_id": batch_id,
         "round": batch_round,
         "max_rounds": max_rounds,
-        "testing_complete": False if max_rounds is None else batch_round >= max_rounds,
+        "testing_complete": False if queue_error or max_rounds is None else batch_round >= max_rounds,
         "reason": "queue_failed" if queue_error else None,
         "error": queue_error,
         "config": _snapshot_config(config),
     }
 
 
+def _notify_queue_failure(*, batch_id, batch_round, trigger, group_id, group_name, error):
+    try:
+        from services.workflow_notification_service import workflow_notification_service
+
+        workflow_notification_service.send_email_message(
+            "[知识星球工作流] 系统同步入队失败",
+            "\n".join([
+                "事件：系统同步入队失败",
+                f"星球：{group_name or group_id or '-'}",
+                f"批次：{batch_id}",
+                f"轮次：{batch_round}",
+                f"触发：{trigger or '-'}",
+                f"错误：{error}",
+            ]),
+        )
+    except Exception:
+        logger.exception("[ZSXQ_SYSTEM_SYNC_TEST] queue failure notification failed | batch_id=%s", batch_id)
+
+
 def _pending_system_sync_work(group_id):
     queue_length = None
     queue_error = None
+    pending_workflow = None
     try:
         client = redis.Redis.from_url(
             celery_app.conf.broker_url,
@@ -374,6 +389,12 @@ def _pending_system_sync_work(group_id):
         queue_length = int(client.llen("zsxq_sync"))
     except Exception as exc:
         queue_error = str(exc)
+
+    try:
+        from services.zsxq_workflow_service import zsxq_workflow_service
+        pending_workflow = zsxq_workflow_service.pending_workflow(group_id=group_id)
+    except Exception:
+        pending_workflow = None
 
     pending_run = (
         ZsxqSyncRun.query
@@ -387,7 +408,10 @@ def _pending_system_sync_work(group_id):
     )
 
     return {
-        "pending": bool(pending_run) or bool(queue_length and queue_length > 0),
+        "pending": bool(pending_workflow) or bool(pending_run) or bool(queue_length and queue_length > 0),
+        "workflow_run_id": pending_workflow.get("id") if isinstance(pending_workflow, dict) else None,
+        "workflow_status": pending_workflow.get("status") if isinstance(pending_workflow, dict) else None,
+        "workflow_stage": pending_workflow.get("current_stage") if isinstance(pending_workflow, dict) else None,
         "queue_length": queue_length,
         "queue_error": queue_error,
         "run_id": pending_run.id if pending_run else None,
@@ -484,6 +508,32 @@ def _normalize_jobs(jobs):
             },
         })
     return normalized
+
+
+def _normalize_auto_publish_after_clean(value, previous=None):
+    previous = previous if isinstance(previous, dict) else {}
+    if isinstance(value, dict):
+        enabled = bool(value.get("enabled", previous.get("enabled", True)))
+        max_rounds = _bounded_int(value.get("max_rounds"), default=previous.get("max_rounds", 20), lower=1, upper=100)
+        trigger = str(value.get("trigger") or previous.get("trigger") or "zsxq_system_sync_clean_complete").strip()
+        rule = value.get("rule") if isinstance(value.get("rule"), dict) else previous.get("rule", {})
+    elif value is None:
+        enabled = bool(previous.get("enabled", True))
+        max_rounds = _bounded_int(previous.get("max_rounds"), default=20, lower=1, upper=100)
+        trigger = str(previous.get("trigger") or "zsxq_system_sync_clean_complete").strip()
+        rule = previous.get("rule", {})
+    else:
+        enabled = bool(value)
+        max_rounds = _bounded_int(previous.get("max_rounds"), default=20, lower=1, upper=100)
+        trigger = str(previous.get("trigger") or "zsxq_system_sync_clean_complete").strip()
+        rule = previous.get("rule", {})
+
+    return {
+        "enabled": enabled,
+        "max_rounds": max_rounds,
+        "trigger": trigger or "zsxq_system_sync_clean_complete",
+        "rule": rule if isinstance(rule, dict) else {},
+    }
 
 
 def _bounded_int(value, default, lower, upper):

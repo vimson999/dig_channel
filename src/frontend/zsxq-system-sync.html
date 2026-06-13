@@ -6,7 +6,7 @@
     <title>知识星球任务与策略 - Shioa</title>
     <link href="css/zsxq-lab.css" rel="stylesheet">
     <link href="css/zsxq-auto-publish.css" rel="stylesheet">
-    <link href="css/zsxq-system-sync.css?v=20260611-batch-detail-page" rel="stylesheet">
+    <link href="css/zsxq-system-sync.css?v=20260612-e2e-handoff" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 </head>
 <body class="min-h-screen bg-slate-50 text-slate-900 overflow-x-hidden">
@@ -192,6 +192,22 @@
                             </div>
 
                             <p class="zsxq-inline-meta">默认场景是“外资研报 + 调研纪要”，范围会按星球 tab 自动识别。</p>
+
+                            <div class="grid grid-cols-1 gap-2 md:grid-cols-2">
+                                <label class="zsxq-inline-check">
+                                    <input id="system-sync-auto-pdf-clean-checkbox" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600" checked>
+                                    <span>同步后清洗 PDF</span>
+                                </label>
+                                <label class="zsxq-inline-check">
+                                    <input id="system-sync-auto-audio-clean-checkbox" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600" checked>
+                                    <span>同步后清洗音频</span>
+                                </label>
+                            </div>
+
+                            <label class="zsxq-inline-check">
+                                <input id="system-sync-auto-publish-after-clean-checkbox" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600" checked>
+                                <span>清洗完成后自动发帖（使用自动发帖页当前策略和账号池）</span>
+                            </label>
 
                             <button id="system-sync-test-config-btn" class="w-full rounded-lg border border-violet-300 bg-violet-50 px-3 py-2.5 text-sm font-bold text-violet-700 hover:bg-violet-100 transition-colors">
                                 <i class="fas fa-floppy-disk mr-2"></i>保存系统同步配置
@@ -438,7 +454,7 @@
                                             </label>
                                             <label class="block">
                                                 <span class="text-xs text-slate-500">最大文件 MB</span>
-                                                <input id="ap-pdf-max-size-input" type="number" min="1" max="1024" value="100" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                                <input id="ap-pdf-max-size-input" type="number" min="1" max="50" value="50" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
                                             </label>
                                         </div>
                                         <div class="grid grid-cols-2 gap-3">
@@ -446,6 +462,7 @@
                                             <input id="ap-pdf-hashtag-title-input" type="text" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500" placeholder="标签名称（可手填）">
                                         </div>
                                         <div class="text-xs text-slate-400">选好 Cookie 和星球后会自动带出 hashtag，也可以手动覆盖。</div>
+                                        <div class="text-xs text-amber-600">知识星球上传接口当前单文件硬限制为 50MB，超过会在预览阶段跳过。</div>
                                         <textarea id="ap-pdf-body-prefix-input" rows="4" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500" placeholder="正文前缀，可包含导语、标签说明等。"></textarea>
                                         <div class="flex flex-wrap gap-3">
                                             <label class="inline-flex items-center gap-2 text-xs font-bold text-slate-600">
@@ -505,7 +522,7 @@
                                             </label>
                                             <label class="block">
                                                 <span class="text-xs text-slate-500">最大文件 MB</span>
-                                                <input id="ap-audio-max-size-input" type="number" min="1" max="1024" value="50" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                                <input id="ap-audio-max-size-input" type="number" min="1" max="50" value="50" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
                                             </label>
                                         </div>
                                         <div class="grid grid-cols-2 gap-3">
@@ -513,6 +530,7 @@
                                             <input id="ap-audio-hashtag-title-input" type="text" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500" placeholder="标签名称（可手填）">
                                         </div>
                                         <div class="text-xs text-slate-400">选好 Cookie 和星球后会自动带出 hashtag，也可以手动覆盖。</div>
+                                        <div class="text-xs text-amber-600">知识星球上传接口当前单文件硬限制为 50MB，超过会在预览阶段跳过。</div>
                                         <textarea id="ap-audio-body-prefix-input" rows="4" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500" placeholder="正文前缀，可包含调研导语、批次说明等。"></textarea>
                                         <div class="flex flex-wrap gap-3">
                                             <label class="inline-flex items-center gap-2 text-xs font-bold text-slate-600">
@@ -601,6 +619,6 @@
     <script src="js/env.js"></script>
     <script src="js/config.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/zsxq-system-sync.js?v=20260611-batch-detail-page"></script>
+    <script src="js/zsxq-system-sync.js?v=20260613-workflow-orchestrator"></script>
 </body>
 </html>
