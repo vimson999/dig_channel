@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Doubao Audio Capture",
+  "version": "0.1.0",
+  "description": "Capture Doubao read-aloud PCM chunks from AudioWorklet MessagePort and export WAV.",
+  "host_permissions": [
+    "https://www.doubao.com/*",
+    "https://*.doubao.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.doubao.com/*",
+        "https://*.doubao.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "injected.js"
+      ],
+      "matches": [
+        "https://www.doubao.com/*",
+        "https://*.doubao.com/*"
+      ]
+    }
+  ]
+}

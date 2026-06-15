@@ -20,7 +20,13 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app import create_app
-from services.zsxq_system_sync_test import config_status, queue_configured_jobs, _scheduler_interval_minutes
+from services.zsxq_system_sync_test import (
+    COOKIE_ENV_NAME,
+    COOKIE_OVERRIDE_ENV_NAME,
+    config_status,
+    queue_configured_jobs,
+    _scheduler_interval_minutes,
+)
 
 DEFAULT_PROJECT_ROOT = BACKEND_DIR.parents[3]
 PROJECT_ROOT = Path(os.environ.get("ZSXQ_PROJECT_ROOT", str(DEFAULT_PROJECT_ROOT))).resolve()
@@ -45,6 +51,7 @@ def _resolve_log_path() -> Tuple[Path, Path]:
 
 
 LOG_PATH = _resolve_log_path()[0]
+PID_PATH = PROJECT_ROOT / "runtime" / "zsxq_auto_scheduler.pid"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,6 +62,55 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("zsxq_auto_scheduler")
+
+
+def _write_runtime_pid_file():
+    payload = {
+        "pid": os.getpid(),
+        "started_at": datetime.utcnow().isoformat() + "Z",
+        "command": " ".join(sys.argv),
+        "log_path": str(LOG_PATH),
+        "log_file_descriptor_opened": True,
+        "cookie_source": _cookie_source(),
+    }
+    try:
+        PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = PID_PATH.with_suffix(".tmp")
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        os.chmod(tmp_path, 0o600)
+        tmp_path.replace(PID_PATH)
+    except Exception:
+        logger.exception("[ZSXQ_AUTO_SYNC] pid file write failed | path=%s", PID_PATH)
+
+
+def _remove_runtime_pid_file():
+    try:
+        with PID_PATH.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        if int(payload.get("pid") or 0) != os.getpid():
+            return
+    except FileNotFoundError:
+        return
+    except Exception:
+        logger.exception("[ZSXQ_AUTO_SYNC] pid file read failed before cleanup | path=%s", PID_PATH)
+        return
+
+    try:
+        PID_PATH.unlink()
+    except FileNotFoundError:
+        return
+    except Exception:
+        logger.exception("[ZSXQ_AUTO_SYNC] pid file cleanup failed | path=%s", PID_PATH)
+
+
+def _cookie_source():
+    if (os.environ.get(COOKIE_OVERRIDE_ENV_NAME) or "").strip():
+        return "page"
+    if (os.environ.get(COOKIE_ENV_NAME) or "").strip():
+        return "env"
+    return None
 
 
 class ZsxqAutoScheduler:
@@ -211,6 +267,8 @@ class ZsxqAutoScheduler:
             return "缺失系统 Cookie 环境变量配置。"
         if reason == "invalid_group":
             return "星球配置无效（占位/已下线/权限不足），请重新保存有效 group_id 后再启动。"
+        if reason == "transient_upstream_error":
+            return "知识星球接口临时错误，本轮已重试后跳过；调度器会继续等待下一轮。"
         if reason == "disabled":
             return "当前配置已停用。"
         if reason == "previous_run_pending":
@@ -293,7 +351,11 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     if args.command == "start":
-        service.start()
+        _write_runtime_pid_file()
+        try:
+            service.start()
+        finally:
+            _remove_runtime_pid_file()
     elif args.command == "once":
         result = service.queue_once(trigger="manual_cli")
         print(json.dumps(result, ensure_ascii=False))

@@ -9,6 +9,16 @@ from services.content_pipeline.retention_cleanup_service import (
     ContentPipelineRetentionCleanupService,
     ContentRetentionPolicy,
 )
+from services.content_pipeline.retention_scheduler_service import (
+    load_config as retention_scheduler_config,
+    restart_scheduler as restart_retention_scheduler,
+    save_config as save_retention_scheduler_config,
+    scheduler_log_tail as retention_scheduler_log_tail,
+    scheduler_status as retention_scheduler_status,
+    start_scheduler as start_retention_scheduler,
+    stop_scheduler as stop_retention_scheduler,
+    trigger_once as trigger_retention_cleanup_once,
+)
 from utils.auth_utils import require_login
 
 
@@ -87,6 +97,68 @@ def run_retention_cleanup(_current_user):
         "success": len(result.get("errors") or []) == 0,
         "message": "清理预览完成" if dry_run else "清理执行完成",
         "data": result,
+    })
+
+
+@bp.route("/retention/scheduler/config", methods=["GET", "POST"])
+@require_login
+def retention_scheduler_config_endpoint(_current_user):
+    if request.method == "GET":
+        return jsonify({"success": True, "data": {"config": retention_scheduler_config()}})
+    data = request.get_json(silent=True) or {}
+    config = save_retention_scheduler_config(data)
+    return jsonify({"success": True, "message": "历史文件清理计划配置已保存", "data": {"config": config}})
+
+
+@bp.route("/retention/scheduler/status", methods=["GET"])
+@require_login
+def retention_scheduler_status_endpoint(_current_user):
+    return jsonify({"success": True, "data": {"scheduler": retention_scheduler_status()}})
+
+
+@bp.route("/retention/scheduler/start", methods=["POST"])
+@require_login
+def retention_scheduler_start_endpoint(_current_user):
+    result = start_retention_scheduler()
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/retention/scheduler/stop", methods=["POST"])
+@require_login
+def retention_scheduler_stop_endpoint(_current_user):
+    result = stop_retention_scheduler()
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/retention/scheduler/restart", methods=["POST"])
+@require_login
+def retention_scheduler_restart_endpoint(_current_user):
+    result = restart_retention_scheduler()
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/retention/scheduler/run-once", methods=["POST"])
+@require_login
+def retention_scheduler_run_once_endpoint(_current_user):
+    data = request.get_json(silent=True) or {}
+    dry_run = data.get("dry_run")
+    if dry_run is not None:
+        dry_run = str(dry_run).lower() not in {"0", "false", "no", "off"}
+    result = trigger_retention_cleanup_once(dry_run_override=dry_run)
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/retention/scheduler/logs", methods=["GET"])
+@require_login
+def retention_scheduler_logs_endpoint(_current_user):
+    lines = request.args.get("lines", 120, type=int)
+    parsed_lines = min(500, max(20, int(lines or 120)))
+    return jsonify({
+        "success": True,
+        "data": {
+            "lines": retention_scheduler_log_tail(lines=parsed_lines),
+            "line_count": parsed_lines,
+        },
     })
 
 

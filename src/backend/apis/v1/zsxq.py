@@ -12,6 +12,7 @@ from services.zsxq_auto_publish_service import (
     save_config as auto_publish_save_config,
 )
 from services.zsxq_auto_publish_scheduler import (
+    restart_scheduler as restart_auto_publish_scheduler,
     scheduler_log_tail as auto_publish_scheduler_log_tail,
     scheduler_status as auto_publish_scheduler_status,
     start_scheduler as start_auto_publish_scheduler,
@@ -20,8 +21,9 @@ from services.zsxq_auto_publish_scheduler import (
 )
 from services.zsxq_system_sync_test import config_status, save_config
 from services.zsxq_system_sync_scheduler import (
-    scheduler_status as system_sync_scheduler_status,
+    restart_scheduler as restart_system_sync_scheduler,
     scheduler_log_tail,
+    scheduler_status as system_sync_scheduler_status,
     start_scheduler as start_system_sync_scheduler,
     stop_scheduler as stop_system_sync_scheduler,
     trigger_once as trigger_once_system_sync_scheduler,
@@ -497,6 +499,19 @@ def system_sync_scheduler_stop():
         return handle_api_error(502, _safe_error(e))
 
 
+@bp.route("/system-sync-scheduler/restart", methods=["POST"])
+def system_sync_scheduler_restart():
+    """Restart the long-running ZSXQ scheduler process."""
+    try:
+        data = request.get_json(silent=True) or {}
+        cookie = (data.get("cookie") or "").strip() or None
+        result = restart_system_sync_scheduler(cookie_override=cookie)
+        return jsonify({"success": True, "data": {"scheduler": result}})
+    except Exception as e:
+        logger.exception("[ZSXQ_SYSTEM_SYNC_SCHEDULER] restart failed")
+        return handle_api_error(502, _safe_error(e))
+
+
 @bp.route("/system-sync-scheduler/run-once", methods=["POST"])
 def system_sync_scheduler_run_once():
     """Trigger one scheduler round immediately (non-loop)."""
@@ -612,6 +627,19 @@ def auto_publish_scheduler_stop():
         return jsonify({"success": True, "data": {"scheduler": result}})
     except Exception as e:
         logger.exception("[ZSXQ_AUTO_PUBLISH] stop scheduler failed")
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/auto-publish/scheduler/restart", methods=["POST"])
+def auto_publish_scheduler_restart():
+    """Restart auto publish scheduler."""
+    try:
+        data = request.get_json(silent=True) or {}
+        cookie = (data.get("cookie") or "").strip() or None
+        result = restart_auto_publish_scheduler(cookie_override=cookie)
+        return jsonify({"success": True, "data": {"scheduler": result}})
+    except Exception as e:
+        logger.exception("[ZSXQ_AUTO_PUBLISH] restart scheduler failed")
         return handle_api_error(502, _safe_error(e))
 
 

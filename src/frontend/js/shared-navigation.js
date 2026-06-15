@@ -40,6 +40,8 @@ class SharedNavigation {
             return 'pdf-scroll-video';
         } else if (filename === 'tts.html') {
             return 'tts';
+        } else if (filename === 'doubao-browser-tts-test.html') {
+            return 'doubao-browser-tts-test';
         } else if (filename === 'mhtml-pdf.html') {
             return 'mhtml-pdf';
         } else if (filename === 'pdf-tools.html') {
@@ -58,6 +60,10 @@ class SharedNavigation {
             return 'bilibili-publisher';
         } else if (filename === 'gemini-test.html') {
             return 'gemini-test';
+        } else if (filename === 'gemini-browser-test.html') {
+            return 'gemini-browser-test';
+        } else if (filename === 'report-audio-workflow-test.html') {
+            return 'report-audio-workflow-test';
         } else if (filename === 'thumbnail-generator.html') {
             return 'thumbnail-generator';
         } else if (filename === 'finance-cover-generator.html') {
@@ -82,6 +88,8 @@ class SharedNavigation {
             return 'batch-transcription';
         } else if (filename === 'downloads.html') {
             return 'downloads';
+        } else if (filename === 'content-retention-cleanup.html') {
+            return 'content-retention-cleanup';
         }
         return 'dashboard';
     }
@@ -99,6 +107,7 @@ class SharedNavigation {
             'word-long-image': 'Word 转长图',
             'pdf-scroll-video': 'PDF 滚动视频',
             'tts': '豆包语音 V3',
+            'doubao-browser-tts-test': '豆包网页朗读测试台',
             'mhtml-pdf': 'MHTML转PDF工具',
             'pdf-tools': 'PDF 工具平台',
             'report-video-factory': '研报导图视频工厂',
@@ -108,6 +117,8 @@ class SharedNavigation {
             'favorites': '我的收藏',
             'bilibili-publisher': 'Bilibili 发布工作台',
             'gemini-test': 'Gemini AI 测试台',
+            'gemini-browser-test': '研报 PDF Gem 测试台',
+            'report-audio-workflow-test': '研报转语音编排台',
             'thumbnail-workbench': '听见资本封面工作台',
             'thumbnail-generator': '研报封面生成器',
             'finance-cover-generator': '金融类视频封面生成器',
@@ -120,7 +131,8 @@ class SharedNavigation {
             'external-batch': '批量任务台',
             'video-editor': '高级剪辑工作台',
             'batch-transcription': '批量音频转文案',
-            'downloads': '素材下载中心'
+            'downloads': '素材下载中心',
+            'content-retention-cleanup': '历史文件清理'
         };
         return titles[this.currentPage] || '智能数据分析平台';
     }
@@ -382,10 +394,22 @@ class SharedNavigation {
                         href: 'report-video-factory.html'
                     },
                     {
+                        id: 'report-audio-workflow-test',
+                        name: '研报转语音',
+                        icon: 'fas fa-file-audio',
+                        href: 'report-audio-workflow-test.html'
+                    },
+                    {
                         id: 'tts',
                         name: '语音合成',
                         icon: 'fas fa-microphone',
                         href: 'tts.html'
+                    },
+                    {
+                        id: 'doubao-browser-tts-test',
+                        name: '网页朗读测试',
+                        icon: 'fas fa-volume-high',
+                        href: 'doubao-browser-tts-test.html'
                     },
                     {
                         id: 'thumbnail-workbench',
@@ -424,6 +448,12 @@ class SharedNavigation {
                         name: 'Celery 控制台',
                         icon: 'fas fa-gauge-high',
                         href: 'celery-monitor.html'
+                    },
+                    {
+                        id: 'content-retention-cleanup',
+                        name: '历史文件清理',
+                        icon: 'fas fa-broom',
+                        href: 'content-retention-cleanup.html'
                     },
                     {
                         id: 'document-converter',
@@ -478,6 +508,12 @@ class SharedNavigation {
                         name: 'Gemini 调试',
                         icon: 'fas fa-robot',
                         href: 'gemini-test.html'
+                    },
+                    {
+                        id: 'gemini-browser-test',
+                        name: '研报 PDF Gem',
+                        icon: 'fas fa-window-restore',
+                        href: 'gemini-browser-test.html'
                     }
                 ]
             }

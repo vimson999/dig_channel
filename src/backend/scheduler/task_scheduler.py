@@ -348,6 +348,13 @@ def stop_scheduler():
     """停止调度器"""
     scheduler_instance.stop()
 
+def restart_scheduler():
+    """重启调度器"""
+    scheduler_instance.stop()
+    time.sleep(0.2)
+    scheduler_instance.start()
+    return scheduler_instance.get_status()
+
 def get_scheduler_status():
     """获取调度器状态"""
     return scheduler_instance.get_status()

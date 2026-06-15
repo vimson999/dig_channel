@@ -1717,6 +1717,20 @@ header[role="banner"] hr {
     word-break: break-all;
 }
 
+.rv-log-box {
+    margin-top: 12px;
+    max-height: 260px;
+    overflow: auto;
+    border: 1px solid #dbe3ef;
+    border-radius: 8px;
+    background: #0f172a;
+    padding: 12px;
+    color: #cbd5e1;
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+}
+
 .rv-prompt-list {
     display: grid;
     align-content: start;

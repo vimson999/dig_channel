@@ -41,10 +41,10 @@ class RetentionCleanupError(RuntimeError):
 
 @dataclass
 class ContentRetentionPolicy:
-    sync_raw_days: int = 2
-    content_pipeline_batch_days: int = 2
-    manual_publish_days: int = 2
-    pytest_batch_days: int = 2
+    sync_raw_days: int = 3
+    content_pipeline_batch_days: int = 3
+    manual_publish_days: int = 3
+    pytest_batch_days: int = 3
     include_sync_raw: bool = True
     include_content_pipeline_batches: bool = True
     include_manual_publish: bool = True
@@ -55,10 +55,10 @@ class ContentRetentionPolicy:
     def from_payload(cls, payload: Optional[dict] = None):
         payload = payload if isinstance(payload, dict) else {}
         return cls(
-            sync_raw_days=_positive_int(payload.get("sync_raw_days"), 2),
-            content_pipeline_batch_days=_positive_int(payload.get("content_pipeline_batch_days"), 2),
-            manual_publish_days=_positive_int(payload.get("manual_publish_days"), 2),
-            pytest_batch_days=_positive_int(payload.get("pytest_batch_days"), 2),
+            sync_raw_days=_positive_int(payload.get("sync_raw_days"), 3),
+            content_pipeline_batch_days=_positive_int(payload.get("content_pipeline_batch_days"), 3),
+            manual_publish_days=_positive_int(payload.get("manual_publish_days"), 3),
+            pytest_batch_days=_positive_int(payload.get("pytest_batch_days"), 3),
             include_sync_raw=_truthy(payload.get("include_sync_raw", True)),
             include_content_pipeline_batches=_truthy(payload.get("include_content_pipeline_batches", True)),
             include_manual_publish=_truthy(payload.get("include_manual_publish", True)),
@@ -273,7 +273,7 @@ class ContentPipelineRetentionCleanupService:
 
     def _protected_paths(self) -> set[Path]:
         protected = set()
-        for task in PublicationTask.query.filter(PublicationTask.status.in_(["pending", "processing"])).all():
+        for task in PublicationTask.query.filter(PublicationTask.status.in_(["pending", "processing", "failed"])).all():
             protected.update(_paths_from_nested(task.result))
             protected.update(_paths_from_nested(task.params))
         if ZsxqSyncRun is not None:

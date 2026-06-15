@@ -17,6 +17,19 @@ def register_all_apis(app):
     # 注册TTS V2模块
     from api.tts_v2 import tts_v2_bp
     app.register_blueprint(tts_v2_bp)
+
+    # 注册豆包网页朗读捕获模块，与官方 WebSocket TTS 路线独立
+    from api.doubao_browser_tts import doubao_browser_tts_bp
+    app.register_blueprint(doubao_browser_tts_bp)
+
+    # 注册研报 PDF Gem 解析模块，与官方 Gemini API 路线独立；保留旧路径兼容
+    from api.gemini_browser import gemini_browser_bp, report_pdf_gemini_bp
+    app.register_blueprint(report_pdf_gemini_bp)
+    app.register_blueprint(gemini_browser_bp)
+
+    # 注册研报 PDF -> 研报 PDF Gem -> 豆包浏览器朗读编排模块
+    from api.report_audio_workflow import report_audio_workflow_bp
+    app.register_blueprint(report_audio_workflow_bp)
     
     # 创建API信息端点
     @app.route('/api', methods=['GET'])
@@ -36,6 +49,10 @@ def register_all_apis(app):
 
         if app.config.get('ENABLE_TTS_API', False):
             endpoints['v1']['tts'] = '/api/v1/tts'
+        endpoints['doubao_browser_tts'] = '/api/doubao-tts'
+        endpoints['report_pdf_gemini'] = '/api/report-pdf-gemini'
+        endpoints['gemini_browser_legacy'] = '/api/gemini-browser'
+        endpoints['report_audio_workflows'] = '/api/report-audio-workflows'
         if app.config.get('ENABLE_MHTML_API', False):
             endpoints['v1']['mhtml_pdf'] = '/api/v1/mhtml-pdf'
 

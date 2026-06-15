@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>研报转语音编排台 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <div id="nav-container"></div>
+
+    <main class="mx-auto max-w-[1440px] px-6 py-6">
+        <div class="mb-5 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+                <h1 class="text-2xl font-black tracking-tight">研报转语音编排台</h1>
+                <p class="mt-1 text-sm text-slate-500">PDF -> 研报 PDF Gem 解析/自审 -> DeepSeek 结构化 -> 豆包浏览器朗读 -> WAV。</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <span id="provider-status" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-500">配置检查中</span>
+                <span id="worker-status" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-500">Worker 检查中</span>
+                <button id="refresh-status-btn" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                    <i class="fas fa-rotate mr-1.5"></i>刷新状态
+                </button>
+                <button id="restart-worker-btn" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                    <i class="fas fa-rotate-right mr-1.5"></i>重启编排 Worker
+                </button>
+            </div>
+        </div>
+
+        <div id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm"></div>
+
+        <section class="grid grid-cols-1 gap-5 xl:grid-cols-[460px_minmax(0,1fr)]">
+            <aside class="space-y-4">
+                <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                    <h2 class="text-base font-black">投递 PDF</h2>
+
+                    <label class="mt-4 block rounded-md border border-dashed border-slate-300 bg-slate-50 px-3 py-3 text-xs text-slate-500">
+                        <span class="mb-2 block font-bold text-slate-700">研报 PDF</span>
+                        <input id="pdf-input" type="file" accept="application/pdf,.pdf" class="block w-full text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-900 file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-white">
+                    </label>
+
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">第一轮解析 Prompt</span>
+                        <textarea id="prompt-input" rows="4" class="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm leading-6 focus:border-slate-500 focus:outline-none"></textarea>
+                    </label>
+
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">自审 Prompt</span>
+                        <textarea id="review-prompt-input" rows="5" class="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm leading-6 focus:border-slate-500 focus:outline-none"></textarea>
+                    </label>
+
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">可选 Gem URL</span>
+                        <input id="gemini-url-input" type="url" class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" placeholder="留空使用 .env 中的 REPORT_PDF_GEMINI_URL/GEMINI_BROWSER_URL">
+                    </label>
+
+                    <div class="mt-4 grid grid-cols-2 gap-2">
+                        <button id="submit-btn" class="rounded-md bg-slate-900 px-3 py-2.5 text-sm font-bold text-white hover:bg-slate-800">
+                            <i class="fas fa-paper-plane mr-1.5"></i>投递编排
+                        </button>
+                        <button id="load-history-btn" class="rounded-md border border-slate-300 px-3 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                            <i class="fas fa-clock-rotate-left mr-1.5"></i>加载历史
+                        </button>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                    <h2 class="text-base font-black">队列</h2>
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">轮询间隔 ms</span>
+                        <input id="poll-delay" type="number" min="1000" step="500" value="3000" class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none">
+                    </label>
+                    <button id="refresh-jobs-btn" class="mt-3 w-full rounded-md border border-slate-300 px-3 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                        <i class="fas fa-arrows-rotate mr-1.5"></i>刷新任务
+                    </button>
+                </div>
+            </aside>
+
+            <section class="min-w-0 rounded-lg border border-slate-200 bg-white shadow-sm">
+                <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+                    <div>
+                        <h2 class="text-base font-black">编排结果</h2>
+                        <p id="summary-text" class="mt-1 text-xs text-slate-500">等待投递。</p>
+                    </div>
+                </div>
+                <div id="job-list" class="space-y-3 p-4"></div>
+            </section>
+        </section>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20260614-report-audio-workflow"></script>
+    <script src="js/report-audio-workflow-test.js?v=20260614-001"></script>
+</body>
+</html>

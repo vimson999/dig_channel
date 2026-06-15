@@ -1786,6 +1786,172 @@ def run_auto_scan():
     })
 
 
+@bp.route("/auto-scan/scheduler/status", methods=["GET"])
+def auto_scan_scheduler_status():
+    from services.report_video_auto_scheduler_service import scheduler_status
+
+    return jsonify({"success": True, "data": {"scheduler": scheduler_status()}})
+
+
+@bp.route("/auto-scan/scheduler/start", methods=["POST"])
+def auto_scan_scheduler_start():
+    from services.report_video_auto_scheduler_service import start_scheduler
+
+    result = start_scheduler()
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/auto-scan/scheduler/stop", methods=["POST"])
+def auto_scan_scheduler_stop():
+    from services.report_video_auto_scheduler_service import stop_scheduler
+
+    result = stop_scheduler()
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/auto-scan/scheduler/restart", methods=["POST"])
+def auto_scan_scheduler_restart():
+    from services.report_video_auto_scheduler_service import restart_scheduler
+
+    result = restart_scheduler()
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/auto-scan/scheduler/run-once", methods=["POST"])
+def auto_scan_scheduler_run_once():
+    from services.report_video_auto_scheduler_service import trigger_once
+
+    try:
+        result = trigger_once()
+    except RuntimeError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 500
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/auto-scan/scheduler/logs", methods=["GET"])
+def auto_scan_scheduler_logs():
+    from services.report_video_auto_scheduler_service import scheduler_log_tail
+
+    lines = request.args.get("lines", 120, type=int)
+    parsed_lines = min(500, max(20, int(lines or 120)))
+    return jsonify({
+        "success": True,
+        "data": {
+            "lines": scheduler_log_tail(lines=parsed_lines),
+            "line_count": parsed_lines,
+        },
+    })
+
+
+@bp.route("/asset-scan/preview", methods=["POST"])
+def preview_asset_scan():
+    data = request.get_json(silent=True) or {}
+    try:
+        from services.report_video_asset_service import preview_zsxq_report_assets
+
+        preview = preview_zsxq_report_assets(data)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    return jsonify({"success": True, "data": preview})
+
+
+@bp.route("/asset-scan/run", methods=["POST"])
+def run_asset_scan():
+    data = request.get_json(silent=True) or {}
+    dry_run = bool(data.get("dry_run", False))
+    if dry_run:
+        try:
+            from services.report_video_asset_service import preview_zsxq_report_assets
+
+            preview = preview_zsxq_report_assets(data)
+        except ValueError as exc:
+            return jsonify({"success": False, "error": str(exc)}), 400
+        return jsonify({"success": True, "data": {"queued": False, "dry_run": True, "preview": preview}})
+
+    from tasks.report_video import scan_zsxq_report_assets_task
+
+    celery_task = _enqueue_report_video_task(scan_zsxq_report_assets_task, data, False)
+    return jsonify({
+        "success": True,
+        "data": {
+            "queued": True,
+            "celery_id": celery_task.id,
+        },
+    })
+
+
+@bp.route("/asset-scan/scheduler/config", methods=["GET", "POST"])
+def asset_scan_scheduler_config():
+    from services.report_video_asset_scheduler_service import (
+        load_config as load_asset_scheduler_config,
+        save_config as save_asset_scheduler_config,
+    )
+
+    if request.method == "GET":
+        return jsonify({"success": True, "data": {"config": load_asset_scheduler_config()}})
+    data = request.get_json(silent=True) or {}
+    config = save_asset_scheduler_config(data)
+    return jsonify({"success": True, "message": "研报资产补漏计划配置已保存", "data": {"config": config}})
+
+
+@bp.route("/asset-scan/scheduler/status", methods=["GET"])
+def asset_scan_scheduler_status():
+    from services.report_video_asset_scheduler_service import scheduler_status
+
+    return jsonify({"success": True, "data": {"scheduler": scheduler_status()}})
+
+
+@bp.route("/asset-scan/scheduler/start", methods=["POST"])
+def asset_scan_scheduler_start():
+    from services.report_video_asset_scheduler_service import start_scheduler
+
+    result = start_scheduler()
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/asset-scan/scheduler/stop", methods=["POST"])
+def asset_scan_scheduler_stop():
+    from services.report_video_asset_scheduler_service import stop_scheduler
+
+    result = stop_scheduler()
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/asset-scan/scheduler/restart", methods=["POST"])
+def asset_scan_scheduler_restart():
+    from services.report_video_asset_scheduler_service import restart_scheduler
+
+    result = restart_scheduler()
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/asset-scan/scheduler/run-once", methods=["POST"])
+def asset_scan_scheduler_run_once():
+    from services.report_video_asset_scheduler_service import trigger_once
+
+    data = request.get_json(silent=True) or {}
+    try:
+        result = trigger_once(target_date=data.get("target_date"))
+    except RuntimeError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 500
+    return jsonify({"success": True, "data": {"scheduler": result}})
+
+
+@bp.route("/asset-scan/scheduler/logs", methods=["GET"])
+def asset_scan_scheduler_logs():
+    from services.report_video_asset_scheduler_service import scheduler_log_tail
+
+    lines = request.args.get("lines", 120, type=int)
+    parsed_lines = min(500, max(20, int(lines or 120)))
+    return jsonify({
+        "success": True,
+        "data": {
+            "lines": scheduler_log_tail(lines=parsed_lines),
+            "line_count": parsed_lines,
+        },
+    })
+
+
 @bp.route("/tasks/<task_id>", methods=["GET"])
 def get_task(task_id):
     task, error = _task_or_404(task_id)

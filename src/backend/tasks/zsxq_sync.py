@@ -102,6 +102,7 @@ def run_zsxq_sync(self, run_id, payload):
                         )
                     except Exception:
                         logger.exception("[ZSXQ_SYNC_TASK] failed to persist audio clean submit error | run_id=%s", run_id)
+            _submit_report_asset_scan_after_sync(run_id, payload, result)
             if workflow_run_id:
                 _notify_workflow_sync_finished(workflow_run_id, run_id, success=True, result=result)
             logger.info("[ZSXQ_SYNC_TASK] complete | run_id=%s", run_id)
@@ -124,6 +125,34 @@ def _truthy(value):
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _submit_report_asset_scan_after_sync(run_id, payload, result):
+    try:
+        from services.report_video_asset_service import (
+            build_sync_run_asset_scan_payload,
+            should_auto_scan_after_sync,
+        )
+        from tasks.report_video import scan_zsxq_report_assets_task
+
+        if not should_auto_scan_after_sync(payload, result):
+            return
+        scan_payload = build_sync_run_asset_scan_payload(run_id, payload)
+        celery_task = scan_zsxq_report_assets_task.apply_async(
+            args=[scan_payload, False],
+            queue="report_video",
+            retry=False,
+        )
+        result.setdefault("run", {}).setdefault("result", {}).setdefault("report_asset_scan", {})[
+            "celery_task_id"
+        ] = celery_task.id
+        logger.info(
+            "[ZSXQ_SYNC_TASK] report asset scan queued | run_id=%s celery_id=%s",
+            run_id,
+            celery_task.id,
+        )
+    except Exception as exc:
+        logger.warning("[ZSXQ_SYNC_TASK] report asset scan submit skipped | run_id=%s error=%s", run_id, exc)
 
 
 def _notify_workflow_sync_finished(workflow_run_id, run_id, *, success, result=None, error=None):

@@ -6,7 +6,7 @@
 """
 
 from flask import Blueprint, request, jsonify
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from scheduler import (
     start_scheduler,
     stop_scheduler, 
@@ -72,6 +72,27 @@ def stop():
         
     except Exception as e:
         return handle_api_error(500, f"停止调度器失败: {str(e)}")
+
+
+@bp.route('/restart', methods=['POST'])
+def restart():
+    """重启调度器
+
+    Returns:
+        JSON: 重启结果
+    """
+    try:
+        stop_scheduler()
+        start_scheduler()
+        return jsonify({
+            'success': True,
+            'message': '调度器重启成功',
+            'data': get_scheduler_status()
+        })
+
+    except Exception as e:
+        return handle_api_error(500, f"重启调度器失败: {str(e)}")
+
 
 @bp.route('/manual-crawl', methods=['POST'])
 @validate_request()

@@ -30,6 +30,7 @@ from services.report_video_auto_service import (
     load_auto_scan_config,
     load_auto_scan_config_from_dict,
 )
+from services.report_video_asset_service import create_zsxq_report_asset_batch
 
 
 logger = logging.getLogger(__name__)
@@ -125,13 +126,15 @@ def parse_report_pdf_task(self, report_id):
             report.parse_status = parse_status
             report.ai_status = "ai_pending" if parse_status == "parsed" else "ai_blocked"
             report.error_message = error_message
-            report.raw_meta = {
+            raw_meta = dict(report.raw_meta or {})
+            raw_meta.update({
                 "scan_stats": parsed.get("stats") or {},
                 "extraction_method": parsed.get("extraction_method") or "pdf_text",
                 "parse_cache": parsed.get("cache") or {},
                 "parsed_at": datetime.utcnow().isoformat(),
                 "async": True,
-            }
+            })
+            report.raw_meta = raw_meta
             report.updated_at = datetime.utcnow()
             _refresh_task_parse_status(report.task)
             report.task.updated_at = datetime.utcnow()
@@ -866,3 +869,35 @@ def scan_report_video_folder_task(self, config_override=None, dry_run=False, tri
             "created": created,
             "queued": queued,
         }
+
+
+@celery_app.task(bind=True, name="tasks.report_video.scan_zsxq_report_assets_task")
+def scan_zsxq_report_assets_task(self, payload=None, dry_run=False):
+    from app import create_app
+
+    app = create_app()
+    with app.app_context():
+        payload = payload or {}
+        if dry_run:
+            from services.report_video_asset_service import preview_zsxq_report_assets
+
+            return {"status": "dry_run", "preview": preview_zsxq_report_assets(payload), "queued": []}
+
+        result = create_zsxq_report_asset_batch(payload)
+        queued = []
+        if result.get("parse_pdfs"):
+            for report_id in result.get("report_ids") or []:
+                celery_task = parse_report_pdf_task.apply_async(args=[report_id], queue="report_video")
+                queued.append({"report_id": report_id, "celery_id": celery_task.id})
+        result["queued_parse"] = queued
+        result["status"] = "queued" if result.get("created_count", 0) > 0 else "no_new_assets"
+        logger.info(
+            "[REPORT_VIDEO_ASSET_SCAN] complete | source=%s run_id=%s target_date=%s candidates=%s created=%s queued_parse=%s",
+            result.get("source"),
+            result.get("run_id") or "-",
+            result.get("target_date") or "-",
+            result.get("candidate_count"),
+            result.get("created_count"),
+            len(queued),
+        )
+        return result

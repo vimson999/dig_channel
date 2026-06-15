@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -10,7 +11,11 @@ import redis
 from celery_config import celery_app
 from models.zsxq_sync import ZsxqSyncRun
 from services.zsxq_service import zsxq_service
-from services.zsxq_sync_service import zsxq_sync_service
+from services.zsxq_sync_service import (
+    TRANSIENT_UPSTREAM_CODES,
+    ZsxqTransientUpstreamError,
+    zsxq_sync_service,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +27,10 @@ DEFAULT_MAX_DOWNLOAD_FILES = 9
 DEFAULT_MAX_ROUNDS = 0
 COOKIE_ENV_NAME = "ZSXQ_SYNC_TEST_COOKIE"
 COOKIE_OVERRIDE_ENV_NAME = "ZSXQ_SYNC_TEST_COOKIE_OVERRIDE"
+TRANSIENT_VALIDATE_RETRIES_ENV_NAME = "ZSXQ_SYSTEM_SYNC_TRANSIENT_RETRIES"
+TRANSIENT_VALIDATE_RETRY_DELAY_ENV_NAME = "ZSXQ_SYSTEM_SYNC_TRANSIENT_RETRY_DELAY_SECONDS"
+DEFAULT_TRANSIENT_VALIDATE_RETRIES = 5
+DEFAULT_TRANSIENT_VALIDATE_RETRY_DELAY_SECONDS = 60
 ENV_INTERVAL_MINUTES = 25
 GROUP_ID_PLACEHOLDER_RE = re.compile(r"^group[-_]?test", re.IGNORECASE)
 
@@ -79,6 +88,10 @@ def _snapshot_config(config):
         "last_trigger_at": config.get("last_trigger_at"),
         "last_queued_run_id": config.get("last_queued_run_id"),
         "last_workflow_run_id": config.get("last_workflow_run_id"),
+        "last_skip_at": config.get("last_skip_at"),
+        "last_skip_reason": config.get("last_skip_reason"),
+        "last_skip_error": config.get("last_skip_error"),
+        "last_transient_retry_count": config.get("last_transient_retry_count"),
         "jobs": [
             {
                 "key": job.get("key"),
@@ -231,9 +244,41 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
             "config": _snapshot_config(config),
         }
 
+    validation_retry_count = _transient_validation_retry_count()
+    validation_retry_delay = _transient_validation_retry_delay_seconds()
     try:
         cookie = runtime_cookie()
-        _validate_group_id(group_id, cookie=cookie)
+        _validate_group_id_with_retry(
+            group_id,
+            cookie=cookie,
+            max_retries=validation_retry_count,
+            delay_seconds=validation_retry_delay,
+        )
+    except ZsxqTransientUpstreamError as exc:
+        snapshot = _record_transient_validation_skip(
+            config,
+            attempt_id=attempt_id,
+            group_id=group_id,
+            error=exc,
+            retry_count=validation_retry_count,
+        )
+        _notify_transient_validation_skip(
+            attempt_id=attempt_id,
+            group_id=group_id,
+            group_name=config.get("group_name"),
+            error=str(exc),
+            retry_count=validation_retry_count,
+            retry_delay_seconds=validation_retry_delay,
+        )
+        return {
+            "queued": [],
+            "skipped": True,
+            "reason": "transient_upstream_error",
+            "error": str(exc),
+            "retry_count": validation_retry_count,
+            "retry_delay_seconds": validation_retry_delay,
+            "config": snapshot,
+        }
     except ValueError as exc:
         if _is_placeholder_group_id(group_id):
             config["enabled"] = False
@@ -356,6 +401,54 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
     }
 
 
+def _record_transient_validation_skip(config, *, attempt_id, group_id, error, retry_count):
+    skipped_at = datetime.utcnow().isoformat() + "Z"
+    config["last_trigger_at"] = skipped_at
+    config["last_skip_at"] = skipped_at
+    config["last_skip_reason"] = "transient_upstream_error"
+    config["last_skip_error"] = str(error)
+    config["last_transient_retry_count"] = retry_count
+    config["last_failed_batch_id"] = attempt_id
+    config["updated_at"] = skipped_at
+    _write_config(config)
+    logger.warning(
+        "[ZSXQ_SYSTEM_SYNC_TEST] skipped transient upstream error after retries | "
+        "attempt_id=%s group_id=%s retries=%s error=%s",
+        attempt_id or "-",
+        group_id,
+        retry_count,
+        error,
+    )
+    return _snapshot_config(config)
+
+
+def _notify_transient_validation_skip(
+    *,
+    attempt_id,
+    group_id,
+    group_name,
+    error,
+    retry_count,
+    retry_delay_seconds,
+):
+    try:
+        from services.workflow_notification_service import workflow_notification_service
+
+        workflow_notification_service.send_email_message(
+            "[知识星球工作流] 系统同步本轮跳过",
+            "\n".join([
+                "事件：系统同步触发前校验遇到知识星球临时错误，本轮已跳过",
+                f"星球：{group_name or group_id or '-'}",
+                f"触发：{attempt_id or '-'}",
+                f"重试：{retry_count} 次，每次间隔 {retry_delay_seconds:g} 秒",
+                f"错误：{error}",
+                "处理：调度器保持运行，下一轮会继续尝试。",
+            ]),
+        )
+    except Exception:
+        logger.exception("[ZSXQ_SYSTEM_SYNC_TEST] transient skip notification failed | attempt_id=%s", attempt_id)
+
+
 def _notify_queue_failure(*, batch_id, batch_round, trigger, group_id, group_name, error):
     try:
         from services.workflow_notification_service import workflow_notification_service
@@ -379,6 +472,7 @@ def _pending_system_sync_work(group_id):
     queue_length = None
     queue_error = None
     pending_workflow = None
+    stale_workflows = []
     try:
         client = redis.Redis.from_url(
             celery_app.conf.broker_url,
@@ -392,7 +486,8 @@ def _pending_system_sync_work(group_id):
 
     try:
         from services.zsxq_workflow_service import zsxq_workflow_service
-        pending_workflow = zsxq_workflow_service.pending_workflow(group_id=group_id)
+        stale_workflows = zsxq_workflow_service.recover_stale_initial_workflows(group_id=group_id)
+        pending_workflow = zsxq_workflow_service.pending_workflow(group_id=group_id, recover_stale=False)
     except Exception:
         pending_workflow = None
 
@@ -412,6 +507,8 @@ def _pending_system_sync_work(group_id):
         "workflow_run_id": pending_workflow.get("id") if isinstance(pending_workflow, dict) else None,
         "workflow_status": pending_workflow.get("status") if isinstance(pending_workflow, dict) else None,
         "workflow_stage": pending_workflow.get("current_stage") if isinstance(pending_workflow, dict) else None,
+        "stale_workflow_count": len(stale_workflows),
+        "stale_workflow_ids": [item.get("id") for item in stale_workflows if isinstance(item, dict)],
         "queue_length": queue_length,
         "queue_error": queue_error,
         "run_id": pending_run.id if pending_run else None,
@@ -461,14 +558,81 @@ def _validate_group_id(group_id, cookie=None):
         raise ValueError(f"群组配置返回格式异常（group_id={group_id}）。")
 
     if result.get("succeeded") is False:
-        code = result.get("code") or "UNKNOWN"
+        code = str(result.get("code") or "UNKNOWN")
         detail = (
             (result.get("resp_data") or {}).get("message")
             or result.get("message")
             or result.get("error")
             or result
         )
+        if code in TRANSIENT_UPSTREAM_CODES:
+            raise ZsxqTransientUpstreamError(code, detail, payload=result)
         raise ValueError(f"知识星球返回失败 code={code}：{detail}（group_id={group_id}）")
+
+
+def _validate_group_id_with_retry(group_id, cookie=None, *, max_retries=None, delay_seconds=None):
+    retries = _normalize_int(
+        max_retries,
+        default=_transient_validation_retry_count(),
+        lower=0,
+        upper=10,
+    )
+    delay = _normalize_float(
+        delay_seconds,
+        default=_transient_validation_retry_delay_seconds(),
+        lower=0,
+        upper=300,
+    )
+    attempts = retries + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return _validate_group_id(group_id, cookie=cookie)
+        except ZsxqTransientUpstreamError as exc:
+            if attempt >= attempts:
+                logger.warning(
+                    "[ZSXQ_SYSTEM_SYNC_TEST] transient group validation retry exhausted | "
+                    "group_id=%s attempts=%s error=%s",
+                    group_id,
+                    attempts,
+                    exc,
+                )
+                raise
+
+            logger.warning(
+                "[ZSXQ_SYSTEM_SYNC_TEST] transient group validation failure | "
+                "group_id=%s attempt=%s/%s retry_in=%.1fs error=%s",
+                group_id,
+                attempt,
+                attempts,
+                delay,
+                exc,
+            )
+            if delay > 0:
+                time.sleep(delay)
+
+    raise RuntimeError("ZSXQ_SYSTEM_SYNC_VALIDATE_RETRY_LOOP_UNREACHABLE")
+
+
+def _transient_validation_retry_count():
+    return _normalize_int(
+        os.environ.get(TRANSIENT_VALIDATE_RETRIES_ENV_NAME),
+        default=DEFAULT_TRANSIENT_VALIDATE_RETRIES,
+        lower=0,
+        upper=10,
+    )
+
+
+def _transient_validation_retry_delay_seconds():
+    return _normalize_float(
+        os.environ.get(TRANSIENT_VALIDATE_RETRY_DELAY_ENV_NAME),
+        default=DEFAULT_TRANSIENT_VALIDATE_RETRY_DELAY_SECONDS,
+        lower=0,
+        upper=300,
+    )
+
+
+def transient_validation_retry_timeout_seconds():
+    return int((_transient_validation_retry_count() * _transient_validation_retry_delay_seconds()) + 90)
 
 
 def _is_placeholder_group_id(group_id):
@@ -537,8 +701,20 @@ def _normalize_auto_publish_after_clean(value, previous=None):
 
 
 def _bounded_int(value, default, lower, upper):
+    return _normalize_int(value, default=default, lower=lower, upper=upper)
+
+
+def _normalize_int(value, default, lower, upper):
     try:
         number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return min(max(number, lower), upper)
+
+
+def _normalize_float(value, default, lower, upper):
+    try:
+        number = float(value)
     except (TypeError, ValueError):
         number = default
     return min(max(number, lower), upper)

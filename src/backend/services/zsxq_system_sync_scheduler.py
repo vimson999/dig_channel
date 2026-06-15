@@ -11,6 +11,7 @@ from services.zsxq_system_sync_test import (
     COOKIE_ENV_NAME,
     COOKIE_OVERRIDE_ENV_NAME,
     config_status,
+    transient_validation_retry_timeout_seconds,
 )
 
 
@@ -162,6 +163,30 @@ def stop_scheduler():
         "retry_after_ms": 1000,
     }
 
+
+def restart_scheduler(cookie_override=None):
+    stop_result = stop_scheduler()
+    if stop_result.get("running"):
+        return {
+            "restarted": False,
+            "running": True,
+            "message": "计划任务尚未完全停止，暂未启动新进程。",
+            "stop": stop_result,
+            "scheduler": scheduler_status(),
+        }
+
+    time.sleep(0.5)
+    start_result = start_scheduler(cookie_override=cookie_override)
+    return {
+        "restarted": bool(start_result.get("running")),
+        "running": bool(start_result.get("running")),
+        "message": "计划任务已重启。" if start_result.get("running") else start_result.get("message"),
+        "stop": stop_result,
+        "start": start_result,
+        "scheduler": start_result.get("scheduler") or scheduler_status(),
+    }
+
+
 def scheduler_log_path():
     info = _read_pid_file()
     log_path = info.get("log_path") if isinstance(info, dict) else None
@@ -222,7 +247,7 @@ def trigger_once(cookie_override=None):
         env=_scheduler_env(extra=extra_env),
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=max(60, transient_validation_retry_timeout_seconds()),
     )
     if process.returncode != 0:
         raise RuntimeError(
@@ -298,11 +323,23 @@ def scheduler_status():
             _safe_unlink(PID_PATH)
             pid = None
 
+    discovered = None
+    if not pid:
+        discovered = _discover_scheduler_process()
+        if discovered:
+            pid = discovered.get("pid")
+            alive = True
+            running = True
+
     config = config_status()
     started_at = pid_info.get("started_at") if isinstance(pid_info, dict) else None
+    if not started_at and discovered:
+        started_at = discovered.get("started_at")
     log_path = None
     if isinstance(pid_info, dict):
         log_path = pid_info.get("log_path")
+    if not log_path and discovered:
+        log_path = discovered.get("log_path")
     if not log_path:
         log_path = str(LOG_PATH)
     next_run = _guess_next_run(config, started_at)
@@ -374,9 +411,50 @@ def _safe_unlink(path):
 def _is_pid_running(pid):
     try:
         os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except (ProcessLookupError, ValueError, TypeError):
+        return False
     except OSError:
         return False
     return True
+
+
+def _discover_scheduler_process():
+    script_path = str(PROJECT_ROOT / "src" / "backend" / "run_zsxq_auto_scheduler.py")
+    try:
+        import psutil
+
+        for process in psutil.process_iter(["pid", "cmdline", "create_time"]):
+            info = process.info or {}
+            cmdline = info.get("cmdline") or []
+            if not cmdline:
+                continue
+            if script_path not in cmdline:
+                continue
+            if "start" not in cmdline:
+                continue
+
+            started_at = None
+            try:
+                started_at = (
+                    datetime
+                    .fromtimestamp(float(info.get("create_time")), tz=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
+            except Exception:
+                started_at = None
+
+            return {
+                "pid": int(info.get("pid") or process.pid),
+                "started_at": started_at,
+                "command": " ".join(str(item) for item in cmdline),
+                "log_path": str(LOG_PATH),
+            }
+    except Exception:
+        return None
+    return None
 
 
 def _terminate_process(pid):

@@ -65,7 +65,11 @@ def _is_pid_running(pid):
     try:
         os.kill(int(pid), 0)
         return True
-    except Exception:
+    except PermissionError:
+        return True
+    except (ProcessLookupError, ValueError, TypeError):
+        return False
+    except OSError:
         return False
 
 
@@ -183,6 +187,29 @@ def stop_scheduler():
         "stopped": True,
         "running": False,
         "message": "自动发帖调度器已停止。",
+    }
+
+
+def restart_scheduler(cookie_override=None):
+    stop_result = stop_scheduler()
+    if stop_result.get("running"):
+        return {
+            "restarted": False,
+            "running": True,
+            "message": "自动发帖调度器尚未完全停止，暂未启动新进程。",
+            "stop": stop_result,
+            "scheduler": scheduler_status(),
+        }
+
+    time.sleep(0.5)
+    start_result = start_scheduler(cookie_override=cookie_override)
+    return {
+        "restarted": bool(start_result.get("running")),
+        "running": bool(start_result.get("running")),
+        "message": "自动发帖调度器已重启。" if start_result.get("running") else start_result.get("message"),
+        "stop": stop_result,
+        "start": start_result,
+        "scheduler": start_result.get("scheduler") or scheduler_status(),
     }
 
 

@@ -26,11 +26,27 @@ from services.content_pipeline.auto_publish_handoff import submit_publish_clean_
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(bind=True, name="tasks.content_pipeline.run_pdf_clean_task")
-def run_pdf_clean_task(self, task_id):
+def _create_content_pipeline_app():
+    """Create an app context for worker tasks without depending on API blueprints."""
     from app import create_app
 
-    app = create_app()
+    try:
+        return create_app()
+    except Exception:
+        logger.exception("Full Flask app initialization failed; falling back to DB-only task app.")
+
+    from flask import Flask
+    from config import Config
+
+    app = Flask(__name__)
+    app.config.from_object(Config)
+    db.init_app(app)
+    return app
+
+
+@celery_app.task(bind=True, name="tasks.content_pipeline.run_pdf_clean_task")
+def run_pdf_clean_task(self, task_id):
+    app = _create_content_pipeline_app()
     with app.app_context():
         task = PublicationTask.query.get(task_id)
         if not task:
@@ -134,9 +150,7 @@ def run_pdf_clean_task(self, task_id):
 
 @celery_app.task(bind=True, name="tasks.content_pipeline.run_audio_clean_task")
 def run_audio_clean_task(self, task_id):
-    from app import create_app
-
-    app = create_app()
+    app = _create_content_pipeline_app()
     with app.app_context():
         task = PublicationTask.query.get(task_id)
         if not task:

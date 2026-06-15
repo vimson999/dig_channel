@@ -19,7 +19,15 @@ RUNTIME_DIR = PROJECT_ROOT / "runtime" / "celery"
 WATCHDOG_STATE_FILE = RUNTIME_DIR / "watchdog_state.json"
 WATCHDOG_LOG_FILE = LOG_DIR / "celery_watchdog.log"
 WATCHDOG_SCRIPT = PROJECT_ROOT / "scripts" / "dev" / "run-celery-watchdog.sh"
-DEFAULT_WATCHDOG_SERVICES = ("zsxq_workflow", "zsxq_sync", "content_pipeline", "zsxq_publish")
+DEFAULT_WATCHDOG_SERVICES = (
+    "zsxq_workflow",
+    "zsxq_sync",
+    "content_pipeline",
+    "zsxq_publish",
+    "doubao_browser_tts",
+    "report_pdf_gemini",
+    "report_audio_workflow",
+)
 
 SERVICES = {
     "render": {
@@ -37,6 +45,30 @@ SERVICES = {
         "run_script": "scripts/dev/run-celery-tts.sh",
         "log_file": "cloud_tts.log",
         "description": "豆包语音合成队列",
+    },
+    "doubao_browser_tts": {
+        "label": "豆包网页朗读捕获",
+        "queue": "doubao_browser_tts",
+        "hostname_prefix": "doubao_browser_tts@",
+        "run_script": "scripts/dev/run-celery-doubao-browser-tts.sh",
+        "log_file": "doubao_browser_tts.log",
+        "description": "真实浏览器控制豆包网页并通过插件捕获 WAV 的串行队列",
+    },
+    "report_pdf_gemini": {
+        "label": "研报 PDF Gem 解析",
+        "queue": "report_pdf_gemini",
+        "hostname_prefix": "report_pdf_gemini@",
+        "run_script": "scripts/dev/run-celery-report-pdf-gemini.sh",
+        "log_file": "report_pdf_gemini.log",
+        "description": "真实浏览器控制研报解析 Gem，上传 PDF、追问自审并提取回复的串行队列",
+    },
+    "report_audio_workflow": {
+        "label": "研报转语音编排",
+        "queue": "report_audio_workflow",
+        "hostname_prefix": "report_audio_workflow@",
+        "run_script": "scripts/dev/run-celery-report-audio-workflow.sh",
+        "log_file": "report_audio_workflow.log",
+        "description": "调度研报 PDF Gem 解析、自审结构化、豆包浏览器朗读并汇总音频",
     },
     "zsxq_sync": {
         "label": "知识星球同步",
@@ -129,6 +161,10 @@ def _process_exists(pid):
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        return True
+    except (ProcessLookupError, ValueError, TypeError):
+        return False
     except OSError:
         return False
 

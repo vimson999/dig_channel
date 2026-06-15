@@ -28,6 +28,8 @@ DEFAULT_INTERVAL_MINUTES = 30
 DEFAULT_BATCH_SIZE = 4
 DEFAULT_MAX_ROUNDS = 0
 DEFAULT_UPLOAD_RETRIES = 2
+DEFAULT_PUBLISH_RETRIES = 5
+DEFAULT_PUBLISH_RETRY_DELAY_SECONDS = 60
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RUNS_LIMIT = 20
 MAX_HISTORY_RUNS = 200
@@ -304,6 +306,13 @@ def _normalize_rule(item, index):
         "hashtag_id": hashtag_id,
         "hashtag_title": hashtag_title,
         "upload_retry_count": _bounded_int(item.get("upload_retry_count"), default=DEFAULT_UPLOAD_RETRIES, lower=0, upper=5),
+        "publish_retry_count": _bounded_int(item.get("publish_retry_count"), default=DEFAULT_PUBLISH_RETRIES, lower=0, upper=20),
+        "publish_retry_delay_seconds": _bounded_int(
+            item.get("publish_retry_delay_seconds"),
+            default=DEFAULT_PUBLISH_RETRY_DELAY_SECONDS,
+            lower=0,
+            upper=600,
+        ),
         "max_run_attempts": _bounded_int(item.get("max_run_attempts"), default=DEFAULT_MAX_ATTEMPTS, lower=1, upper=10),
         "max_file_size_mb": min(
             _bounded_int(item.get("max_file_size_mb"), default=_default_max_file_size_mb(file_type), lower=1, upper=1024),
@@ -374,6 +383,8 @@ def _snapshot_rule(rule):
         "hashtag_id": rule.get("hashtag_id") or "",
         "hashtag_title": rule.get("hashtag_title") or "",
         "upload_retry_count": rule.get("upload_retry_count"),
+        "publish_retry_count": rule.get("publish_retry_count"),
+        "publish_retry_delay_seconds": rule.get("publish_retry_delay_seconds"),
         "max_run_attempts": rule.get("max_run_attempts"),
         "max_file_size_mb": rule.get("max_file_size_mb"),
     }
@@ -609,7 +620,11 @@ def _is_pid_running(pid):
     try:
         os.kill(int(pid), 0)
         return True
-    except Exception:
+    except PermissionError:
+        return True
+    except (ProcessLookupError, ValueError, TypeError):
+        return False
+    except OSError:
         return False
 
 
@@ -787,6 +802,71 @@ def _assert_upstream_success(result):
     raise ValueError(f"知识星球接口返回失败 code={code}: {message}")
 
 
+def _is_transient_publish_error(error_text):
+    normalized = str(error_text or "").lower()
+    return "code=1059" in normalized or "code 1059" in normalized or "1059" in normalized
+
+
+def _publish_topic_with_retry(rule, cookie, group_id, topic_text, uploaded_file_ids, run_id, cookie_account):
+    attempts = _bounded_int(rule.get("publish_retry_count"), DEFAULT_PUBLISH_RETRIES, lower=0, upper=20) + 1
+    delay_seconds = _bounded_int(
+        rule.get("publish_retry_delay_seconds"),
+        DEFAULT_PUBLISH_RETRY_DELAY_SECONDS,
+        lower=0,
+        upper=600,
+    )
+    cookie_account_id = cookie_account.get("id") or ""
+    cookie_account_name = _cookie_account_label(cookie_account)
+
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            publish_result = zsxq_service.publish_topic(
+                cookie,
+                group_id,
+                topic_text,
+                file_ids=uploaded_file_ids,
+                image_ids=[],
+            )
+            _assert_upstream_success(publish_result)
+            if attempt > 1:
+                logger.info(
+                    "[ZSXQ_AUTO_PUBLISH] publish retry succeeded | run_id=%s rule=%s attempt=%s/%s",
+                    run_id,
+                    rule.get("id"),
+                    attempt,
+                    attempts,
+                )
+            return publish_result
+        except Exception as exc:
+            last_error = str(exc)
+            if not _is_transient_publish_error(last_error) or attempt >= attempts:
+                raise
+            _append_publish_event(
+                "publish_retry",
+                run_id=run_id,
+                rule_id=rule.get("id"),
+                cookie_account_id=cookie_account_id,
+                cookie_account_name=cookie_account_name,
+                attempt=attempt,
+                max_attempts=attempts,
+                retry_after_seconds=delay_seconds,
+                error=last_error,
+            )
+            logger.warning(
+                "[ZSXQ_AUTO_PUBLISH] publish transient failure, retrying | run_id=%s rule=%s attempt=%s/%s delay=%ss error=%s",
+                run_id,
+                rule.get("id"),
+                attempt,
+                attempts,
+                delay_seconds,
+                last_error,
+            )
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+    raise ValueError(last_error or "知识星球发帖失败")
+
+
 def _commit_deferred_marks(state, deferred_marks):
     for entry in deferred_marks:
         _mark_record(state, entry["item"], entry["status"], **entry["extra"])
@@ -910,14 +990,15 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
         hashtag_title=rule.get("hashtag_title") or None,
     )
     try:
-        publish_result = zsxq_service.publish_topic(
+        publish_result = _publish_topic_with_retry(
+            rule,
             cookie,
             config.get("group_id"),
             topic_text,
-            file_ids=uploaded_file_ids,
-            image_ids=[],
+            uploaded_file_ids,
+            run_id,
+            cookie_account,
         )
-        _assert_upstream_success(publish_result)
         topic_id = (((publish_result.get("resp_data") or {}).get("topic") or {}).get("topic_id"))
         _commit_deferred_marks(state, deferred_marks)
         for pair in uploaded_assets:

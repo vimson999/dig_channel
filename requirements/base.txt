@@ -47,6 +47,9 @@ schedule==1.2.0
 # 异步任务队列
 celery==5.3.4
 
+# 浏览器自动化
+playwright==1.48.0
+
 # 数据处理
 pandas==1.5.3
 numpy==1.26.4
@@ -92,4 +95,3 @@ moviepy==2.2.1
 
 # 本地语音识别 (ASR)
 faster-whisper==1.0.3
-

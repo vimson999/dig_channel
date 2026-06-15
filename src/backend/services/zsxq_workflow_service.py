@@ -1,8 +1,10 @@
 import logging
+import os
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, or_, text
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from models import db
 from models.task import PublicationTask
@@ -17,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "partial", "skipped"}
 TERMINAL_TASK_STATUSES = {"completed", "failed"}
+QUEUED_STALE_MINUTES_ENV_NAME = "ZSXQ_WORKFLOW_QUEUED_STALE_MINUTES"
+DEFAULT_QUEUED_STALE_MINUTES = 20
 
 
 class ZsxqWorkflowService:
@@ -204,8 +208,19 @@ class ZsxqWorkflowService:
             db.session.commit()
             return workflow.to_dict()
         except Exception as exc:
+            db.session.rollback()
+            if _is_retryable_database_error(exc):
+                logger.warning(
+                    "[ZSXQ_WORKFLOW] sync stage queue transient db failure | workflow=%s error=%s",
+                    workflow.id,
+                    exc,
+                )
+                raise
+
             logger.exception("[ZSXQ_WORKFLOW] sync stage queue failed | workflow=%s", workflow.id)
-            self._mark_failed(workflow, f"同步阶段入队失败: {exc}", stage="sync")
+            workflow = ZsxqWorkflowRun.query.get(str(workflow_run_id))
+            if workflow:
+                self._mark_failed(workflow, f"同步阶段入队失败: {exc}", stage="sync")
             db.session.commit()
             raise
 
@@ -324,13 +339,51 @@ class ZsxqWorkflowService:
         db.session.commit()
         return workflow.to_dict()
 
-    def pending_workflow(self, group_id=None):
+    def pending_workflow(self, group_id=None, *, recover_stale=True):
         self.ensure_schema()
+        if recover_stale:
+            self.recover_stale_initial_workflows(group_id=group_id)
         query = ZsxqWorkflowRun.query.filter(ZsxqWorkflowRun.status.in_(("queued", "running")))
         if group_id:
             query = query.filter(ZsxqWorkflowRun.group_id == str(group_id))
         workflow = query.order_by(ZsxqWorkflowRun.created_at.desc()).first()
         return workflow.to_dict() if workflow else None
+
+    def recover_stale_initial_workflows(self, group_id=None, stale_minutes=None):
+        self.ensure_schema()
+        stale_minutes = _workflow_queued_stale_minutes(stale_minutes)
+        cutoff = datetime.utcnow() - timedelta(minutes=stale_minutes)
+        query = ZsxqWorkflowRun.query.filter(
+            ZsxqWorkflowRun.status == "queued",
+            ZsxqWorkflowRun.current_stage == "init",
+            or_(
+                ZsxqWorkflowRun.updated_at < cutoff,
+                ZsxqWorkflowRun.created_at < cutoff,
+            ),
+        )
+        if group_id:
+            query = query.filter(ZsxqWorkflowRun.group_id == str(group_id))
+
+        workflows = query.order_by(ZsxqWorkflowRun.created_at.asc()).limit(20).all()
+        if not workflows:
+            return []
+
+        recovered = []
+        for workflow in workflows:
+            message = (
+                f"工作流启动任务长时间停留在 queued/init（超过 {stale_minutes} 分钟），"
+                "已自动标记失败，避免阻塞后续调度。"
+            )
+            self._mark_failed(workflow, message, stage="workflow")
+            recovered.append(workflow.to_dict())
+        db.session.commit()
+        logger.warning(
+            "[ZSXQ_WORKFLOW] stale queued workflows marked failed | group_id=%s count=%s ids=%s",
+            group_id or "-",
+            len(recovered),
+            [item.get("id") for item in recovered],
+        )
+        return recovered
 
     def _submit_clean_stage(self, workflow):
         snapshot = self._snapshot(workflow)
@@ -824,6 +877,33 @@ class ZsxqWorkflowService:
 
     def _now_iso(self):
         return datetime.utcnow().isoformat() + "Z"
+
+
+def _is_retryable_database_error(exc):
+    if isinstance(exc, OperationalError):
+        return True
+    if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
+        return True
+
+    text = str(exc).lower()
+    retryable_fragments = (
+        "timeout expired",
+        "connection to server",
+        "server closed the connection unexpectedly",
+        "could not connect to server",
+        "connection refused",
+        "terminating connection",
+        "connection not open",
+    )
+    return any(fragment in text for fragment in retryable_fragments)
+
+
+def _workflow_queued_stale_minutes(value=None):
+    try:
+        minutes = int(value if value is not None else os.environ.get(QUEUED_STALE_MINUTES_ENV_NAME))
+    except (TypeError, ValueError):
+        minutes = DEFAULT_QUEUED_STALE_MINUTES
+    return max(5, min(24 * 60, minutes))
 
 
 zsxq_workflow_service = ZsxqWorkflowService()

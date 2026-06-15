@@ -30,11 +30,19 @@ EVENT_LABELS = {
     "workflow_completed": "工作流完成",
     "workflow_partial": "工作流部分成功",
     "workflow_failed": "工作流失败",
+    "report_audio_started": "研报转语音启动",
+    "report_audio_gemini_submitted": "研报 PDF Gem 解析已提交",
+    "report_audio_gemini_completed": "研报 PDF Gem 解析完成",
+    "report_audio_normalized": "结构化整理完成",
+    "report_audio_doubao_submitted": "豆包浏览器朗读已提交",
+    "report_audio_doubao_completed": "豆包浏览器朗读完成",
+    "report_audio_completed": "研报转语音完成",
+    "report_audio_failed": "研报转语音失败",
     "test": "测试通知",
 }
 
-FINAL_EVENTS = {"workflow_completed", "workflow_partial", "workflow_failed"}
-FAILURE_EVENTS = {"workflow_failed"}
+FINAL_EVENTS = {"workflow_completed", "workflow_partial", "workflow_failed", "report_audio_completed", "report_audio_failed"}
+FAILURE_EVENTS = {"workflow_failed", "report_audio_failed"}
 SUPPORTED_EMAIL_PROVIDERS = {"email", "smtp", "qq_email", "qq-mail"}
 TRUTHY = {"1", "true", "yes", "on"}
 FALSY = {"0", "false", "no", "off"}
@@ -175,21 +183,24 @@ class WorkflowNotificationService:
         event_type = payload.get("event_type") or "workflow"
         workflow = payload.get("workflow") if isinstance(payload.get("workflow"), dict) else {}
         event_label = EVENT_LABELS.get(event_type, event_type)
-        subject_prefix = os.getenv("WORKFLOW_NOTIFY_SUBJECT_PREFIX", "[知识星球工作流]")
+        subject_prefix = workflow.get("subject_prefix") or os.getenv("WORKFLOW_NOTIFY_SUBJECT_PREFIX", "[知识星球工作流]")
         group_name = workflow.get("group_name") or "未知星球"
+        group_label = workflow.get("group_label") or ("星球" if workflow.get("group_id") else "工作流")
         status = workflow.get("status") or "-"
         round_text = self._round_text(workflow)
         subject = f"{subject_prefix} {event_label} · {group_name}{round_text}"
 
         lines = [
             f"事件：{event_label}",
-            f"星球：{group_name}",
+            f"{group_label}：{group_name}",
             f"状态：{self._status_label(status)} / 当前阶段：{workflow.get('current_stage') or '-'}",
             f"批次：{workflow.get('batch_id') or '-'}",
             f"工作流 ID：{workflow.get('id') or '-'}",
             f"触发方式：{workflow.get('trigger') or '-'}",
             f"轮次：{self._round_text(workflow, plain=True) or '-'}",
         ]
+        if workflow.get("event_message"):
+            lines.append(f"说明：{workflow.get('event_message')}")
         if workflow.get("error_message"):
             lines.append(f"错误：{workflow.get('error_message')}")
 
@@ -304,6 +315,27 @@ class WorkflowNotificationService:
             if publish.get("error"):
                 lines.append(f"发布错误：{publish.get('error')}")
 
+        stages = stage_results.get("stages") if isinstance(stage_results.get("stages"), list) else []
+        if stages:
+            lines.append("")
+            lines.append("流程节点：")
+            for stage in stages[:20]:
+                if not isinstance(stage, dict):
+                    continue
+                name = stage.get("name") or stage.get("id") or "节点"
+                message = stage.get("message")
+                suffix = f" | {message}" if message else ""
+                lines.append(f"{name}：{self._status_label(stage.get('status'))}{suffix}")
+
+        outputs = stage_results.get("outputs") if isinstance(stage_results.get("outputs"), dict) else {}
+        if outputs:
+            lines.append("")
+            lines.append("产物：")
+            for key, value in outputs.items():
+                if value is None or value == "":
+                    continue
+                lines.append(f"{key}：{value}")
+
         return lines
 
     def _tasks_text(self, tasks, stage_status=None):
@@ -342,13 +374,16 @@ class WorkflowNotificationService:
     def _status_label(self, value):
         labels = {
             "queued": "排队中",
+            "pending": "等待",
             "running": "运行中",
             "completed": "成功",
+            "succeeded": "成功",
             "partial": "部分成功",
             "failed": "失败",
             "skipped": "跳过",
             "created": "已创建",
             "processing": "处理中",
+            "canceled": "已取消",
         }
         return labels.get(str(value or ""), str(value or "-"))
 

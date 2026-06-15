@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>历史文件清理 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <main class="mx-auto max-w-[1440px] px-6 py-6">
+        <section class="mb-5 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+            <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                <div class="min-w-0">
+                    <nav class="mb-2 flex flex-wrap items-center gap-2 text-sm text-slate-500">
+                        <a href="index.html" class="hover:text-blue-600">首页</a>
+                        <i class="fas fa-chevron-right text-xs"></i>
+                        <span>工具箱</span>
+                        <i class="fas fa-chevron-right text-xs"></i>
+                        <span class="text-slate-700">历史文件清理</span>
+                    </nav>
+                    <h1 class="text-2xl font-black tracking-tight">历史文件清理</h1>
+                    <p class="mt-1 max-w-3xl text-sm leading-6 text-slate-500">
+                        清理同步、清洗和发布过程中产生的本地大文件。默认只预览候选，不删除数据库记录、JSON 元数据和运行中的任务目录。
+                    </p>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                    <a href="zsxq-system-sync.html" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                        <i class="fas fa-clock-rotate-left mr-2"></i>任务策略
+                    </a>
+                    <button id="refresh-preview-btn" class="rounded-lg bg-slate-900 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800">
+                        <i class="fas fa-magnifying-glass-chart mr-2"></i>预览候选
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <section id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm"></section>
+
+        <section class="mb-5 grid grid-cols-1 gap-3 md:grid-cols-4">
+            <article class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                <div class="text-xs font-bold uppercase tracking-wide text-slate-400">候选对象</div>
+                <div id="metric-count" class="mt-2 text-2xl font-black">-</div>
+                <div class="mt-1 text-xs text-slate-500">目录或大文件</div>
+            </article>
+            <article class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                <div class="text-xs font-bold uppercase tracking-wide text-slate-400">可释放空间</div>
+                <div id="metric-size" class="mt-2 text-2xl font-black">-</div>
+                <div class="mt-1 text-xs text-slate-500">按当前策略估算</div>
+            </article>
+            <article class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                <div class="text-xs font-bold uppercase tracking-wide text-slate-400">最近执行</div>
+                <div id="metric-deleted" class="mt-2 text-2xl font-black">-</div>
+                <div class="mt-1 text-xs text-slate-500">本页执行删除结果</div>
+            </article>
+            <article class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                <div class="text-xs font-bold uppercase tracking-wide text-slate-400">错误</div>
+                <div id="metric-errors" class="mt-2 text-2xl font-black">-</div>
+                <div class="mt-1 text-xs text-slate-500">执行异常数量</div>
+            </article>
+        </section>
+
+        <section class="grid grid-cols-1 gap-5 lg:grid-cols-[380px_minmax(0,1fr)]">
+            <aside class="space-y-4">
+                <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="mb-4">
+                        <h2 class="text-base font-black">保留策略</h2>
+                        <p class="mt-1 text-sm leading-5 text-slate-500">不同类型可以设置不同保留天数。填 0 表示只要存在候选就进入预览。</p>
+                    </div>
+
+                    <div class="space-y-3">
+                        <label class="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <input id="include-sync-raw" type="checkbox" class="mt-1 h-4 w-4 rounded border-slate-300" checked>
+                            <span class="min-w-0 flex-1">
+                                <span class="block text-sm font-black">知识星球同步附件</span>
+                                <span class="mt-1 block text-xs leading-5 text-slate-500">只清理 files 目录下的 PDF、MP3、Office、ZIP 等大附件，保留 topic JSON。</span>
+                                <span class="mt-2 block">
+                                    <span class="text-xs text-slate-500">保留天数</span>
+                                    <input id="sync-raw-days" type="number" min="0" max="365" step="1" value="3" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                </span>
+                            </span>
+                        </label>
+
+                        <label class="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <input id="include-content-batches" type="checkbox" class="mt-1 h-4 w-4 rounded border-slate-300" checked>
+                            <span class="min-w-0 flex-1">
+                                <span class="block text-sm font-black">内容流水线批次</span>
+                                <span class="mt-1 block text-xs leading-5 text-slate-500">清理 runtime/content_pipeline/batches 下的清洗工作区。</span>
+                                <span class="mt-2 block">
+                                    <span class="text-xs text-slate-500">保留天数</span>
+                                    <input id="content-batch-days" type="number" min="0" max="365" step="1" value="3" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                </span>
+                            </span>
+                        </label>
+
+                        <label class="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <input id="include-manual-publish" type="checkbox" class="mt-1 h-4 w-4 rounded border-slate-300" checked>
+                            <span class="min-w-0 flex-1">
+                                <span class="block text-sm font-black">手动发布临时目录</span>
+                                <span class="mt-1 block text-xs leading-5 text-slate-500">清理 runtime/content_pipeline/manual_publish 下的整理目录。</span>
+                                <span class="mt-2 block">
+                                    <span class="text-xs text-slate-500">保留天数</span>
+                                    <input id="manual-publish-days" type="number" min="0" max="365" step="1" value="3" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                </span>
+                            </span>
+                        </label>
+
+                        <label class="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <input id="include-pytest-batches" type="checkbox" class="mt-1 h-4 w-4 rounded border-slate-300" checked>
+                            <span class="min-w-0 flex-1">
+                                <span class="block text-sm font-black">pytest 清洗中转批次</span>
+                                <span class="mt-1 block text-xs leading-5 text-slate-500">清理外部 PDF 清洗项目 runtime/batches 下的中转目录。</span>
+                                <span class="mt-2 block">
+                                    <span class="text-xs text-slate-500">保留天数</span>
+                                    <input id="pytest-batch-days" type="number" min="0" max="365" step="1" value="3" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                </span>
+                            </span>
+                        </label>
+                    </div>
+
+                    <div class="mt-4">
+                        <label class="block">
+                            <span class="text-xs text-slate-500">最多展示候选数</span>
+                            <input id="max-candidates" type="number" min="1" max="20000" step="1" value="2000" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                        </label>
+                    </div>
+
+                    <div class="mt-5 grid grid-cols-1 gap-2">
+                        <button id="preview-btn" class="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-700">
+                            <i class="fas fa-eye mr-2"></i>预览，不删除
+                        </button>
+                        <button id="cleanup-btn" class="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-bold text-red-700 hover:bg-red-100">
+                            <i class="fas fa-trash-can mr-2"></i>按当前预览执行清理
+                        </button>
+                    </div>
+
+                    <p class="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+                        执行前会再次确认。pending / processing / failed 任务引用到的目录会被保护。
+                    </p>
+                </section>
+
+                <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="mb-4 flex items-start justify-between gap-3">
+                        <div>
+                            <h2 class="text-base font-black">自动清理计划</h2>
+                            <p class="mt-1 text-sm leading-5 text-slate-500">按当前保留策略周期执行。建议先用 dry-run 观察一两轮，再切到真实清理。</p>
+                        </div>
+                        <span id="scheduler-status-badge" class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-500">未运行</span>
+                    </div>
+
+                    <div class="space-y-3">
+                        <label class="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700">
+                            <input id="scheduler-enabled" type="checkbox" class="h-4 w-4 rounded border-slate-300" checked>
+                            启用计划
+                        </label>
+                        <label class="block">
+                            <span class="text-xs text-slate-500">执行间隔（小时）</span>
+                            <input id="scheduler-interval-hours" type="number" min="1" max="720" step="1" value="24" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                        </label>
+                        <label class="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-bold text-blue-700">
+                            <input id="scheduler-dry-run" type="checkbox" class="h-4 w-4 rounded border-blue-300">
+                            只预览，不删除
+                        </label>
+                        <label class="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700">
+                            <input id="scheduler-run-on-start" type="checkbox" class="h-4 w-4 rounded border-slate-300">
+                            启动后立即执行一次
+                        </label>
+                    </div>
+
+                    <div class="mt-4 grid grid-cols-2 gap-2">
+                        <button id="save-scheduler-config-btn" class="rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white hover:bg-slate-800">
+                            <i class="fas fa-floppy-disk mr-2"></i>保存计划
+                        </button>
+                        <button id="scheduler-run-once-btn" class="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 hover:bg-blue-100">
+                            <i class="fas fa-play mr-2"></i>立即执行
+                        </button>
+                        <button id="scheduler-start-btn" class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100">
+                            <i class="fas fa-forward mr-2"></i>启动
+                        </button>
+                        <button id="scheduler-stop-btn" class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-700 hover:bg-red-100">
+                            <i class="fas fa-stop mr-2"></i>停止
+                        </button>
+                    </div>
+
+                    <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600" id="scheduler-status-text">
+                        等待读取计划状态。
+                    </div>
+                    <button id="scheduler-logs-btn" class="mt-3 w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50">
+                        <i class="fas fa-list mr-2"></i>查看清理日志
+                    </button>
+                    <pre id="scheduler-logs" class="mt-3 hidden max-h-64 overflow-auto rounded-lg bg-slate-950 p-3 text-xs leading-5 text-slate-200">等待日志...</pre>
+                </section>
+
+                <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                    <h2 class="text-base font-black">扫描根目录</h2>
+                    <div id="roots-list" class="mt-3 space-y-2 text-xs text-slate-500">
+                        <div class="rounded-lg bg-slate-50 px-3 py-2">等待预览...</div>
+                    </div>
+                </section>
+            </aside>
+
+            <section class="min-w-0 space-y-4">
+                <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 class="text-base font-black">清理预览</h2>
+                            <p id="preview-subtitle" class="mt-1 text-sm text-slate-500">等待扫描候选文件。</p>
+                        </div>
+                        <span id="preview-mode-badge" class="w-fit rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">未扫描</span>
+                    </div>
+                    <div id="category-breakdown" class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4"></div>
+                </section>
+
+                <section class="rounded-lg border border-slate-200 bg-white shadow-sm">
+                    <div class="flex flex-col gap-2 border-b border-slate-200 px-5 py-4 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 class="text-base font-black">候选明细</h2>
+                            <p class="mt-1 text-sm text-slate-500">路径可复制。列表只展示后端判定为安全候选的对象。</p>
+                        </div>
+                        <button id="copy-all-btn" class="hidden rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50">
+                            <i class="fas fa-copy mr-2"></i>复制全部路径
+                        </button>
+                    </div>
+                    <div id="candidate-list" class="min-h-[360px] p-5">
+                        <div class="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-sm text-slate-500">
+                            点击“预览候选”开始扫描。
+                        </div>
+                    </div>
+                </section>
+
+                <section id="error-panel" class="hidden rounded-lg border border-red-200 bg-red-50 p-5 shadow-sm">
+                    <h2 class="text-base font-black text-red-800">清理错误</h2>
+                    <div id="error-list" class="mt-3 space-y-2"></div>
+                </section>
+            </section>
+        </section>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20260613-retention"></script>
+    <script src="js/content-retention-cleanup.js?v=20260613-retention"></script>
+</body>
+</html>

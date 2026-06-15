@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>研报 PDF Gem 测试台 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .job-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 12px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            display: inline-block;
+        }
+
+        @media (min-width: 1100px) {
+            .job-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <div id="nav-container"></div>
+
+    <main class="mx-auto max-w-[1440px] px-6 py-6">
+        <div class="mb-5 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+                <h1 class="text-2xl font-black tracking-tight">研报 PDF Gem 测试台</h1>
+                <p class="mt-1 text-sm text-slate-500">打开指定 Gem 地址，上传研报 PDF，并提交多轮解析任务。</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <span id="provider-status" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-500">
+                    配置检查中
+                </span>
+                <span id="worker-status" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-500">
+                    Worker 检查中
+                </span>
+                <button id="refresh-status-btn" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                    <i class="fas fa-rotate mr-1.5"></i>刷新状态
+                </button>
+                <button id="restart-worker-btn" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                    <i class="fas fa-rotate-right mr-1.5"></i>重启 Worker
+                </button>
+            </div>
+        </div>
+
+        <div id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm"></div>
+
+        <section class="grid grid-cols-1 gap-5 xl:grid-cols-[440px_minmax(0,1fr)]">
+            <aside class="space-y-4">
+                <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                    <div class="mb-4 flex items-center justify-between gap-3">
+                        <div>
+                            <h2 class="text-base font-black">投递输入</h2>
+                            <p class="mt-1 text-xs text-slate-500">每个输入块会生成一个独立 job，块内追问复用同一个会话。</p>
+                        </div>
+                        <button id="add-input-btn" class="rounded-md border border-slate-300 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                            <i class="fas fa-plus mr-1.5"></i>添加
+                        </button>
+                    </div>
+
+                    <label class="mb-3 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">可选 URL</span>
+                        <input id="target-url" type="url" class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" placeholder="留空使用 .env 中的 REPORT_PDF_GEMINI_URL/GEMINI_BROWSER_URL">
+                    </label>
+
+                    <div id="input-list" class="space-y-3"></div>
+
+                    <div class="mt-4 grid grid-cols-2 gap-2">
+                        <button id="submit-all-btn" class="rounded-md bg-slate-900 px-3 py-2.5 text-sm font-bold text-white hover:bg-slate-800">
+                            <i class="fas fa-paper-plane mr-1.5"></i>投递全部
+                        </button>
+                        <button id="clear-finished-btn" class="rounded-md border border-slate-300 px-3 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                            <i class="fas fa-filter-circle-xmark mr-1.5"></i>清理完成
+                        </button>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                    <h2 class="text-base font-black">队列参数</h2>
+                    <div class="mt-4 grid grid-cols-2 gap-3">
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-bold text-slate-500">投递间隔 ms</span>
+                            <input id="submit-delay" type="number" min="0" step="100" value="300" class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none">
+                        </label>
+                        <label class="block">
+                            <span class="mb-1 block text-xs font-bold text-slate-500">轮询间隔 ms</span>
+                            <input id="poll-delay" type="number" min="1000" step="500" value="2500" class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none">
+                        </label>
+                    </div>
+                    <div class="mt-4 flex flex-wrap gap-2">
+                        <button id="seed-two-btn" class="rounded-md border border-slate-300 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                            两条示例
+                        </button>
+                        <button id="seed-five-btn" class="rounded-md border border-slate-300 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                            五条示例
+                        </button>
+                    </div>
+                </div>
+            </aside>
+
+            <section class="min-w-0 rounded-lg border border-slate-200 bg-white shadow-sm">
+                <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+                    <div>
+                        <h2 class="text-base font-black">任务结果</h2>
+                        <p id="summary-text" class="mt-1 text-xs text-slate-500">等待投递。</p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <button id="load-history-btn" class="rounded-md border border-slate-300 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                            <i class="fas fa-clock-rotate-left mr-1.5"></i>加载最近历史
+                        </button>
+                        <button id="refresh-jobs-btn" class="rounded-md border border-slate-300 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                            <i class="fas fa-arrows-rotate mr-1.5"></i>刷新任务
+                        </button>
+                    </div>
+                </div>
+                <div id="job-list" class="job-grid p-4"></div>
+            </section>
+        </section>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20260614-gemini-browser-test"></script>
+    <script src="js/gemini-browser-test.js?v=20260614-followups"></script>
+</body>
+</html>

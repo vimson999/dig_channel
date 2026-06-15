@@ -88,6 +88,10 @@ def create_app(config_class=Config):
     # 设置应用程序日志
     setup_application_logging(app.config)
     schedule_log_maintenance()
+
+    # 本地后端启动时可自动恢复 Celery workers 和计划任务。
+    from services.backend_process_bootstrap import start_backend_process_bootstrap
+    start_backend_process_bootstrap(app)
     
     # 基础路由
     @app.route('/')
@@ -131,6 +135,15 @@ if __name__ == '__main__':
     # 设置应用日志
     logger = setup_colored_logger("FLASK_APP")
     logger.info("创建Flask应用...")
+
+    os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_ENABLED", "1")
+    os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_MODE", "restart")
+    os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES", "all")
+    os.environ.setdefault(
+        "BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS",
+        "zsxq_auto,zsxq_auto_publish,content_retention,report_video_asset,report_video_auto",
+    )
+    os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_WATCHDOG", "1")
     
     app = create_app()
     

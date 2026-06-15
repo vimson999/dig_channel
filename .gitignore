@@ -141,6 +141,7 @@ node_modules/
 .temp/venv-3.11/
 /tmp/
 /runtime/
+runtime/browser_profiles/
 
 # Project Data
 data/generated_thumbnails/
@@ -148,6 +149,8 @@ data/processed/
 data/uploads/
 data/zsxq/
 data/tasks/
+# Legacy browser profile location; browser profiles are runtime state.
+data/browser_profiles/
 src/backend/data/uploads/
 .gemini/
 

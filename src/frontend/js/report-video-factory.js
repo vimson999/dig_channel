@@ -9,6 +9,7 @@ const ReportVideoApp = {
     refreshTimer: null,
     toastTimer: null,
     autoScan: null,
+    assetScheduler: null,
     prompts: [],
 
     els: {
@@ -75,6 +76,22 @@ const ReportVideoApp = {
         runAutoScanBtn: document.getElementById('run-auto-scan-btn'),
         autoScanSummary: document.getElementById('auto-scan-summary'),
         autoScanList: document.getElementById('auto-scan-list'),
+        assetSchedulerEnabled: document.getElementById('asset-scheduler-enabled'),
+        assetSchedulerTime: document.getElementById('asset-scheduler-time'),
+        assetSchedulerInterval: document.getElementById('asset-scheduler-interval'),
+        assetSchedulerDateOffset: document.getElementById('asset-scheduler-date-offset'),
+        assetSchedulerMaxFiles: document.getElementById('asset-scheduler-max-files'),
+        assetSchedulerTabKeyword: document.getElementById('asset-scheduler-tab-keyword'),
+        assetSchedulerParsePdfs: document.getElementById('asset-scheduler-parse-pdfs'),
+        assetSchedulerSaveBtn: document.getElementById('asset-scheduler-save-btn'),
+        assetSchedulerStartBtn: document.getElementById('asset-scheduler-start-btn'),
+        assetSchedulerStopBtn: document.getElementById('asset-scheduler-stop-btn'),
+        assetSchedulerRefreshBtn: document.getElementById('asset-scheduler-refresh-btn'),
+        assetSchedulerRunOnceBtn: document.getElementById('asset-scheduler-run-once-btn'),
+        assetSchedulerLogsBtn: document.getElementById('asset-scheduler-logs-btn'),
+        assetSchedulerBadge: document.getElementById('asset-scheduler-badge'),
+        assetSchedulerStatus: document.getElementById('asset-scheduler-status'),
+        assetSchedulerLogs: document.getElementById('asset-scheduler-logs'),
         refreshPromptsBtn: document.getElementById('refresh-prompts-btn'),
         promptList: document.getElementById('prompt-list'),
         promptEditorTitle: document.getElementById('prompt-editor-title'),
@@ -95,6 +112,7 @@ const ReportVideoApp = {
         this.updateAudioModeUi();
         this.loadTasks();
         this.loadAutoScan();
+        this.loadAssetScheduler();
         this.loadPrompts();
         this.refreshTimer = window.setInterval(() => this.refreshIfBusy(), 5000);
     },
@@ -124,6 +142,12 @@ const ReportVideoApp = {
         this.els.saveAutoScanBtn?.addEventListener('click', () => this.saveAutoScanConfig());
         this.els.previewAutoScanBtn?.addEventListener('click', () => this.previewAutoScan());
         this.els.runAutoScanBtn?.addEventListener('click', () => this.runAutoScan());
+        this.els.assetSchedulerSaveBtn?.addEventListener('click', () => this.saveAssetSchedulerConfig());
+        this.els.assetSchedulerStartBtn?.addEventListener('click', () => this.startAssetScheduler());
+        this.els.assetSchedulerStopBtn?.addEventListener('click', () => this.stopAssetScheduler());
+        this.els.assetSchedulerRefreshBtn?.addEventListener('click', () => this.loadAssetScheduler());
+        this.els.assetSchedulerRunOnceBtn?.addEventListener('click', () => this.runAssetSchedulerOnce());
+        this.els.assetSchedulerLogsBtn?.addEventListener('click', () => this.toggleAssetSchedulerLogs());
         this.els.refreshPromptsBtn?.addEventListener('click', () => this.loadPrompts());
         this.els.savePromptBtn?.addEventListener('click', () => this.saveSelectedPrompt());
         this.els.resetPromptBtn?.addEventListener('click', () => this.resetSelectedPrompt());
@@ -251,6 +275,116 @@ const ReportVideoApp = {
             alert(`立即扫描失败：${error.message}`);
         } finally {
             this.setButtonLoading(this.els.runAutoScanBtn, false, '立即扫描入队');
+        }
+    },
+
+    async loadAssetScheduler() {
+        if (!this.els.assetSchedulerStatus) return;
+        try {
+            const data = await this.api('/report-video/asset-scan/scheduler/status');
+            const scheduler = data.data?.scheduler || null;
+            this.assetScheduler = scheduler;
+            this.renderAssetSchedulerConfig(scheduler?.config || {});
+            this.renderAssetSchedulerStatus(scheduler);
+        } catch (error) {
+            this.renderError(this.els.assetSchedulerStatus, error.message);
+        }
+    },
+
+    collectAssetSchedulerConfig() {
+        return {
+            enabled: !!this.els.assetSchedulerEnabled?.checked,
+            schedule_time: this.els.assetSchedulerTime?.value || '02:30',
+            interval_minutes: this.els.assetSchedulerInterval?.value ? Number(this.els.assetSchedulerInterval.value) : null,
+            run_on_start: false,
+            parse_pdfs: !!this.els.assetSchedulerParsePdfs?.checked,
+            target_date_offset_days: Number(this.els.assetSchedulerDateOffset?.value || 1),
+            config: {
+                max_files: Number(this.els.assetSchedulerMaxFiles?.value || 50),
+                tab_label_keyword: this.els.assetSchedulerTabKeyword?.value?.trim() || '外资研报',
+                output_ratios: ['16:9'],
+                default_segment_count: 4,
+                style: 'professional_finance',
+                generate_subtitles: true
+            }
+        };
+    },
+
+    async saveAssetSchedulerConfig() {
+        this.setButtonLoading(this.els.assetSchedulerSaveBtn, true, '保存中...');
+        try {
+            await this.api('/report-video/asset-scan/scheduler/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(this.collectAssetSchedulerConfig())
+            });
+            await this.loadAssetScheduler();
+            this.renderToastHint('研报资产补漏配置已保存');
+        } catch (error) {
+            alert(`保存补漏配置失败：${error.message}`);
+        } finally {
+            this.setButtonLoading(this.els.assetSchedulerSaveBtn, false, '保存补漏配置');
+        }
+    },
+
+    async startAssetScheduler() {
+        this.setButtonLoading(this.els.assetSchedulerStartBtn, true, '启动中...');
+        try {
+            await this.api('/report-video/asset-scan/scheduler/start', { method: 'POST' });
+            await this.loadAssetScheduler();
+        } catch (error) {
+            alert(`启动补漏计划失败：${error.message}`);
+        } finally {
+            this.setButtonLoading(this.els.assetSchedulerStartBtn, false, '启动计划');
+        }
+    },
+
+    async stopAssetScheduler() {
+        this.setButtonLoading(this.els.assetSchedulerStopBtn, true, '停止中...');
+        try {
+            await this.api('/report-video/asset-scan/scheduler/stop', { method: 'POST' });
+            await this.loadAssetScheduler();
+        } catch (error) {
+            alert(`停止补漏计划失败：${error.message}`);
+        } finally {
+            this.setButtonLoading(this.els.assetSchedulerStopBtn, false, '停止计划');
+        }
+    },
+
+    async runAssetSchedulerOnce() {
+        this.setButtonLoading(this.els.assetSchedulerRunOnceBtn, true, '入队中...');
+        try {
+            const data = await this.api('/report-video/asset-scan/scheduler/run-once', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const summary = data.data?.scheduler?.summary || {};
+            this.renderToastHint(summary.queued ? `补漏已入队：${summary.celery_id || '-'}` : '补漏检查完成，暂无新资产');
+            await this.loadAssetScheduler();
+            window.setTimeout(() => this.loadTasks(), 1200);
+        } catch (error) {
+            alert(`立即补漏失败：${error.message}`);
+        } finally {
+            this.setButtonLoading(this.els.assetSchedulerRunOnceBtn, false, '立即补漏一次');
+        }
+    },
+
+    async toggleAssetSchedulerLogs() {
+        if (!this.els.assetSchedulerLogs) return;
+        const hidden = this.els.assetSchedulerLogs.classList.contains('hidden');
+        this.els.assetSchedulerLogs.classList.toggle('hidden', !hidden);
+        if (hidden) await this.loadAssetSchedulerLogs();
+    },
+
+    async loadAssetSchedulerLogs() {
+        if (!this.els.assetSchedulerLogs) return;
+        try {
+            const data = await this.api('/report-video/asset-scan/scheduler/logs?lines=120');
+            const lines = data.data?.lines || [];
+            this.els.assetSchedulerLogs.textContent = lines.length ? lines.join('\n') : '暂无日志。';
+        } catch (error) {
+            this.els.assetSchedulerLogs.textContent = `读取日志失败：${error.message || error}`;
         }
     },
 
@@ -849,6 +983,59 @@ const ReportVideoApp = {
                 </article>
             `;
         }).join('');
+    },
+
+    renderAssetSchedulerConfig(config) {
+        if (!this.els.assetSchedulerEnabled) return;
+        const nested = config.config || {};
+        this.els.assetSchedulerEnabled.checked = config.enabled !== false;
+        this.els.assetSchedulerTime.value = config.schedule_time || '02:30';
+        this.els.assetSchedulerInterval.value = config.interval_minutes || '';
+        this.els.assetSchedulerDateOffset.value = config.target_date_offset_days ?? 1;
+        this.els.assetSchedulerMaxFiles.value = nested.max_files || 50;
+        this.els.assetSchedulerTabKeyword.value = nested.tab_label_keyword || '外资研报';
+        this.els.assetSchedulerParsePdfs.checked = config.parse_pdfs !== false;
+    },
+
+    renderAssetSchedulerStatus(scheduler) {
+        if (!this.els.assetSchedulerStatus) return;
+        if (!scheduler) {
+            this.els.assetSchedulerBadge.textContent = '未知';
+            this.els.assetSchedulerStatus.innerHTML = '<div class="rv-empty">暂无补漏计划状态。</div>';
+            return;
+        }
+        const running = !!scheduler.running;
+        const config = scheduler.config || {};
+        const nested = config.config || {};
+        const last = scheduler.last_result || config.last_result || {};
+        this.els.assetSchedulerBadge.textContent = running ? '运行中' : '未运行';
+        this.els.assetSchedulerBadge.className = `rv-pill ${running ? 'ok' : ''}`;
+        const scheduleText = config.interval_minutes
+            ? `每 ${config.interval_minutes} 分钟`
+            : `每天 ${config.schedule_time || '02:30'}`;
+        const lastText = last.completed_at
+            ? [
+                `目标 ${last.target_date || '-'}`,
+                `候选 ${last.candidate_count || 0}`,
+                `新增 ${last.new_count || 0}`,
+                `已存在 ${last.existing_count || 0}`,
+                last.queued ? `已入队 ${last.celery_id || '-'}` : '未入队'
+            ].join(' · ')
+            : '暂无执行记录';
+        this.els.assetSchedulerStatus.innerHTML = `
+            <article class="rv-auto-item">
+                <div>
+                    <h4>${this.escape(running ? `运行中 · PID ${scheduler.pid || '-'}` : '未运行')}</h4>
+                    <p>${this.escape(config.enabled === false ? '配置：已禁用' : `配置：已启用 · ${scheduleText}`)}</p>
+                    <p>${this.escape(`扫描：T-${config.target_date_offset_days ?? 1} · 单次 ${nested.max_files || 50} 个 · ${nested.tab_label_keyword || '外资研报'} · ${config.parse_pdfs === false ? '不解析' : '解析 PDF'}`)}</p>
+                    <p>${this.escape(`下次执行：${this.formatTime(scheduler.next_run_at || config.next_run_at)}`)}</p>
+                    <p>${this.escape(`上次执行：${this.formatTime(scheduler.last_run_at || config.last_run_at)}`)}</p>
+                    <p>${this.escape(`最近结果：${lastText}`)}</p>
+                    <p>日志：<code>${this.escape(scheduler.log_path || config.log_path || '-')}</code></p>
+                </div>
+                <span class="rv-pill ${last.error_count ? 'warn' : (last.queued ? 'ok' : '')}">${this.escape(last.error_count ? '失败' : (last.queued ? '已入队' : '待命'))}</span>
+            </article>
+        `;
     },
 
     renderPrompts() {

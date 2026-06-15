@@ -217,6 +217,8 @@ def _build_transient_publish_config(*, file_type, source_dir, options):
         "hashtag_id",
         "hashtag_title",
         "upload_retry_count",
+        "publish_retry_count",
+        "publish_retry_delay_seconds",
         "max_run_attempts",
         "max_file_size_mb",
     ):

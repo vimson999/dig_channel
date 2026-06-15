@@ -1,0 +1,265 @@
+import os
+from datetime import datetime
+
+from flask import Blueprint, jsonify, request, send_file
+from sqlalchemy.orm.attributes import flag_modified
+
+from celery_config import celery_app
+from models import db
+from models.task import PublicationTask
+from services.doubao_browser_tts import (
+    FEATURE_NAME,
+    QUEUE_NAME,
+    status_payload as browser_status_payload,
+)
+from tasks.doubao_browser_tts import process_doubao_browser_tts_job
+from utils.auth_utils import require_login
+
+
+doubao_browser_tts_bp = Blueprint("doubao_browser_tts", __name__, url_prefix="/api/doubao-tts")
+
+STATUS_MAP = {
+    "pending": "queued",
+    "processing": "running",
+    "completed": "succeeded",
+    "failed": "failed",
+    "canceled": "canceled",
+}
+
+
+@doubao_browser_tts_bp.route("/status", methods=["GET"])
+@require_login
+def service_status(_current_user):
+    return jsonify({
+        "success": True,
+        "data": {
+            "provider": {
+                "id": FEATURE_NAME,
+                "name": "豆包网页朗读捕获",
+                **browser_status_payload(),
+            }
+        },
+    })
+
+
+@doubao_browser_tts_bp.route("/jobs", methods=["POST"])
+@require_login
+def create_job(current_user):
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    metadata = data.get("metadata") or {}
+    if not text:
+        return jsonify({"success": False, "message": "text 不能为空"}), 400
+    if not isinstance(metadata, dict):
+        return jsonify({"success": False, "message": "metadata 必须是对象"}), 400
+
+    max_length = _max_text_length()
+    if len(text) > max_length:
+        return jsonify({"success": False, "message": f"text 超过 {max_length} 字限制"}), 400
+
+    browser_status = browser_status_payload()
+    if not browser_status.get("configured"):
+        return jsonify({
+            "success": False,
+            "message": "豆包浏览器 TTS 未配置，请设置 userDataDir 和插件路径",
+            "data": {"provider": browser_status},
+        }), 400
+
+    task = PublicationTask(
+        status="pending",
+        current_step="queued",
+        progress=0,
+        params={
+            "feature": FEATURE_NAME,
+            "user_id": getattr(current_user, "id", None),
+            "doubao_browser_tts": {
+                "text": text,
+                "metadata": metadata,
+            },
+        },
+        result={
+            "metadata": metadata,
+            "audio": None,
+            "logs": [],
+        },
+    )
+    db.session.add(task)
+    db.session.commit()
+
+    try:
+        celery_task = process_doubao_browser_tts_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+    except Exception as exc:
+        task.status = "failed"
+        task.current_step = "failed"
+        task.error_message = f"任务入队失败: {exc}"
+        task.completed_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({"success": False, "message": task.error_message}), 502
+
+    task.celery_task_id = celery_task.id
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "job_id": task.id,
+        "status": "queued",
+        "data": {"job_id": task.id, "status": "queued", "celery_id": celery_task.id},
+    })
+
+
+@doubao_browser_tts_bp.route("/jobs", methods=["GET"])
+@require_login
+def list_jobs(current_user):
+    page = _bounded_int(request.args.get("page"), 1, 1, 100000)
+    per_page = _bounded_int(request.args.get("per_page"), 20, 1, 100)
+    status = (request.args.get("status") or "").strip()
+
+    query = PublicationTask.query.filter(
+        PublicationTask.params["feature"].as_string() == FEATURE_NAME,
+        PublicationTask.params["user_id"].as_string() == str(getattr(current_user, "id", None)),
+    )
+    if status:
+        reverse_status = {value: key for key, value in STATUS_MAP.items()}
+        query = query.filter(PublicationTask.status == reverse_status.get(status, status))
+
+    pagination = query.order_by(PublicationTask.created_at.desc()).paginate(
+        page=page,
+        per_page=per_page,
+        error_out=False,
+    )
+    items = [_job_payload(task) for task in pagination.items]
+    return jsonify({
+        "success": True,
+        "data": {
+            "items": items,
+            "pagination": {
+                "page": pagination.page,
+                "per_page": per_page,
+                "total": pagination.total,
+                "pages": pagination.pages,
+            },
+        },
+        "items": items,
+    })
+
+
+@doubao_browser_tts_bp.route("/jobs/<job_id>", methods=["GET"])
+@require_login
+def get_job(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    payload = _job_payload(task, include_raw=True)
+    return jsonify({"success": True, **payload, "data": payload})
+
+
+@doubao_browser_tts_bp.route("/jobs/<job_id>/download", methods=["GET"])
+@require_login
+def download_job(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    audio = (task.result or {}).get("audio") or {}
+    wav_path = audio.get("wav_path")
+    if not wav_path or not os.path.exists(wav_path):
+        return jsonify({"success": False, "message": "WAV 文件不存在"}), 404
+    return send_file(
+        wav_path,
+        mimetype="audio/wav",
+        as_attachment=True,
+        download_name=f"{task.id}.wav",
+    )
+
+
+@doubao_browser_tts_bp.route("/jobs/<job_id>/cancel", methods=["POST"])
+@require_login
+def cancel_job(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    if task.status in {"completed", "failed", "canceled"}:
+        payload = _job_payload(task)
+        return jsonify({"success": True, "message": "任务已结束", **payload, "data": payload})
+
+    if task.celery_task_id:
+        celery_app.control.revoke(task.celery_task_id, terminate=False)
+
+    result = dict(task.result or {})
+    result["canceled_at"] = datetime.utcnow().isoformat() + "Z"
+    task.status = "canceled"
+    task.current_step = "canceled"
+    task.completed_at = datetime.utcnow()
+    task.result = result
+    flag_modified(task, "result")
+    db.session.commit()
+
+    payload = _job_payload(task)
+    return jsonify({"success": True, "message": "任务已取消", **payload, "data": payload})
+
+
+def _get_owned_task(current_user, job_id):
+    task = PublicationTask.query.get(job_id)
+    if not task or not isinstance(task.params, dict) or task.params.get("feature") != FEATURE_NAME:
+        return None
+    if str(task.params.get("user_id")) != str(getattr(current_user, "id", None)):
+        return None
+    return task
+
+
+def _job_payload(task, include_raw=False):
+    result = task.result or {}
+    audio = result.get("audio") or None
+    params = task.params or {}
+    request_payload = params.get("doubao_browser_tts") or {}
+    status = STATUS_MAP.get(task.status, task.status or "queued")
+    payload = {
+        "job_id": task.id,
+        "status": status,
+        "step": task.current_step,
+        "progress": task.progress or 0,
+        "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
+        "started_at": result.get("started_at"),
+        "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else result.get("completed_at"),
+        "error": task.error_message or result.get("error"),
+        "text": request_payload.get("text"),
+        "request": {
+            "text": request_payload.get("text"),
+            "metadata": request_payload.get("metadata") or {},
+        },
+        "audio": _public_audio(task.id, audio),
+        "metadata": result.get("metadata") or request_payload.get("metadata") or {},
+        "logs": result.get("logs") or [],
+    }
+    if include_raw:
+        payload["raw_params"] = params
+        payload["raw_result"] = result
+    return payload
+
+
+def _public_audio(job_id, audio):
+    if not audio:
+        return None
+    public = {
+        "chunks": audio.get("chunks"),
+        "seconds": audio.get("seconds"),
+        "sample_rate": audio.get("sample_rate"),
+        "bytes": audio.get("bytes"),
+    }
+    if audio.get("wav_path"):
+        public["download_url"] = f"/api/doubao-tts/jobs/{job_id}/download"
+    return public
+
+
+def _max_text_length():
+    try:
+        return int(os.getenv("DOUBAO_BROWSER_TTS_MAX_TEXT_LENGTH", "5000"))
+    except (TypeError, ValueError):
+        return 5000
+
+
+def _bounded_int(value, default, minimum, maximum):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))

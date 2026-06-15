@@ -18,12 +18,28 @@ from services.content_pipeline.auto_publish_handoff import publish_clean_output
 logger = logging.getLogger(__name__)
 
 
+def _create_zsxq_publish_app():
+    """Create an app context for publish tasks without depending on API blueprints."""
+    from app import create_app
+
+    try:
+        return create_app()
+    except Exception:
+        logger.exception("Full Flask app initialization failed; falling back to DB-only publish app.")
+
+    from flask import Flask
+    from config import Config
+
+    app = Flask(__name__)
+    app.config.from_object(Config)
+    db.init_app(app)
+    return app
+
+
 @celery_app.task(bind=True, name="tasks.zsxq_publish.run_publish_clean_output_task")
 def run_publish_clean_output_task(self, task_id):
     """Publish cleaned content-pipeline output in the dedicated zsxq_publish queue."""
-    from app import create_app
-
-    app = create_app()
+    app = _create_zsxq_publish_app()
     with app.app_context():
         task = PublicationTask.query.get(task_id)
         if not task:

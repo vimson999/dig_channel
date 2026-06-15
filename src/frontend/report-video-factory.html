@@ -374,6 +374,72 @@
                                 </div>
                             </section>
                         </div>
+
+                        <div class="rv-ai-panel">
+                            <div>
+                                <h3>知识星球研报资产补漏</h3>
+                                <p>定时扫描已同步到本地的外资研报 PDF，创建每日研报资产批次并解析正文；不生成 AI 文案和视频。</p>
+                            </div>
+                            <div class="rv-toolbar-actions">
+                                <button id="asset-scheduler-refresh-btn" class="rv-ghost" type="button">刷新状态</button>
+                                <button id="asset-scheduler-run-once-btn" class="rv-primary" type="button">立即补漏一次</button>
+                            </div>
+                        </div>
+
+                        <div class="rv-auto-grid">
+                            <section class="rv-auto-config">
+                                <label class="rv-inline-check">
+                                    <input id="asset-scheduler-enabled" type="checkbox" checked>
+                                    <span>启用补漏计划</span>
+                                </label>
+                                <div class="rv-grid-2">
+                                    <label>
+                                        <span>每天执行时间</span>
+                                        <input id="asset-scheduler-time" type="time" value="02:30">
+                                    </label>
+                                    <label>
+                                        <span>测试间隔分钟</span>
+                                        <input id="asset-scheduler-interval" type="number" min="0" placeholder="留空则按每天时间">
+                                    </label>
+                                </div>
+                                <div class="rv-grid-2">
+                                    <label>
+                                        <span>扫描日期偏移</span>
+                                        <input id="asset-scheduler-date-offset" type="number" min="0" max="30" value="1">
+                                    </label>
+                                    <label>
+                                        <span>单次最多 PDF</span>
+                                        <input id="asset-scheduler-max-files" type="number" min="1" max="500" value="50">
+                                    </label>
+                                </div>
+                                <label>
+                                    <span>tab 关键字</span>
+                                    <input id="asset-scheduler-tab-keyword" value="外资研报">
+                                </label>
+                                <label class="rv-inline-check">
+                                    <input id="asset-scheduler-parse-pdfs" type="checkbox" checked>
+                                    <span>入库后自动解析 PDF 正文</span>
+                                </label>
+                                <div class="rv-toolbar-actions">
+                                    <button id="asset-scheduler-save-btn" class="rv-primary" type="button">保存补漏配置</button>
+                                    <button id="asset-scheduler-start-btn" class="rv-ghost" type="button">启动计划</button>
+                                    <button id="asset-scheduler-stop-btn" class="rv-ghost" type="button">停止计划</button>
+                                </div>
+                                <p class="rv-muted">调度进程使用 <code>scripts/dev/run-report-video-asset-scheduler.sh</code> 启动；同步完成后的实时支线不依赖这个补漏计划。</p>
+                            </section>
+
+                            <section class="rv-auto-preview">
+                                <div class="rv-report-toolbar">
+                                    <h3>补漏状态</h3>
+                                    <span id="asset-scheduler-badge">未运行</span>
+                                </div>
+                                <div id="asset-scheduler-status" class="rv-auto-list">
+                                    <div class="rv-empty">正在加载补漏计划状态...</div>
+                                </div>
+                                <button id="asset-scheduler-logs-btn" class="rv-ghost" type="button">查看最近日志</button>
+                                <pre id="asset-scheduler-logs" class="rv-log-box hidden"></pre>
+                            </section>
+                        </div>
                     </section>
 
                     <section id="tab-prompts" class="rv-tab-panel hidden">
