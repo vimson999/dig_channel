@@ -30,6 +30,8 @@ DEFAULT_MAX_ROUNDS = 0
 DEFAULT_UPLOAD_RETRIES = 2
 DEFAULT_PUBLISH_RETRIES = 5
 DEFAULT_PUBLISH_RETRY_DELAY_SECONDS = 60
+DEFAULT_PUBLISH_VERIFY_ATTEMPTS = 6
+DEFAULT_PUBLISH_VERIFY_DELAY_SECONDS = 30
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RUNS_LIMIT = 20
 MAX_HISTORY_RUNS = 200
@@ -313,6 +315,18 @@ def _normalize_rule(item, index):
             lower=0,
             upper=600,
         ),
+        "publish_verify_attempts": _bounded_int(
+            item.get("publish_verify_attempts"),
+            default=DEFAULT_PUBLISH_VERIFY_ATTEMPTS,
+            lower=1,
+            upper=20,
+        ),
+        "publish_verify_delay_seconds": _bounded_int(
+            item.get("publish_verify_delay_seconds"),
+            default=DEFAULT_PUBLISH_VERIFY_DELAY_SECONDS,
+            lower=0,
+            upper=600,
+        ),
         "max_run_attempts": _bounded_int(item.get("max_run_attempts"), default=DEFAULT_MAX_ATTEMPTS, lower=1, upper=10),
         "max_file_size_mb": min(
             _bounded_int(item.get("max_file_size_mb"), default=_default_max_file_size_mb(file_type), lower=1, upper=1024),
@@ -385,6 +399,8 @@ def _snapshot_rule(rule):
         "upload_retry_count": rule.get("upload_retry_count"),
         "publish_retry_count": rule.get("publish_retry_count"),
         "publish_retry_delay_seconds": rule.get("publish_retry_delay_seconds"),
+        "publish_verify_attempts": rule.get("publish_verify_attempts"),
+        "publish_verify_delay_seconds": rule.get("publish_verify_delay_seconds"),
         "max_run_attempts": rule.get("max_run_attempts"),
         "max_file_size_mb": rule.get("max_file_size_mb"),
     }
@@ -867,6 +883,116 @@ def _publish_topic_with_retry(rule, cookie, group_id, topic_text, uploaded_file_
     raise ValueError(last_error or "知识星球发帖失败")
 
 
+def _verify_published_topic(cookie, topic_id, *, expected_file_count, run_id, rule, cookie_account):
+    topic_id = str(topic_id or "").strip()
+    if not topic_id:
+        raise ValueError("知识星球发帖返回缺少 topic_id")
+
+    attempts = _bounded_int(
+        (rule or {}).get("publish_verify_attempts") or cookie_account.get("publish_verify_attempts"),
+        DEFAULT_PUBLISH_VERIFY_ATTEMPTS,
+        lower=1,
+        upper=20,
+    )
+    delay_seconds = _bounded_int(
+        (rule or {}).get("publish_verify_delay_seconds") or cookie_account.get("publish_verify_delay_seconds"),
+        DEFAULT_PUBLISH_VERIFY_DELAY_SECONDS,
+        lower=0,
+        upper=600,
+    )
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = zsxq_service.get_topic(cookie, topic_id)
+            if isinstance(response, dict) and response.get("succeeded") is False:
+                last_error = f"code={response.get('code')}: {response.get('error') or response.get('message')}"
+            else:
+                topic = ((response or {}).get("resp_data") or {}).get("topic") if isinstance(response, dict) else None
+                if topic:
+                    file_count = _topic_file_count(topic)
+                    if file_count >= int(expected_file_count or 0):
+                        return {
+                            "topic_id": topic_id,
+                            "status": "verified",
+                            "confirmed": True,
+                            "file_count": file_count,
+                            "expected_file_count": int(expected_file_count or 0),
+                            "attempts": attempt,
+                            "verified_at": _now_iso(),
+                        }
+                    last_error = f"附件数量不匹配，期望 {expected_file_count}，实际 {file_count}"
+                else:
+                    last_error = "接口返回中缺少 topic"
+        except Exception as exc:
+            last_error = str(exc)
+
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+
+    _append_publish_event(
+        "publish_verify_pending",
+        run_id=run_id,
+        rule_id=(rule or {}).get("id"),
+        cookie_account_id=cookie_account.get("id") or "",
+        cookie_account_name=_cookie_account_label(cookie_account),
+        topic_id=topic_id,
+        expected_file_count=expected_file_count,
+        attempts=attempts,
+        retry_delay_seconds=delay_seconds,
+        error=last_error,
+    )
+    return {
+        "topic_id": topic_id,
+        "status": "pending",
+        "confirmed": False,
+        "file_count": 0,
+        "expected_file_count": int(expected_file_count or 0),
+        "attempts": attempts,
+        "checked_at": _now_iso(),
+        "reason": "pending_review_or_indexing",
+        "last_error": last_error,
+    }
+
+
+def _topic_file_count(topic):
+    direct_files = []
+    containers = [topic]
+    if isinstance(topic, dict):
+        containers.extend([
+            topic.get("talk") or {},
+            topic.get("article") or {},
+        ])
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        files = container.get("files")
+        if isinstance(files, list):
+            direct_files.extend(item for item in files if isinstance(item, dict))
+    if direct_files:
+        return len(direct_files)
+
+    count = 0
+    stack = [topic] if isinstance(topic, dict) else []
+    seen = set()
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, dict):
+            keys = {str(key).lower() for key in current.keys()}
+            if (
+                ({"file_id", "file_name"} & keys or {"file_id", "name"} <= keys or {"hash_id", "name"} <= keys)
+                and ({"size", "download_count", "downloads_count"} & keys)
+            ):
+                count += 1
+                continue
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return count
+
+
 def _commit_deferred_marks(state, deferred_marks):
     for entry in deferred_marks:
         _mark_record(state, entry["item"], entry["status"], **entry["extra"])
@@ -1000,7 +1126,17 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
             cookie_account,
         )
         topic_id = (((publish_result.get("resp_data") or {}).get("topic") or {}).get("topic_id"))
+        verification = _verify_published_topic(
+            cookie,
+            topic_id,
+            expected_file_count=len(uploaded_assets),
+            run_id=run_id,
+            rule=rule,
+            cookie_account=cookie_account,
+        )
         _commit_deferred_marks(state, deferred_marks)
+        verified_count = len(uploaded_assets) if verification.get("confirmed") else 0
+        pending_verify_count = max(0, len(uploaded_assets) - verified_count)
         for pair in uploaded_assets:
             _mark_record(
                 state,
@@ -1009,19 +1145,33 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
                 rule_id=rule.get("id"),
                 topic_id=topic_id,
                 group_id=config.get("group_id"),
+                verification_status=verification.get("status"),
+                verification_confirmed=bool(verification.get("confirmed")),
+                verification_checked_at=verification.get("verified_at") or verification.get("checked_at"),
+                verification_error=verification.get("last_error") or "",
             )
         _mark_cookie_account_success(cookie_account)
         success_count = len(uploaded_assets)
         fail_count = sum(1 for item in file_results if item.get("status") == "failed")
         result["uploaded_count"] = success_count
+        result["submitted_count"] = success_count
+        result["verified_count"] = verified_count
+        result["pending_verify_count"] = pending_verify_count
         result["failed_count"] = fail_count
         result["topic_id"] = str(topic_id or "")
+        result["verification"] = verification
         result["status"] = "partial" if fail_count else "success"
-        result["message"] = (
-            f"选中 {len(batch)} 个，已发布 {success_count} 个，失败 {fail_count} 个。"
-            if fail_count
-            else f"已发布 {success_count} 个附件。"
-        )
+        if pending_verify_count:
+            result["message"] = (
+                f"选中 {len(batch)} 个，已提交发布 {success_count} 个，"
+                f"已确认 {verified_count} 个，待审核/待确认 {pending_verify_count} 个，失败 {fail_count} 个。"
+            )
+        else:
+            result["message"] = (
+                f"选中 {len(batch)} 个，已提交并确认 {success_count} 个，失败 {fail_count} 个。"
+                if fail_count
+                else f"已提交并确认 {success_count} 个附件。"
+            )
         return result
     except Exception as exc:
         error_text = str(exc)
@@ -1121,6 +1271,43 @@ def _run_rule_batch(rule, config, cookie_accounts, state, run_id):
         result["uploaded_count"] = last_retry_result.get("uploaded_count") or 0
         result["failed_count"] = last_retry_result.get("failed_count") or 0
     return result
+
+
+def _publish_counts_from_rule_results(results):
+    totals = {
+        "selected_count": 0,
+        "uploaded_count": 0,
+        "submitted_count": 0,
+        "verified_count": 0,
+        "pending_verify_count": 0,
+        "failed_count": 0,
+        "topic_count": 0,
+        "verified_topic_count": 0,
+        "pending_verify_topic_count": 0,
+    }
+    for item in results or []:
+        if not isinstance(item, dict):
+            continue
+        selected = int(item.get("selected_count") or 0)
+        uploaded = int(item.get("uploaded_count") or 0)
+        submitted = int(item.get("submitted_count") if item.get("submitted_count") is not None else uploaded)
+        verified = int(item.get("verified_count") or 0)
+        pending = int(item.get("pending_verify_count") or max(0, submitted - verified))
+        failed = int(item.get("failed_count") or 0)
+        totals["selected_count"] += selected
+        totals["uploaded_count"] += uploaded
+        totals["submitted_count"] += submitted
+        totals["verified_count"] += verified
+        totals["pending_verify_count"] += pending
+        totals["failed_count"] += failed
+        if item.get("topic_id"):
+            totals["topic_count"] += 1
+            verification = item.get("verification") if isinstance(item.get("verification"), dict) else {}
+            if verification.get("confirmed"):
+                totals["verified_topic_count"] += 1
+            else:
+                totals["pending_verify_topic_count"] += 1
+    return totals
 
 
 def _persist_cookie_account_runtime_state(runtime_config):
@@ -1252,17 +1439,21 @@ def _run_once_for_config(
             "status": run_status,
             "message": message,
             "rules": results,
+            "summary": _publish_counts_from_rule_results(results),
             "finished_at": _now_iso(),
             "cookie_source": cookie_source,
             "cookie_account_count": len(cookie_accounts),
         })
         _replace_run(run_id, run)
+        summary = _publish_counts_from_rule_results(results)
         return {
             "queued": True,
             "run_id": run_id,
             "status": run_status,
             "message": message,
             "rules": results,
+            "summary": summary,
+            **summary,
             "cookie_source": cookie_source,
             "cookie_account_count": len(cookie_accounts),
         }

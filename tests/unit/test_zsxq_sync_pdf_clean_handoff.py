@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -13,6 +14,39 @@ from services.zsxq_sync_service import zsxq_sync_service  # noqa: E402
 
 
 class ZsxqSyncPdfCleanHandoffTest(unittest.TestCase):
+    def test_attachment_download_policy_blocks_by_default(self):
+        with patch.dict("os.environ", {}, clear=True):
+            policy = zsxq_sync_service._attachment_download_policy(
+                requested=True,
+                explicit_allow=True,
+                max_download_files=9,
+            )
+
+        self.assertFalse(policy["enabled"])
+        self.assertEqual(policy["reason"], "env_disabled")
+        self.assertEqual(policy["max_download_files"], 0)
+
+    def test_attachment_download_policy_requires_explicit_allow_and_caps_limit(self):
+        with patch.dict("os.environ", {
+            "ZSXQ_SYNC_ATTACHMENT_DOWNLOADS_ENABLED": "1",
+            "ZSXQ_SYNC_ATTACHMENT_DOWNLOAD_LIMIT": "9",
+        }, clear=True):
+            missing_allow = zsxq_sync_service._attachment_download_policy(
+                requested=True,
+                explicit_allow=False,
+                max_download_files=9,
+            )
+            enabled = zsxq_sync_service._attachment_download_policy(
+                requested=True,
+                explicit_allow=True,
+                max_download_files=9,
+            )
+
+        self.assertFalse(missing_allow["enabled"])
+        self.assertEqual(missing_allow["reason"], "missing_explicit_allow")
+        self.assertTrue(enabled["enabled"])
+        self.assertEqual(enabled["max_download_files"], 3)
+
     def test_downloaded_pdf_files_from_run_result_is_strict_and_deduped(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)

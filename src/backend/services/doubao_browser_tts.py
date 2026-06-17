@@ -1,7 +1,9 @@
 import base64
 import json
 import os
+import re
 import time
+import wave
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +14,11 @@ FEATURE_NAME = "doubao_browser_tts"
 QUEUE_NAME = "doubao_browser_tts"
 DEFAULT_DOUBAO_URL = "https://www.doubao.com/chat/"
 DEFAULT_SAMPLE_RATE = 24000
+DOUBAO_REPEAT_PROMPT_PREFIX = "请一字不差重复下面的内容，不要总结、不要改写、不要添加开场白或解释："
+MIN_DURATION_CHECK_CHARS = 80
+SHORT_DURATION_CHECK_CHARS = 20
+SHORT_TEXT_MIN_AUDIO_SECONDS = 1.0
+MAX_REASONABLE_TTS_CHARS_PER_SECOND = 25.0
 
 
 class DoubaoBrowserTTSError(RuntimeError):
@@ -158,12 +165,13 @@ class DoubaoBrowserTTSWorker:
                 if not output.exists() or output.stat().st_size == 0:
                     raise DoubaoBrowserTTSAutomationError("WAV 导出完成但文件为空")
 
+                file_seconds = _wav_duration_seconds(output)
                 result = {
                     "wav_path": str(output),
                     "bytes": output.stat().st_size,
                     "sample_rate": audio.get("sample_rate") or self.options.sample_rate,
                     "chunks": audio.get("chunks") or 0,
-                    "seconds": audio.get("seconds") or 0,
+                    "seconds": file_seconds or audio.get("seconds") or 0,
                     "page_url": page.url,
                 }
                 self._emit(progress_callback, "save_file", 96, "WAV 已保存", result=result)
@@ -242,11 +250,12 @@ class DoubaoBrowserTTSWorker:
         if input_locator is None:
             raise DoubaoBrowserTTSAutomationError("未找到豆包输入框")
 
+        prompt_text = build_repeat_prompt(text)
         input_locator.click(timeout=10_000)
         tag_name = input_locator.evaluate("(node) => node.tagName.toLowerCase()")
         editable = input_locator.evaluate("(node) => Boolean(node.isContentEditable)")
         if tag_name in {"textarea", "input"}:
-            input_locator.fill(text, timeout=10_000)
+            input_locator.fill(prompt_text, timeout=10_000)
         elif editable:
             input_locator.evaluate(
                 """(node, value) => {
@@ -254,7 +263,7 @@ class DoubaoBrowserTTSWorker:
                     node.textContent = value;
                     node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
                 }""",
-                text,
+                prompt_text,
             )
         else:
             raise DoubaoBrowserTTSAutomationError("豆包输入框不可编辑")
@@ -463,6 +472,25 @@ class DoubaoBrowserTTSWorker:
             })
 
 
+def build_repeat_prompt(text: str) -> str:
+    content = str(text or "").strip()
+    return f"{DOUBAO_REPEAT_PROMPT_PREFIX}\n\n{content}"
+
+
+def validate_audio_duration_for_text(audio: Dict[str, Any], text: str) -> Dict[str, Any]:
+    result = dict(audio or {})
+    seconds = _float_value(result.get("seconds"))
+    chars = len(re.sub(r"\s+", "", str(text or "")))
+    minimum = _minimum_expected_audio_seconds(chars)
+    if minimum > 0 and seconds < minimum:
+        raise DoubaoBrowserTTSError(
+            f"豆包音频时长异常：文本 {chars} 字，音频 {seconds:.3f}s，"
+            f"低于最低预期 {minimum:.1f}s，疑似朗读未完成或捕获到了空音频"
+        )
+    result["seconds"] = seconds
+    return result
+
+
 def storage_path_for_job(job_id: str, created_at: Optional[datetime] = None) -> str:
     created_at = created_at or datetime.utcnow()
     root = Path(_project_root()) / "data" / "processed" / "doubao_browser_tts" / created_at.strftime("%Y%m%d")
@@ -492,6 +520,32 @@ def _effective_user_data_dir(configured: Optional[str], default: str, legacy: st
     if not value_path.exists() and legacy_path.exists():
         return str(legacy_path)
     return value
+
+
+def _minimum_expected_audio_seconds(chars: int) -> float:
+    if chars >= MIN_DURATION_CHECK_CHARS:
+        return max(SHORT_TEXT_MIN_AUDIO_SECONDS, chars / MAX_REASONABLE_TTS_CHARS_PER_SECOND)
+    if chars >= SHORT_DURATION_CHECK_CHARS:
+        return SHORT_TEXT_MIN_AUDIO_SECONDS
+    return 0.0
+
+
+def _wav_duration_seconds(path: Path) -> float:
+    try:
+        with wave.open(str(path), "rb") as reader:
+            sample_rate = reader.getframerate()
+            if sample_rate <= 0:
+                return 0.0
+            return reader.getnframes() / sample_rate
+    except Exception:
+        return 0.0
+
+
+def _float_value(value) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _truthy_env(name: str, default: bool = False) -> bool:

@@ -186,8 +186,8 @@
                                     <input id="system-sync-count-input" type="number" min="1" max="50" step="1" value="12" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
                                 </label>
                                 <label class="block">
-                                    <span class="text-xs text-slate-500">每条附件上限（1-10）</span>
-                                    <input id="system-sync-max-download-files-input" type="number" min="1" max="10" step="1" value="9" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                    <span class="text-xs text-slate-500">自动附件下载上限（0=禁用）</span>
+                                    <input id="system-sync-max-download-files-input" type="number" min="0" max="3" step="1" value="0" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
                                 </label>
                             </div>
 
@@ -195,11 +195,11 @@
 
                             <div class="grid grid-cols-1 gap-2 md:grid-cols-2">
                                 <label class="zsxq-inline-check">
-                                    <input id="system-sync-auto-pdf-clean-checkbox" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600" checked>
+                                    <input id="system-sync-auto-pdf-clean-checkbox" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600">
                                     <span>同步后清洗 PDF</span>
                                 </label>
                                 <label class="zsxq-inline-check">
-                                    <input id="system-sync-auto-audio-clean-checkbox" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600" checked>
+                                    <input id="system-sync-auto-audio-clean-checkbox" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600">
                                     <span>同步后清洗音频</span>
                                 </label>
                             </div>

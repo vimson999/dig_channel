@@ -11,13 +11,18 @@ from services.doubao_browser_tts import (
     FEATURE_NAME,
     DoubaoBrowserTTSWorker,
     storage_path_for_job,
+    validate_audio_duration_for_text,
 )
 
 
 logger = logging.getLogger("DOUBAO_BROWSER_TTS_TASK")
 
 
-@celery_app.task(bind=True, name="tasks.doubao_browser_tts.process_job")
+@celery_app.task(
+    bind=True,
+    name="tasks.doubao_browser_tts.process_job",
+    store_errors_even_if_ignored=True,
+)
 def process_doubao_browser_tts_job(self, task_id):
     app = create_app()
     with app.app_context():
@@ -81,6 +86,7 @@ def _process_job(task_id):
             output_path=output_path,
             progress_callback=update_progress,
         )
+        audio = validate_audio_duration_for_text(audio, text)
 
         final_result = dict(task.result or {})
         final_result.update({

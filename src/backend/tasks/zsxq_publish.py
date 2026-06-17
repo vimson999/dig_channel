@@ -80,6 +80,7 @@ def run_publish_clean_output_task(self, task_id):
             }
             flag_modified(task, "result")
             db.session.commit()
+            _update_attachment_publish_status(task)
 
             if failed:
                 logger.error("ZSXQ publish task failed: %s message=%s", task_id, task.error_message)
@@ -103,9 +104,26 @@ def run_publish_clean_output_task(self, task_id):
                 task.result = result
                 flag_modified(task, "result")
                 db.session.commit()
+                _update_attachment_publish_status(task)
                 _notify_workflow_from_publish_task(task)
             logger.error("ZSXQ publish task failed: %s", exc, exc_info=True)
             return False
+
+
+def _update_attachment_publish_status(task):
+    try:
+        from services.zsxq_sync_service import zsxq_sync_service
+
+        result = zsxq_sync_service.update_attachment_publish_status_from_publish_task(task)
+        logger.info(
+            "[ZSXQ_PUBLISH_TASK] attachment publish status updated | task=%s matched=%s updated=%s reason=%s",
+            getattr(task, "id", "-"),
+            result.get("matched"),
+            result.get("updated"),
+            result.get("reason") or "",
+        )
+    except Exception:
+        logger.exception("[ZSXQ_PUBLISH_TASK] attachment publish status update failed | task=%s", getattr(task, "id", "-"))
 
 
 def _notify_workflow_from_publish_task(task):

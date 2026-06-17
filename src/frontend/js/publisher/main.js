@@ -74,8 +74,9 @@ function initUI() {
             });
             select.appendChild(optgroup);
         });
-        select.value = "207";
+        select.value = "36";
     }
+    refreshBiliScheduleInput();
 }
 
 async function loadInitialData() {
@@ -136,6 +137,44 @@ async function loadSeasons() {
             });
         }
     } catch (e) { console.error('Failed to load seasons:', e); }
+}
+
+function formatDateTimeLocal(date) {
+    const pad = value => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function refreshBiliScheduleInput() {
+    const checkbox = document.getElementById('bili_schedule_enabled');
+    const input = document.getElementById('bili_schedule_time');
+    if (!checkbox || !input) return;
+
+    const minDate = new Date(Date.now() + 6 * 60 * 1000);
+    const maxDate = new Date(Date.now() + 15 * 24 * 60 * 60 * 1000);
+    minDate.setSeconds(0, 0);
+    maxDate.setSeconds(0, 0);
+    input.min = formatDateTimeLocal(minDate);
+    input.max = formatDateTimeLocal(maxDate);
+    input.disabled = !checkbox.checked;
+    if (checkbox.checked && !input.value) {
+        input.value = input.min;
+    }
+}
+
+function getBiliScheduleTimestamp(fd) {
+    const enabled = document.getElementById('bili_schedule_enabled')?.checked ?? false;
+    if (!enabled) return null;
+
+    const value = fd.get('bili_schedule_time');
+    if (!value) throw new Error('请选择 B站定时发布时间');
+
+    const timestamp = Math.floor(new Date(value).getTime() / 1000);
+    const minTimestamp = Math.floor((Date.now() + 5 * 60 * 1000) / 1000);
+    const maxTimestamp = Math.floor((Date.now() + 15 * 24 * 60 * 60 * 1000) / 1000);
+    if (!Number.isFinite(timestamp) || timestamp < minTimestamp || timestamp > maxTimestamp) {
+        throw new Error('B站定时发布时间需在 5 分钟后、15 天内');
+    }
+    return timestamp;
 }
 
 function initCanvasInteractions() {
@@ -260,6 +299,8 @@ function bindEvents() {
         if (e.target.checked) panel.classList.remove('opacity-50', 'pointer-events-none');
         else panel.classList.add('opacity-50', 'pointer-events-none');
     });
+
+    document.getElementById('bili_schedule_enabled')?.addEventListener('change', refreshBiliScheduleInput);
 
     document.getElementById('select-bg')?.addEventListener('change', (e) => {
         const i = e.target.value;
@@ -437,6 +478,14 @@ async function handleTaskSubmit() {
     const fd = new FormData(elements.publishForm);
     if (!fd.get('audio_path')) { alert('请上传音频素材'); return; }
 
+    let biliDelayTime = null;
+    try {
+        biliDelayTime = getBiliScheduleTimestamp(fd);
+    } catch (e) {
+        alert(e.message || 'B站定时发布时间无效');
+        return;
+    }
+
     const vSubtitles = state.audio_segments.map(s => s.subtitle || "");
 
     const payload = {
@@ -469,10 +518,24 @@ async function handleTaskSubmit() {
             enabled: document.getElementById('bili_enabled')?.checked ?? true,
             title: fd.get('bili_title') || (document.getElementById('thumb_main')?.value || "未命名视频").split('\n')[0],
             desc: fd.get('bili_desc') || "由一键发布台自动合成。",
-            tid: parseInt(fd.get('bili_tid') || 17), 
+            tid: parseInt(fd.get('bili_tid') || 36),
             tags: (fd.get('bili_tags') || "财经, 投资").split(',').map(t => t.trim()).filter(t => t),
             copyright: parseInt(fd.get('bili_copyright') || 1),
-            no_reprint: document.querySelector('input[name="bili_no_reprint"]')?.checked ? 1 : 0
+            no_reprint: document.querySelector('input[name="bili_no_reprint"]')?.checked ? 1 : 0,
+            neutral_mark: fd.get('bili_neutral_mark') || "个人观点，仅供参考",
+            delay_time: biliDelayTime,
+            season_id: parseInt(fd.get('bili_season_id') || 0) || null,
+            charging_pay: {
+                enabled: document.getElementById('bili_charging_pay')?.checked ?? false,
+                upower_mode: 0,
+                preview: {
+                    need_preview: 1,
+                    start_time: 0,
+                    end_time: parseInt(fd.get('bili_charging_preview_end') || 5)
+                },
+                qa: { qa_enabled: 0, qa_id: null },
+                member_first: { enabled: 0, exp_time: 0 }
+            }
         }
     };
     
@@ -484,6 +547,7 @@ async function handleTaskSubmit() {
             date_text: document.getElementById('thumb_date').value,
             bg_index: document.getElementById('select-bg').value,
             layout: 'left', 
+            mode: document.getElementById('thumb_bg_mode')?.value || 'preset',
             custom_bg_path: document.getElementById('val-thumb-bg')?.value, 
             overlay_opacity: document.getElementById('overlay_opacity')?.value || 0.5,
             transform: state.transforms.cover
@@ -560,6 +624,7 @@ function resetFormUI() {
     state.images.custom.src = "";
     
     // 5. 触发一次重绘
+    refreshBiliScheduleInput();
     refreshPreviews();
 }
 

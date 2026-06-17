@@ -6,10 +6,10 @@ const PUBLISH_ACTIVE_COOKIE_ID_STORAGE_KEY = 'zsxq_publish_active_cookie_id';
 const SYSTEM_SYNC_INTERVAL_MINUTES = 25;
 const SYSTEM_SYNC_MAX_ROUNDS = 0;
 const SYSTEM_SYNC_COUNT = 12;
-const SYSTEM_SYNC_MAX_DOWNLOAD_FILES = 9;
-const SYSTEM_SYNC_AUTO_PDF_CLEAN = true;
-const SYSTEM_SYNC_AUTO_AUDIO_CLEAN = true;
-const SYSTEM_SYNC_AUTO_PUBLISH_AFTER_CLEAN = true;
+const SYSTEM_SYNC_MAX_DOWNLOAD_FILES = 0;
+const SYSTEM_SYNC_AUTO_PDF_CLEAN = false;
+const SYSTEM_SYNC_AUTO_AUDIO_CLEAN = false;
+const SYSTEM_SYNC_AUTO_PUBLISH_AFTER_CLEAN = false;
 const SYSTEM_SYNC_STATUS_POLL_MS = 15000;
 const SYSTEM_SYNC_LOG_LINES = 160;
 const AUTO_PUBLISH_LOG_LINES = 160;
@@ -1171,8 +1171,8 @@ async function saveSystemSyncConfig() {
     const maxDownloadFilesRaw = parseBoundedInt(
         els.configMaxDownloadFilesInput?.value,
         SYSTEM_SYNC_MAX_DOWNLOAD_FILES,
-        1,
-        10,
+        0,
+        3,
     );
     const group = selectedGroup('sync');
     const cookie = getActiveCookieForRequest('sync');
@@ -1188,7 +1188,8 @@ async function saveSystemSyncConfig() {
             count: Number(countRaw),
             max_pages: 1,
             stop_on_existing: true,
-            download_attachments: true,
+            download_attachments: false,
+            allow_attachment_downloads: false,
             max_download_files: Number(maxDownloadFilesRaw),
             auto_pdf_clean: Boolean(els.configAutoPdfCleanCheckbox?.checked),
             auto_audio_clean: Boolean(els.configAutoAudioCleanCheckbox?.checked),
@@ -1221,11 +1222,12 @@ async function saveSystemSyncConfig() {
             );
         } else {
             const cleanParts = [
-                config.auto_pdf_clean !== false ? 'PDF清洗' : null,
-                config.auto_audio_clean !== false ? '音频清洗' : null,
+                config.auto_pdf_clean === true ? 'PDF清洗' : null,
+                config.auto_audio_clean === true ? '音频清洗' : null,
             ].filter(Boolean);
-            const workflowText = `同步${cleanParts.length ? ` → ${cleanParts.join('+')}` : ''}${cleanParts.length && config.auto_publish_after_clean?.enabled ? ' → 发布' : ''}`;
-            renderMessage('success', `配置已保存。${workflowText}；间隔 ${serverInterval || intervalMinutes} 分钟，每目标 Tab ${serverCount || countRaw} 条，每条最多 ${serverMaxDownloadFiles || maxDownloadFilesRaw} 个附件，任务轮次：${formatConfigMaxRounds(config.max_rounds)}。`);
+            const workflowText = `同步索引${cleanParts.length ? ` → ${cleanParts.join('+')}` : ''}${cleanParts.length && config.auto_publish_after_clean?.enabled ? ' → 发布' : ''}`;
+            const downloadText = config.download_attachments ? `自动下载最多 ${serverMaxDownloadFiles || maxDownloadFilesRaw} 个附件` : '不自动下载 PDF/音频附件';
+            renderMessage('success', `配置已保存。${workflowText}；${downloadText}；间隔 ${serverInterval || intervalMinutes} 分钟，每目标 Tab ${serverCount || countRaw} 条，任务轮次：${formatConfigMaxRounds(config.max_rounds)}。`);
         }
         if (Number.isFinite(serverCount)) {
             els.configCountInput.value = String(serverCount);
@@ -1442,10 +1444,11 @@ function renderSyncSchedulerPanel() {
     els.schedulerStatusBadge.className = `rounded-full px-2 py-1 text-[10px] font-black ${running ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`;
     const interval = config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES;
     const count = config.count || SYSTEM_SYNC_COUNT;
-    const maxFiles = config.max_download_files || SYSTEM_SYNC_MAX_DOWNLOAD_FILES;
-    const autoPdfClean = config.auto_pdf_clean !== false;
-    const autoAudioClean = config.auto_audio_clean !== false;
-    const autoPublishAfterClean = config.auto_publish_after_clean?.enabled !== false;
+    const maxFiles = Number(config.max_download_files || SYSTEM_SYNC_MAX_DOWNLOAD_FILES);
+    const autoDownloadAttachments = Boolean(config.download_attachments);
+    const autoPdfClean = config.auto_pdf_clean === true;
+    const autoAudioClean = config.auto_audio_clean === true;
+    const autoPublishAfterClean = config.auto_publish_after_clean?.enabled === true;
     const cleanParts = [
         autoPdfClean ? 'PDF' : null,
         autoAudioClean ? '音频' : null,
@@ -1461,7 +1464,7 @@ function renderSyncSchedulerPanel() {
     els.schedulerContent.innerHTML = `
         <div class="space-y-1">
             <div>进程状态：${escapeHtml(running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
-            <div>计划配置：${escapeHtml(String(interval))} 分钟一次 · 每目标 Tab ${escapeHtml(String(count))} 条 · 每条最多 ${escapeHtml(String(maxFiles))} 个附件</div>
+            <div>计划配置：${escapeHtml(String(interval))} 分钟一次 · 每目标 Tab ${escapeHtml(String(count))} 条 · ${escapeHtml(autoDownloadAttachments ? `自动下载最多 ${maxFiles} 个附件` : '不自动下载 PDF/音频附件')}</div>
             <div>工作流：同步 → ${escapeHtml(cleanText)}${escapeHtml(publishEnabled ? ' → 发布' : '')}</div>
             <div>轮次：${escapeHtml(rounds)}</div>
             <div>Cookie：${escapeHtml(cookieMode)}</div>
@@ -1515,15 +1518,18 @@ function renderSyncOverviewCard() {
     els.configBadge.textContent = scheduler.cookie_source === 'page' ? '页面 Cookie' : (config.cookie_env_configured ? '已配置' : '缺少 Cookie');
     els.configBadge.className = `rounded-full px-2 py-1 text-[10px] font-black ${hasRuntimeCookie ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`;
     els.configSummary.textContent = `${config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES} 分钟一次 · 目标星球：${config.group_name || config.group_id || '-'} · ${rounds}`;
-    const autoPdfClean = config.auto_pdf_clean !== false;
-    const autoAudioClean = config.auto_audio_clean !== false;
+    const autoPdfClean = config.auto_pdf_clean === true;
+    const autoAudioClean = config.auto_audio_clean === true;
     const cleanParts = [
         autoPdfClean ? 'PDF 清洗' : null,
         autoAudioClean ? '音频清洗' : null,
     ].filter(Boolean);
     const cleanText = cleanParts.length ? cleanParts.join(' + ') : '不清洗';
-    const autoPublishText = cleanParts.length && config.auto_publish_after_clean?.enabled !== false ? '清洗后自动发帖开启' : '不自动发帖';
-    els.configDetail.textContent = `每条附件上限：${config.max_download_files || SYSTEM_SYNC_MAX_DOWNLOAD_FILES} · 每目标 Tab ${config.count || SYSTEM_SYNC_COUNT} 条 · ${cleanText} · ${autoPublishText} · 任务来源：${cookieSourceText}。`;
+    const autoPublishText = cleanParts.length && config.auto_publish_after_clean?.enabled === true ? '清洗后自动发帖开启' : '不自动发帖';
+    const downloadText = config.download_attachments
+        ? `自动下载附件上限：${config.max_download_files || SYSTEM_SYNC_MAX_DOWNLOAD_FILES}`
+        : '不自动下载 PDF/音频附件';
+    els.configDetail.textContent = `${downloadText} · 每目标 Tab ${config.count || SYSTEM_SYNC_COUNT} 条 · ${cleanText} · ${autoPublishText} · 任务来源：${cookieSourceText}。`;
     renderWorkspaceSnapshot();
 }
 
@@ -1552,8 +1558,8 @@ function hydrateSystemSyncRuntimeConfigInputs(config = {}) {
         const maxDownloadFiles = parseBoundedInt(
             config.max_download_files,
             SYSTEM_SYNC_MAX_DOWNLOAD_FILES,
-            1,
-            10,
+            0,
+            3,
         );
         els.configMaxDownloadFilesInput.value = String(maxDownloadFiles);
     }
@@ -1568,15 +1574,15 @@ function hydrateSystemSyncRuntimeConfigInputs(config = {}) {
     }
 
     if (els.configAutoPdfCleanCheckbox) {
-        els.configAutoPdfCleanCheckbox.checked = config.auto_pdf_clean !== false;
+        els.configAutoPdfCleanCheckbox.checked = config.auto_pdf_clean === true;
     }
 
     if (els.configAutoAudioCleanCheckbox) {
-        els.configAutoAudioCleanCheckbox.checked = config.auto_audio_clean !== false;
+        els.configAutoAudioCleanCheckbox.checked = config.auto_audio_clean === true;
     }
 
     if (els.configAutoPublishAfterCleanCheckbox) {
-        els.configAutoPublishAfterCleanCheckbox.checked = config.auto_publish_after_clean?.enabled !== false;
+        els.configAutoPublishAfterCleanCheckbox.checked = config.auto_publish_after_clean?.enabled === true;
     }
 }
 

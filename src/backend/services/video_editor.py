@@ -23,9 +23,28 @@ class VideoEditorService:
         # 针对 Mac M 系列芯片默认使用硬件加速
         self.video_codec = 'h264_videotoolbox' if platform.system() == 'Darwin' else 'libx264'
         logger.info(f"Detected {platform.system()}, using codec: {self.video_codec}")
+        self.font_path = self._find_font_path()
         
         os.makedirs(self.upload_folder, exist_ok=True)
         os.makedirs(self.output_folder, exist_ok=True)
+
+    def _find_font_path(self):
+        candidates = [
+            os.path.join(self.base_dir, 'assets', 'fonts', 'SourceHanSansSC-Heavy.otf'),
+            '/System/Library/Fonts/PingFang.ttc',
+            '/System/Library/Fonts/Hiragino Sans GB.ttc',
+            '/System/Library/Fonts/STHeiti Medium.ttc',
+            '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
+            '/Library/Fonts/Arial Unicode.ttf',
+            '/System/Library/Fonts/Supplemental/Arial.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        ]
+        for path in candidates:
+            if path and os.path.exists(path):
+                logger.info("Video editor font selected: %s", path)
+                return path
+        logger.warning("No video editor font found, falling back to PIL default font.")
+        return None
 
     def _generate_srt(self, subtitle_data, audio_base_time=0):
         """Convert timed subtitle data to a standard SRT file string."""
@@ -171,13 +190,13 @@ class VideoEditorService:
         else:
             lines = raw_lines or [text.strip()]
 
-        try:
-            font_path = "/System/Library/Fonts/PingFang.ttc"
-            def load_font(size):
-                return ImageFont.truetype(font_path, max(12, int(size)))
-        except:
-            def load_font(size):
-                return ImageFont.load_default()
+        def load_font(size):
+            if self.font_path:
+                try:
+                    return ImageFont.truetype(self.font_path, max(12, int(size)))
+                except OSError as exc:
+                    logger.warning("Failed to load video editor font %s: %s", self.font_path, exc)
+            return ImageFont.load_default()
 
         def text_width(font, line):
             bbox = font.getbbox(line)

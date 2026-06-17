@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>知识星球实验台 - Shioa</title>
-    <link href="css/zsxq-lab.css" rel="stylesheet">
+    <link href="css/zsxq-lab.css?v=20260617-download-heat" rel="stylesheet">
     <style>
         .line-clamp-2 {
             display: -webkit-box;
@@ -123,10 +123,24 @@
                             <i class="fas fa-check-double mr-2"></i>全选主题
                         </button>
                         <button id="batch-download-btn" class="hidden rounded-lg bg-emerald-600 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-700 transition-colors">
-                            <i class="fas fa-download mr-2"></i>排队下载附件
+                            <i class="fas fa-list-check mr-2"></i>创建下载计划
                         </button>
+                        <label id="manual-plan-limit-control" class="hidden inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-600">
+                            <span class="text-xs text-slate-400">本次上限</span>
+                            <input id="manual-plan-limit-input" type="number" min="1" max="50" step="1" value="20" class="w-16 bg-transparent text-sm font-bold outline-none">
+                        </label>
+                        <label id="manual-plan-publish-control" class="hidden inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-700">
+                            <input id="manual-plan-auto-publish-checkbox" type="checkbox" class="h-4 w-4 rounded border-emerald-300 text-emerald-600" checked>
+                            <span>清洗后自动发布</span>
+                        </label>
                         <button id="refresh-topics-btn" class="hidden rounded-lg border border-slate-300 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50 transition-colors">
-                            <i class="fas fa-rotate mr-2"></i>刷新主题
+                            <i class="fas fa-rotate mr-2"></i>刷新本地列表
+                        </button>
+                        <button id="sync-current-tab-btn" class="hidden rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-bold text-blue-700 hover:bg-blue-100 transition-colors">
+                            <i class="fas fa-cloud-arrow-down mr-2"></i>从远端同步当前 Tab
+                        </button>
+                        <button id="sync-all-tabs-btn" class="hidden rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50 transition-colors">
+                            <i class="fas fa-cloud-arrow-down mr-2"></i>从远端同步全部 Tab
                         </button>
                     </div>
                 </div>
@@ -217,6 +231,6 @@
     <script src="js/env.js"></script>
     <script src="js/config.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/zsxq-lab.js?v=20260613-toolbar-cleanup"></script>
+    <script src="js/zsxq-lab.js?v=20260617-manual-publish-default"></script>
 </body>
 </html>

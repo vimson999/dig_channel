@@ -1,5 +1,6 @@
 import logging
 import os
+import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
 
@@ -10,7 +11,10 @@ from models import db
 from models.task import PublicationTask
 from models.zsxq_sync import ZsxqSyncRun
 from models.zsxq_workflow import ZsxqWorkflowRun
-from services.content_pipeline.auto_publish_handoff import submit_publish_clean_output_task
+from services.content_pipeline.auto_publish_handoff import (
+    submit_publish_clean_output_task,
+    summarize_publish_runs_for_request,
+)
 from services.workflow_notification_service import workflow_notification_service
 from services.zsxq_sync_service import zsxq_sync_service
 
@@ -100,6 +104,32 @@ class ZsxqWorkflowService:
         db.session.commit()
         return workflow.to_dict()
 
+    def create_manual_download_workflow(self, *, config, trigger):
+        self.ensure_schema()
+        snapshot = self._build_manual_download_snapshot(config=config, trigger=trigger)
+        system_sync = snapshot.get("system_sync") or {}
+        workflow = ZsxqWorkflowRun(
+            batch_id=system_sync.get("batch_id"),
+            group_id=str((snapshot.get("sync") or {}).get("group_id") or ""),
+            group_name=(snapshot.get("sync") or {}).get("group_name"),
+            trigger=trigger,
+            status="queued",
+            current_stage="init",
+            round=None,
+            max_rounds=None,
+            config_snapshot=snapshot,
+            stage_results={
+                "workflow": {
+                    "status": "created",
+                    "created_at": self._now_iso(),
+                },
+                "manual_download_plan": system_sync.get("manual_attachment_plan") or {},
+            },
+        )
+        db.session.add(workflow)
+        db.session.commit()
+        return workflow.to_dict()
+
     def enqueue_workflow_task(self, workflow_run_id, *, cookie=None):
         self.ensure_schema()
         workflow = ZsxqWorkflowRun.query.get(str(workflow_run_id))
@@ -158,6 +188,7 @@ class ZsxqWorkflowService:
                 initial_result={
                     "queued": True,
                     "system_sync": snapshot.get("system_sync") or {},
+                    "manual_attachment_plan": (sync_config.get("manual_attachment_plan") or {}).get("public") or {},
                     "workflow": {
                         "workflow_run_id": workflow.id,
                         "batch_id": workflow.batch_id,
@@ -172,15 +203,17 @@ class ZsxqWorkflowService:
                 "count": sync_config.get("count", 20),
                 "max_pages": sync_config.get("max_pages", 1),
                 "stop_on_existing": sync_config.get("stop_on_existing", True),
-                "download_attachments": sync_config.get("download_attachments", True),
+                "download_attachments": sync_config.get("download_attachments", False),
                 "download_pdf_only": False,
                 "download_file_types": sync_config.get("download_file_types") or ["all"],
                 "download_file_types_by_tab": sync_config.get("download_file_types_by_tab") or {},
                 "max_download_files": sync_config.get("max_download_files"),
+                "allow_attachment_downloads": sync_config.get("allow_attachment_downloads", False),
                 "mode": sync_config.get("mode") or "workflow",
                 "trigger": workflow.trigger or "workflow",
                 "sync_meta": snapshot.get("system_sync") or {},
                 "workflow_run_id": workflow.id,
+                "manual_attachment_plan": sync_config.get("manual_attachment_plan"),
                 # Workflow owns downstream orchestration. Keep legacy direct
                 # sync->clean handoff off for workflow-triggered sync tasks.
                 "auto_pdf_clean": False,
@@ -636,6 +669,152 @@ class ZsxqWorkflowService:
         if terminal_status:
             self._queue_notification(workflow, f"publish_{terminal_status}")
 
+    def _build_manual_download_snapshot(self, *, config, trigger):
+        config = config if isinstance(config, dict) else {}
+        group_id = str(config.get("group_id") or "").strip()
+        if not group_id:
+            raise ValueError("group_id 不能为空")
+
+        raw_items = config.get("attachments") or config.get("items") or []
+        tabs = self._manual_tabs_from_config(config, raw_items)
+        if not tabs:
+            raise ValueError("人工计划至少需要一个 tab")
+
+        options = config.get("options") if isinstance(config.get("options"), dict) else {}
+        max_download_files = (
+            options.get("max_download_files")
+            or config.get("max_download_files")
+        )
+        manual_plan = zsxq_sync_service.normalize_manual_attachment_plan(
+            {
+                "enabled": True,
+                "items": raw_items,
+                "max_download_files": max_download_files,
+            },
+            group_id=group_id,
+            tabs=tabs,
+        )
+        if not manual_plan.get("items"):
+            raise ValueError("人工计划至少需要一个附件")
+
+        selected_types = {
+            str(item.get("file_type") or "").lower()
+            for item in manual_plan.get("items") or []
+            if item.get("file_type")
+        }
+        download_file_types = sorted(item for item in selected_types if item in {"pdf", "mp3"})
+        if not download_file_types:
+            download_file_types = ["all"]
+        has_pdf = "pdf" in selected_types or download_file_types == ["all"]
+        has_audio = bool(selected_types.intersection({"mp3", "m4a", "wav", "aac", "flac", "ogg"}))
+        auto_pdf_clean = bool(options.get("auto_pdf_clean", has_pdf))
+        auto_audio_clean = bool(options.get("auto_audio_clean", has_audio))
+        publish_config = self._normalize_auto_publish(options.get("auto_publish_after_clean"))
+        batch_id = str(config.get("batch_id") or f"manual-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}")
+        stamp = datetime.utcnow().strftime("%H%M%S")
+        public_plan = zsxq_sync_service.public_manual_attachment_plan(manual_plan)
+        system_sync = {
+            "batch_id": batch_id,
+            "attempt_id": batch_id,
+            "round": None,
+            "max_rounds": None,
+            "continuous": False,
+            "trigger": trigger,
+            "queued_at": self._now_iso(),
+            "manual_download_plan": True,
+            "manual_attachment_plan": public_plan,
+            "selected_count": public_plan.get("selected_count"),
+            "max_download_files": public_plan.get("limit"),
+            "download_attachments_requested": True,
+            "download_attachments": True,
+            "allow_attachment_downloads": True,
+            "auto_pdf_clean": auto_pdf_clean,
+            "auto_audio_clean": auto_audio_clean,
+            "auto_publish_after_clean": publish_config,
+            "jobs": [
+                {
+                    "key": f"manual_{index + 1}",
+                    "tab_label": item.get("tab_label"),
+                    "tab_id": item.get("tab_id"),
+                    "file_type": item.get("file_type") or "file",
+                    "topic_id": item.get("topic_id"),
+                    "name": item.get("name"),
+                }
+                for index, item in enumerate(manual_plan.get("items") or [])
+            ],
+        }
+        return {
+            "version": 1,
+            "stages": {
+                "sync": True,
+                "clean": auto_pdf_clean or auto_audio_clean,
+                "publish": bool(publish_config.get("enabled")),
+            },
+            "system_sync": system_sync,
+            "sync": {
+                "group_id": group_id,
+                "group_name": config.get("group_name") or "",
+                "tabs": tabs,
+                "count": 1,
+                "max_pages": 1,
+                "stop_on_existing": False,
+                "download_attachments": True,
+                "allow_attachment_downloads": True,
+                "download_file_types": download_file_types,
+                "download_file_types_by_tab": {},
+                "max_download_files": public_plan.get("limit"),
+                "mode": f"manual_plan_{stamp}",
+                "manual_attachment_plan": {
+                    "enabled": True,
+                    "max_download_files": public_plan.get("limit"),
+                    "items": manual_plan.get("items") or [],
+                    "public": public_plan,
+                },
+            },
+            "clean": {
+                "auto_pdf_clean": auto_pdf_clean,
+                "pdf_cleaner": options.get("pdf_cleaner") or config.get("pdf_cleaner") or {},
+                "auto_audio_clean": auto_audio_clean,
+                "audio_cleaner": options.get("audio_cleaner") or config.get("audio_cleaner") or {},
+            },
+            "publish": publish_config,
+        }
+
+    def _manual_tabs_from_config(self, config, raw_items):
+        candidates = []
+        if isinstance(config.get("tab"), dict):
+            candidates.append(config["tab"])
+        if isinstance(config.get("tabs"), list):
+            candidates.extend(item for item in config["tabs"] if isinstance(item, dict))
+        for item in raw_items or []:
+            if not isinstance(item, dict):
+                continue
+            tab_id = str(item.get("tab_id") or item.get("tabId") or "").strip()
+            if not tab_id:
+                continue
+            candidates.append({
+                "id": tab_id,
+                "label": item.get("tab_label") or item.get("tabLabel") or tab_id,
+                "scope": "all",
+                "hashtagId": item.get("hashtag_id") or item.get("hashtagId"),
+            })
+
+        tabs = []
+        seen = set()
+        for item in candidates:
+            tab_id = str(item.get("id") or item.get("tab_id") or "").strip()
+            if not tab_id or tab_id in seen:
+                continue
+            seen.add(tab_id)
+            tabs.append({
+                "id": tab_id,
+                "label": str(item.get("label") or item.get("tab_label") or tab_id).strip(),
+                "scope": item.get("scope") or "all",
+                "hashtagId": item.get("hashtagId") or item.get("hashtag_id"),
+                "extraParams": item.get("extraParams") if isinstance(item.get("extraParams"), dict) else {},
+            })
+        return tabs
+
     def _build_system_snapshot(self, *, config, trigger, batch_id, batch_round, max_rounds, max_download_files, jobs):
         jobs = jobs or []
         tabs = [job["tab"] for job in jobs]
@@ -645,9 +824,12 @@ class ZsxqWorkflowService:
         }
         stamp = datetime.utcnow().strftime("%H%M%S")
         mode = f"sys{batch_round}_workflow_{stamp}"
-        auto_pdf_clean = bool(config.get("auto_pdf_clean", True))
-        auto_audio_clean = bool(config.get("auto_audio_clean", True))
+        auto_pdf_clean = bool(config.get("auto_pdf_clean", False))
+        auto_audio_clean = bool(config.get("auto_audio_clean", False))
         publish_config = self._normalize_auto_publish(config.get("auto_publish_after_clean"))
+        requested_download_attachments = bool(config.get("download_attachments", False))
+        allow_attachment_downloads = bool(config.get("allow_attachment_downloads", False))
+        download_attachments = requested_download_attachments and allow_attachment_downloads
         system_sync = {
             "batch_id": batch_id,
             "attempt_id": batch_id,
@@ -657,6 +839,9 @@ class ZsxqWorkflowService:
             "trigger": trigger,
             "queued_at": self._now_iso(),
             "max_download_files": max_download_files,
+            "download_attachments_requested": requested_download_attachments,
+            "download_attachments": download_attachments,
+            "allow_attachment_downloads": allow_attachment_downloads,
             "auto_pdf_clean": auto_pdf_clean,
             "auto_audio_clean": auto_audio_clean,
             "auto_publish_after_clean": publish_config,
@@ -685,7 +870,8 @@ class ZsxqWorkflowService:
                 "count": config.get("count", 12),
                 "max_pages": config.get("max_pages", 1),
                 "stop_on_existing": config.get("stop_on_existing", True),
-                "download_attachments": config.get("download_attachments", True),
+                "download_attachments": download_attachments,
+                "allow_attachment_downloads": allow_attachment_downloads,
                 "download_file_types": ["all"],
                 "download_file_types_by_tab": download_file_types_by_tab,
                 "max_download_files": max_download_files,
@@ -780,6 +966,16 @@ class ZsxqWorkflowService:
         if feature == "zsxq_clean_output_publish":
             file_type = (params.get("zsxq_publish") or {}).get("file_type")
         result = task.result or {}
+        publish_runtime = None
+        if feature == "zsxq_clean_output_publish":
+            try:
+                publish_runtime = summarize_publish_runs_for_request(f"zsxq_publish:{task.id}")
+            except Exception:
+                logger.exception("[ZSXQ_WORKFLOW] failed to summarize publish runtime runs | task=%s", task.id)
+                publish_runtime = None
+        runtime_summary = (publish_runtime or {}).get("summary") if isinstance(publish_runtime, dict) else None
+        result_summary = result.get("summary") if isinstance(result.get("summary"), dict) else None
+        summary = runtime_summary if runtime_summary and any(runtime_summary.values()) else result_summary
         return {
             "task_id": task.id,
             "celery_task_id": task.celery_task_id,
@@ -790,8 +986,19 @@ class ZsxqWorkflowService:
             "file_type": file_type,
             "error_message": task.error_message,
             "local_output_dir": result.get("local_output_dir"),
+            "files_count": result.get("files_count"),
             "success_count": result.get("success_count"),
             "failed_count": result.get("failed_count"),
+            "selected_count": result.get("selected_count") if result.get("selected_count") is not None else (summary or {}).get("selected_count"),
+            "uploaded_count": result.get("uploaded_count") if result.get("uploaded_count") is not None else (summary or {}).get("uploaded_count"),
+            "submitted_count": result.get("submitted_count") if result.get("submitted_count") is not None else (summary or {}).get("submitted_count"),
+            "verified_count": result.get("verified_count") if result.get("verified_count") is not None else (summary or {}).get("verified_count"),
+            "pending_verify_count": result.get("pending_verify_count") if result.get("pending_verify_count") is not None else (summary or {}).get("pending_verify_count"),
+            "topic_count": result.get("topic_count") if result.get("topic_count") is not None else (summary or {}).get("topic_count"),
+            "verified_topic_count": result.get("verified_topic_count") if result.get("verified_topic_count") is not None else (summary or {}).get("verified_topic_count"),
+            "pending_verify_topic_count": result.get("pending_verify_topic_count") if result.get("pending_verify_topic_count") is not None else (summary or {}).get("pending_verify_topic_count"),
+            "summary": summary,
+            "publish_runtime": publish_runtime,
             "message": result.get("message"),
             "updated_at": task.updated_at.isoformat() if task.updated_at else None,
             "completed_at": task.completed_at.isoformat() if task.completed_at else None,

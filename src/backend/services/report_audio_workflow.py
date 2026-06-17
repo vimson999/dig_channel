@@ -40,6 +40,47 @@ def audio_path_for_job(job_id: str, created_at: Optional[datetime] = None) -> st
     return str(root / f"{job_id}.wav")
 
 
+def pdf_first_page_image_path_for_job(job_id: str, created_at: Optional[datetime] = None) -> str:
+    created_at = created_at or datetime.utcnow()
+    root = Path(_project_root()) / "data" / "processed" / "report_audio_workflow" / created_at.strftime("%Y%m%d")
+    root.mkdir(parents=True, exist_ok=True)
+    return str(root / f"{job_id}_pdf_first_page.jpg")
+
+
+def render_pdf_first_page_image(pdf_path: str, output_path: str, *, dpi: int = 170) -> Dict[str, Any]:
+    source = Path(str(pdf_path or ""))
+    if not source.exists() or not source.is_file():
+        raise ReportAudioWorkflowError(f"PDF 文件不存在，无法生成首屏截图: {pdf_path}")
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import fitz  # type: ignore
+
+        with fitz.open(str(source)) as doc:
+            if doc.page_count <= 0:
+                raise ReportAudioWorkflowError("PDF 没有可渲染页面")
+            page = doc.load_page(0)
+            pix = page.get_pixmap(dpi=max(72, int(dpi)), colorspace=fitz.csRGB, alpha=False)
+            pix.save(str(output))
+            width = pix.width
+            height = pix.height
+    except ReportAudioWorkflowError:
+        raise
+    except Exception as exc:
+        raise ReportAudioWorkflowError(f"PDF 首屏截图生成失败: {exc}") from exc
+
+    return {
+        "path": str(output),
+        "bytes": output.stat().st_size,
+        "width": width,
+        "height": height,
+        "page": 1,
+        "dpi": dpi,
+    }
+
+
 def normalize_for_tts(raw_text: str, *, initial_text: str = "", metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     raw_text = (raw_text or "").strip()
     if not raw_text:
@@ -55,8 +96,8 @@ def split_tts_text(text: str, max_chars: Optional[int] = None) -> List[str]:
     text = _clean_text(text)
     if not text:
         return []
-    max_chars = max_chars or _int_env("REPORT_AUDIO_TTS_CHUNK_CHARS", _int_env("DOUBAO_BROWSER_TTS_MAX_TEXT_LENGTH", 4500))
-    max_chars = max(500, min(max_chars, 5000))
+    max_chars = max_chars or _int_env("REPORT_AUDIO_TTS_CHUNK_CHARS", 500)
+    max_chars = max(200, min(max_chars, 5000))
     if len(text) <= max_chars:
         return [text]
 
@@ -115,10 +156,12 @@ def combine_wav_files(input_paths: List[str], output_path: str) -> Dict[str, Any
 
 
 def status_payload() -> Dict[str, Any]:
+    deepseek_configured = bool(os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("REPORT_AUDIO_NORMALIZER_API_KEY"))
     return {
         "configured": True,
-        "deepseek_configured": bool(os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("REPORT_AUDIO_NORMALIZER_API_KEY")),
-        "normalizer_provider": "deepseek" if os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("REPORT_AUDIO_NORMALIZER_API_KEY") else "local_fallback",
+        "deepseek_configured": deepseek_configured,
+        "normalizer_provider": "deepseek" if deepseek_configured else "local_fallback",
+        "normalizer_model": _normalizer_model() if deepseek_configured else None,
         "mode": "celery_orchestrator",
     }
 
@@ -129,7 +172,7 @@ def _deepseek_normalize(raw_text: str, *, initial_text: str, metadata: Dict[str,
         return None
 
     base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-    model = os.environ.get("REPORT_AUDIO_NORMALIZER_MODEL") or os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    model = _normalizer_model()
     timeout = _int_env("REPORT_AUDIO_NORMALIZER_TIMEOUT", 120)
     system_prompt = (
         "你是内容流水线的结构化整理器。只做抽取和规整，不新增事实，不扩写观点。"
@@ -138,16 +181,25 @@ def _deepseek_normalize(raw_text: str, *, initial_text: str, metadata: Dict[str,
     user_prompt = "\n".join([
         "请把下面 Gemini 审核后的研报口播结果整理成严格 JSON。",
         "字段必须包含：",
-        "- title: 字符串，最适合最终音频/内容的标题",
+        "- title: 字符串，最适合最终音频/内容列表展示的标题，优先从 Gemini 返回的标题方案、短标题、标准标题或核心观点中挑选并轻微润色",
         "- summary: 字符串，200字以内摘要",
         "- final_script_for_tts: 字符串，只包含要交给 TTS 朗读的最终口播正文，不包含修正清单、标题方案、参考来源说明、Markdown 标题",
         "- corrections: 数组，每项包含 issue、basis、action",
         "- titles: 对象，包含 standard 和 short 两个数组",
+        "- cover_title: 字符串，横屏封面主标题，最多两行，用 \\n 换行；第一行必须优先使用“投行简称:核心对象+结论/动作”的格式，例如“大摩:增持腾讯”；第二行只补充一个最关键变量或影响，禁止行首标点",
+        "- cover_subtitle: 字符串，横屏封面副标题，只能一行，控制在34个中文字符以内，补充数据、估值或行业范围，不要换行",
         "- sources: 数组，引用来源说明",
         "- risk_notes: 数组，风险提示或合规提示",
         "- editor_notes: 字符串，简短说明整理策略",
         "如果原文中没有某字段内容，用空字符串或空数组。",
         "final_script_for_tts 必须适合直接朗读，保留必要的投资风险提示。",
+        "",
+        "标题选择规则：",
+        "1. 先扫描 Gemini 审核后结果中的“标题方案、标准标题、短标题、封面标题、核心观点、段落标题”，从中选择最贴合研报结论的一条；只有没有可用标题时，才从正文抽取重写。",
+        "2. title 和 cover_title 必须忠于 Gemini 返回内容；涉及数字、订单、评级、目标价、市场规模、时间窗口时，必须在 Gemini 文本中明确出现。",
+        "3. 禁止为了吸引点击新增或夸大事实，尤其不要凭空使用“引爆、颠覆、巨头转身、百亿/千亿/万亿、大单、暴涨、暴跌”等词。",
+        "4. cover_title 第一行控制在 18 个中文字符以内，第二行控制在 18 个中文字符以内；如果一行已经足够好，就不要硬凑第二行。",
+        "5. cover_subtitle 只保留一行事实补充，不要复述主标题，不要写成完整长句。",
         "",
         f"metadata={json.dumps(metadata, ensure_ascii=False)}",
         "",
@@ -198,6 +250,8 @@ def _validate_structured_result(payload: Dict[str, Any], raw_text: str) -> Dict[
     result = {
         "title": _clean_text(payload.get("title") or "")[:300],
         "summary": _clean_text(payload.get("summary") or "")[:1000],
+        "cover_title": _clean_multiline_text(payload.get("cover_title") or "")[:160],
+        "cover_subtitle": _clean_text(payload.get("cover_subtitle") or "")[:120],
         "final_script_for_tts": script,
         "corrections": _safe_list(payload.get("corrections"), 50),
         "titles": payload.get("titles") if isinstance(payload.get("titles"), dict) else {"standard": [], "short": []},
@@ -214,6 +268,8 @@ def _fallback_normalize(raw_text: str) -> Dict[str, Any]:
     return {
         "title": "",
         "summary": "",
+        "cover_title": "",
+        "cover_subtitle": "",
         "final_script_for_tts": _extract_final_script(raw_text) or raw_text,
         "corrections": [],
         "titles": {"standard": [], "short": []},
@@ -278,6 +334,11 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _clean_multiline_text(value: Any) -> str:
+    lines = [_clean_text(line) for line in str(value or "").replace("\r", "\n").split("\n")]
+    return "\n".join(line for line in lines if line)
+
+
 def _compact_text(value: str, max_chars: int) -> str:
     text = str(value or "").strip()
     if len(text) <= max_chars:
@@ -292,6 +353,10 @@ def _int_env(name: str, default: int) -> int:
         return int(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+def _normalizer_model() -> str:
+    return os.environ.get("REPORT_AUDIO_NORMALIZER_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "deepseek-v4-pro"
 
 
 def _project_root() -> str:

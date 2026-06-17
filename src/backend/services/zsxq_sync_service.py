@@ -1,17 +1,21 @@
+import hashlib
 import json
 import logging
 import os
 import random
 import re
 import time
+from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 from flask import current_app, has_app_context
 from sqlalchemy import and_, inspect, or_
+from sqlalchemy.orm import load_only
 
 from models import db
+from models.task import PublicationTask
 from models.zsxq_sync import ZsxqAttachment, ZsxqSyncCursor, ZsxqSyncRun, ZsxqTopic
 from services.zsxq_service import zsxq_service
 
@@ -20,6 +24,27 @@ logger = logging.getLogger(__name__)
 
 
 TRANSIENT_UPSTREAM_CODES = {"1059"}
+ATTACHMENT_DOWNLOADS_ENABLED_ENV = "ZSXQ_SYNC_ATTACHMENT_DOWNLOADS_ENABLED"
+ATTACHMENT_DOWNLOAD_LIMIT_ENV = "ZSXQ_SYNC_ATTACHMENT_DOWNLOAD_LIMIT"
+MANUAL_ATTACHMENT_PLAN_LIMIT_ENV = "ZSXQ_MANUAL_DOWNLOAD_PLAN_LIMIT"
+MANUAL_ATTACHMENT_PLAN_HARD_LIMIT_ENV = "ZSXQ_MANUAL_DOWNLOAD_PLAN_HARD_LIMIT"
+DEFAULT_SAFE_ATTACHMENT_DOWNLOAD_LIMIT = 1
+DEFAULT_MANUAL_ATTACHMENT_PLAN_LIMIT = 20
+DEFAULT_MANUAL_ATTACHMENT_PLAN_HARD_LIMIT = 50
+ATTACHMENT_STATUS_CACHE_TTL_SECONDS = 20
+PUBLISH_STATUS_CONTEXT_CACHE_TTL_SECONDS = 60
+MAX_ATTACHMENT_STATUS_CACHE_ENTRIES = 128
+REQUIRED_ATTACHMENT_COLUMNS = {
+    "error_message",
+    "publish_status",
+    "publish_task_id",
+    "publish_source_task_id",
+    "publish_topic_id",
+    "publish_submitted_count",
+    "publish_verified_count",
+    "publish_failed_count",
+    "publish_updated_at",
+}
 
 
 class ZsxqTransientUpstreamError(ValueError):
@@ -41,6 +66,8 @@ class ZsxqSyncService:
     def __init__(self):
         self._schema_checked = False
         self._last_pdf_download_at = 0.0
+        self._attachment_status_cache = {}
+        self._publish_status_context_cache = {"expires_at": 0, "items": []}
 
     def ensure_schema(self):
         if self._schema_checked:
@@ -64,10 +91,12 @@ class ZsxqSyncService:
             item["name"]
             for item in self._get_columns(inspector, "zsxq_attachments")
         }
-        if "error_message" not in attachment_columns:
+        missing_attachment_columns = sorted(REQUIRED_ATTACHMENT_COLUMNS - attachment_columns)
+        if missing_attachment_columns:
             raise ValueError(
-                "知识星球同步表结构需要更新，请执行 docs/sql/zsxq_sync_tables.sql 中的 "
-                "ALTER TABLE public.zsxq_attachments ADD COLUMN IF NOT EXISTS error_message text;"
+                "知识星球同步表结构需要更新，请执行 "
+                "docs/sql/zsxq_attachment_publish_status_columns.sql；缺失列："
+                + ", ".join(missing_attachment_columns)
             )
         self._schema_checked = True
 
@@ -94,14 +123,16 @@ class ZsxqSyncService:
         count=20,
         max_pages=1,
         stop_on_existing=True,
-        download_attachments=True,
+        download_attachments=False,
         download_pdf_only=True,
         download_file_types=None,
         download_file_types_by_tab=None,
         max_download_files=None,
+        allow_attachment_downloads=False,
         mode="manual",
         run_id=None,
         sync_meta=None,
+        manual_attachment_plan=None,
     ):
         self.ensure_schema()
         tabs = self._normalize_tabs(tabs)
@@ -114,11 +145,28 @@ class ZsxqSyncService:
         max_pages = min(max(int(max_pages or 1), 1), 20)
         download_file_types = self._normalize_download_file_types(download_file_types, download_pdf_only)
         download_file_types_by_tab = self._normalize_download_file_types_by_tab(download_file_types_by_tab)
-        max_download_files = self._normalize_max_download_files(max_download_files)
+        manual_plan = self._normalize_manual_attachment_plan(
+            manual_attachment_plan,
+            group_id=group_id,
+            tabs=tabs,
+        )
+        if manual_plan["items"] and max_download_files in (None, "", 0, "0"):
+            max_download_files = len(manual_plan["items"])
+        download_policy = self._attachment_download_policy(
+            requested=download_attachments,
+            explicit_allow=allow_attachment_downloads,
+            max_download_files=max_download_files,
+            manual_plan_count=len(manual_plan["items"]),
+        )
+        download_attachments = download_policy["enabled"]
+        max_download_files = download_policy["max_download_files"]
         sync_meta = sync_meta if isinstance(sync_meta, dict) else {}
         running_result = {"running": True}
         if sync_meta:
             running_result["system_sync"] = sync_meta
+        if manual_plan["items"]:
+            running_result["manual_attachment_plan"] = self._public_manual_attachment_plan(manual_plan)
+        running_result["attachment_download_policy"] = download_policy
 
         if run_id:
             run = ZsxqSyncRun.query.get(str(run_id))
@@ -162,42 +210,73 @@ class ZsxqSyncService:
             "downloaded_files": [],
             "downloaded_pdf_files": [],
             "max_download_files": max_download_files,
+            "attachment_download_policy": download_policy,
             "download_limit_reached": False,
             "tabs": [],
         }
         if sync_meta:
             result["system_sync"] = sync_meta
+        if manual_plan["items"]:
+            result["manual_attachment_plan"] = self._public_manual_attachment_plan(manual_plan)
 
         try:
-            for index, tab in enumerate(tabs):
-                if index > 0:
-                    self._human_pause()
-                tab_download_file_types = download_file_types_by_tab.get(tab["id"], download_file_types)
-                tab_result = self._sync_one_tab(
+            if manual_plan["items"]:
+                if not download_attachments:
+                    raise ValueError(f"人工计划下载被安全策略拦截: {download_policy.get('reason') or 'disabled'}")
+                manual_result = self._sync_manual_attachment_plan(
                     cookie=cookie,
                     group_id=group_id,
                     group_name=group_name,
-                    tab=tab,
+                    tabs=tabs,
                     run=run,
-                    count=count,
-                    max_pages=max_pages,
-                    stop_on_existing=stop_on_existing,
-                    download_attachments=download_attachments,
-                    download_file_types=tab_download_file_types,
+                    download_file_types=download_file_types,
+                    manual_plan=manual_plan,
                     max_download_files=max_download_files,
                 )
-                result["tabs"].append(tab_result)
-                result["topics_fetched"] += tab_result["topics_fetched"]
-                result["topics_new"] += tab_result["topics_new"]
-                result["topics_updated"] += tab_result["topics_updated"]
-                result["topics_existing"] += tab_result["topics_existing"]
-                result["attachments_seen"] += tab_result["attachments_seen"]
-                result["attachments_downloaded"] += tab_result["attachments_downloaded"]
-                result["attachments_failed"] += tab_result["attachments_failed"]
-                result["attachments_skipped"] += tab_result["attachments_skipped"]
-                self._merge_downloaded_file_entries(result, tab_result)
-                if tab_result.get("download_limit_reached") or tab_result.get("stopped_by_download_limit"):
-                    result["download_limit_reached"] = True
+                result.update({
+                    "tabs": manual_result["tabs"],
+                    "topics_fetched": manual_result["topics_fetched"],
+                    "topics_new": manual_result["topics_new"],
+                    "topics_updated": manual_result["topics_updated"],
+                    "topics_existing": manual_result["topics_existing"],
+                    "attachments_seen": manual_result["attachments_seen"],
+                    "attachments_downloaded": manual_result["attachments_downloaded"],
+                    "attachments_failed": manual_result["attachments_failed"],
+                    "attachments_skipped": manual_result["attachments_skipped"],
+                    "download_limit_reached": manual_result["download_limit_reached"],
+                    "downloaded_files": manual_result["downloaded_files"],
+                    "downloaded_pdf_files": manual_result["downloaded_pdf_files"],
+                })
+            else:
+                for index, tab in enumerate(tabs):
+                    if index > 0:
+                        self._human_pause()
+                    tab_download_file_types = download_file_types_by_tab.get(tab["id"], download_file_types)
+                    tab_result = self._sync_one_tab(
+                        cookie=cookie,
+                        group_id=group_id,
+                        group_name=group_name,
+                        tab=tab,
+                        run=run,
+                        count=count,
+                        max_pages=max_pages,
+                        stop_on_existing=stop_on_existing,
+                        download_attachments=download_attachments,
+                        download_file_types=tab_download_file_types,
+                        max_download_files=max_download_files,
+                    )
+                    result["tabs"].append(tab_result)
+                    result["topics_fetched"] += tab_result["topics_fetched"]
+                    result["topics_new"] += tab_result["topics_new"]
+                    result["topics_updated"] += tab_result["topics_updated"]
+                    result["topics_existing"] += tab_result["topics_existing"]
+                    result["attachments_seen"] += tab_result["attachments_seen"]
+                    result["attachments_downloaded"] += tab_result["attachments_downloaded"]
+                    result["attachments_failed"] += tab_result["attachments_failed"]
+                    result["attachments_skipped"] += tab_result["attachments_skipped"]
+                    self._merge_downloaded_file_entries(result, tab_result)
+                    if tab_result.get("download_limit_reached") or tab_result.get("stopped_by_download_limit"):
+                        result["download_limit_reached"] = True
 
             run.status = "completed"
             run.completed_at = datetime.utcnow()
@@ -714,6 +793,208 @@ class ZsxqSyncService:
         except (TypeError, OSError, ValueError):
             return None
 
+    def list_cached_tabs(self, group_id):
+        if not self._sync_tables_ready():
+            return {"tabs": [], "source": "local_db", "tables_ready": False}
+
+        group_id = str(group_id or "").strip()
+        if not group_id:
+            return {"tabs": [], "source": "local_db", "tables_ready": True}
+
+        rows = db.session.query(
+            ZsxqTopic.tab_id,
+            ZsxqTopic.tab_label,
+            db.func.count(ZsxqTopic.id),
+            db.func.max(ZsxqTopic.last_synced_at),
+        ).filter(
+            ZsxqTopic.group_id == group_id,
+        ).group_by(
+            ZsxqTopic.tab_id,
+            ZsxqTopic.tab_label,
+        ).order_by(
+            db.func.max(ZsxqTopic.last_synced_at).desc(),
+        ).all()
+
+        tabs = []
+        for tab_id, tab_label, topic_count, last_synced_at in rows:
+            tab_id = str(tab_id or "").strip()
+            if not tab_id:
+                continue
+            tabs.append({
+                "id": tab_id,
+                "tab_id": tab_id,
+                "label": tab_label or tab_id,
+                "tab_label": tab_label or tab_id,
+                "topic_count": int(topic_count or 0),
+                "last_synced_at": last_synced_at.isoformat() if last_synced_at else None,
+            })
+        return {
+            "tabs": tabs,
+            "source": "local_db",
+            "tables_ready": True,
+        }
+
+    def list_cached_topics(self, group_id, tab_id=None, count=20, end_time=None):
+        if not self._sync_tables_ready():
+            return {
+                "succeeded": True,
+                "source": "local_db",
+                "tables_ready": False,
+                "resp_data": {
+                    "topics": [],
+                    "next_end_time": None,
+                    "has_more": False,
+                    "message": "本地同步表尚未初始化。",
+                },
+            }
+
+        group_id = str(group_id or "").strip()
+        tab_id = str(tab_id or "").strip()
+        if not group_id:
+            return {
+                "succeeded": True,
+                "source": "local_db",
+                "tables_ready": True,
+                "resp_data": {
+                    "topics": [],
+                    "next_end_time": None,
+                    "has_more": False,
+                    "message": "group_id 不能为空。",
+                },
+            }
+
+        try:
+            limit = min(max(int(count or 20), 1), 100)
+        except (TypeError, ValueError):
+            limit = 20
+
+        base_query = ZsxqTopic.query.filter(ZsxqTopic.group_id == group_id)
+        if tab_id:
+            base_query = base_query.filter(ZsxqTopic.tab_id == tab_id)
+
+        page_query = base_query
+        if end_time:
+            page_query = page_query.filter(ZsxqTopic.create_time < str(end_time))
+
+        total = self._cached_topic_total(group_id, tab_id)
+        rows = page_query.options(
+            load_only(
+                ZsxqTopic.id,
+                ZsxqTopic.group_id,
+                ZsxqTopic.group_name,
+                ZsxqTopic.tab_id,
+                ZsxqTopic.tab_label,
+                ZsxqTopic.topic_id,
+                ZsxqTopic.topic_uid,
+                ZsxqTopic.title,
+                ZsxqTopic.author_name,
+                ZsxqTopic.content,
+                ZsxqTopic.create_time,
+                ZsxqTopic.raw_json_path,
+                ZsxqTopic.first_sync_run_id,
+                ZsxqTopic.last_sync_run_id,
+                ZsxqTopic.last_synced_at,
+            )
+        ).order_by(
+            ZsxqTopic.create_time.desc(),
+            ZsxqTopic.last_synced_at.desc(),
+        ).limit(limit + 1).all()
+        has_more = len(rows) > limit
+        topics = rows[:limit]
+        attachments = self._attachments_by_topic(group_id, topics)
+        payloads = [
+            self._public_cached_topic(topic, attachments.get((topic.tab_id, topic.topic_id), []))
+            for topic in topics
+        ]
+        next_end_time = self._oldest_cached_topic_time(topics) if has_more else None
+        message = ""
+        if not payloads and not end_time and not self._has_cached_topics(group_id, tab_id):
+            message = "本地库暂无该 Tab 的主题。请先点击“同步当前 Tab”拉取元数据。"
+        elif not payloads and end_time:
+            message = "本地库已加载到底。"
+
+        return {
+            "succeeded": True,
+            "source": "local_db",
+            "tables_ready": True,
+            "resp_data": {
+                "topics": payloads,
+                "count": len(payloads),
+                "total": total,
+                "next_end_time": next_end_time,
+                "has_more": has_more,
+                "message": message,
+            },
+        }
+
+    def _cached_topic_total(self, group_id, tab_id=None):
+        if not tab_id:
+            return None
+        cursor = ZsxqSyncCursor.query.filter_by(
+            group_id=str(group_id),
+            tab_id=str(tab_id),
+        ).first()
+        if not cursor:
+            return None
+        try:
+            return int(cursor.total_topics or 0)
+        except (TypeError, ValueError):
+            return None
+
+    def _has_cached_topics(self, group_id, tab_id=None):
+        query = ZsxqTopic.query.filter(ZsxqTopic.group_id == str(group_id))
+        if tab_id:
+            query = query.filter(ZsxqTopic.tab_id == str(tab_id))
+        return query.with_entities(ZsxqTopic.id).limit(1).first() is not None
+
+    def _oldest_cached_topic_time(self, topics):
+        times = sorted(
+            str(topic.create_time or "")
+            for topic in topics or []
+            if topic.create_time
+        )
+        return times[0] if times else None
+
+    def _public_cached_topic(self, topic, attachments):
+        payload = {}
+        payload.setdefault("topic_id", topic.topic_id)
+        payload.setdefault("topic_uid", topic.topic_uid)
+        payload.setdefault("title", topic.title)
+        payload.setdefault("create_time", topic.create_time)
+        payload.setdefault("raw_json_path", topic.raw_json_path)
+        payload.setdefault("tab_id", topic.tab_id)
+        payload.setdefault("tab_label", topic.tab_label)
+        if topic.author_name:
+            payload.setdefault("owner", {"name": topic.author_name})
+
+        if topic.content:
+            payload["talk"] = {
+                "text": topic.content,
+                "create_time": topic.create_time,
+                "owner": {"name": topic.author_name or "未知作者"},
+            }
+
+        files = []
+        images = []
+        for attachment in attachments or []:
+            item = dict(attachment.raw_payload or {})
+            item.setdefault("name", attachment.name)
+            if attachment.file_id:
+                item.setdefault("file_id", attachment.file_id)
+            if attachment.download_count is not None:
+                item.setdefault("download_count", attachment.download_count)
+            item.setdefault("attachment_key", attachment.attachment_key)
+            if attachment.attachment_type == "image":
+                images.append(item)
+            else:
+                files.append(item)
+
+        if files:
+            payload["files"] = files
+        if images:
+            payload["images"] = images
+        return payload
+
     def get_attachment_statuses(self, group_id, tab_id, topic_ids, attachment_refs=None):
         if not self._sync_tables_ready():
             return {}
@@ -723,6 +1004,11 @@ class ZsxqSyncService:
         topic_ids = [str(item) for item in (topic_ids or []) if item]
         if not topic_ids:
             return {}
+
+        cache_key = self._attachment_status_cache_key(group_id, tab_id, topic_ids[:200], attachment_refs)
+        cached = self._get_cache_value(self._attachment_status_cache, cache_key)
+        if cached is not None:
+            return deepcopy(cached)
 
         rows = ZsxqAttachment.query.filter(
             ZsxqAttachment.group_id == group_id,
@@ -767,7 +1053,572 @@ class ZsxqSyncService:
             tab_id=tab_id,
             attachment_refs=attachment_refs,
         )
+        self._add_attachment_publish_statuses(result)
+        self._set_cache_value(
+            self._attachment_status_cache,
+            cache_key,
+            result,
+            ATTACHMENT_STATUS_CACHE_TTL_SECONDS,
+            MAX_ATTACHMENT_STATUS_CACHE_ENTRIES,
+        )
         return result
+
+    def _attachment_status_cache_key(self, group_id, tab_id, topic_ids, attachment_refs=None):
+        refs = []
+        for item in attachment_refs or []:
+            if not isinstance(item, dict):
+                continue
+            refs.append({
+                "topic_id": str(item.get("topic_id") or ""),
+                "attachment_key": str(item.get("attachment_key") or ""),
+                "file_id": str(item.get("file_id") or ""),
+                "name": str(item.get("name") or ""),
+            })
+        payload = {
+            "group_id": str(group_id or ""),
+            "tab_id": str(tab_id or ""),
+            "topic_ids": list(topic_ids or []),
+            "refs": refs,
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
+        return f"{group_id}:{tab_id}:{digest}"
+
+    def _get_cache_value(self, cache, key):
+        item = cache.get(key)
+        if not item:
+            return None
+        if float(item.get("expires_at") or 0) <= time.time():
+            cache.pop(key, None)
+            return None
+        return item.get("value")
+
+    def _set_cache_value(self, cache, key, value, ttl_seconds, max_entries=128):
+        if len(cache) >= max_entries:
+            now = time.time()
+            expired_keys = [
+                cache_key
+                for cache_key, item in cache.items()
+                if float(item.get("expires_at") or 0) <= now
+            ]
+            for cache_key in expired_keys:
+                cache.pop(cache_key, None)
+            if len(cache) >= max_entries:
+                oldest_key = min(cache.items(), key=lambda pair: pair[1].get("expires_at") or 0)[0]
+                cache.pop(oldest_key, None)
+        cache[key] = {
+            "expires_at": time.time() + max(float(ttl_seconds or 0), 1),
+            "value": deepcopy(value),
+        }
+
+    def _clear_attachment_status_cache(self):
+        self._attachment_status_cache.clear()
+
+    def _add_attachment_publish_statuses(self, result):
+        payloads = [
+            item
+            for rows in (result or {}).values()
+            for item in (rows or [])
+            if isinstance(item, dict)
+        ]
+        if not payloads:
+            return
+        if all(item.get("publish_status") for item in payloads):
+            return
+
+        match_index = self._attachment_publish_match_index(payloads)
+        if not any(match_index.values()):
+            return
+
+        for context in self._recent_publish_status_context():
+            status = context.get("status")
+            outcomes = context.get("outcomes") or {"by_path": {}, "by_name": {}}
+            for source_ref in context.get("source_refs") or []:
+                source_status = self._status_for_source_ref(source_ref, status, outcomes)
+                if not source_status:
+                    continue
+                for payload in self._matched_attachment_payloads(source_ref, match_index):
+                    self._merge_publish_status(payload, source_status)
+
+    def _recent_publish_status_context(self):
+        now = time.time()
+        cached = self._publish_status_context_cache
+        if float(cached.get("expires_at") or 0) > now:
+            return deepcopy(cached.get("items") or [])
+
+        try:
+            recent_tasks = PublicationTask.query.options(
+                load_only(
+                    PublicationTask.id,
+                    PublicationTask.status,
+                    PublicationTask.params,
+                    PublicationTask.result,
+                    PublicationTask.created_at,
+                    PublicationTask.updated_at,
+                    PublicationTask.completed_at,
+                )
+            ).order_by(PublicationTask.created_at.desc()).limit(240).all()
+        except Exception as exc:
+            db.session.rollback()
+            logger.warning("[ZSXQ_SYNC] attachment publish status lookup failed: %s", exc)
+            return []
+
+        publish_tasks = [
+            task
+            for task in recent_tasks
+            if self._task_feature(task) == "zsxq_clean_output_publish"
+        ]
+        if not publish_tasks:
+            self._publish_status_context_cache = {
+                "expires_at": now + PUBLISH_STATUS_CONTEXT_CACHE_TTL_SECONDS,
+                "items": [],
+            }
+            return []
+
+        source_task_ids = [
+            source_task_id
+            for source_task_id in (self._publish_source_task_id(task) for task in publish_tasks)
+            if source_task_id
+        ]
+        if not source_task_ids:
+            self._publish_status_context_cache = {
+                "expires_at": now + PUBLISH_STATUS_CONTEXT_CACHE_TTL_SECONDS,
+                "items": [],
+            }
+            return []
+
+        try:
+            clean_tasks = PublicationTask.query.options(
+                load_only(
+                    PublicationTask.id,
+                    PublicationTask.params,
+                    PublicationTask.result,
+                )
+            ).filter(PublicationTask.id.in_(list(dict.fromkeys(source_task_ids)))).all()
+        except Exception as exc:
+            db.session.rollback()
+            logger.warning("[ZSXQ_SYNC] attachment publish source lookup failed: %s", exc)
+            return []
+
+        clean_task_by_id = {str(task.id): task for task in clean_tasks}
+        contexts = []
+        for publish_task in publish_tasks:
+            source_task_id = self._publish_source_task_id(publish_task)
+            clean_task = clean_task_by_id.get(source_task_id)
+            if not clean_task:
+                continue
+            status = self._publish_task_status_snapshot(publish_task)
+            if not status:
+                continue
+            contexts.append({
+                "status": status,
+                "outcomes": self._publish_file_outcomes(publish_task),
+                "source_refs": self._clean_task_source_refs(clean_task),
+            })
+
+        self._publish_status_context_cache = {
+            "expires_at": time.time() + PUBLISH_STATUS_CONTEXT_CACHE_TTL_SECONDS,
+            "items": deepcopy(contexts),
+        }
+        return contexts
+
+    def update_attachment_publish_status_from_publish_task(self, publish_task_or_id):
+        if not self._sync_tables_ready():
+            return {"updated": 0, "matched": 0, "reason": "schema_not_ready"}
+
+        publish_task = publish_task_or_id
+        if not isinstance(publish_task_or_id, PublicationTask):
+            publish_task = PublicationTask.query.get(str(publish_task_or_id))
+        if not publish_task:
+            return {"updated": 0, "matched": 0, "reason": "publish_task_not_found"}
+        if self._task_feature(publish_task) != "zsxq_clean_output_publish":
+            return {"updated": 0, "matched": 0, "reason": "not_zsxq_publish_task"}
+
+        source_task_id = self._publish_source_task_id(publish_task)
+        if not source_task_id:
+            return {"updated": 0, "matched": 0, "reason": "missing_source_task_id"}
+
+        clean_task = PublicationTask.query.get(source_task_id)
+        if not clean_task:
+            return {"updated": 0, "matched": 0, "reason": "source_task_not_found"}
+
+        context = self._publish_task_context(publish_task, clean_task)
+        if not context:
+            return {"updated": 0, "matched": 0, "reason": "no_publish_context"}
+
+        result = self._apply_publish_context_to_attachments(context)
+        db.session.commit()
+        self._clear_attachment_status_cache()
+        self._publish_status_context_cache = {"expires_at": 0, "items": []}
+        return result
+
+    def backfill_attachment_publish_statuses(self, limit=240):
+        if not self._sync_tables_ready():
+            return {"updated": 0, "matched": 0, "tasks": 0, "reason": "schema_not_ready"}
+        try:
+            max_limit = min(max(int(limit or 240), 1), 1000)
+        except (TypeError, ValueError):
+            max_limit = 240
+
+        recent_tasks = PublicationTask.query.options(
+            load_only(
+                PublicationTask.id,
+                PublicationTask.status,
+                PublicationTask.params,
+                PublicationTask.result,
+                PublicationTask.created_at,
+                PublicationTask.updated_at,
+                PublicationTask.completed_at,
+            )
+        ).order_by(PublicationTask.created_at.desc()).limit(max_limit).all()
+        publish_tasks = [
+            task
+            for task in recent_tasks
+            if self._task_feature(task) == "zsxq_clean_output_publish"
+        ]
+
+        totals = {"updated": 0, "matched": 0, "tasks": len(publish_tasks)}
+        for task in publish_tasks:
+            result = self.update_attachment_publish_status_from_publish_task(task)
+            totals["updated"] += int(result.get("updated") or 0)
+            totals["matched"] += int(result.get("matched") or 0)
+        return totals
+
+    def _publish_task_context(self, publish_task, clean_task):
+        status = self._publish_task_status_snapshot(publish_task)
+        if not status:
+            return None
+        return {
+            "status": status,
+            "outcomes": self._publish_file_outcomes(publish_task),
+            "source_refs": self._clean_task_source_refs(clean_task),
+        }
+
+    def _apply_publish_context_to_attachments(self, context):
+        status = context.get("status") or {}
+        outcomes = context.get("outcomes") or {"by_path": {}, "by_name": {}}
+        seen_ids = set()
+        matched = 0
+        updated = 0
+        for source_ref in context.get("source_refs") or []:
+            source_status = self._status_for_source_ref(source_ref, status, outcomes)
+            if not source_status:
+                continue
+            for attachment in self._attachment_records_for_source_ref(source_ref):
+                if attachment.id in seen_ids:
+                    continue
+                seen_ids.add(attachment.id)
+                matched += 1
+                if self._apply_publish_status_to_attachment(attachment, source_status):
+                    updated += 1
+        return {"updated": updated, "matched": matched}
+
+    def _attachment_records_for_source_ref(self, source_ref):
+        attachment_id = str(source_ref.get("attachment_id") or "").strip()
+        if attachment_id:
+            record = ZsxqAttachment.query.get(attachment_id)
+            if record:
+                return [record]
+
+        group_id = str(source_ref.get("group_id") or "").strip()
+        tab_id = str(source_ref.get("tab_id") or "").strip()
+        topic_id = str(source_ref.get("topic_id") or "").strip()
+        name = str(source_ref.get("name") or "").strip()
+        source_path = source_ref.get("source_path")
+        if not group_id or not tab_id or not topic_id:
+            return []
+
+        query = ZsxqAttachment.query.filter_by(
+            group_id=group_id,
+            tab_id=tab_id,
+            topic_id=topic_id,
+        )
+        if name:
+            query = query.filter(ZsxqAttachment.name == name)
+        records = query.limit(20).all()
+        if source_path:
+            exact = [
+                record
+                for record in records
+                if self._path_key(record.local_path) == source_path
+            ]
+            if exact:
+                return exact
+        return records
+
+    def _apply_publish_status_to_attachment(self, attachment, status):
+        incoming = str(status.get("publish_status") or "")
+        if not incoming:
+            return False
+        current = str(attachment.publish_status or "")
+        if not self._should_replace_publish_status(current, incoming):
+            return False
+
+        updated_at = status.get("publish_updated_at_dt")
+        changed = False
+        updates = {
+            "publish_status": incoming,
+            "publish_task_id": status.get("publish_task_id"),
+            "publish_source_task_id": status.get("publish_source_task_id"),
+            "publish_topic_id": status.get("publish_topic_id") or attachment.publish_topic_id,
+            "publish_submitted_count": int(status.get("publish_submitted_count") or 0),
+            "publish_verified_count": int(status.get("publish_verified_count") or 0),
+            "publish_failed_count": int(status.get("publish_failed_count") or 0),
+            "publish_updated_at": updated_at or datetime.utcnow(),
+        }
+        for field, value in updates.items():
+            if getattr(attachment, field) != value:
+                setattr(attachment, field, value)
+                changed = True
+        return changed
+
+    def _should_replace_publish_status(self, current, incoming):
+        rank = {
+            "publish_failed": 1,
+            "publishing": 2,
+            "submitted": 3,
+            "published": 4,
+        }
+        if current == "publishing" and incoming == "publish_failed":
+            return True
+        return rank.get(current, 0) <= rank.get(incoming, 0)
+
+    def _attachment_publish_match_index(self, payloads):
+        index = {"attachment_id": {}, "source_path": {}, "name": {}}
+        for payload in payloads:
+            attachment_id = str(payload.get("id") or "").strip()
+            if attachment_id:
+                index["attachment_id"].setdefault(attachment_id, []).append(payload)
+
+            local_path = self._path_key(payload.get("local_path"))
+            if local_path:
+                index["source_path"].setdefault(local_path, []).append(payload)
+
+            name = str(payload.get("name") or "").strip()
+            if name:
+                index["name"].setdefault(name, []).append(payload)
+        return index
+
+    def _matched_attachment_payloads(self, source_ref, match_index):
+        for key_type, value in (
+            ("attachment_id", source_ref.get("attachment_id")),
+            ("source_path", source_ref.get("source_path")),
+            ("name", source_ref.get("name")),
+        ):
+            if not value:
+                continue
+            matched = match_index.get(key_type, {}).get(str(value), [])
+            if matched:
+                return matched
+        return []
+
+    def _clean_task_source_refs(self, clean_task):
+        params = clean_task.params if isinstance(clean_task.params, dict) else {}
+        pipeline = params.get("content_pipeline") if isinstance(params.get("content_pipeline"), dict) else {}
+        metadata = pipeline.get("metadata") if isinstance(pipeline.get("metadata"), dict) else {}
+        source_files = metadata.get("files") if isinstance(metadata.get("files"), list) else []
+        output_paths_by_source = self._clean_output_paths_by_source(clean_task)
+        default_group_id = str(metadata.get("group_id") or "").strip()
+
+        refs = []
+        for item in source_files:
+            if not isinstance(item, dict):
+                continue
+            path_key = self._path_key(item.get("path"))
+            attachment_id = str(item.get("attachment_id") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if not name and path_key:
+                name = Path(path_key).name
+            refs.append({
+                "attachment_id": attachment_id,
+                "group_id": str(item.get("group_id") or default_group_id or "").strip(),
+                "tab_id": str(item.get("tab_id") or "").strip(),
+                "topic_id": str(item.get("topic_id") or "").strip(),
+                "source_path": path_key,
+                "name": name,
+                "output_paths": output_paths_by_source.get(path_key, []) if path_key else [],
+            })
+        return refs
+
+    def _clean_output_paths_by_source(self, clean_task):
+        params = clean_task.params if isinstance(clean_task.params, dict) else {}
+        pipeline = params.get("content_pipeline") if isinstance(params.get("content_pipeline"), dict) else {}
+        result = clean_task.result if isinstance(clean_task.result, dict) else {}
+        source_root = self._path_key(
+            ((pipeline.get("pdf_clean") or {}).get("source_root") if isinstance(pipeline.get("pdf_clean"), dict) else None)
+            or ((pipeline.get("audio_clean") or {}).get("source_root") if isinstance(pipeline.get("audio_clean"), dict) else None)
+        )
+
+        output_paths_by_source = {}
+        for item in (result.get("cleaned_files") or result.get("files") or []):
+            if not isinstance(item, dict):
+                continue
+            source_key = self._clean_result_source_key(item, source_root)
+            output_key = self._path_key(
+                item.get("cleaner_output_path")
+                or item.get("output_path")
+                or item.get("path")
+            )
+            if source_key and output_key:
+                output_paths_by_source.setdefault(source_key, []).append(output_key)
+        return output_paths_by_source
+
+    def _clean_result_source_key(self, item, source_root=None):
+        source_value = item.get("source_path") or item.get("source")
+        if not source_value:
+            return None
+        source_text = str(source_value)
+        if source_root and not Path(source_text).is_absolute():
+            return self._path_key(Path(source_root) / source_text)
+        return self._path_key(source_text)
+
+    def _publish_file_outcomes(self, publish_task):
+        result = publish_task.result if isinstance(publish_task.result, dict) else {}
+        by_path = {}
+        by_name = {}
+        for rule in self._iter_publish_result_rules(result):
+            rule_status = self._publish_rule_status(rule)
+            for file_item in rule.get("files") or []:
+                if not isinstance(file_item, dict):
+                    continue
+                file_status = str(file_item.get("status") or "").lower()
+                status = {
+                    "failed": "publish_failed",
+                    "publish_failed": "publish_failed",
+                    "uploaded": rule_status,
+                    "published": "published",
+                }.get(file_status, rule_status)
+                if not status:
+                    continue
+                snapshot = {
+                    **self._publish_task_status_snapshot(publish_task),
+                    "publish_status": status,
+                    "publish_file_status": file_status,
+                    "publish_topic_id": str(rule.get("topic_id") or ""),
+                }
+                path_key = self._path_key(file_item.get("path"))
+                if path_key:
+                    by_path[path_key] = snapshot
+                name = str(file_item.get("name") or "").strip()
+                if name:
+                    by_name[name] = snapshot
+        return {"by_path": by_path, "by_name": by_name}
+
+    def _iter_publish_result_rules(self, result):
+        containers = []
+        if isinstance(result, dict):
+            containers.append(result)
+            publish_result = result.get("publish_result")
+            if isinstance(publish_result, dict):
+                containers.append(publish_result)
+
+        for container in containers:
+            rounds = container.get("rounds") if isinstance(container.get("rounds"), list) else [container]
+            for run in rounds:
+                if not isinstance(run, dict):
+                    continue
+                for rule in run.get("rules") or []:
+                    if isinstance(rule, dict):
+                        yield rule
+
+    def _publish_rule_status(self, rule):
+        verified = self._safe_int(rule.get("verified_count"))
+        submitted = self._safe_int(rule.get("submitted_count"))
+        uploaded = self._safe_int(rule.get("uploaded_count"))
+        failed = self._safe_int(rule.get("failed_count"))
+        status = str(rule.get("status") or "").lower()
+        if verified > 0 and verified >= max(submitted, uploaded, 1):
+            return "published"
+        if submitted > 0 or uploaded > 0 or status in {"success", "partial"}:
+            return "submitted"
+        if failed > 0 or status == "failed":
+            return "publish_failed"
+        return ""
+
+    def _status_for_source_ref(self, source_ref, task_status, outcomes):
+        for output_path in source_ref.get("output_paths") or []:
+            matched = outcomes.get("by_path", {}).get(output_path)
+            if matched:
+                return matched
+            output_name = Path(output_path).name if output_path else ""
+            matched = outcomes.get("by_name", {}).get(output_name)
+            if matched:
+                return matched
+        return task_status
+
+    def _publish_task_status_snapshot(self, task):
+        result = task.result if isinstance(task.result, dict) else {}
+        summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+        verified = self._safe_int(result.get("verified_count") or summary.get("verified_count"))
+        submitted = self._safe_int(result.get("submitted_count") or summary.get("submitted_count"))
+        uploaded = self._safe_int(result.get("uploaded_count") or summary.get("uploaded_count"))
+        failed = self._safe_int(result.get("failed_count") or summary.get("failed_count"))
+        raw_status = str(result.get("status") or task.status or "").lower()
+
+        if verified > 0:
+            publish_status = "published"
+        elif submitted > 0 or uploaded > 0:
+            publish_status = "submitted"
+        elif task.status in {"pending", "processing"}:
+            publish_status = "publishing"
+        elif failed > 0 or raw_status == "failed" or task.status == "failed":
+            publish_status = "publish_failed"
+        else:
+            return None
+
+        return {
+            "publish_status": publish_status,
+            "publish_task_id": task.id,
+            "publish_source_task_id": self._publish_source_task_id(task),
+            "publish_verified_count": verified,
+            "publish_submitted_count": submitted,
+            "publish_uploaded_count": uploaded,
+            "publish_failed_count": failed,
+            "publish_updated_at_dt": task.completed_at or task.updated_at,
+            "publish_updated_at": task.completed_at.isoformat() if task.completed_at else (
+                task.updated_at.isoformat() if task.updated_at else None
+            ),
+        }
+
+    def _merge_publish_status(self, payload, status):
+        current = str(payload.get("publish_status") or "")
+        incoming = str(status.get("publish_status") or "")
+        if not self._should_replace_publish_status(current, incoming):
+            return
+        payload.update({
+            key: value
+            for key, value in status.items()
+            if key != "publish_updated_at_dt"
+        })
+        payload["published"] = incoming == "published"
+        payload["publish_submitted"] = incoming in {"submitted", "published"}
+
+    def _publish_source_task_id(self, task):
+        params = task.params if isinstance(task.params, dict) else {}
+        publish = params.get("zsxq_publish") if isinstance(params.get("zsxq_publish"), dict) else {}
+        result = task.result if isinstance(task.result, dict) else {}
+        return str(publish.get("source_task_id") or result.get("source_task_id") or "").strip()
+
+    def _task_feature(self, task):
+        params = task.params if isinstance(task.params, dict) else {}
+        return str(params.get("feature") or "").strip()
+
+    def _path_key(self, value):
+        if not value or str(value).startswith("browser-download:"):
+            return None
+        try:
+            path = Path(str(value)).expanduser()
+            if not path.is_absolute():
+                path = self._project_root() / path
+            return str(path.resolve())
+        except (TypeError, OSError, ValueError):
+            return None
+
+    def _safe_int(self, value, default=0):
+        try:
+            return int(value or default)
+        except (TypeError, ValueError):
+            return default
 
     def _add_attachment_ref_statuses(self, result, seen_keys, group_id, tab_id, attachment_refs=None):
         refs = []
@@ -885,9 +1736,12 @@ class ZsxqSyncService:
             record = ZsxqAttachment(**values)
             db.session.add(record)
         db.session.commit()
+        self._clear_attachment_status_cache()
         return record.to_dict()
 
     def _sync_tables_ready(self):
+        if self._schema_checked:
+            return True
         required_tables = {
             "zsxq_sync_runs",
             "zsxq_topics",
@@ -899,7 +1753,255 @@ class ZsxqSyncService:
         if not required_tables.issubset(existing_tables):
             return False
         columns = {item["name"] for item in self._get_columns(inspector, "zsxq_attachments")}
-        return "error_message" in columns
+        ready = REQUIRED_ATTACHMENT_COLUMNS.issubset(columns)
+        if ready:
+            self._schema_checked = True
+        return ready
+
+    def _sync_manual_attachment_plan(self, cookie, group_id, group_name, tabs, run, download_file_types, manual_plan, max_download_files=None):
+        tab_map = {tab["id"]: tab for tab in tabs}
+        tab_results = {}
+        topic_states = {}
+        remaining_downloads = int(max_download_files) if max_download_files else None
+        result = {
+            "topics_fetched": 0,
+            "topics_new": 0,
+            "topics_updated": 0,
+            "topics_existing": 0,
+            "attachments_seen": 0,
+            "attachments_downloaded": 0,
+            "attachments_failed": 0,
+            "attachments_skipped": 0,
+            "downloaded_files": [],
+            "downloaded_pdf_files": [],
+            "download_limit_reached": False,
+            "tabs": [],
+        }
+
+        def ensure_tab_result(tab):
+            tab_id = tab["id"]
+            if tab_id not in tab_results:
+                tab_results[tab_id] = {
+                    "tab_id": tab_id,
+                    "tab_label": tab["label"],
+                    "pages": 0,
+                    "topics_fetched": 0,
+                    "topics_new": 0,
+                    "topics_updated": 0,
+                    "topics_existing": 0,
+                    "attachments_seen": 0,
+                    "attachments_downloaded": 0,
+                    "attachments_failed": 0,
+                    "attachments_skipped": 0,
+                    "downloaded_files": [],
+                    "downloaded_pdf_files": [],
+                    "stopped_by_existing": False,
+                    "stopped_by_download_limit": False,
+                    "download_limit_reached": False,
+                    "attachment_download_enabled": True,
+                    "manual_attachment_plan": True,
+                    "last_end_time": None,
+                }
+            return tab_results[tab_id]
+
+        for item in manual_plan["items"]:
+            tab = tab_map.get(item["tab_id"]) or {
+                "id": item["tab_id"],
+                "label": item.get("tab_label") or item["tab_id"],
+                "scope": "all",
+                "hashtagId": item.get("hashtag_id"),
+                "extraParams": {},
+            }
+            tab_map.setdefault(tab["id"], tab)
+            tab_result = ensure_tab_result(tab)
+            topic_key = (tab["id"], item["topic_id"])
+            topic = self._manual_topic_payload(item)
+
+            if topic_key not in topic_states:
+                topic_status = self._upsert_manual_topic(group_id, group_name, tab, topic, run)
+                topic_states[topic_key] = topic_status
+                tab_result["topics_fetched"] += 1
+                if topic_status == "new":
+                    tab_result["topics_new"] += 1
+                elif topic_status == "updated":
+                    tab_result["topics_updated"] += 1
+                else:
+                    tab_result["topics_existing"] += 1
+
+            record = self._upsert_manual_attachment(group_id, tab, item)
+            tab_result["attachments_seen"] += 1
+            download_stats = self._download_manual_attachment_record(
+                cookie=cookie,
+                group_id=group_id,
+                tab=tab,
+                topic_id=item["topic_id"],
+                record=record,
+                download_file_types=download_file_types,
+                remaining_downloads=remaining_downloads,
+            )
+            self._merge_attachment_stats(tab_result, download_stats)
+            if download_stats.get("download_limit_reached"):
+                tab_result["download_limit_reached"] = True
+                tab_result["stopped_by_download_limit"] = True
+            if download_stats.get("_download_attempted") and remaining_downloads is not None:
+                remaining_downloads = max(0, remaining_downloads - 1)
+            self._commit_manual_running_progress(run, tab, item["topic_id"], tab_result, manual_plan)
+
+        for tab_result in tab_results.values():
+            result["tabs"].append(tab_result)
+            result["topics_fetched"] += tab_result["topics_fetched"]
+            result["topics_new"] += tab_result["topics_new"]
+            result["topics_updated"] += tab_result["topics_updated"]
+            result["topics_existing"] += tab_result["topics_existing"]
+            result["attachments_seen"] += tab_result["attachments_seen"]
+            result["attachments_downloaded"] += tab_result["attachments_downloaded"]
+            result["attachments_failed"] += tab_result["attachments_failed"]
+            result["attachments_skipped"] += tab_result["attachments_skipped"]
+            self._merge_downloaded_file_entries(result, tab_result)
+            if tab_result.get("download_limit_reached") or tab_result.get("stopped_by_download_limit"):
+                result["download_limit_reached"] = True
+
+        db.session.commit()
+        return result
+
+    def _upsert_manual_topic(self, group_id, group_name, tab, topic, run):
+        topic_id = self._topic_id(topic)
+        record = ZsxqTopic.query.filter_by(
+            group_id=group_id,
+            tab_id=tab["id"],
+            topic_id=topic_id,
+        ).first()
+        if record:
+            record.last_sync_run_id = run.id
+            meta = self._topic_meta(topic)
+            if not record.title and meta["title"]:
+                record.title = meta["title"]
+            if not record.group_name and group_name:
+                record.group_name = group_name
+            db.session.flush()
+            return "existing"
+
+        record = self._create_topic_record(group_id, group_name, tab, topic, run)
+        db.session.add(record)
+        db.session.flush()
+        return "new"
+
+    def _upsert_manual_attachment(self, group_id, tab, item):
+        payload = item["file"]
+        topic_id = item["topic_id"]
+        key = item.get("attachment_key") or self._attachment_key(payload, 0, "file")
+        record = ZsxqAttachment.query.filter_by(
+            group_id=group_id,
+            tab_id=tab["id"],
+            topic_id=topic_id,
+            attachment_key=key,
+        ).first()
+        values = {
+            "group_id": group_id,
+            "tab_id": tab["id"],
+            "topic_id": topic_id,
+            "attachment_key": key,
+            "attachment_type": "file",
+            "name": item.get("name") or self._attachment_name(payload, "file"),
+            "file_id": item.get("file_id") or self._attachment_file_id(payload),
+            "download_count": self._download_count(payload),
+            "raw_payload": payload,
+        }
+        if record:
+            for field, value in values.items():
+                setattr(record, field, value)
+        else:
+            record = ZsxqAttachment(**values)
+            db.session.add(record)
+        db.session.flush()
+        return record
+
+    def _download_manual_attachment_record(self, cookie, group_id, tab, topic_id, record, download_file_types, remaining_downloads=None):
+        payload = record.raw_payload or {}
+        stats = {
+            "attachments_seen": 0,
+            "attachments_downloaded": 0,
+            "attachments_failed": 0,
+            "attachments_skipped": 0,
+            "downloaded_files": [],
+            "downloaded_pdf_files": [],
+            "stopped_by_download_limit": False,
+            "download_limit_reached": False,
+            "_download_attempted": False,
+        }
+        if not self._should_download_attachment(record, download_file_types):
+            if record.download_status == "pending":
+                record.download_status = "skipped"
+                record.error_message = f"非目标类型附件，跳过人工计划下载: {self._attachment_file_type(record)}"
+                stats["attachments_skipped"] += 1
+                db.session.flush()
+            return stats
+        if self._download_record_is_reusable(record):
+            record.download_status = "downloaded"
+            record.error_message = None
+            stats["attachments_skipped"] += 1
+            self._append_downloaded_record_entry(stats, record, record.local_path)
+            db.session.flush()
+            return stats
+
+        existing_download = self._find_existing_downloaded_attachment(record)
+        if existing_download:
+            record.local_path = existing_download.local_path
+            record.download_status = "downloaded"
+            record.error_message = None
+            stats["attachments_skipped"] += 1
+            self._append_downloaded_record_entry(stats, record, record.local_path)
+            db.session.flush()
+            return stats
+
+        if remaining_downloads is not None and remaining_downloads <= 0:
+            stats["stopped_by_download_limit"] = True
+            stats["download_limit_reached"] = True
+            return stats
+
+        self._attachment_download_pause()
+        try:
+            stats["_download_attempted"] = True
+            local_path = self._download_attachment_file(cookie, group_id, tab, topic_id, payload, record.name)
+            record.local_path = local_path
+            record.download_status = "downloaded"
+            record.error_message = None
+            stats["attachments_downloaded"] += 1
+            self._append_downloaded_record_entry(stats, record, local_path)
+        except Exception as exc:
+            record.download_status = "failed"
+            record.error_message = str(exc)[:1000]
+            stats["attachments_failed"] += 1
+            logger.warning(
+                "[ZSXQ_SYNC] manual attachment download failed | group_id=%s | tab=%s | topic_id=%s | name=%s | error=%s",
+                group_id,
+                tab["id"],
+                topic_id,
+                record.name,
+                exc,
+            )
+        finally:
+            db.session.flush()
+        return stats
+
+    def _append_downloaded_record_entry(self, stats, record, local_path):
+        entry = self._downloaded_file_entry(record, local_path)
+        if not entry:
+            return
+        self._append_unique_file_entry(stats["downloaded_files"], entry)
+        if entry["path"].lower().endswith(".pdf"):
+            self._append_unique_file_entry(stats["downloaded_pdf_files"], entry)
+
+    def _commit_manual_running_progress(self, run, tab, topic_id, tab_result, manual_plan):
+        run.updated_at = datetime.utcnow()
+        run.result = {
+            "running": True,
+            "current_tab": self._public_tab(tab),
+            "current_topic_id": topic_id,
+            "manual_attachment_plan": self._public_manual_attachment_plan(manual_plan),
+            "partial": dict(tab_result),
+        }
+        db.session.commit()
 
     def _sync_one_tab(self, cookie, group_id, group_name, tab, run, count, max_pages, stop_on_existing, download_attachments, download_file_types, max_download_files=None):
         tab_id = tab["id"]
@@ -922,6 +2024,7 @@ class ZsxqSyncService:
             "stopped_by_existing": False,
             "stopped_by_download_limit": False,
             "download_limit_reached": False,
+            "attachment_download_enabled": bool(download_attachments),
             "last_end_time": None,
         }
         newest_topic = None
@@ -1241,6 +2344,8 @@ class ZsxqSyncService:
                 if attempted_download and remaining_downloads is not None:
                     remaining_downloads = max(0, remaining_downloads - 1)
                 db.session.flush()
+        if stats["attachments_downloaded"] or stats["attachments_failed"] or stats["attachments_skipped"]:
+            self._clear_attachment_status_cache()
         return stats
 
     def _download_attachment_file(self, cookie, group_id, tab, topic_id, payload, name):
@@ -1322,6 +2427,132 @@ class ZsxqSyncService:
         path = directory / f"{self._safe_path_part(topic_id)}.json"
         path.write_text(json.dumps(topic, ensure_ascii=False, indent=2), encoding="utf-8")
         return self._relative_to_project(path)
+
+    def normalize_manual_attachment_plan(self, manual_attachment_plan, group_id, tabs):
+        return self._normalize_manual_attachment_plan(
+            manual_attachment_plan,
+            group_id=group_id,
+            tabs=self._normalize_tabs(tabs),
+        )
+
+    def public_manual_attachment_plan(self, manual_plan):
+        return self._public_manual_attachment_plan(manual_plan)
+
+    def _normalize_manual_attachment_plan(self, manual_attachment_plan, group_id, tabs):
+        if not manual_attachment_plan:
+            return {"enabled": False, "items": [], "selected_count": 0}
+        if isinstance(manual_attachment_plan, list):
+            raw_items = manual_attachment_plan
+            enabled = True
+        elif isinstance(manual_attachment_plan, dict):
+            raw_items = (
+                manual_attachment_plan.get("items")
+                or manual_attachment_plan.get("attachments")
+                or []
+            )
+            enabled = self._truthy(manual_attachment_plan.get("enabled", True)) or bool(raw_items)
+            requested_limit = manual_attachment_plan.get("max_download_files") or manual_attachment_plan.get("limit")
+        else:
+            raise ValueError("manual_attachment_plan 格式不正确")
+        if isinstance(manual_attachment_plan, list):
+            requested_limit = None
+        if not enabled or not raw_items:
+            return {"enabled": False, "items": [], "selected_count": 0}
+        if not isinstance(raw_items, list):
+            raise ValueError("manual_attachment_plan.items 必须是数组")
+
+        default_tab = tabs[0] if tabs else {"id": "", "label": ""}
+        items = []
+        seen = set()
+        for index, raw in enumerate(raw_items):
+            if not isinstance(raw, dict):
+                raise ValueError(f"第 {index + 1} 个附件计划格式不正确")
+            file_info = raw.get("file")
+            if not isinstance(file_info, dict):
+                raise ValueError(f"第 {index + 1} 个附件缺少 file 原始信息")
+            topic_id = str(raw.get("topic_id") or raw.get("topicId") or "").strip()
+            if not topic_id:
+                raise ValueError(f"第 {index + 1} 个附件缺少 topic_id")
+            tab_id = str(raw.get("tab_id") or raw.get("tabId") or default_tab.get("id") or "").strip()
+            if not tab_id:
+                raise ValueError(f"第 {index + 1} 个附件缺少 tab_id")
+            attachment_key = str(raw.get("attachment_key") or self._attachment_key(file_info, index, "file") or "").strip()
+            file_id = str(raw.get("file_id") or self._attachment_file_id(file_info) or "").strip()
+            name = str(raw.get("name") or self._attachment_name(file_info, "file") or "附件").strip()
+            dedupe_key = (
+                tab_id,
+                topic_id,
+                attachment_key or file_id or name,
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            items.append({
+                "group_id": str(raw.get("group_id") or group_id or "").strip(),
+                "tab_id": tab_id,
+                "tab_label": str(raw.get("tab_label") or raw.get("tabLabel") or default_tab.get("label") or tab_id).strip(),
+                "hashtag_id": raw.get("hashtag_id") or raw.get("hashtagId"),
+                "topic_id": topic_id,
+                "topic_title": str(raw.get("topic_title") or raw.get("topicTitle") or raw.get("title") or name).strip(),
+                "topic_content": str(raw.get("topic_content") or raw.get("topicContent") or "").strip(),
+                "author_name": str(raw.get("author_name") or raw.get("authorName") or "未知作者").strip(),
+                "create_time": str(raw.get("create_time") or raw.get("createTime") or "").strip(),
+                "attachment_key": attachment_key[:255],
+                "file_id": file_id[:128],
+                "name": name[:500],
+                "file_type": str(raw.get("file_type") or raw.get("fileType") or "").lower().lstrip("."),
+                "file": file_info,
+            })
+
+        limit = self._normalize_manual_attachment_plan_limit(requested_limit)
+        if len(items) > limit:
+            raise ValueError(f"已选择 {len(items)} 个附件，超过页面配置的单次上限 {limit} 个。请调大上限或拆成多个小批次。")
+        return {
+            "enabled": True,
+            "items": items,
+            "selected_count": len(items),
+            "limit": limit,
+        }
+
+    def _public_manual_attachment_plan(self, manual_plan):
+        items = manual_plan.get("items") or []
+        return {
+            "enabled": bool(items),
+            "selected_count": len(items),
+            "limit": manual_plan.get("limit") or self._normalize_manual_attachment_plan_limit(None),
+            "hard_limit": self._manual_attachment_plan_hard_limit(),
+            "items": [
+                {
+                    "tab_id": item.get("tab_id"),
+                    "tab_label": item.get("tab_label"),
+                    "topic_id": item.get("topic_id"),
+                    "topic_title": item.get("topic_title"),
+                    "attachment_key": item.get("attachment_key"),
+                    "file_id": item.get("file_id"),
+                    "name": item.get("name"),
+                    "file_type": item.get("file_type"),
+                }
+                for item in items
+            ],
+        }
+
+    def _manual_topic_payload(self, item):
+        owner = {"name": item.get("author_name") or "未知作者"}
+        create_time = item.get("create_time") or ""
+        text = item.get("topic_content") or item.get("topic_title") or item.get("name") or ""
+        return {
+            "topic_id": item["topic_id"],
+            "title": item.get("topic_title") or item.get("name") or "人工计划附件",
+            "owner": owner,
+            "create_time": create_time,
+            "files": [item["file"]],
+            "talk": {
+                "text": text,
+                "owner": owner,
+                "create_time": create_time,
+                "files": [item["file"]],
+            },
+        }
 
     def _normalize_tabs(self, tabs):
         output = []
@@ -1682,6 +2913,89 @@ class ZsxqSyncService:
             return min(max(int(max_download_files), 1), 100)
         except (TypeError, ValueError):
             raise ValueError("max_download_files 必须是正整数")
+
+    def _attachment_download_policy(self, *, requested, explicit_allow=False, max_download_files=None, manual_plan_count=0):
+        requested = self._truthy(requested)
+        normalized_limit = self._normalize_max_download_files(max_download_files)
+        env_enabled = self._truthy(os.getenv(ATTACHMENT_DOWNLOADS_ENABLED_ENV))
+        explicit_allowed = self._truthy(explicit_allow)
+        manual_plan_count = min(max(int(manual_plan_count or 0), 0), 10_000)
+        is_manual_plan = manual_plan_count > 0
+        safe_cap = self._manual_attachment_plan_hard_limit() if is_manual_plan else self._safe_attachment_download_limit()
+
+        policy = {
+            "requested": requested,
+            "enabled": False,
+            "explicit_allow": explicit_allowed,
+            "env_enabled": env_enabled,
+            "manual_plan": is_manual_plan,
+            "manual_plan_count": manual_plan_count,
+            "env_name": ATTACHMENT_DOWNLOADS_ENABLED_ENV,
+            "limit_env_name": ATTACHMENT_DOWNLOAD_LIMIT_ENV,
+            "safe_cap": safe_cap,
+            "requested_max_download_files": normalized_limit,
+            "max_download_files": 0,
+            "reason": "metadata_only",
+        }
+        if not requested:
+            return policy
+        if not explicit_allowed:
+            policy["reason"] = "missing_explicit_allow"
+            return policy
+        if not env_enabled and not is_manual_plan:
+            policy["reason"] = "env_disabled"
+            return policy
+
+        if is_manual_plan and manual_plan_count > safe_cap:
+            policy["reason"] = "manual_plan_limit_exceeded"
+            return policy
+
+        effective_limit = normalized_limit if normalized_limit is not None else (manual_plan_count if is_manual_plan else safe_cap)
+        effective_limit = min(max(int(effective_limit or 0), 0), safe_cap)
+        if effective_limit <= 0:
+            policy["reason"] = "zero_limit"
+            return policy
+
+        policy["enabled"] = True
+        policy["max_download_files"] = effective_limit
+        policy["reason"] = "manual_plan_enabled" if is_manual_plan and not env_enabled else "enabled"
+        return policy
+
+    def _safe_attachment_download_limit(self):
+        try:
+            value = int(os.getenv(ATTACHMENT_DOWNLOAD_LIMIT_ENV, str(DEFAULT_SAFE_ATTACHMENT_DOWNLOAD_LIMIT)))
+        except (TypeError, ValueError):
+            value = DEFAULT_SAFE_ATTACHMENT_DOWNLOAD_LIMIT
+        return min(max(value, 0), 3)
+
+    def _normalize_manual_attachment_plan_limit(self, value):
+        hard_limit = self._manual_attachment_plan_hard_limit()
+        if value in (None, "", 0, "0"):
+            return min(DEFAULT_MANUAL_ATTACHMENT_PLAN_LIMIT, hard_limit)
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("人工计划单次上限必须是正整数")
+        return min(max(number, 1), hard_limit)
+
+    def _manual_attachment_plan_hard_limit(self):
+        raw_value = (
+            os.getenv(MANUAL_ATTACHMENT_PLAN_HARD_LIMIT_ENV)
+            or os.getenv(MANUAL_ATTACHMENT_PLAN_LIMIT_ENV)
+            or str(DEFAULT_MANUAL_ATTACHMENT_PLAN_HARD_LIMIT)
+        )
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            value = DEFAULT_MANUAL_ATTACHMENT_PLAN_HARD_LIMIT
+        return min(max(value, 1), 100)
+
+    def _truthy(self, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enabled", "y"}
 
     def _should_download_attachment(self, record, download_file_types):
         if not download_file_types or "all" in download_file_types:

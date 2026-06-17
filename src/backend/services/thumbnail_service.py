@@ -73,18 +73,37 @@ class ThumbnailService:
         logger.info(f"🎨 [Font Discovery] Selected font: {self.font_path}")
 
     def _find_font(self):
-        candidates = [
-            os.path.join(self.font_base_dir, 'SourceHanSansSC-Heavy.otf'),
-            '/System/Library/Fonts/PingFang.ttc', 
-            '/usr/share/fonts/truetype/source-han-sans/SourceHanSansSC-Heavy.otf',
-            'C:\\Windows\\Fonts\\msyhbd.ttc'
+        env_candidates = [
+            os.environ.get('REPORT_THUMBNAIL_FONT_PATH'),
+            os.environ.get('THUMBNAIL_FONT_PATH'),
         ]
-        # 添加日志以确定最终选用的字体，但不修改逻辑
+        candidates = [
+            *[path for path in env_candidates if path],
+            os.path.join(self.font_base_dir, 'SourceHanSansSC-Heavy.otf'),
+            os.path.join(self.font_base_dir, 'SourceHanSansSC-Bold.otf'),
+            os.path.join(self.font_base_dir, 'SourceHanSansSC-Regular.otf'),
+            os.path.join(self.font_base_dir, 'NotoSansCJKsc-Bold.otf'),
+            os.path.join(self.font_base_dir, 'NotoSansCJKsc-Regular.otf'),
+            # Modern macOS no longer ships PingFang at this legacy path on all versions.
+            '/System/Library/Fonts/Hiragino Sans GB.ttc',
+            '/System/Library/Fonts/STHeiti Medium.ttc',
+            '/System/Library/Fonts/STHeiti Light.ttc',
+            '/System/Library/Fonts/Supplemental/Songti.ttc',
+            '/System/Library/Fonts/PingFang.ttc',
+            '/System/Library/Fonts/Helvetica.ttc',
+            '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc',
+            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+            '/usr/share/fonts/truetype/source-han-sans/SourceHanSansSC-Heavy.otf',
+            '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+            'C:\\Windows\\Fonts\\msyhbd.ttc',
+            'C:\\Windows\\Fonts\\msyh.ttc',
+            'C:\\Windows\\Fonts\\simhei.ttf',
+        ]
         for path in candidates:
             if os.path.exists(path):
                 logger.info(f"✅ [Font Selection Check] Final font path: {path}")
                 return path
-        logger.warning("⚠️ [Font Selection Check] No premium fonts found, falling back to default.")
+        logger.warning("⚠️ [Font Selection Check] No CJK-capable font found.")
         return None 
 
     def _parse_rgba(self, rgba_str: str) -> Tuple[int, int, int, int]:
@@ -232,12 +251,20 @@ class ThumbnailService:
             current_y = 520 if is_screenshot else (420 if is_podcast else 180)
             
             try:
+                if not self.font_path:
+                    raise RuntimeError(
+                        "未找到可渲染中文的封面字体；请安装 Source Han Sans/Noto CJK，"
+                        "或通过 REPORT_THUMBNAIL_FONT_PATH 指定字体文件。"
+                    )
                 main_size = 110
                 font_main = ImageFont.truetype(self.font_path, main_size)
                 font_sub = ImageFont.truetype(self.font_path, 56)
                 font_date = ImageFont.truetype(self.font_path, 32)
                 font_tag = ImageFont.truetype(self.font_path, 30)
-            except: font_main = font_sub = font_date = font_tag = ImageFont.load_default()
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(f"封面字体加载失败: {self.font_path}: {exc}") from exc
 
             # --- 播客模式新增：顶部身份标签栏 (包裹文字的小标签) ---
             if is_podcast:
@@ -309,4 +336,3 @@ class ThumbnailService:
             raise e
 
 thumbnail_service = ThumbnailService()
-

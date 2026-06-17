@@ -1,16 +1,21 @@
 import json
 from pathlib import Path
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from pydantic import BaseModel
 
 class BiliVideoMetadata(BaseModel):
     """Bilibili video metadata model."""
     title: str
     desc: str = ""
-    tid: int = 171 # Default to Lifestyle (生活/电子竞技)
+    tid: int = 36  # 知识
     tags: List[str] = ["BiliFlow"]
     cover_path: Optional[str] = None
     copyright: int = 1  # 1=Original, 2=Reprint
+    no_reprint: int = 1
+    neutral_mark: str = "个人观点，仅供参考"
+    charging_pay: Optional[Dict[str, Any]] = None
+    delay_time: Optional[int] = None
+    season_id: Optional[int] = None
     dynamic: str = ""   # Dynamic feed text
 
 def get_metadata_path(video_path: Path) -> Path:

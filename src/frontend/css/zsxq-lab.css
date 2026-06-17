@@ -502,16 +502,34 @@ button {
 }
 
 #load-groups-btn,
-#publish-topic-btn,
-#sync-current-tab-btn {
+#publish-topic-btn {
     background: linear-gradient(135deg, #1f2937, #111827);
     box-shadow: 0 8px 18px rgba(17, 24, 39, .14);
 }
 
 #load-groups-btn:hover,
-#publish-topic-btn:hover,
-#sync-current-tab-btn:hover {
+#publish-topic-btn:hover {
     background: linear-gradient(135deg, #111827, #020617);
+}
+
+#sync-current-tab-btn {
+    background: #eff6ff;
+    color: #1d4ed8;
+    box-shadow: none;
+}
+
+#sync-current-tab-btn:hover {
+    background: #dbeafe;
+}
+
+#sync-all-tabs-btn {
+    background: #fff;
+    color: #475569;
+    box-shadow: none;
+}
+
+#sync-all-tabs-btn:hover {
+    background: #f8fafc;
 }
 
 #batch-download-btn {
@@ -619,6 +637,43 @@ button {
 
 .zsxq-file-row:hover {
     background: #f3f7fb !important;
+}
+
+.zsxq-file-row--heat-1 {
+    background: #fffbeb !important;
+    border-color: #fde68a !important;
+}
+
+.zsxq-file-row--heat-1:hover {
+    background: #fef3c7 !important;
+}
+
+.zsxq-file-row--heat-2 {
+    background: #fff7ed !important;
+    border-color: #fed7aa !important;
+}
+
+.zsxq-file-row--heat-2:hover {
+    background: #ffedd5 !important;
+}
+
+.zsxq-file-row--heat-3 {
+    background: #fff1f2 !important;
+    border-color: #fecdd3 !important;
+}
+
+.zsxq-file-row--heat-3:hover {
+    background: #ffe4e6 !important;
+}
+
+.zsxq-file-row--heat-4 {
+    background: #fef2f2 !important;
+    border-color: #fca5a5 !important;
+    box-shadow: inset 3px 0 0 #ef4444;
+}
+
+.zsxq-file-row--heat-4:hover {
+    background: #fee2e2 !important;
 }
 
 .zsxq-rank-number {

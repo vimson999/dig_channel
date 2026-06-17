@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_PATH = PROJECT_ROOT / "runtime" / "zsxq_scheduled_sync_test.json"
 DEFAULT_COUNT = 12
-DEFAULT_MAX_DOWNLOAD_FILES = 9
+DEFAULT_MAX_DOWNLOAD_FILES = 0
 DEFAULT_MAX_ROUNDS = 0
 COOKIE_ENV_NAME = "ZSXQ_SYNC_TEST_COOKIE"
 COOKIE_OVERRIDE_ENV_NAME = "ZSXQ_SYNC_TEST_COOKIE_OVERRIDE"
@@ -73,12 +73,14 @@ def _snapshot_config(config):
         "group_name": config.get("group_name"),
         "count": config.get("count"),
         "max_pages": config.get("max_pages"),
+        "download_attachments": bool(config.get("download_attachments", False)),
+        "allow_attachment_downloads": bool(config.get("allow_attachment_downloads", False)),
         "max_download_files": config.get("max_download_files"),
-        "auto_pdf_clean": bool(config.get("auto_pdf_clean", True)),
-        "auto_audio_clean": bool(config.get("auto_audio_clean", True)),
+        "auto_pdf_clean": bool(config.get("auto_pdf_clean", False)),
+        "auto_audio_clean": bool(config.get("auto_audio_clean", False)),
         "auto_publish_after_clean": _normalize_auto_publish_after_clean(
             config.get("auto_publish_after_clean"),
-            previous={"enabled": True},
+            previous={"enabled": False},
         ),
         "max_rounds": max_rounds,
         "continuous": max_rounds is None,
@@ -140,22 +142,23 @@ def save_config(payload, cookie):
         "count": _bounded_int(payload.get("count"), default=DEFAULT_COUNT, lower=1, upper=50),
         "max_pages": _bounded_int(payload.get("max_pages"), default=1, lower=1, upper=5),
         "stop_on_existing": bool(payload.get("stop_on_existing", True)),
-        "download_attachments": bool(payload.get("download_attachments", True)),
+        "download_attachments": bool(payload.get("download_attachments", False)),
+        "allow_attachment_downloads": bool(payload.get("allow_attachment_downloads", False)),
         "max_download_files": _bounded_int(
             payload.get("max_download_files"),
             default=DEFAULT_MAX_DOWNLOAD_FILES,
-            lower=1,
+            lower=0,
             upper=10,
         ),
-        "auto_pdf_clean": bool(payload.get("auto_pdf_clean", previous.get("auto_pdf_clean", True))),
+        "auto_pdf_clean": bool(payload.get("auto_pdf_clean", previous.get("auto_pdf_clean", False))),
         "pdf_cleaner": payload.get("pdf_cleaner") if isinstance(payload.get("pdf_cleaner"), dict) else previous.get("pdf_cleaner", {}),
-        "auto_audio_clean": bool(payload.get("auto_audio_clean", previous.get("auto_audio_clean", True))),
+        "auto_audio_clean": bool(payload.get("auto_audio_clean", previous.get("auto_audio_clean", False))),
         "audio_cleaner": payload.get("audio_cleaner") if isinstance(payload.get("audio_cleaner"), dict) else previous.get("audio_cleaner", {}),
         "auto_publish_after_clean": _normalize_auto_publish_after_clean(
             payload.get("auto_publish_after_clean")
             if "auto_publish_after_clean" in payload
             else previous.get("auto_publish_after_clean"),
-            previous=previous.get("auto_publish_after_clean") or {"enabled": True},
+            previous=previous.get("auto_publish_after_clean") or {"enabled": False},
         ),
         "max_rounds": _normalize_max_rounds(
             payload["max_rounds"] if "max_rounds" in payload else DEFAULT_MAX_ROUNDS,
@@ -297,7 +300,7 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
     max_download_files = _bounded_int(
         config.get("max_download_files"),
         default=DEFAULT_MAX_DOWNLOAD_FILES,
-        lower=1,
+        lower=0,
         upper=10,
     )
     queued = []
@@ -677,12 +680,12 @@ def _normalize_jobs(jobs):
 def _normalize_auto_publish_after_clean(value, previous=None):
     previous = previous if isinstance(previous, dict) else {}
     if isinstance(value, dict):
-        enabled = bool(value.get("enabled", previous.get("enabled", True)))
+        enabled = bool(value.get("enabled", previous.get("enabled", False)))
         max_rounds = _bounded_int(value.get("max_rounds"), default=previous.get("max_rounds", 20), lower=1, upper=100)
         trigger = str(value.get("trigger") or previous.get("trigger") or "zsxq_system_sync_clean_complete").strip()
         rule = value.get("rule") if isinstance(value.get("rule"), dict) else previous.get("rule", {})
     elif value is None:
-        enabled = bool(previous.get("enabled", True))
+        enabled = bool(previous.get("enabled", False))
         max_rounds = _bounded_int(previous.get("max_rounds"), default=20, lower=1, upper=100)
         trigger = str(previous.get("trigger") or "zsxq_system_sync_clean_complete").strip()
         rule = previous.get("rule", {})

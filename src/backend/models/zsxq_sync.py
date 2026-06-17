@@ -104,6 +104,14 @@ class ZsxqAttachment(db.Model):
     local_path = db.Column(db.String(600), nullable=True)
     download_status = db.Column(db.String(20), nullable=False, default="pending", index=True)
     error_message = db.Column(db.Text, nullable=True)
+    publish_status = db.Column(db.String(32), nullable=True, index=True)
+    publish_task_id = db.Column(db.String(36), nullable=True, index=True)
+    publish_source_task_id = db.Column(db.String(36), nullable=True, index=True)
+    publish_topic_id = db.Column(db.String(64), nullable=True)
+    publish_submitted_count = db.Column(db.Integer, nullable=False, default=0)
+    publish_verified_count = db.Column(db.Integer, nullable=False, default=0)
+    publish_failed_count = db.Column(db.Integer, nullable=False, default=0)
+    publish_updated_at = db.Column(db.DateTime, nullable=True)
     raw_payload = db.Column(db.JSON, default=dict)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -122,6 +130,16 @@ class ZsxqAttachment(db.Model):
             "local_path": self.local_path,
             "download_status": self.download_status,
             "error_message": self.error_message,
+            "publish_status": self.publish_status,
+            "published": self.publish_status == "published",
+            "publish_submitted": self.publish_status in {"submitted", "published"},
+            "publish_task_id": self.publish_task_id,
+            "publish_source_task_id": self.publish_source_task_id,
+            "publish_topic_id": self.publish_topic_id,
+            "publish_submitted_count": self.publish_submitted_count or 0,
+            "publish_verified_count": self.publish_verified_count or 0,
+            "publish_failed_count": self.publish_failed_count or 0,
+            "publish_updated_at": self.publish_updated_at.isoformat() if self.publish_updated_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

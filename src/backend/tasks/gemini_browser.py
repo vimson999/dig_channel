@@ -24,12 +24,20 @@ def _run_with_app_context(task_id):
         return _process_job(task_id)
 
 
-@celery_app.task(bind=True, name="tasks.report_pdf_gemini.process_job")
+@celery_app.task(
+    bind=True,
+    name="tasks.report_pdf_gemini.process_job",
+    store_errors_even_if_ignored=True,
+)
 def process_report_pdf_gemini_job(self, task_id):
     return _run_with_app_context(task_id)
 
 
-@celery_app.task(bind=True, name="tasks.gemini_browser.process_job")
+@celery_app.task(
+    bind=True,
+    name="tasks.gemini_browser.process_job",
+    store_errors_even_if_ignored=True,
+)
 def process_gemini_browser_job(self, task_id):
     return _run_with_app_context(task_id)
 

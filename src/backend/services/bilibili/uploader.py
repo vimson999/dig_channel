@@ -1,13 +1,17 @@
 import asyncio
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 
+import requests
 from bilibili_api import Credential
 from bilibili_api.video_uploader import VideoUploader, VideoUploaderPage, VideoMeta
 from .utils import extract_cover
 
 logger = logging.getLogger("bilibili")
+
+DEFAULT_NEUTRAL_MARK = "个人观点，仅供参考"
+DEFAULT_CHARGING_PREVIEW_END = 5
 
 class BiliUploader:
     """Bilibili video uploader service."""
@@ -17,6 +21,10 @@ class BiliUploader:
         """
         Initialize the uploader with credentials.
         """
+        self.sessdata = sessdata
+        self.bili_jct = bili_jct
+        self.buvid3 = buvid3
+        self.dedeuserid = dedeuserid
         self.credential = Credential(
             sessdata=sessdata,
             bili_jct=bili_jct,
@@ -24,17 +32,171 @@ class BiliUploader:
             dedeuserid=dedeuserid
         )
 
+    @staticmethod
+    def _truthy(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @staticmethod
+    def _base_meta_dict(
+        *,
+        title: str,
+        desc: str,
+        tid: int,
+        tags: List[str],
+        copyright: int,
+        no_reprint: int,
+        dynamic: str,
+        neutral_mark: Optional[str],
+        delay_time: Optional[int] = None,
+        season_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        meta = {
+            "title": title,
+            "copyright": copyright,
+            "tid": tid,
+            "tag": ",".join(tags),
+            "desc_format_id": 9999,
+            "desc": desc,
+            "recreate": -1,
+            "dynamic": dynamic or "",
+            "interactive": 0,
+            "act_reserve_create": 0,
+            "no_disturbance": 0,
+            "porder": None,
+            "adorder_type": 9,
+            "no_reprint": 1 if int(no_reprint or 0) else 0,
+            "subtitle": {"open": 0, "lan": ""},
+            "neutral_mark": neutral_mark or None,
+            "dolby": 0,
+            "lossless_music": 0,
+            "up_selection_reply": False,
+            "up_close_reply": False,
+            "up_close_danmu": False,
+            "web_os": 1,
+            "source": None,
+            "watermark": {"state": 0},
+        }
+        if delay_time:
+            meta["dtime"] = int(delay_time)
+        if season_id:
+            meta["season_id"] = int(season_id)
+            meta["no_disturbance"] = 0
+        return {key: value for key, value in meta.items() if value is not None}
+
+    def _fetch_default_upower_level_id(self) -> str:
+        cookies = {
+            "SESSDATA": self.sessdata,
+            "bili_jct": self.bili_jct,
+            "buvid3": self.buvid3,
+            "DedeUserID": self.dedeuserid,
+        }
+        cookies = {key: value for key, value in cookies.items() if value}
+        response = requests.get(
+            "https://member.bilibili.com/x/vupre/web/archive/pre",
+            params={"lang": "cn"},
+            cookies=cookies,
+            headers={
+                "user-agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "referer": "https://member.bilibili.com/platform/upload/video/frame",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        body = response.json()
+        if body.get("code") != 0:
+            raise RuntimeError(f"Bilibili archive/pre failed: {body.get('message') or body.get('code')}")
+
+        info = ((body.get("data") or {}).get("charging_pay_info") or {})
+        if not self._truthy(info.get("upower_auth")):
+            raise RuntimeError("当前账号未开放充电专属视频权限")
+
+        levels = [item for item in (info.get("upower_level_list") or []) if item]
+        level = levels[0] if levels else info.get("upower_level") or {}
+        level_id = level.get("id") if isinstance(level, dict) else None
+        if not level_id:
+            raise RuntimeError("当前账号没有可用的充电档位")
+
+        publish_info = level.get("publish_info") or {}
+        logger.info(
+            "Using Bilibili charging level: %s (%s)",
+            publish_info.get("level_title_str") or "default",
+            level_id,
+        )
+        return str(level_id)
+
+    def _charging_pay_fields(self, charging_pay: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not charging_pay or not self._truthy(charging_pay.get("enabled", charging_pay.get("charging_pay"))):
+            return None
+
+        preview = charging_pay.get("preview") or {}
+        qa = charging_pay.get("qa") or {}
+        member_first = charging_pay.get("member_first") or {}
+        upower_mode = int(charging_pay.get("upower_mode") or 0)
+        upower_level_id = charging_pay.get("upower_level_id") or self._fetch_default_upower_level_id()
+
+        return {
+            "charging_pay": 1,
+            "upower_level_id": str(upower_level_id),
+            "upower_mode": upower_mode,
+            "upower_unit_price": int(charging_pay.get("upower_unit_price") or 0),
+            "preview": {
+                "need_preview": 1 if self._truthy(preview.get("need_preview", True)) else 0,
+                "start_time": int(preview.get("start_time") or 0),
+                "end_time": int(
+                    preview.get("end_time")
+                    or charging_pay.get("preview_end_time")
+                    or DEFAULT_CHARGING_PREVIEW_END
+                ),
+            },
+            "qa": {
+                "qa_enabled": 1 if self._truthy(qa.get("qa_enabled") or qa.get("enabled")) else 0,
+                "qa_id": qa.get("qa_id"),
+            },
+            "member_first": {
+                "enabled": 1 if self._truthy(member_first.get("enabled")) else 0,
+                "exp_time": int(member_first.get("exp_time") or 0),
+            },
+            "limited_free": None,
+        }
+
+    @staticmethod
+    def _normalize_delay_time(value: Any) -> Optional[int]:
+        if value in (None, "", 0, "0", False):
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            raise ValueError("Bilibili delay_time must be a Unix timestamp in seconds")
+
+    @staticmethod
+    def _normalize_season_id(value: Any) -> Optional[int]:
+        if value in (None, "", 0, "0", False):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError("Bilibili season_id must be an integer")
+
     async def upload_single(
         self,
         video_path: str,
         title: str,
         desc: str = "",
-        tid: int = 171,  # 171 = 生活/电子竞技
+        tid: int = 36,  # 36 = 知识
         tags: List[str] = None,
         cover_path: Optional[str] = None,
         copyright: int = 1,
         no_reprint: int = 1, # Default allow reprint? No, usually 1 means NO reprint (forbidden). Let's check logic.
-        dynamic: str = ""
+        dynamic: str = "",
+        neutral_mark: Optional[str] = DEFAULT_NEUTRAL_MARK,
+        charging_pay: Optional[Dict[str, Any]] = None,
+        delay_time: Optional[int] = None,
+        season_id: Optional[int] = None
     ):
         """
         Uploads a single video file to Bilibili.
@@ -61,6 +223,12 @@ class BiliUploader:
 
         # Map copyright (1=Original, 2=Reprint) to VideoMeta 'original' (bool)
         is_original = (copyright == 1)
+        neutral_mark = neutral_mark.strip() if isinstance(neutral_mark, str) else None
+        charging_pay_fields = self._charging_pay_fields(charging_pay)
+        delay_time = self._normalize_delay_time(delay_time)
+        season_id = self._normalize_season_id(season_id)
+        if charging_pay_fields and not is_original:
+            raise ValueError("Bilibili charging pay videos must be original")
 
         # Fallback for cover: if not provided, extract from video
         # This avoids 'NoneType' or 'missing argument' errors in bilibili_api
@@ -74,16 +242,35 @@ class BiliUploader:
             except Exception as e:
                 logger.warning(f"Failed to extract cover: {e}. Trying to continue without cover (may fail).")
 
-        # Construct Meta
-        meta = VideoMeta(
-            title=title,
-            desc=desc,
-            tid=tid,
-            tags=tags,
-            cover=actual_cover or "", # Ensure it's never None
-            original=is_original,
-            dynamic=dynamic
-        )
+        if charging_pay_fields or season_id:
+            meta = self._base_meta_dict(
+                title=title,
+                desc=desc,
+                tid=tid,
+                tags=tags,
+                copyright=copyright,
+                no_reprint=no_reprint,
+                dynamic=dynamic,
+                neutral_mark=neutral_mark,
+                delay_time=delay_time,
+                season_id=season_id,
+            )
+            if charging_pay_fields:
+                meta.update(charging_pay_fields)
+        else:
+            # Construct Meta
+            meta = VideoMeta(
+                title=title,
+                desc=desc,
+                tid=tid,
+                tags=tags,
+                cover=actual_cover or "", # Ensure it's never None
+                original=is_original,
+                dynamic=dynamic,
+                no_reprint=bool(int(no_reprint)) if no_reprint is not None else False,
+                neutral_mark=neutral_mark or None,
+                delay_time=delay_time
+            )
         
         # Construct Page
         page = VideoUploaderPage(

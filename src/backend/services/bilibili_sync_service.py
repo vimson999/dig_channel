@@ -67,7 +67,12 @@ class BilibiliSyncService:
                 tags=meta.tags,
                 cover_path=meta.cover_path,
                 copyright=meta.copyright,
-                dynamic=meta.dynamic
+                no_reprint=meta.no_reprint,
+                dynamic=meta.dynamic,
+                neutral_mark=meta.neutral_mark,
+                charging_pay=meta.charging_pay,
+                delay_time=meta.delay_time,
+                season_id=meta.season_id
             )
             
             # On Success: Move to processed

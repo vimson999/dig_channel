@@ -417,7 +417,33 @@
                                         <select name="bili_tid" id="bili_tid" class="input-field py-2 text-xs font-bold"></select>
                                         <select name="bili_season_id" id="bili_season_id" class="input-field py-2 text-xs font-bold"><option value="">-- 合集 --</option></select>
                                     </div>
+                                    <div class="flex flex-wrap items-center gap-3 rounded-2xl border border-blue-100 bg-white/70 px-3 py-2">
+                                        <label class="flex items-center gap-2 text-xs font-bold text-slate-700">
+                                            <input type="checkbox" name="bili_schedule_enabled" id="bili_schedule_enabled" class="w-4 h-4 text-blue-600 rounded">
+                                            定时发布
+                                        </label>
+                                        <input type="datetime-local" name="bili_schedule_time" id="bili_schedule_time" class="min-w-[210px] flex-1 rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-700" disabled>
+                                    </div>
+                                    <select name="bili_neutral_mark" id="bili_neutral_mark" class="input-field py-2 text-xs font-bold">
+                                        <option value="个人观点，仅供参考" selected>个人观点，仅供参考</option>
+                                        <option value="内容无需标注">内容无需标注</option>
+                                        <option value="含AI生成内容">含AI生成内容</option>
+                                        <option value="含虚构演绎内容">含虚构演绎内容</option>
+                                        <option value="内容含营销信息">内容含营销信息</option>
+                                        <option value="内容为转载">内容为转载</option>
+                                    </select>
                                     <input type="text" name="bili_tags" id="bili_tags" class="input-field py-2 text-xs" value="金融, 投资, 宏观">
+                                    <div class="flex flex-wrap items-center gap-3 rounded-2xl border border-blue-100 bg-white/70 px-3 py-2">
+                                        <label class="flex items-center gap-2 text-xs font-bold text-slate-700">
+                                            <input type="checkbox" name="bili_charging_pay" id="bili_charging_pay" class="w-4 h-4 text-blue-600 rounded">
+                                            充电专属
+                                        </label>
+                                        <label class="flex items-center gap-2 text-xs text-slate-500">
+                                            试看至
+                                            <input type="number" name="bili_charging_preview_end" id="bili_charging_preview_end" min="1" max="3600" value="5" class="w-20 rounded-lg border border-slate-200 px-2 py-1 text-xs font-mono text-slate-700">
+                                            秒
+                                        </label>
+                                    </div>
                                 </div>
                             </div>
 
@@ -555,6 +581,6 @@
     <script src="js/shared-navigation.js"></script>
     <script src="js/publisher/renderer.js?v=0528-2"></script>
     <script src="js/publisher/services.js?v=0227"></script>
-    <script src="js/publisher/main.js?v=0304"></script>
+    <script src="js/publisher/main.js?v=0308"></script>
 </body>
 </html>

@@ -190,11 +190,13 @@ def add_task():
         # Handle metadata
         title = request.form.get('title', Path(filename).stem)
         desc = request.form.get('desc', '')
-        tid = int(request.form.get('tid', 171))
+        tid = int(request.form.get('tid', 36))
         tags_str = request.form.get('tags', 'BiliFlow')
         tags = [t.strip() for t in tags_str.split(',') if t.strip()]
         copyright_val = int(request.form.get('copyright', 1))
         dynamic = request.form.get('dynamic', '')
+        delay_time = request.form.get('delay_time') or request.form.get('dtime') or None
+        season_id = request.form.get('season_id') or None
         
         # Handle cover
         cover_path = None
@@ -214,6 +216,8 @@ def add_task():
             tags=tags,
             cover_path=cover_path,
             copyright=copyright_val,
+            delay_time=int(delay_time) if delay_time else None,
+            season_id=int(season_id) if season_id else None,
             dynamic=dynamic
         )
         save_metadata(save_path, meta)
@@ -247,6 +251,9 @@ def update_task(filename):
             else:
                 meta.tags = [t.strip() for t in str(data['tags']).split(',') if t.strip()]
         if 'copyright' in data: meta.copyright = int(data['copyright'])
+        if 'delay_time' in data: meta.delay_time = int(data['delay_time']) if data['delay_time'] else None
+        if 'dtime' in data: meta.delay_time = int(data['dtime']) if data['dtime'] else None
+        if 'season_id' in data: meta.season_id = int(data['season_id']) if data['season_id'] else None
         if 'dynamic' in data: meta.dynamic = data['dynamic']
         
         save_metadata(video_path, meta)

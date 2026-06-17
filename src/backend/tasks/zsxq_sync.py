@@ -32,13 +32,15 @@ def run_zsxq_sync(self, run_id, payload):
                 count=payload.get("count", 20),
                 max_pages=payload.get("max_pages", 1),
                 stop_on_existing=payload.get("stop_on_existing", True),
-                download_attachments=payload.get("download_attachments", True),
+                download_attachments=payload.get("download_attachments", False),
                 download_pdf_only=payload.get("download_pdf_only", True),
                 download_file_types=payload.get("download_file_types"),
                 download_file_types_by_tab=payload.get("download_file_types_by_tab"),
                 max_download_files=payload.get("max_download_files"),
+                allow_attachment_downloads=payload.get("allow_attachment_downloads", False),
                 mode=payload.get("mode", "manual"),
                 sync_meta=payload.get("sync_meta"),
+                manual_attachment_plan=payload.get("manual_attachment_plan"),
             )
             if not workflow_run_id and _auto_pdf_clean_enabled(payload):
                 try:

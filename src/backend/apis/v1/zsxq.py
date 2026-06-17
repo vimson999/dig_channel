@@ -117,6 +117,39 @@ def topics():
         return handle_api_error(502, _safe_error(e))
 
 
+@bp.route("/topics/local", methods=["POST"])
+def local_topics():
+    """Read cached topics from local sync tables without touching ZSXQ upstream."""
+    try:
+        data = request.get_json(silent=True) or {}
+        group_id = data.get("group_id")
+        if not group_id:
+            return handle_api_error(400, "group_id 不能为空")
+        result = zsxq_sync_service.list_cached_topics(
+            group_id=group_id,
+            tab_id=data.get("tab_id"),
+            count=data.get("count", 20),
+            end_time=data.get("end_time"),
+        )
+        return jsonify({"success": True, "data": result})
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/topics/local/tabs", methods=["POST"])
+def local_topic_tabs():
+    """Read cached tab definitions from local topic tables."""
+    try:
+        data = request.get_json(silent=True) or {}
+        group_id = data.get("group_id")
+        if not group_id:
+            return handle_api_error(400, "group_id 不能为空")
+        result = zsxq_sync_service.list_cached_tabs(group_id=group_id)
+        return jsonify({"success": True, "data": result})
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
 @bp.route("/menus", methods=["POST"])
 def menus():
     """Fetch official ZSXQ group menus/tabs."""
@@ -288,10 +321,11 @@ def sync():
             "count": data.get("count", 20),
             "max_pages": data.get("max_pages", 1),
             "stop_on_existing": data.get("stop_on_existing", True),
-            "download_attachments": data.get("download_attachments", True),
+            "download_attachments": data.get("download_attachments", False),
             "download_pdf_only": data.get("download_pdf_only", True),
             "download_file_types": data.get("download_file_types"),
             "max_download_files": data.get("max_download_files"),
+            "allow_attachment_downloads": data.get("allow_attachment_downloads", False),
             "mode": mode,
             "auto_pdf_clean": data.get("auto_pdf_clean", False),
             "pdf_cleaner": data.get("pdf_cleaner") or {},
@@ -363,6 +397,21 @@ def attachment_status():
         return handle_api_error(502, _safe_error(e))
 
 
+@bp.route("/attachments/publish-status/backfill", methods=["POST"])
+def attachment_publish_status_backfill():
+    """Backfill attachment publish status from existing clean/publish task history."""
+    try:
+        data = request.get_json(silent=True) or {}
+        result = zsxq_sync_service.backfill_attachment_publish_statuses(
+            limit=data.get("limit", 240),
+        )
+        return jsonify({"success": True, "data": result})
+    except ValueError as e:
+        return handle_api_error(400, str(e))
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
 @bp.route("/system-sync-test/config", methods=["GET", "POST"])
 def system_sync_test_config():
     """Read or save the local system scheduled-sync test config."""
@@ -425,6 +474,51 @@ def system_sync_test_batch_detail():
         return jsonify({"success": True, "data": {"batch": result}})
     except Exception as e:
         return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/manual-download-workflows", methods=["POST"])
+def manual_download_workflows():
+    """Create a workflow from explicitly selected ZSXQ attachments."""
+    try:
+        data, cookie = _payload()
+        group_id = data.get("group_id")
+        if not group_id:
+            return handle_api_error(400, "group_id 不能为空")
+        if not (data.get("attachments") or data.get("items")):
+            return handle_api_error(400, "请先选择需要下载的附件")
+
+        trigger = data.get("trigger") or "zsxq_lab_manual_download_plan"
+        workflow = zsxq_workflow_service.create_manual_download_workflow(
+            config=data,
+            trigger=trigger,
+        )
+        try:
+            queued = zsxq_workflow_service.enqueue_workflow_task(
+                workflow["id"],
+                cookie=cookie,
+            )
+        except Exception as exc:
+            logger.exception("[ZSXQ_WORKFLOW] manual download workflow queue failed | workflow=%s", workflow.get("id"))
+            zsxq_workflow_service.mark_failed_by_id(
+                workflow["id"],
+                f"人工计划工作流入队失败: {exc}",
+                stage="workflow",
+            )
+            return handle_api_error(502, f"人工计划工作流入队失败：{exc}")
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "workflow": queued.get("workflow") or workflow,
+                "workflow_run_id": queued.get("workflow_run_id") or workflow["id"],
+                "celery_task_id": queued.get("celery_task_id"),
+            },
+        })
+    except ValueError as e:
+        return handle_api_error(400, str(e))
+    except Exception as e:
+        logger.exception("[ZSXQ_WORKFLOW] manual download workflow endpoint failed")
+        return handle_api_error(502, f"人工计划工作流接口异常：{e}")
 
 
 @bp.route("/workflows", methods=["POST"])

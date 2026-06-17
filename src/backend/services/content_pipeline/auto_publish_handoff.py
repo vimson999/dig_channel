@@ -5,6 +5,7 @@ from pathlib import Path
 from models import db
 from models.task import PublicationTask
 from services.zsxq_auto_publish_service import (
+    list_runs as auto_publish_list_runs,
     load_config as load_auto_publish_config,
     preview_payload as auto_publish_preview_payload,
     run_once_with_config,
@@ -149,6 +150,7 @@ def publish_clean_output(*, file_type, output_dir, options=None, requested_by="c
         rule_preview = _preview_for_type(preview, normalized_type)
         eligible_count = int((rule_preview or {}).get("eligible_count") or 0)
         if eligible_count <= 0:
+            summary = _summarize_publish_runs(runs)
             return {
                 "enabled": True,
                 "queued": bool(runs),
@@ -158,6 +160,8 @@ def publish_clean_output(*, file_type, output_dir, options=None, requested_by="c
                 "source_dir": str(source_dir),
                 "rounds": runs,
                 "preview": rule_preview,
+                "summary": summary,
+                **summary,
             }
 
         result = run_once_with_config(
@@ -169,6 +173,7 @@ def publish_clean_output(*, file_type, output_dir, options=None, requested_by="c
         runs.append(result)
 
         if result.get("skipped") or result.get("status") in {"failed"}:
+            summary = _summarize_publish_runs(runs)
             return {
                 "enabled": True,
                 "queued": bool(runs),
@@ -178,8 +183,11 @@ def publish_clean_output(*, file_type, output_dir, options=None, requested_by="c
                 "source_dir": str(source_dir),
                 "rounds": runs,
                 "preview": rule_preview,
+                "summary": summary,
+                **summary,
             }
 
+    summary = _summarize_publish_runs(runs)
     return {
         "enabled": True,
         "queued": bool(runs),
@@ -188,6 +196,8 @@ def publish_clean_output(*, file_type, output_dir, options=None, requested_by="c
         "message": f"清洗后自动发布达到最大轮次 {max_rounds}，可能仍有未发布文件。",
         "source_dir": str(source_dir),
         "rounds": runs,
+        "summary": summary,
+        **summary,
     }
 
 
@@ -219,6 +229,8 @@ def _build_transient_publish_config(*, file_type, source_dir, options):
         "upload_retry_count",
         "publish_retry_count",
         "publish_retry_delay_seconds",
+        "publish_verify_attempts",
+        "publish_verify_delay_seconds",
         "max_run_attempts",
         "max_file_size_mb",
     ):
@@ -266,6 +278,100 @@ def _preview_for_type(preview, file_type):
         if rule.get("file_type") == file_type or rule.get("id") == file_type:
             return item
     return None
+
+
+def _summarize_publish_runs(runs):
+    totals = {
+        "selected_count": 0,
+        "uploaded_count": 0,
+        "submitted_count": 0,
+        "verified_count": 0,
+        "pending_verify_count": 0,
+        "failed_count": 0,
+        "topic_count": 0,
+        "verified_topic_count": 0,
+        "pending_verify_topic_count": 0,
+        "round_count": len(runs or []),
+    }
+    for run in runs or []:
+        summary = run.get("summary") if isinstance(run, dict) and isinstance(run.get("summary"), dict) else None
+        if summary:
+            for key in totals:
+                if key == "round_count":
+                    continue
+                totals[key] += int(summary.get(key) or 0)
+            continue
+
+        for rule in (run.get("rules") if isinstance(run, dict) else []) or []:
+            if not isinstance(rule, dict):
+                continue
+            uploaded = int(rule.get("uploaded_count") or 0)
+            submitted = int(rule.get("submitted_count") if rule.get("submitted_count") is not None else uploaded)
+            verified = int(rule.get("verified_count") or 0)
+            totals["selected_count"] += int(rule.get("selected_count") or 0)
+            totals["uploaded_count"] += uploaded
+            totals["submitted_count"] += submitted
+            totals["verified_count"] += verified
+            totals["pending_verify_count"] += int(rule.get("pending_verify_count") or max(0, submitted - verified))
+            totals["failed_count"] += int(rule.get("failed_count") or 0)
+            if rule.get("topic_id"):
+                totals["topic_count"] += 1
+                verification = rule.get("verification") if isinstance(rule.get("verification"), dict) else {}
+                if verification.get("confirmed"):
+                    totals["verified_topic_count"] += 1
+                else:
+                    totals["pending_verify_topic_count"] += 1
+    return totals
+
+
+def summarize_publish_runs_for_request(requested_by, limit=100):
+    requested_by = str(requested_by or "").strip()
+    if not requested_by:
+        return {"summary": _summarize_publish_runs([]), "runs": [], "batches": []}
+
+    runs = [
+        deepcopy(run)
+        for run in auto_publish_list_runs(limit=limit)
+        if isinstance(run, dict) and str(run.get("requested_by") or "").strip() == requested_by
+    ]
+    runs.sort(key=lambda run: (run.get("started_at") or "", run.get("id") or ""))
+    summary = _summarize_publish_runs(runs)
+    batches = []
+    topic_ids = []
+    for run in runs:
+        for rule in (run.get("rules") if isinstance(run, dict) else []) or []:
+            if not isinstance(rule, dict):
+                continue
+            uploaded = int(rule.get("uploaded_count") or 0)
+            submitted = int(rule.get("submitted_count") if rule.get("submitted_count") is not None else uploaded)
+            verified = int(rule.get("verified_count") or 0)
+            pending = int(rule.get("pending_verify_count") or max(0, submitted - verified))
+            failed = int(rule.get("failed_count") or 0)
+            topic_id = str(rule.get("topic_id") or "").strip()
+            if topic_id:
+                topic_ids.append(topic_id)
+            if not any([submitted, verified, pending, failed, topic_id]):
+                continue
+            batches.append({
+                "run_id": run.get("id"),
+                "rule_id": rule.get("rule_id") or rule.get("id"),
+                "file_type": rule.get("file_type"),
+                "submitted_count": submitted,
+                "verified_count": verified,
+                "pending_verify_count": pending,
+                "failed_count": failed,
+                "topic_id": topic_id,
+                "status": rule.get("status"),
+            })
+
+    return {
+        "summary": summary,
+        "runs": runs,
+        "batches": batches,
+        "batch_counts": [item["submitted_count"] for item in batches if item.get("submitted_count")],
+        "topic_ids": topic_ids,
+        "recovered_from_runtime": bool(runs),
+    }
 
 
 def _normalize_file_type(value):

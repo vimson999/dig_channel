@@ -19,7 +19,7 @@ from models.task import PublicationTask
 from models import db
 from services.video_editor import video_editor_service
 from services.thumbnail_service import thumbnail_service
-from services.bilibili.uploader import BiliUploader
+from services.bilibili.uploader import BiliUploader, DEFAULT_NEUTRAL_MARK
 from services.youtube.uploader import YouTubeUploader
 from services.config_service import ConfigService
 from config import get_config
@@ -451,7 +451,8 @@ def run_publication_pipeline(self, task_id):
                     output_filename=f"{base_name}.jpg",
                     custom_bg_path=to_abs_path(thumb_params.get('custom_bg_path')),
                     overlay_opacity=float(thumb_params.get('overlay_opacity', 0.5)),
-                    transform=thumb_params.get('transform')
+                    transform=thumb_params.get('transform'),
+                    mode=thumb_params.get('mode', 'preset')
                 )
                 
                 result_state = {**result_state, 'cover_path': final_cover_path}
@@ -486,12 +487,16 @@ def run_publication_pipeline(self, task_id):
                         video_path=upload_path,
                         title=bili_params.get('title'),
                         desc=bili_params.get('desc', ''),
-                        tid=int(bili_params.get('tid', 17)),
+                        tid=int(bili_params.get('tid', 36)),
                         tags=bili_params.get('tags', []),
                         cover_path=final_cover_path,
                         copyright=int(bili_params.get('copyright', 1)),
                         no_reprint=int(bili_params.get('no_reprint', 1)),
-                        dynamic=bili_params.get('dynamic', '')
+                        dynamic=bili_params.get('dynamic', ''),
+                        neutral_mark=bili_params.get('neutral_mark') or DEFAULT_NEUTRAL_MARK,
+                        charging_pay=bili_params.get('charging_pay'),
+                        delay_time=bili_params.get('delay_time') or bili_params.get('dtime'),
+                        season_id=bili_params.get('season_id')
                     )
                 
                 upload_result = asyncio.run(_do_upload())

@@ -282,6 +282,18 @@ class WorkflowNotificationService:
     def _stage_lines(self, workflow):
         stage_results = workflow.get("stage_results") if isinstance(workflow.get("stage_results"), dict) else {}
         lines = ["", "阶段概览："]
+        totals = self._workflow_totals(stage_results)
+        if totals:
+            lines.append(
+                "总量："
+                f"下载 {totals['downloaded']} 个，下载失败 {totals['download_failed']} 个"
+                f" | 清洗成功 {totals['clean_success']} 个，清洗失败 {totals['clean_failed']} 个"
+                f" | 发布已提交 {totals['publish_submitted']} 个，已确认可见 {totals['publish_verified']} 个"
+                f"，待审核/待确认 {totals['publish_pending']} 个，发布失败 {totals['publish_failed']} 个"
+            )
+            business_summary = self._business_summary_text(totals)
+            if business_summary:
+                lines.append(business_summary)
 
         sync = stage_results.get("sync") if isinstance(stage_results.get("sync"), dict) else {}
         if sync:
@@ -299,19 +311,30 @@ class WorkflowNotificationService:
 
         clean = stage_results.get("clean") if isinstance(stage_results.get("clean"), dict) else {}
         if clean:
+            clean_counts = self._clean_counts(clean.get("tasks"))
             lines.append(
                 f"清洗：{self._status_label(clean.get('status'))}"
                 f"{self._tasks_text(clean.get('tasks'), stage_status=clean.get('status'))}"
+                f"{self._clean_counts_text(clean_counts)}"
             )
             if clean.get("error"):
                 lines.append(f"清洗错误：{clean.get('error')}")
 
         publish = stage_results.get("publish") if isinstance(stage_results.get("publish"), dict) else {}
         if publish:
+            publish_counts = self._publish_counts(publish.get("tasks"))
             lines.append(
                 f"发布：{self._status_label(publish.get('status'))}"
                 f"{self._tasks_text(publish.get('tasks'), stage_status=publish.get('status'))}"
+                f"{self._publish_counts_text(publish_counts)}"
             )
+            publish_detail_lines = self._publish_detail_lines(publish.get("tasks"))
+            if publish_detail_lines:
+                lines.append("发布明细：")
+                lines.extend(publish_detail_lines)
+            recovered_note = self._publish_recovered_note(publish.get("tasks"))
+            if recovered_note:
+                lines.append(recovered_note)
             if publish.get("error"):
                 lines.append(f"发布错误：{publish.get('error')}")
 
@@ -337,6 +360,180 @@ class WorkflowNotificationService:
                 lines.append(f"{key}：{value}")
 
         return lines
+
+    def _workflow_totals(self, stage_results):
+        sync = stage_results.get("sync") if isinstance(stage_results.get("sync"), dict) else {}
+        sync_summary = sync.get("summary") if isinstance(sync.get("summary"), dict) else {}
+        clean = stage_results.get("clean") if isinstance(stage_results.get("clean"), dict) else {}
+        publish = stage_results.get("publish") if isinstance(stage_results.get("publish"), dict) else {}
+        clean_counts = self._clean_counts(clean.get("tasks"))
+        publish_counts = self._publish_counts(publish.get("tasks"))
+        totals = {
+            "downloaded": self._safe_int(sync_summary.get("attachments_downloaded")),
+            "download_failed": self._safe_int(sync_summary.get("attachments_failed")),
+            "clean_success": clean_counts["success"],
+            "clean_failed": clean_counts["failed"],
+            "publish_submitted": publish_counts["submitted"],
+            "publish_verified": publish_counts["verified"],
+            "publish_pending": publish_counts["pending"],
+            "publish_failed": publish_counts["failed"],
+        }
+        return totals if any(totals.values()) else None
+
+    def _clean_counts(self, tasks):
+        counts = {"files": 0, "success": 0, "failed": 0}
+        if not isinstance(tasks, list):
+            return counts
+        for item in tasks:
+            if not isinstance(item, dict):
+                continue
+            counts["files"] += self._safe_int(item.get("files_count"))
+            counts["success"] += self._safe_int(item.get("success_count"))
+            counts["failed"] += self._safe_int(item.get("failed_count"))
+        return counts
+
+    def _publish_counts(self, tasks):
+        counts = {
+            "selected": 0,
+            "uploaded": 0,
+            "submitted": 0,
+            "verified": 0,
+            "pending": 0,
+            "failed": 0,
+            "topics": 0,
+            "verified_topics": 0,
+            "pending_topics": 0,
+        }
+        if not isinstance(tasks, list):
+            return counts
+        for item in tasks:
+            if not isinstance(item, dict):
+                continue
+            summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+            selected = self._first_number(item.get("selected_count"), summary.get("selected_count"))
+            uploaded = self._first_number(item.get("uploaded_count"), summary.get("uploaded_count"))
+            submitted = self._first_number(item.get("submitted_count"), summary.get("submitted_count"), uploaded)
+            verified = self._first_number(item.get("verified_count"), summary.get("verified_count"))
+            pending = self._first_number(
+                item.get("pending_verify_count"),
+                summary.get("pending_verify_count"),
+                max(0, submitted - verified),
+            )
+            counts["selected"] += selected
+            counts["uploaded"] += uploaded
+            counts["submitted"] += submitted
+            counts["verified"] += verified
+            counts["pending"] += pending
+            counts["failed"] += self._first_number(item.get("failed_count"), summary.get("failed_count"))
+            counts["topics"] += self._first_number(item.get("topic_count"), summary.get("topic_count"))
+            counts["verified_topics"] += self._first_number(item.get("verified_topic_count"), summary.get("verified_topic_count"))
+            counts["pending_topics"] += self._first_number(item.get("pending_verify_topic_count"), summary.get("pending_verify_topic_count"))
+        return counts
+
+    def _clean_counts_text(self, counts):
+        if not counts or not any(counts.values()):
+            return ""
+        return f" | 文件成功 {counts['success']}，失败 {counts['failed']}"
+
+    def _publish_counts_text(self, counts):
+        if not counts or not any(counts.values()):
+            return ""
+        return (
+            f" | 已提交 {counts['submitted']}，已确认 {counts['verified']}，"
+            f"待审核/待确认 {counts['pending']}，失败 {counts['failed']}"
+        )
+
+    def _business_summary_text(self, totals):
+        if not totals:
+            return ""
+        text = (
+            f"业务结论：下载 {totals['downloaded']} 个，清洗成功 {totals['clean_success']} 个，"
+            f"发布确认 {totals['publish_verified']} 个。"
+        )
+        extras = []
+        if totals.get("download_failed"):
+            extras.append(f"下载失败 {totals['download_failed']} 个")
+        if totals.get("clean_failed"):
+            extras.append(f"清洗失败 {totals['clean_failed']} 个")
+        if totals.get("publish_pending"):
+            extras.append(f"发布待审核/待确认 {totals['publish_pending']} 个")
+        if totals.get("publish_failed"):
+            extras.append(f"发布失败 {totals['publish_failed']} 个")
+        if extras:
+            text += f"未完成项：{'，'.join(extras)}。"
+        return text
+
+    def _publish_detail_lines(self, tasks):
+        if not isinstance(tasks, list):
+            return []
+        lines = []
+        for item in tasks:
+            if not isinstance(item, dict):
+                continue
+            runtime = item.get("publish_runtime") if isinstance(item.get("publish_runtime"), dict) else {}
+            batches = runtime.get("batches") if isinstance(runtime.get("batches"), list) else []
+            summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+            counts = [self._safe_int(batch.get("submitted_count")) for batch in batches if isinstance(batch, dict)]
+            counts = [count for count in counts if count > 0]
+            submitted = self._first_number(item.get("submitted_count"), summary.get("submitted_count"), sum(counts))
+            if submitted <= 0:
+                continue
+            batch_count = len(counts) or self._safe_int(summary.get("round_count")) or 1
+            count_text = self._batch_count_text(counts, submitted)
+            topic_count = self._first_number(item.get("topic_count"), summary.get("topic_count"))
+            verified = self._first_number(item.get("verified_count"), summary.get("verified_count"))
+            pending = self._first_number(item.get("pending_verify_count"), summary.get("pending_verify_count"))
+            failed = self._first_number(item.get("failed_count"), summary.get("failed_count"))
+            label = self._file_type_label(item.get("file_type"))
+            verify_text = self._publish_verify_text(submitted, verified, pending, failed)
+            lines.append(
+                f"{label}：{batch_count} 批，{count_text} 个附件，"
+                f"{topic_count} 个 topic，{verify_text}。"
+            )
+        return lines
+
+    def _publish_recovered_note(self, tasks):
+        if not isinstance(tasks, list):
+            return ""
+        failed_with_runtime = 0
+        for item in tasks:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "").lower()
+            runtime = item.get("publish_runtime") if isinstance(item.get("publish_runtime"), dict) else {}
+            summary = runtime.get("summary") if isinstance(runtime.get("summary"), dict) else {}
+            if status == "failed" and self._safe_int(summary.get("verified_count")) > 0:
+                failed_with_runtime += 1
+        if not failed_with_runtime:
+            return ""
+        return (
+            f"说明：有 {failed_with_runtime} 个发布子任务状态为失败，但本地发布运行记录显示已有内容确认可见，"
+            "通常是结果回写数据库超时导致的状态误报。"
+        )
+
+    def _batch_count_text(self, counts, total):
+        if not counts:
+            return str(total)
+        if len(counts) == 1:
+            return str(counts[0])
+        return f"{' + '.join(str(count) for count in counts)} = {total}"
+
+    def _publish_verify_text(self, submitted, verified, pending, failed):
+        if failed:
+            return f"已确认可见 {verified}，待审核/待确认 {pending}，失败 {failed}"
+        if pending:
+            return f"已确认可见 {verified}，待审核/待确认 {pending}"
+        if verified >= submitted:
+            return "全部确认可见"
+        return f"已确认可见 {verified}"
+
+    def _file_type_label(self, value):
+        labels = {
+            "pdf": "PDF",
+            "audio": "音频",
+            "mp3": "音频",
+        }
+        return labels.get(str(value or "").lower(), str(value or "发布"))
 
     def _tasks_text(self, tasks, stage_status=None):
         if not isinstance(tasks, list) or not tasks:
@@ -414,6 +611,18 @@ class WorkflowNotificationService:
 
     def _num(self, value):
         return value if value is not None else 0
+
+    def _safe_int(self, value):
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _first_number(self, *values):
+        for value in values:
+            if value is not None:
+                return self._safe_int(value)
+        return 0
 
     def _first_env(self, names, default=None):
         for name in names:

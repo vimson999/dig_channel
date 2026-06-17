@@ -1,9 +1,12 @@
 const COOKIE_STORAGE_KEY = 'zsxq_cookie';
 const COOKIE_PROFILES_STORAGE_KEY = 'zsxq_cookie_profiles';
 const ACTIVE_COOKIE_ID_STORAGE_KEY = 'zsxq_active_cookie_id';
+const MANUAL_PLAN_LIMIT_STORAGE_KEY = 'zsxq_manual_plan_limit';
 const AUTO_SYNC_TEST_INTERVAL_MS = 5 * 60 * 1000;
 const AUTO_SYNC_TEST_ROUNDS = 3;
-const AUTO_SYNC_TEST_MAX_FILES = 5;
+const AUTO_SYNC_TEST_MAX_FILES = 0;
+const MANUAL_PLAN_DEFAULT_LIMIT = 20;
+const MANUAL_PLAN_MAX_LIMIT = 50;
 const SYSTEM_SYNC_INTERVAL_MINUTES = 5;
 const SYSTEM_SYNC_COUNT = 50;
 const SYSTEM_SYNC_MAX_ROUNDS = 3;
@@ -19,6 +22,7 @@ const state = {
     fileMap: new Map(),
     topicMap: new Map(),
     selectedTopicKeys: new Set(),
+    selectedAttachmentKeys: new Set(),
     currentTopics: [],
     activeTab: 'latest',
     officialMenus: [],
@@ -68,6 +72,10 @@ const els = {
     refreshTopicsBtn: document.getElementById('refresh-topics-btn'),
     selectAllTopicsBtn: document.getElementById('select-all-topics-btn'),
     batchDownloadBtn: document.getElementById('batch-download-btn'),
+    manualPlanLimitControl: document.getElementById('manual-plan-limit-control'),
+    manualPlanLimitInput: document.getElementById('manual-plan-limit-input'),
+    manualPlanPublishControl: document.getElementById('manual-plan-publish-control'),
+    manualPlanAutoPublishCheckbox: document.getElementById('manual-plan-auto-publish-checkbox'),
     attachmentViewFilterControl: document.getElementById('attachment-view-filter-control'),
     attachmentViewFilterSelect: document.getElementById('attachment-view-filter-select'),
     attachmentTypeControl: document.getElementById('attachment-type-control'),
@@ -118,6 +126,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (els.systemSyncMaxRoundsInput) {
         els.systemSyncMaxRoundsInput.value = String(SYSTEM_SYNC_MAX_ROUNDS);
+    }
+    if (els.manualPlanLimitInput) {
+        const savedLimit = localStorage.getItem(MANUAL_PLAN_LIMIT_STORAGE_KEY);
+        els.manualPlanLimitInput.value = String(readManualPlanLimit(savedLimit || els.manualPlanLimitInput.value));
+    }
+    if (els.manualPlanAutoPublishCheckbox) {
+        els.manualPlanAutoPublishCheckbox.checked = true;
     }
     bindEvents();
 
@@ -170,18 +185,27 @@ function bindEvents() {
 
     els.loadGroupsBtn.addEventListener('click', loadGroups);
     els.refreshTopicsBtn.addEventListener('click', () => {
-        if (state.selectedGroup) loadTopics(state.selectedGroup);
+        if (state.selectedGroup) loadActiveTabPage({ reset: true });
     });
     els.scopeSelect.addEventListener('change', () => {
         const tab = getTabDefinitions().find(item => !item.hashtagId && item.scope === els.scopeSelect.value);
         state.activeTab = tab?.id || 'preset:all';
-        if (state.selectedGroup) loadTopics(state.selectedGroup);
+        if (state.selectedGroup) loadActiveTabPage({ reset: true });
     });
     els.selectAllTopicsBtn.addEventListener('click', toggleSelectAllTopics);
-    els.batchDownloadBtn.addEventListener('click', downloadVisibleFiles);
+    els.batchDownloadBtn.addEventListener('click', createManualDownloadWorkflow);
+    els.manualPlanLimitInput?.addEventListener('change', () => {
+        const limit = readManualPlanLimit();
+        els.manualPlanLimitInput.value = String(limit);
+        localStorage.setItem(MANUAL_PLAN_LIMIT_STORAGE_KEY, String(limit));
+        updateBatchDownloadButton();
+    });
     els.attachmentTypeSelect.addEventListener('change', () => {
         state.attachmentType = els.attachmentTypeSelect.value || 'pdf';
+        state.selectedTopicKeys.clear();
+        state.selectedAttachmentKeys.clear();
         updateBatchDownloadButton();
+        renderTopics(state.currentTopics, activeTabState());
         renderSyncIntro();
     });
     els.attachmentViewFilterSelect.addEventListener('change', () => {
@@ -191,6 +215,7 @@ function bindEvents() {
             state.attachmentType = state.attachmentViewFilter;
         }
         state.selectedTopicKeys.clear();
+        state.selectedAttachmentKeys.clear();
         renderTopics(state.currentTopics, activeTabState());
         renderSyncIntro();
     });
@@ -402,6 +427,7 @@ function resetZsxqWorkspace() {
     state.fileMap.clear();
     state.topicMap.clear();
     state.selectedTopicKeys.clear();
+    state.selectedAttachmentKeys.clear();
     state.currentTopics = [];
     state.officialMenus = [];
     state.tabStates.clear();
@@ -569,7 +595,7 @@ async function loadTopics(group, options = {}) {
     els.copyTopicsJsonBtn?.classList.add('hidden');
     els.topicsTitle.textContent = group.name || `星球 ${group.group_id}`;
     els.topicsSubtitle.textContent = `Group ID: ${group.group_id}`;
-    els.topicsList.innerHTML = loadingCard('正在获取最新主题...');
+    els.topicsList.innerHTML = loadingCard('正在读取本地主题...');
     state.officialMenus = await loadOfficialMenus(group.group_id);
     const tabs = getTabDefinitions();
     if (!tabs.length) {
@@ -580,6 +606,7 @@ async function loadTopics(group, options = {}) {
     state.activeTab = tabs.some(tab => tab.id === requestedActiveTab)
         ? requestedActiveTab
         : (tabs[0]?.id || 'latest');
+    applyAttachmentDefaultsForTab(getActiveTabConfig());
     renderTopicTabs();
     renderSyncIntro();
     startSystemSyncSchedulerPolling();
@@ -594,6 +621,11 @@ async function loadTopics(group, options = {}) {
 
 async function loadOfficialMenus(groupId) {
     state.menuError = null;
+    const cachedTabs = await loadLocalCachedTabs(groupId);
+    if (cachedTabs.length) {
+        return cachedTabs;
+    }
+
     try {
         const result = await apiPost('/zsxq/menus', {
             cookie: state.cookie,
@@ -603,18 +635,29 @@ async function loadOfficialMenus(groupId) {
         state.menuError = menus.length ? null : '官方菜单为空，不能展示本地猜测分类。';
         return menus;
     } catch (error) {
-        state.menuError = `官方菜单加载失败：${error.message}`;
+        state.menuError = `官方菜单加载失败，且本地库暂无 Tab：${error.message}`;
+        return [];
+    }
+}
+
+async function loadLocalCachedTabs(groupId) {
+    try {
+        const result = await apiPost('/zsxq/topics/local/tabs', { group_id: groupId });
+        return (result?.tabs || []).map(tab => ({
+            local_cached: true,
+            tab_id: tab.id || tab.tab_id,
+            title: tab.label || tab.tab_label || tab.id || '本地缓存',
+            label: tab.label || tab.tab_label || tab.id || '本地缓存',
+            topic_count: tab.topic_count || 0,
+            last_synced_at: tab.last_synced_at || '',
+        })).filter(tab => tab.tab_id);
+    } catch {
         return [];
     }
 }
 
 async function loadActiveTabPage(options = {}) {
     if (!state.selectedGroup || state.isLoadingMore) return;
-    const cooldownMs = state.topicCooldownUntil - Date.now();
-    if (cooldownMs > 0) {
-        showCooldownMessage(cooldownMs);
-        return;
-    }
 
     const tab = getActiveTabConfig();
     const tabState = getTabState(tab.id);
@@ -623,7 +666,7 @@ async function loadActiveTabPage(options = {}) {
 
     if (reset) {
         resetTabState(tabState);
-        els.topicsList.innerHTML = loadingCard(`正在获取${tab.label}...`);
+        els.topicsList.innerHTML = loadingCard(`正在读取本地${tab.label}...`);
     }
 
     state.isLoadingMore = true;
@@ -636,17 +679,19 @@ async function loadActiveTabPage(options = {}) {
         const maxAutoPages = 1;
 
         do {
-            const requestPayload = buildTopicsRequest(tab, tabState);
-            await waitForTopicRequestSlot();
-            const result = await apiPost('/zsxq/topics', requestPayload);
+            const requestPayload = buildLocalTopicsRequest(tab, tabState);
+            const result = await apiPost('/zsxq/topics/local', requestPayload);
             state.lastTopicsRequest = withoutSensitiveCookie(requestPayload);
             state.lastTopicsResponse = result;
-            state.lastTopicsScope = requestPayload.scope || 'all';
+            state.lastTopicsScope = requestPayload.scope || 'local';
             els.copyTopicsJsonBtn?.classList.remove('hidden');
 
             const pageTopics = extractTopicsFromResponse(result);
             appendTabTopics(tabState, tab, pageTopics);
             tabState.loaded = true;
+            tabState.source = result?.source || 'local_db';
+            tabState.total = result?.resp_data?.total ?? tabState.total;
+            tabState.emptyMessage = result?.resp_data?.message || '';
             tabState.endTime = result?.resp_data?.next_end_time || oldestTopicTime(pageTopics);
             tabState.hasMore = pageTopics.length > 0 && Boolean(tabState.endTime);
             pagesLoaded += 1;
@@ -657,10 +702,6 @@ async function loadActiveTabPage(options = {}) {
         );
     } catch (error) {
         tabState.error = error.message;
-        if (isRateLimitedError(error)) {
-            state.topicCooldownUntil = Date.now() + 30000;
-            tabState.error = '知识星球接口暂时限流，已暂停 30 秒后再试。';
-        }
         if (tabState.topics.length > 0) {
             tabState.hasMore = false;
         }
@@ -735,8 +776,8 @@ async function syncTabs(scope) {
     renderSyncStatus({
         type: 'loading',
         message: scope === 'all'
-            ? `正在同步全部 ${tabs.length} 个 tab，每个 tab 默认拉 1 页，并自动下载${attachmentTypeLabel}。`
-            : `正在同步「${activeTab.label}」，最多拉 ${maxPages} 页，并自动下载${attachmentTypeLabel}。`,
+            ? `正在同步全部 ${tabs.length} 个 tab，每个 tab 默认拉 1 页；只同步主题和附件索引，不自动下载${attachmentTypeLabel}。`
+            : `正在同步「${activeTab.label}」，最多拉 ${maxPages} 页；只同步主题和附件索引，不自动下载${attachmentTypeLabel}。`,
     });
 
     try {
@@ -748,7 +789,8 @@ async function syncTabs(scope) {
             count: Number(els.countInput.value || 20),
             max_pages: maxPages,
             stop_on_existing: true,
-            download_attachments: true,
+            download_attachments: false,
+            allow_attachment_downloads: false,
             download_file_types: attachmentType === 'all' ? ['all'] : [attachmentType],
             download_pdf_only: attachmentType === 'pdf',
             mode: scope === 'all' ? 'manual_all_tabs' : 'manual_current_tab',
@@ -760,6 +802,7 @@ async function syncTabs(scope) {
         } else {
             renderSyncResult(result);
             await loadSyncRuns(state.selectedGroup.group_id, { render: false });
+            await loadActiveTabPage({ reset: true });
         }
         state.attachmentStatusCache.clear();
         refreshAttachmentStatusBadges();
@@ -839,7 +882,7 @@ async function runAutoSyncTestRound() {
     renderSyncStatus({
         type: 'loading',
         title: `${autoSyncScopeLabel(scope)} · 第 ${round}/${AUTO_SYNC_TEST_ROUNDS} 轮`,
-        message: `${autoSyncScopeSubmitText(scope)}同一条内容最多下载 ${AUTO_SYNC_TEST_MAX_FILES} 个附件。`,
+        message: `${autoSyncScopeSubmitText(scope)}仅同步主题和附件索引，不自动下载 PDF/音频附件。`,
     });
 
     try {
@@ -887,7 +930,8 @@ async function queueAutoSyncJob(job, round, modePrefix = 'auto') {
         count: Number(els.countInput.value || 20),
         max_pages: 1,
         stop_on_existing: true,
-        download_attachments: true,
+        download_attachments: false,
+        allow_attachment_downloads: false,
         download_file_types: [job.fileType],
         download_pdf_only: job.fileType === 'pdf',
         max_download_files: AUTO_SYNC_TEST_MAX_FILES,
@@ -918,7 +962,7 @@ async function saveSystemSyncTestConfig() {
     renderSyncStatus({
         type: 'loading',
         title: '系统计划配置',
-        message: `正在保存本机系统计划任务配置。真实观察模式会每 ${systemIntervalMinutes} 分钟执行一次，每批获取 ${SYSTEM_SYNC_COUNT} 条主题，每条最多 ${AUTO_SYNC_TEST_MAX_FILES} 个附件。`,
+        message: `正在保存本机系统计划任务配置。真实观察模式会每 ${systemIntervalMinutes} 分钟执行一次，每批获取 ${SYSTEM_SYNC_COUNT} 条主题；只同步主题和附件索引，不自动下载 PDF/音频附件。`,
     });
 
     try {
@@ -928,7 +972,8 @@ async function saveSystemSyncTestConfig() {
             count: SYSTEM_SYNC_COUNT,
             max_pages: 1,
             stop_on_existing: true,
-            download_attachments: true,
+            download_attachments: false,
+            allow_attachment_downloads: false,
             max_download_files: AUTO_SYNC_TEST_MAX_FILES,
             interval_minutes: systemIntervalMinutes,
             max_rounds: maxRoundsRaw,
@@ -954,7 +999,7 @@ async function saveSystemSyncTestConfig() {
                 <div class="text-xs text-slate-500 leading-6">
                     <div>配置文件：<span class="font-mono">${escapeHtml(config.path || '-')}</span></div>
                     <div>Cookie 来源：<span class="font-mono">${escapeHtml(config.cookie_env_name || 'ZSXQ_SYNC_TEST_COOKIE')}</span>${config.cookie_env_configured ? ' · 已检测到' : ' · 未检测到'}</div>
-                    <div>任务范围：外资研报 PDF + 调研纪要 MP3；每 ${config.interval_minutes || systemIntervalMinutes} 分钟 1 批；每批获取 ${SYSTEM_SYNC_COUNT} 条主题；每条内容最多 ${AUTO_SYNC_TEST_MAX_FILES} 个附件。</div>
+                    <div>任务范围：外资研报 PDF + 调研纪要 MP3；每 ${config.interval_minutes || systemIntervalMinutes} 分钟 1 批；每批获取 ${SYSTEM_SYNC_COUNT} 条主题；不自动下载 PDF/音频附件。</div>
                     <div>调度轮次：${formatConfigMaxRounds(config.max_rounds ?? maxRoundsRaw)}</div>
                 </div>
             `,
@@ -988,6 +1033,17 @@ function parsePositiveInt(value, fallback, minValue = 1) {
         return fallback;
     }
     return Math.max(minValue, Math.min(Math.round(number), 1440));
+}
+
+function readManualPlanLimit(value = undefined) {
+    const raw = value !== undefined && value !== null && String(value).trim() !== ''
+        ? value
+        : (els.manualPlanLimitInput?.value || localStorage.getItem(MANUAL_PLAN_LIMIT_STORAGE_KEY));
+    const number = Number(raw);
+    if (!Number.isFinite(number)) {
+        return MANUAL_PLAN_DEFAULT_LIMIT;
+    }
+    return Math.max(1, Math.min(Math.round(number), MANUAL_PLAN_MAX_LIMIT));
 }
 
 function parsePositiveIntOrZero(value, fallback, minValue = 0) {
@@ -1093,7 +1149,7 @@ function renderSyncQueuedResult(result) {
     renderSyncStatus({
         type: 'loading',
         title: '已加入同步队列',
-        message: `Run ID：${run.id || '-'} · 状态：${syncStatusLabel(run.status)}。后台 worker 会继续同步并下载附件，页面会自动刷新日志。`,
+        message: `Run ID：${run.id || '-'} · 状态：${syncStatusLabel(run.status)}。后台 worker 会同步主题和附件索引，完成后页面会回读本地库。`,
         details: run.requested_tabs?.length
             ? `<div class="text-xs text-slate-500">范围：${escapeHtml(run.requested_tabs.map(tab => tab.label || tab.id).join('、'))}</div>`
             : '',
@@ -1109,6 +1165,7 @@ function startSyncPolling() {
         if (!stillActive) {
             stopSyncPolling();
             state.attachmentStatusCache.clear();
+            await loadActiveTabPage({ reset: true });
             refreshAttachmentStatusBadges();
         }
     }, 5000);
@@ -1377,7 +1434,7 @@ function renderSystemSyncSchedulerPanel() {
 
     const interval = scheduler.interval_minutes || config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES;
     const count = config.count || SYSTEM_SYNC_COUNT;
-    const maxFiles = config.max_download_files || AUTO_SYNC_TEST_MAX_FILES;
+    const autoDownloadAttachments = Boolean(config.download_attachments);
     const lastTrigger = scheduler.last_trigger_at ? formatZsxqTime(scheduler.last_trigger_at) : '尚未触发';
     const nextRun = scheduler.next_run ? formatZsxqTime(scheduler.next_run) : '尚未预测';
     const roundsText = scheduler.continuous ? `已运行 ${scheduler.rounds_completed || 0} 轮 · 持续模式` : `进度 ${scheduler.rounds_completed || 0}/${scheduler.max_rounds || 0} 轮`;
@@ -1393,7 +1450,7 @@ function renderSystemSyncSchedulerPanel() {
     els.systemSchedulerContent.innerHTML = `
         <div class="space-y-1">
             <div>进程状态：${escapeHtml(scheduler.running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
-            <div>调度配置：${escapeHtml(String(interval))} 分钟一次 · 每批 ${escapeHtml(String(count))} 条 · 每条最多 ${escapeHtml(String(maxFiles))} 个附件</div>
+            <div>调度配置：${escapeHtml(String(interval))} 分钟一次 · 每批 ${escapeHtml(String(count))} 条 · ${escapeHtml(autoDownloadAttachments ? '自动下载已显式开启' : '不自动下载 PDF/音频附件')}</div>
             <div>本轮状态：${escapeHtml(roundsText)} · ${escapeHtml(scheduler.message || '')}</div>
             <div>上次触发：${escapeHtml(lastTrigger)} · 下一次：${escapeHtml(nextRun)}</div>
             <div>日志：<span class="font-mono break-all">${escapeHtml(scheduler.log_path || '-')}</span></div>
@@ -1446,9 +1503,10 @@ function renderSyncIntro() {
         message: `未看到同步记录。当前 Tab 同步最多 ${count * 3} 条；全部 Tab 每个 Tab 最多 ${count} 条。`,
         details: `
             <div class="text-xs text-slate-500 leading-6">
-                <div>保存内容：主题元数据、附件元数据、原始 topic JSON 和匹配类型的附件文件。</div>
+                <div>列表来源：默认读取本地数据库；只有点击同步按钮才访问星球接口。</div>
+                <div>同步内容：主题元数据、附件元数据、原始 topic JSON；不会自动下载 PDF/音频文件。</div>
                 <div>保存位置：数据库同步表 + <span class="font-mono">data/zsxq/${escapeHtml(String(state.selectedGroup.group_id))}/</span></div>
-                <div>${escapeHtml(attachmentTypeLabel)}保存位置：当前 tab 目录下的 <span class="font-mono">files/</span>；下载间隔随机 9-12 秒。</div>
+                <div>${escapeHtml(attachmentTypeLabel)}下载：在列表中显式勾选附件后创建下载计划。</div>
                 ${activeTab ? `<div>当前 Tab：${escapeHtml(activeTab.label)}</div>` : ''}
             </div>
         `,
@@ -1516,7 +1574,7 @@ function renderSystemSyncBatches() {
 
 function systemSyncConfigSummary(config) {
     if (!config || !config.exists) return '未保存系统计划配置';
-    const maxFiles = config.max_download_files || AUTO_SYNC_TEST_MAX_FILES;
+    const autoDownloadAttachments = Boolean(config.download_attachments);
     const interval = config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES;
     const count = config.count || SYSTEM_SYNC_COUNT;
     const maxRounds = config.max_rounds;
@@ -1524,7 +1582,8 @@ function systemSyncConfigSummary(config) {
     const roundsText = maxRounds ? `${done}/${maxRounds} 轮` : `已运行 ${done} 轮 · 持续运行`;
     const cookie = config.cookie_env_configured ? 'Cookie 已配置' : 'Cookie 未配置';
     const complete = config.testing_complete ? ' · 已达测试轮数' : '';
-    return `${interval} 分钟一次 · 每批 ${count} 条 · 每条最多 ${maxFiles} 个附件 · ${roundsText} · ${cookie}${complete}`;
+    const downloadText = autoDownloadAttachments ? '自动下载已显式开启' : '不自动下载 PDF/音频附件';
+    return `${interval} 分钟一次 · 每批 ${count} 条 · ${downloadText} · ${roundsText} · ${cookie}${complete}`;
 }
 
 function renderSystemSyncBatchCard(batch) {
@@ -1676,6 +1735,17 @@ function buildTopicsRequest(tab, tabState) {
     };
 }
 
+function buildLocalTopicsRequest(tab, tabState) {
+    return {
+        group_id: state.selectedGroup.group_id,
+        tab_id: tab.id,
+        count: Number(els.countInput.value || 20),
+        scope: tab.scope || 'all',
+        end_time: tabState.endTime || null,
+        hashtag_id: tab.hashtagId || '',
+    };
+}
+
 function withoutSensitiveCookie(payload) {
     return { ...payload, cookie: payload.cookie ? '[saved locally]' : '' };
 }
@@ -1687,12 +1757,15 @@ function getTabState(tabId) {
             id: tabId,
             topics: [],
             rawCount: 0,
+            total: null,
+            source: 'local_db',
             topicIds: new Set(),
             endTime: null,
             hasMore: true,
             loading: false,
             loaded: false,
             error: null,
+            emptyMessage: '',
         });
     }
     return state.tabStates.get(key);
@@ -1701,13 +1774,17 @@ function getTabState(tabId) {
 function resetTabState(tabState) {
     tabState.topics = [];
     tabState.rawCount = 0;
+    tabState.total = null;
+    tabState.source = 'local_db';
     tabState.topicIds = new Set();
     tabState.endTime = null;
     tabState.hasMore = true;
     tabState.loading = false;
     tabState.loaded = false;
     tabState.error = null;
+    tabState.emptyMessage = '';
     state.selectedTopicKeys.clear();
+    state.selectedAttachmentKeys.clear();
 }
 
 function appendTabTopics(tabState, tab, pageTopics) {
@@ -1726,10 +1803,14 @@ function renderActiveTab() {
     state.currentTopics = tabState.topics;
 
     if (state.selectedGroup) {
+        const sourceLabel = tabState.source === 'local_db' ? '本地库' : '接口';
+        const totalText = tabState.total === null || tabState.total === undefined
+            ? `${sourceLabel} ${tabState.rawCount} 条`
+            : `${sourceLabel} ${tabState.total} 条`;
         els.topicsSubtitle.textContent = [
             `Group ID: ${state.selectedGroup.group_id}`,
             tab.hashtagId ? `hashtag ${tab.hashtagId}` : `scope ${tab.scope || 'all'}`,
-            `接口 ${tabState.rawCount} 条`,
+            totalText,
             `当前 tab ${tabState.topics.length} 条`,
             tabState.hasMore ? '可继续下滑' : '已到底',
         ].join(' · ');
@@ -1844,7 +1925,9 @@ async function activateTopicTab(tabId, options = {}) {
 
     state.activeTab = targetTab.id;
     if (!targetTab.hashtagId) els.scopeSelect.value = targetTab.scope || 'all';
+    applyAttachmentDefaultsForTab(targetTab);
     state.selectedTopicKeys.clear();
+    state.selectedAttachmentKeys.clear();
 
     const tabState = getTabState(targetTab.id);
     if (options.reset || !tabState.loaded) {
@@ -1863,6 +1946,17 @@ function getTabDefinitions() {
 function buildOfficialMenuTabs() {
     return state.officialMenus.map(menu => {
         const label = cleanMenuTitle(menu.title || menu.name || '未命名');
+        if (menu.local_cached && menu.tab_id) {
+            const tabId = String(menu.tab_id);
+            const hashtagMatch = tabId.match(/^hashtag:(.+)$/);
+            return {
+                id: tabId,
+                label,
+                scope: tabId.startsWith('preset:') ? normalizePresetScope(tabId.replace(/^preset:/, '')) : 'all',
+                hashtagId: hashtagMatch ? hashtagMatch[1] : '',
+            };
+        }
+
         const hashtagId = extractMenuHashtagId(menu);
         if (hashtagId) {
             return {
@@ -1915,6 +2009,26 @@ function normalizePresetScope(presetType) {
 
 function getActiveTabConfig() {
     return getTabDefinitions().find(tab => tab.id === state.activeTab) || getTabDefinitions()[0];
+}
+
+function preferredAttachmentTypeForTab(tab) {
+    const label = String(tab?.label || '');
+    if (label.includes('调研')) return 'mp3';
+    if (label.includes('外资')) return 'pdf';
+    return '';
+}
+
+function applyAttachmentDefaultsForTab(tab) {
+    const preferredType = preferredAttachmentTypeForTab(tab);
+    if (!preferredType) return;
+    state.attachmentType = preferredType;
+    state.attachmentViewFilter = preferredType;
+    if (els.attachmentTypeSelect) {
+        els.attachmentTypeSelect.value = preferredType;
+    }
+    if (els.attachmentViewFilterSelect) {
+        els.attachmentViewFilterSelect.value = preferredType;
+    }
 }
 
 function updatePublishTabState() {
@@ -1979,10 +2093,11 @@ function renderTopics(topics, tabState = null) {
     if (!visibleTopics.length) {
         const message = tabState?.loading
             ? '正在加载...'
-            : (tabState?.hasMore ? '当前页还没有匹配内容，继续下滑会尝试加载更多。' : attachmentViewEmptyText(viewFilter));
+            : (tabState?.emptyMessage || (tabState?.hasMore ? '当前页还没有匹配内容，继续下滑会尝试加载更多。' : attachmentViewEmptyText(viewFilter)));
         els.topicsList.innerHTML = emptyCard(message, tabState?.loading ? 'muted' : 'warning') + renderLoadMoreFooter(tabState);
         state.fileMap.clear();
         state.topicMap.clear();
+        state.selectedAttachmentKeys.clear();
         updateBatchDownloadButton();
         updateSelectAllButton();
         renderHotRankList();
@@ -2002,13 +2117,14 @@ function renderTopics(topics, tabState = null) {
         const createdText = formatZsxqTime(created);
         const allFiles = topicFiles(topic);
         const files = filterFilesByAttachmentView(allFiles, viewFilter);
+        const topicSelection = topicFileSelectionState(files, topic.topic_id, topicKey);
         const images = topicImages(topic);
 
         return `
             <article class="rounded-lg border border-slate-200 p-4 hover:border-blue-200 hover:shadow-sm transition-all min-w-0" data-topic-key="${escapeHtml(topicKey)}">
                 <div class="flex items-start justify-between gap-4 min-w-0">
                     <div class="flex items-start gap-3 min-w-0 flex-1">
-                        <input type="checkbox" class="topic-select-checkbox mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 shrink-0" data-topic-key="${escapeHtml(topicKey)}" ${files.length ? '' : 'disabled'} ${state.selectedTopicKeys.has(topicKey) ? 'checked' : ''} title="${files.length ? '选择该主题附件' : '该主题没有附件'}">
+                        <input type="checkbox" class="topic-select-checkbox mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 shrink-0" data-topic-key="${escapeHtml(topicKey)}" ${topicSelection.total ? '' : 'disabled'} ${topicSelection.allSelected ? 'checked' : ''} title="${topicSelection.total ? '勾选该主题下当前类型的全部附件' : '该主题没有匹配附件'}">
                         <div class="min-w-0 flex-1">
                         <h4 class="font-black text-slate-900 leading-snug line-clamp-2 break-words">${escapeHtml(title)}</h4>
                         <div class="mt-1 text-xs text-slate-400">${escapeHtml(author)} ${createdText ? `· ${escapeHtml(createdText)}` : ''}</div>
@@ -2025,6 +2141,7 @@ function renderTopics(topics, tabState = null) {
             </article>
         `;
     }).join('') + renderLoadMoreFooter(tabState);
+    pruneSelectedAttachmentsToCurrentFiles();
 
     bindTopicSelection();
     bindFileActions();
@@ -2084,6 +2201,43 @@ function topicFiles(topic) {
 
 function topicImages(topic) {
     return topic.images || topic?.talk?.images || topic?.article?.images || [];
+}
+
+function attachmentSelectionKey({ topicId, attachmentKey, fileId, name }) {
+    return [
+        String(topicId || ''),
+        String(attachmentKey || ''),
+        String(fileId || ''),
+        String(name || ''),
+    ].join('::');
+}
+
+function attachmentSelectionKeyForFile(file, index, topicId) {
+    const attachmentKey = attachmentKeyForFile(file, index);
+    const fileId = fileIdForFile(file);
+    const name = file?.name || file?.title || file?.file_name || '附件';
+    return attachmentSelectionKey({ topicId, attachmentKey, fileId, name });
+}
+
+function selectableFilesForTopic(files, topicId) {
+    const type = currentAttachmentType();
+    return (files || [])
+        .map((file, index) => ({
+            file,
+            selectionKey: attachmentSelectionKeyForFile(file, index, topicId),
+        }))
+        .filter(item => type === 'all' || fileTypeForFile(item.file) === type);
+}
+
+function topicFileSelectionState(files, topicId) {
+    const selectable = selectableFilesForTopic(files, topicId);
+    const selected = selectable.filter(item => state.selectedAttachmentKeys.has(item.selectionKey)).length;
+    return {
+        total: selectable.length,
+        selected,
+        allSelected: selectable.length > 0 && selected === selectable.length,
+        partial: selected > 0 && selected < selectable.length,
+    };
 }
 
 function currentAttachmentViewFilter() {
@@ -2169,29 +2323,37 @@ function extractHashtags(topic) {
 }
 
 function renderFiles(files, topicId, topicKey) {
+    const activeTab = getActiveTabConfig();
     return `
         <div class="mt-3 space-y-2">
             ${files.map((file, index) => {
                 const id = `${topicId || 'topic'}-${index}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
                 const attachmentKey = attachmentKeyForFile(file, index);
                 const fileId = fileIdForFile(file);
-                state.fileMap.set(id, { file, topicId, topicKey, attachmentKey, fileId });
                 const name = file.name || file.title || file.file_name || '附件';
+                const selectionKey = attachmentSelectionKey({ topicId, attachmentKey, fileId, name });
+                state.fileMap.set(id, { file, topicId, topicKey, attachmentKey, fileId, selectionKey });
                 const downloadCount = getDownloadCount(file);
                 const fileType = fileTypeForFile(file);
                 const fileIcon = fileIconClass(fileType);
                 const fileTypeLabel = fileType.toUpperCase();
+                const heatClass = downloadHeatClass(activeTab, fileType, downloadCount);
+                const selected = state.selectedAttachmentKeys.has(selectionKey);
                 return `
-                    <div class="zsxq-file-row flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 min-w-0" data-file-id="${escapeHtml(id)}">
-                        <div class="min-w-0 flex flex-col gap-1">
-                            <div class="min-w-0 flex items-center gap-2 text-sm text-slate-700">
-                            <span class="shrink-0 text-[10px] font-black ${fileIcon}">${escapeHtml(fileTypeLabel)}</span>
-                            <span class="break-words min-w-0">${escapeHtml(name)}</span>
-                            <span class="downloaded-badge hidden shrink-0 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">下载过</span>
-                            <span class="download-failed-badge hidden shrink-0 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-bold text-red-600">下载失败</span>
+                    <div class="zsxq-file-row ${heatClass} flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 min-w-0" data-file-id="${escapeHtml(id)}">
+                        <div class="min-w-0 flex items-start gap-2 flex-1">
+                            <input type="checkbox" class="file-select-checkbox mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 shrink-0" data-file-id="${escapeHtml(id)}" ${selected ? 'checked' : ''} title="选择这个附件加入下载计划">
+                            <div class="min-w-0 flex flex-col gap-1">
+                                <div class="min-w-0 flex items-center gap-2 text-sm text-slate-700">
+                                <span class="shrink-0 text-[10px] font-black ${fileIcon}">${escapeHtml(fileTypeLabel)}</span>
+                                <span class="break-words min-w-0">${escapeHtml(name)}</span>
+                                <span class="downloaded-badge hidden shrink-0 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">下载过</span>
+                                <span class="publish-status-badge hidden shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold"></span>
+                                <span class="download-failed-badge hidden shrink-0 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-bold text-red-600">下载失败</span>
+                                </div>
+                                ${downloadCount !== null ? `<div class="pl-6 text-xs text-slate-400">下载 ${escapeHtml(String(downloadCount))} 次</div>` : ''}
+                                <div class="download-error-text hidden pl-6 text-xs text-red-500"></div>
                             </div>
-                            ${downloadCount !== null ? `<div class="pl-6 text-xs text-slate-400">下载 ${escapeHtml(String(downloadCount))} 次</div>` : ''}
-                            <div class="download-error-text hidden pl-6 text-xs text-red-500"></div>
                         </div>
                         <div class="flex items-center gap-2 shrink-0">
                             <button class="copy-file-json-btn rounded-md border border-slate-300 px-2 py-1 text-xs font-bold text-slate-500 hover:bg-white" data-file-id="${escapeHtml(id)}">
@@ -2297,10 +2459,9 @@ async function refreshAttachmentStatusBadges() {
         const statuses = result?.statuses || {};
         topicIds.forEach(topicId => {
             const cacheKey = `${cachePrefix}${topicId}`;
+            const existing = state.attachmentStatusCache.get(cacheKey) || [];
             const incoming = statuses[topicId] || [];
-            if (incoming.length || !state.attachmentStatusCache.has(cacheKey)) {
-                state.attachmentStatusCache.set(cacheKey, incoming);
-            }
+            state.attachmentStatusCache.set(cacheKey, mergeAttachmentStatusRecords(existing, incoming));
         });
     } catch (error) {
         console.warn('[ZSXQ] attachment status lookup failed', error);
@@ -2316,6 +2477,50 @@ async function refreshAttachmentStatusBadges() {
     });
 }
 
+function mergeAttachmentStatusRecords(existing, incoming) {
+    const incomingRecords = Array.isArray(incoming) ? incoming : [];
+    const incomingKeys = new Set(incomingRecords.map(attachmentStatusRecordKey).filter(Boolean));
+    const localRecords = (Array.isArray(existing) ? existing : [])
+        .filter(isLocalAttachmentStatusRecord)
+        .map(stripLocalPublishStatus)
+        .filter(record => {
+            const key = attachmentStatusRecordKey(record);
+            return !key || !incomingKeys.has(key);
+        });
+    return [...incomingRecords, ...localRecords];
+}
+
+function isLocalAttachmentStatusRecord(record) {
+    const localPath = String(record?.local_path || '');
+    return localPath.startsWith('browser-download:')
+        || (record?.download_status === 'failed' && !record?.id);
+}
+
+function stripLocalPublishStatus(record) {
+    const copy = { ...(record || {}) };
+    delete copy.publish_status;
+    delete copy.published;
+    delete copy.publish_submitted;
+    delete copy.publish_task_id;
+    delete copy.publish_source_task_id;
+    delete copy.publish_topic_id;
+    delete copy.publish_submitted_count;
+    delete copy.publish_verified_count;
+    delete copy.publish_failed_count;
+    delete copy.publish_updated_at;
+    return copy;
+}
+
+function attachmentStatusRecordKey(record) {
+    if (!record) return '';
+    return [
+        record.topic_id || '',
+        record.attachment_key || '',
+        record.file_id || '',
+        record.name || '',
+    ].map(value => String(value || '')).join('|');
+}
+
 function visibleAttachmentRefs() {
     return Array.from(state.fileMap.values()).map(entry => ({
         topic_id: String(entry.topicId || ''),
@@ -2327,15 +2532,23 @@ function visibleAttachmentRefs() {
 
 function updateFileRowDownloadStatus(row, matched) {
     const downloadedBadge = row.querySelector('.downloaded-badge');
+    const publishStatusBadge = row.querySelector('.publish-status-badge');
     const failedBadge = row.querySelector('.download-failed-badge');
     const errorText = row.querySelector('.download-error-text');
     const button = row.querySelector('.download-file-btn');
     const downloaded = matched?.download_status === 'downloaded';
     const failed = matched?.download_status === 'failed';
+    const publishBadge = publishBadgeState(matched);
 
     if (downloadedBadge) {
         downloadedBadge.classList.toggle('hidden', !downloaded);
         downloadedBadge.title = downloaded ? (matched.local_path || '已通过浏览器下载') : '';
+    }
+    if (publishStatusBadge) {
+        publishStatusBadge.textContent = publishBadge.label;
+        publishStatusBadge.title = publishBadge.title;
+        publishStatusBadge.className = `publish-status-badge shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold ${publishBadge.className}`;
+        publishStatusBadge.classList.toggle('hidden', !publishBadge.label);
     }
     if (failedBadge) {
         failedBadge.classList.toggle('hidden', !failed);
@@ -2355,6 +2568,41 @@ function updateFileRowDownloadStatus(row, matched) {
             button.innerHTML = '<i class="fas fa-download mr-1"></i>下载';
         }
     }
+}
+
+function publishBadgeState(matched) {
+    const status = String(matched?.publish_status || '').toLowerCase();
+    const updatedAt = matched?.publish_updated_at ? ` · ${formatZsxqTime(matched.publish_updated_at)}` : '';
+    const taskText = matched?.publish_task_id ? `发布任务 ${matched.publish_task_id}${updatedAt}` : `发布状态${updatedAt}`;
+    if (status === 'published' || matched?.published === true) {
+        return {
+            label: '已发布',
+            className: 'border-violet-200 bg-violet-50 text-violet-700',
+            title: `${taskText}，已确认可见。`,
+        };
+    }
+    if (status === 'submitted' || matched?.publish_submitted === true) {
+        return {
+            label: '已提交',
+            className: 'border-blue-200 bg-blue-50 text-blue-700',
+            title: `${taskText}，已提交发布，可能仍在审核/待确认。`,
+        };
+    }
+    if (status === 'publishing') {
+        return {
+            label: '发布中',
+            className: 'border-amber-200 bg-amber-50 text-amber-700',
+            title: `${taskText}，发布任务仍在执行。`,
+        };
+    }
+    if (status === 'publish_failed') {
+        return {
+            label: '发布失败',
+            className: 'border-red-200 bg-red-50 text-red-600',
+            title: `${taskText}，上次发布失败。`,
+        };
+    }
+    return { label: '', className: 'hidden', title: '' };
 }
 
 function matchAttachmentStatus(records, entry) {
@@ -2395,6 +2643,38 @@ function getDownloadCount(file) {
     ];
     const value = candidates.find(item => item !== undefined && item !== null && item !== '');
     return value === undefined ? null : value;
+}
+
+function numericDownloadCount(value) {
+    if (value === undefined || value === null || value === '') return null;
+    const match = String(value).replace(/,/g, '').match(/\d+(?:\.\d+)?/);
+    if (!match) return null;
+    const count = Number(match[0]);
+    return Number.isFinite(count) ? count : null;
+}
+
+function downloadHeatClass(tab, fileType, downloadCount) {
+    const count = numericDownloadCount(downloadCount);
+    if (count === null) return '';
+    const preferredType = preferredAttachmentTypeForTab(tab);
+    if (preferredType !== fileType) return '';
+
+    if (preferredType === 'pdf') {
+        if (count >= 60) return 'zsxq-file-row--heat-4';
+        if (count >= 50) return 'zsxq-file-row--heat-3';
+        if (count >= 40) return 'zsxq-file-row--heat-2';
+        if (count > 30) return 'zsxq-file-row--heat-1';
+        return '';
+    }
+
+    if (preferredType === 'mp3') {
+        if (count >= 30) return 'zsxq-file-row--heat-4';
+        if (count >= 20) return 'zsxq-file-row--heat-3';
+        if (count >= 15) return 'zsxq-file-row--heat-2';
+        if (count >= 10) return 'zsxq-file-row--heat-1';
+    }
+
+    return '';
 }
 
 function currentAttachmentType() {
@@ -2458,15 +2738,20 @@ function formatZsxqTime(value) {
 function bindTopicSelection() {
     els.topicsList.querySelectorAll('.topic-select-checkbox').forEach(input => {
         input.addEventListener('change', () => {
+            const entries = fileEntriesForTopic(input.dataset.topicKey);
             if (input.checked) {
                 state.selectedTopicKeys.add(input.dataset.topicKey);
+                entries.forEach(entry => state.selectedAttachmentKeys.add(entry.selectionKey));
             } else {
                 state.selectedTopicKeys.delete(input.dataset.topicKey);
+                entries.forEach(entry => state.selectedAttachmentKeys.delete(entry.selectionKey));
             }
+            syncSelectionControls();
             updateBatchDownloadButton();
             updateSelectAllButton();
         });
     });
+    syncSelectionControls();
     updateSelectAllButton();
 }
 
@@ -2478,6 +2763,20 @@ function bindLoadMoreAction() {
 }
 
 function bindFileActions() {
+    els.topicsList.querySelectorAll('.file-select-checkbox').forEach(input => {
+        input.addEventListener('change', () => {
+            const entry = state.fileMap.get(input.dataset.fileId);
+            if (!entry?.selectionKey) return;
+            if (input.checked) {
+                state.selectedAttachmentKeys.add(entry.selectionKey);
+            } else {
+                state.selectedAttachmentKeys.delete(entry.selectionKey);
+            }
+            syncSelectionControls();
+            updateBatchDownloadButton();
+            updateSelectAllButton();
+        });
+    });
     els.topicsList.querySelectorAll('.download-file-btn').forEach(button => {
         button.addEventListener('click', () => downloadFile(button));
     });
@@ -2644,7 +2943,8 @@ function setPublishStatus(message, type = 'muted') {
 
 function updateBatchDownloadButton() {
     const selectedEntries = getSelectedFileEntries();
-    const selectedTopics = Array.from(state.fileMap.values()).filter(entry => state.selectedTopicKeys.has(entry.topicKey));
+    const manualPlanLimit = readManualPlanLimit();
+    const limitExceeded = selectedEntries.length > manualPlanLimit;
     const typeLabel = attachmentTypeText(currentAttachmentType());
     if (hasCurrentTopicAttachments()) {
         els.attachmentViewFilterControl.classList.remove('hidden');
@@ -2656,16 +2956,26 @@ function updateBatchDownloadButton() {
         els.batchDownloadBtn.classList.remove('hidden');
         els.selectAllTopicsBtn.classList.remove('hidden');
         els.attachmentTypeControl.classList.remove('hidden');
-        els.batchDownloadBtn.innerHTML = `<i class="fas fa-download mr-2"></i>排队下载${typeLabel}（${selectedEntries.length}）`;
-        els.batchDownloadBtn.disabled = selectedEntries.length === 0;
-        els.batchDownloadBtn.classList.toggle('opacity-50', selectedEntries.length === 0);
-        els.batchDownloadBtn.title = selectedEntries.length === 0 && selectedTopics.length > 0
-            ? `选中的主题里没有${typeLabel}`
-            : '';
+        els.manualPlanLimitControl?.classList.remove('hidden');
+        els.manualPlanPublishControl?.classList.remove('hidden');
+        els.batchDownloadBtn.innerHTML = limitExceeded
+            ? `<i class="fas fa-triangle-exclamation mr-2"></i>已选 ${selectedEntries.length} / 上限 ${manualPlanLimit}`
+            : selectedEntries.length
+            ? `<i class="fas fa-list-check mr-2"></i>创建下载计划（${selectedEntries.length} 个）`
+            : `<i class="fas fa-list-check mr-2"></i>创建下载计划`;
+        els.batchDownloadBtn.disabled = !selectedEntries.length || limitExceeded;
+        els.batchDownloadBtn.classList.toggle('opacity-50', !selectedEntries.length || limitExceeded);
+        els.batchDownloadBtn.title = limitExceeded
+            ? `已选 ${selectedEntries.length} 个，超过本次上限 ${manualPlanLimit} 个。`
+            : selectedEntries.length
+            ? `创建人工计划，只下载已勾选的 ${typeLabel}。`
+            : `先勾选具体附件，再创建 ${typeLabel} 下载计划。`;
     } else {
         els.batchDownloadBtn.classList.add('hidden');
         els.selectAllTopicsBtn.classList.add('hidden');
         els.attachmentTypeControl.classList.add('hidden');
+        els.manualPlanLimitControl?.classList.add('hidden');
+        els.manualPlanPublishControl?.classList.add('hidden');
     }
 }
 
@@ -2673,49 +2983,86 @@ function hasCurrentTopicAttachments() {
     return state.currentTopics.some(topic => topicFiles(topic).length > 0);
 }
 
+function fileEntriesForTopic(topicKey) {
+    const type = currentAttachmentType();
+    return Array.from(state.fileMap.values()).filter(entry => (
+        entry.topicKey === topicKey
+        && fileMatchesAttachmentType(entry, type)
+    ));
+}
+
+function getSelectableFileEntries() {
+    const type = currentAttachmentType();
+    return Array.from(state.fileMap.values()).filter(entry => fileMatchesAttachmentType(entry, type));
+}
+
 function getSelectableTopicKeys() {
     const keys = new Set();
-    for (const entry of state.fileMap.values()) {
+    for (const entry of getSelectableFileEntries()) {
         if (entry.topicKey) keys.add(entry.topicKey);
     }
     return keys;
 }
 
 function getSelectedFileEntries() {
-    const type = currentAttachmentType();
     return Array.from(state.fileMap.values()).filter(entry => (
-        state.selectedTopicKeys.has(entry.topicKey)
-        && fileMatchesAttachmentType(entry, type)
+        state.selectedAttachmentKeys.has(entry.selectionKey)
+        && fileMatchesAttachmentType(entry)
     ));
 }
 
 function updateSelectAllButton() {
-    const selectable = getSelectableTopicKeys();
-    if (!selectable.size) {
+    const selectable = getSelectableFileEntries();
+    if (!selectable.length) {
         els.selectAllTopicsBtn.classList.add('hidden');
         return;
     }
     els.selectAllTopicsBtn.classList.remove('hidden');
-    const allSelected = Array.from(selectable).every(key => state.selectedTopicKeys.has(key));
+    const allSelected = selectable.every(entry => state.selectedAttachmentKeys.has(entry.selectionKey));
     els.selectAllTopicsBtn.innerHTML = allSelected
         ? '<i class="fas fa-square-minus mr-2"></i>取消全选'
-        : '<i class="fas fa-check-double mr-2"></i>全选主题';
+        : '<i class="fas fa-check-double mr-2"></i>全选附件';
 }
 
 function toggleSelectAllTopics() {
-    const selectable = getSelectableTopicKeys();
-    const allSelected = Array.from(selectable).every(key => state.selectedTopicKeys.has(key));
+    const selectable = getSelectableFileEntries();
+    const allSelected = selectable.every(entry => state.selectedAttachmentKeys.has(entry.selectionKey));
     if (allSelected) {
-        selectable.forEach(key => state.selectedTopicKeys.delete(key));
+        selectable.forEach(entry => state.selectedAttachmentKeys.delete(entry.selectionKey));
     } else {
-        selectable.forEach(key => state.selectedTopicKeys.add(key));
+        selectable.forEach(entry => state.selectedAttachmentKeys.add(entry.selectionKey));
     }
 
-    els.topicsList.querySelectorAll('.topic-select-checkbox').forEach(input => {
-        input.checked = state.selectedTopicKeys.has(input.dataset.topicKey);
-    });
+    syncSelectionControls();
     updateSelectAllButton();
     updateBatchDownloadButton();
+}
+
+function syncSelectionControls() {
+    state.selectedTopicKeys.clear();
+    els.topicsList.querySelectorAll('.file-select-checkbox').forEach(input => {
+        const entry = state.fileMap.get(input.dataset.fileId);
+        input.checked = Boolean(entry?.selectionKey && state.selectedAttachmentKeys.has(entry.selectionKey));
+    });
+
+    els.topicsList.querySelectorAll('.topic-select-checkbox').forEach(input => {
+        const entries = fileEntriesForTopic(input.dataset.topicKey);
+        const selectedCount = entries.filter(entry => state.selectedAttachmentKeys.has(entry.selectionKey)).length;
+        input.checked = entries.length > 0 && selectedCount === entries.length;
+        input.indeterminate = selectedCount > 0 && selectedCount < entries.length;
+        if (input.checked) {
+            state.selectedTopicKeys.add(input.dataset.topicKey);
+        }
+    });
+}
+
+function pruneSelectedAttachmentsToCurrentFiles() {
+    const available = new Set(Array.from(state.fileMap.values()).map(entry => entry.selectionKey));
+    for (const key of Array.from(state.selectedAttachmentKeys)) {
+        if (!available.has(key)) {
+            state.selectedAttachmentKeys.delete(key);
+        }
+    }
 }
 
 function randomDelay(minSeconds = 9, maxSeconds = 12) {
@@ -2726,75 +3073,109 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function downloadVisibleFiles() {
-    const entries = getSelectedFileEntries();
-    if (!entries.length) {
-        alert('请先勾选要下载的主题。');
+async function createManualDownloadWorkflow() {
+    state.cookie = els.cookieInput.value.trim();
+    if (!state.cookie) {
+        renderSyncStatus({ type: 'error', message: '请先填写 Cookie。' });
+        return;
+    }
+    if (!state.selectedGroup) {
+        renderSyncStatus({ type: 'error', message: '请先选择一个星球。' });
         return;
     }
 
-    const originalHTML = els.batchDownloadBtn.innerHTML;
-    setLoading(els.batchDownloadBtn, true, '排队中...');
+    const selectedEntries = getSelectedFileEntries();
+    if (!selectedEntries.length) {
+        renderSyncStatus({ type: 'error', message: '请先勾选至少一个 PDF/MP3 附件。' });
+        return;
+    }
 
-    const failures = [];
+    const manualPlanLimit = readManualPlanLimit();
+    if (selectedEntries.length > manualPlanLimit) {
+        renderSyncStatus({
+            type: 'error',
+            title: '人工计划未提交',
+            message: `已选择 ${selectedEntries.length} 个附件，超过本次上限 ${manualPlanLimit} 个。请调大上限或减少勾选。`,
+        });
+        updateBatchDownloadButton();
+        return;
+    }
+    localStorage.setItem(MANUAL_PLAN_LIMIT_STORAGE_KEY, String(manualPlanLimit));
+    if (els.manualPlanLimitInput) {
+        els.manualPlanLimitInput.value = String(manualPlanLimit);
+    }
+
+    const publishEnabled = els.manualPlanAutoPublishCheckbox?.checked === true;
+    const typeLabel = attachmentTypeText(currentAttachmentType());
+    const originalHTML = els.batchDownloadBtn.innerHTML;
+    setLoading(els.batchDownloadBtn, true, '创建中...');
+    renderSyncStatus({
+        type: 'loading',
+        title: '人工计划',
+        message: `正在创建 ${selectedEntries.length} 个${typeLabel}的下载编排，只处理当前显式勾选的附件。`,
+    });
 
     try {
-        for (let index = 0; index < entries.length; index++) {
-            const entry = entries[index];
-            const { file } = entry;
-            const filename = file.name || file.title || file.file_name || `zsxq_file_${index + 1}`;
-
-            if (index > 0) {
-                const waitMs = randomDelay(9, 12);
-                els.batchDownloadBtn.innerHTML = `<i class="fas fa-clock mr-2"></i>等待 ${Math.ceil(waitMs / 1000)}s (${index + 1}/${entries.length})`;
-                await sleep(waitMs);
-            }
-
-            els.batchDownloadBtn.innerHTML = `<i class="fas fa-circle-notch fa-spin mr-2"></i>下载中 ${index + 1}/${entries.length}`;
-
-            try {
-                const response = await fetch(`${apiBaseUrl()}/zsxq/download`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        cookie: state.cookie,
-                        filename,
-                        ...downloadMetadataPayload(entry),
-                    }),
-                });
-
-                if (!response.ok) {
-                    let message = `HTTP ${response.status}`;
-                    try {
-                        const data = await response.json();
-                        message = data?.error?.message || data?.message || message;
-                    } catch {}
-                    throw new Error(message);
-                }
-
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = filename;
-                document.body.appendChild(link);
-                link.click();
-                link.remove();
-                URL.revokeObjectURL(url);
-                markEntryDownloaded(entry, filename);
-            } catch (error) {
-                failures.push(`${filename}: ${error.message}`);
-            }
-        }
-
-        if (failures.length) {
-            alert(`部分附件下载失败：\n${failures.join('\n')}`);
-        }
+        const attachmentTypes = new Set(selectedEntries.map(entry => fileTypeForFile(entry.file)));
+        const payload = {
+            cookie: state.cookie,
+            group_id: state.selectedGroup.group_id,
+            group_name: state.selectedGroup.name,
+            tab: getActiveTabConfig(),
+            attachments: selectedEntries.map(manualDownloadAttachmentPayload),
+            options: {
+                max_download_files: manualPlanLimit,
+                auto_pdf_clean: attachmentTypes.has('pdf') || currentAttachmentType() === 'all',
+                auto_audio_clean: Array.from(attachmentTypes).some(type => ['mp3', 'm4a', 'wav', 'aac', 'flac', 'ogg'].includes(type)),
+                auto_publish_after_clean: {
+                    enabled: publishEnabled,
+                },
+                pdf_cleaner: state.systemSyncConfig?.pdf_cleaner || {},
+                audio_cleaner: state.systemSyncConfig?.audio_cleaner || {},
+            },
+            trigger: 'zsxq-lab-manual-download-plan',
+        };
+        const result = await apiPost('/zsxq/manual-download-workflows', payload);
+        const workflow = result?.workflow || {};
+        renderSyncStatus({
+            type: 'success',
+            title: '人工计划已提交',
+            message: `工作流 ${shortId(result?.workflow_run_id || workflow.id)} 已进入队列。`,
+            details: `
+                <div class="text-xs text-slate-500 leading-6">
+                    <div>附件数量：${escapeHtml(String(selectedEntries.length))} 个；本次上限：${escapeHtml(String(manualPlanLimit))} 个；类型：${escapeHtml(typeLabel)}。</div>
+                    <div>后续节点：下载 → 清洗${publishEnabled ? ' → 发布' : ''}。</div>
+                    <div>Workflow ID：<span class="font-mono">${escapeHtml(result?.workflow_run_id || workflow.id || '-')}</span></div>
+                    <div>Celery ID：<span class="font-mono">${escapeHtml(result?.celery_task_id || '-')}</span></div>
+                </div>
+            `,
+        });
+        await loadSyncRuns(state.selectedGroup.group_id, { render: false });
+        await loadSystemSyncBatches(state.selectedGroup.group_id, { render: false });
+        renderSystemSyncBatches();
     } catch (error) {
-        alert(`批量下载失败：${error.message}`);
+        renderSyncStatus({ type: 'error', title: '人工计划提交失败', message: error.message });
     } finally {
         setLoading(els.batchDownloadBtn, false, originalHTML);
+        updateBatchDownloadButton();
     }
+}
+
+function manualDownloadAttachmentPayload(entry) {
+    const tab = getActiveTabConfig();
+    const topic = state.topicMap.get(entry.topicKey) || {};
+    const file = entry.file || {};
+    return {
+        ...downloadMetadataPayload(entry),
+        tab_label: tab?.label || '',
+        hashtag_id: tab?.hashtagId || '',
+        topic_title: topic.title || topic?.article?.title || extractContent(topic).slice(0, 48) || file.name || file.title || file.file_name || '附件',
+        topic_content: extractContent(topic),
+        author_name: topic?.owner?.name || topic?.talk?.owner?.name || '未知作者',
+        create_time: topic.create_time || topic?.talk?.create_time || '',
+        name: file.name || file.title || file.file_name || '附件',
+        file_type: fileTypeForFile(file),
+    };
 }
 
 function downloadMetadataPayload(entry) {

@@ -49,6 +49,8 @@ CREATE INDEX IF NOT EXISTS ix_zsxq_topics_group_id ON public.zsxq_topics (group_
 CREATE INDEX IF NOT EXISTS ix_zsxq_topics_tab_id ON public.zsxq_topics (tab_id);
 CREATE INDEX IF NOT EXISTS ix_zsxq_topics_topic_id ON public.zsxq_topics (topic_id);
 CREATE INDEX IF NOT EXISTS ix_zsxq_topics_create_time ON public.zsxq_topics (create_time);
+CREATE INDEX IF NOT EXISTS ix_zsxq_topics_group_tab_create_time_desc
+    ON public.zsxq_topics (group_id, tab_id, create_time DESC, last_synced_at DESC);
 CREATE INDEX IF NOT EXISTS ix_zsxq_topics_first_sync_run_id ON public.zsxq_topics (first_sync_run_id);
 CREATE INDEX IF NOT EXISTS ix_zsxq_topics_last_sync_run_id ON public.zsxq_topics (last_sync_run_id);
 
@@ -65,6 +67,14 @@ CREATE TABLE IF NOT EXISTS public.zsxq_attachments (
     local_path varchar(600),
     download_status varchar(20) NOT NULL DEFAULT 'pending',
     error_message text,
+    publish_status varchar(32),
+    publish_task_id varchar(36),
+    publish_source_task_id varchar(36),
+    publish_topic_id varchar(64),
+    publish_submitted_count integer NOT NULL DEFAULT 0,
+    publish_verified_count integer NOT NULL DEFAULT 0,
+    publish_failed_count integer NOT NULL DEFAULT 0,
+    publish_updated_at timestamp without time zone,
     raw_payload jsonb DEFAULT '{}'::jsonb,
     created_at timestamp without time zone NOT NULL,
     updated_at timestamp without time zone,
@@ -76,9 +86,21 @@ CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_tab_id ON public.zsxq_attachments
 CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_topic_id ON public.zsxq_attachments (topic_id);
 CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_file_id ON public.zsxq_attachments (file_id);
 CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_download_status ON public.zsxq_attachments (download_status);
+CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_publish_status ON public.zsxq_attachments (publish_status);
+CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_publish_task_id ON public.zsxq_attachments (publish_task_id);
+CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_group_tab_topic_created
+    ON public.zsxq_attachments (group_id, tab_id, topic_id, created_at);
 
 ALTER TABLE public.zsxq_attachments
-    ADD COLUMN IF NOT EXISTS error_message text;
+    ADD COLUMN IF NOT EXISTS error_message text,
+    ADD COLUMN IF NOT EXISTS publish_status varchar(32),
+    ADD COLUMN IF NOT EXISTS publish_task_id varchar(36),
+    ADD COLUMN IF NOT EXISTS publish_source_task_id varchar(36),
+    ADD COLUMN IF NOT EXISTS publish_topic_id varchar(64),
+    ADD COLUMN IF NOT EXISTS publish_submitted_count integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS publish_verified_count integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS publish_failed_count integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS publish_updated_at timestamp without time zone;
 
 CREATE TABLE IF NOT EXISTS public.zsxq_sync_cursors (
     id varchar(36) PRIMARY KEY,
