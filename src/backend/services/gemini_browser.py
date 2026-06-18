@@ -1,10 +1,19 @@
 import json
 import os
 import time
+import base64
+import hashlib
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 
 FEATURE_NAME = "report_pdf_gemini"
@@ -12,6 +21,7 @@ QUEUE_NAME = "report_pdf_gemini"
 LEGACY_FEATURE_NAME = "gemini_browser"
 LEGACY_QUEUE_NAME = "gemini_browser"
 DEFAULT_GEMINI_URL = "https://gemini.google.com/gem/099a92ae7888"
+_ACTIVE_PROFILE_LOCKS: Dict[str, Dict[str, Any]] = {}
 
 
 class GeminiBrowserError(RuntimeError):
@@ -35,6 +45,7 @@ class GeminiBrowserOptions:
     chrome_channel: str = ""
     headless: bool = False
     response_timeout_seconds: int = 180
+    image_timeout_seconds: int = 360
     response_stable_seconds: float = 3.0
     total_timeout_seconds: int = 300
     ready_timeout_seconds: int = 90
@@ -54,6 +65,7 @@ class GeminiBrowserOptions:
             chrome_channel=_env("REPORT_PDF_GEMINI_CHANNEL", "GEMINI_BROWSER_CHANNEL", ""),
             headless=_truthy_env("REPORT_PDF_GEMINI_HEADLESS", _truthy_env("GEMINI_BROWSER_HEADLESS", False)),
             response_timeout_seconds=_int_env("REPORT_PDF_GEMINI_RESPONSE_TIMEOUT", _int_env("GEMINI_BROWSER_RESPONSE_TIMEOUT", 180)),
+            image_timeout_seconds=_int_env("REPORT_PDF_GEMINI_IMAGE_TIMEOUT", _int_env("GEMINI_BROWSER_IMAGE_TIMEOUT", 360)),
             response_stable_seconds=_float_env("REPORT_PDF_GEMINI_RESPONSE_STABLE_SECONDS", _float_env("GEMINI_BROWSER_RESPONSE_STABLE_SECONDS", 3.0)),
             total_timeout_seconds=_int_env("REPORT_PDF_GEMINI_TOTAL_TIMEOUT", _int_env("GEMINI_BROWSER_TOTAL_TIMEOUT", 300)),
             ready_timeout_seconds=_int_env("REPORT_PDF_GEMINI_READY_TIMEOUT", _int_env("GEMINI_BROWSER_READY_TIMEOUT", 90)),
@@ -126,30 +138,182 @@ class GeminiBrowserWorker:
             raise GeminiBrowserConfigError("缺少 playwright 依赖，请安装 requirements 后执行 playwright install") from exc
 
         url = (target_url or self.options.gemini_url or DEFAULT_GEMINI_URL).strip()
-        self._emit(progress_callback, "prepare_browser", 5, "启动研报 PDF Gem 浏览器")
+        self._emit(progress_callback, "wait_browser_profile", 4, "等待 Gemini 浏览器 profile 空闲")
+        with _gemini_profile_lock(self.options):
+            self._wait_for_profile_singleton_release()
+            self._emit(progress_callback, "prepare_browser", 5, "启动研报 PDF Gem 浏览器")
+            with sync_playwright() as playwright:
+                context = self._launch_context(playwright)
+                page = context.pages[0] if context.pages else context.new_page()
+                page.set_default_timeout(10_000)
+
+                try:
+                    self._emit(progress_callback, "open_page", 12, "打开 Gemini 页面")
+                    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                    self._wait_for_interactive_page(page, started)
+                    self._raise_if_login_or_captcha(page)
+                    self._guard_total_timeout(started)
+
+                    baseline_text = self._body_text(page)
+                    if pdf_file:
+                        self._emit(progress_callback, "upload_pdf", 25, "上传 PDF 到 Gemini")
+                        self._upload_file(page, str(pdf_file), started)
+                        self._guard_total_timeout(started)
+
+                    self._emit(progress_callback, "submit_prompt", 35, "提交 Gemini 任务")
+                    self._submit_prompt(page, prompt)
+                    self._guard_total_timeout(started)
+
+                    self._emit(progress_callback, "wait_response", 48, "等待 Gemini 回复")
+                    response = self._wait_for_response(page, prompt, baseline_text, started)
+                    turns = [{
+                        "index": 1,
+                        "kind": "initial",
+                        "prompt": prompt,
+                        "response_text": response["text"],
+                        "page_url": page.url,
+                        "completed_at": datetime.utcnow().isoformat() + "Z",
+                    }]
+                    self._emit(
+                        progress_callback,
+                        "initial_response",
+                        55,
+                        "第一轮 Gemini 回复已获取",
+                        result={
+                            "initial_response_text": response["text"],
+                            "response_text": response["text"],
+                            "turns": turns,
+                        },
+                    )
+
+                    for index, followup in enumerate(followups, start=2):
+                        progress_base = min(88, 50 + (index - 1) * 10)
+                        baseline_text = self._body_text(page)
+                        self._emit(
+                            progress_callback,
+                            f"followup_{index - 1}_submit",
+                            progress_base,
+                            f"提交第 {index - 1} 个追问",
+                        )
+                        self._submit_prompt(page, followup)
+                        self._guard_total_timeout(started)
+
+                        self._emit(
+                            progress_callback,
+                            f"followup_{index - 1}_wait",
+                            min(92, progress_base + 5),
+                            f"等待第 {index - 1} 个追问回复",
+                        )
+                        followup_response = self._wait_for_response(page, followup, baseline_text, started)
+                        turns.append({
+                            "index": index,
+                            "kind": "followup",
+                            "prompt": followup,
+                            "response_text": followup_response["text"],
+                            "page_url": page.url,
+                            "completed_at": datetime.utcnow().isoformat() + "Z",
+                        })
+                        self._emit(
+                            progress_callback,
+                            f"followup_{index - 1}_response",
+                            min(94, progress_base + 8),
+                            f"第 {index - 1} 个追问回复已获取",
+                            result={
+                                "response_text": turns[-1]["response_text"],
+                                "final_response_text": turns[-1]["response_text"],
+                                "turns": turns,
+                            },
+                        )
+
+                    result = {
+                        "prompt": prompt,
+                        "followup_prompts": followups,
+                        "pdf": {
+                            "path": str(pdf_file) if pdf_file else None,
+                            "filename": pdf_file.name if pdf_file else None,
+                            "bytes": pdf_file.stat().st_size if pdf_file else None,
+                        } if pdf_file else None,
+                        "initial_response_text": response["text"],
+                        "response_text": turns[-1]["response_text"],
+                        "final_response_text": turns[-1]["response_text"],
+                        "turns": turns,
+                        "page_url": page.url,
+                        "target_url": url,
+                        "completed_at": datetime.utcnow().isoformat() + "Z",
+                    }
+                    output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                    result["output_path"] = str(output)
+                    self._emit(progress_callback, "save_result", 96, "Gemini 结果已保存", result={"output_path": str(output)})
+                    return result
+                except PlaywrightTimeoutError as exc:
+                    screenshot = self._save_failure_screenshot(page, job_id)
+                    raise GeminiBrowserAutomationError(f"页面自动化超时: {exc}; screenshot={screenshot}") from exc
+                except Exception:
+                    self._save_failure_screenshot(page, job_id)
+                    raise
+                finally:
+                    context.close()
+
+    def generate_from_file(
+        self,
+        *,
+        job_id: str,
+        file_path: str,
+        output_path: str,
+        prompt: str = "",
+        target_url: Optional[str] = None,
+        followup_prompts: Optional[List[str]] = None,
+        image_followup_prompt: Optional[str] = None,
+        image_output_path: Optional[str] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        source_file = Path(file_path).expanduser() if file_path else None
+        if not source_file or not source_file.exists() or not source_file.is_file():
+            raise GeminiBrowserConfigError(f"上传文件不存在: {file_path}")
+        prompt = (prompt or "").strip()
+        followups = [str(item).strip() for item in (followup_prompts or []) if str(item).strip()]
+        image_prompt = (image_followup_prompt or "").strip()
+        if image_prompt and not image_output_path:
+            raise ValueError("需要指定 image_output_path 才能保存 Gemini 生成图片")
+
+        started = time.monotonic()
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        image_output = Path(image_output_path).expanduser() if image_output_path else None
+        if image_output:
+            image_output.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise GeminiBrowserConfigError("缺少 playwright 依赖，请安装 requirements 后执行 playwright install") from exc
+
+        url = (target_url or self.options.gemini_url or DEFAULT_GEMINI_URL).strip()
+        self._emit(progress_callback, "wait_browser_profile", 3, "等待 Gemini 浏览器 profile 空闲")
+        self._emit(progress_callback, "prepare_browser", 4, "启动 Gemini 浏览器")
         with sync_playwright() as playwright:
             context = self._launch_context(playwright)
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(10_000)
 
             try:
-                self._emit(progress_callback, "open_page", 12, "打开 Gemini 页面")
+                self._emit(progress_callback, "open_page", 8, "打开 Gemini 页面")
                 page.goto(url, wait_until="domcontentloaded", timeout=60_000)
                 self._wait_for_interactive_page(page, started)
                 self._raise_if_login_or_captcha(page)
                 self._guard_total_timeout(started)
 
                 baseline_text = self._body_text(page)
-                if pdf_file:
-                    self._emit(progress_callback, "upload_pdf", 25, "上传 PDF 到 Gemini")
-                    self._upload_pdf(page, str(pdf_file), started)
-                    self._guard_total_timeout(started)
+                self._emit(progress_callback, "upload_file", 18, f"上传文件到 Gemini：{source_file.name}")
+                self._upload_file(page, str(source_file), started)
+                self._guard_total_timeout(started)
 
-                self._emit(progress_callback, "submit_prompt", 35, "提交 Gemini 任务")
+                self._emit(progress_callback, "submit_initial", 28, "提交 Gemini 初始任务")
                 self._submit_prompt(page, prompt)
                 self._guard_total_timeout(started)
 
-                self._emit(progress_callback, "wait_response", 48, "等待 Gemini 回复")
+                self._emit(progress_callback, "wait_initial_response", 40, "等待 Gemini 第一轮回复")
                 response = self._wait_for_response(page, prompt, baseline_text, started)
                 turns = [{
                     "index": 1,
@@ -162,33 +326,41 @@ class GeminiBrowserWorker:
                 self._emit(
                     progress_callback,
                     "initial_response",
-                    55,
-                    "第一轮 Gemini 回复已获取",
+                    48,
+                    "Gemini 第一轮回复已获取",
                     result={
                         "initial_response_text": response["text"],
                         "response_text": response["text"],
                         "turns": turns,
                     },
                 )
+                output.write_text(json.dumps({
+                    "status": "partial",
+                    "prompt": prompt,
+                    "followup_prompts": followups,
+                    "image_followup_prompt": image_prompt,
+                    "file": {
+                        "path": str(source_file),
+                        "filename": source_file.name,
+                        "bytes": source_file.stat().st_size,
+                    },
+                    "initial_response_text": response["text"],
+                    "response_text": response["text"],
+                    "final_response_text": response["text"],
+                    "image": None,
+                    "turns": turns,
+                    "page_url": page.url,
+                    "target_url": url,
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
 
                 for index, followup in enumerate(followups, start=2):
-                    progress_base = min(88, 50 + (index - 1) * 10)
+                    progress_base = min(68, 48 + (index - 1) * 8)
                     baseline_text = self._body_text(page)
-                    self._emit(
-                        progress_callback,
-                        f"followup_{index - 1}_submit",
-                        progress_base,
-                        f"提交第 {index - 1} 个追问",
-                    )
+                    self._emit(progress_callback, f"followup_{index - 1}_submit", progress_base, f"提交第 {index - 1} 个追问")
                     self._submit_prompt(page, followup)
                     self._guard_total_timeout(started)
-
-                    self._emit(
-                        progress_callback,
-                        f"followup_{index - 1}_wait",
-                        min(92, progress_base + 5),
-                        f"等待第 {index - 1} 个追问回复",
-                    )
+                    self._emit(progress_callback, f"followup_{index - 1}_wait", min(72, progress_base + 4), f"等待第 {index - 1} 个追问回复")
                     followup_response = self._wait_for_response(page, followup, baseline_text, started)
                     turns.append({
                         "index": index,
@@ -201,26 +373,53 @@ class GeminiBrowserWorker:
                     self._emit(
                         progress_callback,
                         f"followup_{index - 1}_response",
-                        min(94, progress_base + 8),
+                        min(76, progress_base + 7),
                         f"第 {index - 1} 个追问回复已获取",
-                        result={
-                            "response_text": turns[-1]["response_text"],
-                            "final_response_text": turns[-1]["response_text"],
-                            "turns": turns,
-                        },
+                        result={"response_text": turns[-1]["response_text"], "turns": turns},
+                    )
+
+                image_info = None
+                image_response_text = ""
+                if image_prompt:
+                    baseline_text = self._body_text(page)
+                    baseline_images = self._visible_image_keys(page)
+                    self._emit(progress_callback, "image_prompt_submit", 76, "提交 Gemini 生成图片提示词")
+                    self._submit_prompt(page, image_prompt)
+                    self._guard_total_timeout(started)
+                    self._emit(progress_callback, "wait_generated_image", 86, "等待 Gemini 生成图片")
+                    image_record = self._wait_for_generated_image(page, baseline_images, started)
+                    image_info = self._save_generated_image(page, image_record, str(image_output))
+                    image_response_text = self._latest_response_text(page, image_prompt, baseline_text)
+                    turns.append({
+                        "index": len(turns) + 1,
+                        "kind": "image_followup",
+                        "prompt": image_prompt,
+                        "response_text": image_response_text,
+                        "image": image_info,
+                        "page_url": page.url,
+                        "completed_at": datetime.utcnow().isoformat() + "Z",
+                    })
+                    self._emit(
+                        progress_callback,
+                        "generated_image_saved",
+                        94,
+                        "Gemini 生成图片已保存",
+                        result={"image": image_info, "turns": turns},
                     )
 
                 result = {
                     "prompt": prompt,
                     "followup_prompts": followups,
-                    "pdf": {
-                        "path": str(pdf_file) if pdf_file else None,
-                        "filename": pdf_file.name if pdf_file else None,
-                        "bytes": pdf_file.stat().st_size if pdf_file else None,
-                    } if pdf_file else None,
+                    "image_followup_prompt": image_prompt,
+                    "file": {
+                        "path": str(source_file),
+                        "filename": source_file.name,
+                        "bytes": source_file.stat().st_size,
+                    },
                     "initial_response_text": response["text"],
                     "response_text": turns[-1]["response_text"],
                     "final_response_text": turns[-1]["response_text"],
+                    "image": image_info,
                     "turns": turns,
                     "page_url": page.url,
                     "target_url": url,
@@ -228,7 +427,7 @@ class GeminiBrowserWorker:
                 }
                 output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
                 result["output_path"] = str(output)
-                self._emit(progress_callback, "save_result", 96, "Gemini 结果已保存", result={"output_path": str(output)})
+                self._emit(progress_callback, "save_result", 97, "Gemini 结果已保存", result={"output_path": str(output)})
                 return result
             except PlaywrightTimeoutError as exc:
                 screenshot = self._save_failure_screenshot(page, job_id)
@@ -250,6 +449,22 @@ class GeminiBrowserWorker:
         if self.options.headless:
             raise GeminiBrowserConfigError("研报 PDF Gem 浏览器自动化建议使用非 headless profile 以复用登录态")
 
+    def _wait_for_profile_singleton_release(self) -> None:
+        user_data_dir = Path(self.options.user_data_dir).expanduser()
+        lock_path = user_data_dir / "SingletonLock"
+        timeout_seconds = max(0, _int_env("GEMINI_BROWSER_SINGLETON_WAIT_SECONDS", 90))
+        deadline = time.monotonic() + timeout_seconds
+
+        while _path_exists_or_symlink(lock_path):
+            owner = _singleton_owner(lock_path)
+            if time.monotonic() >= deadline:
+                owner_suffix = f"；占用信息: {owner}" if owner else ""
+                raise GeminiBrowserAutomationError(
+                    "Gemini 浏览器 profile 正在被其他 Chrome 占用"
+                    f"{owner_suffix}。请关闭该浏览器窗口，或等待正在运行的任务结束后重试: {user_data_dir}"
+                )
+            time.sleep(1)
+
     def _launch_context(self, playwright):
         user_data_dir = str(Path(self.options.user_data_dir).expanduser())
         args = [
@@ -269,7 +484,16 @@ class GeminiBrowserWorker:
             kwargs["executable_path"] = self.options.chrome_executable_path
         if self.options.chrome_channel:
             kwargs["channel"] = self.options.chrome_channel
-        return playwright.chromium.launch_persistent_context(user_data_dir, **kwargs)
+
+        profile_lock = _gemini_profile_lock(self.options)
+        profile_lock.__enter__()
+        try:
+            self._wait_for_profile_singleton_release()
+            context = playwright.chromium.launch_persistent_context(user_data_dir, **kwargs)
+            return _LockedBrowserContext(context, profile_lock)
+        except Exception:
+            profile_lock.__exit__(None, None, None)
+            raise
 
     def _wait_for_interactive_page(self, page, started_at: float) -> None:
         deadline = time.monotonic() + self.options.ready_timeout_seconds
@@ -292,6 +516,9 @@ class GeminiBrowserWorker:
         )
 
     def _upload_pdf(self, page, pdf_path: str, started_at: float) -> None:
+        self._upload_file(page, pdf_path, started_at)
+
+    def _upload_file(self, page, file_path: str, started_at: float) -> None:
         self._guard_total_timeout(started_at)
         direct_error = None
         try:
@@ -300,15 +527,15 @@ class GeminiBrowserWorker:
             for index in range(count - 1, -1, -1):
                 candidate = inputs.nth(index)
                 try:
-                    candidate.set_input_files(pdf_path, timeout=10_000)
-                    self._wait_for_upload_ready(page, Path(pdf_path).name, started_at)
+                    candidate.set_input_files(file_path, timeout=10_000)
+                    self._wait_for_upload_ready(page, Path(file_path).name, started_at)
                     return
                 except Exception as exc:
                     direct_error = exc
         except Exception as exc:
             direct_error = exc
 
-        attach_button = self._last_visible(page, self._selectors("attach"))
+        attach_button = self._wait_for_visible_enabled(page, self._selectors("attach"), started_at, timeout_seconds=30)
         if attach_button is None:
             raise GeminiBrowserAutomationError(f"未找到 Gemini 文件上传入口; direct_error={direct_error}")
 
@@ -316,13 +543,13 @@ class GeminiBrowserWorker:
         try:
             with page.expect_file_chooser(timeout=5_000) as chooser_info:
                 attach_button.click(timeout=10_000)
-            chooser_info.value.set_files(pdf_path)
-            self._wait_for_upload_ready(page, Path(pdf_path).name, started_at)
+            chooser_info.value.set_files(file_path)
+            self._wait_for_upload_ready(page, Path(file_path).name, started_at)
             return
         except Exception as exc:
             attach_error = exc
 
-        upload_option = self._last_visible(page, self._selectors("upload_file_option"))
+        upload_option = self._wait_for_visible_enabled(page, self._selectors("upload_file_option"), started_at, timeout_seconds=10)
         if upload_option is None:
             raise GeminiBrowserAutomationError(
                 f"未找到 Gemini 文件上传菜单项; direct_error={direct_error}; attach_error={attach_error}"
@@ -331,10 +558,10 @@ class GeminiBrowserWorker:
         try:
             with page.expect_file_chooser(timeout=10_000) as chooser_info:
                 upload_option.click(timeout=10_000)
-            chooser_info.value.set_files(pdf_path)
-            self._wait_for_upload_ready(page, Path(pdf_path).name, started_at)
+            chooser_info.value.set_files(file_path)
+            self._wait_for_upload_ready(page, Path(file_path).name, started_at)
         except Exception as exc:
-            raise GeminiBrowserAutomationError(f"PDF 上传失败: {exc}") from exc
+            raise GeminiBrowserAutomationError(f"文件上传失败: {exc}") from exc
 
     def _wait_for_upload_ready(self, page, filename: str, started_at: float) -> None:
         deadline = time.monotonic() + 90
@@ -371,7 +598,7 @@ class GeminiBrowserWorker:
             if isinstance(state, dict) and (state.get("hasName") or state.get("enabledSend")) and not state.get("busy"):
                 return
             time.sleep(1)
-        raise GeminiBrowserAutomationError("等待 Gemini PDF 上传完成超时")
+        raise GeminiBrowserAutomationError("等待 Gemini 文件上传完成超时")
 
     def _submit_prompt(self, page, prompt: str) -> None:
         input_locator = self._last_visible(page, self._selectors("input"))
@@ -442,6 +669,127 @@ class GeminiBrowserWorker:
         if last_text:
             return {"text": last_text}
         raise GeminiBrowserAutomationError("等待 Gemini 回复超时")
+
+    def _visible_image_keys(self, page) -> List[str]:
+        records = self._visible_image_records(page)
+        keys = []
+        for record in records:
+            key = record.get("src") or record.get("currentSrc") or record.get("alt") or str(record.get("dom_index"))
+            if key:
+                keys.append(str(key))
+        return keys
+
+    def _visible_image_records(self, page) -> List[Dict[str, Any]]:
+        try:
+            records = page.evaluate(
+                """() => {
+                    const visible = (node) => {
+                        const style = window.getComputedStyle(node);
+                        const rect = node.getBoundingClientRect();
+                        return style && style.visibility !== "hidden" && style.display !== "none" && rect.width >= 80 && rect.height >= 80;
+                    };
+                    return Array.from(document.querySelectorAll("img")).map((img, index) => {
+                        const rect = img.getBoundingClientRect();
+                        return {
+                            dom_index: index,
+                            src: img.getAttribute("src") || "",
+                            currentSrc: img.currentSrc || "",
+                            alt: img.getAttribute("alt") || "",
+                            width: rect.width,
+                            height: rect.height,
+                            naturalWidth: img.naturalWidth || 0,
+                            naturalHeight: img.naturalHeight || 0,
+                            top: rect.top,
+                            left: rect.left
+                        };
+                    }).filter((item) => item.width >= 80 && item.height >= 80);
+                }"""
+            )
+            return records if isinstance(records, list) else []
+        except Exception:
+            return []
+
+    def _wait_for_generated_image(self, page, baseline_keys: List[str], started_at: float) -> Dict[str, Any]:
+        deadline = time.monotonic() + max(30, int(self.options.image_timeout_seconds or self.options.response_timeout_seconds))
+        baseline = set(str(item or "") for item in (baseline_keys or []))
+        last_records: List[Dict[str, Any]] = []
+        last_candidates: List[Dict[str, Any]] = []
+        stable_since = time.monotonic()
+        last_key = ""
+
+        while time.monotonic() < deadline:
+            self._guard_total_timeout(started_at)
+            self._raise_if_login_or_captcha(page)
+            records = self._visible_image_records(page)
+            candidates = []
+            for record in records:
+                key = str(record.get("src") or record.get("currentSrc") or record.get("alt") or record.get("dom_index") or "")
+                area = float(record.get("width") or 0) * float(record.get("height") or 0)
+                if key in baseline:
+                    continue
+                if area < 30_000:
+                    continue
+                candidates.append((area, record))
+            if candidates:
+                candidates.sort(key=lambda item: (item[0], float(item[1].get("top") or 0)))
+                last_candidates = [item[1] for item in candidates]
+                candidate = candidates[-1][1]
+                key = str(candidate.get("src") or candidate.get("currentSrc") or candidate.get("dom_index") or "")
+                if key != last_key:
+                    last_key = key
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= self.options.response_stable_seconds and not self._is_generating(page):
+                    return candidate
+            last_records = records
+            time.sleep(1)
+
+        if last_candidates:
+            last_candidates.sort(key=lambda item: float(item.get("width") or 0) * float(item.get("height") or 0))
+            return last_candidates[-1]
+        raise GeminiBrowserAutomationError("等待 Gemini 生成图片超时")
+
+    def _save_generated_image(self, page, record: Dict[str, Any], output_path: str) -> Dict[str, Any]:
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        src = record.get("currentSrc") or record.get("src") or ""
+        saved_by = "screenshot"
+        if src:
+            try:
+                data_url = page.evaluate(
+                    """async (src) => {
+                        const response = await fetch(src);
+                        const blob = await response.blob();
+                        return await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => resolve(reader.result);
+                            reader.onerror = reject;
+                            reader.readAsDataURL(blob);
+                        });
+                    }""",
+                    src,
+                )
+                if isinstance(data_url, str) and data_url.startswith("data:") and "," in data_url:
+                    header, payload = data_url.split(",", 1)
+                    output.write_bytes(base64.b64decode(payload))
+                    saved_by = "fetch"
+            except Exception:
+                saved_by = "screenshot"
+
+        if not output.exists() or output.stat().st_size <= 0:
+            dom_index = record.get("dom_index")
+            if dom_index is None:
+                raise GeminiBrowserAutomationError("无法定位 Gemini 生成图片")
+            page.locator("img").nth(int(dom_index)).screenshot(path=str(output))
+            saved_by = "screenshot"
+
+        return {
+            "path": str(output),
+            "bytes": output.stat().st_size,
+            "source": src,
+            "saved_by": saved_by,
+            "width": record.get("naturalWidth") or record.get("width"),
+            "height": record.get("naturalHeight") or record.get("height"),
+        }
 
     def _latest_response_text(self, page, prompt: str, baseline_text: str) -> str:
         candidates = page.evaluate(
@@ -522,6 +870,8 @@ class GeminiBrowserWorker:
             "发送",
         )
         if any(marker in lowered for marker in blocked_markers):
+            return False
+        if _looks_like_page_shell_text(text):
             return False
         if prompt and text == prompt:
             return False
@@ -626,6 +976,10 @@ class GeminiBrowserWorker:
             ],
             "response": [
                 "message-content",
+                "model-response",
+                "[id^='model-response-message']",
+                "[class*='response-content']",
+                "[class*='markdown']",
                 "[data-response-index]",
                 "[data-testid*='response']",
                 "[class*='model-response']",
@@ -684,6 +1038,24 @@ class GeminiBrowserWorker:
                 continue
         return None
 
+    def _wait_for_visible_enabled(self, page, selectors: List[str], started_at: float, timeout_seconds: float = 10):
+        deadline = time.monotonic() + timeout_seconds
+        last_visible = None
+
+        while time.monotonic() < deadline:
+            self._guard_total_timeout(started_at)
+            self._raise_if_login_or_captcha(page)
+            last_visible = self._last_visible(page, selectors)
+            if last_visible is not None:
+                try:
+                    if last_visible.is_enabled(timeout=500):
+                        return last_visible
+                except Exception:
+                    pass
+            time.sleep(0.5)
+
+        return None
+
     def _raise_if_login_or_captcha(self, page) -> None:
         if self._first_visible(page, self._selectors("captcha")) is not None:
             raise GeminiBrowserAutomationError("Gemini 页面出现验证码或安全验证，需要人工处理")
@@ -740,8 +1112,172 @@ def _legacy_user_data_dir() -> str:
     return str(Path(_project_root()) / "data" / "browser_profiles" / "gemini")
 
 
+class _LockedBrowserContext:
+    def __init__(self, context, profile_lock):
+        self._context = context
+        self._profile_lock = profile_lock
+        self._released = False
+
+    def __getattr__(self, name: str):
+        return getattr(self._context, name)
+
+    def close(self):
+        try:
+            return self._context.close()
+        finally:
+            self._release_profile_lock()
+
+    def _release_profile_lock(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._profile_lock.__exit__(None, None, None)
+
+
+@contextmanager
+def _gemini_profile_lock(options: GeminiBrowserOptions):
+    if fcntl is None:
+        yield
+        return
+
+    timeout_seconds = max(1, _int_env("GEMINI_BROWSER_PROFILE_LOCK_TIMEOUT_SECONDS", 1800))
+    user_data_dir = str(Path(options.user_data_dir or "").expanduser())
+    profile = options.profile_directory or "Default"
+    key = hashlib.sha1(f"{user_data_dir}|{profile}".encode("utf-8")).hexdigest()[:16]
+    owner = (os.getpid(), threading.get_ident())
+    lock_dir = Path(_project_root()) / "runtime" / "locks" / "gemini_browser"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{key}.lock"
+    deadline = time.monotonic() + timeout_seconds
+
+    while True:
+        state = _ACTIVE_PROFILE_LOCKS.get(str(lock_path))
+        if state:
+            if state.get("owner") == owner:
+                state["depth"] = int(state.get("depth") or 0) + 1
+                try:
+                    yield
+                finally:
+                    state["depth"] = max(0, int(state.get("depth") or 1) - 1)
+                return
+            if time.monotonic() >= deadline:
+                raise GeminiBrowserAutomationError(
+                    f"等待 Gemini 浏览器 profile 空闲超时: {user_data_dir} ({timeout_seconds}s)"
+                )
+            time.sleep(0.5)
+            continue
+
+        handle = open(lock_path, "a+", encoding="utf-8")
+        try:
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise GeminiBrowserAutomationError(
+                            f"等待 Gemini 浏览器 profile 空闲超时: {user_data_dir} ({timeout_seconds}s)"
+                        ) from exc
+                    time.sleep(1)
+
+            handle.seek(0)
+            handle.truncate()
+            handle.write(
+                "pid={pid} thread={thread} acquired_at={at} user_data_dir={dir} profile={profile}\n".format(
+                    pid=os.getpid(),
+                    thread=threading.get_ident(),
+                    at=datetime.utcnow().isoformat() + "Z",
+                    dir=user_data_dir,
+                    profile=profile,
+                )
+            )
+            handle.flush()
+            _ACTIVE_PROFILE_LOCKS[str(lock_path)] = {"owner": owner, "depth": 1, "handle": handle}
+            try:
+                yield
+            finally:
+                state = _ACTIVE_PROFILE_LOCKS.get(str(lock_path))
+                if state and state.get("owner") == owner:
+                    depth = max(0, int(state.get("depth") or 1) - 1)
+                    if depth > 0:
+                        state["depth"] = depth
+                    else:
+                        _ACTIVE_PROFILE_LOCKS.pop(str(lock_path), None)
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+        return
+
+
+def _path_exists_or_symlink(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _singleton_owner(lock_path: Path) -> str:
+    target = ""
+    try:
+        target = os.readlink(lock_path)
+    except OSError:
+        if _path_exists_or_symlink(lock_path):
+            target = str(lock_path)
+    if not target:
+        return ""
+
+    pid = _singleton_pid(target)
+    if pid is None:
+        return target
+    status = "运行中" if _pid_is_running(pid) else "未运行/疑似残留"
+    return f"{target}（pid {pid} {status}）"
+
+
+def _singleton_pid(target: str) -> Optional[int]:
+    tail = str(target or "").rsplit("-", 1)[-1]
+    if tail.isdigit():
+        return int(tail)
+    return None
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def _clean_text(value: str) -> str:
     return " ".join(str(value or "").split()).strip()
+
+
+def _looks_like_page_shell_text(value: str) -> bool:
+    text = _clean_text(value).lower()
+    if not text:
+        return False
+
+    strong_markers = (
+        "跳至主要内容",
+        "发起新对话",
+        "搜索对话内容",
+        "gemini 是一款 ai 工具",
+        "与 gemini 对话",
+        "ask gemini",
+        "enter a prompt",
+        "gemini can make mistakes",
+    )
+    if any(marker in text for marker in strong_markers):
+        return True
+
+    shell_markers = (
+        "近期对话",
+        "所有笔记本",
+        "新建笔记本",
+        "问问 gemini",
+        "笔记本",
+        "gem",
+        "pro",
+    )
+    hits = sum(1 for marker in shell_markers if marker in text)
+    return hits >= 3 and "gemini" in text
 
 
 def _truthy_env(name: str, default: bool = False) -> bool:

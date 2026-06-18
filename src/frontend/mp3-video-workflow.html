@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MP3 视频编排台 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <div id="nav-container"></div>
+
+    <main class="mx-auto max-w-[1440px] px-6 py-6">
+        <div class="mb-5 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+                <h1 class="text-2xl font-black tracking-tight">MP3 视频编排台</h1>
+                <p class="mt-1 text-sm text-slate-500">已同步 MP3 -> Gemini Gem 摘要与信息图 -> DS v4 pro 标题/时间戳 -> 四张封皮/背景 -> 横竖屏视频。</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <span id="provider-status" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-500">配置检查中</span>
+                <span id="worker-status" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-500">Worker 检查中</span>
+                <button id="refresh-status-btn" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                    <i class="fas fa-rotate mr-1.5"></i>刷新状态
+                </button>
+                <button id="restart-worker-btn" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                    <i class="fas fa-rotate-right mr-1.5"></i>重启编排/渲染 Worker
+                </button>
+            </div>
+        </div>
+
+        <div id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm"></div>
+
+        <section class="grid grid-cols-1 gap-5 xl:grid-cols-[470px_minmax(0,1fr)]">
+            <aside class="space-y-4">
+                <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                    <div class="flex items-center justify-between gap-3">
+                        <div>
+                            <h2 class="text-base font-black">选择已同步 MP3</h2>
+                            <p class="mt-1 text-xs text-slate-500">支持搜索、翻页和跳页，选中后直接投递全流程。</p>
+                        </div>
+                        <span id="selected-badge" class="rounded-md bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-500">未选择</span>
+                    </div>
+
+                    <div class="mt-4 flex gap-2">
+                        <input id="audio-asset-search" type="search" class="min-w-0 flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" placeholder="搜索 MP3 文件 / 主题">
+                        <button id="audio-asset-refresh-btn" type="button" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                            <i class="fas fa-rotate mr-1"></i>刷新
+                        </button>
+                    </div>
+
+                    <div id="audio-asset-summary" class="mt-2 text-xs text-slate-500">等待加载已同步 MP3。</div>
+                    <div id="audio-asset-list" class="mt-2 max-h-[34rem] space-y-2 overflow-auto"></div>
+                    <div id="audio-asset-pagination" class="mt-3"></div>
+
+                    <div id="selected-audio-panel" class="mt-4 hidden rounded-md border border-emerald-100 bg-emerald-50/60 p-3">
+                        <div class="mb-2 text-xs font-black text-emerald-700">当前音频</div>
+                        <div id="selected-audio-title" class="text-sm font-bold text-slate-900"></div>
+                        <div id="selected-audio-meta" class="mt-1 text-xs text-slate-500"></div>
+                        <audio id="selected-audio-player" class="mt-3 w-full" controls preload="none"></audio>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                    <h2 class="text-base font-black">投递配置</h2>
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">Gemini Gem URL</span>
+                        <input id="gemini-url-input" type="url" class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" value="https://gemini.google.com/gem/f9e84d5e215c">
+                    </label>
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">Gemini 生成图片 Prompt</span>
+                        <textarea id="image-prompt-input" rows="6" class="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm leading-6 focus:border-slate-500 focus:outline-none"></textarea>
+                    </label>
+                    <div class="mt-4 grid grid-cols-2 gap-2">
+                        <button id="submit-btn" class="rounded-md bg-slate-900 px-3 py-2.5 text-sm font-bold text-white hover:bg-slate-800">
+                            <i class="fas fa-paper-plane mr-1.5"></i>投递编排
+                        </button>
+                        <button id="load-history-btn" class="rounded-md border border-slate-300 px-3 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                            <i class="fas fa-clock-rotate-left mr-1.5"></i>加载历史
+                        </button>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                    <h2 class="text-base font-black">队列</h2>
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">轮询间隔 ms</span>
+                        <input id="poll-delay" type="number" min="1000" step="500" value="3000" class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none">
+                    </label>
+                    <button id="refresh-jobs-btn" class="mt-3 w-full rounded-md border border-slate-300 px-3 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                        <i class="fas fa-arrows-rotate mr-1.5"></i>刷新任务
+                    </button>
+                </div>
+            </aside>
+
+            <section class="min-w-0 rounded-lg border border-slate-200 bg-white shadow-sm">
+                <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+                    <div>
+                        <h2 class="text-base font-black">编排结果</h2>
+                        <p id="summary-text" class="mt-1 text-xs text-slate-500">等待投递。</p>
+                    </div>
+                </div>
+                <div id="job-list" class="space-y-3 p-4"></div>
+                <div id="job-pagination" class="border-t border-slate-100 px-4 py-3"></div>
+            </section>
+        </section>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20260618-mp3-video-workflow"></script>
+    <script src="js/mp3-video-workflow.js?v=20260618-resume-standard"></script>
+</body>
+</html>

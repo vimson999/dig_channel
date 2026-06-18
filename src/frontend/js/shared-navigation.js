@@ -64,6 +64,8 @@ class SharedNavigation {
             return 'gemini-browser-test';
         } else if (filename === 'report-audio-workflow-test.html') {
             return 'report-audio-workflow-test';
+        } else if (filename === 'mp3-video-workflow.html') {
+            return 'mp3-video-workflow';
         } else if (filename === 'thumbnail-generator.html') {
             return 'thumbnail-generator';
         } else if (filename === 'finance-cover-generator.html') {
@@ -119,6 +121,7 @@ class SharedNavigation {
             'gemini-test': 'Gemini AI 测试台',
             'gemini-browser-test': '研报 PDF Gem 测试台',
             'report-audio-workflow-test': '研报转语音编排台',
+            'mp3-video-workflow': 'MP3 视频编排台',
             'thumbnail-workbench': '听见资本封面工作台',
             'thumbnail-generator': '研报封面生成器',
             'finance-cover-generator': '金融类视频封面生成器',
@@ -398,6 +401,12 @@ class SharedNavigation {
                         name: '研报转语音',
                         icon: 'fas fa-file-audio',
                         href: 'report-audio-workflow-test.html'
+                    },
+                    {
+                        id: 'mp3-video-workflow',
+                        name: 'MP3 视频编排',
+                        icon: 'fas fa-wave-square',
+                        href: 'mp3-video-workflow.html'
                     },
                     {
                         id: 'tts',

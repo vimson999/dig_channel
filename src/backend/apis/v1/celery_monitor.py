@@ -1,9 +1,11 @@
 import json
 import os
+import re
 import signal
 import subprocess
+import threading
 import time
-from collections import Counter
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +29,22 @@ DEFAULT_WATCHDOG_SERVICES = (
     "doubao_browser_tts",
     "report_pdf_gemini",
     "report_audio_workflow",
+    "mp3_video_workflow",
+)
+
+BUSINESS_TASK_FEATURES = {
+    "render": ("publisher",),
+    "report_audio_workflow": ("report_audio_workflow",),
+    "mp3_video_workflow": ("mp3_video_workflow",),
+    "content_pipeline": ("content_pdf_clean", "content_audio_clean"),
+    "zsxq_publish": ("zsxq_clean_output_publish",),
+}
+ZSXQ_BUSINESS_TASK_SERVICES = ("zsxq_sync", "zsxq_workflow")
+ZSXQ_ACTIVE_STATUSES = ("queued", "running", "pending", "processing")
+BUSINESS_TASK_ACTIVE_STATUSES = ("pending", "processing")
+BUSINESS_TASK_LIMIT_PER_SERVICE = 8
+BUSINESS_TASK_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
 
 SERVICES = {
@@ -69,6 +87,14 @@ SERVICES = {
         "run_script": "scripts/dev/run-celery-report-audio-workflow.sh",
         "log_file": "report_audio_workflow.log",
         "description": "调度研报 PDF Gem 解析、自审结构化、豆包浏览器朗读并汇总音频",
+    },
+    "mp3_video_workflow": {
+        "label": "MP3 视频编排",
+        "queue": "mp3_video_workflow",
+        "hostname_prefix": "mp3_video_workflow@",
+        "run_script": "scripts/dev/run-celery-mp3-video-workflow.sh",
+        "log_file": "mp3_video_workflow.log",
+        "description": "调度已同步 MP3、Gemini 信息图、DS 规划与横竖屏视频子任务",
     },
     "zsxq_sync": {
         "label": "知识星球同步",
@@ -120,12 +146,127 @@ SERVICES = {
     },
 }
 
+SCHEDULERS = {
+    "zsxq_auto_scheduler": {
+        "label": "ZSXQ 自动同步调度器",
+        "pattern": "run_zsxq_auto_scheduler.py",
+        "run_script": "scripts/dev/run-zsxq-auto-scheduler.sh",
+        "log_file": "zsxq_auto_scheduler.log",
+        "description": "知识星球自动同步调度器",
+    },
+    "zsxq_auto_publish_scheduler": {
+        "label": "ZSXQ 自动发帖调度器",
+        "pattern": "run_zsxq_auto_publish_scheduler.py",
+        "run_script": "scripts/dev/run-zsxq-auto-publish-scheduler.sh",
+        "log_file": "zsxq_auto_publish.log",
+        "description": "知识星球自动发帖调度器",
+    },
+    "content_retention_cleanup_scheduler": {
+        "label": "内容保留清理调度器",
+        "pattern": "run_content_retention_cleanup_scheduler.py",
+        "argv": [
+            "venv/bin/python",
+            "src/backend/run_content_retention_cleanup_scheduler.py",
+            "start",
+        ],
+        "log_file": "content_retention_cleanup_scheduler.log",
+        "description": "内容流水线历史文件清理调度器",
+    },
+    "report_video_asset_scheduler": {
+        "label": "研报资产扫描调度器",
+        "pattern": "run_report_video_asset_scheduler.py",
+        "run_script": "scripts/dev/run-report-video-asset-scheduler.sh",
+        "log_file": "report_video_asset_scan_scheduler.log",
+        "description": "研报资产补漏扫描调度器",
+    },
+    "report_video_auto_scheduler": {
+        "label": "研报视频自动调度器",
+        "pattern": "run_report_video_auto_scheduler.py",
+        "run_script": "scripts/dev/run-report-video-auto-scheduler.sh",
+        "log_file": "report_video_auto_scheduler.log",
+        "description": "研报视频自动扫描调度器",
+    },
+    "youtube_data_scheduler": {
+        "label": "YouTube 数据抓取调度器",
+        "pattern": "run_scheduler.py",
+        "argv": [
+            "venv/bin/python",
+            "src/backend/run_scheduler.py",
+            "start",
+        ],
+        "log_file": "scheduler.log",
+        "description": "YouTube 数据抓取调度器",
+    },
+}
+
+
+def _truthy_env(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_env(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+STATUS_CACHE_TTL_SECONDS = float(os.environ.get("CELERY_MONITOR_STATUS_CACHE_TTL", "5"))
+REPORT_VIDEO_STATS_CACHE_TTL_SECONDS = float(os.environ.get("CELERY_MONITOR_REPORT_VIDEO_STATS_CACHE_TTL", "60"))
+BUSINESS_TASKS_CACHE_TTL_SECONDS = float(os.environ.get("CELERY_MONITOR_BUSINESS_TASKS_CACHE_TTL", "30"))
+BUSINESS_TASKS_AUTO_CLEAN_STALE = _truthy_env("CELERY_MONITOR_AUTO_CLEAN_STALE_BUSINESS_TASKS", True)
+BUSINESS_TASKS_STALE_PENDING_SECONDS = max(60, _int_env("CELERY_MONITOR_STALE_PENDING_MINUTES", 10) * 60)
+BUSINESS_TASKS_STALE_PROCESSING_SECONDS = max(300, _int_env("CELERY_MONITOR_STALE_PROCESSING_MINUTES", 60) * 60)
+BUSINESS_TASKS_QUEUE_SCAN_LIMIT = max(20, _int_env("CELERY_MONITOR_BUSINESS_TASK_QUEUE_SCAN_LIMIT", 1000))
+STATUS_CACHE = {
+    "key": None,
+    "expires_at": 0.0,
+    "payload": None,
+}
+REPORT_VIDEO_STATS_CACHE = {
+    "expires_at": 0.0,
+    "payload": None,
+    "error": None,
+}
+BUSINESS_TASKS_CACHE = {
+    "expires_at": 0.0,
+    "tasks": None,
+    "errors": None,
+}
+STATUS_CACHE_LOCK = threading.Lock()
+REPORT_VIDEO_STATS_CACHE_LOCK = threading.Lock()
+BUSINESS_TASKS_CACHE_LOCK = threading.Lock()
+
 
 def _service_or_404(service_id):
     service = SERVICES.get(service_id)
     if not service:
         return None, (jsonify({"success": False, "message": "未知 Celery 服务"}), 404)
     return service, None
+
+
+def _clear_status_cache():
+    with STATUS_CACHE_LOCK:
+        STATUS_CACHE.update({
+            "key": None,
+            "expires_at": 0.0,
+            "payload": None,
+        })
+    with REPORT_VIDEO_STATS_CACHE_LOCK:
+        REPORT_VIDEO_STATS_CACHE.update({
+            "expires_at": 0.0,
+            "payload": None,
+            "error": None,
+        })
+    with BUSINESS_TASKS_CACHE_LOCK:
+        BUSINESS_TASKS_CACHE.update({
+            "expires_at": 0.0,
+            "tasks": None,
+            "errors": None,
+        })
 
 
 def _ensure_dirs():
@@ -143,6 +284,10 @@ def _watchdog_pid_file():
 
 def _log_path(service):
     return LOG_DIR / service["log_file"]
+
+
+def _scheduler_log_path(scheduler):
+    return PROJECT_ROOT / "logs" / scheduler["log_file"]
 
 
 def _read_pid_file(service_id):
@@ -221,6 +366,98 @@ def _service_processes(service):
 
 def _watchdog_processes():
     return [proc for proc in _list_processes() if "celery_watchdog_loop.py" in proc.get("command", "")]
+
+
+def _scheduler_processes(scheduler):
+    pattern = scheduler.get("pattern")
+    if not pattern:
+        return []
+    return [proc for proc in _list_processes() if pattern in proc.get("command", "")]
+
+
+def _terminate_pids(pids, timeout=3):
+    pids = sorted(set(pid for pid in pids if pid and pid != os.getpid()))
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not any(_process_exists(pid) for pid in pids):
+            break
+        time.sleep(0.2)
+
+    killed = []
+    for pid in pids:
+        if _process_exists(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed.append(pid)
+            except OSError:
+                pass
+    return {"terminated_pids": pids, "force_killed_pids": killed}
+
+
+def _stop_scheduler(scheduler_id, scheduler):
+    processes = _scheduler_processes(scheduler)
+    result = _terminate_pids([proc["pid"] for proc in processes], timeout=5)
+    result["was_running"] = bool(processes)
+    result["processes"] = processes
+    result["label"] = scheduler.get("label") or scheduler_id
+    return result
+
+
+def _scheduler_argv(scheduler):
+    if scheduler.get("run_script"):
+        return ["/bin/bash", str(PROJECT_ROOT / scheduler["run_script"])]
+    return [
+        str(PROJECT_ROOT / item) if index == 0 or "/" in item else item
+        for index, item in enumerate(scheduler.get("argv") or [])
+    ]
+
+
+def _start_scheduler(scheduler_id, scheduler):
+    existing = _scheduler_processes(scheduler)
+    if existing:
+        return {
+            "already_running": True,
+            "pids": [proc["pid"] for proc in existing],
+            "label": scheduler.get("label") or scheduler_id,
+            "log_file": str(_scheduler_log_path(scheduler).relative_to(PROJECT_ROOT)),
+        }
+
+    argv = _scheduler_argv(scheduler)
+    if not argv:
+        raise ValueError(f"调度器缺少启动命令: {scheduler_id}")
+
+    log_path = _scheduler_log_path(scheduler)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env.setdefault("DATABASE_TYPE", "postgresql")
+    env["PYTHONPATH"] = str(PROJECT_ROOT / "src" / "backend")
+
+    with log_path.open("ab") as log:
+        log.write(f"\n\n===== UI START {datetime.now().isoformat()} scheduler={scheduler_id} =====\n".encode("utf-8"))
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(PROJECT_ROOT),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+
+    time.sleep(0.8)
+    return {
+        "started": True,
+        "starter_pid": proc.pid,
+        "label": scheduler.get("label") or scheduler_id,
+        "log_file": str(log_path.relative_to(PROJECT_ROOT)),
+    }
 
 
 def _watchdog_status_payload():
@@ -324,6 +561,12 @@ def _stop_watchdog():
     return {"terminated_pids": pids, "force_killed_pids": killed}
 
 
+def _result_has_flag(result, *keys):
+    if not isinstance(result, dict):
+        return False
+    return any(bool(result.get(key)) for key in keys)
+
+
 def _tail_file(path, lines=80):
     if not path.exists():
         return ""
@@ -360,6 +603,28 @@ def _queue_length(queue_name):
         return None, str(exc)
 
 
+def _queue_lengths():
+    queues = [service["queue"] for service in SERVICES.values()]
+    try:
+        client = redis.Redis.from_url(
+            _broker_url(),
+            socket_connect_timeout=1,
+            socket_timeout=1,
+            retry_on_timeout=False,
+        )
+        pipe = client.pipeline()
+        for queue_name in queues:
+            pipe.llen(queue_name)
+        values = pipe.execute()
+        return {
+            queue_name: (int(value), None)
+            for queue_name, value in zip(queues, values)
+        }
+    except Exception as exc:
+        error = str(exc)
+        return {queue_name: (None, error) for queue_name in queues}
+
+
 def _purge_queue(queue_name):
     client = redis.Redis.from_url(
         _broker_url(),
@@ -377,20 +642,6 @@ def _purge_queue(queue_name):
         "deleted_key": bool(deleted),
         "purged": max(0, before - after),
     }
-
-
-def _truthy_env(name, default=False):
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _int_env(name, default):
-    try:
-        return int(os.environ.get(name, default))
-    except (TypeError, ValueError):
-        return default
 
 
 def _watchdog_services():
@@ -609,7 +860,8 @@ def _inspect_tasks_by_queue():
     try:
         from celery_config import celery_app
 
-        inspector = celery_app.control.inspect(timeout=3.0)
+        timeout = float(os.environ.get("CELERY_MONITOR_INSPECT_TIMEOUT", "1.2"))
+        inspector = celery_app.control.inspect(timeout=timeout)
         replies = {
             "active": inspector.active() or {},
             "reserved": inspector.reserved() or {},
@@ -642,39 +894,506 @@ def _inspect_tasks_by_queue():
     return grouped, None
 
 
-def _report_video_stage_stats():
+def _uuid_refs_from_value(value):
+    if value is None:
+        return set()
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    elif isinstance(value, (dict, list, tuple)):
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    else:
+        text = str(value)
+    return set(BUSINESS_TASK_UUID_RE.findall(text))
+
+
+def _business_task_runtime_refs():
+    refs = set()
+    queue_names = []
+    for service_id in BUSINESS_TASK_FEATURES.keys():
+        service = SERVICES.get(service_id)
+        if not service:
+            continue
+        queue_name = service["queue"]
+        if queue_name not in queue_names:
+            queue_names.append(queue_name)
+
+    try:
+        client = redis.Redis.from_url(
+            _broker_url(),
+            socket_connect_timeout=1,
+            socket_timeout=2,
+            retry_on_timeout=False,
+        )
+        for queue_name in queue_names:
+            queue_length = int(client.llen(queue_name))
+            if queue_length > BUSINESS_TASKS_QUEUE_SCAN_LIMIT:
+                return refs, (
+                    f"{queue_name} 队列长度 {queue_length} 超过扫描上限 "
+                    f"{BUSINESS_TASKS_QUEUE_SCAN_LIMIT}，跳过历史残留自动收口"
+                )
+            for item in client.lrange(queue_name, 0, BUSINESS_TASKS_QUEUE_SCAN_LIMIT - 1):
+                refs.update(_uuid_refs_from_value(item))
+    except Exception as exc:
+        return refs, f"Redis 队列扫描失败: {exc}"
+
+    inspect_data, inspect_error = _inspect_tasks_by_queue()
+    if inspect_error:
+        return refs, f"Celery 运行态检查失败: {inspect_error}"
+
+    for service_id in BUSINESS_TASK_FEATURES.keys():
+        service = SERVICES.get(service_id)
+        if not service:
+            continue
+        tasks_by_state = inspect_data.get(service["queue"]) or {}
+        for tasks in tasks_by_state.values():
+            for task in tasks or []:
+                refs.update(_uuid_refs_from_value(task))
+    return refs, None
+
+
+def _business_task_stale_threshold(row):
+    return (
+        BUSINESS_TASKS_STALE_PENDING_SECONDS
+        if row.status == "pending"
+        else BUSINESS_TASKS_STALE_PROCESSING_SECONDS
+    )
+
+
+def _business_task_should_auto_clean(row, runtime_refs, now):
+    task_id = str(row.id or "")
+    celery_task_id = str(row.celery_task_id or "")
+    if task_id and task_id in runtime_refs:
+        return False
+    if celery_task_id and celery_task_id in runtime_refs:
+        return False
+    marker = row.updated_at or row.created_at
+    if not marker:
+        return False
+    return (now - marker).total_seconds() >= _business_task_stale_threshold(row)
+
+
+def _business_task_stale_by_age(row, now):
+    marker = row.updated_at or row.created_at
+    if not marker:
+        return False
+    return (now - marker).total_seconds() >= _business_task_stale_threshold(row)
+
+
+def _auto_clean_stale_business_tasks(PublicationTask, stale_rows):
+    ids = [str(row.id) for row in stale_rows if row.id]
+    if not ids:
+        return None
+
+    try:
+        from models import db
+    except Exception as exc:
+        return f"加载数据库失败: {exc}"
+
+    now = datetime.utcnow()
+    reason = "数据库仍是未终态，但 Redis 队列和 Celery 运行态均没有对应任务；监控自动收口为 failed。"
+    try:
+        tasks = (
+            PublicationTask.query
+            .filter(PublicationTask.id.in_(ids))
+            .filter(PublicationTask.status.in_(BUSINESS_TASK_ACTIVE_STATUSES))
+            .all()
+        )
+        for task in tasks:
+            previous_result = task.result if isinstance(task.result, dict) else {}
+            task.result = {
+                **previous_result,
+                "stale_cleanup": {
+                    "cleaned_at": now.isoformat() + "Z",
+                    "reason": reason,
+                    "previous_status": task.status,
+                    "previous_step": task.current_step,
+                    "previous_progress": task.progress,
+                    "previous_updated_at": task.updated_at.isoformat() + "Z" if task.updated_at else None,
+                    "auto_cleaned_by": "celery_monitor",
+                },
+            }
+            task.status = "failed"
+            task.current_step = "stale_cleaned"
+            task.error_message = f"Celery Monitor 自动清理历史残留任务：{reason}"
+            task.completed_at = now
+            task.updated_at = now
+            task.sync_projection_fields()
+        if tasks:
+            db.session.commit()
+        return None
+    except Exception as exc:
+        db.session.rollback()
+        return str(exc)
+
+
+def _report_video_stage_stats(force_refresh=False):
+    if REPORT_VIDEO_STATS_CACHE_TTL_SECONDS > 0 and not force_refresh:
+        with REPORT_VIDEO_STATS_CACHE_LOCK:
+            if REPORT_VIDEO_STATS_CACHE["expires_at"] > time.time():
+                return deepcopy(REPORT_VIDEO_STATS_CACHE["payload"]), REPORT_VIDEO_STATS_CACHE["error"]
+
     try:
         from models.report_video import ReportVideoReport, ReportVideoTask
+        from sqlalchemy import func
     except Exception as exc:
         return None, f"加载研报模型失败: {exc}"
 
     try:
-        task_statuses = [row[0] for row in ReportVideoTask.query.with_entities(ReportVideoTask.status).all()]
-        report_rows = ReportVideoReport.query.with_entities(
-            ReportVideoReport.parse_status,
-            ReportVideoReport.ai_status,
-        ).all()
+        task_rows = (
+            ReportVideoTask.query
+            .with_entities(ReportVideoTask.status, func.count(ReportVideoTask.id))
+            .group_by(ReportVideoTask.status)
+            .all()
+        )
+        parse_rows = (
+            ReportVideoReport.query
+            .with_entities(ReportVideoReport.parse_status, func.count(ReportVideoReport.id))
+            .group_by(ReportVideoReport.parse_status)
+            .all()
+        )
+        ai_rows = (
+            ReportVideoReport.query
+            .with_entities(ReportVideoReport.ai_status, func.count(ReportVideoReport.id))
+            .group_by(ReportVideoReport.ai_status)
+            .all()
+        )
     except Exception as exc:
         return None, str(exc)
 
-    task_counter = Counter(filter(None, task_statuses))
-    parse_counter = Counter(row[0] for row in report_rows if row and row[0])
-    ai_counter = Counter(row[1] for row in report_rows if row and row[1])
+    task_counter = {status: int(count or 0) for status, count in task_rows if status}
+    parse_counter = {status: int(count or 0) for status, count in parse_rows if status}
+    ai_counter = {status: int(count or 0) for status, count in ai_rows if status}
 
-    return {
-        "task_status": dict(task_counter),
-        "parse_status": dict(parse_counter),
-        "ai_status": dict(ai_counter),
+    payload = {
+        "task_status": task_counter,
+        "parse_status": parse_counter,
+        "ai_status": ai_counter,
         "totals": {
-            "tasks": len(task_statuses),
-            "reports": len(report_rows),
+            "tasks": sum(task_counter.values()),
+            "reports": max(sum(parse_counter.values()), sum(ai_counter.values())),
         },
-    }, None
+    }
+    if REPORT_VIDEO_STATS_CACHE_TTL_SECONDS > 0:
+        with REPORT_VIDEO_STATS_CACHE_LOCK:
+            REPORT_VIDEO_STATS_CACHE.update({
+                "expires_at": time.time() + REPORT_VIDEO_STATS_CACHE_TTL_SECONDS,
+                "payload": deepcopy(payload),
+                "error": None,
+            })
+    return payload, None
 
 
-def _service_status(service_id, service, include_logs=False, log_lines=20, inspect_data=None, inspect_error=None):
-    processes = _service_processes(service)
-    queue_len, queue_error = _queue_length(service["queue"])
+def _business_tasks_snapshot(force_refresh=False):
+    service_ids = _business_task_service_ids()
+    publication_service_ids = list(BUSINESS_TASK_FEATURES.keys())
+    empty = {service_id: [] for service_id in service_ids}
+    if not service_ids:
+        return {}, {}
+
+    if BUSINESS_TASKS_CACHE_TTL_SECONDS > 0 and not force_refresh:
+        with BUSINESS_TASKS_CACHE_LOCK:
+            if BUSINESS_TASKS_CACHE["expires_at"] > time.time() and BUSINESS_TASKS_CACHE["tasks"] is not None:
+                return deepcopy(BUSINESS_TASKS_CACHE["tasks"]), deepcopy(BUSINESS_TASKS_CACHE["errors"])
+
+    try:
+        from models.task import PublicationTask
+    except Exception as exc:
+        publication_errors = {
+            service_id: f"加载任务模型失败: {exc}"
+            for service_id in publication_service_ids
+        }
+        zsxq_buckets, zsxq_errors = _zsxq_business_tasks_snapshot()
+        empty.update(zsxq_buckets)
+        publication_errors.update(zsxq_errors)
+        return empty, {service_id: publication_errors.get(service_id) for service_id in service_ids}
+
+    features = sorted({feature for values in BUSINESS_TASK_FEATURES.values() for feature in values})
+    try:
+        rows = (
+            PublicationTask.query
+            .with_entities(
+                PublicationTask.id.label("id"),
+                PublicationTask.celery_task_id.label("celery_task_id"),
+                PublicationTask.feature.label("feature"),
+                PublicationTask.status.label("status"),
+                PublicationTask.current_step.label("current_step"),
+                PublicationTask.progress.label("progress"),
+                PublicationTask.task_title.label("task_title"),
+                PublicationTask.parent_feature.label("parent_feature"),
+                PublicationTask.parent_task_id.label("parent_task_id"),
+                PublicationTask.source_feature.label("source_feature"),
+                PublicationTask.source_task_id.label("source_task_id"),
+                PublicationTask.error_message.label("error_message"),
+                PublicationTask.created_at.label("created_at"),
+                PublicationTask.updated_at.label("updated_at"),
+                PublicationTask.completed_at.label("completed_at"),
+            )
+            .filter(PublicationTask.feature.in_(features))
+            .filter(PublicationTask.status.in_(BUSINESS_TASK_ACTIVE_STATUSES))
+            .order_by(PublicationTask.updated_at.desc(), PublicationTask.created_at.desc())
+            .limit(max(200, BUSINESS_TASK_LIMIT_PER_SERVICE * max(1, len(service_ids)) * 8))
+            .all()
+        )
+    except Exception as exc:
+        return empty, {service_id: f"业务任务读取失败: {exc}" for service_id in service_ids}
+
+    errors = {service_id: None for service_id in service_ids}
+    if BUSINESS_TASKS_AUTO_CLEAN_STALE and rows:
+        now = datetime.utcnow()
+        stale_candidates = [
+            row for row in rows
+            if _business_task_stale_by_age(row, now)
+        ]
+    else:
+        stale_candidates = []
+
+    if stale_candidates:
+        runtime_refs, runtime_error = _business_task_runtime_refs()
+        if not runtime_error:
+            stale_rows = [
+                row for row in stale_candidates
+                if _business_task_should_auto_clean(row, runtime_refs, now)
+            ]
+            if stale_rows:
+                cleanup_error = _auto_clean_stale_business_tasks(PublicationTask, stale_rows)
+                if cleanup_error:
+                    errors = {
+                        service_id: f"历史残留自动收口失败: {cleanup_error}"
+                        for service_id in service_ids
+                    }
+                else:
+                    stale_ids = {str(row.id) for row in stale_rows}
+                    rows = [row for row in rows if str(row.id) not in stale_ids]
+
+    buckets = {service_id: [] for service_id in service_ids}
+    for row in rows:
+        for service_id, feature_names in BUSINESS_TASK_FEATURES.items():
+            if row.feature not in feature_names or len(buckets[service_id]) >= BUSINESS_TASK_LIMIT_PER_SERVICE:
+                continue
+            buckets[service_id].append(_business_task_payload(row))
+
+    zsxq_buckets, zsxq_errors = _zsxq_business_tasks_snapshot()
+    for service_id in ZSXQ_BUSINESS_TASK_SERVICES:
+        buckets[service_id] = zsxq_buckets.get(service_id, [])
+        errors[service_id] = zsxq_errors.get(service_id)
+
+    if BUSINESS_TASKS_CACHE_TTL_SECONDS > 0:
+        with BUSINESS_TASKS_CACHE_LOCK:
+            BUSINESS_TASKS_CACHE.update({
+                "expires_at": time.time() + BUSINESS_TASKS_CACHE_TTL_SECONDS,
+                "tasks": deepcopy(buckets),
+                "errors": deepcopy(errors),
+            })
+    return buckets, errors
+
+
+def _business_task_service_ids():
+    service_ids = list(BUSINESS_TASK_FEATURES.keys())
+    for service_id in ZSXQ_BUSINESS_TASK_SERVICES:
+        if service_id not in service_ids:
+            service_ids.append(service_id)
+    return service_ids
+
+
+def _zsxq_business_tasks_snapshot():
+    buckets = {service_id: [] for service_id in ZSXQ_BUSINESS_TASK_SERVICES}
+    errors = {service_id: None for service_id in ZSXQ_BUSINESS_TASK_SERVICES}
+    try:
+        from models.zsxq_sync import ZsxqSyncRun
+        from models.zsxq_workflow import ZsxqWorkflowRun
+    except Exception as exc:
+        return buckets, {
+            service_id: f"加载星球任务模型失败: {exc}"
+            for service_id in ZSXQ_BUSINESS_TASK_SERVICES
+        }
+
+    try:
+        sync_rows = (
+            ZsxqSyncRun.query
+            .with_entities(
+                ZsxqSyncRun.id.label("id"),
+                ZsxqSyncRun.group_id.label("group_id"),
+                ZsxqSyncRun.group_name.label("group_name"),
+                ZsxqSyncRun.tab_label.label("tab_label"),
+                ZsxqSyncRun.mode.label("mode"),
+                ZsxqSyncRun.status.label("status"),
+                ZsxqSyncRun.system_batch_id.label("system_batch_id"),
+                ZsxqSyncRun.topics_fetched.label("topics_fetched"),
+                ZsxqSyncRun.attachments_downloaded.label("attachments_downloaded"),
+                ZsxqSyncRun.attachments_failed.label("attachments_failed"),
+                ZsxqSyncRun.error_message.label("error_message"),
+                ZsxqSyncRun.created_at.label("created_at"),
+                ZsxqSyncRun.updated_at.label("updated_at"),
+                ZsxqSyncRun.completed_at.label("completed_at"),
+            )
+            .filter(ZsxqSyncRun.status.in_(ZSXQ_ACTIVE_STATUSES))
+            .order_by(ZsxqSyncRun.updated_at.desc(), ZsxqSyncRun.created_at.desc())
+            .limit(BUSINESS_TASK_LIMIT_PER_SERVICE)
+            .all()
+        )
+        buckets["zsxq_sync"] = [_zsxq_sync_task_payload(row) for row in sync_rows]
+    except Exception as exc:
+        errors["zsxq_sync"] = f"星球同步运行记录读取失败: {exc}"
+
+    try:
+        workflow_rows = (
+            ZsxqWorkflowRun.query
+            .with_entities(
+                ZsxqWorkflowRun.id.label("id"),
+                ZsxqWorkflowRun.batch_id.label("batch_id"),
+                ZsxqWorkflowRun.group_id.label("group_id"),
+                ZsxqWorkflowRun.group_name.label("group_name"),
+                ZsxqWorkflowRun.trigger.label("trigger"),
+                ZsxqWorkflowRun.status.label("status"),
+                ZsxqWorkflowRun.current_stage.label("current_stage"),
+                ZsxqWorkflowRun.round.label("round"),
+                ZsxqWorkflowRun.max_rounds.label("max_rounds"),
+                ZsxqWorkflowRun.sync_run_id.label("sync_run_id"),
+                ZsxqWorkflowRun.error_message.label("error_message"),
+                ZsxqWorkflowRun.created_at.label("created_at"),
+                ZsxqWorkflowRun.updated_at.label("updated_at"),
+                ZsxqWorkflowRun.completed_at.label("completed_at"),
+            )
+            .filter(ZsxqWorkflowRun.status.in_(ZSXQ_ACTIVE_STATUSES))
+            .order_by(ZsxqWorkflowRun.updated_at.desc(), ZsxqWorkflowRun.created_at.desc())
+            .limit(BUSINESS_TASK_LIMIT_PER_SERVICE)
+            .all()
+        )
+        buckets["zsxq_workflow"] = [_zsxq_workflow_task_payload(row) for row in workflow_rows]
+    except Exception as exc:
+        errors["zsxq_workflow"] = f"星球编排运行记录读取失败: {exc}"
+
+    return buckets, errors
+
+
+def _zsxq_sync_task_payload(row):
+    task_id = str(row.id or "")
+    title = f"{row.group_name or row.group_id or '知识星球'} · 同步"
+    if row.system_batch_id:
+        title = f"{title} {row.system_batch_id}"
+    details = [
+        row.tab_label or row.mode,
+        f"topics {row.topics_fetched or 0}",
+        f"下载 {row.attachments_downloaded or 0}",
+    ]
+    if row.attachments_failed:
+        details.append(f"失败 {row.attachments_failed}")
+    return {
+        "id": task_id,
+        "short_id": task_id[:8],
+        "feature": "zsxq_sync_run",
+        "status": _zsxq_business_status(row.status),
+        "step": " · ".join(str(item) for item in details if item),
+        "progress": 0,
+        "title": title,
+        "parent_feature": None,
+        "parent_task_id": None,
+        "source_feature": row.mode,
+        "source_task_id": row.system_batch_id,
+        "error": row.error_message,
+        "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
+        "completed_at": row.completed_at.isoformat() + "Z" if row.completed_at else None,
+    }
+
+
+def _zsxq_workflow_task_payload(row):
+    task_id = str(row.id or "")
+    title = f"{row.group_name or row.group_id or '知识星球'} · 编排"
+    if row.batch_id:
+        title = f"{title} {row.batch_id}"
+    round_text = f"第 {row.round} 轮" if row.round is not None else ""
+    max_round_text = f"/{row.max_rounds}" if row.max_rounds is not None else ""
+    return {
+        "id": task_id,
+        "short_id": task_id[:8],
+        "feature": "zsxq_workflow_run",
+        "status": _zsxq_business_status(row.status),
+        "step": " · ".join(item for item in [row.current_stage, f"{round_text}{max_round_text}".strip()] if item),
+        "progress": _zsxq_workflow_progress(row.current_stage),
+        "title": title,
+        "parent_feature": None,
+        "parent_task_id": None,
+        "source_feature": row.trigger,
+        "source_task_id": row.sync_run_id,
+        "error": row.error_message,
+        "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
+        "completed_at": row.completed_at.isoformat() + "Z" if row.completed_at else None,
+    }
+
+
+def _zsxq_business_status(status):
+    if status == "queued":
+        return "pending"
+    if status in {"running", "processing"}:
+        return "processing"
+    return status or "pending"
+
+
+def _zsxq_workflow_progress(stage):
+    return {
+        "init": 0,
+        "sync": 25,
+        "clean": 60,
+        "publish": 85,
+        "done": 100,
+    }.get(stage, 0)
+
+
+def _business_task_payload(row):
+    task_id = str(row.id or "")
+    title = row.task_title or _business_task_fallback_title(row)
+    return {
+        "id": task_id,
+        "short_id": task_id[:8],
+        "feature": row.feature,
+        "status": row.status,
+        "step": row.current_step,
+        "progress": row.progress or 0,
+        "title": title,
+        "parent_feature": row.parent_feature,
+        "parent_task_id": row.parent_task_id,
+        "source_feature": row.source_feature,
+        "source_task_id": row.source_task_id,
+        "error": row.error_message,
+        "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
+        "completed_at": row.completed_at.isoformat() + "Z" if row.completed_at else None,
+    }
+
+
+def _business_task_fallback_title(row):
+    labels = {
+        "publisher": "视频合成任务",
+        "report_audio_workflow": "研报转语音编排",
+        "mp3_video_workflow": "MP3 视频编排",
+        "content_pdf_clean": "PDF 清洗任务",
+        "content_audio_clean": "音频清洗任务",
+        "zsxq_clean_output_publish": "知识星球发布任务",
+    }
+    return labels.get(row.feature, row.feature or "业务任务")
+
+
+def _service_status(
+    service_id,
+    service,
+    include_logs=False,
+    log_lines=20,
+    inspect_data=None,
+    inspect_error=None,
+    queue_lengths=None,
+    all_processes=None,
+    business_tasks=None,
+    business_task_error=None,
+    force_refresh=False,
+):
+    process_source = all_processes if all_processes is not None else _list_processes()
+    processes = [proc for proc in process_source if _matches_service(proc, service)]
+    if queue_lengths and service["queue"] in queue_lengths:
+        queue_len, queue_error = queue_lengths[service["queue"]]
+    else:
+        queue_len, queue_error = _queue_length(service["queue"])
     starter_pid = _read_pid_file(service_id)
     log_path = _log_path(service)
     tasks = (inspect_data or {}).get(service["queue"]) or {"active": [], "reserved": [], "scheduled": []}
@@ -710,12 +1429,15 @@ def _service_status(service_id, service, include_logs=False, log_lines=20, inspe
         "active_count": active_count,
         "reserved_count": reserved_count,
         "scheduled_count": scheduled_count,
+        "business_tasks": business_tasks or [],
+        "business_active_count": len(business_tasks or []),
+        "business_tasks_error": business_task_error,
         "inspect_error": None,
         "consumer_warning": consumer_warning,
         "updated_at": datetime.utcnow().isoformat() + "Z",
     }
     if service_id == "report_video":
-        report_video_stats, report_video_error = _report_video_stage_stats()
+        report_video_stats, report_video_error = _report_video_stage_stats(force_refresh=force_refresh)
         status["report_video_stats"] = report_video_stats
         status["report_video_stats_error"] = report_video_error
     if include_logs:
@@ -811,17 +1533,17 @@ def list_services():
     })
 
 
-@bp.route("/status", methods=["GET"])
-def status():
+def _status_payload(include_logs=False, log_lines=20, include_inspect=False, force_refresh=False):
     _ensure_dirs()
-    include_logs = request.args.get("logs", "0") in {"1", "true", "yes"}
-    try:
-        log_lines = min(max(int(request.args.get("log_lines", 20)), 1), 200)
-    except ValueError:
-        log_lines = 20
 
     broker_ok, broker_error = _broker_ping()
-    inspect_data, inspect_error = _inspect_tasks_by_queue()
+    if include_inspect:
+        inspect_data, inspect_error = _inspect_tasks_by_queue()
+    else:
+        inspect_data, inspect_error = {}, "skipped"
+    queue_lengths = _queue_lengths()
+    all_processes = _list_processes()
+    business_tasks, business_task_errors = _business_tasks_snapshot(force_refresh=force_refresh)
     services = [
         _service_status(
             service_id,
@@ -830,10 +1552,15 @@ def status():
             log_lines=log_lines,
             inspect_data=inspect_data,
             inspect_error=inspect_error,
+            queue_lengths=queue_lengths,
+            all_processes=all_processes,
+            business_tasks=business_tasks.get(service_id),
+            business_task_error=business_task_errors.get(service_id),
+            force_refresh=force_refresh,
         )
         for service_id, service in SERVICES.items()
     ]
-    return jsonify({
+    return {
         "success": True,
         "data": {
             "broker": {
@@ -844,7 +1571,52 @@ def status():
             },
             "services": services,
         },
-    })
+    }
+
+
+@bp.route("/status", methods=["GET"])
+def status():
+    include_logs = request.args.get("logs", "0") in {"1", "true", "yes"}
+    include_inspect = request.args.get("inspect", "0") in {"1", "true", "yes"}
+    force_refresh = request.args.get("refresh", "0") in {"1", "true", "yes"}
+    try:
+        log_lines = min(max(int(request.args.get("log_lines", 20)), 1), 200)
+    except ValueError:
+        log_lines = 20
+
+    cache_key = (include_logs, log_lines, include_inspect)
+    cacheable = not include_logs and STATUS_CACHE_TTL_SECONDS > 0
+    now = time.time()
+    if cacheable and not force_refresh:
+        cached = STATUS_CACHE.get("payload")
+        if STATUS_CACHE.get("key") == cache_key and cached and STATUS_CACHE.get("expires_at", 0) > now:
+            return jsonify(deepcopy(cached))
+
+    if cacheable:
+        with STATUS_CACHE_LOCK:
+            now = time.time()
+            cached = STATUS_CACHE.get("payload")
+            if not force_refresh and STATUS_CACHE.get("key") == cache_key and cached and STATUS_CACHE.get("expires_at", 0) > now:
+                return jsonify(deepcopy(cached))
+            payload = _status_payload(
+                include_logs=include_logs,
+                log_lines=log_lines,
+                include_inspect=include_inspect,
+                force_refresh=force_refresh,
+            )
+            STATUS_CACHE.update({
+                "key": cache_key,
+                "expires_at": time.time() + STATUS_CACHE_TTL_SECONDS,
+                "payload": deepcopy(payload),
+            })
+            return jsonify(payload)
+
+    return jsonify(_status_payload(
+        include_logs=include_logs,
+        log_lines=log_lines,
+        include_inspect=include_inspect,
+        force_refresh=force_refresh,
+    ))
 
 
 @bp.route("/watchdog/status", methods=["GET"])
@@ -963,6 +1735,84 @@ def restart(service_id):
             },
         })
     except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@bp.route("/restart-all", methods=["POST"])
+def restart_all():
+    """Restart all managed Celery workers, watchdog, and currently running schedulers."""
+    try:
+        data = request.get_json(silent=True) or {}
+        start_all_schedulers = bool(data.get("start_all_schedulers"))
+        celery_results = {}
+        scheduler_results = {}
+
+        watchdog_stop = _stop_watchdog()
+
+        for service_id, service in SERVICES.items():
+            celery_results[service_id] = {
+                "label": service.get("label") or service_id,
+                "stop": _stop_service(service_id, service),
+            }
+
+        for scheduler_id, scheduler in SCHEDULERS.items():
+            stop_result = _stop_scheduler(scheduler_id, scheduler) or {}
+            scheduler_results[scheduler_id] = {
+                "label": scheduler.get("label") or scheduler_id,
+                "stop": stop_result,
+                "start": None,
+                "skipped": not (stop_result.get("was_running") or start_all_schedulers),
+            }
+
+        time.sleep(0.8)
+
+        for service_id, service in SERVICES.items():
+            celery_results[service_id]["start"] = _start_service(service_id, service)
+
+        watchdog_start = _start_watchdog()
+
+        for scheduler_id, scheduler in SCHEDULERS.items():
+            item = scheduler_results[scheduler_id]
+            if item.get("skipped"):
+                continue
+            item["start"] = _start_scheduler(scheduler_id, scheduler)
+
+        _clear_status_cache()
+
+        celery_started = sum(
+            1
+            for item in celery_results.values()
+            if _result_has_flag(item.get("start"), "started", "already_running")
+        )
+        schedulers_started = sum(
+            1
+            for item in scheduler_results.values()
+            if _result_has_flag(item.get("start"), "started", "already_running")
+        )
+        schedulers_skipped = sum(1 for item in scheduler_results.values() if item.get("skipped"))
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "summary": {
+                    "celery_total": len(SERVICES),
+                    "celery_started": celery_started,
+                    "schedulers_total": len(SCHEDULERS),
+                    "schedulers_started": schedulers_started,
+                    "schedulers_skipped": schedulers_skipped,
+                    "watchdog_started": _result_has_flag(watchdog_start, "started", "already_running"),
+                },
+                "watchdog": {
+                    "stop": watchdog_stop,
+                    "start": watchdog_start,
+                    "status": _watchdog_status_payload(),
+                },
+                "celery": celery_results,
+                "schedulers": scheduler_results,
+            },
+        })
+    except Exception as exc:
+        _clear_status_cache()
         return jsonify({"success": False, "message": str(exc)}), 500
 
 

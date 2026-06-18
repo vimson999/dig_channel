@@ -15,6 +15,11 @@ Content pipeline worker:
 - `./scripts/dev/run-celery-content-pipeline.sh` 启动 `content_pipeline` 队列，负责 PDF 清洗引擎适配与文件搬运
 - `./scripts/dev/stop-celery-content-pipeline.sh` 停止 `content_pipeline` 队列
 
+MP3 video workflow worker:
+
+- `./scripts/dev/run-celery-mp3-video-workflow.sh` 启动 `mp3_video_workflow` 队列，负责已同步 MP3 到 Gemini 信息图与横竖屏视频编排
+- `./scripts/dev/stop-celery-mp3-video-workflow.sh` 停止 `mp3_video_workflow` 队列
+
 Runtime configuration should come from `.env` or shell environment variables. Do not hardcode service credentials in these scripts.
 
 Backend startup bootstrap:

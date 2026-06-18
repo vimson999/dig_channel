@@ -317,6 +317,46 @@
             });
         }
 
+        function loadWorkflowImage(dataUrl) {
+            return new Promise((resolve, reject) => {
+                if (!dataUrl) {
+                    resolve(null);
+                    return;
+                }
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.onerror = reject;
+                img.src = dataUrl;
+            });
+        }
+
+        function waitWorkflowFonts() {
+            if (!document.fonts || !document.fonts.ready) return Promise.resolve();
+            return Promise.race([
+                document.fonts.ready.catch(() => {}),
+                new Promise(resolve => setTimeout(resolve, 2000))
+            ]);
+        }
+
+        window.renderWorkflowFinanceCover = async function(payload = {}) {
+            inputs.mainTitle.value = payload.mainTitle || '内资闭门会议';
+            inputs.subTitle.value = payload.subTitle || '';
+            inputs.dateText.value = payload.dateText || '';
+            inputs.disclaimer.value = payload.disclaimer || '本内容只供交流学习，不作为任何投资建议。理财有风险，投资需谨慎。';
+            inputs.mainColor.value = payload.mainColor || '#ffffff';
+            inputs.subColor.value = payload.subColor || '#FFE900';
+            customBgImage = payload.backgroundDataUrl ? await loadWorkflowImage(payload.backgroundDataUrl) : null;
+            await waitWorkflowFonts();
+            draw();
+            return {
+                dataUrl: canvas.toDataURL(payload.mimeType || 'image/jpeg', payload.quality || 0.95),
+                width: canvas.width,
+                height: canvas.height
+            };
+        };
+
+        window.__workflowFinanceCoverReady = true;
+
         // 初始化加载字体可能需要时间，延迟绘制一次确保字体生效，并默认执行一次
         document.fonts.ready.then(() => {
             draw();

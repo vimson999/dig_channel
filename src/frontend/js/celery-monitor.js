@@ -3,16 +3,20 @@ const state = {
     selectedServiceId: 'render',
     busyServiceId: null,
     busyWatchdogAction: null,
+    busyRestartAll: false,
     watchdog: null,
     watchdogError: '',
     refreshTimer: null,
 };
 
-const ZSXQ_SERVICE_ORDER = ['zsxq_workflow', 'zsxq_sync', 'content_pipeline', 'zsxq_publish'];
-const ZSXQ_SERVICE_IDS = new Set(ZSXQ_SERVICE_ORDER);
+const WORKFLOW_SERVICE_ORDER = ['zsxq_workflow', 'report_audio_workflow', 'mp3_video_workflow'];
+const WORKFLOW_SERVICE_IDS = new Set(WORKFLOW_SERVICE_ORDER);
+const ZSXQ_SUPPORT_SERVICE_ORDER = ['zsxq_sync', 'content_pipeline', 'zsxq_publish'];
+const ZSXQ_SUPPORT_SERVICE_IDS = new Set(ZSXQ_SUPPORT_SERVICE_ORDER);
 
 const els = {
     brokerStatus: document.getElementById('broker-status'),
+    restartAllBtn: document.getElementById('restart-all-btn'),
     refreshBtn: document.getElementById('refresh-btn'),
     notice: document.getElementById('notice'),
     watchdogCard: document.getElementById('watchdog-card'),
@@ -33,6 +37,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function bindEvents() {
     els.refreshBtn.addEventListener('click', () => refreshStatus({ loadLogs: true }));
+    els.restartAllBtn.addEventListener('click', restartAll);
     els.refreshLogBtn.addEventListener('click', () => loadLogs(state.selectedServiceId));
     els.watchdogCard.addEventListener('click', handleWatchdogAction);
     els.serviceGrid.addEventListener('click', handleServiceAction);
@@ -89,8 +94,9 @@ function apiBaseUrl() {
 
 async function refreshStatus(options = {}) {
     if (!options.silent) setNotice('正在刷新 Celery 状态...', 'muted');
+    const includeInspect = options.inspect === true;
     const [statusResult, watchdogResult] = await Promise.all([
-        apiFetch('/celery/status', { timeoutMs: 20000 })
+        apiFetch(includeInspect ? '/celery/status?inspect=1' : '/celery/status', { timeoutMs: includeInspect ? 30000 : 12000 })
             .then(data => ({ data }))
             .catch(error => ({ error })),
         apiFetch('/celery/watchdog/status', { timeoutMs: 8000 })
@@ -137,6 +143,7 @@ async function handleWatchdogAction(event) {
 }
 
 async function runWatchdogAction(action) {
+    if (state.busyRestartAll) return;
     state.busyWatchdogAction = action;
     render();
     const actionLabel = {
@@ -165,6 +172,7 @@ async function runWatchdogAction(action) {
 }
 
 async function runAction(serviceId, action) {
+    if (state.busyRestartAll) return;
     state.busyServiceId = serviceId;
     render();
     const actionLabel = { start: '启动', stop: '停止', restart: '重启', purge: '清空积压' }[action] || action;
@@ -185,6 +193,40 @@ async function runAction(serviceId, action) {
         }
     } finally {
         state.busyServiceId = null;
+        render();
+    }
+}
+
+async function restartAll() {
+    if (state.busyRestartAll) return;
+    const ok = window.confirm(
+        '确认一键重启全部 Celery Worker、Celery Watchdog，以及当前正在运行的 scheduler？\n\n' +
+        '正在执行中的任务可能会被中断，尚未被 worker 取走的队列消息会保留。'
+    );
+    if (!ok) return;
+
+    state.busyRestartAll = true;
+    state.busyServiceId = null;
+    state.busyWatchdogAction = null;
+    render();
+    try {
+        setNotice('正在重启全部 Celery 和 scheduler...', 'muted');
+        const data = await apiFetch('/celery/restart-all', {
+            method: 'POST',
+            body: JSON.stringify({}),
+            timeoutMs: 120000,
+        });
+        const summary = data.summary || {};
+        setNotice(
+            `重启完成：Celery ${summary.celery_started ?? 0}/${summary.celery_total ?? 0}，` +
+            `scheduler ${summary.schedulers_started ?? 0} 个已重启，${summary.schedulers_skipped ?? 0} 个未运行已跳过。`,
+            'success'
+        );
+        await refreshStatus({ silent: true, loadLogs: true });
+    } catch (error) {
+        setNotice(`一键重启失败：${error.message}`, 'error');
+    } finally {
+        state.busyRestartAll = false;
         render();
     }
 }
@@ -215,10 +257,22 @@ async function loadLogs(serviceId) {
 
 function render(broker = null) {
     if (broker) renderBroker(broker);
+    renderGlobalControls();
     renderWatchdog();
     renderCards();
     renderServiceList();
     els.lastUpdated.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function renderGlobalControls() {
+    if (!els.restartAllBtn) return;
+    els.restartAllBtn.disabled = Boolean(state.busyRestartAll);
+    els.restartAllBtn.innerHTML = state.busyRestartAll
+        ? '<i class="fas fa-spinner fa-spin mr-2"></i>重启中'
+        : '<i class="fas fa-power-off mr-2"></i>重启全部';
+    els.refreshBtn.disabled = Boolean(state.busyRestartAll);
+    els.refreshBtn.classList.toggle('opacity-50', Boolean(state.busyRestartAll));
+    els.refreshBtn.classList.toggle('cursor-not-allowed', Boolean(state.busyRestartAll));
 }
 
 function renderWatchdog() {
@@ -235,7 +289,7 @@ function renderWatchdog() {
     const config = watchdog.config || {};
     const events = Array.isArray(watchdog.state?.events) ? watchdog.state.events.slice(-3).reverse() : [];
     const running = Boolean(watchdog.running);
-    const busy = Boolean(state.busyWatchdogAction);
+    const busy = Boolean(state.busyWatchdogAction || state.busyRestartAll);
     const statusClass = running
         ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
         : 'border-slate-200 bg-slate-50 text-slate-500';
@@ -327,24 +381,29 @@ function renderTaskPanel(service) {
     const active = tasks.active || [];
     const reserved = tasks.reserved || [];
     const scheduled = tasks.scheduled || [];
-    const hasTasks = active.length || reserved.length || scheduled.length;
+    const businessTasks = service.business_tasks || [];
+    const hasTasks = active.length || reserved.length || scheduled.length || businessTasks.length;
     const consumerWarning = service.consumer_warning;
+    const businessError = service.business_tasks_error;
 
     return `
         <div class="mt-3 rounded-md border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
-            <div class="grid grid-cols-3 gap-2">
+            <div class="grid grid-cols-4 gap-2">
                 ${renderTaskCount('执行中', active.length, 'text-emerald-700')}
                 ${renderTaskCount('已领取', reserved.length, 'text-blue-700')}
                 ${renderTaskCount('定时', scheduled.length, 'text-slate-700')}
+                ${renderTaskCount('业务未收尾', businessTasks.length, businessTasks.length ? 'text-indigo-700' : 'text-slate-700')}
             </div>
             ${consumerWarning ? `<div class="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 font-bold leading-5 text-amber-700">${escapeHtml(consumerWarning)}</div>` : ''}
+            ${businessError ? `<div class="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 font-bold leading-5 text-amber-700">业务任务读取失败：${escapeHtml(businessError)}</div>` : ''}
             ${hasTasks ? `
                 <div class="mt-2 space-y-1">
                     ${renderTaskRows('执行中', active, 'border-emerald-200 bg-emerald-50')}
                     ${renderTaskRows('已领取', reserved, 'border-blue-200 bg-blue-50')}
                     ${renderTaskRows('定时', scheduled, 'border-slate-200 bg-white')}
+                    ${renderBusinessTaskRows('业务未收尾', businessTasks, 'border-indigo-200 bg-indigo-50')}
                 </div>
-            ` : '<div class="mt-2 text-slate-400">当前没有 worker 已领取的任务。</div>'}
+            ` : '<div class="mt-2 text-slate-400">当前没有 worker 已领取或业务表未收尾任务。</div>'}
         </div>
     `;
 }
@@ -373,6 +432,64 @@ function renderTaskRows(label, tasks, className) {
             ${taskRuntimeText(task) ? `<div class="mt-0.5 text-slate-400">${escapeHtml(taskRuntimeText(task))}</div>` : ''}
         </div>
     `).join('');
+}
+
+function renderBusinessTaskRows(label, tasks, className) {
+    if (!tasks.length) return '';
+    return tasks.map(task => `
+        <div class="rounded border ${className} px-2 py-1">
+            <div class="flex items-center justify-between gap-2">
+                <span class="shrink-0 font-black text-indigo-700">${label}</span>
+                <span class="truncate font-mono text-[10px] text-slate-500">${escapeHtml(task.short_id || task.id || '-')}</span>
+            </div>
+            <div class="mt-0.5 truncate font-bold text-slate-800" title="${escapeHtml(task.title || '')}">
+                ${escapeHtml(task.title || businessFeatureLabel(task.feature))}
+            </div>
+            <div class="mt-0.5 truncate text-slate-500" title="${escapeHtml(businessTaskDetail(task))}">
+                ${escapeHtml(businessTaskDetail(task))}
+            </div>
+            ${task.parent_task_id ? `<div class="mt-0.5 truncate text-[10px] text-slate-400" title="${escapeHtml(task.parent_task_id)}">父任务 ${escapeHtml(task.parent_feature || '-')}: ${escapeHtml(String(task.parent_task_id).slice(0, 8))}</div>` : ''}
+        </div>
+    `).join('');
+}
+
+function businessTaskDetail(task) {
+    const pieces = [
+        businessStatusLabel(task.status),
+        task.step || '-',
+        `${Number(task.progress || 0)}%`,
+        task.updated_at ? `更新 ${formatShortTime(task.updated_at)}` : '',
+    ];
+    return pieces.filter(Boolean).join(' · ');
+}
+
+function businessStatusLabel(status) {
+    return {
+        pending: '排队中',
+        processing: '处理中',
+        completed: '已完成',
+        failed: '失败',
+        canceled: '已取消',
+    }[status] || status || '未知';
+}
+
+function businessFeatureLabel(feature) {
+    return {
+        publisher: '视频合成任务',
+        report_audio_workflow: '研报转语音编排',
+        mp3_video_workflow: 'MP3 视频编排',
+        content_pdf_clean: 'PDF 清洗任务',
+        content_audio_clean: '音频清洗任务',
+        zsxq_clean_output_publish: '知识星球发布任务',
+        zsxq_sync_run: '知识星球同步',
+        zsxq_workflow_run: '知识星球编排',
+    }[feature] || feature || '业务任务';
+}
+
+function formatShortTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function shortTaskName(name) {
@@ -413,16 +530,28 @@ function taskRuntimeText(task) {
 
 function renderCards() {
     els.serviceGrid.dataset.count = String(state.services.length);
-    const zsxqServices = ZSXQ_SERVICE_ORDER
+    const workflowServices = WORKFLOW_SERVICE_ORDER
         .map(id => state.services.find(service => service.id === id))
         .filter(Boolean);
-    const otherServices = state.services.filter(service => !ZSXQ_SERVICE_IDS.has(service.id));
+    const zsxqSupportServices = ZSXQ_SUPPORT_SERVICE_ORDER
+        .map(id => state.services.find(service => service.id === id))
+        .filter(Boolean);
+    const groupedIds = new Set([...WORKFLOW_SERVICE_IDS, ...ZSXQ_SUPPORT_SERVICE_IDS]);
+    const otherServices = state.services.filter(service => !groupedIds.has(service.id));
     const groups = [
-        zsxqServices.length
+        workflowServices.length
             ? renderServiceGroup({
-                title: '知识星球链路',
-                subtitle: '编排、同步、清洗、发布集中查看。',
-                services: zsxqServices,
+                title: '编排任务',
+                subtitle: '三条业务编排横向集中查看，便于对比积压、状态和日志。',
+                services: workflowServices,
+                layout: 'workflow-row',
+            })
+            : '',
+        zsxqSupportServices.length
+            ? renderServiceGroup({
+                title: '知识星球支撑队列',
+                subtitle: '同步、清洗、发布等编排下游队列。',
+                services: zsxqSupportServices,
             })
             : '',
         otherServices.length
@@ -436,7 +565,8 @@ function renderCards() {
     els.serviceGrid.innerHTML = groups.filter(Boolean).join('');
 }
 
-function renderServiceGroup({ title, subtitle, services }) {
+function renderServiceGroup({ title, subtitle, services, layout = 'grid' }) {
+    const listClass = layout === 'workflow-row' ? 'celery-workflow-row' : 'celery-service-grid';
     return `
         <section>
             <div class="mb-3 flex items-end justify-between gap-3">
@@ -446,7 +576,7 @@ function renderServiceGroup({ title, subtitle, services }) {
                 </div>
                 <span class="rounded-full bg-white px-2.5 py-1 text-xs font-black text-slate-500">${services.length}</span>
             </div>
-            <div class="celery-service-grid">
+            <div class="${listClass}">
                 ${services.map(renderServiceCard).join('')}
             </div>
         </section>
@@ -455,7 +585,8 @@ function renderServiceGroup({ title, subtitle, services }) {
 
 function renderServiceCard(service) {
     const running = Boolean(service.running);
-    const busy = state.busyServiceId === service.id;
+    const busy = state.busyServiceId === service.id || state.busyRestartAll;
+    const businessActive = Number(service.business_active_count || 0);
     const statusClass = running
         ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
         : 'border-slate-200 bg-slate-50 text-slate-500';
@@ -471,7 +602,7 @@ function renderServiceCard(service) {
                     ${running ? '在线' : '离线'}
                 </span>
             </div>
-            <div class="mt-4 grid grid-cols-2 gap-2 text-xs">
+            <div class="mt-4 grid grid-cols-3 gap-2 text-xs">
                 <div class="rounded-md bg-slate-50 px-3 py-2">
                     <div class="text-slate-400">队列</div>
                     <div class="mt-1 font-black text-slate-700">${escapeHtml(service.queue)}</div>
@@ -479,6 +610,10 @@ function renderServiceCard(service) {
                 <div class="rounded-md bg-slate-50 px-3 py-2">
                     <div class="text-slate-400">积压</div>
                     <div class="mt-1 font-black ${risk ? 'text-red-600' : 'text-slate-700'}">${service.queue_length ?? '-'}</div>
+                </div>
+                <div class="rounded-md bg-slate-50 px-3 py-2">
+                    <div class="text-slate-400">业务未收尾</div>
+                    <div class="mt-1 font-black ${businessActive ? 'text-indigo-700' : 'text-slate-700'}">${businessActive}</div>
                 </div>
             </div>
             <div class="mt-3 text-xs text-slate-500">
@@ -557,6 +692,7 @@ function renderServiceList() {
         const active = Number(service.active_count || 0);
         const reserved = Number(service.reserved_count || 0);
         const scheduled = Number(service.scheduled_count || 0);
+        const businessActive = Number(service.business_active_count || 0);
         return `
             <button data-select-service="${escapeHtml(service.id)}" class="w-full rounded-lg border px-3 py-3 text-left transition-colors ${selected ? 'border-blue-300 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'}">
                 <div class="flex items-center justify-between gap-2">
@@ -564,7 +700,7 @@ function renderServiceList() {
                     <span class="h-2.5 w-2.5 rounded-full ${running ? 'bg-emerald-500' : 'bg-slate-300'}"></span>
                 </div>
                 <div class="mt-1 text-xs text-slate-500">队列 ${escapeHtml(service.queue)} · 积压 ${service.queue_length ?? '-'}</div>
-                <div class="mt-1 text-xs ${active ? 'font-bold text-emerald-700' : 'text-slate-400'}">执行 ${active} · 已领取 ${reserved} · 定时 ${scheduled}</div>
+                <div class="mt-1 text-xs ${active || businessActive ? 'font-bold text-emerald-700' : 'text-slate-400'}">执行 ${active} · 已领取 ${reserved} · 定时 ${scheduled} · 未收尾 ${businessActive}</div>
             </button>
         `;
     }).join('');

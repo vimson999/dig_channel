@@ -774,6 +774,69 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function loadWorkflowImage(dataUrl) {
+        return new Promise((resolve, reject) => {
+            if (!dataUrl) {
+                resolve(null);
+                return;
+            }
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = reject;
+            img.src = dataUrl;
+        });
+    }
+
+    function waitWorkflowFonts() {
+        if (!document.fonts || !document.fonts.ready) return Promise.resolve();
+        return Promise.race([
+            document.fonts.ready.catch(() => {}),
+            new Promise(resolve => setTimeout(resolve, 2000))
+        ]);
+    }
+
+    window.renderWorkflowThumbnail = async function(payload = {}) {
+        if (payload.format && layouts[payload.format]) {
+            inputs.format.value = payload.format;
+            updateLayoutAndDraw();
+        }
+        if (typeof payload.showGuides === 'boolean') inputs.showGuides.checked = payload.showGuides;
+        if (payload.inst) inputs.inst.value = payload.inst;
+        if (payload.mainTitle !== undefined) inputs.mainTitle.value = payload.mainTitle || '';
+        if (payload.subTitle !== undefined) inputs.subTitle.value = payload.subTitle || '';
+        if (payload.footerText !== undefined) inputs.footerText.value = payload.footerText || '';
+        if (payload.emotion) {
+            inputs.emotions.forEach(radio => {
+                radio.checked = radio.value === payload.emotion;
+            });
+        }
+        if (payload.imageDataUrl) {
+            reportImg = await loadWorkflowImage(payload.imageDataUrl);
+            imgOffsetX = Number(payload.imageOffsetX || 0);
+            imgOffsetY = Number(payload.imageOffsetY || 0);
+            imgScale = Number(payload.imageScale || 1);
+            if (inputs.clearImg) inputs.clearImg.classList.remove('hidden');
+            canvas.style.cursor = 'grab';
+        } else if (payload.clearImage) {
+            reportImg = null;
+            imgOffsetX = 0;
+            imgOffsetY = 0;
+            imgScale = 1.0;
+            if (inputs.upload) inputs.upload.value = '';
+            if (inputs.clearImg) inputs.clearImg.classList.add('hidden');
+            canvas.style.cursor = 'default';
+        }
+        await waitWorkflowFonts();
+        draw();
+        return {
+            dataUrl: canvas.toDataURL(payload.mimeType || 'image/png', payload.quality || 1.0),
+            width: canvas.width,
+            height: canvas.height
+        };
+    };
+
+    window.__workflowThumbnailReady = true;
+
     // 绑定到 window 用于 HTML 按钮调用
     window.downloadThumbnail = function() {
         const currentFormat = getCurrentFormat();

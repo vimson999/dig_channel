@@ -1,6 +1,46 @@
 from datetime import datetime
 import uuid
+from sqlalchemy import event
+
 from . import db
+
+
+def _compact_text(value, max_length=None):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if max_length and len(text) > max_length:
+        return text[:max_length]
+    return text
+
+
+def _nested(mapping, *keys):
+    value = mapping if isinstance(mapping, dict) else {}
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _boolish(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
 
 class PublicationTask(db.Model):
     __tablename__ = 'publication_tasks'
@@ -12,7 +52,7 @@ class PublicationTask(db.Model):
     status = db.Column(db.String(20), default='pending', index=True)
     
     # 当前步骤: init, synthesis, thumbnail, upload, done
-    current_step = db.Column(db.String(20), default='init')
+    current_step = db.Column(db.String(80), default='init')
     
     # 进度百分比 (0-100)
     progress = db.Column(db.Integer, default=0)
@@ -26,11 +66,132 @@ class PublicationTask(db.Model):
     
     # 错误信息
     error_message = db.Column(db.Text, nullable=True)
+
+    # 高频查询投影列。完整载荷仍保留在 params/result；这些列只承接列表、关联、
+    # 轮询等热路径，避免每次从 JSON 大字段中过滤和投影。
+    feature = db.Column(db.String(80), nullable=True, index=True)
+    user_id = db.Column(db.String(64), nullable=True, index=True)
+    parent_task_id = db.Column(db.String(36), nullable=True, index=True)
+    source_task_id = db.Column(db.String(36), nullable=True, index=True)
+    parent_feature = db.Column(db.String(80), nullable=True)
+    source_feature = db.Column(db.String(80), nullable=True)
+    task_title = db.Column(db.String(500), nullable=True)
+    task_video_path = db.Column(db.String(600), nullable=True)
+
+    # report_pdf_audio_workflow 列表页投影列。
+    report_audio_pdf_attachment_id = db.Column(db.String(36), nullable=True, index=True)
+    report_audio_pdf_filename = db.Column(db.String(500), nullable=True)
+    report_audio_pdf_bytes = db.Column(db.String(40), nullable=True)
+    report_audio_pdf_topic_title = db.Column(db.String(500), nullable=True)
+    report_audio_result_pdf_filename = db.Column(db.String(500), nullable=True)
+    report_audio_result_pdf_bytes = db.Column(db.String(40), nullable=True)
+    report_audio_result_pdf_topic_title = db.Column(db.String(500), nullable=True)
+    report_audio_metadata_title = db.Column(db.String(500), nullable=True)
+    report_audio_video_title = db.Column(db.String(500), nullable=True)
+    report_audio_cover_title = db.Column(db.String(500), nullable=True)
+    report_audio_structured_title = db.Column(db.String(500), nullable=True)
+    report_audio_started_at = db.Column(db.String(64), nullable=True)
+    report_audio_completed_at = db.Column(db.String(64), nullable=True)
+    report_audio_error = db.Column(db.Text, nullable=True)
+    report_audio_output_path = db.Column(db.String(600), nullable=True)
+    report_audio_wav_path = db.Column(db.String(600), nullable=True)
+    report_audio_seconds = db.Column(db.String(40), nullable=True)
+    report_audio_audio_bytes = db.Column(db.String(40), nullable=True)
+    report_audio_video_enabled = db.Column(db.Boolean, nullable=True)
+    report_audio_video_status = db.Column(db.String(80), nullable=True)
+    report_audio_video_publisher_task_id = db.Column(db.String(36), nullable=True)
+    report_audio_video_message = db.Column(db.Text, nullable=True)
+    report_audio_video_path = db.Column(db.String(600), nullable=True)
+    report_audio_cover_path = db.Column(db.String(600), nullable=True)
     
     # 时间戳
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.sync_projection_fields()
+
+    def sync_projection_fields(self):
+        params = self.params if isinstance(self.params, dict) else {}
+        result = self.result if isinstance(self.result, dict) else {}
+
+        feature = _compact_text(params.get('feature'), 80)
+        self.feature = feature or 'publisher'
+        self.user_id = _compact_text(params.get('user_id'), 64)
+        self.parent_task_id = _compact_text(params.get('parent_task_id'), 36)
+        self.parent_feature = _compact_text(params.get('parent_feature'), 80)
+
+        zsxq_publish = params.get('zsxq_publish') if isinstance(params.get('zsxq_publish'), dict) else {}
+        self.source_task_id = _compact_text(
+            params.get('source_task_id')
+            or zsxq_publish.get('source_task_id')
+            or result.get('source_task_id'),
+            36,
+        )
+        self.source_feature = _compact_text(params.get('source_feature'), 80)
+        self.task_video_path = _compact_text(result.get('video_path'), 600)
+        self.task_title = self._derive_task_title(params, result)
+
+        self._sync_report_audio_projection(params, result)
+
+    def _derive_task_title(self, params, result):
+        candidates = [
+            _nested(params, 'bilibili', 'title'),
+            _nested(params, 'thumbnail', 'main_title'),
+            _nested(params, 'content_pipeline', 'title'),
+            _nested(params, 'zsxq_publish', 'title'),
+            _nested(params, 'report_audio_workflow', 'metadata', 'title'),
+            _nested(params, 'report_audio_workflow', 'video', 'title'),
+            _nested(result, 'plan', 'title'),
+            _nested(params, 'mp3_video_workflow', 'metadata', 'title'),
+            _nested(params, 'mp3_video_workflow', 'audio', 'topic_title'),
+            _nested(params, 'mp3_video_workflow', 'audio', 'filename'),
+            _nested(result, 'structured_result', 'cover_title'),
+            _nested(result, 'structured_result', 'title'),
+            _nested(result, 'pdf', 'topic_title'),
+            _nested(params, 'report_audio_workflow', 'pdf', 'topic_title'),
+            _nested(params, 'report_audio_workflow', 'pdf', 'filename'),
+        ]
+        for value in candidates:
+            text = _compact_text(value, 500)
+            if text:
+                return text
+        return None
+
+    def _sync_report_audio_projection(self, params, result):
+        workflow = params.get('report_audio_workflow') if isinstance(params.get('report_audio_workflow'), dict) else {}
+        request_pdf = workflow.get('pdf') if isinstance(workflow.get('pdf'), dict) else {}
+        result_pdf = result.get('pdf') if isinstance(result.get('pdf'), dict) else {}
+        structured = result.get('structured_result') if isinstance(result.get('structured_result'), dict) else {}
+        audio = result.get('audio') if isinstance(result.get('audio'), dict) else {}
+        video = result.get('video') if isinstance(result.get('video'), dict) else {}
+
+        self.report_audio_pdf_attachment_id = _compact_text(request_pdf.get('attachment_id'), 36)
+        self.report_audio_pdf_filename = _compact_text(request_pdf.get('filename'), 500)
+        self.report_audio_pdf_bytes = _compact_text(request_pdf.get('bytes'), 40)
+        self.report_audio_pdf_topic_title = _compact_text(request_pdf.get('topic_title'), 500)
+        self.report_audio_result_pdf_filename = _compact_text(result_pdf.get('filename'), 500)
+        self.report_audio_result_pdf_bytes = _compact_text(result_pdf.get('bytes'), 40)
+        self.report_audio_result_pdf_topic_title = _compact_text(result_pdf.get('topic_title'), 500)
+        self.report_audio_metadata_title = _compact_text(_nested(workflow, 'metadata', 'title'), 500)
+        self.report_audio_video_title = _compact_text(_nested(workflow, 'video', 'title'), 500)
+        self.report_audio_cover_title = _compact_text(structured.get('cover_title'), 500)
+        self.report_audio_structured_title = _compact_text(structured.get('title'), 500)
+        self.report_audio_started_at = _compact_text(result.get('started_at'), 64)
+        self.report_audio_completed_at = _compact_text(result.get('completed_at'), 64)
+        self.report_audio_error = _compact_text(result.get('error'))
+        self.report_audio_output_path = _compact_text(result.get('output_path'), 600)
+        self.report_audio_wav_path = _compact_text(audio.get('wav_path'), 600)
+        self.report_audio_seconds = _compact_text(audio.get('seconds'), 40)
+        self.report_audio_audio_bytes = _compact_text(audio.get('bytes'), 40)
+        self.report_audio_video_enabled = _boolish(video.get('enabled'))
+        self.report_audio_video_status = _compact_text(video.get('status'), 80)
+        self.report_audio_video_publisher_task_id = _compact_text(video.get('publisher_task_id'), 36)
+        self.report_audio_video_message = _compact_text(video.get('message'))
+        self.report_audio_video_path = _compact_text(video.get('video_path'), 600)
+        self.report_audio_cover_path = _compact_text(video.get('cover_path'), 600)
 
     def to_dict(self):
         # Extract a human-readable title
@@ -53,6 +214,10 @@ class PublicationTask(db.Model):
                     title = self.params.get('content_pipeline', {}).get('title') or "音频清洗任务"
                 if title == "未命名任务" and self.params.get('feature') == 'zsxq_clean_output_publish':
                     title = self.params.get('zsxq_publish', {}).get('title') or "知识星球发布任务"
+                if title == "未命名任务" and self.params.get('feature') == 'mp3_video_workflow':
+                    workflow = self.params.get('mp3_video_workflow', {})
+                    audio = workflow.get('audio', {}) if isinstance(workflow, dict) else {}
+                    title = audio.get('topic_title') or audio.get('filename') or "MP3 视频编排任务"
         
         return {
             'id': self.id,
@@ -68,3 +233,9 @@ class PublicationTask(db.Model):
             'updated_at': (self.updated_at.isoformat() + "Z") if self.updated_at else None,
             'completed_at': (self.completed_at.isoformat() + "Z") if self.completed_at else None
         }
+
+
+@event.listens_for(PublicationTask, "before_insert")
+@event.listens_for(PublicationTask, "before_update")
+def _sync_publication_task_projection(_mapper, _connection, target):
+    target.sync_projection_fields()

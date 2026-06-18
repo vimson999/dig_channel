@@ -30,6 +30,10 @@ def register_all_apis(app):
     # 注册研报 PDF -> 研报 PDF Gem -> 豆包浏览器朗读编排模块
     from api.report_audio_workflow import report_audio_workflow_bp
     app.register_blueprint(report_audio_workflow_bp)
+
+    # 注册已同步 MP3 -> Gemini 图片 -> 横竖屏视频编排模块
+    from api.mp3_video_workflow import mp3_video_workflow_bp
+    app.register_blueprint(mp3_video_workflow_bp)
     
     # 创建API信息端点
     @app.route('/api', methods=['GET'])
@@ -53,6 +57,7 @@ def register_all_apis(app):
         endpoints['report_pdf_gemini'] = '/api/report-pdf-gemini'
         endpoints['gemini_browser_legacy'] = '/api/gemini-browser'
         endpoints['report_audio_workflows'] = '/api/report-audio-workflows'
+        endpoints['mp3_video_workflows'] = '/api/mp3-video-workflows'
         if app.config.get('ENABLE_MHTML_API', False):
             endpoints['v1']['mhtml_pdf'] = '/api/v1/mhtml-pdf'
 

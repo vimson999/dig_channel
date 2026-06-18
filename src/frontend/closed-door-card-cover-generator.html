@@ -560,6 +560,63 @@ PB从0.4到0.8，年底前看到修复</textarea>
             if (stroke) ctx.stroke();
         }
 
+        function loadWorkflowImage(dataUrl) {
+            return new Promise((resolve, reject) => {
+                if (!dataUrl) {
+                    resolve(null);
+                    return;
+                }
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.onerror = reject;
+                img.src = dataUrl;
+            });
+        }
+
+        async function waitForWorkflowBackground() {
+            if (customBgImage || referenceBgImage) return;
+            await new Promise(resolve => {
+                const timer = setTimeout(resolve, 2000);
+                referenceBg.addEventListener('load', () => {
+                    clearTimeout(timer);
+                    resolve();
+                }, { once: true });
+                referenceBg.addEventListener('error', () => {
+                    clearTimeout(timer);
+                    resolve();
+                }, { once: true });
+            });
+        }
+
+        function waitWorkflowFonts() {
+            if (!document.fonts || !document.fonts.ready) return Promise.resolve();
+            return Promise.race([
+                document.fonts.ready.catch(() => {}),
+                new Promise(resolve => setTimeout(resolve, 2000))
+            ]);
+        }
+
+        window.renderWorkflowClosedDoorCover = async function(payload = {}) {
+            inputs.mainTitle.value = payload.mainTitle || '内资闭门会议';
+            inputs.subTitle.value = payload.subTitle || '';
+            inputs.dateText.value = payload.dateText || '';
+            inputs.disclaimer.value = payload.disclaimer || '本内容只供交流学习，不作为任何投资建议。理财有风险，投资需谨慎。';
+            inputs.subtitleSafeSpace.checked = Boolean(payload.subtitleSafeSpace);
+            inputs.mainColor.value = payload.mainColor || '#FFFFFF';
+            inputs.subColor.value = payload.subColor || '#FFE900';
+            customBgImage = payload.backgroundDataUrl ? await loadWorkflowImage(payload.backgroundDataUrl) : null;
+            await waitForWorkflowBackground();
+            await waitWorkflowFonts();
+            draw();
+            return {
+                dataUrl: canvas.toDataURL(payload.mimeType || 'image/jpeg', payload.quality || 0.95),
+                width: canvas.width,
+                height: canvas.height
+            };
+        };
+
+        window.__workflowClosedDoorCoverReady = true;
+
         document.fonts.ready.then(draw);
         draw();
     </script>
