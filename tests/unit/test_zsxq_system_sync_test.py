@@ -179,6 +179,7 @@ class ZsxqSystemSyncTest(unittest.TestCase):
         self.assertEqual(result["reason"], "invalid_group")
         self.assertEqual(config["last_skip_reason"], "invalid_group")
         self.assertIn("401", config["last_skip_error"])
+        self.assertFalse(config["enabled"])
         write_config.assert_called_once()
         send_email.assert_called_once()
         subject, body = send_email.call_args[0]
@@ -186,6 +187,7 @@ class ZsxqSystemSyncTest(unittest.TestCase):
         self.assertIn("401", body)
         self.assertIn("本轮未入队", body)
         self.assertIn("调度器已停止", body)
+        self.assertIn("认证失效", body)
 
 
 if __name__ == "__main__":
