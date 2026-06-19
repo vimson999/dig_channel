@@ -36,6 +36,192 @@ from services.report_video_asset_service import create_zsxq_report_asset_batch
 logger = logging.getLogger(__name__)
 
 
+REPORT_VIDEO_TASK_FAILURE_STATUS = {
+    "tasks.report_video.generate_ai_scripts_task": "ai_failed",
+    "tasks.report_video.generate_topic_cards_task": "topic_cards_failed",
+    "tasks.report_video.generate_topic_clusters_task": "topic_failed",
+    "tasks.report_video.generate_topic_video_script_task": "topic_script_failed",
+    "tasks.report_video.generate_videos_task": "video_failed",
+}
+
+
+class ReportVideoFailureTask(celery_app.Task):
+    abstract = True
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        details = _mark_report_video_failure_safely(
+            self.name,
+            args=args or (),
+            kwargs=kwargs or {},
+            exc=exc,
+        )
+        _send_direct_report_video_failure_email(
+            celery_task_name=self.name,
+            celery_task_id=task_id,
+            details=details,
+            error=str(exc),
+        )
+        return super().on_failure(exc, task_id, args, kwargs, einfo)
+
+
+def _arg(args, kwargs, key, index=0):
+    if isinstance(kwargs, dict) and kwargs.get(key) is not None:
+        return kwargs.get(key)
+    if args and len(args) > index:
+        return args[index]
+    return None
+
+
+def _mark_report_video_failure_safely(task_name, *, args=None, kwargs=None, exc=None):
+    details = {
+        "entity_type": None,
+        "entity_id": None,
+        "parent_task_id": None,
+        "persisted": False,
+        "persist_error": None,
+    }
+    args = args or ()
+    kwargs = kwargs or {}
+    message = str(exc or "研报视频任务异常")
+
+    try:
+        from app import create_app
+
+        app = create_app()
+        with app.app_context():
+            if task_name == "tasks.report_video.parse_report_pdf_task":
+                report_id = _arg(args, kwargs, "report_id", 0)
+                details.update(_mark_report_failed(report_id, message, parent_status="parse_failed"))
+            elif task_name == "tasks.report_video.auto_process_report_task":
+                report_id = _arg(args, kwargs, "report_id", 0)
+                details.update(_mark_report_failed(report_id, message, parent_status="failed"))
+            elif task_name == "tasks.report_video.process_audio_timeline_task":
+                audio_id = _arg(args, kwargs, "audio_id", 0)
+                details.update(_mark_audio_timeline_failed(audio_id, message))
+            elif task_name in REPORT_VIDEO_TASK_FAILURE_STATUS:
+                task_id = _arg(args, kwargs, "task_id", 0)
+                details.update(_mark_report_video_task_failed(
+                    task_id,
+                    message,
+                    REPORT_VIDEO_TASK_FAILURE_STATUS[task_name],
+                ))
+
+            db.session.commit()
+            details["persisted"] = bool(details.get("entity_id"))
+    except Exception as persist_exc:
+        details["persist_error"] = str(persist_exc)
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        logger.exception(
+            "[REPORT_VIDEO_GUARD] failed to persist task failure | task=%s entity=%s error=%s",
+            task_name,
+            details.get("entity_id") or "-",
+            persist_exc,
+        )
+
+    return details
+
+
+def _mark_report_failed(report_id, message, *, parent_status):
+    if not report_id:
+        return {"entity_type": "report", "entity_id": None}
+    report = ReportVideoReport.query.get(str(report_id))
+    if not report:
+        return {"entity_type": "report", "entity_id": str(report_id)}
+
+    report.error_message = message
+    report.updated_at = datetime.utcnow()
+    report.parse_status = "parse_failed"
+    report.ai_status = "ai_blocked"
+    if report.task:
+        report.task.status = parent_status
+        report.task.error_message = message
+        report.task.updated_at = datetime.utcnow()
+    return {
+        "entity_type": "report",
+        "entity_id": report.id,
+        "parent_task_id": report.task_id,
+    }
+
+
+def _mark_audio_timeline_failed(audio_id, message):
+    if not audio_id:
+        return {"entity_type": "audio", "entity_id": None}
+    audio = ReportVideoAudio.query.get(str(audio_id))
+    if not audio:
+        return {"entity_type": "audio", "entity_id": str(audio_id)}
+
+    audio.match_status = "unmatched"
+    audio.error_message = message
+    audio.updated_at = datetime.utcnow()
+    if audio.task:
+        audio.task.status = "audio_failed"
+        audio.task.error_message = message
+        _update_audio_timeline_job(
+            audio.task,
+            status="failed",
+            audio_id=audio.id,
+            error_message=message,
+            completed_at=datetime.utcnow().isoformat(),
+        )
+    return {
+        "entity_type": "audio",
+        "entity_id": audio.id,
+        "parent_task_id": audio.task_id,
+    }
+
+
+def _mark_report_video_task_failed(task_id, message, status):
+    if not task_id:
+        return {"entity_type": "task", "entity_id": None}
+    task = ReportVideoTask.query.get(str(task_id))
+    if not task:
+        return {"entity_type": "task", "entity_id": str(task_id)}
+
+    task.status = status
+    task.error_message = message
+    task.updated_at = datetime.utcnow()
+    if status.startswith("topic"):
+        try:
+            _touch_topic_planning(task, status=status)
+        except Exception:
+            logger.exception("[REPORT_VIDEO_GUARD] failed to update topic planning | task=%s", task.id)
+    return {
+        "entity_type": "task",
+        "entity_id": task.id,
+        "parent_task_id": task.id,
+    }
+
+
+def _send_direct_report_video_failure_email(*, celery_task_name, celery_task_id=None, details=None, error=None):
+    details = details or {}
+    try:
+        from services.workflow_notification_service import workflow_notification_service
+
+        short_name = str(celery_task_name or "report_video").rsplit(".", 1)[-1]
+        subject = f"[研报视频编排] 任务异常 · {short_name}"
+        lines = [
+            "事件：研报视频编排任务异常",
+            f"Celery 任务：{celery_task_name or '-'}",
+            f"Celery ID：{celery_task_id or '-'}",
+            f"对象类型：{details.get('entity_type') or '-'}",
+            f"对象 ID：{details.get('entity_id') or '-'}",
+            f"父任务 ID：{details.get('parent_task_id') or '-'}",
+            f"失败状态已写入 DB：{'是' if details.get('persisted') else '否'}",
+        ]
+        if details.get("persist_error"):
+            lines.append(f"DB 写失败：{details.get('persist_error')}")
+        lines.extend([
+            f"错误：{error or '-'}",
+            f"发送时间：{datetime.utcnow().isoformat()}Z",
+        ])
+        workflow_notification_service.send_email_message(subject, "\n".join(lines))
+    except Exception:
+        logger.exception("[REPORT_VIDEO_GUARD] direct failure email failed | task=%s", celery_task_name)
+
+
 def _parse_result_status(parsed):
     cleaned_chars = int(parsed.get("cleaned_text_chars") or 0)
     extraction_method = parsed.get("extraction_method") or "pdf_text"
@@ -92,7 +278,7 @@ def _update_audio_timeline_job(task, **updates):
     return job
 
 
-@celery_app.task(bind=True, name="tasks.report_video.parse_report_pdf_task")
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.parse_report_pdf_task")
 def parse_report_pdf_task(self, report_id):
     from app import create_app
 
@@ -157,7 +343,7 @@ def parse_report_pdf_task(self, report_id):
             raise
 
 
-@celery_app.task(bind=True, name="tasks.report_video.generate_ai_scripts_task")
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.generate_ai_scripts_task")
 def generate_ai_scripts_task(self, task_id, segment_count=4):
     from app import create_app
 
@@ -222,7 +408,7 @@ def generate_ai_scripts_task(self, task_id, segment_count=4):
             raise
 
 
-@celery_app.task(bind=True, name="tasks.report_video.generate_topic_cards_task")
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.generate_topic_cards_task")
 def generate_topic_cards_task(self, task_id):
     from app import create_app
 
@@ -285,7 +471,7 @@ def generate_topic_cards_task(self, task_id):
             raise
 
 
-@celery_app.task(bind=True, name="tasks.report_video.generate_topic_clusters_task")
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.generate_topic_clusters_task")
 def generate_topic_clusters_task(self, task_id):
     from app import create_app
 
@@ -346,7 +532,7 @@ def generate_topic_clusters_task(self, task_id):
             raise
 
 
-@celery_app.task(bind=True, name="tasks.report_video.generate_topic_video_script_task")
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.generate_topic_video_script_task")
 def generate_topic_video_script_task(self, task_id, topic_id):
     from app import create_app
 
@@ -398,7 +584,7 @@ def generate_topic_video_script_task(self, task_id, topic_id):
             raise
 
 
-@celery_app.task(bind=True, name="tasks.report_video.process_audio_timeline_task")
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.process_audio_timeline_task")
 def process_audio_timeline_task(self, audio_id, options=None):
     """Generate a full-audio timeline with ASR and match it to report-video segments."""
     from app import create_app
@@ -583,7 +769,7 @@ def process_audio_timeline_task(self, audio_id, options=None):
             raise
 
 
-@celery_app.task(bind=True, name="tasks.report_video.generate_videos_task")
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.generate_videos_task")
 def generate_videos_task(self, task_id, ratios=None, report_id=None):
     from app import create_app
 
@@ -690,7 +876,7 @@ def generate_videos_task(self, task_id, ratios=None, report_id=None):
             raise
 
 
-@celery_app.task(bind=True, name="tasks.report_video.auto_process_report_task")
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.auto_process_report_task")
 def auto_process_report_task(self, report_id):
     from app import create_app
 
@@ -826,7 +1012,7 @@ def auto_process_report_task(self, report_id):
             raise
 
 
-@celery_app.task(bind=True, name="tasks.report_video.scan_report_video_folder_task")
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.scan_report_video_folder_task")
 def scan_report_video_folder_task(self, config_override=None, dry_run=False, trigger="manual"):
     from app import create_app
 
@@ -871,7 +1057,7 @@ def scan_report_video_folder_task(self, config_override=None, dry_run=False, tri
         }
 
 
-@celery_app.task(bind=True, name="tasks.report_video.scan_zsxq_report_assets_task")
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.scan_zsxq_report_assets_task")
 def scan_zsxq_report_assets_task(self, payload=None, dry_run=False):
     from app import create_app
 

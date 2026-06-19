@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+from datetime import datetime
 
 from sqlalchemy.exc import DBAPIError, OperationalError
 
@@ -36,7 +37,7 @@ def run_zsxq_workflow(self, workflow_run_id, runtime=None):
                 exc,
                 workflow_run_id=workflow_run_id,
                 stage="workflow",
-                final_message=f"工作流启动阶段数据库异常重试耗尽: {exc}",
+                final_message=f"工作流启动阶段异常: {exc}",
             )
 
 
@@ -57,7 +58,40 @@ def advance_zsxq_workflow(self, workflow_run_id, reason=None):
                 exc,
                 workflow_run_id=workflow_run_id,
                 stage="workflow",
-                final_message=f"工作流推进阶段数据库异常重试耗尽: {exc}",
+                final_message=f"工作流推进阶段异常: {exc}",
+            )
+
+
+@celery_app.task(bind=True, name="tasks.zsxq_workflow.finalize_zsxq_sync_stage")
+def finalize_zsxq_sync_stage(self, workflow_run_id, run_id, *, success, result=None, error=None):
+    """Persist sync completion and advance the workflow with DB retry protection."""
+    from app import create_app
+    from services.zsxq_workflow_service import zsxq_workflow_service
+
+    app = create_app()
+    with app.app_context():
+        logger.info(
+            "[ZSXQ_WORKFLOW_TASK] finalize sync | workflow=%s run_id=%s success=%s",
+            workflow_run_id,
+            run_id,
+            success,
+        )
+        try:
+            zsxq_workflow_service.record_sync_finished(
+                workflow_run_id,
+                run_id=run_id,
+                success=success,
+                result=result,
+                error=error,
+            )
+            return zsxq_workflow_service.advance_workflow(workflow_run_id, reason="sync_finished")
+        except Exception as exc:
+            _handle_task_failure(
+                self,
+                exc,
+                workflow_run_id=workflow_run_id,
+                stage="sync",
+                final_message=f"同步阶段完成后推进工作流异常: {exc}",
             )
 
 
@@ -65,7 +99,8 @@ def _handle_task_failure(task, exc, *, workflow_run_id, stage, final_message):
     from models import db
 
     db.session.rollback()
-    if _is_retryable_db_error(exc) and task.request.retries < _db_retry_count():
+    retryable_db_error = _is_retryable_db_error(exc)
+    if retryable_db_error and task.request.retries < _db_retry_count():
         countdown = _db_retry_delay_seconds(task.request.retries)
         logger.warning(
             "[ZSXQ_WORKFLOW_TASK] retry transient db error | workflow=%s retry=%s/%s countdown=%ss error=%s",
@@ -77,18 +112,68 @@ def _handle_task_failure(task, exc, *, workflow_run_id, stage, final_message):
         )
         raise task.retry(exc=exc, countdown=countdown, max_retries=_db_retry_count())
 
-    if _is_retryable_db_error(exc):
-        try:
-            from services.zsxq_workflow_service import zsxq_workflow_service
+    marked_failed = False
+    mark_error = None
+    try:
+        from services.zsxq_workflow_service import zsxq_workflow_service
 
-            zsxq_workflow_service.mark_failed_by_id(
-                workflow_run_id,
-                final_message,
-                stage=stage,
-            )
-        except Exception:
-            logger.exception("[ZSXQ_WORKFLOW_TASK] failed to mark workflow failed | workflow=%s", workflow_run_id)
+        result = zsxq_workflow_service.mark_failed_by_id(
+            workflow_run_id,
+            final_message,
+            stage=stage,
+        )
+        marked_failed = bool(result)
+        if not marked_failed:
+            mark_error = "工作流记录不存在或未能标记失败"
+    except Exception as mark_exc:
+        mark_error = str(mark_exc)
+        logger.exception("[ZSXQ_WORKFLOW_TASK] failed to mark workflow failed | workflow=%s", workflow_run_id)
+
+    _send_direct_workflow_failure_email(
+        workflow_run_id=workflow_run_id,
+        stage=stage,
+        final_message=final_message,
+        error=exc,
+        retryable_db_error=retryable_db_error,
+        marked_failed=marked_failed,
+        mark_error=mark_error,
+    )
     raise exc
+
+
+def _send_direct_workflow_failure_email(
+    *,
+    workflow_run_id,
+    stage,
+    final_message,
+    error,
+    retryable_db_error=False,
+    marked_failed=False,
+    mark_error=None,
+):
+    try:
+        from services.workflow_notification_service import workflow_notification_service
+
+        subject = f"[知识星球工作流] 编排任务异常 · {stage or '-'} · {str(workflow_run_id)[:8]}"
+        lines = [
+            "编排任务异常退出，已触发兜底通知。",
+            "",
+            f"工作流 ID：{workflow_run_id}",
+            f"阶段：{stage or '-'}",
+            f"失败已写入数据库：{'是' if marked_failed else '否'}",
+            f"是否数据库连接类异常：{'是' if retryable_db_error else '否'}",
+            f"失败信息：{final_message}",
+            f"原始异常：{error}",
+        ]
+        if mark_error:
+            lines.append(f"落库异常：{mark_error}")
+        lines.extend([
+            "",
+            f"发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ])
+        workflow_notification_service.send_email_message(subject, "\n".join(lines))
+    except Exception:
+        logger.exception("[ZSXQ_WORKFLOW_TASK] direct failure email failed | workflow=%s", workflow_run_id)
 
 
 def _is_retryable_db_error(exc):

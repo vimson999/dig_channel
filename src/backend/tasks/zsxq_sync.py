@@ -41,6 +41,7 @@ def run_zsxq_sync(self, run_id, payload):
                 mode=payload.get("mode", "manual"),
                 sync_meta=payload.get("sync_meta"),
                 manual_attachment_plan=payload.get("manual_attachment_plan"),
+                attachment_download_rules=payload.get("attachment_download_rules"),
             )
             if not workflow_run_id and _auto_pdf_clean_enabled(payload):
                 try:
@@ -106,12 +107,26 @@ def run_zsxq_sync(self, run_id, payload):
                         logger.exception("[ZSXQ_SYNC_TASK] failed to persist audio clean submit error | run_id=%s", run_id)
             _submit_report_asset_scan_after_sync(run_id, payload, result)
             if workflow_run_id:
-                _notify_workflow_sync_finished(workflow_run_id, run_id, success=True, result=result)
+                queued_id = _notify_workflow_sync_finished(workflow_run_id, run_id, success=True, result=result)
+                if not queued_id:
+                    _send_direct_sync_failure_email(
+                        workflow_run_id=workflow_run_id,
+                        run_id=run_id,
+                        success=True,
+                        error="同步完成，但工作流 finalizer 入队失败，可能无法进入清洗/发布阶段。",
+                    )
             logger.info("[ZSXQ_SYNC_TASK] complete | run_id=%s", run_id)
             return result
         except Exception as exc:
             if workflow_run_id:
-                _notify_workflow_sync_finished(workflow_run_id, run_id, success=False, error=str(exc))
+                queued_id = _notify_workflow_sync_finished(workflow_run_id, run_id, success=False, error=str(exc))
+                if not queued_id:
+                    _send_direct_sync_failure_email(
+                        workflow_run_id=workflow_run_id,
+                        run_id=run_id,
+                        success=False,
+                        error=str(exc),
+                    )
             raise
 
 
@@ -158,21 +173,54 @@ def _submit_report_asset_scan_after_sync(run_id, payload, result):
 
 
 def _notify_workflow_sync_finished(workflow_run_id, run_id, *, success, result=None, error=None):
-    try:
-        from services.zsxq_workflow_service import zsxq_workflow_service
-        from tasks.zsxq_workflow import advance_zsxq_workflow
+    from tasks.zsxq_workflow import finalize_zsxq_sync_stage
 
-        zsxq_workflow_service.record_sync_finished(
-            workflow_run_id,
-            run_id=run_id,
-            success=success,
-            result=result,
-            error=error,
-        )
-        advance_zsxq_workflow.apply_async(
-            args=[workflow_run_id, "sync_finished"],
+    try:
+        async_result = finalize_zsxq_sync_stage.apply_async(
+            args=[workflow_run_id, run_id],
+            kwargs={
+                "success": success,
+                "result": result,
+                "error": error,
+            },
             queue="zsxq_workflow",
             retry=False,
         )
+        logger.info(
+            "[ZSXQ_SYNC_TASK] workflow finalizer queued | workflow=%s run_id=%s celery_id=%s success=%s",
+            workflow_run_id,
+            run_id,
+            async_result.id,
+            success,
+        )
+        return async_result.id
+    except Exception as exc:
+        logger.exception(
+            "[ZSXQ_SYNC_TASK] workflow finalizer queue failed | workflow=%s run_id=%s success=%s error=%s",
+            workflow_run_id,
+            run_id,
+            success,
+            exc,
+        )
+        return None
+
+
+def _send_direct_sync_failure_email(*, workflow_run_id, run_id, success, error):
+    try:
+        from datetime import datetime
+        from services.workflow_notification_service import workflow_notification_service
+
+        subject = f"[知识星球工作流] 同步收尾异常 · {str(workflow_run_id)[:8]}"
+        lines = [
+            "知识星球同步任务未能通知工作流收尾，已触发兜底通知。",
+            "",
+            f"工作流 ID：{workflow_run_id}",
+            f"同步 Run ID：{run_id}",
+            f"同步是否已成功：{'是' if success else '否'}",
+            f"异常：{error}",
+            "",
+            f"发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+        workflow_notification_service.send_email_message(subject, "\n".join(lines))
     except Exception:
-        logger.exception("[ZSXQ_SYNC_TASK] workflow notify failed | workflow=%s run_id=%s", workflow_run_id, run_id)
+        logger.exception("[ZSXQ_SYNC_TASK] direct sync failure email failed | workflow=%s run_id=%s", workflow_run_id, run_id)

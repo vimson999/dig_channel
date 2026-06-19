@@ -1322,21 +1322,50 @@ def mark_job_failed_safely(task_id: str, message: str, *, notify: bool = True) -
     except Exception:
         pass
 
+    persisted = False
+    persist_error = None
     try:
         fresh = PublicationTask.query.get(task_id)
         if not fresh or fresh.status == "canceled":
+            if notify and not fresh:
+                _send_direct_mp3_workflow_failure_email(
+                    task_id=task_id,
+                    message=message,
+                    persisted=False,
+                    notification_queued=False,
+                    persist_error=f"任务不存在: {task_id}",
+                )
             return False
         _mark_failed(fresh, message)
-    except Exception:
+        persisted = True
+    except Exception as exc:
+        persist_error = str(exc)
         try:
             db.session.rollback()
         except Exception:
             pass
         logger.exception("[MP3_VIDEO_WORKFLOW] failed to persist failure state | task=%s", task_id)
+        if notify:
+            _send_direct_mp3_workflow_failure_email(
+                task_id=task_id,
+                message=message,
+                persisted=False,
+                notification_queued=False,
+                persist_error=persist_error,
+            )
         return False
 
+    notification_queued = False
     if notify:
-        _queue_notification(task_id, "mp3_video_failed", message)
+        notification_queued = _queue_notification(task_id, "mp3_video_failed", message)
+        if not notification_queued:
+            _send_direct_mp3_workflow_failure_email(
+                task_id=task_id,
+                message=message,
+                persisted=persisted,
+                notification_queued=notification_queued,
+                persist_error=persist_error,
+            )
     return True
 
 
@@ -1372,20 +1401,20 @@ def _mark_child_failed(child: PublicationTask, message: str) -> None:
     db.session.commit()
 
 
-def _queue_notification(task_id: str, event_type: str, message: Optional[str] = None) -> None:
+def _queue_notification(task_id: str, event_type: str, message: Optional[str] = None) -> bool:
     try:
         fresh = PublicationTask.query.get(task_id)
         if not fresh:
-            return
+            return False
         result = dict(fresh.result or {})
         notifications = dict(result.get("notifications") or {})
         if notifications.get(event_type, {}).get("queued"):
-            return
+            return True
 
         payload = _notification_payload(fresh, event_type, message)
         queued = workflow_notification_service.enqueue_workflow_event(event_type, payload)
         if not queued.get("queued"):
-            return
+            return False
 
         notifications[event_type] = {
             "queued": True,
@@ -1397,9 +1426,40 @@ def _queue_notification(task_id: str, event_type: str, message: Optional[str] = 
         fresh.result = result
         flag_modified(fresh, "result")
         db.session.commit()
+        return True
     except Exception:
         db.session.rollback()
         logger.exception("[MP3_VIDEO_WORKFLOW] notification queue failed | task=%s event=%s", task_id, event_type)
+        return False
+
+
+def _send_direct_mp3_workflow_failure_email(
+    *,
+    task_id: str,
+    message: str,
+    persisted: bool = False,
+    notification_queued: bool = False,
+    persist_error: Optional[str] = None,
+) -> None:
+    try:
+        subject = f"[MP3 视频编排] 任务异常 · {str(task_id)[:8]}"
+        lines = [
+            "MP3 视频编排任务异常退出，已触发兜底通知。",
+            "",
+            f"任务 ID：{task_id}",
+            f"失败已写入数据库：{'是' if persisted else '否'}",
+            f"失败通知已入队：{'是' if notification_queued else '否'}",
+            f"异常：{message}",
+        ]
+        if persist_error:
+            lines.append(f"落库/通知异常：{persist_error}")
+        lines.extend([
+            "",
+            f"发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ])
+        workflow_notification_service.send_email_message(subject, "\n".join(lines))
+    except Exception:
+        logger.exception("[MP3_VIDEO_WORKFLOW] direct failure email failed | task=%s", task_id)
 
 
 def _notification_payload(task: PublicationTask, event_type: str, message: Optional[str] = None) -> Dict[str, Any]:
