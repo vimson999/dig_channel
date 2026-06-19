@@ -249,7 +249,7 @@ def run_snapshot(conn: Connection, args: argparse.Namespace) -> None:
             wait_event_type,
             wait_event,
             count(*) AS sessions,
-            max(now() - COALESCE(query_start, state_change)) AS max_age,
+            max(clock_timestamp() - COALESCE(query_start, state_change)) AS max_age,
             left(max(query), 180) AS sample_query
         FROM pg_stat_activity
         WHERE datname = current_database()
@@ -271,7 +271,7 @@ def run_snapshot(conn: Connection, args: argparse.Namespace) -> None:
             state,
             wait_event_type,
             wait_event,
-            now() - COALESCE(query_start, state_change) AS age,
+            clock_timestamp() - COALESCE(query_start, state_change) AS age,
             left(query, 300) AS query_sample
         FROM pg_stat_activity
         WHERE datname = current_database()

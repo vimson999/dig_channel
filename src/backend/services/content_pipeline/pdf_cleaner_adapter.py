@@ -25,7 +25,7 @@ class PdfCleanOptions:
     prefix: str = ""
     poll_interval: float = 1.5
     timeout_seconds: int = 3600
-    engine: str = "external"
+    engine: str = "local"
 
 
 class PdfCleanerAdapter:
@@ -60,7 +60,7 @@ class PdfCleanerAdapter:
 
     def check_service(self, timeout: float = 3.0, engine: Optional[str] = None) -> dict:
         """Check whether the configured PDF cleaner engine is reachable."""
-        engine_name = str(engine or os.getenv("PDF_CLEANER_ENGINE") or "external").strip().lower()
+        engine_name = str(engine or os.getenv("PDF_CLEANER_ENGINE") or "local").strip().lower()
         if engine_name == "local":
             try:
                 from services.watermark.pdf_processor import PDFProcessor

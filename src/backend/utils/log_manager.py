@@ -23,6 +23,11 @@ class LogManager:
         self.retention_days = int(os.environ.get('LOG_RETENTION_DAYS', '30'))
         self.max_log_size = int(os.environ.get('MAX_LOG_SIZE_MB', '100')) * 1024 * 1024  # MB转字节
         self.max_backup_count = int(os.environ.get('MAX_BACKUP_COUNT', '10'))
+        self.archive_large_logs_enabled = os.environ.get(
+            'LOG_ARCHIVE_LARGE_PLAIN_LOGS',
+            '1',
+        ).lower() in {'1', 'true', 'yes', 'on'}
+        self.large_log_archive_size = int(os.environ.get('LOG_ARCHIVE_LARGE_MB', '100')) * 1024 * 1024
     
     def setup_rotating_logger(self, name, filename, level=logging.INFO):
         """设置轮转日志记录器"""
@@ -84,7 +89,7 @@ class LogManager:
         """压缩旧日志文件"""
         try:
             compressed_count = 0
-            for log_file in self.log_dir.glob('*.log.*'):
+            for log_file in self.log_dir.rglob('*.log.*'):
                 # 跳过已压缩的文件
                 if log_file.suffix == '.gz':
                     continue
@@ -107,6 +112,64 @@ class LogManager:
         
         except Exception as e:
             logger.error(f"❌ 压缩日志文件失败: {e}")
+
+    def archive_large_plain_logs(self):
+        """压缩并截断过大的活跃日志文件。
+
+        对仍被进程持有的 stdout 日志不能简单 rename，否则进程会继续写旧 inode。
+        这里采用 copytruncate：先 gzip 拷贝，再把原文件截断为 0。
+        """
+        if not self.archive_large_logs_enabled:
+            logger.info("日志大文件归档已关闭")
+            return
+
+        try:
+            archived_count = 0
+            total_bytes = 0
+            timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+
+            for log_file in self.log_dir.rglob('*.log'):
+                if not log_file.is_file() or log_file.is_symlink():
+                    continue
+
+                try:
+                    file_size = log_file.stat().st_size
+                except OSError:
+                    continue
+
+                if file_size < self.large_log_archive_size:
+                    continue
+
+                archive_path = log_file.with_name(f"{log_file.name}.{timestamp}.gz")
+                tmp_path = archive_path.with_suffix(archive_path.suffix + '.tmp')
+
+                with log_file.open('rb') as f_in:
+                    with gzip.open(tmp_path, 'wb') as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+
+                tmp_path.replace(archive_path)
+
+                with log_file.open('r+b') as f_out:
+                    f_out.truncate(0)
+
+                archived_count += 1
+                total_bytes += file_size
+                logger.info(
+                    "🗜️ 归档并截断大日志: %s -> %s (%.2fMB)",
+                    log_file.relative_to(self.log_dir),
+                    archive_path.relative_to(self.log_dir),
+                    file_size / 1024 / 1024,
+                )
+
+            if archived_count > 0:
+                logger.info(
+                    "✅ 大日志归档完成，共处理 %s 个文件，原始大小 %.2fMB",
+                    archived_count,
+                    total_bytes / 1024 / 1024,
+                )
+
+        except Exception as e:
+            logger.error(f"❌ 归档大日志失败: {e}")
     
     def clean_old_logs(self):
         """清理过期日志文件"""
@@ -115,14 +178,16 @@ class LogManager:
             cutoff_date = datetime.now() - timedelta(days=self.retention_days)
             
             # 清理普通日志文件
-            for log_file in self.log_dir.glob('*.log.*'):
+            for log_file in self.log_dir.rglob('*.log.*'):
+                if log_file.suffix == '.gz':
+                    continue
                 if self._is_file_old(log_file, days=self.retention_days):
                     log_file.unlink()
                     deleted_count += 1
                     logger.info(f"🗑️ 删除过期日志: {log_file.name}")
             
             # 清理压缩日志文件
-            for gz_file in self.log_dir.glob('*.gz'):
+            for gz_file in self.log_dir.rglob('*.gz'):
                 if self._is_file_old(gz_file, days=self.retention_days):
                     gz_file.unlink()
                     deleted_count += 1
@@ -152,7 +217,7 @@ class LogManager:
             file_count = 0
             compressed_count = 0
             
-            for log_file in self.log_dir.glob('*'):
+            for log_file in self.log_dir.rglob('*'):
                 if log_file.is_file():
                     file_count += 1
                     total_size += log_file.stat().st_size
@@ -181,6 +246,9 @@ class LogManager:
         
         # 压缩旧日志
         self.compress_old_logs()
+
+        # 归档过大的活跃日志
+        self.archive_large_plain_logs()
         
         # 清理过期日志
         self.clean_old_logs()

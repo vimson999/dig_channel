@@ -12,6 +12,22 @@ CREATE TABLE IF NOT EXISTS public.zsxq_sync_runs (
     status varchar(20) NOT NULL DEFAULT 'running',
     requested_tabs jsonb DEFAULT '[]'::jsonb,
     result jsonb DEFAULT '{}'::jsonb,
+    system_batch_id varchar(80),
+    system_attempt_id varchar(80),
+    system_round integer,
+    system_max_rounds integer,
+    system_trigger varchar(120),
+    system_queued_at varchar(64),
+    system_max_download_files integer,
+    topics_fetched integer,
+    topics_new integer,
+    topics_updated integer,
+    topics_existing integer,
+    attachments_seen integer,
+    attachments_downloaded integer,
+    attachments_failed integer,
+    attachments_skipped integer,
+    download_limit_reached boolean,
     error_message text,
     started_at timestamp without time zone NOT NULL,
     completed_at timestamp without time zone,
@@ -23,6 +39,20 @@ CREATE INDEX IF NOT EXISTS ix_zsxq_sync_runs_group_id ON public.zsxq_sync_runs (
 CREATE INDEX IF NOT EXISTS ix_zsxq_sync_runs_tab_id ON public.zsxq_sync_runs (tab_id);
 CREATE INDEX IF NOT EXISTS ix_zsxq_sync_runs_status ON public.zsxq_sync_runs (status);
 CREATE INDEX IF NOT EXISTS ix_zsxq_sync_runs_created_at ON public.zsxq_sync_runs (created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_zsxq_sync_runs_sys_group_created_desc
+    ON public.zsxq_sync_runs (group_id, created_at DESC)
+    WHERE mode LIKE 'sys%';
+CREATE INDEX IF NOT EXISTS ix_zsxq_sync_runs_sys_created_desc
+    ON public.zsxq_sync_runs (created_at DESC)
+    WHERE mode LIKE 'sys%';
+CREATE INDEX IF NOT EXISTS ix_zsxq_sync_runs_system_batch_created_desc
+    ON public.zsxq_sync_runs (system_batch_id, created_at DESC)
+    WHERE mode LIKE 'sys%'
+      AND system_batch_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_zsxq_sync_runs_system_attempt_created_desc
+    ON public.zsxq_sync_runs (system_attempt_id, created_at DESC)
+    WHERE mode LIKE 'sys%'
+      AND system_attempt_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.zsxq_topics (
     id varchar(36) PRIMARY KEY,
@@ -65,6 +95,7 @@ CREATE TABLE IF NOT EXISTS public.zsxq_attachments (
     file_id varchar(128),
     download_count integer,
     local_path varchar(600),
+    file_ext varchar(20),
     download_status varchar(20) NOT NULL DEFAULT 'pending',
     error_message text,
     publish_status varchar(32),
@@ -85,6 +116,7 @@ CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_group_id ON public.zsxq_attachmen
 CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_tab_id ON public.zsxq_attachments (tab_id);
 CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_topic_id ON public.zsxq_attachments (topic_id);
 CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_file_id ON public.zsxq_attachments (file_id);
+CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_file_ext ON public.zsxq_attachments (file_ext);
 CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_download_status ON public.zsxq_attachments (download_status);
 CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_publish_status ON public.zsxq_attachments (publish_status);
 CREATE INDEX IF NOT EXISTS ix_zsxq_attachments_publish_task_id ON public.zsxq_attachments (publish_task_id);

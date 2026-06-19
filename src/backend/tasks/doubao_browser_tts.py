@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime
 
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import create_app
@@ -18,6 +19,35 @@ from services.doubao_browser_tts import (
 logger = logging.getLogger("DOUBAO_BROWSER_TTS_TASK")
 
 
+TASK_UPDATE_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.created_at,
+    PublicationTask.completed_at,
+)
+TASK_PAYLOAD_COLUMNS = (
+    *TASK_UPDATE_COLUMNS,
+    PublicationTask.params,
+    PublicationTask.feature,
+)
+
+
+def _load_task(task_id, *columns):
+    seen = set()
+    attrs = []
+    for column in (PublicationTask.id, *columns):
+        key = getattr(column, "key", str(column))
+        if key in seen:
+            continue
+        seen.add(key)
+        attrs.append(column)
+    return PublicationTask.query.options(load_only(*attrs)).get(task_id)
+
+
 @celery_app.task(
     bind=True,
     name="tasks.doubao_browser_tts.process_job",
@@ -30,7 +60,7 @@ def process_doubao_browser_tts_job(self, task_id):
 
 
 def _process_job(task_id):
-    task = PublicationTask.query.get(task_id)
+    task = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
     if not task:
         logger.error("Doubao browser TTS task not found: %s", task_id)
         return False
@@ -40,6 +70,8 @@ def _process_job(task_id):
     if task.status == "canceled":
         return False
 
+    job_id = task.id
+    job_created_at = task.created_at
     payload = task.params.get("doubao_browser_tts") or {}
     text = (payload.get("text") or "").strip()
     if not text:
@@ -57,7 +89,7 @@ def _process_job(task_id):
     db.session.commit()
 
     def update_progress(event):
-        fresh = PublicationTask.query.get(task_id)
+        fresh = _load_task(task_id, *TASK_UPDATE_COLUMNS)
         if not fresh or fresh.status == "canceled":
             raise RuntimeError("任务已取消")
         current_result = dict(fresh.result or {})
@@ -78,17 +110,20 @@ def _process_job(task_id):
         db.session.commit()
 
     try:
-        output_path = storage_path_for_job(task.id, task.created_at)
+        output_path = storage_path_for_job(job_id, job_created_at)
         worker = DoubaoBrowserTTSWorker()
         audio = worker.synthesize(
-            job_id=task.id,
+            job_id=job_id,
             text=text,
             output_path=output_path,
             progress_callback=update_progress,
         )
         audio = validate_audio_duration_for_text(audio, text)
 
-        final_result = dict(task.result or {})
+        fresh = _load_task(task_id, *TASK_UPDATE_COLUMNS)
+        if not fresh:
+            raise RuntimeError("任务不存在")
+        final_result = dict(fresh.result or {})
         final_result.update({
             "audio": {
                 "wav_path": audio.get("wav_path"),
@@ -100,19 +135,19 @@ def _process_job(task_id):
             "page_url": audio.get("page_url"),
             "completed_at": datetime.utcnow().isoformat() + "Z",
         })
-        task.status = "completed"
-        task.current_step = "done"
-        task.progress = 100
-        task.completed_at = datetime.utcnow()
-        task.error_message = None
-        task.result = final_result
-        flag_modified(task, "result")
+        fresh.status = "completed"
+        fresh.current_step = "done"
+        fresh.progress = 100
+        fresh.completed_at = datetime.utcnow()
+        fresh.error_message = None
+        fresh.result = final_result
+        flag_modified(fresh, "result")
         db.session.commit()
         logger.info("Doubao browser TTS task completed: %s", task_id)
         return True
     except Exception as exc:
         db.session.rollback()
-        task = PublicationTask.query.get(task_id)
+        task = _load_task(task_id, *TASK_UPDATE_COLUMNS)
         if task:
             _mark_failed(task, str(exc))
         logger.error("Doubao browser TTS task failed: %s", exc, exc_info=True)

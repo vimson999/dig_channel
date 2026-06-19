@@ -81,9 +81,9 @@ def run_backend_process_bootstrap(app=None):
         return {"started": False, "skipped": True, "reason": "lock_held"}
 
     started_at = datetime.utcnow().isoformat() + "Z"
-    mode = (os.environ.get("BACKEND_PROCESS_BOOTSTRAP_MODE") or "restart").strip().lower()
+    mode = (os.environ.get("BACKEND_PROCESS_BOOTSTRAP_MODE") or "ensure").strip().lower()
     if mode not in {"restart", "ensure"}:
-        mode = "restart"
+        mode = "ensure"
 
     config = {
         "mode": mode,

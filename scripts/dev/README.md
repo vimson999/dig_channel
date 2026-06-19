@@ -25,7 +25,7 @@ Runtime configuration should come from `.env` or shell environment variables. Do
 Backend startup bootstrap:
 
 - `./scripts/dev/run-backend.sh` 默认启用 `BACKEND_PROCESS_BOOTSTRAP_ENABLED=1`
-- 默认 `BACKEND_PROCESS_BOOTSTRAP_MODE=restart`，后端启动后会重启 Celery Monitor 中登记的 worker、Celery watchdog，并恢复已配置的调度器
-- 临时只确保进程存在、不强制重启：`BACKEND_PROCESS_BOOTSTRAP_MODE=ensure ./scripts/dev/run-backend.sh`
+- 默认 `BACKEND_PROCESS_BOOTSTRAP_MODE=ensure`，后端启动后只补启动缺失的 worker、Celery watchdog 和已配置的调度器；已在线的 worker 不会被重启，避免打断长任务
+- 临时强制重启全部托管进程：`BACKEND_PROCESS_BOOTSTRAP_MODE=restart ./scripts/dev/run-backend.sh`
 - 临时关闭自动恢复：`BACKEND_PROCESS_BOOTSTRAP_ENABLED=0 ./scripts/dev/run-backend.sh`
 - 可用 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES` 和 `BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS` 指定逗号分隔的服务列表

@@ -2,6 +2,7 @@ import os
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request, send_file
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
 from celery_config import celery_app
@@ -25,6 +26,22 @@ STATUS_MAP = {
     "failed": "failed",
     "canceled": "canceled",
 }
+
+TASK_PAYLOAD_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.feature,
+    PublicationTask.user_id,
+    PublicationTask.created_at,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
+)
 
 
 @doubao_browser_tts_bp.route("/status", methods=["GET"])
@@ -115,14 +132,14 @@ def list_jobs(current_user):
     status = (request.args.get("status") or "").strip()
 
     query = PublicationTask.query.filter(
-        PublicationTask.params["feature"].as_string() == FEATURE_NAME,
-        PublicationTask.params["user_id"].as_string() == str(getattr(current_user, "id", None)),
+        PublicationTask.feature == FEATURE_NAME,
+        PublicationTask.user_id == str(getattr(current_user, "id", None)),
     )
     if status:
         reverse_status = {value: key for key, value in STATUS_MAP.items()}
         query = query.filter(PublicationTask.status == reverse_status.get(status, status))
 
-    pagination = query.order_by(PublicationTask.created_at.desc()).paginate(
+    pagination = query.options(load_only(*TASK_PAYLOAD_COLUMNS)).order_by(PublicationTask.created_at.desc()).paginate(
         page=page,
         per_page=per_page,
         error_out=False,
@@ -198,10 +215,10 @@ def cancel_job(current_user, job_id):
 
 
 def _get_owned_task(current_user, job_id):
-    task = PublicationTask.query.get(job_id)
-    if not task or not isinstance(task.params, dict) or task.params.get("feature") != FEATURE_NAME:
+    task = PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).get(job_id)
+    if not task or (task.feature or (task.params or {}).get("feature")) != FEATURE_NAME:
         return None
-    if str(task.params.get("user_id")) != str(getattr(current_user, "id", None)):
+    if str(task.user_id or (task.params or {}).get("user_id")) != str(getattr(current_user, "id", None)):
         return None
     return task
 

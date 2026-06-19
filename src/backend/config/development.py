@@ -5,7 +5,9 @@
 用于本地开发环境的特定配置
 """
 
-from .base import BaseConfig
+import os
+
+from .base import BaseConfig, _int_env, _postgres_engine_options
 
 class DevelopmentConfig(BaseConfig):
     """开发环境配置"""
@@ -23,16 +25,14 @@ class DevelopmentConfig(BaseConfig):
     DEBUG_TB_ENABLED = True
     DEBUG_TB_INTERCEPT_REDIRECTS = False
     
-    # 开发环境下更宽松的数据库连接配置
-    SQLALCHEMY_ENGINE_OPTIONS = {
-        'pool_size': 10,           # 开发环境较小的连接池
-        'max_overflow': 20,        # 较少的溢出连接
-        'pool_timeout': 30,        # 获取连接的超时时间
-        'pool_recycle': 3600,      # 连接回收时间(1小时)
-        'pool_pre_ping': True,     # 连接前ping检查
-        'connect_args': {
-            'connect_timeout': 5,   # 较短的连接超时
-            'sslmode': 'prefer',    # SSL模式
-            'options': '-c statement_timeout=30000',  # SQL语句超时30秒
-        } if BaseConfig.SQLALCHEMY_DATABASE_URI.startswith('postgresql') else {}
-    }
+    # 开发环境通常同时跑后端、多个 Celery worker 和 scheduler；每个进程独立建池。
+    # 本地队列较多时连接池会成倍放大，默认只保留 1 个连接，避免打满远端 PostgreSQL。
+    SQLALCHEMY_ENGINE_OPTIONS = _postgres_engine_options(
+        BaseConfig.SQLALCHEMY_DATABASE_URI,
+        pool_size=_int_env('DB_POOL_SIZE', 1, 1),
+        max_overflow=_int_env('DB_MAX_OVERFLOW', 0, 0),
+        pool_timeout=_int_env('DB_POOL_TIMEOUT', 10, 1),
+        pool_recycle=_int_env('DB_POOL_RECYCLE', 1800, 60),
+        connect_timeout=_int_env('DB_CONNECT_TIMEOUT', 5, 1),
+        statement_timeout_ms=os.environ.get('DB_STATEMENT_TIMEOUT_MS', '30000'),
+    )

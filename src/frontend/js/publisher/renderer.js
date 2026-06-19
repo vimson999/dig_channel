@@ -37,20 +37,45 @@ const CanvasRenderer = {
         
         // 1. 背景渲染
         if (isScreenshot) {
+            const screenshotH = Math.round(h * 0.41);
             if (images.custom.src && images.custom.complete && images.custom.naturalWidth > 0) {
                 ctx.save();
-                ctx.beginPath(); ctx.rect(0, 0, w, h * 0.45); ctx.clip();
+                ctx.beginPath(); ctx.rect(0, 0, w, screenshotH); ctx.clip();
                 const trans = config.transform || { x: 0, y: 0, scale: 1 };
-                this.drawImageCover(ctx, images.custom, 0, 0, w, h * 0.45, trans.x, trans.y, trans.scale);
+                this.drawImageCover(ctx, images.custom, 0, 0, w, screenshotH, trans.x, trans.y, trans.scale, { anchorY: 0, quality: 'high' });
+                const topShade = ctx.createLinearGradient(0, screenshotH - 90, 0, screenshotH);
+                topShade.addColorStop(0, 'rgba(255,255,255,0)');
+                topShade.addColorStop(1, 'rgba(255,255,255,0.22)');
+                ctx.fillStyle = topShade;
+                ctx.fillRect(0, Math.max(0, screenshotH - 90), w, 90);
                 ctx.restore();
             } else {
                 // 截图模式占位：深蓝色顶部 + 提示文字
-                ctx.fillStyle = '#002140'; ctx.fillRect(0, 0, w, h * 0.45);
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.2)'; ctx.textAlign = 'center'; ctx.font = `bold 40px ${FONT_STACK}`;
-                ctx.fillText('等待上传研报截图...', w/2, h * 0.22);
+                ctx.fillStyle = '#f8fafc'; ctx.fillRect(0, 0, w, screenshotH);
+                ctx.fillStyle = 'rgba(100, 116, 139, 0.42)'; ctx.textAlign = 'center'; ctx.font = `bold 40px ${FONT_STACK}`;
+                ctx.fillText('等待上传研报截图...', w/2, screenshotH * 0.5);
                 ctx.textAlign = 'left';
             }
-            ctx.fillStyle = '#001529'; ctx.fillRect(0, h * 0.45, w, h * 0.55);
+            const titleBg = ctx.createLinearGradient(0, screenshotH, 0, h);
+            titleBg.addColorStop(0, '#082136');
+            titleBg.addColorStop(0.55, '#061827');
+            titleBg.addColorStop(1, '#03111D');
+            ctx.fillStyle = titleBg;
+            ctx.fillRect(0, screenshotH, w, h - screenshotH);
+
+            const titleGlow = ctx.createRadialGradient(w * 0.24, screenshotH + 185, 0, w * 0.24, screenshotH + 185, w * 0.58);
+            titleGlow.addColorStop(0, 'rgba(229, 200, 75, 0.075)');
+            titleGlow.addColorStop(1, 'rgba(229, 200, 75, 0)');
+            ctx.fillStyle = titleGlow;
+            ctx.fillRect(0, screenshotH, w, h - screenshotH);
+
+            ctx.fillStyle = '#DCC457';
+            ctx.fillRect(0, screenshotH, w, 4);
+            const splitShadow = ctx.createLinearGradient(0, screenshotH, 0, screenshotH + 70);
+            splitShadow.addColorStop(0, 'rgba(0,0,0,0.26)');
+            splitShadow.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = splitShadow;
+            ctx.fillRect(0, screenshotH, w, 70);
         } else if (isPodcast) {
             if (images.custom.src && images.custom.complete && images.custom.naturalWidth > 0) {
                 const trans = config.transform || { x: 0, y: 0, scale: 1 };
@@ -77,6 +102,11 @@ const CanvasRenderer = {
             maskGradient.addColorStop(0, `rgba(0, 15, 30, ${opacity})`); maskGradient.addColorStop(1, `rgba(0, 15, 30, 0)`);
             ctx.fillStyle = maskGradient; ctx.fillRect(0, 0, w, h);
         } else { ctx.fillStyle = this.themes.bg; ctx.fillRect(0, 0, w, h); }
+
+        if (isScreenshot) {
+            this._drawScreenshotCoverContent(ctx, w, h, config);
+            return;
+        }
 
         const leftMargin = 120;
         const centerX = w / 2; // 定义中轴线
@@ -228,6 +258,122 @@ const CanvasRenderer = {
         ctx.restore();
     },
 
+    _drawScreenshotCoverContent(ctx, w, h, config) {
+        const splitY = Math.round(h * 0.41);
+        const left = 120;
+        const right = 180;
+        const maxTextW = w - left - right;
+        let currentY = splitY + 74;
+
+        ctx.save();
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+
+        ctx.fillStyle = '#DCC457';
+        ctx.fillRect(left, currentY - 30, 88, 4);
+
+        const titleText = String(config.mainTitle || '').trim() || '研报核心观点解读';
+        const fittedTitle = this._fitWrappedLines(ctx, titleText, maxTextW, {
+            weight: 900,
+            baseSize: 86,
+            minSize: 60,
+            maxLines: 3,
+            lineHeight: 1.20,
+        });
+
+        this._drawTitleLinesWithAccent(ctx, fittedTitle.lines, left, currentY, fittedTitle.fontSize, fittedTitle.lineHeight);
+        currentY += fittedTitle.lines.length * fittedTitle.lineHeight + 38;
+
+        const subText = String(config.subTitle || '').trim();
+        if (subText) {
+            const fittedSub = this._fitWrappedLines(ctx, subText, maxTextW, {
+                weight: 600,
+                baseSize: 52,
+                minSize: 40,
+                maxLines: 2,
+                lineHeight: 1.30,
+            });
+            ctx.font = `600 ${fittedSub.fontSize}px ${FONT_STACK}`;
+            ctx.fillStyle = 'rgba(255,255,255,0.92)';
+            fittedSub.lines.forEach((line) => {
+                ctx.fillText(line, left, currentY);
+                currentY += fittedSub.lineHeight;
+            });
+        }
+
+        const footerY = h - 102;
+        ctx.fillStyle = 'rgba(255,255,255,0.82)';
+        ctx.fillRect(left, footerY - 44, 64, 2);
+        ctx.font = `550 34px ${FONT_STACK}`;
+        ctx.fillText(config.dateText || '研报播客', left, footerY - 30);
+        ctx.restore();
+    },
+
+    _fitWrappedLines(ctx, text, maxWidth, options) {
+        const weight = options.weight || 700;
+        const maxLines = options.maxLines || 3;
+        let fontSize = options.baseSize || 72;
+        const minSize = options.minSize || 42;
+        let lines = [];
+
+        while (fontSize >= minSize) {
+            ctx.font = `${weight} ${fontSize}px ${FONT_STACK}`;
+            lines = this._wrapText(ctx, text, maxWidth).filter(line => line.trim());
+            if (lines.length <= maxLines) break;
+            fontSize -= 4;
+        }
+
+        ctx.font = `${weight} ${fontSize}px ${FONT_STACK}`;
+        lines = this._wrapText(ctx, text, maxWidth).filter(line => line.trim());
+        if (lines.length > maxLines) {
+            lines = lines.slice(0, maxLines);
+            lines[lines.length - 1] = this._truncateLineToWidth(ctx, lines[lines.length - 1], maxWidth);
+        }
+
+        return {
+            fontSize,
+            lines,
+            lineHeight: fontSize * (options.lineHeight || 1.28),
+        };
+    },
+
+    _truncateLineToWidth(ctx, text, maxWidth) {
+        let value = String(text || '').trim();
+        if (!value || ctx.measureText(value).width <= maxWidth) return value;
+        while (value.length > 1 && ctx.measureText(`${value}...`).width > maxWidth) {
+            value = value.slice(0, -1);
+        }
+        return `${value}...`;
+    },
+
+    _drawTitleLinesWithAccent(ctx, lines, x, y, fontSize, lineHeight) {
+        ctx.font = `900 ${fontSize}px ${FONT_STACK}`;
+        ctx.shadowColor = 'rgba(0,0,0,0.22)';
+        ctx.shadowBlur = 8;
+        ctx.shadowOffsetY = 2;
+        lines.forEach((line, index) => {
+            const text = String(line || '').trim();
+            if (!text) return;
+
+            const separatorIndex = text.search(/[:：]/);
+            if (index === 0 && separatorIndex > 0 && separatorIndex < 8) {
+                const prefix = text.slice(0, separatorIndex + 1);
+                const rest = text.slice(separatorIndex + 1);
+                ctx.fillStyle = '#E5C84B';
+                ctx.fillText(prefix, x, y);
+                ctx.fillStyle = '#F8FAFC';
+                ctx.fillText(rest, x + ctx.measureText(prefix).width + 8, y);
+            } else {
+                ctx.fillStyle = '#F8FAFC';
+                ctx.fillText(text, x, y);
+            }
+            y += lineHeight;
+        });
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetY = 0;
+    },
+
     /**
      * 核心：绘制 9:16 竖版封面 (PRD 实现)
      */
@@ -289,7 +435,7 @@ const CanvasRenderer = {
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
 
-        const mainLines = this._wrapText(ctx, config.mainTitle, maxTextW).slice(0, 4);
+        const mainLines = this._wrapText(ctx, config.mainTitle, maxTextW).slice(0, 3);
         mainLines.forEach(line => {
             ctx.fillText(line, leftPadding, currentY);
             currentY += mainFs * 1.35;
@@ -300,7 +446,7 @@ const CanvasRenderer = {
         const subFs = 55;
         ctx.font = `500 ${subFs}px ${FONT_STACK}`;
         ctx.fillStyle = '#FFFFFF';
-        const subLines = this._wrapText(ctx, config.subTitle, maxTextW).slice(0, 3);
+        const subLines = this._wrapText(ctx, config.subTitle, maxTextW).slice(0, 1);
         subLines.forEach(line => {
             ctx.fillText(line, leftPadding, currentY);
             currentY += subFs * 1.5;
@@ -462,7 +608,7 @@ const CanvasRenderer = {
     /**
      * 工具：图片 Cover 填充 (支持平移和缩放)
      */
-    drawImageCover(ctx, img, x, y, w, h, offsetX = 0, offsetY = 0, scale = 1) {
+    drawImageCover(ctx, img, x, y, w, h, offsetX = 0, offsetY = 0, scale = 1, options = {}) {
         if (!img.naturalWidth) return;
         const r = img.naturalWidth / img.naturalHeight, cr = w / h;
         let rw, rh, rx, ry;
@@ -476,9 +622,13 @@ const CanvasRenderer = {
         // 缩放围绕中心进行
         const sw = rw * scale;
         const sh = rh * scale;
+        const anchorY = Number.isFinite(Number(options.anchorY)) ? Number(options.anchorY) : 0.5;
+        const baseY = y - Math.max(0, sh - h) * Math.min(1, Math.max(0, anchorY));
         const finalX = rx + (rw - sw) / 2 + offsetX;
-        const finalY = ry + (rh - sh) / 2 + offsetY;
+        const finalY = (options.anchorY === undefined ? ry + (rh - sh) / 2 : baseY) + offsetY;
         
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = options.quality || 'medium';
         ctx.drawImage(img, finalX, finalY, sw, sh);
     }
 };

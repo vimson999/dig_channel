@@ -47,6 +47,14 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_zsxq_sync_runs_group_mode_created_at_
 CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_zsxq_sync_runs_mode_created_at_desc
     ON public.zsxq_sync_runs (mode varchar_pattern_ops, created_at DESC);
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_zsxq_sync_runs_sys_group_created_desc
+    ON public.zsxq_sync_runs (group_id, created_at DESC)
+    WHERE mode LIKE 'sys%';
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_zsxq_sync_runs_sys_created_desc
+    ON public.zsxq_sync_runs (created_at DESC)
+    WHERE mode LIKE 'sys%';
+
 \echo ''
 \echo '== zsxq_topics: latest run topic lookup with first/last sync run OR condition =='
 
@@ -56,11 +64,17 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_zsxq_topics_group_first_run_tab_synce
 CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_zsxq_topics_group_last_run_tab_synced_desc
     ON public.zsxq_topics (group_id, last_sync_run_id, tab_id, last_synced_at DESC);
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_zsxq_topics_group_tab_create_time_desc
+    ON public.zsxq_topics (group_id, tab_id, create_time DESC, last_synced_at DESC);
+
 \echo ''
 \echo '== zsxq_attachments: attachments grouped by topic and publish status lookups =='
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_zsxq_attachments_group_topic_tab_created
     ON public.zsxq_attachments (group_id, topic_id, tab_id, created_at);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_zsxq_attachments_group_tab_topic_created
+    ON public.zsxq_attachments (group_id, tab_id, topic_id, created_at);
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_zsxq_attachments_publish_source_task_id
     ON public.zsxq_attachments (publish_source_task_id);

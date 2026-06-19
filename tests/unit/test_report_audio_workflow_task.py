@@ -14,7 +14,9 @@ from tasks.report_audio_workflow import (  # noqa: E402
     _format_cover_title,
     _publisher_script_subtitles,
     _publisher_sub_burn_enabled,
+    _publisher_result_summary,
     _publisher_video_transform,
+    _video_stage_enabled,
 )
 
 
@@ -83,6 +85,32 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertTrue(_publisher_sub_burn_enabled({"sub_burn_enabled": "1"}))
         self.assertFalse(_publisher_sub_burn_enabled({"sub_burn_enabled": False}))
         self.assertFalse(_publisher_sub_burn_enabled({"sub_burn_enabled": "0"}))
+
+    def test_video_stage_runs_when_only_vertical_enabled(self):
+        self.assertTrue(_video_stage_enabled({"video": {"enabled": False, "vertical_enabled": True}}))
+        self.assertTrue(_video_stage_enabled({"video": {"enabled": True, "vertical_enabled": False}}))
+        self.assertFalse(_video_stage_enabled({"video": {"enabled": False, "vertical_enabled": False}}))
+
+    def test_publisher_result_summary_exposes_vertical_video(self):
+        class FakePublisherTask:
+            id = "publisher-1"
+            celery_task_id = "celery-1"
+            status = "completed"
+            params = {
+                "video": {"enabled": False},
+                "vertical_video": {"enabled": True},
+            }
+            result = {
+                "vertical_video_path": "/tmp/vertical.mp4",
+                "cover_path": "/tmp/cover.jpg",
+            }
+
+        summary = _publisher_result_summary(FakePublisherTask(), {"path": "/tmp/page.jpg"})
+
+        self.assertFalse(summary["landscape_enabled"])
+        self.assertTrue(summary["vertical_enabled"])
+        self.assertEqual(summary["video_path"], "/tmp/vertical.mp4")
+        self.assertEqual(summary["vertical_video_path"], "/tmp/vertical.mp4")
 
     def test_script_subtitles_are_generated_from_tts_text(self):
         subtitles = _publisher_script_subtitles(

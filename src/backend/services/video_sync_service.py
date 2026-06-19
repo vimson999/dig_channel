@@ -3,13 +3,37 @@ import json
 import logging
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Tuple
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, load_only
 
 from models import db, Channel, Video, VideoData
 from utils.youtube_api import YouTubeAPI
 from utils.colored_logger import setup_colored_logger
 
 logger = setup_colored_logger("VIDEO_SYNC")
+
+CHANNEL_SYNC_COLUMNS = (
+    Channel.id,
+    Channel.user_id,
+    Channel.name,
+    Channel.channel_id,
+    Channel.url,
+    Channel.cpm,
+    Channel.category,
+    Channel.sort,
+    Channel.is_active,
+    Channel.created_at,
+    Channel.updated_at,
+)
+
+VIDEO_UPDATE_COLUMNS = (
+    Video.id,
+    Video.video_id,
+    Video.view_count,
+    Video.like_count,
+    Video.comment_count,
+    Video.title,
+    Video.description,
+)
 
 class VideoSyncService:
     def __init__(self):
@@ -152,7 +176,7 @@ class VideoSyncService:
         """同步单个频道的视频"""
         try:
             # 获取频道信息
-            channel = Channel.query.get(channel_id)
+            channel = Channel.query.options(load_only(*CHANNEL_SYNC_COLUMNS)).get(channel_id)
             if not channel:
                 return {
                     'success': False,
@@ -165,7 +189,12 @@ class VideoSyncService:
             start_date = end_date - timedelta(days=days_back)
             
             # 检查是否为首次同步
-            existing_videos = Video.query.filter_by(channel_id=channel_id).first()
+            existing_videos = (
+                db.session.query(Video.id)
+                .filter(Video.channel_id == channel_id)
+                .limit(1)
+                .first()
+            )
             is_initial_sync = existing_videos is None
             
             logger.info(f"同步频道 {channel.name} 的视频 ({'首次同步' if is_initial_sync else '增量同步'})")
@@ -197,6 +226,19 @@ class VideoSyncService:
             # 处理视频数据
             new_videos = 0
             updated_videos = 0
+            video_ids = [video_info['video_id'] for video_info in videos if video_info.get('video_id')]
+            existing_videos_map = {}
+            if video_ids:
+                existing_videos = (
+                    Video.query
+                    .options(load_only(*VIDEO_UPDATE_COLUMNS))
+                    .filter(
+                        Video.video_id.in_(video_ids),
+                        Video.channel_id == channel_id,
+                    )
+                    .all()
+                )
+                existing_videos_map = {video.video_id: video for video in existing_videos}
             
             for video_info in videos:
                 try:
@@ -206,7 +248,7 @@ class VideoSyncService:
                         continue
                     
                     # 检查视频是否已存在（避免重复抓取）
-                    existing_video = Video.query.filter_by(video_id=video_info['video_id']).first()
+                    existing_video = existing_videos_map.get(video_info['video_id'])
                     
                     if existing_video:
                         # 更新现有视频
@@ -289,7 +331,7 @@ class VideoSyncService:
     def _create_video(self, channel_id: int, video_info: Dict) -> Video:
         """创建新视频记录"""
         # 获取频道的user_id
-        channel = Channel.query.get(channel_id)
+        channel = Channel.query.options(load_only(*CHANNEL_SYNC_COLUMNS)).get(channel_id)
         if not channel:
             raise ValueError(f"频道ID {channel_id} 不存在")
         
@@ -343,9 +385,10 @@ class VideoSyncService:
             updated = True
         
         if updated:
+            video_title = video.title
             video.updated_at = datetime.utcnow()
             db.session.commit()
-            logger.debug(f"更新视频: {video.title}")
+            logger.debug(f"更新视频: {video_title}")
         
         return updated
     
@@ -426,26 +469,45 @@ class VideoSyncService:
     
     def _create_video_data_records(self, channel_id: int, record_date: date) -> None:
         """为频道的所有视频创建数据记录"""
-        videos = Video.query.filter_by(channel_id=channel_id, is_active=True).all()
-        
-        for video in videos:
-            # 检查今天是否已有记录
-            existing_record = VideoData.query.filter_by(
-                video_id=video.id,
-                date=record_date
-            ).first()
-            
-            if not existing_record:
-                # 创建新的数据记录
-                VideoData.create_video_data(
-                    video_id=video.id,
-                    date=record_date,
-                    metrics={
-                        'view_count': video.view_count,
-                        'like_count': video.like_count,
-                        'comment_count': video.comment_count
-                    }
-                )
+        videos = (
+            db.session.query(
+                Video.id.label("id"),
+                Video.view_count.label("view_count"),
+                Video.like_count.label("like_count"),
+                Video.comment_count.label("comment_count"),
+            )
+            .filter(Video.channel_id == channel_id, Video.is_active.is_(True))
+            .all()
+        )
+
+        if not videos:
+            return
+
+        video_ids = [video.id for video in videos]
+        existing_records = (
+            db.session.query(VideoData.video_id)
+            .filter(
+                VideoData.video_id.in_(video_ids),
+                VideoData.date == record_date,
+            )
+            .all()
+        )
+        existing_video_ids = {record.video_id for record in existing_records}
+        new_records = [
+            {
+                "video_id": video.id,
+                "date": record_date,
+                "view_count": video.view_count,
+                "like_count": video.like_count,
+                "comment_count": video.comment_count,
+                "created_at": datetime.utcnow(),
+            }
+            for video in videos
+            if video.id not in existing_video_ids
+        ]
+        if new_records:
+            db.session.bulk_insert_mappings(VideoData, new_records)
+            db.session.commit()
 
     def _apply_sorting(self, query, sort_by: str, order: str):
         """应用排序"""

@@ -4,7 +4,8 @@ from datetime import datetime
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_file
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 from werkzeug.utils import secure_filename
 
@@ -64,12 +65,16 @@ def list_pdf_assets(_current_user):
     tab_id = (request.args.get("tab_id") or "").strip()
 
     query = (
-        db.session.query(ZsxqAttachment, ZsxqTopic)
-        .outerjoin(
-            ZsxqTopic,
-            (ZsxqTopic.group_id == ZsxqAttachment.group_id)
-            & (ZsxqTopic.tab_id == ZsxqAttachment.tab_id)
-            & (ZsxqTopic.topic_id == ZsxqAttachment.topic_id),
+        db.session.query(
+            ZsxqAttachment.id.label("attachment_id"),
+            ZsxqAttachment.name.label("attachment_name"),
+            ZsxqAttachment.download_count.label("download_count"),
+            ZsxqAttachment.local_path.label("local_path"),
+            ZsxqAttachment.updated_at.label("attachment_updated_at"),
+            ZsxqAttachment.created_at.label("attachment_created_at"),
+            ZsxqAttachment.group_id.label("group_id"),
+            ZsxqAttachment.tab_id.label("tab_id"),
+            ZsxqAttachment.topic_id.label("topic_id"),
         )
         .filter(ZsxqAttachment.download_status == "downloaded")
         .filter(ZsxqAttachment.local_path.isnot(None))
@@ -81,32 +86,45 @@ def list_pdf_assets(_current_user):
         query = query.filter(ZsxqAttachment.tab_id == tab_id)
     if q:
         pattern = f"%{q}%"
+        query = query.outerjoin(
+            ZsxqTopic,
+            (ZsxqTopic.group_id == ZsxqAttachment.group_id)
+            & (ZsxqTopic.tab_id == ZsxqAttachment.tab_id)
+            & (ZsxqTopic.topic_id == ZsxqAttachment.topic_id),
+        )
         query = query.filter(or_(
             ZsxqAttachment.name.ilike(pattern),
             ZsxqTopic.title.ilike(pattern),
             ZsxqTopic.content.ilike(pattern),
         ))
 
-    scan_limit = min(max(page * per_page * 10, 200), 2000)
-    rows = (
-        query
-        .order_by(ZsxqAttachment.updated_at.desc(), ZsxqAttachment.created_at.desc())
-        .limit(scan_limit)
-        .all()
-    )
+    target_count = page * per_page + 1
+    chunk_size = min(max(per_page * 4, 40), 120)
+    scan_limit = min(max(target_count * 5, 120), 2000)
+    ordered = query.order_by(ZsxqAttachment.updated_at.desc(), ZsxqAttachment.created_at.desc())
     valid_items = []
     skipped_missing = 0
-    for attachment, topic in rows:
-        item = _pdf_asset_payload(attachment, topic)
-        if item:
-            valid_items.append(item)
-        else:
-            skipped_missing += 1
+    scanned = 0
+    while len(valid_items) < target_count and scanned < scan_limit:
+        batch_limit = min(chunk_size, scan_limit - scanned)
+        rows = ordered.offset(scanned).limit(batch_limit).all()
+        if not rows:
+            break
+        scanned += len(rows)
+        for row in rows:
+            item = _pdf_asset_row_payload(row)
+            if item:
+                valid_items.append(item)
+            else:
+                skipped_missing += 1
+        if len(rows) < batch_limit:
+            break
 
     start = (page - 1) * per_page
     end = start + per_page
     items = valid_items[start:end]
-    has_more = len(valid_items) > end or len(rows) == scan_limit
+    _attach_pdf_asset_topics(items)
+    has_more = len(valid_items) > end or scanned >= scan_limit
     return jsonify({
         "success": True,
         "data": {
@@ -116,9 +134,27 @@ def list_pdf_assets(_current_user):
                 "per_page": per_page,
                 "has_more": has_more,
                 "skipped_missing": skipped_missing,
+                "scanned": scanned,
             },
         },
         "items": items,
+    })
+
+
+@report_audio_workflow_bp.route("/pdf-assets/workflow-stats", methods=["GET"])
+@require_login
+def pdf_asset_workflow_stats(current_user):
+    raw_ids = request.args.get("ids") or ""
+    ids = [item.strip() for item in raw_ids.split(",") if item.strip()]
+    ids = ids[:50]
+    stats = _pdf_asset_workflow_stats(
+        ids,
+        user_id=str(getattr(current_user, "id", None)),
+    )
+    return jsonify({
+        "success": True,
+        "data": {"stats": stats},
+        "stats": stats,
     })
 
 
@@ -260,30 +296,79 @@ def list_jobs(current_user):
     page = _bounded_int(request.args.get("page"), 1, 1, 100000)
     per_page = _bounded_int(request.args.get("per_page"), 20, 1, 100)
     status = (request.args.get("status") or "").strip()
+    include_detail = str(request.args.get("detail") or "").lower() in {"1", "true", "yes"}
 
     query = PublicationTask.query.filter(
-        PublicationTask.params["feature"].as_string() == FEATURE_NAME,
-        PublicationTask.params["user_id"].as_string() == str(getattr(current_user, "id", None)),
+        PublicationTask.feature == FEATURE_NAME,
+        PublicationTask.user_id == str(getattr(current_user, "id", None)),
     )
     if status:
         reverse_status = {value: key for key, value in STATUS_MAP.items()}
         query = query.filter(PublicationTask.status == reverse_status.get(status, status))
 
-    pagination = query.order_by(PublicationTask.created_at.desc()).paginate(
-        page=page,
-        per_page=per_page,
-        error_out=False,
-    )
-    items = [_job_payload(task) for task in pagination.items]
+    ordered = query.order_by(PublicationTask.created_at.desc())
+    if include_detail:
+        pagination = ordered.paginate(
+            page=page,
+            per_page=per_page,
+            error_out=False,
+        )
+        items = [_job_payload(task) for task in pagination.items]
+        total = pagination.total
+        pages = pagination.pages
+    else:
+        total = query.with_entities(PublicationTask.id).order_by(None).count()
+        offset = (page - 1) * per_page
+        rows = (
+            ordered.with_entities(
+                PublicationTask.id.label("id"),
+                PublicationTask.status.label("status"),
+                PublicationTask.current_step.label("current_step"),
+                PublicationTask.progress.label("progress"),
+                PublicationTask.error_message.label("error_message"),
+                PublicationTask.created_at.label("created_at"),
+                PublicationTask.completed_at.label("completed_at"),
+                PublicationTask.result.label("result"),
+                PublicationTask.report_audio_started_at.label("started_at"),
+                PublicationTask.report_audio_completed_at.label("result_completed_at"),
+                PublicationTask.report_audio_error.label("result_error"),
+                PublicationTask.report_audio_output_path.label("output_path"),
+                PublicationTask.report_audio_pdf_filename.label("request_pdf_filename"),
+                PublicationTask.report_audio_pdf_bytes.label("request_pdf_bytes"),
+                PublicationTask.report_audio_pdf_topic_title.label("request_pdf_topic_title"),
+                PublicationTask.report_audio_result_pdf_filename.label("result_pdf_filename"),
+                PublicationTask.report_audio_result_pdf_bytes.label("result_pdf_bytes"),
+                PublicationTask.report_audio_result_pdf_topic_title.label("result_pdf_topic_title"),
+                PublicationTask.report_audio_metadata_title.label("metadata_title"),
+                PublicationTask.report_audio_video_title.label("video_title"),
+                PublicationTask.report_audio_cover_title.label("cover_title"),
+                PublicationTask.report_audio_structured_title.label("structured_title"),
+                PublicationTask.report_audio_wav_path.label("audio_wav_path"),
+                PublicationTask.report_audio_seconds.label("audio_seconds"),
+                PublicationTask.report_audio_audio_bytes.label("audio_bytes"),
+                PublicationTask.report_audio_video_enabled.label("video_enabled"),
+                PublicationTask.report_audio_video_status.label("video_status"),
+                PublicationTask.report_audio_video_publisher_task_id.label("video_publisher_task_id"),
+                PublicationTask.report_audio_video_message.label("video_message"),
+                PublicationTask.report_audio_video_path.label("video_path"),
+                PublicationTask.report_audio_cover_path.label("cover_path"),
+            )
+            .offset(offset)
+            .limit(per_page)
+            .all()
+        )
+        child_summaries = _child_summaries_for_parent_ids([row.id for row in rows])
+        items = [_job_summary_payload(row, child_summaries.get(row.id)) for row in rows]
+        pages = ((total + per_page - 1) // per_page) if total else 0
     return jsonify({
         "success": True,
         "data": {
             "items": items,
             "pagination": {
-                "page": pagination.page,
+                "page": page,
                 "per_page": per_page,
-                "total": pagination.total,
-                "pages": pagination.pages,
+                "total": total,
+                "pages": pages,
             },
         },
         "items": items,
@@ -297,6 +382,39 @@ def get_job(current_user, job_id):
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
     payload = _job_payload(task, include_raw=True)
+    return jsonify({"success": True, **payload, "data": payload})
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/children/<child_id>", methods=["GET"])
+@require_login
+def get_child_job(current_user, job_id, child_id):
+    parent = _get_owned_task(current_user, job_id)
+    if not parent:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    child = PublicationTask.query.options(
+        load_only(
+            PublicationTask.id,
+            PublicationTask.celery_task_id,
+            PublicationTask.status,
+            PublicationTask.current_step,
+            PublicationTask.progress,
+            PublicationTask.params,
+            PublicationTask.result,
+            PublicationTask.error_message,
+            PublicationTask.feature,
+            PublicationTask.parent_task_id,
+            PublicationTask.source_task_id,
+            PublicationTask.created_at,
+            PublicationTask.completed_at,
+        )
+    ).get(child_id)
+    if not child or str(parent.id) not in {str(child.parent_task_id or ""), str(child.source_task_id or "")}:
+        return jsonify({"success": False, "message": "子任务不存在"}), 404
+
+    payload = _child_task_summary(child)
+    payload["raw_params"] = child.params if isinstance(child.params, dict) else {}
+    payload["raw_result"] = child.result if isinstance(child.result, dict) else {}
     return jsonify({"success": True, **payload, "data": payload})
 
 
@@ -336,6 +454,19 @@ def download_video(current_user, job_id):
     if not video_path or not os.path.exists(video_path):
         return jsonify({"success": False, "message": "视频文件不存在"}), 404
     return send_file(video_path, mimetype="video/mp4", as_attachment=True, download_name=f"{task.id}.mp4")
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/download-vertical-video", methods=["GET"])
+@require_login
+def download_vertical_video(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    video = (task.result or {}).get("video") or {}
+    video_path = video.get("vertical_video_path")
+    if not video_path or not os.path.exists(video_path):
+        return jsonify({"success": False, "message": "竖屏视频文件不存在"}), 404
+    return send_file(video_path, mimetype="video/mp4", as_attachment=True, download_name=f"{task.id}-vertical.mp4")
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-cover", methods=["GET"])
@@ -440,10 +571,26 @@ def retry_job(current_user, job_id):
 
 
 def _get_owned_task(current_user, job_id):
-    task = PublicationTask.query.get(job_id)
-    if not task or not isinstance(task.params, dict) or task.params.get("feature") != FEATURE_NAME:
+    task = PublicationTask.query.options(
+        load_only(
+            PublicationTask.id,
+            PublicationTask.celery_task_id,
+            PublicationTask.status,
+            PublicationTask.current_step,
+            PublicationTask.progress,
+            PublicationTask.params,
+            PublicationTask.result,
+            PublicationTask.error_message,
+            PublicationTask.feature,
+            PublicationTask.user_id,
+            PublicationTask.created_at,
+            PublicationTask.completed_at,
+        )
+    ).get(job_id)
+    if not task or (task.feature or (task.params or {}).get("feature")) != FEATURE_NAME:
         return None
-    if str(task.params.get("user_id")) != str(getattr(current_user, "id", None)):
+    task_user_id = task.user_id or (task.params or {}).get("user_id")
+    if str(task_user_id) != str(getattr(current_user, "id", None)):
         return None
     return task
 
@@ -456,10 +603,12 @@ def _job_payload(task, include_raw=False):
     audio = result.get("audio") or None
     status = STATUS_MAP.get(task.status, task.status or "queued")
     live_children = _live_child_tasks(task.id)
+    live_doubao_children = [
+        child for child in live_children if child.feature == doubao_browser_tts.FEATURE_NAME
+    ]
     live_doubao_items = [
-        _child_task_summary(child)
-        for child in live_children
-        if (child.params or {}).get("feature") == doubao_browser_tts.FEATURE_NAME
+        _child_task_summary_row(child)
+        for child in live_doubao_children
     ]
     payload = {
         "job_id": task.id,
@@ -495,6 +644,7 @@ def _job_payload(task, include_raw=False):
         "download_audio_url": f"/api/report-audio-workflows/jobs/{task.id}/download-audio" if audio and audio.get("wav_path") else None,
         "download_result_url": f"/api/report-audio-workflows/jobs/{task.id}/download-result" if result.get("output_path") else None,
         "download_video_url": f"/api/report-audio-workflows/jobs/{task.id}/download-video" if _path_exists((result.get("video") or {}).get("video_path")) else None,
+        "download_vertical_video_url": f"/api/report-audio-workflows/jobs/{task.id}/download-vertical-video" if _path_exists((result.get("video") or {}).get("vertical_video_path")) else None,
         "download_cover_url": f"/api/report-audio-workflows/jobs/{task.id}/download-cover" if _path_exists((result.get("video") or {}).get("cover_path")) else None,
         "metadata": result.get("metadata") or request_payload.get("metadata") or {},
         "notifications": result.get("notifications") or {},
@@ -506,33 +656,329 @@ def _job_payload(task, include_raw=False):
     return payload
 
 
-def _live_child_tasks(parent_id):
+def _number_or_none(value, cast=float):
+    if value is None or value == "":
+        return None
     try:
-        return PublicationTask.query.filter(
-            or_(
-                PublicationTask.params["parent_task_id"].as_string() == parent_id,
-                PublicationTask.params["source_task_id"].as_string() == parent_id,
+        return cast(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bool_or_none(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in {"1", "true", "yes", "on"}
+
+
+def _first_compact_title(*values):
+    for value in values:
+        title = _compact_title(value)
+        if title:
+            return title
+    return ""
+
+
+def _job_summary_payload(row, child_bundle=None):
+    child_bundle = child_bundle or {}
+    result = row.result if isinstance(getattr(row, "result", None), dict) else {}
+    result_video = result.get("video") if isinstance(result.get("video"), dict) else {}
+    pdf = {
+        "filename": row.request_pdf_filename or row.result_pdf_filename,
+        "bytes": _number_or_none(row.request_pdf_bytes or row.result_pdf_bytes, int),
+        "topic_title": row.request_pdf_topic_title or row.result_pdf_topic_title,
+    }
+    pdf = {key: value for key, value in pdf.items() if value is not None}
+    if pdf:
+        pdf["download_url"] = f"/api/report-audio-workflows/jobs/{row.id}/input-pdf"
+
+    structured_result = {
+        "cover_title": row.cover_title,
+        "title": row.structured_title,
+    }
+    structured_result = {key: value for key, value in structured_result.items() if value}
+
+    audio_payload = None
+    if row.audio_wav_path:
+        audio_payload = {
+            "seconds": _number_or_none(row.audio_seconds),
+            "bytes": _number_or_none(row.audio_bytes, int),
+            "download_url": f"/api/report-audio-workflows/jobs/{row.id}/download-audio",
+        }
+        audio_payload = {key: value for key, value in audio_payload.items() if value is not None}
+
+    video_payload = None
+    vertical_video_path = result_video.get("vertical_video_path")
+    landscape_enabled = _bool_or_none(result_video.get("landscape_enabled"))
+    vertical_enabled = _bool_or_none(result_video.get("vertical_enabled"))
+    if (
+        row.video_enabled is not None
+        or row.video_status
+        or row.video_publisher_task_id
+        or row.video_path
+        or vertical_video_path
+        or landscape_enabled is not None
+        or vertical_enabled is not None
+    ):
+        video_payload = {
+            "enabled": _bool_or_none(row.video_enabled),
+            "status": row.video_status,
+            "publisher_task_id": row.video_publisher_task_id,
+            "message": row.video_message,
+            "landscape_enabled": landscape_enabled,
+            "vertical_enabled": vertical_enabled,
+        }
+        if row.video_path and _path_exists(row.video_path):
+            video_payload["video"] = {"download_url": f"/api/report-audio-workflows/jobs/{row.id}/download-video"}
+        if vertical_video_path and _path_exists(vertical_video_path):
+            video_payload["vertical_video"] = {"download_url": f"/api/report-audio-workflows/jobs/{row.id}/download-vertical-video"}
+        if row.cover_path:
+            video_payload["cover"] = {"download_url": f"/api/report-audio-workflows/jobs/{row.id}/download-cover"}
+        video_payload = {key: value for key, value in video_payload.items() if value is not None}
+
+    title = _first_compact_title(
+        row.cover_title,
+        row.structured_title,
+        row.video_title,
+        row.metadata_title,
+        row.request_pdf_topic_title,
+        row.result_pdf_topic_title,
+        row.request_pdf_filename,
+        row.result_pdf_filename,
+    )
+    status = STATUS_MAP.get(row.status, row.status or "queued")
+    result_error = row.result_error
+    return {
+        "job_id": row.id,
+        "status": status,
+        "step": row.current_step,
+        "progress": row.progress or 0,
+        "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+        "started_at": row.started_at,
+        "completed_at": row.completed_at.isoformat() + "Z" if row.completed_at else row.result_completed_at,
+        "error": row.error_message or result_error,
+        "title": title,
+        "request": {"pdf": pdf or None, "metadata": {"title": row.metadata_title} if row.metadata_title else {}},
+        "pdf": pdf or None,
+        "children": child_bundle.get("children") or {},
+        "gemini": child_bundle.get("gemini"),
+        "doubao_browser_tts": child_bundle.get("doubao_browser_tts") or [],
+        "structured_result": structured_result or None,
+        "cover_title": row.cover_title or "",
+        "cover_subtitle": "",
+        "audio": audio_payload,
+        "video": video_payload,
+        "publisher_video": child_bundle.get("publisher_video"),
+        "download_audio_url": f"/api/report-audio-workflows/jobs/{row.id}/download-audio" if row.audio_wav_path else None,
+        "download_result_url": f"/api/report-audio-workflows/jobs/{row.id}/download-result" if row.output_path else None,
+        "download_video_url": f"/api/report-audio-workflows/jobs/{row.id}/download-video" if row.video_path and _path_exists(row.video_path) else None,
+        "download_vertical_video_url": f"/api/report-audio-workflows/jobs/{row.id}/download-vertical-video" if vertical_video_path and _path_exists(vertical_video_path) else None,
+        "download_cover_url": f"/api/report-audio-workflows/jobs/{row.id}/download-cover" if row.cover_path else None,
+        "metadata": {"title": row.metadata_title} if row.metadata_title else {},
+        "logs": [],
+    }
+
+
+def _live_child_tasks(parent_id):
+    def child_query(column):
+        return (
+            PublicationTask.query
+            .with_entities(
+                PublicationTask.id.label("id"),
+                PublicationTask.celery_task_id.label("celery_task_id"),
+                PublicationTask.status.label("status"),
+                PublicationTask.current_step.label("current_step"),
+                PublicationTask.progress.label("progress"),
+                PublicationTask.error_message.label("error_message"),
+                PublicationTask.feature.label("feature"),
+                PublicationTask.params.label("params"),
+                PublicationTask.parent_task_id.label("parent_task_id"),
+                PublicationTask.source_task_id.label("source_task_id"),
+                PublicationTask.task_title.label("task_title"),
+                PublicationTask.task_video_path.label("task_video_path"),
+                PublicationTask.report_audio_wav_path.label("audio_wav_path"),
+                PublicationTask.report_audio_seconds.label("audio_seconds"),
+                PublicationTask.report_audio_audio_bytes.label("audio_bytes"),
+                PublicationTask.created_at.label("created_at"),
+                PublicationTask.completed_at.label("completed_at"),
             )
-        ).order_by(PublicationTask.created_at.asc()).all()
+            .filter(column == parent_id)
+            .order_by(PublicationTask.created_at.asc())
+            .all()
+        )
+
+    try:
+        rows = []
+        seen = set()
+        for child in child_query(PublicationTask.parent_task_id) + child_query(PublicationTask.source_task_id):
+            if child.id in seen:
+                continue
+            seen.add(child.id)
+            rows.append(child)
+        rows.sort(key=lambda item: item.created_at or datetime.min)
+        return rows
     except Exception:
         return []
+
+
+def _child_summaries_for_parent_ids(parent_ids):
+    ids = [str(item or "").strip() for item in parent_ids if str(item or "").strip()]
+    if not ids:
+        return {}
+    grouped = {
+        parent_id: {
+            "children": {},
+            "doubao_browser_tts": [],
+        }
+        for parent_id in ids
+    }
+    try:
+        base_query = PublicationTask.query.with_entities(
+            PublicationTask.id.label("id"),
+            PublicationTask.celery_task_id.label("celery_task_id"),
+            PublicationTask.status.label("status"),
+            PublicationTask.current_step.label("current_step"),
+            PublicationTask.progress.label("progress"),
+            PublicationTask.error_message.label("error_message"),
+            PublicationTask.feature.label("feature"),
+            PublicationTask.params.label("params"),
+            PublicationTask.parent_task_id.label("parent_task_id"),
+            PublicationTask.source_task_id.label("source_task_id"),
+            PublicationTask.task_title.label("task_title"),
+            PublicationTask.task_video_path.label("task_video_path"),
+            PublicationTask.report_audio_wav_path.label("audio_wav_path"),
+            PublicationTask.report_audio_seconds.label("audio_seconds"),
+            PublicationTask.report_audio_audio_bytes.label("audio_bytes"),
+            PublicationTask.created_at.label("created_at"),
+            PublicationTask.completed_at.label("completed_at"),
+        )
+        rows = []
+        seen = set()
+        for column in (PublicationTask.parent_task_id, PublicationTask.source_task_id):
+            for row in base_query.filter(column.in_(ids)).order_by(PublicationTask.created_at.asc()).all():
+                if row.id in seen:
+                    continue
+                seen.add(row.id)
+                rows.append(row)
+        rows.sort(key=lambda row: row.created_at or datetime.min)
+    except Exception:
+        return grouped
+
+    gemini_features = {gemini_browser.FEATURE_NAME, gemini_browser.LEGACY_FEATURE_NAME}
+    for row in rows:
+        parent_id = row.parent_task_id or row.source_task_id
+        parent_id = str(parent_id or "").strip()
+        if parent_id not in grouped:
+            continue
+        feature = row.feature
+        summary = _child_task_summary_row(row)
+        if feature in gemini_features:
+            grouped[parent_id]["gemini"] = summary
+            grouped[parent_id]["children"]["gemini"] = summary
+        elif feature == doubao_browser_tts.FEATURE_NAME:
+            grouped[parent_id]["doubao_browser_tts"].append(summary)
+            grouped[parent_id]["children"]["doubao_browser_tts"] = grouped[parent_id]["doubao_browser_tts"]
+        elif feature == "publisher":
+            grouped[parent_id]["publisher_video"] = summary
+            grouped[parent_id]["children"]["publisher_video"] = summary
+    return grouped
+
+
+def _child_task_summary_row(row, result_payload=None):
+    result = result_payload if isinstance(result_payload, dict) else {}
+    params = getattr(row, "params", None)
+    params = params if isinstance(params, dict) else {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if not metadata:
+        metadata = _child_metadata_from_params(params)
+    audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
+    metadata = dict(metadata)
+    if row.task_title and not metadata.get("title"):
+        metadata["title"] = row.task_title
+    payload = {
+        "job_id": row.id,
+        "celery_id": row.celery_task_id,
+        "status": row.status,
+        "step": row.current_step,
+        "progress": row.progress or 0,
+        "feature": row.feature,
+        "error": row.error_message,
+        "metadata": metadata,
+        "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+        "completed_at": row.completed_at.isoformat() + "Z" if row.completed_at else None,
+    }
+    seconds = audio.get("seconds") if audio else getattr(row, "audio_seconds", None)
+    audio_bytes = audio.get("bytes") if audio else getattr(row, "audio_bytes", None)
+    if audio or row.audio_wav_path or seconds or audio_bytes:
+        payload["audio"] = {
+            "seconds": seconds,
+            "bytes": audio_bytes,
+        }
+        if row.audio_wav_path:
+            payload["audio"]["download_url"] = f"/api/report-audio-workflows/jobs/{row.id}/download-audio"
+        payload["audio"] = {key: value for key, value in payload["audio"].items() if value is not None}
+    if row.task_video_path:
+        payload["video"] = {
+            "download_url": f"/api/report-audio-workflows/jobs/{row.id}/download-video",
+        }
+    return payload
 
 
 def _child_task_summary(task):
     result = task.result if isinstance(task.result, dict) else {}
     params = task.params if isinstance(task.params, dict) else {}
-    return {
+    feature = task.feature or params.get("feature")
+    payload = {
         "job_id": task.id,
         "celery_id": task.celery_task_id,
         "status": task.status,
         "step": task.current_step,
         "progress": task.progress or 0,
+        "feature": feature,
         "error": task.error_message or result.get("error"),
         "metadata": result.get("metadata") or _child_metadata_from_params(params),
         "audio": result.get("audio"),
         "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
         "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else None,
     }
+    preview = _child_text_preview(result, feature)
+    if preview:
+        payload["text_preview"] = preview
+    turns = result.get("turns") if isinstance(result.get("turns"), list) else None
+    if turns:
+        payload["turn_count"] = len(turns)
+    return payload
+
+
+def _child_text_preview(result, feature=None, max_chars=180):
+    if not isinstance(result, dict):
+        return ""
+    if feature not in {gemini_browser.FEATURE_NAME, gemini_browser.LEGACY_FEATURE_NAME}:
+        return ""
+    candidates = [
+        result.get("final_response_text"),
+        result.get("response_text"),
+        result.get("text"),
+    ]
+    turns = result.get("turns") if isinstance(result.get("turns"), list) else []
+    for turn in reversed(turns):
+        if isinstance(turn, dict):
+            candidates.extend([
+                turn.get("final_response_text"),
+                turn.get("response_text"),
+                turn.get("text"),
+                turn.get("content"),
+            ])
+    for candidate in candidates:
+        text = " ".join(str(candidate or "").split())
+        if not text:
+            continue
+        if len(text) > max_chars:
+            return f"{text[:max_chars].rstrip()}..."
+        return text
+    return ""
 
 
 def _child_metadata_from_params(params):
@@ -632,7 +1078,7 @@ def _parse_video_options(data):
         "cta_text": str(pick("video_cta_text", "cta_text", default="") or "").strip(),
         "vertical_enabled": _truthy(pick("vertical_video_enabled", "vertical_enabled", default=False)),
         "bilibili_enabled": _truthy(pick("bilibili_enabled", "publish_bilibili_enabled", default=False)),
-        "sub_burn_enabled": _truthy(pick("sub_burn_enabled", default=False)),
+        "sub_burn_enabled": _truthy(pick("sub_burn_enabled", default=True), default=True),
     }
 
 
@@ -734,6 +1180,7 @@ def _pdf_asset_payload(attachment, topic=None):
         "id": attachment.id,
         "filename": attachment.name or path.name,
         "bytes": size,
+        "download_count": attachment.download_count,
         "updated_at": attachment.updated_at.isoformat() + "Z" if attachment.updated_at else None,
         "created_at": attachment.created_at.isoformat() + "Z" if attachment.created_at else None,
         "group_id": attachment.group_id,
@@ -746,6 +1193,138 @@ def _pdf_asset_payload(attachment, topic=None):
         "local_path": str(path),
         "preview_url": f"/api/report-audio-workflows/pdf-assets/{attachment.id}/preview",
     }
+
+
+def _pdf_asset_row_payload(row):
+    path = _resolve_pdf_path(row.local_path)
+    if not path:
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size <= 0:
+        return None
+    return {
+        "id": row.attachment_id,
+        "filename": row.attachment_name or path.name,
+        "bytes": size,
+        "download_count": row.download_count,
+        "updated_at": row.attachment_updated_at.isoformat() + "Z" if row.attachment_updated_at else None,
+        "created_at": row.attachment_created_at.isoformat() + "Z" if row.attachment_created_at else None,
+        "group_id": row.group_id,
+        "tab_id": row.tab_id,
+        "topic_id": row.topic_id,
+        "topic_title": getattr(row, "topic_title", None),
+        "topic_author": getattr(row, "topic_author", None),
+        "topic_create_time": getattr(row, "topic_create_time", None),
+        "tab_label": getattr(row, "tab_label", None),
+        "local_path": str(path),
+        "preview_url": f"/api/report-audio-workflows/pdf-assets/{row.attachment_id}/preview",
+    }
+
+
+def _attach_pdf_asset_topics(items):
+    keys = {
+        (item.get("group_id"), item.get("tab_id"), item.get("topic_id"))
+        for item in items
+        if item.get("group_id") and item.get("tab_id") and item.get("topic_id")
+    }
+    if not keys:
+        return
+    filters = [
+        and_(
+            ZsxqTopic.group_id == group_id,
+            ZsxqTopic.tab_id == tab_id,
+            ZsxqTopic.topic_id == topic_id,
+        )
+        for group_id, tab_id, topic_id in keys
+    ]
+    rows = (
+        db.session.query(
+            ZsxqTopic.group_id.label("group_id"),
+            ZsxqTopic.tab_id.label("tab_id"),
+            ZsxqTopic.topic_id.label("topic_id"),
+            ZsxqTopic.title.label("topic_title"),
+            ZsxqTopic.tab_label.label("tab_label"),
+            ZsxqTopic.author_name.label("topic_author"),
+            ZsxqTopic.create_time.label("topic_create_time"),
+        )
+        .filter(or_(*filters))
+        .all()
+    )
+    topics = {
+        (row.group_id, row.tab_id, row.topic_id): row
+        for row in rows
+    }
+    for item in items:
+        topic = topics.get((item.get("group_id"), item.get("tab_id"), item.get("topic_id")))
+        if not topic:
+            continue
+        item["topic_title"] = topic.topic_title
+        item["topic_author"] = topic.topic_author
+        item["topic_create_time"] = topic.topic_create_time
+        item["tab_label"] = topic.tab_label
+
+
+def _empty_pdf_asset_workflow_stats():
+    return {
+        "has_workflow": False,
+        "total": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "running": 0,
+        "latest": None,
+    }
+
+
+def _pdf_asset_workflow_stats(asset_ids, user_id=None):
+    ids = [str(item or "").strip() for item in asset_ids if str(item or "").strip()]
+    if not ids:
+        return {}
+
+    rows = (
+        PublicationTask.query
+        .with_entities(
+            PublicationTask.id.label("id"),
+            PublicationTask.status.label("status"),
+            PublicationTask.current_step.label("current_step"),
+            PublicationTask.progress.label("progress"),
+            PublicationTask.created_at.label("created_at"),
+            PublicationTask.completed_at.label("completed_at"),
+            PublicationTask.report_audio_pdf_attachment_id.label("attachment_id"),
+        )
+        .filter(PublicationTask.feature == FEATURE_NAME)
+        .filter(PublicationTask.report_audio_pdf_attachment_id.in_(ids))
+    )
+    if user_id:
+        rows = rows.filter(PublicationTask.user_id == user_id)
+
+    stats = {asset_id: _empty_pdf_asset_workflow_stats() for asset_id in ids}
+    for row in rows.order_by(PublicationTask.created_at.desc()).all():
+        asset_id = str(row.attachment_id or "").strip()
+        if asset_id not in stats:
+            continue
+        bucket = stats[asset_id]
+        bucket["has_workflow"] = True
+        bucket["total"] += 1
+        public_status = STATUS_MAP.get(row.status, row.status or "queued")
+        if public_status == "succeeded":
+            bucket["succeeded"] += 1
+        elif public_status == "failed":
+            bucket["failed"] += 1
+        elif public_status in {"queued", "running", "submitting"}:
+            bucket["running"] += 1
+        if not bucket["latest"]:
+            bucket["latest"] = {
+                "job_id": row.id,
+                "status": public_status,
+                "step": row.current_step,
+                "progress": row.progress or 0,
+                "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+                "completed_at": row.completed_at.isoformat() + "Z" if row.completed_at else None,
+            }
+    return stats
 
 
 def _resolve_pdf_path(value):
@@ -805,14 +1384,22 @@ def _public_video(job_id, video):
         "status": video.get("status"),
         "publisher_task_id": video.get("publisher_task_id"),
         "message": video.get("message"),
+        "landscape_enabled": video.get("landscape_enabled"),
+        "vertical_enabled": video.get("vertical_enabled"),
         "bilibili_result": video.get("bilibili_result"),
     }
     video_path = video.get("video_path")
+    vertical_video_path = video.get("vertical_video_path")
     cover_path = video.get("cover_path")
     if video_path and os.path.exists(video_path):
         public["video"] = {
             "bytes": os.path.getsize(video_path),
             "download_url": f"/api/report-audio-workflows/jobs/{job_id}/download-video",
+        }
+    if vertical_video_path and os.path.exists(vertical_video_path):
+        public["vertical_video"] = {
+            "bytes": os.path.getsize(vertical_video_path),
+            "download_url": f"/api/report-audio-workflows/jobs/{job_id}/download-vertical-video",
         }
     if cover_path and os.path.exists(cover_path):
         public["cover"] = {

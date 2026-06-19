@@ -71,6 +71,64 @@ class WorkflowNotificationServiceTest(unittest.TestCase):
         self.assertIn("发布已提交 23 个，已确认可见 7 个，待审核/待确认 16 个，发布失败 0 个", text)
         self.assertIn("发布：成功 | 任务 1 个，完成 1，失败 0，跳过 0，进行中 0 | 已提交 23，已确认 7，待审核/待确认 16，失败 0", text)
 
+    def test_stage_lines_include_sync_audit_breakdown(self):
+        workflow = {
+            "stage_results": {
+                "sync": {
+                    "status": "completed",
+                    "summary": {
+                        "target_topics_per_tab": 40,
+                        "planned_topics_total": 40,
+                        "max_pages": 2,
+                        "planned_pages_total": 2,
+                        "pages_fetched": 2,
+                        "topics_fetched": 39,
+                        "topics_new": 0,
+                        "topics_updated": 39,
+                        "attachments_seen": 52,
+                        "attachments_downloaded": 9,
+                        "attachments_failed": 1,
+                        "attachments_skipped": 42,
+                        "attachments_already_downloaded_skipped": 20,
+                        "attachments_below_threshold": 12,
+                        "attachments_missing_download_count": 3,
+                        "attachments_non_target_skipped": 7,
+                        "tabs": [
+                            {
+                                "tab_label": "外资研报",
+                                "target_topics": 40,
+                                "planned_pages": 2,
+                                "pages": 2,
+                                "topics_fetched": 39,
+                                "attachments_seen": 52,
+                                "attachments_downloaded": 9,
+                                "attachments_failed": 1,
+                                "attachments_skipped": 42,
+                                "attachments_already_downloaded_skipped": 20,
+                                "attachments_below_threshold": 12,
+                                "attachments_missing_download_count": 3,
+                                "attachments_non_target_skipped": 7,
+                            }
+                        ],
+                    },
+                },
+                "clean": {
+                    "status": "completed",
+                    "tasks": [{"status": "completed", "success_count": 9, "failed_count": 0}],
+                },
+                "publish": {
+                    "status": "completed",
+                    "tasks": [{"status": "completed", "summary": {"submitted_count": 9, "verified_count": 9}}],
+                },
+            }
+        }
+
+        text = "\n".join(workflow_notification_service._stage_lines(workflow))
+
+        self.assertIn("同步对账：计划 每个目标 Tab 40 个 topic，合计计划 40 个 topic，每个目标最多 2 页，合计最多 2 页；实际拉取 2 页，拿到 39 个 topic，发现 52 个附件/item。", text)
+        self.assertIn("下载对账：真正下载 9 个，失败 1 个，跳过 42 个（已下载/复用 20, 低于阈值 12, 缺少下载次数 3, 非目标类型 7）。", text)
+        self.assertIn("外资研报：计划 40 个 topic / 2 页，实际 39 个 topic / 2 页；附件 52，下载 9，跳过 42（已下载/复用 20, 低于阈值 12, 缺少下载次数 3, 非目标类型 7），失败 1。", text)
+
     def test_stage_lines_include_publish_batch_breakdown_and_recovered_note(self):
         workflow = {
             "stage_results": {
@@ -126,6 +184,37 @@ class WorkflowNotificationServiceTest(unittest.TestCase):
         self.assertIn("PDF：1 批，1 个附件，1 个 topic，全部确认可见。", text)
         self.assertIn("音频：3 批，8 + 8 + 4 = 20 个附件，3 个 topic，全部确认可见。", text)
         self.assertIn("说明：有 1 个发布子任务状态为失败，但本地发布运行记录显示已有内容确认可见", text)
+
+    def test_mp3_video_event_label_and_stage_lines(self):
+        payload = {
+            "event_type": "mp3_video_completed",
+            "workflow": {
+                "id": "job-1",
+                "batch_id": "job-1",
+                "group_name": "MP3 视频编排",
+                "group_label": "编排",
+                "subject_prefix": "[MP3 视频编排]",
+                "status": "completed",
+                "current_stage": "done",
+                "stage_results": {
+                    "stages": [
+                        {"name": "MP3 输入", "status": "completed", "message": "demo.mp3 / 42.0 MB"},
+                        {"name": "Gemini Gem 解析/信息图", "status": "completed", "message": "第一轮返回已获取"},
+                    ],
+                    "outputs": {
+                        "标题": "算力调整假摔还是上车",
+                        "横屏视频": "/tmp/landscape.mp4",
+                    },
+                },
+            },
+        }
+
+        subject, body = workflow_notification_service.build_email_content(payload)
+
+        self.assertIn("MP3 视频编排完成", subject)
+        self.assertIn("流程节点：", body)
+        self.assertIn("MP3 输入：成功 | demo.mp3 / 42.0 MB", body)
+        self.assertIn("标题：算力调整假摔还是上车", body)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,9 @@ const ACTIVE_COOKIE_ID_STORAGE_KEY = 'zsxq_active_cookie_id';
 const MANUAL_PLAN_LIMIT_STORAGE_KEY = 'zsxq_manual_plan_limit';
 const AUTO_SYNC_TEST_INTERVAL_MS = 5 * 60 * 1000;
 const AUTO_SYNC_TEST_ROUNDS = 3;
-const AUTO_SYNC_TEST_MAX_FILES = 0;
+const AUTO_SYNC_TEST_MAX_FILES = 40;
+const SYSTEM_SYNC_PDF_DOWNLOAD_THRESHOLD = 30;
+const SYSTEM_SYNC_MP3_DOWNLOAD_THRESHOLD = 15;
 const MANUAL_PLAN_DEFAULT_LIMIT = 20;
 const MANUAL_PLAN_MAX_LIMIT = 50;
 const SYSTEM_SYNC_INTERVAL_MINUTES = 5;
@@ -962,19 +964,23 @@ async function saveSystemSyncTestConfig() {
     renderSyncStatus({
         type: 'loading',
         title: '系统计划配置',
-        message: `正在保存本机系统计划任务配置。真实观察模式会每 ${systemIntervalMinutes} 分钟执行一次，每批获取 ${SYSTEM_SYNC_COUNT} 条主题；只同步主题和附件索引，不自动下载 PDF/音频附件。`,
+        message: `正在保存本机系统计划任务配置。真实观察模式会每 ${systemIntervalMinutes} 分钟执行一次，每批获取 ${SYSTEM_SYNC_COUNT} 条主题；达到下载量阈值后才自动下载附件。`,
     });
 
     try {
+        const attachmentDownloadRules = buildSystemAttachmentDownloadRules(jobs);
+        const thresholdedDownloadEnabled = AUTO_SYNC_TEST_MAX_FILES > 0 && attachmentDownloadRules.rules.length > 0;
         const payload = {
             group_id: state.selectedGroup.group_id,
             group_name: state.selectedGroup.name,
             count: SYSTEM_SYNC_COUNT,
             max_pages: 1,
             stop_on_existing: true,
-            download_attachments: false,
-            allow_attachment_downloads: false,
+            download_attachments: thresholdedDownloadEnabled,
+            allow_attachment_downloads: thresholdedDownloadEnabled,
             max_download_files: AUTO_SYNC_TEST_MAX_FILES,
+            skip_existing_downloads: true,
+            attachment_download_rules: attachmentDownloadRules,
             interval_minutes: systemIntervalMinutes,
             max_rounds: maxRoundsRaw,
             jobs: jobs.map(job => ({
@@ -999,7 +1005,7 @@ async function saveSystemSyncTestConfig() {
                 <div class="text-xs text-slate-500 leading-6">
                     <div>配置文件：<span class="font-mono">${escapeHtml(config.path || '-')}</span></div>
                     <div>Cookie 来源：<span class="font-mono">${escapeHtml(config.cookie_env_name || 'ZSXQ_SYNC_TEST_COOKIE')}</span>${config.cookie_env_configured ? ' · 已检测到' : ' · 未检测到'}</div>
-                    <div>任务范围：外资研报 PDF + 调研纪要 MP3；每 ${config.interval_minutes || systemIntervalMinutes} 分钟 1 批；每批获取 ${SYSTEM_SYNC_COUNT} 条主题；不自动下载 PDF/音频附件。</div>
+                    <div>任务范围：外资研报 PDF + 调研纪要 MP3；每 ${config.interval_minutes || systemIntervalMinutes} 分钟 1 批；每批获取 ${SYSTEM_SYNC_COUNT} 条主题；${escapeHtml(formatSystemThresholdDownloadText(config))}。</div>
                     <div>调度轮次：${formatConfigMaxRounds(config.max_rounds ?? maxRoundsRaw)}</div>
                 </div>
             `,
@@ -1095,6 +1101,53 @@ function buildAutoSyncTestJobs(scope = 'full') {
         researchMemoTab ? { key: 'research_memo_mp3', modeCode: 'rm', tab: researchMemoTab, fileType: 'mp3' } : null,
     ].filter(Boolean);
     return scope === 'memo' ? jobs.filter(job => job.key === 'research_memo_mp3') : jobs;
+}
+
+function buildSystemAttachmentDownloadRules(jobs) {
+    const rules = [];
+    (jobs || []).forEach(job => {
+        const tab = job.tab || {};
+        if (job.fileType === 'pdf' && (job.key === 'foreign_report' || String(tab.label || '').includes('外资'))) {
+            rules.push({
+                key: job.key,
+                tab_id: String(tab.id || ''),
+                tab_label: String(tab.label || ''),
+                file_type: 'pdf',
+                min_download_count: SYSTEM_SYNC_PDF_DOWNLOAD_THRESHOLD,
+            });
+        }
+        if (job.fileType === 'mp3' && (job.key === 'research_memo_mp3' || String(tab.label || '').includes('调研'))) {
+            rules.push({
+                key: job.key,
+                tab_id: String(tab.id || ''),
+                tab_label: String(tab.label || ''),
+                file_type: 'mp3',
+                min_download_count: SYSTEM_SYNC_MP3_DOWNLOAD_THRESHOLD,
+            });
+        }
+    });
+    return {
+        enabled: rules.length > 0,
+        rules,
+    };
+}
+
+function formatSystemThresholdDownloadText(config = {}) {
+    const rules = config.attachment_download_rules || {};
+    const items = Array.isArray(rules.rules) ? rules.rules : [];
+    const maxFilesRaw = Number(config.max_download_files);
+    const maxFiles = Number.isFinite(maxFilesRaw) ? maxFilesRaw : AUTO_SYNC_TEST_MAX_FILES;
+    const detail = items.map(rule => `${rule.tab_label || rule.tab_id || '目标 Tab'} ${String(rule.file_type || '').toUpperCase()}≥${rule.min_download_count || 0}`).join('；');
+    if (!config.download_attachments) {
+        if (rules.enabled && items.length) {
+            return `达标下载规则已保存：${detail}；但当前每目标下载上限为 ${maxFiles}，本轮只同步索引`;
+        }
+        return '当前只同步索引，不自动下载附件';
+    }
+    if (!rules.enabled || !items.length) {
+        return `每目标自动下载上限 ${maxFiles} 个；已下载过的不重复下载`;
+    }
+    return `满足规则且未下载过才自动下载：${detail}；每个目标最多 ${maxFiles} 个`;
 }
 
 function autoSyncScopeLabel(scope) {
@@ -1434,7 +1487,7 @@ function renderSystemSyncSchedulerPanel() {
 
     const interval = scheduler.interval_minutes || config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES;
     const count = config.count || SYSTEM_SYNC_COUNT;
-    const autoDownloadAttachments = Boolean(config.download_attachments);
+    const downloadText = formatSystemThresholdDownloadText(config);
     const lastTrigger = scheduler.last_trigger_at ? formatZsxqTime(scheduler.last_trigger_at) : '尚未触发';
     const nextRun = scheduler.next_run ? formatZsxqTime(scheduler.next_run) : '尚未预测';
     const roundsText = scheduler.continuous ? `已运行 ${scheduler.rounds_completed || 0} 轮 · 持续模式` : `进度 ${scheduler.rounds_completed || 0}/${scheduler.max_rounds || 0} 轮`;
@@ -1450,7 +1503,7 @@ function renderSystemSyncSchedulerPanel() {
     els.systemSchedulerContent.innerHTML = `
         <div class="space-y-1">
             <div>进程状态：${escapeHtml(scheduler.running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
-            <div>调度配置：${escapeHtml(String(interval))} 分钟一次 · 每批 ${escapeHtml(String(count))} 条 · ${escapeHtml(autoDownloadAttachments ? '自动下载已显式开启' : '不自动下载 PDF/音频附件')}</div>
+            <div>调度配置：${escapeHtml(String(interval))} 分钟一次 · 每批 ${escapeHtml(String(count))} 条 · ${escapeHtml(downloadText)}</div>
             <div>本轮状态：${escapeHtml(roundsText)} · ${escapeHtml(scheduler.message || '')}</div>
             <div>上次触发：${escapeHtml(lastTrigger)} · 下一次：${escapeHtml(nextRun)}</div>
             <div>日志：<span class="font-mono break-all">${escapeHtml(scheduler.log_path || '-')}</span></div>
@@ -1574,7 +1627,6 @@ function renderSystemSyncBatches() {
 
 function systemSyncConfigSummary(config) {
     if (!config || !config.exists) return '未保存系统计划配置';
-    const autoDownloadAttachments = Boolean(config.download_attachments);
     const interval = config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES;
     const count = config.count || SYSTEM_SYNC_COUNT;
     const maxRounds = config.max_rounds;
@@ -1582,7 +1634,7 @@ function systemSyncConfigSummary(config) {
     const roundsText = maxRounds ? `${done}/${maxRounds} 轮` : `已运行 ${done} 轮 · 持续运行`;
     const cookie = config.cookie_env_configured ? 'Cookie 已配置' : 'Cookie 未配置';
     const complete = config.testing_complete ? ' · 已达测试轮数' : '';
-    const downloadText = autoDownloadAttachments ? '自动下载已显式开启' : '不自动下载 PDF/音频附件';
+    const downloadText = formatSystemThresholdDownloadText(config);
     return `${interval} 分钟一次 · 每批 ${count} 条 · ${downloadText} · ${roundsText} · ${cookie}${complete}`;
 }
 

@@ -30,6 +30,8 @@ class Video(db.Model):
         db.UniqueConstraint('user_id', 'video_id', name='unique_user_video'),
         db.Index('idx_video_user_id', 'user_id'),
         db.Index('idx_video_channel_id', 'channel_id'),
+        db.Index('ix_videos_channel_active_published', 'channel_id', 'is_active', 'published_at'),
+        db.Index('ix_videos_channel_video_id', 'channel_id', 'video_id'),
     )
     
     # 关联关系
@@ -197,6 +199,7 @@ class VideoData(db.Model):
     # 创建复合索引
     __table_args__ = (
         db.Index('idx_video_date', 'video_id', 'date'),
+        db.Index('ix_video_data_date_video_id', 'date', 'video_id'),
     )
     
     def __repr__(self):

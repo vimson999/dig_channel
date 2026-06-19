@@ -18,18 +18,26 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from scheduler import DataCrawlerScheduler, manual_crawl
 import logging
+from logging.handlers import RotatingFileHandler
 
 # 配置日志
 import os
 logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
 os.makedirs(logs_dir, exist_ok=True)
 scheduler_log_path = os.path.join(logs_dir, 'scheduler.log')
+scheduler_log_max_bytes = int(os.environ.get('SCHEDULER_LOG_MAX_MB', '50')) * 1024 * 1024
+scheduler_log_backup_count = int(os.environ.get('SCHEDULER_LOG_BACKUP_COUNT', '5'))
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(scheduler_log_path),
+        RotatingFileHandler(
+            scheduler_log_path,
+            maxBytes=scheduler_log_max_bytes,
+            backupCount=scheduler_log_backup_count,
+            encoding='utf-8',
+        ),
         logging.StreamHandler()
     ]
 )

@@ -1,3 +1,4 @@
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -13,6 +14,22 @@ from services.zsxq_sync_service import ZsxqTransientUpstreamError  # noqa: E402
 
 
 class ZsxqSystemSyncTest(unittest.TestCase):
+    def test_topic_pages_for_count_matches_observed_zsxq_page_size(self):
+        self.assertEqual(system_sync_test._topic_pages_for_count(12), 1)
+        self.assertEqual(system_sync_test._topic_pages_for_count(40), 2)
+        self.assertEqual(system_sync_test._topic_pages_for_count(50), 3)
+
+    def test_runtime_cookie_override_counts_as_configured(self):
+        with patch.dict(
+            os.environ,
+            {
+                system_sync_test.COOKIE_ENV_NAME: "",
+                system_sync_test.COOKIE_OVERRIDE_ENV_NAME: "zsxq_access_token=token",
+            },
+        ):
+            self.assertTrue(system_sync_test._runtime_cookie_configured())
+            self.assertEqual(system_sync_test._runtime_cookie_source(), "page")
+
     def test_validate_group_id_treats_1059_as_transient(self):
         with patch.object(
             system_sync_test.zsxq_service,
@@ -66,6 +83,56 @@ class ZsxqSystemSyncTest(unittest.TestCase):
 
         self.assertEqual(get_menus.call_count, 3)
         self.assertEqual(sleep.call_count, 0)
+
+    def test_invalid_group_skip_records_and_notifies(self):
+        config = {
+            "enabled": True,
+            "group_id": "28888112822211",
+            "group_name": "前沿信息收录",
+            "interval_minutes": 240,
+            "count": 40,
+            "max_pages": 2,
+            "max_download_files": 40,
+            "rounds_completed": 4,
+            "max_rounds": None,
+            "jobs": [
+                {
+                    "key": "foreign_report_pdf",
+                    "file_type": "pdf",
+                    "mode_code": "fr",
+                    "tab": {"id": "tab-1", "label": "外资研报", "scope": "all"},
+                }
+            ],
+        }
+
+        with patch.object(system_sync_test, "load_config", return_value=config):
+            with patch.object(system_sync_test, "_pending_system_sync_work", return_value={"pending": False}):
+                with patch.object(system_sync_test, "runtime_cookie", return_value="zsxq_access_token=token"):
+                    with patch.object(
+                        system_sync_test,
+                        "_validate_group_id_with_retry",
+                        side_effect=ValueError("知识星球返回失败 code=401：Unauthorized"),
+                    ):
+                        with patch.object(system_sync_test, "_write_config") as write_config:
+                            with patch(
+                                "services.workflow_notification_service.workflow_notification_service.send_email_message"
+                            ) as send_email:
+                                result = system_sync_test.queue_configured_jobs(
+                                    trigger="scheduler",
+                                    attempt_id="20260618-210105",
+                                )
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "invalid_group")
+        self.assertEqual(config["last_skip_reason"], "invalid_group")
+        self.assertIn("401", config["last_skip_error"])
+        write_config.assert_called_once()
+        send_email.assert_called_once()
+        subject, body = send_email.call_args[0]
+        self.assertIn("系统同步触发失败", subject)
+        self.assertIn("401", body)
+        self.assertIn("本轮未入队", body)
+        self.assertIn("调度器已停止", body)
 
 
 if __name__ == "__main__":

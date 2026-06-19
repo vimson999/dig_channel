@@ -3,21 +3,86 @@ from models.task import PublicationTask
 from models import db
 from sqlalchemy import or_
 from datetime import datetime, timedelta
+from copy import deepcopy
 import base64
 import json
 import logging
 import os
 import redis
+import threading
+import time
 
 bp = Blueprint('publisher', __name__, url_prefix='/api/v1/publisher')
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../..'))
+PUBLISHER_TASK_LIST_CACHE_TTL_SECONDS = float(os.environ.get('PUBLISHER_TASK_LIST_CACHE_TTL', '10'))
+PUBLISHER_TASK_LIST_CACHE = {}
+PUBLISHER_TASK_LIST_CACHE_LOCK = threading.Lock()
+
+
+def _clear_publisher_task_list_cache():
+    with PUBLISHER_TASK_LIST_CACHE_LOCK:
+        PUBLISHER_TASK_LIST_CACHE.clear()
+
+
+def _get_publisher_task_list_cache(cache_key):
+    if PUBLISHER_TASK_LIST_CACHE_TTL_SECONDS <= 0:
+        return None
+    with PUBLISHER_TASK_LIST_CACHE_LOCK:
+        cached = PUBLISHER_TASK_LIST_CACHE.get(cache_key)
+        if not cached or cached.get('expires_at', 0) <= time.time():
+            return None
+        return deepcopy(cached.get('payload'))
+
+
+def _set_publisher_task_list_cache(cache_key, payload):
+    if PUBLISHER_TASK_LIST_CACHE_TTL_SECONDS <= 0:
+        return
+    with PUBLISHER_TASK_LIST_CACHE_LOCK:
+        PUBLISHER_TASK_LIST_CACHE[cache_key] = {
+            'expires_at': time.time() + PUBLISHER_TASK_LIST_CACHE_TTL_SECONDS,
+            'payload': deepcopy(payload),
+        }
 
 
 def _is_publisher_task(task):
     params = task.params if isinstance(task.params, dict) else {}
-    feature = params.get('feature')
+    feature = task.feature or params.get('feature')
     return feature in (None, 'publisher')
+
+
+def _compact_title(*candidates):
+    for candidate in candidates:
+        value = str(candidate or '').replace('\r', '\n').strip()
+        if value:
+            return ' | '.join(part.strip() for part in value.split('\n') if part.strip()) or value
+    return '未命名任务'
+
+
+def _publication_task_summary(row):
+    feature = getattr(row, 'feature', None)
+    title = _compact_title(
+        getattr(row, 'task_title', None),
+    )
+    is_video_task = feature in (None, '', 'publisher')
+    video_path = getattr(row, 'video_path', None)
+    return {
+        'id': row.id,
+        'title': title,
+        'celery_task_id': row.celery_task_id,
+        'status': row.status,
+        'current_step': row.current_step,
+        'progress': row.progress or 0,
+        'feature': feature or 'publisher',
+        'is_video_editor_task': is_video_task,
+        'has_reusable_config': is_video_task,
+        'params': {'feature': feature or 'publisher', '_summary': True},
+        'result': {'video_path': video_path} if video_path else {},
+        'error_message': row.error_message,
+        'created_at': (row.created_at.isoformat() + "Z") if row.created_at else None,
+        'updated_at': (row.updated_at.isoformat() + "Z") if row.updated_at else None,
+        'completed_at': (row.completed_at.isoformat() + "Z") if row.completed_at else None,
+    }
 
 
 def _abs_project_path(path):
@@ -100,6 +165,7 @@ def _enqueue_publication_task(task):
         task.error_message = asset_error
         task.completed_at = datetime.utcnow()
         db.session.commit()
+        _clear_publisher_task_list_cache()
         raise ValueError(asset_error)
 
     try:
@@ -115,6 +181,7 @@ def _enqueue_publication_task(task):
         task.progress = 0
         task.error_message = f'视频任务入队失败: {exc}'
         db.session.commit()
+        _clear_publisher_task_list_cache()
         raise
 
     task.celery_task_id = celery_task.id
@@ -124,6 +191,7 @@ def _enqueue_publication_task(task):
     task.error_message = None
     task.completed_at = None
     db.session.commit()
+    _clear_publisher_task_list_cache()
     return celery_task
 
 
@@ -301,10 +369,9 @@ def recover_pending_tasks():
 
         queue_refs = _read_render_queue_refs()
 
-        feature = PublicationTask.params['feature'].as_string()
         candidates = (
             PublicationTask.query
-            .filter(or_(feature.is_(None), feature == 'publisher'))
+            .filter(PublicationTask.feature == 'publisher')
             .filter(PublicationTask.status == 'pending')
             .filter(PublicationTask.updated_at <= cutoff)
             .order_by(PublicationTask.updated_at.asc())
@@ -410,13 +477,46 @@ def list_tasks():
     List recent publisher/video tasks (pagination could be added).
     """
     include_all = str(request.args.get('include_all', '')).lower() in ('1', 'true', 'yes')
+    include_payload = str(request.args.get('include_payload', '')).lower() in ('1', 'true', 'yes')
+    cache_key = (include_all,)
+    if not include_payload:
+        cached = _get_publisher_task_list_cache(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
     query = PublicationTask.query
     if not include_all:
-        feature = PublicationTask.params['feature'].as_string()
-        query = query.filter(or_(feature.is_(None), feature == 'publisher'))
+        query = query.filter(PublicationTask.feature == 'publisher')
 
-    tasks = query.order_by(PublicationTask.created_at.desc()).limit(20).all()
-    return jsonify({
+    if include_payload:
+        tasks = query.order_by(PublicationTask.created_at.desc()).limit(20).all()
+        data = [t.to_dict() for t in tasks]
+    else:
+        rows = (
+            query.with_entities(
+                PublicationTask.id.label('id'),
+                PublicationTask.celery_task_id.label('celery_task_id'),
+                PublicationTask.status.label('status'),
+                PublicationTask.current_step.label('current_step'),
+                PublicationTask.progress.label('progress'),
+                PublicationTask.error_message.label('error_message'),
+                PublicationTask.created_at.label('created_at'),
+                PublicationTask.updated_at.label('updated_at'),
+                PublicationTask.completed_at.label('completed_at'),
+                PublicationTask.feature.label('feature'),
+                PublicationTask.task_title.label('task_title'),
+                PublicationTask.task_video_path.label('video_path'),
+            )
+            .order_by(PublicationTask.created_at.desc())
+            .limit(20)
+            .all()
+        )
+        data = [_publication_task_summary(row) for row in rows]
+
+    payload = {
         'success': True,
-        'data': [t.to_dict() for t in tasks]
-    })
+        'data': data
+    }
+    if not include_payload:
+        _set_publisher_task_list_cache(cache_key, payload)
+    return jsonify(payload)

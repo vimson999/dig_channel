@@ -1,7 +1,11 @@
 import os
 import logging
+import re
+import uuid
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 from typing import Dict, Any, Tuple, Optional
+
+from services.frontend_thumbnail_renderer import frontend_thumbnail_renderer
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +141,178 @@ class ThumbnailService:
         draw.line([x + size*0.25, y, x + size*0.25, y + size*0.3], fill=color, width=2)
         draw.line([x + size*0.75, y, x + size*0.75, y + size*0.3], fill=color, width=2)
 
+    def _font(self, size: int):
+        if not self.font_path:
+            raise RuntimeError(
+                "未找到可渲染中文的封面字体；请安装 Source Han Sans/Noto CJK，"
+                "或通过 REPORT_THUMBNAIL_FONT_PATH 指定字体文件。"
+            )
+        return ImageFont.truetype(self.font_path, size)
+
+    def _text_width(self, draw, text: str, font) -> int:
+        left, _top, right, _bottom = draw.textbbox((0, 0), text, font=font)
+        return right - left
+
+    def _fit_text_line(self, draw, text: str, font, max_width: int) -> str:
+        text = str(text or "").strip()
+        if self._text_width(draw, text, font) <= max_width:
+            return text
+        suffix = "..."
+        while text and self._text_width(draw, text + suffix, font) > max_width:
+            text = text[:-1].rstrip()
+        return (text + suffix) if text else suffix
+
+    def _resize_cover(self, image: Image.Image, target_w: int, target_h: int, *, anchor_y: float = 0.0) -> Image.Image:
+        src_w, src_h = image.size
+        if src_w <= 0 or src_h <= 0:
+            return Image.new("RGBA", (target_w, target_h), (255, 255, 255, 255))
+        scale = max(target_w / src_w, target_h / src_h)
+        resized_w = max(1, int(src_w * scale))
+        resized_h = max(1, int(src_h * scale))
+        resized = image.resize((resized_w, resized_h), Image.Resampling.LANCZOS)
+        crop_x = max(0, (resized_w - target_w) // 2)
+        crop_y = max(0, int((resized_h - target_h) * max(0.0, min(1.0, anchor_y))))
+        return resized.crop((crop_x, crop_y, crop_x + target_w, crop_y + target_h))
+
+    def _vertical_title_lines(self, draw, title: str, max_width: int, max_lines: int):
+        compact = "".join(str(title or "").split())
+        base_size = 82 if len(compact) <= 18 else 76 if len(compact) <= 26 else 68
+        for size in range(base_size, 55, -4):
+            font = self._font(size)
+            lines = self._wrap_vertical_text(draw, title, font, max_width, max_lines)
+            line_gap = int(size * 1.15)
+            if len(lines) * line_gap <= 390:
+                return lines, font, size, line_gap
+        font = self._font(56)
+        return self._wrap_vertical_text(draw, title, font, max_width, max_lines), font, 56, 66
+
+    def _draw_vertical_title_line(self, draw, x: int, y: int, line: str, font, *, accent=(226, 198, 82, 255), text=(245, 248, 252, 255)):
+        value = str(line or "")
+        colon_positions = [pos for pos in (value.find(":"), value.find("：")) if pos >= 0]
+        if colon_positions and min(colon_positions) <= 5:
+            split_at = min(colon_positions) + 1
+            prefix = value[:split_at]
+            rest = value[split_at:].lstrip()
+            draw.text((x, y), prefix, font=font, fill=accent)
+            offset = self._text_width(draw, prefix, font) + 14
+            draw.text((x + offset, y), rest, font=font, fill=text)
+            return
+        draw.text((x, y), value, font=font, fill=text)
+
+    def _wrap_vertical_text(self, draw, text: str, font, max_width: int, max_lines: int):
+        raw = str(text or "").strip()
+        if not raw or max_lines <= 0:
+            return []
+
+        lines = []
+        for paragraph in raw.splitlines():
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            tokens = re.findall(r"[\u4e00-\u9fff]|[A-Za-z0-9.]+|[^\u4e00-\u9fff]", paragraph)
+            current = ""
+            for token in tokens:
+                candidate = current + token
+                if current and self._text_width(draw, candidate, font) > max_width:
+                    lines.append(current.strip())
+                    current = token
+                else:
+                    current = candidate
+            if current.strip():
+                lines.append(current.strip())
+
+        if len(lines) > max_lines:
+            trimmed = lines[:max_lines]
+            trimmed[-1] = self._fit_text_line(draw, trimmed[-1], font, max_width)
+            return trimmed
+        return lines
+
+    def generate_vertical_thumbnail(self, main_title: str, sub_title: str = "", date_text: str = "",
+                                    screenshot_path: str = None, output_filename: str = None) -> str:
+        """Generate the 9:16 vertical background used by vertical video synthesis."""
+        try:
+            width, height = 1080, 1920
+            preview_h = 600
+            content_top = preview_h + 86
+            left_padding = 76
+            right_padding = 76
+            max_text_width = width - left_padding - right_padding
+            navy_top = (7, 23, 39)
+            navy_bottom = (3, 10, 22)
+            gold = (226, 198, 82, 255)
+            white = (246, 248, 252, 255)
+            muted = (214, 222, 232, 210)
+
+            img = Image.new("RGBA", (width, height), (*navy_bottom, 255))
+            draw = ImageDraw.Draw(img)
+
+            for y in range(height):
+                ratio = y / max(1, height - 1)
+                color = tuple(int(navy_top[i] * (1 - ratio) + navy_bottom[i] * ratio) for i in range(3))
+                draw.line((0, y, width, y), fill=(*color, 255))
+
+            if screenshot_path and os.path.exists(screenshot_path):
+                screenshot = Image.open(screenshot_path).convert("RGBA")
+                preview = self._resize_cover(screenshot, width, preview_h, anchor_y=0.0)
+                img.paste(preview, (0, 0), preview)
+            else:
+                draw.rectangle([0, 0, width, preview_h], fill=(245, 247, 250, 255))
+                placeholder_font = self._font(30)
+                placeholder = "等待上传研报截图..."
+                text_w = self._text_width(draw, placeholder, placeholder_font)
+                draw.text(((width - text_w) / 2, preview_h / 2 - 20), placeholder, font=placeholder_font, fill=(148, 163, 184, 255))
+
+            overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            fade_start = preview_h - 210
+            fade_end = preview_h + 64
+            for y in range(fade_start, fade_end):
+                ratio = (y - fade_start) / max(1, fade_end - fade_start)
+                alpha = int(238 * ratio)
+                overlay_draw.line((0, y, width, y), fill=(*navy_top, alpha))
+            img = Image.alpha_composite(img, overlay)
+            draw = ImageDraw.Draw(img)
+
+            draw.line((left_padding, content_top - 38, left_padding + 152, content_top - 38), fill=gold, width=6)
+            draw.line((0, preview_h, width, preview_h), fill=(226, 198, 82, 74), width=2)
+
+            title_lines, main_font, main_font_size, line_gap = self._vertical_title_lines(
+                draw,
+                main_title,
+                max_text_width,
+                4,
+            )
+            current_y = content_top
+            for line in title_lines:
+                self._draw_vertical_title_line(draw, left_padding, current_y, line, main_font, accent=gold, text=white)
+                current_y += line_gap
+
+            sub_font = self._font(42)
+            date_font = self._font(34)
+            sub_lines = self._wrap_vertical_text(draw, sub_title, sub_font, max_text_width, 2)
+            if sub_lines:
+                current_y += 34
+                for line in sub_lines[:2]:
+                    draw.text((left_padding, current_y), line, font=sub_font, fill=muted)
+                    current_y += int(42 * 1.25)
+
+            if date_text:
+                footer_y = min(max(current_y + 78, 1368), 1440)
+                draw.rectangle([left_padding, footer_y - 38, left_padding + 108, footer_y - 35], fill=(255, 255, 255, 150))
+                draw.text((left_padding, footer_y - 16), str(date_text), font=date_font, fill=(235, 239, 245, 178))
+
+            if not output_filename:
+                output_filename = f"vertical_thumbnail_{uuid.uuid4().hex[:8]}.jpg"
+            if not output_filename.lower().endswith((".jpg", ".jpeg")):
+                output_filename += ".jpg"
+            output_path = os.path.join(self.output_dir, output_filename)
+            img.convert("RGB").save(output_path, quality=95)
+            logger.info(f"Vertical thumbnail generated: {output_path}")
+            return output_path
+        except Exception as e:
+            logger.error(f"Vertical thumbnail generation failed: {e}", exc_info=True)
+            raise e
+
     def generate_thumbnail(self, main_title: str, sub_title: str = "", date_text: str = "", tag_text: str = "",
                           bg_preset_index: int = 0, layout: str = 'left', output_filename: str = None,
                           custom_bg_path: str = None, overlay_opacity: float = 0.5, transform: dict = None,
@@ -152,6 +328,36 @@ class ThumbnailService:
             
             # 判断是否应用特定视觉标识 (VI)
             is_screenshot_style = is_screenshot or is_podcast
+
+            renderer_mode = os.getenv("REPORT_COVER_RENDERER", "frontend").strip().lower()
+            if is_screenshot and renderer_mode not in {"pil", "legacy", "off", "0", "false"}:
+                try:
+                    frontend_output_filename = output_filename or f"thumbnail_{uuid.uuid4().hex[:8]}.jpg"
+                    if not frontend_output_filename.lower().endswith('.jpg'):
+                        frontend_output_filename += '.jpg'
+                    frontend_output_path = os.path.join(self.output_dir, frontend_output_filename)
+                    image_path = custom_bg_path if custom_bg_path and os.path.exists(custom_bg_path) else None
+                    rendered = frontend_thumbnail_renderer.render_landscape_cover(
+                        output_path=frontend_output_path,
+                        main_title=main_title or "",
+                        sub_title=sub_title or "",
+                        date_text=date_text or "",
+                        tag_text=tag_text or "",
+                        mode=mode,
+                        custom_bg_path=image_path,
+                        transform=transform or {'x': 0, 'y': 0, 'scale': 1},
+                        quality=0.95,
+                    )
+                    logger.info(f"Thumbnail generated by frontend renderer: {rendered}")
+                    return rendered
+                except Exception as exc:
+                    if renderer_mode in {"frontend-only", "browser-only", "strict"}:
+                        raise
+                    logger.warning(
+                        "Frontend thumbnail renderer failed; falling back to PIL renderer: %s",
+                        exc,
+                        exc_info=True,
+                    )
 
             if is_screenshot_style and is_custom_bg:
                 # 实现与前端一致的 drawImageCover 逻辑 (带变换)

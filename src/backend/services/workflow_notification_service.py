@@ -38,11 +38,30 @@ EVENT_LABELS = {
     "report_audio_doubao_completed": "豆包浏览器朗读完成",
     "report_audio_completed": "研报转语音完成",
     "report_audio_failed": "研报转语音失败",
+    "mp3_video_started": "MP3 视频编排启动",
+    "mp3_video_gemini_started": "MP3 Gemini 解析已开始",
+    "mp3_video_gemini_completed": "MP3 Gemini 解析完成",
+    "mp3_video_plan_completed": "MP3 视频规划完成",
+    "mp3_video_visuals_completed": "MP3 封皮背景生成完成",
+    "mp3_video_landscape_submitted": "MP3 横屏视频已提交",
+    "mp3_video_landscape_completed": "MP3 横屏视频完成",
+    "mp3_video_vertical_submitted": "MP3 竖屏视频已提交",
+    "mp3_video_vertical_completed": "MP3 竖屏视频完成",
+    "mp3_video_completed": "MP3 视频编排完成",
+    "mp3_video_failed": "MP3 视频编排失败",
     "test": "测试通知",
 }
 
-FINAL_EVENTS = {"workflow_completed", "workflow_partial", "workflow_failed", "report_audio_completed", "report_audio_failed"}
-FAILURE_EVENTS = {"workflow_failed", "report_audio_failed"}
+FINAL_EVENTS = {
+    "workflow_completed",
+    "workflow_partial",
+    "workflow_failed",
+    "report_audio_completed",
+    "report_audio_failed",
+    "mp3_video_completed",
+    "mp3_video_failed",
+}
+FAILURE_EVENTS = {"workflow_failed", "report_audio_failed", "mp3_video_failed"}
 SUPPORTED_EMAIL_PROVIDERS = {"email", "smtp", "qq_email", "qq-mail"}
 TRUTHY = {"1", "true", "yes", "on"}
 FALSY = {"0", "false", "no", "off"}
@@ -99,6 +118,14 @@ class WorkflowNotificationService:
         subject, body = self.build_email_content(payload)
         self._send_email_with_retry(settings, subject, body)
         logger.info("[WORKFLOW_NOTIFY] email sent | event=%s to=%s", event_type, settings["to"])
+        workflow = payload.get("workflow") if isinstance(payload.get("workflow"), dict) else {}
+        if workflow.get("stage_results"):
+            logger.info(
+                "[WORKFLOW_NOTIFY] workflow audit | event=%s workflow=%s\n%s",
+                event_type,
+                workflow.get("id") or "-",
+                "\n".join(self._stage_lines(workflow)),
+            )
         return {"sent": True, "event_type": event_type, "to": settings["to"]}
 
     def send_test_email(self):
@@ -304,8 +331,10 @@ class WorkflowNotificationService:
                 f" | 新增 {self._num(summary.get('topics_new'))}"
                 f" | 更新 {self._num(summary.get('topics_updated'))}"
                 f" | 下载 {self._num(summary.get('attachments_downloaded'))}"
+                f" | 跳过 {self._num(summary.get('attachments_skipped'))}"
                 f" | 失败 {self._num(summary.get('attachments_failed'))}"
             )
+            lines.extend(self._sync_audit_lines(summary))
             if sync.get("error"):
                 lines.append(f"同步错误：{sync.get('error')}")
 
@@ -371,6 +400,12 @@ class WorkflowNotificationService:
         totals = {
             "downloaded": self._safe_int(sync_summary.get("attachments_downloaded")),
             "download_failed": self._safe_int(sync_summary.get("attachments_failed")),
+            "download_skipped": self._safe_int(sync_summary.get("attachments_skipped")),
+            "download_below_threshold": self._safe_int(sync_summary.get("attachments_below_threshold")),
+            "download_missing_count": self._safe_int(sync_summary.get("attachments_missing_download_count")),
+            "download_already_present": self._safe_int(sync_summary.get("attachments_already_downloaded_skipped")),
+            "attachments_non_target_skipped": self._safe_int(sync_summary.get("attachments_non_target_skipped")),
+            "attachments_limited_skipped": self._safe_int(sync_summary.get("attachments_limited_skipped")),
             "clean_success": clean_counts["success"],
             "clean_failed": clean_counts["failed"],
             "publish_submitted": publish_counts["submitted"],
@@ -379,6 +414,95 @@ class WorkflowNotificationService:
             "publish_failed": publish_counts["failed"],
         }
         return totals if any(totals.values()) else None
+
+    def _sync_audit_lines(self, summary):
+        if not isinstance(summary, dict):
+            return []
+
+        planned_topics = self._safe_int(summary.get("planned_topics_total"))
+        topics_target = self._safe_int(summary.get("target_topics_per_tab"))
+        tabs = summary.get("tabs") if isinstance(summary.get("tabs"), list) else []
+        if not planned_topics and topics_target and tabs:
+            planned_topics = topics_target * len(tabs)
+
+        planned_pages = self._safe_int(summary.get("planned_pages_total"))
+        max_pages = self._safe_int(summary.get("max_pages"))
+        if not planned_pages and max_pages and tabs:
+            planned_pages = max_pages * len(tabs)
+
+        actual_pages = self._safe_int(summary.get("pages_fetched"))
+        if not actual_pages and tabs:
+            actual_pages = sum(self._safe_int(tab.get("pages")) for tab in tabs if isinstance(tab, dict))
+
+        topics_fetched = self._safe_int(summary.get("topics_fetched"))
+        attachments_seen = self._safe_int(summary.get("attachments_seen"))
+        downloaded = self._safe_int(summary.get("attachments_downloaded"))
+        failed = self._safe_int(summary.get("attachments_failed"))
+        skipped = self._safe_int(summary.get("attachments_skipped"))
+
+        lines = []
+        if any([planned_topics, planned_pages, actual_pages, topics_fetched, attachments_seen]):
+            plan_bits = []
+            if topics_target:
+                plan_bits.append(f"每个目标 Tab {topics_target} 个 topic")
+            if planned_topics:
+                plan_bits.append(f"合计计划 {planned_topics} 个 topic")
+            if max_pages:
+                plan_bits.append(f"每个目标最多 {max_pages} 页")
+            if planned_pages:
+                plan_bits.append(f"合计最多 {planned_pages} 页")
+            plan_text = "，".join(plan_bits) if plan_bits else "未记录计划值"
+            lines.append(
+                f"同步对账：计划 {plan_text}；实际拉取 {actual_pages} 页，"
+                f"拿到 {topics_fetched} 个 topic，发现 {attachments_seen} 个附件/item。"
+            )
+
+        if any([downloaded, failed, skipped]):
+            skip_text = self._download_skip_breakdown_text(summary)
+            limit_text = "；达到本轮下载上限" if summary.get("download_limit_reached") else ""
+            lines.append(
+                f"下载对账：真正下载 {downloaded} 个，失败 {failed} 个，"
+                f"跳过 {skipped} 个{skip_text}{limit_text}。"
+            )
+
+        tab_lines = self._sync_tab_audit_lines(tabs)
+        if tab_lines:
+            lines.append("同步 Tab 明细：")
+            lines.extend(tab_lines)
+        return lines
+
+    def _sync_tab_audit_lines(self, tabs):
+        if not isinstance(tabs, list):
+            return []
+        lines = []
+        for tab in tabs[:8]:
+            if not isinstance(tab, dict):
+                continue
+            label = tab.get("tab_label") or tab.get("tab_id") or "Tab"
+            target = self._safe_int(tab.get("target_topics"))
+            planned_pages = self._safe_int(tab.get("planned_pages"))
+            pages = self._safe_int(tab.get("pages"))
+            topics = self._safe_int(tab.get("topics_fetched"))
+            seen = self._safe_int(tab.get("attachments_seen"))
+            downloaded = self._safe_int(tab.get("attachments_downloaded"))
+            skipped = self._safe_int(tab.get("attachments_skipped"))
+            failed = self._safe_int(tab.get("attachments_failed"))
+            if not any([target, planned_pages, pages, topics, seen, downloaded, skipped, failed]):
+                continue
+            stop_reasons = []
+            if tab.get("stopped_by_existing"):
+                stop_reasons.append("遇到已有 topic 后停止")
+            if tab.get("stopped_by_download_limit") or tab.get("download_limit_reached"):
+                stop_reasons.append("达到下载上限")
+            stop_text = f"；{'，'.join(stop_reasons)}" if stop_reasons else ""
+            lines.append(
+                f"{label}：计划 {target or '-'} 个 topic / {planned_pages or '-'} 页，"
+                f"实际 {topics} 个 topic / {pages} 页；附件 {seen}，下载 {downloaded}，"
+                f"跳过 {skipped}{self._download_skip_breakdown_text(tab)}，失败 {failed}{stop_text}。"
+            )
+        if len(tabs) > 8:
+            lines.append(f"其余 {len(tabs) - 8} 个 Tab 已省略。")
+        return lines
 
     def _clean_counts(self, tasks):
         counts = {"files": 0, "success": 0, "failed": 0}
@@ -453,6 +577,9 @@ class WorkflowNotificationService:
         extras = []
         if totals.get("download_failed"):
             extras.append(f"下载失败 {totals['download_failed']} 个")
+        if totals.get("download_skipped"):
+            skip_reason = self._download_skip_breakdown_text(totals)
+            extras.append(f"下载跳过 {totals['download_skipped']} 个{skip_reason}")
         if totals.get("clean_failed"):
             extras.append(f"清洗失败 {totals['clean_failed']} 个")
         if totals.get("publish_pending"):
@@ -462,6 +589,36 @@ class WorkflowNotificationService:
         if extras:
             text += f"未完成项：{'，'.join(extras)}。"
         return text
+
+    def _download_skip_breakdown_text(self, summary):
+        if not isinstance(summary, dict):
+            return ""
+        parts = []
+        already = self._safe_int(
+            summary.get("attachments_already_downloaded_skipped")
+            or summary.get("download_already_present")
+        )
+        below = self._safe_int(
+            summary.get("attachments_below_threshold")
+            or summary.get("download_below_threshold")
+        )
+        missing = self._safe_int(
+            summary.get("attachments_missing_download_count")
+            or summary.get("download_missing_count")
+        )
+        non_target = self._safe_int(summary.get("attachments_non_target_skipped"))
+        limited = self._safe_int(summary.get("attachments_limited_skipped"))
+        if already:
+            parts.append(f"已下载/复用 {already}")
+        if below:
+            parts.append(f"低于阈值 {below}")
+        if missing:
+            parts.append(f"缺少下载次数 {missing}")
+        if non_target:
+            parts.append(f"非目标类型 {non_target}")
+        if limited:
+            parts.append(f"下载上限 {limited}")
+        return f"（{', '.join(parts)}）" if parts else ""
 
     def _publish_detail_lines(self, tasks):
         if not isinstance(tasks, list):

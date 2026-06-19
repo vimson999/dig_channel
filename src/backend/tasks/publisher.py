@@ -23,8 +23,32 @@ from services.bilibili.uploader import BiliUploader, DEFAULT_NEUTRAL_MARK
 from services.youtube.uploader import YouTubeUploader
 from services.config_service import ConfigService
 from config import get_config
+from sqlalchemy.orm import load_only
 
 logger = logging.getLogger(__name__)
+
+TASK_UPDATE_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.completed_at,
+)
+
+TASK_PAYLOAD_COLUMNS = (
+    *TASK_UPDATE_COLUMNS,
+    PublicationTask.params,
+    PublicationTask.feature,
+    PublicationTask.user_id,
+    PublicationTask.created_at,
+)
+
+
+def _load_task(task_id, *columns):
+    attrs = columns or TASK_PAYLOAD_COLUMNS
+    return PublicationTask.query.options(load_only(*attrs)).get(task_id)
 
 def update_task_record(task_id, retries=3, **fields):
     """Persist task state in a short transaction with rollback/retry.
@@ -39,7 +63,7 @@ def update_task_record(task_id, retries=3, **fields):
     for attempt in range(1, retries + 1):
         try:
             db.session.rollback()
-            task = PublicationTask.query.get(task_id)
+            task = _load_task(task_id, *TASK_UPDATE_COLUMNS)
             if not task:
                 raise ValueError(f"Task {task_id} not found")
             for key, value in fields.items():
@@ -105,6 +129,20 @@ def has_usable_subtitles(value):
         return any(has_usable_subtitles(item) for item in value)
     return False
 
+def _enabled(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
 @celery_app.task(bind=True)
 def run_publication_pipeline(self, task_id):
     """
@@ -123,7 +161,7 @@ def run_publication_pipeline(self, task_id):
     app = create_app()
     
     with app.app_context():
-        task = PublicationTask.query.get(task_id)
+        task = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
         if not task:
             logger.error(f"Task {task_id} not found in DB")
             return
@@ -375,11 +413,28 @@ def run_publication_pipeline(self, task_id):
                     progress=30,
                     result=result_state,
                 )
-
+                
                 # 如果是显式指定竖屏，则参数从 vid_params 取；否则从 v_vid_params 取
                 active_v_params = vid_params if is_explicit_vertical else v_vid_params
+                vertical_thumb_params = params.get('vertical_thumbnail') if isinstance(params.get('vertical_thumbnail'), dict) else {}
                 
                 v_image_path = to_abs_path(active_v_params.get('image_path'))
+                if vertical_thumb_params and _enabled(vertical_thumb_params.get('enabled'), True):
+                    screenshot_path = to_abs_path(
+                        vertical_thumb_params.get('screenshot_path')
+                        or active_v_params.get('image_path')
+                        or vid_params.get('image_path')
+                    )
+                    v_image_path = thumbnail_service.generate_vertical_thumbnail(
+                        main_title=vertical_thumb_params.get('main_title') or thumb_params.get('main_title') or bili_params.get('title') or "",
+                        sub_title=vertical_thumb_params.get('sub_title') or thumb_params.get('sub_title') or "",
+                        date_text=vertical_thumb_params.get('date_text') or thumb_params.get('date_text') or "",
+                        screenshot_path=screenshot_path,
+                        output_filename=f"vbg_{base_name}.jpg",
+                    )
+                    result_state = {**result_state, 'vertical_background_path': v_image_path}
+                    task = update_task_record(task_id, result=result_state)
+
                 if not v_image_path or not os.path.exists(v_image_path):
                     # Fallback
                     v_image_path = to_abs_path(vid_params.get('image_path'))
@@ -405,7 +460,7 @@ def run_publication_pipeline(self, task_id):
                 
                 # 如果这是唯一的合成任务，把它也放到主 video_path 里方便前端下载
                 res_dict = {**result_state, 'vertical_video_path': v_video_path}
-                if is_explicit_vertical:
+                if is_explicit_vertical or not final_video_path:
                     res_dict['video_path'] = v_video_path
                     
                 result_state = res_dict
@@ -496,7 +551,18 @@ def run_publication_pipeline(self, task_id):
                         neutral_mark=bili_params.get('neutral_mark') or DEFAULT_NEUTRAL_MARK,
                         charging_pay=bili_params.get('charging_pay'),
                         delay_time=bili_params.get('delay_time') or bili_params.get('dtime'),
-                        season_id=bili_params.get('season_id')
+                        season_id=bili_params.get('season_id'),
+                        is_only_self=(
+                            bili_params.get('is_only_self')
+                            or bili_params.get('isOnlySelf')
+                            or bili_params.get('only_self')
+                            or 0
+                        ),
+                        space_hidden=bili_params.get('space_hidden'),
+                        creation_statement_id=(
+                            bili_params.get('creation_statement_id')
+                            or bili_params.get('creationStatementId')
+                        )
                     )
                 
                 upload_result = asyncio.run(_do_upload())
@@ -575,28 +641,26 @@ def run_youtube_upload_only(self, task_id):
     app = create_app()
     
     with app.app_context():
-        task = PublicationTask.query.get(task_id)
+        task = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
         if not task:
             logger.error(f"Task {task_id} not found")
             return
-    
+
+        params = task.params or {}
+        result_state = dict(task.result or {})
+
         # Check if we have the necessary files
-        video_path = task.result.get('video_path')
+        video_path = result_state.get('video_path')
         if not video_path or not os.path.exists(video_path):
             logger.error(f"Cannot supplement YouTube: Video file missing at {video_path}")
-            task.error_message = "无法补发：找不到原始视频文件"
-            db.session.commit()
+            update_task_record(task_id, error_message="无法补发：找不到原始视频文件")
             return
     
         try:
-            task.status = 'processing'
-            task.current_step = 'upload_youtube'
-            db.session.commit()
-    
-            params = task.params
+            update_task_record(task_id, status='processing', current_step='upload_youtube')
             yt_params = params.get('youtube') or {}
             bili_params = params.get('bilibili') or {}
-            final_cover_path = task.result.get('cover_path')
+            final_cover_path = result_state.get('cover_path')
     
             logger.info(f"Task {task_id}: Supplementing YouTube upload...")
             
@@ -611,18 +675,24 @@ def run_youtube_upload_only(self, task_id):
                 thumbnail_path=final_cover_path
             )
             
-            task.result = {**(task.result or {}), 'youtube_result': yt_response}
-            task.status = 'completed'
-            task.current_step = 'done'
-            task.progress = 100
-            db.session.commit()
+            result_state = {**result_state, 'youtube_result': yt_response}
+            update_task_record(
+                task_id,
+                result=result_state,
+                status='completed',
+                current_step='done',
+                progress=100,
+            )
             logger.info(f"Task {task_id}: YouTube supplement successful.")
     
         except Exception as e:
             logger.error(f"YouTube supplement failed for task {task_id}: {e}", exc_info=True)
             # Don't mark the whole task as failed if it was previously completed, 
             # just record the error in result
-            task.result = {**(task.result or {}), 'youtube_error': str(e)}
-            task.status = 'completed' # Keep as completed since Bili was done
-            task.current_step = 'done'
-            db.session.commit()
+            result_state = {**result_state, 'youtube_error': str(e)}
+            update_task_record(
+                task_id,
+                result=result_state,
+                status='completed',
+                current_step='done',
+            )

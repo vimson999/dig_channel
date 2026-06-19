@@ -8,8 +8,35 @@
 from functools import wraps
 from flask import request, session, current_app
 import jwt
+from sqlalchemy.orm import load_only
 from models import User
 from utils.api_utils import handle_api_error
+
+
+LIGHT_USER_COLUMNS = (
+    User.id,
+    User.username,
+    User.email,
+    User.display_name,
+    User.avatar_url,
+    User.is_active,
+    User.is_verified,
+    User.is_admin,
+    User.timezone,
+    User.language,
+    User.created_at,
+    User.updated_at,
+    User.last_login_at,
+)
+
+
+def _light_user_query():
+    return User.query.options(load_only(*LIGHT_USER_COLUMNS))
+
+
+def _get_light_user_by_id(user_id):
+    return _light_user_query().filter(User.id == user_id).first()
+
 
 def get_current_user():
     """获取当前登录用户
@@ -47,7 +74,7 @@ def get_user_from_token():
     try:
         # 解码token
         data = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
-        user = User.query.get(data['user_id'])
+        user = _get_light_user_by_id(data['user_id'])
         
         if user and user.is_active:
             return user
@@ -66,7 +93,7 @@ def get_user_from_session():
     if not user_id:
         return None
     
-    user = User.query.get(user_id)
+    user = _get_light_user_by_id(user_id)
     if user and user.is_active:
         return user
     
@@ -87,13 +114,13 @@ def require_login(f):
         if not current_user and current_app.config.get('DEBUG', False):
             try:
                 # 优先使用已有的admin用户(通常有数据)
-                admin_user = User.query.filter_by(username='admin').first()
+                admin_user = _light_user_query().filter_by(username='admin').first()
                 if admin_user and admin_user.is_active:
                     print(f"🔧 [开发模式] 使用admin用户: {admin_user.username} (ID: {admin_user.id})")
                     current_user = admin_user
                 else:
                     # 如果没有admin用户，则查找或创建test_user
-                    test_user = User.query.filter_by(username='test_user').first()
+                    test_user = _light_user_query().filter_by(username='test_user').first()
                     if not test_user:
                         from models import db
                         test_user = User(
@@ -110,7 +137,7 @@ def require_login(f):
                             db.session.rollback()
                             print(f"❌ 创建测试用户失败: {e}")
                             # 尝试再次查找
-                            test_user = User.query.filter_by(username='test_user').first()
+                            test_user = _light_user_query().filter_by(username='test_user').first()
                     
                     if test_user:
                         print(f"🔧 [开发模式] 使用测试用户: {test_user.username} (ID: {test_user.id})")

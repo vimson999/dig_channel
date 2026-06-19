@@ -14,6 +14,12 @@ from services.zsxq_sync_service import zsxq_sync_service  # noqa: E402
 
 
 class ZsxqSyncPdfCleanHandoffTest(unittest.TestCase):
+    def test_effective_topic_max_pages_expands_to_cover_target_count(self):
+        self.assertEqual(zsxq_sync_service._effective_topic_max_pages(12, 1), 1)
+        self.assertEqual(zsxq_sync_service._effective_topic_max_pages(40, 1), 2)
+        self.assertEqual(zsxq_sync_service._effective_topic_max_pages(50, 1), 3)
+        self.assertEqual(zsxq_sync_service._effective_topic_max_pages(40, 4), 4)
+
     def test_attachment_download_policy_blocks_by_default(self):
         with patch.dict("os.environ", {}, clear=True):
             policy = zsxq_sync_service._attachment_download_policy(

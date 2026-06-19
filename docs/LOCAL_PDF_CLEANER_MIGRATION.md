@@ -4,7 +4,7 @@
 
 把 `/Users/v9/Documents/3---work/06---dev---python/pytest` 项目里已经稳定的 PDF 清洗能力完整迁移到当前系统，最终用当前系统本地清洗替代外部 `pytest` 服务。
 
-当前阶段只做迁移与独立测试，不把本地清洗默认接入工作流。工作流仍默认使用 `engine=external`。
+当前阶段已把本地清洗默认接入内容清洗与知识星球编排。未显式指定 `engine` 的 PDF 清洗任务默认使用 `engine=local`；仍可通过显式传入 `engine=external` 临时回退到外部 `pytest` 服务。
 
 ## 已迁移内容
 
@@ -58,15 +58,16 @@
 - 自主保护策略不是简单盖字，而是字符级随机熵、ghost layer、权限加密组合。
 - 取证分析用于发现隐藏文字、权限限制和隐形追踪指纹，后续可驱动 text_clean 策略。
 
-## 尚未切入工作流
+## 工作流默认切换
 
-这些默认值仍保持 external：
+这些默认值已经切换为 local：
 
 - `PdfCleanOptions.engine`
 - `submit_pdf_clean_task()` 创建任务时的默认 cleaner engine
 - `tasks.content_pipeline.run_pdf_clean_task` 运行时兜底 engine
+- `zsxq_workflow_service` 生成手动/系统工作流快照时的 `clean.pdf_cleaner.engine`
 
-所以当前自动同步、清洗、发布工作流不会因为本次迁移而改变行为。
+所以当前自动同步、清洗、发布工作流不再依赖 `http://127.0.0.1:5005`，除非请求或配置里显式指定 `pdf_cleaner.engine=external`。
 
 ## 单体测试
 

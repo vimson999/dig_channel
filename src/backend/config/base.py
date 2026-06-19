@@ -11,6 +11,35 @@ from dotenv import load_dotenv
 # 加载环境变量
 load_dotenv()
 
+
+def _int_env(name, default, minimum=0):
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(value, minimum)
+
+
+def _postgres_engine_options(database_uri, *, pool_size, max_overflow, pool_timeout, pool_recycle, connect_timeout, statement_timeout_ms=None):
+    if not str(database_uri or '').startswith(('postgresql', 'postgres://')):
+        return {}
+
+    connect_args = {
+        'connect_timeout': connect_timeout,
+        'sslmode': 'prefer',
+    }
+    if statement_timeout_ms:
+        connect_args['options'] = f'-c statement_timeout={statement_timeout_ms}'
+
+    return {
+        'pool_size': pool_size,
+        'max_overflow': max_overflow,
+        'pool_timeout': pool_timeout,
+        'pool_recycle': pool_recycle,
+        'pool_pre_ping': True,
+        'connect_args': connect_args,
+    }
+
 class BaseConfig:
     """基础配置类"""
     
@@ -23,18 +52,16 @@ class BaseConfig:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ECHO = False
     
-    # 数据库连接池配置
-    SQLALCHEMY_ENGINE_OPTIONS = {
-        'pool_size': 20,           # 连接池大小
-        'max_overflow': 30,        # 最大溢出连接数
-        'pool_timeout': 30,        # 获取连接的超时时间
-        'pool_recycle': 1800,      # 连接回收时间(30分钟)
-        'pool_pre_ping': True,     # 连接前ping检查
-        'connect_args': {
-            'connect_timeout': 10,  # 连接超时
-            'sslmode': 'prefer',    # SSL模式
-        } if os.environ.get('DATABASE_URL', '').startswith('postgresql') else {}
-    }
+    # 数据库连接池配置。每个 Flask/Celery/scheduler 进程都有独立连接池，默认值要克制。
+    SQLALCHEMY_ENGINE_OPTIONS = _postgres_engine_options(
+        SQLALCHEMY_DATABASE_URI,
+        pool_size=_int_env('DB_POOL_SIZE', 2, 1),
+        max_overflow=_int_env('DB_MAX_OVERFLOW', 1, 0),
+        pool_timeout=_int_env('DB_POOL_TIMEOUT', 10, 1),
+        pool_recycle=_int_env('DB_POOL_RECYCLE', 1800, 60),
+        connect_timeout=_int_env('DB_CONNECT_TIMEOUT', 10, 1),
+        statement_timeout_ms=os.environ.get('DB_STATEMENT_TIMEOUT_MS'),
+    )
     
     # Redis配置
     REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')

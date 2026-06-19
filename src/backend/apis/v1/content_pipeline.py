@@ -1,6 +1,7 @@
 import logging
 
 from flask import Blueprint, jsonify, request
+from sqlalchemy.orm import load_only
 
 from models.task import PublicationTask
 from services.content_pipeline.pdf_cleaner_adapter import PdfCleanerAdapter
@@ -31,6 +32,21 @@ CONTENT_PIPELINE_FEATURES = {
     "content_audio_clean",
     "zsxq_clean_output_publish",
 }
+
+TASK_PAYLOAD_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.feature,
+    PublicationTask.created_at,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
+)
 
 
 @bp.route("/pdf-clean/health", methods=["GET"])
@@ -168,9 +184,9 @@ def list_content_pipeline_tasks(_current_user):
     page = max(1, request.args.get("page", 1, type=int))
     per_page = min(50, max(1, request.args.get("per_page", 20, type=int)))
     query = PublicationTask.query.filter(
-        PublicationTask.params["feature"].as_string().in_(CONTENT_PIPELINE_FEATURES)
+        PublicationTask.feature.in_(CONTENT_PIPELINE_FEATURES)
     ).order_by(PublicationTask.created_at.desc())
-    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+    pagination = query.options(load_only(*TASK_PAYLOAD_COLUMNS)).paginate(page=page, per_page=per_page, error_out=False)
     return jsonify(
         {
             "success": True,
@@ -190,7 +206,7 @@ def list_content_pipeline_tasks(_current_user):
 @bp.route("/task/<task_id>", methods=["GET"])
 @require_login
 def get_content_pipeline_task(_current_user, task_id):
-    task = PublicationTask.query.get(task_id)
-    if not task or not isinstance(task.params, dict) or task.params.get("feature") not in CONTENT_PIPELINE_FEATURES:
+    task = PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).get(task_id)
+    if not task or (task.feature or (task.params or {}).get("feature")) not in CONTENT_PIPELINE_FEATURES:
         return jsonify({"success": False, "message": "任务不存在"}), 404
     return jsonify({"success": True, "data": task.to_dict()})

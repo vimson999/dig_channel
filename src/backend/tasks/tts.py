@@ -10,11 +10,47 @@ from models.task import PublicationTask
 from models.tts import TTSArticle, TTSSegment
 from services.doubao_tts_ws import DoubaoTTSWebSocketClient, write_srt
 from utils.volc_tts import VolcTTS
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
 logger = logging.getLogger("TTS_TASK")
 
 SUPPORTED_DOUBAO_FORMATS = {'mp3', 'ogg_opus', 'pcm'}
+
+TASK_UPDATE_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.completed_at,
+)
+
+TASK_PAYLOAD_COLUMNS = (
+    *TASK_UPDATE_COLUMNS,
+    PublicationTask.params,
+    PublicationTask.feature,
+    PublicationTask.user_id,
+    PublicationTask.created_at,
+)
+
+
+def _load_publication_task(task_id, *columns):
+    attrs = columns or TASK_PAYLOAD_COLUMNS
+    return PublicationTask.query.options(load_only(*attrs)).get(task_id)
+
+
+def _update_publication_task(task_id, **fields):
+    task = _load_publication_task(task_id, *TASK_UPDATE_COLUMNS)
+    if not task:
+        raise ValueError(f"Publication task not found: {task_id}")
+    for key, value in fields.items():
+        setattr(task, key, value)
+    if "result" in fields:
+        flag_modified(task, "result")
+    db.session.commit()
+    return task
 
 
 def _safe_title(title):
@@ -78,7 +114,7 @@ def process_doubao_tts_task(self, task_id):
 
 
 def _process_doubao_tts_task(task_id):
-    task = PublicationTask.query.get(task_id)
+    task = _load_publication_task(task_id, *TASK_PAYLOAD_COLUMNS)
     if not task:
         logger.error("未找到豆包TTS任务: %s", task_id)
         return False
@@ -90,22 +126,23 @@ def _process_doubao_tts_task(task_id):
     segments_text = [str(item).strip() for item in (tts.get('segments') or []) if str(item).strip()]
     total_count = len(segments_text)
     if not total_count:
-        task.status = 'failed'
-        task.current_step = 'failed'
-        task.error_message = '段落内容不能为空'
-        db.session.commit()
+        _update_publication_task(
+            task_id,
+            status='failed',
+            current_step='failed',
+            error_message='段落内容不能为空',
+        )
         return False
 
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     base_save_dir = os.path.join(project_root, 'data', 'processed', 'doubao_tts', task_id)
     os.makedirs(base_save_dir, exist_ok=True)
 
-    task.status = 'processing'
-    task.current_step = 'synthesis'
-    task.progress = 3
-    existing_segments = (task.result or {}).get('segments') or []
+    current_progress = 3
+    result_state = dict(task.result or {})
+    existing_segments = result_state.get('segments') or []
     if len(existing_segments) != total_count:
-        task.result = {'segments': [
+        result_state = {'segments': [
             {
                 'sequence': index + 1,
                 'text': text,
@@ -116,24 +153,32 @@ def _process_doubao_tts_task(task_id):
             }
             for index, text in enumerate(segments_text)
         ]}
-    db.session.commit()
+    _update_publication_task(
+        task_id,
+        status='processing',
+        current_step='synthesis',
+        progress=current_progress,
+        result=result_state,
+    )
 
     client = DoubaoTTSWebSocketClient(
         api_key=config.get('api_key') or None,
         resource_id=config.get('resource_id') or None,
     )
     success_count = 0
-    result_segments = list((task.result or {}).get('segments') or [])
+    result_segments = list(result_state.get('segments') or [])
 
     try:
         for index, text in enumerate(segments_text):
             sequence = index + 1
             result_segments[index]['status'] = 'processing'
             result_segments[index]['error_log'] = None
-            task.result = {'segments': result_segments}
-            task.progress = max(5, int(index / total_count * 92))
-            flag_modified(task, 'result')
-            db.session.commit()
+            current_progress = max(5, int(index / total_count * 92))
+            _update_publication_task(
+                task_id,
+                progress=current_progress,
+                result={'segments': result_segments},
+            )
 
             try:
                 audio_format = (config.get('format') or 'mp3').strip()
@@ -185,29 +230,33 @@ def _process_doubao_tts_task(task_id):
                 })
                 logger.error("豆包TTS段落 %s 失败: %s", sequence, exc)
 
-            task.result = {'segments': result_segments}
-            task.progress = min(96, int(sequence / total_count * 96))
-            flag_modified(task, 'result')
-            db.session.commit()
+            current_progress = min(96, int(sequence / total_count * 96))
+            _update_publication_task(
+                task_id,
+                progress=current_progress,
+                result={'segments': result_segments},
+            )
             time.sleep(0.3)
 
-        task.status = 'completed' if success_count == total_count else ('failed' if success_count == 0 else 'partial_failed')
-        task.current_step = 'done' if success_count else 'failed'
-        task.progress = 100 if success_count else task.progress
-        task.completed_at = datetime.utcnow()
-        task.result = {'segments': result_segments, 'success_count': success_count, 'total_count': total_count}
-        flag_modified(task, 'result')
-        db.session.commit()
+        _update_publication_task(
+            task_id,
+            status='completed' if success_count == total_count else ('failed' if success_count == 0 else 'partial_failed'),
+            current_step='done' if success_count else 'failed',
+            progress=100 if success_count else current_progress,
+            completed_at=datetime.utcnow(),
+            result={'segments': result_segments, 'success_count': success_count, 'total_count': total_count},
+        )
         logger.info("豆包TTS任务完成: %s %s/%s", task_id, success_count, total_count)
         return True
     except Exception as exc:
-        task.status = 'failed'
-        task.current_step = 'failed'
-        task.completed_at = datetime.utcnow()
-        task.error_message = str(exc)
-        task.result = {'segments': result_segments, 'success_count': success_count, 'total_count': total_count}
-        flag_modified(task, 'result')
-        db.session.commit()
+        _update_publication_task(
+            task_id,
+            status='failed',
+            current_step='failed',
+            completed_at=datetime.utcnow(),
+            error_message=str(exc),
+            result={'segments': result_segments, 'success_count': success_count, 'total_count': total_count},
+        )
         logger.error("豆包TTS任务异常: %s", exc, exc_info=True)
         return False
 

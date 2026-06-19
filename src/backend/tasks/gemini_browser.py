@@ -1,7 +1,9 @@
 import logging
 from datetime import datetime
 
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy.exc import OperationalError
 
 from app import create_app
 from celery_config import celery_app
@@ -17,6 +19,28 @@ from services.gemini_browser import (
 
 logger = logging.getLogger("REPORT_PDF_GEMINI_TASK")
 
+TASK_UPDATE_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.completed_at,
+)
+
+TASK_PAYLOAD_COLUMNS = (
+    *TASK_UPDATE_COLUMNS,
+    PublicationTask.params,
+    PublicationTask.feature,
+    PublicationTask.created_at,
+)
+
+
+def _load_task(task_id, *columns):
+    attrs = columns or TASK_PAYLOAD_COLUMNS
+    return PublicationTask.query.options(load_only(*attrs)).get(task_id)
+
 
 def _run_with_app_context(task_id):
     app = create_app()
@@ -28,6 +52,10 @@ def _run_with_app_context(task_id):
     bind=True,
     name="tasks.report_pdf_gemini.process_job",
     store_errors_even_if_ignored=True,
+    autoretry_for=(OperationalError,),
+    retry_backoff=True,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 3},
 )
 def process_report_pdf_gemini_job(self, task_id):
     return _run_with_app_context(task_id)
@@ -37,22 +65,28 @@ def process_report_pdf_gemini_job(self, task_id):
     bind=True,
     name="tasks.gemini_browser.process_job",
     store_errors_even_if_ignored=True,
+    autoretry_for=(OperationalError,),
+    retry_backoff=True,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 3},
 )
 def process_gemini_browser_job(self, task_id):
     return _run_with_app_context(task_id)
 
 
 def _process_job(task_id):
-    task = PublicationTask.query.get(task_id)
+    task = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
     if not task:
         logger.error("Report PDF Gemini task not found: %s", task_id)
         return False
-    if not isinstance(task.params, dict) or task.params.get("feature") not in {FEATURE_NAME, LEGACY_FEATURE_NAME}:
+    if not isinstance(task.params, dict) or (task.feature or task.params.get("feature")) not in {FEATURE_NAME, LEGACY_FEATURE_NAME}:
         logger.error("Invalid report PDF Gemini task params: %s", task_id)
         return False
     if task.status == "canceled":
         return False
 
+    job_id = task.id
+    job_created_at = task.created_at or datetime.utcnow()
     payload = task.params.get("report_pdf_gemini") or task.params.get("gemini_browser") or {}
     prompt = (payload.get("prompt") or "").strip()
     followups = [str(item).strip() for item in (payload.get("followups") or []) if str(item).strip()]
@@ -73,7 +107,7 @@ def _process_job(task_id):
     db.session.commit()
 
     def update_progress(event):
-        fresh = PublicationTask.query.get(task_id)
+        fresh = _load_task(job_id, *TASK_UPDATE_COLUMNS)
         if not fresh or fresh.status == "canceled":
             raise RuntimeError("任务已取消")
         current_result = dict(fresh.result or {})
@@ -94,10 +128,10 @@ def _process_job(task_id):
         db.session.commit()
 
     try:
-        output_path = storage_path_for_job(task.id, task.created_at)
+        output_path = storage_path_for_job(job_id, job_created_at)
         worker = GeminiBrowserWorker()
         gemini_result = worker.generate(
-            job_id=task.id,
+            job_id=job_id,
             prompt=prompt,
             output_path=output_path,
             pdf_path=pdf_path,
@@ -106,7 +140,11 @@ def _process_job(task_id):
             progress_callback=update_progress,
         )
 
-        final_result = dict(task.result or {})
+        fresh = _load_task(job_id, *TASK_UPDATE_COLUMNS)
+        if not fresh:
+            logger.error("Report PDF Gemini task disappeared before final update: %s", job_id)
+            return False
+        final_result = dict(fresh.result or {})
         final_result.update({
             "response_text": gemini_result.get("response_text"),
             "final_response_text": gemini_result.get("final_response_text") or gemini_result.get("response_text"),
@@ -119,19 +157,19 @@ def _process_job(task_id):
             "output_path": gemini_result.get("output_path"),
             "completed_at": datetime.utcnow().isoformat() + "Z",
         })
-        task.status = "completed"
-        task.current_step = "done"
-        task.progress = 100
-        task.completed_at = datetime.utcnow()
-        task.error_message = None
-        task.result = final_result
-        flag_modified(task, "result")
+        fresh.status = "completed"
+        fresh.current_step = "done"
+        fresh.progress = 100
+        fresh.completed_at = datetime.utcnow()
+        fresh.error_message = None
+        fresh.result = final_result
+        flag_modified(fresh, "result")
         db.session.commit()
-        logger.info("Report PDF Gemini task completed: %s", task_id)
+        logger.info("Report PDF Gemini task completed: %s", job_id)
         return True
     except Exception as exc:
         db.session.rollback()
-        task = PublicationTask.query.get(task_id)
+        task = _load_task(job_id, *TASK_UPDATE_COLUMNS)
         if task:
             _mark_failed(task, str(exc))
         logger.error("Report PDF Gemini task failed: %s", exc, exc_info=True)

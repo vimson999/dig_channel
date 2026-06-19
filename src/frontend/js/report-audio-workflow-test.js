@@ -7,6 +7,7 @@ class ReportAudioWorkflowPage {
         this.pdfAssetPagination = { page: 1, per_page: 10, has_more: false };
         this.pdfAssetSearchTimer = null;
         this.pdfAssetRequestSeq = 0;
+        this.pdfAssetWorkflowSeq = 0;
         this.selectedPdfAsset = null;
         this.jobPage = this.initialJobPage();
         this.jobPerPage = 10;
@@ -72,6 +73,19 @@ class ReportAudioWorkflowPage {
             this.els.jobList.insertAdjacentElement('afterend', pagination);
             this.els.jobPagination = pagination;
         }
+        if (!document.getElementById('child-detail-modal')) {
+            document.body.insertAdjacentHTML('beforeend', `
+                <div id="child-detail-modal" class="fixed inset-0 z-50 hidden bg-slate-950/45 p-4">
+                    <div class="mx-auto flex h-full max-w-5xl items-center justify-center">
+                        <div class="max-h-[92vh] w-full overflow-hidden rounded-lg bg-white shadow-2xl">
+                            <div id="child-detail-modal-content"></div>
+                        </div>
+                    </div>
+                </div>
+            `);
+        }
+        this.els.childDetailModal = document.getElementById('child-detail-modal');
+        this.els.childDetailModalContent = document.getElementById('child-detail-modal-content');
     }
 
     defaults() {
@@ -106,7 +120,22 @@ class ReportAudioWorkflowPage {
         this.els.refreshJobsBtn.addEventListener('click', () => this.refreshJobs());
         this.els.pollDelay.addEventListener('change', () => this.resetPollTimer());
         this.els.jobList.addEventListener('click', (event) => this.handleJobAction(event));
+        this.els.jobList.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            if (!event.target.closest('[data-child-detail]')) return;
+            event.preventDefault();
+            this.handleJobAction(event);
+        });
         this.els.jobPagination.addEventListener('click', (event) => this.handleJobPageClick(event));
+        this.els.jobPagination.addEventListener('submit', (event) => this.handleJobPageJump(event));
+        this.els.childDetailModal.addEventListener('click', (event) => {
+            if (event.target === this.els.childDetailModal || event.target.closest('[data-child-detail-close]')) {
+                this.closeChildDetailModal();
+            }
+        });
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') this.closeChildDetailModal();
+        });
     }
 
     apiRoot() {
@@ -238,9 +267,12 @@ class ReportAudioWorkflowPage {
                 per_page: String(this.pdfAssetPerPage),
             });
             if (q) query.set('q', q);
-            const result = await this.request(`/api/report-audio-workflows/pdf-assets?${query.toString()}`, { timeoutMs: 15000 });
+            const result = await this.request(`/api/report-audio-workflows/pdf-assets?${query.toString()}`, { timeoutMs: 45000 });
             if (requestSeq !== this.pdfAssetRequestSeq) return;
-            this.pdfAssets = result.data?.items || result.items || [];
+            this.pdfAssets = (result.data?.items || result.items || []).map((item) => ({
+                ...item,
+                workflow_loading: true,
+            }));
             this.pdfAssetPagination = result.data?.pagination || {
                 page,
                 per_page: this.pdfAssetPerPage,
@@ -253,6 +285,7 @@ class ReportAudioWorkflowPage {
             }
             this.renderPdfAssets();
             this.renderPdfAssetPagination();
+            this.loadPdfAssetWorkflowStats(this.pdfAssets);
             if (!options.silent) this.setNotice(`已加载第 ${this.pdfAssetPage} 页，共 ${this.pdfAssets.length} 个已同步 PDF。`, 'success');
         } catch (error) {
             if (requestSeq !== this.pdfAssetRequestSeq) return;
@@ -264,6 +297,33 @@ class ReportAudioWorkflowPage {
             if (requestSeq !== this.pdfAssetRequestSeq) return;
             this.els.pdfAssetRefreshBtn.disabled = false;
             this.els.pdfAssetRefreshBtn.innerHTML = '<i class="fas fa-rotate mr-1"></i>刷新';
+        }
+    }
+
+    async loadPdfAssetWorkflowStats(items) {
+        const ids = (items || []).map((item) => item.id).filter(Boolean);
+        if (!ids.length) return;
+        const requestSeq = ++this.pdfAssetWorkflowSeq;
+        const query = new URLSearchParams({ ids: ids.join(',') });
+        try {
+            const result = await this.request(`/api/report-audio-workflows/pdf-assets/workflow-stats?${query.toString()}`, { timeoutMs: 30000 });
+            if (requestSeq !== this.pdfAssetWorkflowSeq) return;
+            const stats = result.data?.stats || result.stats || {};
+            this.pdfAssets = this.pdfAssets.map((item) => ({
+                ...item,
+                workflow_loading: false,
+                workflow_load_error: false,
+                workflow: stats[item.id] || item.workflow || null,
+            }));
+            this.renderPdfAssets();
+        } catch (error) {
+            if (requestSeq !== this.pdfAssetWorkflowSeq) return;
+            this.pdfAssets = this.pdfAssets.map((item) => ({
+                ...item,
+                workflow_loading: false,
+                workflow_load_error: true,
+            }));
+            this.renderPdfAssets();
         }
     }
 
@@ -289,6 +349,10 @@ class ReportAudioWorkflowPage {
             const previewPath = item.preview_url || `/api/report-audio-workflows/pdf-assets/${encodeURIComponent(item.id)}/preview`;
             const previewUrl = `${this.apiRoot()}${previewPath}`;
             const itemTitle = [item.filename, item.topic_title, item.tab_label].filter(Boolean).join('\n');
+            const downloadText = Number.isFinite(Number(item.download_count))
+                ? `下载 ${Number(item.download_count)} 次`
+                : '下载 -';
+            const workflowMeta = this.pdfAssetWorkflowMeta(item);
             return `
                 <div role="button" tabindex="0" data-pdf-asset-id="${this.escape(item.id)}" title="${this.escape(itemTitle)}" class="w-full cursor-pointer rounded-md border px-3 py-2 text-left text-xs ${active ? 'border-indigo-300 bg-indigo-50 text-indigo-900' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}">
                     <div class="flex items-start justify-between gap-2">
@@ -302,6 +366,17 @@ class ReportAudioWorkflowPage {
                         </div>
                     </div>
                     <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(item.tab_label || '')}${item.topic_create_time ? ` · ${this.escape(item.topic_create_time)}` : ''}</div>
+                    <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                        <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500">
+                            <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
+                        </span>
+                        <span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${workflowMeta.className}">
+                            ${workflowMeta.latestMeta ? `<span class="mr-1 inline-block h-1.5 w-1.5 rounded-full ${workflowMeta.latestMeta.dot}"></span>` : ''}
+                            ${this.escape(workflowMeta.text)}
+                        </span>
+                        ${workflowMeta.latestMeta ? `<span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${workflowMeta.latestMeta.className}">最近 ${this.escape(workflowMeta.latestMeta.label)}</span>` : ''}
+                        ${workflowMeta.detail ? `<span class="text-[11px] font-bold text-slate-400">${this.escape(workflowMeta.detail)}</span>` : ''}
+                    </div>
                 </div>
             `;
         }).join('');
@@ -454,7 +529,7 @@ class ReportAudioWorkflowPage {
                 this.jobPage -= 1;
                 return this.loadHistory({ ...options, page: this.jobPage, force: true });
             }
-            this.jobs = items;
+            this.jobs = items.map((item) => this.mergeJobSummary(item));
             if (!options.silent) this.setNotice(`已加载编排历史第 ${this.jobPage} 页。`, 'success');
             this.render();
         } catch (error) {
@@ -468,6 +543,102 @@ class ReportAudioWorkflowPage {
                 this.els.loadHistoryBtn.innerHTML = '<i class="fas fa-clock-rotate-left mr-1.5"></i>加载历史';
             }
         }
+    }
+
+    mergeJobSummary(incoming) {
+        const key = this.jobIdentity(incoming);
+        const existing = key ? this.jobs.find((item) => this.jobIdentity(item) === key) : null;
+        if (!existing) return incoming;
+
+        const merged = { ...existing, ...incoming };
+        [
+            'logs',
+            'children',
+            'gemini',
+            'doubao_browser_tts',
+            'publisher_video',
+            'structured_result',
+            'tts_text',
+            'request',
+            'pdf',
+            'audio',
+            'video',
+            'metadata',
+            'notifications',
+        ].forEach((field) => {
+            merged[field] = this.mergeDetailValue(existing[field], incoming[field]);
+        });
+        return merged;
+    }
+
+    jobIdentity(job) {
+        return String(job?.job_id || job?.local_id || '').trim();
+    }
+
+    mergeDetailValue(existing, incoming) {
+        if (this.isEmptyDetailValue(incoming)) return existing;
+        if (this.isEmptyDetailValue(existing)) return incoming;
+        if (Array.isArray(existing) && Array.isArray(incoming)) {
+            return this.mergeDetailArray(existing, incoming);
+        }
+        if (this.isPlainObject(existing) && this.isPlainObject(incoming)) {
+            return this.mergeDetailObject(existing, incoming);
+        }
+        return incoming;
+    }
+
+    mergeDetailObject(existing, incoming) {
+        const merged = { ...existing };
+        Object.entries(incoming || {}).forEach(([key, value]) => {
+            if (this.isEmptyDetailValue(value)) {
+                if (!(key in merged)) merged[key] = value;
+                return;
+            }
+            merged[key] = this.mergeDetailValue(merged[key], value);
+        });
+        return merged;
+    }
+
+    mergeDetailArray(existing, incoming) {
+        if (!incoming.length) return existing;
+        if (!existing.length) return incoming;
+
+        const existingByKey = new Map();
+        existing.forEach((item) => {
+            const key = this.detailArrayItemKey(item);
+            if (key) existingByKey.set(key, item);
+        });
+
+        const usedKeys = new Set();
+        const merged = incoming.map((item) => {
+            const key = this.detailArrayItemKey(item);
+            if (!key || !existingByKey.has(key)) return item;
+            usedKeys.add(key);
+            return this.mergeDetailValue(existingByKey.get(key), item);
+        });
+
+        existing.forEach((item) => {
+            const key = this.detailArrayItemKey(item);
+            if (key && usedKeys.has(key)) return;
+            merged.push(item);
+        });
+        return merged;
+    }
+
+    detailArrayItemKey(item) {
+        if (!this.isPlainObject(item)) return '';
+        return String(item.job_id || item.id || item.celery_id || '').trim();
+    }
+
+    isEmptyDetailValue(value) {
+        if (value === null || value === undefined || value === '') return true;
+        if (Array.isArray(value)) return value.length === 0;
+        if (this.isPlainObject(value)) return Object.keys(value).length === 0;
+        return false;
+    }
+
+    isPlainObject(value) {
+        return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
     }
 
     async refreshJobs() {
@@ -498,15 +669,60 @@ class ReportAudioWorkflowPage {
     }
 
     handleJobAction(event) {
+        const childCard = event.target.closest('[data-child-detail]');
+        if (childCard) {
+            event.preventDefault();
+            event.stopPropagation();
+            this.openChildDetail({
+                jobId: childCard.dataset.jobId,
+                kind: childCard.dataset.childKind,
+                childId: childCard.dataset.childId,
+                chunkIndex: childCard.dataset.chunkIndex,
+            });
+            return;
+        }
+
         const button = event.target.closest('[data-job-action]');
         if (!button) return;
         const jobId = button.dataset.jobId;
         const action = button.dataset.jobAction;
+        if (action === 'copy-title') {
+            event.preventDefault();
+            event.stopPropagation();
+            this.copyText(button.dataset.copyText || '', '标题已复制。');
+            return;
+        }
         if (action === 'refresh') this.refreshJob(jobId);
         if (action === 'retry') this.retryJob(jobId);
         if (action === 'remove') {
             this.jobs = this.jobs.filter((job) => (job.job_id || job.local_id) !== jobId);
             this.render();
+        }
+    }
+
+    async copyText(text, successMessage = '已复制。') {
+        const value = String(text || '').trim();
+        if (!value) {
+            this.setNotice('没有可复制的内容。', 'error');
+            return;
+        }
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(value);
+            } else {
+                const textarea = document.createElement('textarea');
+                textarea.value = value;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'fixed';
+                textarea.style.left = '-9999px';
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                textarea.remove();
+            }
+            this.setNotice(successMessage, 'success');
+        } catch (error) {
+            this.setNotice(`复制失败：${error.message || error}`, 'error');
         }
     }
 
@@ -559,6 +775,28 @@ class ReportAudioWorkflowPage {
         this.loadHistory({ page: targetPage, force: true });
     }
 
+    handleJobPageJump(event) {
+        const form = event.target.closest('[data-job-page-jump-form]');
+        if (!form) return;
+        event.preventDefault();
+
+        const input = form.querySelector('[name="job_page_jump"]');
+        const pages = Math.max(1, Number(this.jobPagination?.pages || 1));
+        const parsed = Number(input?.value || 0);
+        if (!Number.isFinite(parsed) || parsed < 1) {
+            this.setNotice('请输入有效页码。', 'error');
+            input?.focus();
+            return;
+        }
+
+        const targetPage = Math.min(pages, Math.max(1, Math.floor(parsed)));
+        if (input) input.value = String(targetPage);
+        if (targetPage === this.jobPage) return;
+
+        this.updateJobPageUrl(targetPage);
+        this.loadHistory({ page: targetPage, force: true });
+    }
+
     resetPollTimer() {
         if (this.pollTimer) window.clearInterval(this.pollTimer);
         const delay = Math.max(1000, Number(this.els.pollDelay.value) || 3000);
@@ -585,6 +823,53 @@ class ReportAudioWorkflowPage {
         this.renderJobPagination();
     }
 
+    pdfAssetWorkflowMeta(item) {
+        if (item.workflow_loading) {
+            return {
+                latestMeta: null,
+                text: '编排状态加载中',
+                detail: '',
+                className: 'bg-indigo-50 text-indigo-600',
+            };
+        }
+        if (item.workflow_load_error) {
+            return {
+                latestMeta: null,
+                text: '编排状态待刷新',
+                detail: '',
+                className: 'bg-amber-50 text-amber-700',
+            };
+        }
+        const workflow = item.workflow || {};
+        const total = Number(workflow.total || 0);
+        const succeeded = Number(workflow.succeeded || 0);
+        const failed = Number(workflow.failed || 0);
+        const running = Number(workflow.running || 0);
+        const latest = workflow.latest || null;
+        const latestMeta = this.statusMeta(latest?.status || '');
+
+        if (!total) {
+            return {
+                latestMeta: null,
+                text: '未编排',
+                detail: '',
+                className: 'bg-slate-100 text-slate-500',
+            };
+        }
+
+        const detail = [
+            succeeded ? `成功 ${succeeded}` : '',
+            failed ? `失败 ${failed}` : '',
+            running ? `运行 ${running}` : '',
+        ].filter(Boolean).join(' · ');
+        return {
+            latestMeta,
+            text: `编排 ${total} 次`,
+            detail,
+            className: latestMeta.className,
+        };
+    }
+
     renderJobPagination() {
         const page = Math.max(1, Number(this.jobPagination?.page || this.jobPage || 1));
         const pages = Math.max(1, Number(this.jobPagination?.pages || 1));
@@ -602,7 +887,16 @@ class ReportAudioWorkflowPage {
                         <i class="fas fa-chevron-left mr-1"></i>上一页
                     </span>
                 `}
-                <span class="font-bold text-slate-500">第 ${page}/${pages} 页 · 共 ${total} 条</span>
+                <div class="flex flex-wrap items-center justify-center gap-2">
+                    <span class="font-bold text-slate-500">第 ${page}/${pages} 页 · 共 ${total} 条</span>
+                    <form data-job-page-jump-form class="flex items-center gap-1.5">
+                        <label class="sr-only" for="job-page-jump">跳转页码</label>
+                        <input id="job-page-jump" name="job_page_jump" type="number" min="1" max="${pages}" value="${page}" class="h-8 w-20 rounded-md border border-slate-200 bg-white px-2 text-center text-xs font-bold text-slate-700 focus:border-slate-500 focus:outline-none">
+                        <button type="submit" class="h-8 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50">
+                            跳转
+                        </button>
+                    </form>
+                </div>
                 ${hasNext ? `
                     <a href="${this.escape(this.jobPageUrl(page + 1))}" data-job-page="next" class="rounded-md border border-slate-200 bg-white px-3 py-1.5 font-bold text-slate-600 hover:bg-slate-50">
                         下一页<i class="fas fa-chevron-right ml-1"></i>
@@ -646,14 +940,21 @@ class ReportAudioWorkflowPage {
         const metaLine = this.jobMetaLine(job, sequenceLabel, hasDisplayTitle);
         const audioUrl = job.download_audio_url ? `${this.apiRoot()}${job.download_audio_url}` : '';
         const resultUrl = job.download_result_url ? `${this.apiRoot()}${job.download_result_url}` : '';
-        const videoUrl = job.download_video_url ? `${this.apiRoot()}${job.download_video_url}` : '';
+        const video = job.video || null;
+        const videoUrl = job.download_video_url
+            ? `${this.apiRoot()}${job.download_video_url}`
+            : (video?.video?.download_url ? `${this.apiRoot()}${video.video.download_url}` : '');
+        const verticalVideoUrl = job.download_vertical_video_url
+            ? `${this.apiRoot()}${job.download_vertical_video_url}`
+            : (video?.vertical_video?.download_url ? `${this.apiRoot()}${video.vertical_video.download_url}` : '');
+        const showLandscapeVideoUrl = Boolean(videoUrl && video?.landscape_enabled !== false);
         const coverUrl = job.download_cover_url ? `${this.apiRoot()}${job.download_cover_url}` : '';
         const pdf = job.pdf || job.request?.pdf || null;
         const parentStatus = job.status || '';
         const geminiChild = job.gemini || job.children?.gemini;
         const doubaoItems = job.doubao_browser_tts || [];
+        const doubaoDisplayItems = this.doubaoDisplayItems(doubaoItems);
         const publisherChild = job.publisher_video || job.children?.publisher_video;
-        const video = job.video || null;
         return `
             <article class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="flex items-start justify-between gap-3">
@@ -661,6 +962,9 @@ class ReportAudioWorkflowPage {
                         <div class="flex items-center gap-2">
                             <span class="status-dot ${status.dot}"></span>
                             <h3 class="truncate text-sm font-black" title="${this.escape(displayTitle)}">${this.escape(displayTitle)}</h3>
+                            <button type="button" data-job-action="copy-title" data-copy-text="${this.escape(displayTitle)}" class="shrink-0 rounded-md border border-slate-200 bg-white px-1.5 py-1 text-[11px] text-slate-500 hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700" title="复制标题">
+                                <i class="fas fa-copy"></i>
+                            </button>
                         </div>
                         <p class="mt-1 truncate text-xs text-slate-500" title="${this.escape(metaLine)}">${this.escape(metaLine)}</p>
                     </div>
@@ -683,9 +987,9 @@ class ReportAudioWorkflowPage {
                 ${pdf ? `<div class="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"><i class="fas fa-file-pdf mr-1.5 text-red-500"></i>${this.escape(pdf.filename || 'PDF')} · ${this.formatBytes(pdf.bytes)}</div>` : ''}
 
                 <div class="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
-                    ${this.renderChild('Gemini', geminiChild, parentStatus, this.stageDisplayStatus('gemini', job, geminiChild))}
-                    ${doubaoItems.length ? doubaoItems.map((item, idx) => this.renderChild(this.doubaoChildLabel(item, idx, doubaoItems), item, parentStatus, this.stageDisplayStatus('doubao', job, item))).join('') : this.renderChild('豆包', null, parentStatus, this.stageDisplayStatus('doubao', job, null))}
-                    ${this.renderChild('横屏视频', publisherChild, parentStatus, this.stageDisplayStatus('publisher', job, publisherChild))}
+                    ${this.renderChild('Gemini', geminiChild, parentStatus, this.stageDisplayStatus('gemini', job, geminiChild), this.childDetailRef(job, 'gemini', geminiChild))}
+                    ${doubaoDisplayItems.length ? doubaoDisplayItems.map((item, idx) => this.renderChild(this.doubaoChildLabel(item, idx, doubaoDisplayItems), item, parentStatus, this.stageDisplayStatus('doubao', job, item), this.childDetailRef(job, 'doubao', item, idx))).join('') : this.renderChild('豆包', null, parentStatus, this.stageDisplayStatus('doubao', job, null))}
+                    ${this.renderChild('视频合成', publisherChild, parentStatus, this.stageDisplayStatus('publisher', job, publisherChild), this.childDetailRef(job, 'publisher', publisherChild))}
                 </div>
 
                 ${structured ? `
@@ -716,7 +1020,8 @@ class ReportAudioWorkflowPage {
                             <span>${this.videoSummary(video)}</span>
                             <div class="flex items-center gap-2">
                                 ${coverUrl ? `<a href="${coverUrl}" download class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50"><i class="fas fa-image mr-1"></i>封面</a>` : ''}
-                                ${videoUrl ? `<a href="${videoUrl}" download class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800"><i class="fas fa-film mr-1"></i>MP4</a>` : ''}
+                                ${showLandscapeVideoUrl ? `<a href="${videoUrl}" download class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800"><i class="fas fa-film mr-1"></i>横屏 MP4</a>` : ''}
+                                ${verticalVideoUrl ? `<a href="${verticalVideoUrl}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : ''}
                             </div>
                         </div>
                     </div>
@@ -764,6 +1069,196 @@ class ReportAudioWorkflowPage {
         return parts.join(' · ');
     }
 
+    async openChildDetail(ref = {}) {
+        if (!ref.jobId) return;
+        this.showChildDetailLoading();
+        await this.refreshJob(ref.jobId);
+
+        const job = this.jobs.find((item) => item.job_id === ref.jobId);
+        const resolved = this.resolveChildDetail(job, ref);
+        if (!resolved?.child) {
+            this.closeChildDetailModal();
+            this.setNotice('没有找到这个子任务详情。', 'error');
+            return;
+        }
+
+        let child = resolved.child;
+        let detailError = '';
+        if (ref.childId) {
+            try {
+                const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(ref.jobId)}/children/${encodeURIComponent(ref.childId)}`, { timeoutMs: 15000 });
+                child = this.mergeDetailValue(child, result.data || result);
+            } catch (error) {
+                detailError = error.message;
+            }
+        }
+        this.renderChildDetailModal({ ...resolved, child, detailError });
+    }
+
+    resolveChildDetail(job, ref = {}) {
+        if (!job) return null;
+        const kind = ref.kind || '';
+        if (kind === 'gemini') {
+            return { job, kind, label: 'Gemini', child: job.gemini || job.children?.gemini };
+        }
+        if (kind === 'publisher') {
+            return { job, kind, label: '视频合成', child: job.publisher_video || job.children?.publisher_video };
+        }
+        if (kind === 'doubao') {
+            const items = this.doubaoDisplayItems(job.doubao_browser_tts || []);
+            const targetChunk = Number(ref.chunkIndex || 0);
+            const index = items.findIndex((item) => {
+                const metadata = item?.metadata || {};
+                const chunkIndex = Number(metadata.chunk_index || 0);
+                if (targetChunk && chunkIndex === targetChunk) return true;
+                if (item?.job_id && item.job_id === ref.childId) return true;
+                return Array.isArray(item?.attempts) && item.attempts.some((attempt) => attempt?.job_id === ref.childId);
+            });
+            const item = index >= 0 ? items[index] : null;
+            return {
+                job,
+                kind,
+                label: item ? this.doubaoChildLabel(item, index, items) : '豆包',
+                child: item,
+            };
+        }
+        return null;
+    }
+
+    showChildDetailLoading() {
+        this.els.childDetailModalContent.innerHTML = `
+            <div class="p-6 text-sm text-slate-500">
+                <i class="fas fa-spinner fa-spin mr-2"></i>正在读取子任务详情...
+            </div>
+        `;
+        this.els.childDetailModal.classList.remove('hidden');
+        document.body.classList.add('overflow-hidden');
+    }
+
+    closeChildDetailModal() {
+        if (!this.els.childDetailModal) return;
+        this.els.childDetailModal.classList.add('hidden');
+        document.body.classList.remove('overflow-hidden');
+    }
+
+    renderChildDetailModal({ job, label, child, detailError }) {
+        const status = this.statusMeta(this.normalizeStatus(child?.status || ''));
+        const metadata = child?.metadata || {};
+        const attempts = Array.isArray(child?.attempts) ? child.attempts : [];
+        const rawParams = child?.raw_params || null;
+        const rawResult = child?.raw_result || null;
+        const audio = child?.audio || {};
+        const audioUrl = audio.download_url ? `${this.apiRoot()}${audio.download_url}` : '';
+        this.els.childDetailModalContent.innerHTML = `
+            <div class="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <h3 class="text-base font-black text-slate-900">${this.escape(label || '子任务详情')}</h3>
+                        <span class="rounded-full px-2.5 py-1 text-xs font-bold ${status.className}">${status.label}</span>
+                    </div>
+                    <p class="mt-1 truncate text-xs text-slate-500">${this.escape(job?.title || job?.job_id || '-')}</p>
+                </div>
+                <button type="button" data-child-detail-close class="rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-50">
+                    <i class="fas fa-xmark mr-1"></i>关闭
+                </button>
+            </div>
+            <div class="max-h-[76vh] overflow-auto p-5">
+                ${detailError ? `<div class="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">读取完整子任务失败：${this.escape(detailError)}</div>` : ''}
+                <div class="grid gap-2 text-xs md:grid-cols-4">
+                    ${this.renderDetailStat('任务 ID', child?.job_id || '-')}
+                    ${this.renderDetailStat('Celery ID', child?.celery_id || '-')}
+                    ${this.renderDetailStat('步骤', child?.step || '-')}
+                    ${this.renderDetailStat('进度', `${Number(child?.progress || 0)}%`)}
+                    ${this.renderDetailStat('创建', this.formatDateTime(child?.created_at) || '-')}
+                    ${this.renderDetailStat('完成', this.formatDateTime(child?.completed_at) || '-')}
+                    ${this.renderDetailStat('分段', metadata.chunk_index ? `${metadata.chunk_index}/${metadata.chunk_total || '-'}` : '-')}
+                    ${this.renderDetailStat('尝试', metadata.chunk_attempt ? `第 ${metadata.chunk_attempt} 次` : '-')}
+                </div>
+
+                ${child?.error ? `<div class="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">${this.escape(child.error)}</div>` : ''}
+
+                ${this.renderAttemptRows(attempts)}
+
+                ${audio && (audio.seconds || audio.bytes || audioUrl) ? `
+                    <div class="mt-4 rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+                        <div class="flex flex-wrap items-center justify-between gap-2">
+                            <span>音频 ${audio.seconds ? `${Math.round(Number(audio.seconds))}s` : '-'} · ${this.formatBytes(audio.bytes)}</span>
+                            ${audioUrl ? `<a href="${this.escape(audioUrl)}" download class="rounded-md bg-blue-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-blue-800"><i class="fas fa-download mr-1"></i>下载</a>` : ''}
+                        </div>
+                    </div>
+                ` : ''}
+
+                ${child?.text_preview ? `
+                    <div class="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+                        <div class="mb-2 text-xs font-black text-slate-600">文本预览</div>
+                        <div class="whitespace-pre-wrap text-sm leading-6 text-slate-700">${this.escape(child.text_preview)}</div>
+                    </div>
+                ` : ''}
+
+                ${this.renderJsonDetails('Metadata', metadata)}
+                ${this.renderJsonDetails('Raw Params', rawParams)}
+                ${this.renderJsonDetails('Raw Result', rawResult)}
+            </div>
+        `;
+        this.els.childDetailModal.classList.remove('hidden');
+        document.body.classList.add('overflow-hidden');
+    }
+
+    renderDetailStat(label, value) {
+        return `
+            <div class="rounded-md bg-slate-50 px-3 py-2">
+                <div class="text-slate-400">${this.escape(label)}</div>
+                <div class="mt-1 truncate font-black text-slate-700" title="${this.escape(value)}">${this.escape(value)}</div>
+            </div>
+        `;
+    }
+
+    renderAttemptRows(attempts = []) {
+        if (!Array.isArray(attempts) || attempts.length <= 1) return '';
+        return `
+            <div class="mt-4 rounded-md border border-slate-200">
+                <div class="border-b border-slate-100 px-3 py-2 text-xs font-black text-slate-600">重试记录</div>
+                <div class="divide-y divide-slate-100">
+                    ${attempts.map((attempt, index) => {
+                        const metadata = attempt?.metadata || {};
+                        const status = this.statusMeta(this.normalizeStatus(attempt?.status || ''));
+                        const attemptNo = metadata.chunk_attempt || index + 1;
+                        const detail = this.childDetail(attempt);
+                        return `
+                            <div class="px-3 py-2 text-xs">
+                                <div class="flex flex-wrap items-center justify-between gap-2">
+                                    <div class="font-black text-slate-700">第 ${this.escape(attemptNo)} 次${Number(metadata.retry_index || 0) > 0 ? ` · 重试 ${this.escape(metadata.retry_index)}` : ''}</div>
+                                    <span class="rounded-full px-2 py-0.5 font-bold ${status.className}">${status.label}</span>
+                                </div>
+                                <div class="mt-1 truncate font-mono text-[11px] text-slate-400">${this.escape(attempt?.job_id || '-')}</div>
+                                ${detail ? `<div class="mt-1 text-slate-500">${this.escape(detail)}</div>` : ''}
+                                ${attempt?.error ? `<div class="mt-1 rounded border border-red-100 bg-red-50 px-2 py-1 leading-5 text-red-700">${this.escape(attempt.error)}</div>` : ''}
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    renderJsonDetails(label, value) {
+        if (this.isEmptyDetailValue(value)) return '';
+        return `
+            <details class="mt-4 rounded-md border border-slate-200 bg-white">
+                <summary class="cursor-pointer px-3 py-2 text-xs font-black text-slate-600">${this.escape(label)}</summary>
+                <pre class="max-h-72 overflow-auto border-t border-slate-100 bg-slate-950 p-3 text-xs leading-5 text-slate-100">${this.escape(this.stringifyJson(value))}</pre>
+            </details>
+        `;
+    }
+
+    stringifyJson(value) {
+        try {
+            return JSON.stringify(value, null, 2);
+        } catch (error) {
+            return String(value ?? '');
+        }
+    }
+
     compactTitle(value) {
         return String(value ?? '')
             .replace(/\s*\n\s*/g, ' / ')
@@ -771,18 +1266,125 @@ class ReportAudioWorkflowPage {
             .trim();
     }
 
-    renderChild(label, child, parentStatus = '', statusOverride = '') {
+    childDetailRef(job, kind, child, index = 0) {
+        if (!job?.job_id || !child?.job_id) return null;
+        const metadata = child.metadata || {};
+        return {
+            jobId: job.job_id,
+            kind,
+            childId: child.job_id,
+            chunkIndex: metadata.chunk_index || index + 1,
+        };
+    }
+
+    renderChild(label, child, parentStatus = '', statusOverride = '', detailRef = null) {
         const childStatus = child?.status ? this.normalizeStatus(child.status) : '';
         const meta = this.statusMeta(statusOverride || this.childDisplayStatus(childStatus, parentStatus, Boolean(child)));
+        const detail = this.childDetail(child);
+        const preview = this.compactTitle(child?.text_preview || '');
+        const clickable = Boolean(detailRef?.jobId && detailRef?.childId);
+        const detailAttrs = clickable
+            ? `role="button" tabindex="0" data-child-detail="1" data-job-id="${this.escape(detailRef.jobId)}" data-child-kind="${this.escape(detailRef.kind)}" data-child-id="${this.escape(detailRef.childId)}" data-chunk-index="${this.escape(detailRef.chunkIndex || '')}" title="查看子任务详情"`
+            : '';
         return `
-            <div class="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+            <div ${detailAttrs} class="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs ${clickable ? 'cursor-pointer transition hover:border-indigo-200 hover:bg-white focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100' : ''}">
                 <div class="flex items-center justify-between gap-2">
                     <span class="font-bold text-slate-600">${this.escape(label)}</span>
                     <span class="${meta.className} rounded-full px-2 py-0.5 font-bold">${meta.label}</span>
                 </div>
                 <div class="mt-1 truncate text-slate-400">${this.escape(child?.job_id || '-')}</div>
+                ${detail ? `<div class="mt-1 truncate text-slate-500">${this.escape(detail)}</div>` : ''}
+                ${preview ? `<div class="mt-1 text-slate-500" title="${this.escape(preview)}" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${this.escape(preview)}</div>` : ''}
             </div>
         `;
+    }
+
+    childDetail(child) {
+        if (!child) return '';
+        const parts = [];
+        const step = String(child.step || '').trim();
+        if (step && step !== 'done' && step !== 'queued') parts.push(step);
+        const progress = Number(child.progress || 0);
+        if (progress > 0 && progress < 100) parts.push(`${progress}%`);
+        const audio = child.audio || {};
+        const seconds = Number(audio.seconds || 0);
+        const bytes = Number(audio.bytes || 0);
+        if (seconds || bytes) {
+            const audioParts = [];
+            if (seconds) audioParts.push(`${Math.round(seconds)}s`);
+            if (bytes) audioParts.push(this.formatBytes(bytes));
+            parts.push(`音频 ${audioParts.join(' / ')}`);
+        }
+        const turnCount = Number(child.turn_count || 0);
+        if (turnCount > 1) parts.push(`${turnCount} 轮`);
+        const retryCount = Number(child.retry_count || 0);
+        const failedAttempts = Number(child.failed_attempts || 0);
+        if (retryCount > 0) parts.push(`重试 ${retryCount} 次`);
+        if (failedAttempts > 0) parts.push(`失败尝试 ${failedAttempts}`);
+        return parts.join(' · ');
+    }
+
+    doubaoDisplayItems(items = []) {
+        if (!Array.isArray(items) || !items.length) return [];
+        const groups = new Map();
+        items.forEach((item, index) => {
+            const metadata = item?.metadata || {};
+            const rawChunk = Number(metadata.chunk_index);
+            const chunkIndex = Number.isFinite(rawChunk) && rawChunk > 0 ? rawChunk : 0;
+            const key = chunkIndex ? `chunk:${chunkIndex}` : `item:${index}`;
+            if (!groups.has(key)) {
+                groups.set(key, {
+                    key,
+                    chunkIndex: chunkIndex || index + 1,
+                    firstIndex: index,
+                    attempts: [],
+                    chunkTotal: 0,
+                });
+            }
+            const group = groups.get(key);
+            group.attempts.push({ ...item, _attempt_order: index });
+            const rawTotal = Number(metadata.chunk_total);
+            if (Number.isFinite(rawTotal) && rawTotal > 0) group.chunkTotal = rawTotal;
+        });
+
+        return Array.from(groups.values())
+            .sort((a, b) => (a.chunkIndex - b.chunkIndex) || (a.firstIndex - b.firstIndex))
+            .map((group) => {
+                const attempts = group.attempts.slice().sort((a, b) => {
+                    const attemptA = Number(a?.metadata?.chunk_attempt || a?.metadata?.retry_index || 0);
+                    const attemptB = Number(b?.metadata?.chunk_attempt || b?.metadata?.retry_index || 0);
+                    return (attemptA - attemptB) || ((a._attempt_order || 0) - (b._attempt_order || 0));
+                });
+                const display = this.bestDoubaoAttempt(attempts);
+                const failedAttempts = attempts.filter((attempt) => this.normalizeStatus(attempt?.status || '') === 'failed').length;
+                const retryCount = Math.max(
+                    0,
+                    attempts.length - 1,
+                    Number(display?.metadata?.retry_index || 0),
+                    Number(display?.metadata?.chunk_attempt || 1) - 1,
+                );
+                return {
+                    ...display,
+                    metadata: {
+                        ...(display?.metadata || {}),
+                        chunk_index: group.chunkIndex,
+                        chunk_total: group.chunkTotal || display?.metadata?.chunk_total,
+                    },
+                    attempts,
+                    failed_attempts: failedAttempts,
+                    retry_count: retryCount,
+                };
+            });
+    }
+
+    bestDoubaoAttempt(attempts = []) {
+        const reversed = attempts.slice().reverse();
+        return (
+            reversed.find((item) => this.normalizeStatus(item?.status || '') === 'succeeded')
+            || reversed.find((item) => ['running', 'queued'].includes(this.normalizeStatus(item?.status || '')))
+            || reversed[0]
+            || null
+        );
     }
 
     doubaoChildLabel(item, index, items = []) {
@@ -791,23 +1393,11 @@ class ReportAudioWorkflowPage {
         const chunkIndex = Number.isFinite(rawChunk) && rawChunk > 0 ? rawChunk : index + 1;
         const rawTotal = Number(metadata.chunk_total);
         const chunkTotal = Number.isFinite(rawTotal) && rawTotal > 0 ? rawTotal : 0;
-        const priorAttempts = items
-            .slice(0, index)
-            .filter((candidate) => {
-                const candidateChunk = Number(candidate?.metadata?.chunk_index);
-                return Number.isFinite(candidateChunk) && candidateChunk === chunkIndex;
-            })
-            .length;
-        const rawRetryIndex = Number(metadata.retry_index);
-        const retryIndex = Number.isFinite(rawRetryIndex) ? rawRetryIndex : priorAttempts;
-        const hasMultipleAttempts = retryIndex > 0 || items.some((candidate, candidateIndex) => {
-            if (candidateIndex === index) return false;
-            const candidateChunk = Number(candidate?.metadata?.chunk_index);
-            return Number.isFinite(candidateChunk) && candidateChunk === chunkIndex;
-        });
         const base = `豆包 ${chunkIndex}${chunkTotal ? `/${chunkTotal}` : ''}`;
-        if (retryIndex > 0) return `${base} · 重试 ${retryIndex}`;
-        if (hasMultipleAttempts) return `${base} · 首次`;
+        const retryCount = Number(item?.retry_count || metadata.retry_index || 0);
+        const status = this.normalizeStatus(item?.status || '');
+        if (retryCount > 0 && status === 'succeeded') return `${base} · 重试成功`;
+        if (retryCount > 0) return `${base} · 重试 ${retryCount} 次`;
         return base;
     }
 
@@ -835,6 +1425,7 @@ class ReportAudioWorkflowPage {
                 }
                 return childStatus;
             }
+            if (job.audio || job.download_audio_url) return 'succeeded';
             if (this.isTerminal(parentStatus)) {
                 return this.childDisplayStatus('', parentStatus, false);
             }
@@ -940,11 +1531,25 @@ class ReportAudioWorkflowPage {
     }
 
     videoSummary(video) {
-        if (!video) return '横屏视频等待生成';
-        if (video.enabled === false) return video.message || '横屏视频已跳过';
-        if (video.video?.bytes) return `横屏视频已生成 · ${this.formatBytes(video.video.bytes)}`;
-        if (video.publisher_task_id) return `横屏视频任务 ${video.publisher_task_id}`;
-        return '横屏视频处理中';
+        if (!video) return '视频等待生成';
+        if (video.enabled === false) return video.message || '视频已跳过';
+
+        const parts = [];
+        const onlyVertical = video.vertical_enabled && video.landscape_enabled === false;
+        if (video.video?.bytes && !onlyVertical) {
+            parts.push(`横屏 ${this.formatBytes(video.video.bytes)}`);
+        }
+        if (video.vertical_video?.bytes) {
+            parts.push(`竖屏 ${this.formatBytes(video.vertical_video.bytes)}`);
+        }
+        if (video.video?.bytes && onlyVertical && !video.vertical_video?.bytes) {
+            parts.push(`竖屏 ${this.formatBytes(video.video.bytes)}`);
+        }
+        if (parts.length) return `视频已生成 · ${parts.join(' / ')}`;
+
+        if (video.publisher_task_id) return `视频任务 ${video.publisher_task_id}`;
+        if (video.landscape_enabled || video.vertical_enabled) return '视频处理中';
+        return '视频等待生成';
     }
 
     escape(value) {

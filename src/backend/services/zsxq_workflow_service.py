@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import inspect, or_, text
 from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.orm.attributes import flag_modified
 
 from models import db
 from models.task import PublicationTask
@@ -25,12 +26,22 @@ TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "partial", "skipped"}
 TERMINAL_TASK_STATUSES = {"completed", "failed"}
 QUEUED_STALE_MINUTES_ENV_NAME = "ZSXQ_WORKFLOW_QUEUED_STALE_MINUTES"
 DEFAULT_QUEUED_STALE_MINUTES = 20
+SCHEMA_CHECK_TTL_SECONDS_ENV_NAME = "ZSXQ_WORKFLOW_SCHEMA_CHECK_TTL_SECONDS"
+DEFAULT_SCHEMA_CHECK_TTL_SECONDS = 300
+TOPIC_PAGE_SIZE_HINT = 20
 
 
 class ZsxqWorkflowService:
     """Lightweight state machine for the ZSXQ sync -> clean -> publish workflow."""
 
+    def __init__(self):
+        self._schema_checked_at = None
+
     def ensure_schema(self):
+        now = datetime.utcnow()
+        if self._schema_checked_at and (now - self._schema_checked_at).total_seconds() < _schema_check_ttl_seconds():
+            return
+
         backend = db.engine.url.get_backend_name()
         if backend == "sqlite":
             raise ValueError(
@@ -55,6 +66,7 @@ class ZsxqWorkflowService:
                 "当前数据库账号没有 public.zsxq_workflow_runs 的读写权限。请用表 owner 或管理员执行："
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.zsxq_workflow_runs TO cappa_rw;"
             )
+        self._schema_checked_at = now
 
     def _table_names(self, inspector):
         try:
@@ -189,6 +201,7 @@ class ZsxqWorkflowService:
                     "queued": True,
                     "system_sync": snapshot.get("system_sync") or {},
                     "manual_attachment_plan": (sync_config.get("manual_attachment_plan") or {}).get("public") or {},
+                    "attachment_download_rules": sync_config.get("attachment_download_rules") or {},
                     "workflow": {
                         "workflow_run_id": workflow.id,
                         "batch_id": workflow.batch_id,
@@ -214,6 +227,7 @@ class ZsxqWorkflowService:
                 "sync_meta": snapshot.get("system_sync") or {},
                 "workflow_run_id": workflow.id,
                 "manual_attachment_plan": sync_config.get("manual_attachment_plan"),
+                "attachment_download_rules": sync_config.get("attachment_download_rules"),
                 # Workflow owns downstream orchestration. Keep legacy direct
                 # sync->clean handoff off for workflow-triggered sync tasks.
                 "auto_pdf_clean": False,
@@ -442,7 +456,7 @@ class ZsxqWorkflowService:
                 workflow=workflow,
                 run_id=run_id,
                 file_type="pdf",
-                cleaner=clean_config.get("pdf_cleaner") or {},
+                cleaner=self._normalize_pdf_cleaner(clean_config.get("pdf_cleaner")),
             )
             tasks.append(result)
             if result.get("queued") and result.get("task_id"):
@@ -525,6 +539,8 @@ class ZsxqWorkflowService:
             return
 
         tasks = PublicationTask.query.filter(PublicationTask.id.in_(task_ids)).all()
+        for task in tasks:
+            self._recover_publish_task_from_runtime(task)
         task_map = {task.id: task for task in tasks}
         summaries = [self._task_summary(task_map.get(task_id), task_id=task_id) for task_id in task_ids]
         statuses = [item.get("status") for item in summaries]
@@ -773,7 +789,7 @@ class ZsxqWorkflowService:
             },
             "clean": {
                 "auto_pdf_clean": auto_pdf_clean,
-                "pdf_cleaner": options.get("pdf_cleaner") or config.get("pdf_cleaner") or {},
+                "pdf_cleaner": self._normalize_pdf_cleaner(options.get("pdf_cleaner") or config.get("pdf_cleaner")),
                 "auto_audio_clean": auto_audio_clean,
                 "audio_cleaner": options.get("audio_cleaner") or config.get("audio_cleaner") or {},
             },
@@ -830,6 +846,10 @@ class ZsxqWorkflowService:
         requested_download_attachments = bool(config.get("download_attachments", False))
         allow_attachment_downloads = bool(config.get("allow_attachment_downloads", False))
         download_attachments = requested_download_attachments and allow_attachment_downloads
+        attachment_download_rules = self._normalize_attachment_download_rules(config.get("attachment_download_rules"))
+        skip_existing_downloads = bool(config.get("skip_existing_downloads", True))
+        count = _topic_count(config.get("count", 12))
+        max_pages = _effective_topic_max_pages(count, config.get("max_pages", 1))
         system_sync = {
             "batch_id": batch_id,
             "attempt_id": batch_id,
@@ -838,10 +858,14 @@ class ZsxqWorkflowService:
             "continuous": max_rounds is None,
             "trigger": trigger,
             "queued_at": self._now_iso(),
+            "count": count,
+            "max_pages": max_pages,
             "max_download_files": max_download_files,
             "download_attachments_requested": requested_download_attachments,
             "download_attachments": download_attachments,
             "allow_attachment_downloads": allow_attachment_downloads,
+            "attachment_download_rules": attachment_download_rules,
+            "skip_existing_downloads": skip_existing_downloads,
             "auto_pdf_clean": auto_pdf_clean,
             "auto_audio_clean": auto_audio_clean,
             "auto_publish_after_clean": publish_config,
@@ -867,19 +891,21 @@ class ZsxqWorkflowService:
                 "group_id": str(config.get("group_id") or ""),
                 "group_name": config.get("group_name"),
                 "tabs": tabs,
-                "count": config.get("count", 12),
-                "max_pages": config.get("max_pages", 1),
+                "count": count,
+                "max_pages": max_pages,
                 "stop_on_existing": config.get("stop_on_existing", True),
                 "download_attachments": download_attachments,
                 "allow_attachment_downloads": allow_attachment_downloads,
                 "download_file_types": ["all"],
                 "download_file_types_by_tab": download_file_types_by_tab,
                 "max_download_files": max_download_files,
+                "attachment_download_rules": attachment_download_rules,
+                "skip_existing_downloads": skip_existing_downloads,
                 "mode": mode,
             },
             "clean": {
                 "auto_pdf_clean": auto_pdf_clean,
-                "pdf_cleaner": config.get("pdf_cleaner") or {},
+                "pdf_cleaner": self._normalize_pdf_cleaner(config.get("pdf_cleaner")),
                 "auto_audio_clean": auto_audio_clean,
                 "audio_cleaner": config.get("audio_cleaner") or {},
             },
@@ -1004,20 +1030,140 @@ class ZsxqWorkflowService:
             "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         }
 
+    def _recover_publish_task_from_runtime(self, task):
+        if not task or task.status in TERMINAL_TASK_STATUSES:
+            return False
+        params = task.params if isinstance(task.params, dict) else {}
+        if params.get("feature") != "zsxq_clean_output_publish":
+            return False
+
+        try:
+            publish_runtime = summarize_publish_runs_for_request(f"zsxq_publish:{task.id}")
+        except Exception:
+            logger.exception("[ZSXQ_WORKFLOW] failed to recover publish task from runtime | task=%s", task.id)
+            return False
+
+        summary = (publish_runtime or {}).get("summary") if isinstance(publish_runtime, dict) else {}
+        if not self._publish_runtime_completed(task, summary):
+            return False
+
+        now = datetime.utcnow()
+        recovered = {
+            "queued": True,
+            "enabled": True,
+            "status": "completed",
+            "reason": "recovered_after_worker_shutdown",
+            "message": "清洗输出目录已无待发布文件。",
+            "summary": summary,
+            "rounds": (publish_runtime or {}).get("runs") or [],
+            "batches": (publish_runtime or {}).get("batches") or [],
+            "topic_ids": (publish_runtime or {}).get("topic_ids") or [],
+            "recovered_from_runtime": True,
+            "recovered_at": now.isoformat() + "Z",
+        }
+        task.status = "completed"
+        task.current_step = "done"
+        task.progress = 100
+        task.error_message = None
+        task.completed_at = task.completed_at or now
+        task.result = {
+            **(task.result or {}),
+            **recovered,
+            "publish_result": recovered,
+        }
+        flag_modified(task, "result")
+        try:
+            zsxq_sync_service.update_attachment_publish_status_from_publish_task(task)
+        except Exception:
+            logger.exception("[ZSXQ_WORKFLOW] failed to backfill recovered publish task attachments | task=%s", task.id)
+        return True
+
+    def _publish_runtime_completed(self, task, summary):
+        summary = summary if isinstance(summary, dict) else {}
+        submitted = _safe_int(summary.get("submitted_count"))
+        verified = _safe_int(summary.get("verified_count"))
+        failed = _safe_int(summary.get("failed_count"))
+        pending = _safe_int(summary.get("pending_verify_count"))
+        if verified <= 0 or failed > 0 or pending > 0:
+            return False
+
+        expected = self._publish_expected_source_count(task)
+        if expected > 0:
+            return verified >= expected
+        return submitted > 0 and verified >= submitted
+
+    def _publish_expected_source_count(self, task):
+        params = task.params if isinstance(task.params, dict) else {}
+        publish_params = params.get("zsxq_publish") if isinstance(params.get("zsxq_publish"), dict) else {}
+        source_task_id = str(publish_params.get("source_task_id") or "").strip()
+        if not source_task_id:
+            return 0
+
+        clean_task = PublicationTask.query.get(source_task_id)
+        result = clean_task.result if clean_task and isinstance(clean_task.result, dict) else {}
+        for key in ("cleaned_files", "files"):
+            files = result.get(key)
+            if isinstance(files, list):
+                return len(files)
+        return _safe_int(result.get("success_count") or result.get("files_count"))
+
     def _sync_summary(self, result):
         summary = result.get("summary") if isinstance(result, dict) else {}
         if not isinstance(summary, dict):
             summary = {}
         run = result.get("run") if isinstance(result, dict) else {}
-        return {
+        compact = {
             "run_id": (run or {}).get("id"),
+            "target_topics_per_tab": summary.get("target_topics_per_tab"),
+            "planned_topics_total": summary.get("planned_topics_total"),
+            "max_pages": summary.get("max_pages"),
+            "planned_pages_total": summary.get("planned_pages_total"),
+            "pages_fetched": summary.get("pages_fetched"),
             "topics_fetched": summary.get("topics_fetched"),
             "topics_new": summary.get("topics_new"),
             "topics_updated": summary.get("topics_updated"),
+            "topics_existing": summary.get("topics_existing"),
             "attachments_seen": summary.get("attachments_seen"),
             "attachments_downloaded": summary.get("attachments_downloaded"),
             "attachments_failed": summary.get("attachments_failed"),
+            "attachments_skipped": summary.get("attachments_skipped"),
+            "attachments_below_threshold": summary.get("attachments_below_threshold"),
+            "attachments_missing_download_count": summary.get("attachments_missing_download_count"),
+            "attachments_non_target_skipped": summary.get("attachments_non_target_skipped"),
+            "attachments_already_downloaded_skipped": summary.get("attachments_already_downloaded_skipped"),
+            "attachments_reused_local": summary.get("attachments_reused_local"),
+            "attachments_reused_existing": summary.get("attachments_reused_existing"),
+            "attachments_limited_skipped": summary.get("attachments_limited_skipped"),
+            "max_download_files": summary.get("max_download_files"),
             "download_limit_reached": summary.get("download_limit_reached"),
+        }
+        tabs = summary.get("tabs") if isinstance(summary.get("tabs"), list) else []
+        compact["tabs"] = [self._sync_tab_summary(tab) for tab in tabs[:20] if isinstance(tab, dict)]
+        return compact
+
+    def _sync_tab_summary(self, tab):
+        return {
+            "tab_id": tab.get("tab_id"),
+            "tab_label": tab.get("tab_label"),
+            "target_topics": tab.get("target_topics"),
+            "planned_pages": tab.get("planned_pages") or tab.get("max_pages"),
+            "pages": tab.get("pages"),
+            "topics_fetched": tab.get("topics_fetched"),
+            "topics_new": tab.get("topics_new"),
+            "topics_updated": tab.get("topics_updated"),
+            "topics_existing": tab.get("topics_existing"),
+            "attachments_seen": tab.get("attachments_seen"),
+            "attachments_downloaded": tab.get("attachments_downloaded"),
+            "attachments_failed": tab.get("attachments_failed"),
+            "attachments_skipped": tab.get("attachments_skipped"),
+            "attachments_below_threshold": tab.get("attachments_below_threshold"),
+            "attachments_missing_download_count": tab.get("attachments_missing_download_count"),
+            "attachments_non_target_skipped": tab.get("attachments_non_target_skipped"),
+            "attachments_already_downloaded_skipped": tab.get("attachments_already_downloaded_skipped"),
+            "attachments_limited_skipped": tab.get("attachments_limited_skipped"),
+            "download_limit_reached": tab.get("download_limit_reached"),
+            "stopped_by_existing": tab.get("stopped_by_existing"),
+            "stopped_by_download_limit": tab.get("stopped_by_download_limit"),
         }
 
     def _mark_failed(self, workflow, message, stage=None):
@@ -1082,6 +1228,39 @@ class ZsxqWorkflowService:
         data["enabled"] = bool(data.get("enabled", False))
         return data
 
+    def _normalize_pdf_cleaner(self, value):
+        data = deepcopy(value) if isinstance(value, dict) else {}
+        engine = str(data.get("engine") or os.getenv("PDF_CLEANER_ENGINE", "local")).strip().lower()
+        data["engine"] = engine or "local"
+        return data
+
+    def _normalize_attachment_download_rules(self, value):
+        if not isinstance(value, dict):
+            return {"enabled": False, "rules": []}
+
+        rules = []
+        for raw_rule in value.get("rules") or []:
+            if not isinstance(raw_rule, dict):
+                continue
+            file_type = str(raw_rule.get("file_type") or "").strip().lower().lstrip(".")
+            if file_type not in {"pdf", "mp3", "all"}:
+                continue
+            try:
+                threshold = int(raw_rule.get("min_download_count", raw_rule.get("threshold")))
+            except (TypeError, ValueError):
+                continue
+            rules.append({
+                "key": str(raw_rule.get("key") or f"{raw_rule.get('tab_id') or '*'}:{file_type}")[:80],
+                "tab_id": str(raw_rule.get("tab_id") or "").strip(),
+                "tab_label": str(raw_rule.get("tab_label") or "").strip(),
+                "file_type": file_type,
+                "min_download_count": min(max(threshold, 0), 1_000_000),
+            })
+        return {
+            "enabled": bool(value.get("enabled", False) and rules),
+            "rules": rules,
+        }
+
     def _now_iso(self):
         return datetime.utcnow().isoformat() + "Z"
 
@@ -1111,6 +1290,37 @@ def _workflow_queued_stale_minutes(value=None):
     except (TypeError, ValueError):
         minutes = DEFAULT_QUEUED_STALE_MINUTES
     return max(5, min(24 * 60, minutes))
+
+
+def _schema_check_ttl_seconds():
+    try:
+        seconds = int(os.environ.get(SCHEMA_CHECK_TTL_SECONDS_ENV_NAME, DEFAULT_SCHEMA_CHECK_TTL_SECONDS))
+    except (TypeError, ValueError):
+        seconds = DEFAULT_SCHEMA_CHECK_TTL_SECONDS
+    return max(0, min(3600, seconds))
+
+
+def _topic_count(value):
+    try:
+        return min(max(int(value or 12), 1), 50)
+    except (TypeError, ValueError):
+        return 12
+
+
+def _safe_int(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _effective_topic_max_pages(target_count, requested_max_pages):
+    try:
+        requested = min(max(int(requested_max_pages or 1), 1), 20)
+    except (TypeError, ValueError):
+        requested = 1
+    target_pages = max(1, (target_count + TOPIC_PAGE_SIZE_HINT - 1) // TOPIC_PAGE_SIZE_HINT)
+    return min(max(requested, target_pages), 20)
 
 
 zsxq_workflow_service = ZsxqWorkflowService()

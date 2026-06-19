@@ -1,6 +1,38 @@
 import os
+import threading
+import time
 from models import db, SystemConfig
 from flask import current_app
+
+
+CONFIG_SERVICE_CACHE_TTL_SECONDS = float(os.environ.get('CONFIG_SERVICE_CACHE_TTL', '60'))
+_CONFIG_CACHE = {}
+_CONFIG_CACHE_LOCK = threading.Lock()
+
+
+def _cache_get(cache_key):
+    if CONFIG_SERVICE_CACHE_TTL_SECONDS <= 0:
+        return None, False
+    with _CONFIG_CACHE_LOCK:
+        cached = _CONFIG_CACHE.get(cache_key)
+        if not cached or cached.get('expires_at', 0) <= time.time():
+            return None, False
+        return cached.get('value'), True
+
+
+def _cache_set(cache_key, value):
+    if CONFIG_SERVICE_CACHE_TTL_SECONDS <= 0:
+        return
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE[cache_key] = {
+            'expires_at': time.time() + CONFIG_SERVICE_CACHE_TTL_SECONDS,
+            'value': value,
+        }
+
+
+def _cache_clear():
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE.clear()
 
 class ConfigService:
     """
@@ -30,6 +62,10 @@ class ConfigService:
             str: 配置值
         """
         scope = ConfigService.get_current_scope()
+        cache_key = ('get', scope, type_group or '', key, repr(default))
+        cached, hit = _cache_get(cache_key)
+        if hit:
+            return cached
         
         # 1. 尝试从数据库查询
         try:
@@ -45,6 +81,7 @@ class ConfigService:
             config = query.first()
             
             if config:
+                _cache_set(cache_key, config.value)
                 return config.value
         except Exception as e:
             # 数据库查询失败时（如尚未初始化），回退到环境变量
@@ -61,7 +98,9 @@ class ConfigService:
         elif key == 'buvid3': env_key = 'BILI_BUVID3'
         elif key == 'dedeuserid': env_key = 'BILI_DEDEUSERID'
         
-        return os.environ.get(env_key, default)
+        value = os.environ.get(env_key, default)
+        _cache_set(cache_key, value)
+        return value
 
     @staticmethod
     def set(key, value, type_group='general', description=None, scope=None):
@@ -89,6 +128,7 @@ class ConfigService:
                 db.session.add(config)
             
             db.session.commit()
+            _cache_clear()
             return True
         except Exception as e:
             db.session.rollback()
@@ -101,10 +141,17 @@ class ConfigService:
         获取某类业务下的所有配置 (返回字典)
         """
         scope = ConfigService.get_current_scope()
+        cache_key = ('group', scope, type_group)
+        cached, hit = _cache_get(cache_key)
+        if hit:
+            return dict(cached or {})
+
         configs = SystemConfig.query.filter_by(
             type=type_group, 
             scope=scope, 
             status=1
         ).all()
         
-        return {c.key: c.value for c in configs}
+        values = {c.key: c.value for c in configs}
+        _cache_set(cache_key, dict(values))
+        return values

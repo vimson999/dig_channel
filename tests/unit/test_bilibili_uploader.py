@@ -17,7 +17,7 @@ from services.bilibili.uploader import (  # noqa: E402
 
 
 class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
-    async def test_upload_single_passes_neutral_mark_to_sdk_meta(self):
+    async def test_upload_single_maps_neutral_mark_to_creation_statement(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
             with patch("services.bilibili.uploader.VideoMeta") as meta_cls:
                 with patch("services.bilibili.uploader.VideoUploader") as sdk_uploader_cls:
@@ -37,11 +37,13 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
                     )
 
         self.assertEqual(result["aid"], 1)
-        meta_kwargs = meta_cls.call_args.kwargs
-        self.assertEqual(meta_kwargs["neutral_mark"], DEFAULT_NEUTRAL_MARK)
-        self.assertTrue(meta_kwargs["no_reprint"])
+        self.assertFalse(meta_cls.called)
+        meta = sdk_uploader_cls.call_args.kwargs["meta"]
+        self.assertEqual(meta["creation_statement"], {"id": 4})
+        self.assertNotIn("neutral_mark", meta)
+        self.assertEqual(meta["no_reprint"], 1)
 
-    async def test_upload_single_passes_delay_time_to_sdk_meta(self):
+    async def test_upload_single_passes_delay_time_to_meta(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
             with patch("services.bilibili.uploader.VideoMeta") as meta_cls:
                 with patch("services.bilibili.uploader.VideoUploader") as sdk_uploader_cls:
@@ -60,7 +62,10 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
                         delay_time=1782000000,
                     )
 
-        self.assertEqual(meta_cls.call_args.kwargs["delay_time"], 1782000000)
+        self.assertFalse(meta_cls.called)
+        meta = sdk_uploader_cls.call_args.kwargs["meta"]
+        self.assertEqual(meta["dtime"], 1782000000)
+        self.assertEqual(meta["creation_statement"], {"id": 4})
 
     async def test_upload_single_builds_season_meta_dict(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
@@ -87,6 +92,34 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["season_id"], 12345)
         self.assertEqual(meta["dtime"], 1782000000)
         self.assertEqual(meta["no_disturbance"], 0)
+        self.assertEqual(meta["creation_statement"], {"id": 4})
+
+    async def test_upload_single_builds_only_self_meta_dict(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            with patch("services.bilibili.uploader.VideoMeta") as meta_cls:
+                with patch("services.bilibili.uploader.VideoUploader") as sdk_uploader_cls:
+                    sdk_uploader = sdk_uploader_cls.return_value
+                    sdk_uploader.start = AsyncMock(return_value={"aid": 6, "bvid": "BVprivate"})
+                    sdk_uploader.on.return_value = lambda handler: handler
+
+                    uploader = BiliUploader(sessdata="sess", bili_jct="csrf")
+                    await uploader.upload_single(
+                        video_path=video.name,
+                        title="仅自己可见测试",
+                        desc="测试简介",
+                        tid=36,
+                        tags=["测试"],
+                        cover_path="/tmp/cover.jpg",
+                        is_only_self=1,
+                        space_hidden=2,
+                    )
+
+        self.assertFalse(meta_cls.called)
+        meta = sdk_uploader_cls.call_args.kwargs["meta"]
+        self.assertEqual(meta["is_only_self"], 1)
+        self.assertEqual(meta["space_hidden"], 2)
+        self.assertEqual(meta["creation_statement"], {"id": 4})
+        self.assertNotIn("charging_pay", meta)
 
     async def test_upload_single_builds_charging_pay_meta_dict(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
@@ -125,7 +158,8 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["preview"], {"need_preview": 1, "start_time": 0, "end_time": 5})
         self.assertEqual(meta["qa"], {"qa_enabled": 0, "qa_id": None})
         self.assertEqual(meta["member_first"], {"enabled": 0, "exp_time": 0})
-        self.assertEqual(meta["neutral_mark"], DEFAULT_NEUTRAL_MARK)
+        self.assertEqual(meta["creation_statement"], {"id": 4})
+        self.assertNotIn("neutral_mark", meta)
         self.assertEqual(meta["tid"], 36)
 
     async def test_upload_single_charging_pay_defaults_preview_end(self):

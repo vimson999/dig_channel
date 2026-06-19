@@ -2,6 +2,7 @@ import logging
 import os
 
 from flask import Blueprint, jsonify, request, send_file
+from sqlalchemy.orm import load_only
 
 from models import db
 from models.task import PublicationTask
@@ -13,9 +14,26 @@ logger = logging.getLogger("TTS_V2_API")
 
 tts_v2_bp = Blueprint('tts_v2', __name__, url_prefix='/api/v2/tts')
 
+TASK_PAYLOAD_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.feature,
+    PublicationTask.user_id,
+    PublicationTask.task_title,
+    PublicationTask.created_at,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
+)
+
 
 def _is_tts_task(task):
-    return bool(task.params and task.params.get('feature') == 'doubao_tts')
+    return bool((task.feature or (task.params or {}).get('feature')) == 'doubao_tts')
 
 
 def _task_title(task):
@@ -187,10 +205,10 @@ def get_history(current_user):
         per_page = min(50, max(1, request.args.get('per_page', 10, type=int)))
 
         query = PublicationTask.query.filter(
-            PublicationTask.params['feature'].as_string() == 'doubao_tts',
-            PublicationTask.params['user_id'].as_string() == str(current_user.id),
+            PublicationTask.feature == 'doubao_tts',
+            PublicationTask.user_id == str(current_user.id),
         ).order_by(PublicationTask.created_at.desc())
-        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        pagination = query.options(load_only(*TASK_PAYLOAD_COLUMNS)).paginate(page=page, per_page=per_page, error_out=False)
 
         return jsonify({
             'success': True,
@@ -210,8 +228,8 @@ def get_history(current_user):
 def get_article_detail(current_user, task_id):
     """获取任务详情及所有段落状态"""
     try:
-        task = PublicationTask.query.get(task_id)
-        if not task or not _is_tts_task(task) or str((task.params or {}).get('user_id')) != str(current_user.id):
+        task = _get_tts_task(task_id)
+        if not task or str(task.user_id or (task.params or {}).get('user_id')) != str(current_user.id):
             return jsonify({'success': False, 'message': '未找到该任务'}), 404
 
         data = _task_to_list_item(task)
@@ -222,13 +240,17 @@ def get_article_detail(current_user, task_id):
 
 
 def _find_segment(task_id, sequence):
-    task = PublicationTask.query.get(task_id)
+    task = _get_tts_task(task_id)
     if not task or not _is_tts_task(task):
         return None, None
     for segment in _task_segments(task):
         if int(segment.get('sequence') or 0) == int(sequence):
             return task, segment
     return task, None
+
+
+def _get_tts_task(task_id):
+    return PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).get(task_id)
 
 
 @tts_v2_bp.route('/task/<task_id>/segment/<int:sequence>/audio', methods=['GET'])

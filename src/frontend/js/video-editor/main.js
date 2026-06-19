@@ -594,6 +594,7 @@ async function refreshTaskList() {
 }
 
 function isVideoEditorTask(task) {
+    if (typeof task?.is_video_editor_task === 'boolean') return task.is_video_editor_task;
     const params = task?.params || {};
     if (params.feature && params.feature !== 'publisher') return false;
     return !!params.video || Array.isArray(params.audio_segments) || !!params.bilibili || !!params.thumbnail;
@@ -654,7 +655,8 @@ function renderTaskList() {
         const errorMessage = task.error_message || '';
         const invalidAssetError = /No valid audio clips|音频文件不存在|缺少音频配置/.test(errorMessage);
         const canRequeue = !isCompleted && !invalidAssetError;
-        const hasReusableConfig = !!task.params?.video || Array.isArray(task.params?.audio_segments);
+        const hasReusableConfig = Boolean(task.has_reusable_config || task.params?.video || Array.isArray(task.params?.audio_segments));
+        const videoPath = task.result?.video_path || task.video_path;
         const pendingMinutes = getTaskPendingMinutes(task);
         const pendingNotice = getPendingNotice(task, pendingMinutes, worker);
         return `
@@ -672,7 +674,7 @@ function renderTaskList() {
                 </div>
                 ${canRequeue ? `<button type="button" data-requeue-task-id="${task.id || task._id}" class="mt-2 mr-2 rounded bg-blue-600 px-2 py-1 text-[8px] font-black uppercase text-white hover:bg-blue-500">重新入队</button>` : ''}
                 ${hasReusableConfig ? `<button type="button" data-apply-task-id="${task.id || task._id}" class="mt-2 mr-2 rounded bg-zinc-800 px-2 py-1 text-[8px] font-black uppercase text-zinc-300 hover:bg-zinc-700">套用配置</button>` : ''}
-                ${isCompleted ? `<a href="${PublisherService.API_BASE}/resources/view?path=${encodeURIComponent(task.result.video_path)}" target="_blank" class="block mt-2 text-[8px] font-black text-emerald-500 uppercase hover:underline">Download Video</a>` : ''}
+                ${isCompleted && videoPath ? `<a href="${PublisherService.API_BASE}/resources/view?path=${encodeURIComponent(videoPath)}" target="_blank" class="block mt-2 text-[8px] font-black text-emerald-500 uppercase hover:underline">Download Video</a>` : ''}
             </div>
         `;
     }).join('');
@@ -710,7 +712,7 @@ function getRenderWorkerSnapshot() {
         active,
         reserved,
         scheduled,
-        idle: active === 0 && reserved === 0 && scheduled === 0
+        idle: !render.inspect_error && active === 0 && reserved === 0 && scheduled === 0
     };
 }
 
@@ -865,9 +867,23 @@ async function maybeAutoWakeRenderWorker() {
     }
 }
 
-function applyTaskConfig(taskId) {
-    const task = state.tasks.find(item => String(item.id || item._id) === String(taskId));
-    const params = task?.params;
+async function applyTaskConfig(taskId) {
+    let task = state.tasks.find(item => String(item.id || item._id) === String(taskId));
+    let params = task?.params;
+    if (!params || params._summary) {
+        try {
+            const result = await PublisherService.getTaskStatus(taskId);
+            const fullTask = result?.data || result?.task;
+            if (fullTask?.params) {
+                task = { ...(task || {}), ...fullTask };
+                const index = state.tasks.findIndex(item => String(item.id || item._id) === String(taskId));
+                if (index >= 0) state.tasks[index] = task;
+                params = fullTask.params;
+            }
+        } catch (err) {
+            console.warn('Task detail fetch failed', err);
+        }
+    }
     if (!task || !params) {
         showToast('没有找到可套用的历史配置', 'error');
         return;

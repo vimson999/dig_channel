@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 
 from models import db
@@ -55,7 +56,7 @@ def submit_pdf_clean_task(
                         "do_ocr": bool(cleaner.get("do_ocr", False)),
                         "overwrite": bool(cleaner.get("overwrite", False)),
                         "prefix": cleaner.get("prefix") or "",
-                        "engine": cleaner.get("engine") or "external",
+                        "engine": cleaner.get("engine") or os.getenv("PDF_CLEANER_ENGINE") or "local",
                         "base_url": cleaner.get("base_url") or None,
                         "cleaner_project_dir": cleaner.get("cleaner_project_dir") or None,
                         "cleaner_batch_root": cleaner.get("cleaner_batch_root") or None,

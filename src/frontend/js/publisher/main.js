@@ -64,7 +64,19 @@ function initUI() {
     const select = document.getElementById('bili_tid');
     if (select) {
         const BILI_TIDS = [
-            { label: "知识/科技", items: [{ value: "207", label: "财经" }, { value: "36", label: "知识" }] },
+            {
+                label: "知识",
+                items: [
+                    { value: "207", label: "财经商业" },
+                    { value: "201", label: "科学科普" },
+                    { value: "124", label: "社科·法律·心理" },
+                    { value: "228", label: "人文历史" },
+                    { value: "208", label: "校园学习" },
+                    { value: "209", label: "职业职场" },
+                    { value: "229", label: "设计·创意" },
+                    { value: "122", label: "野生技能协会" }
+                ]
+            },
             { label: "热门", items: [{ value: "171", label: "电子竞技" }] }
         ];
         BILI_TIDS.forEach(group => {
@@ -74,7 +86,7 @@ function initUI() {
             });
             select.appendChild(optgroup);
         });
-        select.value = "36";
+        select.value = "207";
     }
     refreshBiliScheduleInput();
 }
@@ -518,7 +530,7 @@ async function handleTaskSubmit() {
             enabled: document.getElementById('bili_enabled')?.checked ?? true,
             title: fd.get('bili_title') || (document.getElementById('thumb_main')?.value || "未命名视频").split('\n')[0],
             desc: fd.get('bili_desc') || "由一键发布台自动合成。",
-            tid: parseInt(fd.get('bili_tid') || 36),
+            tid: parseInt(fd.get('bili_tid') || 207),
             tags: (fd.get('bili_tags') || "财经, 投资").split(',').map(t => t.trim()).filter(t => t),
             copyright: parseInt(fd.get('bili_copyright') || 1),
             no_reprint: document.querySelector('input[name="bili_no_reprint"]')?.checked ? 1 : 0,
@@ -556,6 +568,7 @@ async function handleTaskSubmit() {
 
     if (document.getElementById('v_thumb_enabled')?.checked) {
         payload.vertical_thumbnail = {
+            enabled: true,
             main_title: document.getElementById('v_thumb_main').value,
             sub_title: document.getElementById('v_thumb_sub').value,
             date_text: document.getElementById('v_thumb_date').value,

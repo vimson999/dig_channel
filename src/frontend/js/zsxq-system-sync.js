@@ -6,7 +6,9 @@ const PUBLISH_ACTIVE_COOKIE_ID_STORAGE_KEY = 'zsxq_publish_active_cookie_id';
 const SYSTEM_SYNC_INTERVAL_MINUTES = 25;
 const SYSTEM_SYNC_MAX_ROUNDS = 0;
 const SYSTEM_SYNC_COUNT = 12;
-const SYSTEM_SYNC_MAX_DOWNLOAD_FILES = 0;
+const SYSTEM_SYNC_MAX_DOWNLOAD_FILES = 40;
+const SYSTEM_SYNC_PDF_DOWNLOAD_THRESHOLD = 30;
+const SYSTEM_SYNC_MP3_DOWNLOAD_THRESHOLD = 15;
 const SYSTEM_SYNC_AUTO_PDF_CLEAN = false;
 const SYSTEM_SYNC_AUTO_AUDIO_CLEAN = false;
 const SYSTEM_SYNC_AUTO_PUBLISH_AFTER_CLEAN = false;
@@ -87,6 +89,8 @@ const els = {
     configMaxRoundsInput: document.getElementById('system-sync-max-rounds-input'),
     configCountInput: document.getElementById('system-sync-count-input'),
     configMaxDownloadFilesInput: document.getElementById('system-sync-max-download-files-input'),
+    configPdfDownloadThresholdInput: document.getElementById('system-sync-pdf-download-threshold-input'),
+    configMp3DownloadThresholdInput: document.getElementById('system-sync-mp3-download-threshold-input'),
     configAutoPdfCleanCheckbox: document.getElementById('system-sync-auto-pdf-clean-checkbox'),
     configAutoAudioCleanCheckbox: document.getElementById('system-sync-auto-audio-clean-checkbox'),
     configAutoPublishAfterCleanCheckbox: document.getElementById('system-sync-auto-publish-after-clean-checkbox'),
@@ -202,6 +206,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (els.configMaxDownloadFilesInput) {
         els.configMaxDownloadFilesInput.value = String(SYSTEM_SYNC_MAX_DOWNLOAD_FILES);
+    }
+    if (els.configPdfDownloadThresholdInput) {
+        els.configPdfDownloadThresholdInput.value = String(SYSTEM_SYNC_PDF_DOWNLOAD_THRESHOLD);
+    }
+    if (els.configMp3DownloadThresholdInput) {
+        els.configMp3DownloadThresholdInput.value = String(SYSTEM_SYNC_MP3_DOWNLOAD_THRESHOLD);
     }
     if (els.configAutoPdfCleanCheckbox) {
         els.configAutoPdfCleanCheckbox.checked = SYSTEM_SYNC_AUTO_PDF_CLEAN;
@@ -1147,6 +1157,77 @@ function buildSystemJobs(tabs = state.selectedTabDefinitions) {
     return jobs;
 }
 
+function buildAttachmentDownloadRules(jobs, pdfThreshold, mp3Threshold) {
+    const rules = [];
+    (jobs || []).forEach(job => {
+        const tab = job.tab || {};
+        if (job.fileType === 'pdf' && (job.key === 'foreign_report' || String(tab.label || '').includes('外资'))) {
+            rules.push({
+                key: job.key,
+                tab_id: String(tab.id || ''),
+                tab_label: String(tab.label || ''),
+                file_type: 'pdf',
+                min_download_count: Number(pdfThreshold),
+            });
+        }
+        if (job.fileType === 'mp3' && (job.key === 'research_memo_mp3' || String(tab.label || '').includes('调研'))) {
+            rules.push({
+                key: job.key,
+                tab_id: String(tab.id || ''),
+                tab_label: String(tab.label || ''),
+                file_type: 'mp3',
+                min_download_count: Number(mp3Threshold),
+            });
+        }
+    });
+    return {
+        enabled: rules.length > 0,
+        rules,
+    };
+}
+
+function attachmentDownloadRules(config = {}) {
+    const value = config.attachment_download_rules;
+    if (!value || typeof value !== 'object') {
+        return { enabled: false, rules: [] };
+    }
+    const rules = Array.isArray(value.rules) ? value.rules : [];
+    return {
+        enabled: value.enabled === true && rules.length > 0,
+        rules,
+    };
+}
+
+function formatThresholdDownloadText(config = {}, fallbackMaxFiles = SYSTEM_SYNC_MAX_DOWNLOAD_FILES) {
+    const rules = attachmentDownloadRules(config);
+    const fallbackNumber = Number(fallbackMaxFiles);
+    const configLimitNumber = Number(config.max_download_files);
+    const maxFiles = Number.isFinite(fallbackNumber)
+        ? fallbackNumber
+        : (Number.isFinite(configLimitNumber) ? configLimitNumber : SYSTEM_SYNC_MAX_DOWNLOAD_FILES);
+    const ruleText = rules.rules.map(rule => {
+        const tab = rule.tab_label || rule.tab_id || '目标 Tab';
+        const type = String(rule.file_type || '').toUpperCase() || '附件';
+        return `${tab} ${type}≥${rule.min_download_count || 0}`;
+    }).join('；');
+    if (!config.download_attachments) {
+        if (rules.enabled) {
+            return `达标下载规则已保存：${ruleText}；但当前每目标下载上限为 ${maxFiles}，本轮只同步索引`;
+        }
+        return '当前只同步索引，不自动下载附件';
+    }
+    if (!rules.enabled) {
+        return `每目标自动下载上限：${maxFiles}；已下载过的不重复下载`;
+    }
+    return `满足规则且未下载过才自动下载：${ruleText}；每个目标最多 ${maxFiles} 个`;
+}
+
+function downloadThresholdFromConfig(config, fileType, fallback) {
+    const rules = attachmentDownloadRules(config).rules || [];
+    const matched = rules.find(rule => String(rule.file_type || '').toLowerCase() === fileType);
+    return parseBoundedInt(matched?.min_download_count, fallback, 0, 100000);
+}
+
 async function saveSystemSyncConfig() {
     const context = syncContext();
     if (!context.selectedGroupId) {
@@ -1172,8 +1253,26 @@ async function saveSystemSyncConfig() {
         els.configMaxDownloadFilesInput?.value,
         SYSTEM_SYNC_MAX_DOWNLOAD_FILES,
         0,
-        3,
+        40,
     );
+    const pdfDownloadThreshold = parseBoundedInt(
+        els.configPdfDownloadThresholdInput?.value,
+        SYSTEM_SYNC_PDF_DOWNLOAD_THRESHOLD,
+        0,
+        100000,
+    );
+    const mp3DownloadThreshold = parseBoundedInt(
+        els.configMp3DownloadThresholdInput?.value,
+        SYSTEM_SYNC_MP3_DOWNLOAD_THRESHOLD,
+        0,
+        100000,
+    );
+    const attachmentDownloadRules = buildAttachmentDownloadRules(
+        jobs,
+        pdfDownloadThreshold,
+        mp3DownloadThreshold,
+    );
+    const thresholdedDownloadEnabled = Number(maxDownloadFilesRaw) > 0 && attachmentDownloadRules.rules.length > 0;
     const group = selectedGroup('sync');
     const cookie = getActiveCookieForRequest('sync');
 
@@ -1188,9 +1287,11 @@ async function saveSystemSyncConfig() {
             count: Number(countRaw),
             max_pages: 1,
             stop_on_existing: true,
-            download_attachments: false,
-            allow_attachment_downloads: false,
+            download_attachments: thresholdedDownloadEnabled,
+            allow_attachment_downloads: thresholdedDownloadEnabled,
             max_download_files: Number(maxDownloadFilesRaw),
+            skip_existing_downloads: true,
+            attachment_download_rules: attachmentDownloadRules,
             auto_pdf_clean: Boolean(els.configAutoPdfCleanCheckbox?.checked),
             auto_audio_clean: Boolean(els.configAutoAudioCleanCheckbox?.checked),
             auto_publish_after_clean: {
@@ -1226,7 +1327,7 @@ async function saveSystemSyncConfig() {
                 config.auto_audio_clean === true ? '音频清洗' : null,
             ].filter(Boolean);
             const workflowText = `同步索引${cleanParts.length ? ` → ${cleanParts.join('+')}` : ''}${cleanParts.length && config.auto_publish_after_clean?.enabled ? ' → 发布' : ''}`;
-            const downloadText = config.download_attachments ? `自动下载最多 ${serverMaxDownloadFiles || maxDownloadFilesRaw} 个附件` : '不自动下载 PDF/音频附件';
+            const downloadText = formatThresholdDownloadText(config, serverMaxDownloadFiles || maxDownloadFilesRaw);
             renderMessage('success', `配置已保存。${workflowText}；${downloadText}；间隔 ${serverInterval || intervalMinutes} 分钟，每目标 Tab ${serverCount || countRaw} 条，任务轮次：${formatConfigMaxRounds(config.max_rounds)}。`);
         }
         if (Number.isFinite(serverCount)) {
@@ -1444,8 +1545,8 @@ function renderSyncSchedulerPanel() {
     els.schedulerStatusBadge.className = `rounded-full px-2 py-1 text-[10px] font-black ${running ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`;
     const interval = config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES;
     const count = config.count || SYSTEM_SYNC_COUNT;
-    const maxFiles = Number(config.max_download_files || SYSTEM_SYNC_MAX_DOWNLOAD_FILES);
-    const autoDownloadAttachments = Boolean(config.download_attachments);
+    const maxFiles = Number(config.max_download_files ?? SYSTEM_SYNC_MAX_DOWNLOAD_FILES);
+    const downloadText = formatThresholdDownloadText(config, maxFiles);
     const autoPdfClean = config.auto_pdf_clean === true;
     const autoAudioClean = config.auto_audio_clean === true;
     const autoPublishAfterClean = config.auto_publish_after_clean?.enabled === true;
@@ -1464,7 +1565,7 @@ function renderSyncSchedulerPanel() {
     els.schedulerContent.innerHTML = `
         <div class="space-y-1">
             <div>进程状态：${escapeHtml(running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
-            <div>计划配置：${escapeHtml(String(interval))} 分钟一次 · 每目标 Tab ${escapeHtml(String(count))} 条 · ${escapeHtml(autoDownloadAttachments ? `自动下载最多 ${maxFiles} 个附件` : '不自动下载 PDF/音频附件')}</div>
+            <div>计划配置：${escapeHtml(String(interval))} 分钟一次 · 每目标 Tab ${escapeHtml(String(count))} 条 · ${escapeHtml(downloadText)}</div>
             <div>工作流：同步 → ${escapeHtml(cleanText)}${escapeHtml(publishEnabled ? ' → 发布' : '')}</div>
             <div>轮次：${escapeHtml(rounds)}</div>
             <div>Cookie：${escapeHtml(cookieMode)}</div>
@@ -1526,9 +1627,7 @@ function renderSyncOverviewCard() {
     ].filter(Boolean);
     const cleanText = cleanParts.length ? cleanParts.join(' + ') : '不清洗';
     const autoPublishText = cleanParts.length && config.auto_publish_after_clean?.enabled === true ? '清洗后自动发帖开启' : '不自动发帖';
-    const downloadText = config.download_attachments
-        ? `自动下载附件上限：${config.max_download_files || SYSTEM_SYNC_MAX_DOWNLOAD_FILES}`
-        : '不自动下载 PDF/音频附件';
+    const downloadText = formatThresholdDownloadText(config, config.max_download_files);
     els.configDetail.textContent = `${downloadText} · 每目标 Tab ${config.count || SYSTEM_SYNC_COUNT} 条 · ${cleanText} · ${autoPublishText} · 任务来源：${cookieSourceText}。`;
     renderWorkspaceSnapshot();
 }
@@ -1559,9 +1658,25 @@ function hydrateSystemSyncRuntimeConfigInputs(config = {}) {
             config.max_download_files,
             SYSTEM_SYNC_MAX_DOWNLOAD_FILES,
             0,
-            3,
+            40,
         );
         els.configMaxDownloadFilesInput.value = String(maxDownloadFiles);
+    }
+
+    if (els.configPdfDownloadThresholdInput) {
+        els.configPdfDownloadThresholdInput.value = String(downloadThresholdFromConfig(
+            config,
+            'pdf',
+            SYSTEM_SYNC_PDF_DOWNLOAD_THRESHOLD,
+        ));
+    }
+
+    if (els.configMp3DownloadThresholdInput) {
+        els.configMp3DownloadThresholdInput.value = String(downloadThresholdFromConfig(
+            config,
+            'mp3',
+            SYSTEM_SYNC_MP3_DOWNLOAD_THRESHOLD,
+        ));
     }
 
     if (els.configMaxRoundsInput) {
@@ -1632,6 +1747,7 @@ function renderBatchesPanel() {
 function renderSystemSyncBatchCard(batch) {
     const summary = batch.summary || {};
     const topics = batch.topics || [];
+    const topicCount = Number(batch.topics_count ?? topics.length ?? 0);
     const status = batchStatusMeta(batch.status);
     const detailUrl = systemSyncBatchDetailUrl(batch);
     const roundText = batch.round && batch.max_rounds
@@ -1663,7 +1779,7 @@ function renderSystemSyncBatchCard(batch) {
 
             <a class="zsxq-batch-detail-link" href="${escapeHtml(detailUrl)}" target="_blank" rel="noopener">
                 <span>打开明细</span>
-                <strong>${escapeHtml(String(topics.length))} 条内容</strong>
+                <strong>${escapeHtml(String(topicCount))} 条内容</strong>
                 ${batch.topics_truncated ? '<em>已截断</em>' : ''}
                 <i class="fas fa-up-right-from-square" aria-hidden="true"></i>
             </a>

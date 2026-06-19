@@ -41,8 +41,12 @@ const PublisherService = {
         return await res.json();
     },
 
-    async fetchTasks() {
-        const res = await fetch(`${this.API_BASE}/publisher/tasks`);
+    async fetchTasks(options = {}) {
+        const query = new URLSearchParams();
+        if (options.includePayload) query.set('include_payload', '1');
+        if (options.includeAll) query.set('include_all', '1');
+        const suffix = query.toString() ? `?${query.toString()}` : '';
+        const res = await fetch(`${this.API_BASE}/publisher/tasks${suffix}`);
         return await res.json();
     },
 

@@ -113,6 +113,50 @@ def _cookie_source():
     return None
 
 
+def _notify_scheduler_trigger_failure(*, attempt_id, trigger, reason, message=None, error=None, config=None, stopped=False):
+    try:
+        from services.workflow_notification_service import workflow_notification_service
+
+        config = config if isinstance(config, dict) else {}
+        group_name = config.get("group_name") or config.get("group_id") or "-"
+        detail = error or message or reason or "-"
+        lines = [
+            "事件：系统同步触发失败",
+            f"星球：{group_name}",
+            "状态：失败 / 当前阶段：scheduler",
+            f"触发方式：{trigger or '-'}",
+            f"触发批次：{attempt_id or '-'}",
+            f"原因：{reason or '-'}",
+            f"错误：{detail}",
+            "结果：本轮未入队，未创建 workflow，未执行下载、清洗、发布。",
+        ]
+        if config.get("interval_minutes"):
+            lines.append(f"计划间隔：{config.get('interval_minutes')} 分钟")
+        if config.get("path"):
+            lines.append(f"配置文件：{config.get('path')}")
+        if stopped:
+            lines.append("处理：调度器已停止，请修复配置后重启。")
+        else:
+            lines.append("处理：调度器仍在运行，下一轮会继续尝试。")
+        result = workflow_notification_service.send_email_message(
+            "[知识星球工作流] 系统同步触发失败",
+            "\n".join(lines),
+        )
+        logger.info(
+            "[ZSXQ_AUTO_SYNC] trigger_failure_notification | attempt_id=%s reason=%s sent=%s result=%s",
+            attempt_id or "-",
+            reason or "-",
+            bool(isinstance(result, dict) and result.get("sent")),
+            result,
+        )
+    except Exception:
+        logger.exception(
+            "[ZSXQ_AUTO_SYNC] trigger failure notification failed | attempt_id=%s reason=%s",
+            attempt_id or "-",
+            reason or "-",
+        )
+
+
 class ZsxqAutoScheduler:
     def __init__(self):
         self.app = create_app()
@@ -145,6 +189,13 @@ class ZsxqAutoScheduler:
                         status.get("path"),
                         time.monotonic() - started_at,
                     )
+                    _notify_scheduler_trigger_failure(
+                        attempt_id=attempt_id,
+                        trigger=trigger,
+                        reason="missing_config",
+                        message="未找到系统计划配置，请先保存配置。",
+                        config=status,
+                    )
                     return {
                         "queued": False,
                         "skipped": True,
@@ -158,6 +209,13 @@ class ZsxqAutoScheduler:
                         attempt_id,
                         status.get("cookie_env_name"),
                         time.monotonic() - started_at,
+                    )
+                    _notify_scheduler_trigger_failure(
+                        attempt_id=attempt_id,
+                        trigger=trigger,
+                        reason="missing_cookie_env",
+                        message=f"未配置环境变量 {status.get('cookie_env_name')}，请先设置后再启动。",
+                        config=status,
                     )
                     return {
                         "queued": False,
@@ -247,6 +305,13 @@ class ZsxqAutoScheduler:
                 trigger,
                 time.monotonic() - started_at,
                 exc,
+            )
+            _notify_scheduler_trigger_failure(
+                attempt_id=attempt_id,
+                trigger=trigger,
+                reason="error",
+                error=str(exc),
+                config=locals().get("status"),
             )
             return {
                 "queued": False,

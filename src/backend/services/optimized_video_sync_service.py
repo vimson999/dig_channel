@@ -8,12 +8,38 @@ from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
+from sqlalchemy.orm import load_only
+
 from models import db, Channel, Video, VideoData
 from utils.youtube_api import YouTubeAPI
 from utils.colored_logger import setup_colored_logger
 from config.base import BaseConfig
 
 logger = setup_colored_logger("OPTIMIZED_VIDEO_SYNC")
+
+CHANNEL_CACHE_COLUMNS = (
+    Channel.id,
+    Channel.user_id,
+    Channel.name,
+    Channel.channel_id,
+    Channel.url,
+    Channel.cpm,
+    Channel.category,
+    Channel.sort,
+    Channel.is_active,
+    Channel.created_at,
+    Channel.updated_at,
+)
+
+VIDEO_UPDATE_COLUMNS = (
+    Video.id,
+    Video.video_id,
+    Video.view_count,
+    Video.like_count,
+    Video.comment_count,
+    Video.title,
+    Video.description,
+)
 
 class VideoSyncCache:
     """视频同步缓存管理器"""
@@ -318,7 +344,7 @@ class OptimizedVideoSyncService:
             # 2. 获取频道信息（优先使用缓存）
             channel_info = self.cache.get_cached_channel_info(channel_id)
             if not channel_info:
-                channel = Channel.query.get(channel_id)
+                channel = Channel.query.options(load_only(*CHANNEL_CACHE_COLUMNS)).get(channel_id)
                 if not channel:
                     return {'success': False, 'message': '频道不存在', 'data': {}}
                 
@@ -378,7 +404,12 @@ class OptimizedVideoSyncService:
         start_date = end_date - timedelta(days=days_back)
         
         # 检查是否为首次同步
-        existing_videos = Video.query.filter_by(channel_id=db_channel_id).first()
+        existing_videos = (
+            db.session.query(Video.id)
+            .filter(Video.channel_id == db_channel_id)
+            .limit(1)
+            .first()
+        )
         is_initial_sync = existing_videos is None
         
         max_results = 50 if is_initial_sync else 20
@@ -405,10 +436,14 @@ class OptimizedVideoSyncService:
         
         existing_videos_map = {}
         if uncached_video_ids:
-            existing_videos = Video.query.filter(
-                Video.video_id.in_(uncached_video_ids),
-                Video.channel_id == channel_id
-            ).all()
+            existing_videos = (
+                db.session.query(*VIDEO_UPDATE_COLUMNS)
+                .filter(
+                    Video.video_id.in_(uncached_video_ids),
+                    Video.channel_id == channel_id,
+                )
+                .all()
+            )
             existing_videos_map = {v.video_id: v for v in existing_videos}
             
             # 缓存查询结果
@@ -455,7 +490,7 @@ class OptimizedVideoSyncService:
         
         try:
             # 获取频道信息
-            channel = Channel.query.get(channel_id)
+            channel = Channel.query.options(load_only(*CHANNEL_CACHE_COLUMNS)).get(channel_id)
             if not channel:
                 raise ValueError(f"频道ID {channel_id} 不存在")
             
@@ -484,18 +519,28 @@ class OptimizedVideoSyncService:
             return 0
         
         try:
+            video_ids = [video_info['video_id'] for video_info in videos]
+            missing_video_ids = [
+                video_id
+                for video_id in video_ids
+                if video_id not in existing_videos_map
+            ]
+            if missing_video_ids:
+                rows = (
+                    db.session.query(*VIDEO_UPDATE_COLUMNS)
+                    .filter(
+                        Video.video_id.in_(missing_video_ids),
+                        Video.channel_id == channel_id,
+                    )
+                    .all()
+                )
+                existing_videos_map.update({row.video_id: row for row in rows})
+
             updates_data = []
             
             for video_info in videos:
                 video_id = video_info['video_id']
-                
-                # 从现有视频映射中获取，如果没有则查询数据库
                 existing_video = existing_videos_map.get(video_id)
-                if not existing_video:
-                    existing_video = Video.query.filter_by(
-                        video_id=video_id, 
-                        channel_id=channel_id
-                    ).first()
                 
                 if existing_video:
                     update_data = self._prepare_update_data(existing_video, video_info)
@@ -569,17 +614,30 @@ class OptimizedVideoSyncService:
         """批量创建视频数据记录"""
         try:
             # 1. 获取频道所有活跃视频
-            videos = Video.query.filter_by(channel_id=channel_id, is_active=True).all()
+            videos = (
+                db.session.query(
+                    Video.id.label("id"),
+                    Video.view_count.label("view_count"),
+                    Video.like_count.label("like_count"),
+                    Video.comment_count.label("comment_count"),
+                )
+                .filter(Video.channel_id == channel_id, Video.is_active.is_(True))
+                .all()
+            )
             
             if not videos:
                 return
             
             # 2. 批量查询现有记录
             video_ids = [v.id for v in videos]
-            existing_records = VideoData.query.filter(
-                VideoData.video_id.in_(video_ids),
-                VideoData.date == record_date
-            ).all()
+            existing_records = (
+                db.session.query(VideoData.video_id)
+                .filter(
+                    VideoData.video_id.in_(video_ids),
+                    VideoData.date == record_date,
+                )
+                .all()
+            )
             
             existing_video_ids = {record.video_id for record in existing_records}
             

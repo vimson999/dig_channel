@@ -13,6 +13,35 @@ from services.content_pipeline.pdf_cleaner_adapter import PdfCleanOptions, PdfCl
 
 
 class LocalPdfCleanerAdapterTest(unittest.TestCase):
+    def test_default_engine_is_local_without_external_service(self):
+        self.assertEqual(PdfCleanOptions().engine, "local")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.pdf"
+            source.write_bytes(b"%PDF-1.4\nsample")
+
+            def fake_remove_watermark(_input_path, output_path, *args, **kwargs):
+                Path(output_path).write_bytes(b"%PDF-1.4\ncleaned")
+                return True, "Success"
+
+            adapter = PdfCleanerAdapter(
+                base_url="http://127.0.0.1:1",
+                output_root=root / "batches",
+            )
+
+            with patch(
+                "services.watermark.pdf_processor.PDFProcessor.remove_watermark",
+                side_effect=fake_remove_watermark,
+            ):
+                result = adapter.run_batch(
+                    batch_id="default-local-clean",
+                    files=[source],
+                )
+
+            self.assertEqual(result["engine"], "local")
+            self.assertEqual(result["success_count"], 1)
+
     def test_local_engine_writes_cleaned_output_without_external_service(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

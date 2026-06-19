@@ -7,7 +7,7 @@ class BiliVideoMetadata(BaseModel):
     """Bilibili video metadata model."""
     title: str
     desc: str = ""
-    tid: int = 36  # 知识
+    tid: int = 207  # 知识 / 财经商业
     tags: List[str] = ["BiliFlow"]
     cover_path: Optional[str] = None
     copyright: int = 1  # 1=Original, 2=Reprint

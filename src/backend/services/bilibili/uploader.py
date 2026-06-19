@@ -12,6 +12,14 @@ logger = logging.getLogger("bilibili")
 
 DEFAULT_NEUTRAL_MARK = "个人观点，仅供参考"
 DEFAULT_CHARGING_PREVIEW_END = 5
+CREATION_STATEMENT_IDS = {
+    "内容无需标注": -1,
+    "含AI生成内容": 1,
+    "含虚构演绎内容": 2,
+    "内容含营销信息": 3,
+    "个人观点，仅供参考": 4,
+    "内容为转载": -2,
+}
 
 class BiliUploader:
     """Bilibili video uploader service."""
@@ -51,6 +59,9 @@ class BiliUploader:
         neutral_mark: Optional[str],
         delay_time: Optional[int] = None,
         season_id: Optional[int] = None,
+        is_only_self: int = 0,
+        space_hidden: Optional[int] = None,
+        creation_statement_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         meta = {
             "title": title,
@@ -68,7 +79,7 @@ class BiliUploader:
             "adorder_type": 9,
             "no_reprint": 1 if int(no_reprint or 0) else 0,
             "subtitle": {"open": 0, "lan": ""},
-            "neutral_mark": neutral_mark or None,
+            "neutral_mark": None if creation_statement_id is not None else (neutral_mark or None),
             "dolby": 0,
             "lossless_music": 0,
             "up_selection_reply": False,
@@ -77,7 +88,12 @@ class BiliUploader:
             "web_os": 1,
             "source": None,
             "watermark": {"state": 0},
+            "is_only_self": 1 if int(is_only_self or 0) else 0,
         }
+        if creation_statement_id is not None:
+            meta["creation_statement"] = {"id": int(creation_statement_id)}
+        if space_hidden is not None:
+            meta["space_hidden"] = int(space_hidden)
         if delay_time:
             meta["dtime"] = int(delay_time)
         if season_id:
@@ -182,12 +198,23 @@ class BiliUploader:
         except (TypeError, ValueError):
             raise ValueError("Bilibili season_id must be an integer")
 
+    @staticmethod
+    def _normalize_creation_statement_id(value: Any, neutral_mark: Optional[str]) -> Optional[int]:
+        if value not in (None, ""):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                raise ValueError("Bilibili creation_statement_id must be an integer")
+        if isinstance(neutral_mark, str):
+            return CREATION_STATEMENT_IDS.get(neutral_mark.strip())
+        return None
+
     async def upload_single(
         self,
         video_path: str,
         title: str,
         desc: str = "",
-        tid: int = 36,  # 36 = 知识
+        tid: int = 207,  # 207 = 知识 / 财经商业
         tags: List[str] = None,
         cover_path: Optional[str] = None,
         copyright: int = 1,
@@ -196,7 +223,10 @@ class BiliUploader:
         neutral_mark: Optional[str] = DEFAULT_NEUTRAL_MARK,
         charging_pay: Optional[Dict[str, Any]] = None,
         delay_time: Optional[int] = None,
-        season_id: Optional[int] = None
+        season_id: Optional[int] = None,
+        is_only_self: int = 0,
+        space_hidden: Optional[int] = None,
+        creation_statement_id: Optional[int] = None,
     ):
         """
         Uploads a single video file to Bilibili.
@@ -224,9 +254,15 @@ class BiliUploader:
         # Map copyright (1=Original, 2=Reprint) to VideoMeta 'original' (bool)
         is_original = (copyright == 1)
         neutral_mark = neutral_mark.strip() if isinstance(neutral_mark, str) else None
+        creation_statement_id = self._normalize_creation_statement_id(
+            creation_statement_id,
+            neutral_mark,
+        )
         charging_pay_fields = self._charging_pay_fields(charging_pay)
         delay_time = self._normalize_delay_time(delay_time)
         season_id = self._normalize_season_id(season_id)
+        is_only_self = 1 if int(is_only_self or 0) else 0
+        space_hidden = int(space_hidden) if space_hidden not in (None, "") else None
         if charging_pay_fields and not is_original:
             raise ValueError("Bilibili charging pay videos must be original")
 
@@ -242,7 +278,13 @@ class BiliUploader:
             except Exception as e:
                 logger.warning(f"Failed to extract cover: {e}. Trying to continue without cover (may fail).")
 
-        if charging_pay_fields or season_id:
+        if (
+            charging_pay_fields
+            or season_id
+            or is_only_self
+            or space_hidden is not None
+            or creation_statement_id is not None
+        ):
             meta = self._base_meta_dict(
                 title=title,
                 desc=desc,
@@ -254,6 +296,9 @@ class BiliUploader:
                 neutral_mark=neutral_mark,
                 delay_time=delay_time,
                 season_id=season_id,
+                is_only_self=is_only_self,
+                space_hidden=space_hidden,
+                creation_statement_id=creation_statement_id,
             )
             if charging_pay_fields:
                 meta.update(charging_pay_fields)

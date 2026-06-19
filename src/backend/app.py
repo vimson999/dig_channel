@@ -137,7 +137,7 @@ if __name__ == '__main__':
     logger.info("创建Flask应用...")
 
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_ENABLED", "1")
-    os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_MODE", "restart")
+    os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_MODE", "ensure")
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES", "all")
     os.environ.setdefault(
         "BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS",

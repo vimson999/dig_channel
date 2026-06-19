@@ -186,12 +186,20 @@
                                     <input id="system-sync-count-input" type="number" min="1" max="50" step="1" value="12" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
                                 </label>
                                 <label class="block">
-                                    <span class="text-xs text-slate-500">自动附件下载上限（0=禁用）</span>
-                                    <input id="system-sync-max-download-files-input" type="number" min="0" max="3" step="1" value="0" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                    <span class="text-xs text-slate-500">每目标自动下载上限（0=只同步索引）</span>
+                                    <input id="system-sync-max-download-files-input" type="number" min="0" max="40" step="1" value="40" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                </label>
+                                <label class="block">
+                                    <span class="text-xs text-slate-500">外资 PDF 下载阈值</span>
+                                    <input id="system-sync-pdf-download-threshold-input" type="number" min="0" max="100000" step="1" value="30" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                </label>
+                                <label class="block">
+                                    <span class="text-xs text-slate-500">调研 MP3 下载阈值</span>
+                                    <input id="system-sync-mp3-download-threshold-input" type="number" min="0" max="100000" step="1" value="15" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
                                 </label>
                             </div>
 
-                            <p class="zsxq-inline-meta">默认场景是“外资研报 + 调研纪要”，范围会按星球 tab 自动识别。</p>
+                            <p class="zsxq-inline-meta">默认场景是“外资研报 PDF + 调研纪要 MP3”：先同步索引，只有下载次数达到阈值且本地未下载过的附件才会自动下载。</p>
 
                             <div class="grid grid-cols-1 gap-2 md:grid-cols-2">
                                 <label class="zsxq-inline-check">
@@ -619,6 +627,6 @@
     <script src="js/env.js"></script>
     <script src="js/config.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/zsxq-system-sync.js?v=20260613-workflow-orchestrator"></script>
+    <script src="js/zsxq-system-sync.js?v=20260618-per-target-download-limit"></script>
 </body>
 </html>
