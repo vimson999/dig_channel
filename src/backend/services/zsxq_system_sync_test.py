@@ -28,6 +28,8 @@ DEFAULT_MAX_DOWNLOAD_FILES = 40
 DEFAULT_MAX_ROUNDS = 0
 DEFAULT_FOREIGN_REPORT_PDF_DOWNLOAD_THRESHOLD = 30
 DEFAULT_RESEARCH_MEMO_MP3_DOWNLOAD_THRESHOLD = 15
+DEFAULT_AUTO_VIDEO_PDF_THRESHOLD = 35
+DEFAULT_AUTO_VIDEO_MP3_THRESHOLD = 25
 TOPIC_PAGE_SIZE_HINT = 20
 COOKIE_ENV_NAME = "ZSXQ_SYNC_TEST_COOKIE"
 COOKIE_OVERRIDE_ENV_NAME = "ZSXQ_SYNC_TEST_COOKIE_OVERRIDE"
@@ -87,6 +89,7 @@ def _snapshot_config(config):
             config.get("attachment_download_rules"),
             config.get("jobs") or [],
         ),
+        "auto_video_dispatch": _normalize_auto_video_dispatch(config.get("auto_video_dispatch")),
         "auto_pdf_clean": bool(config.get("auto_pdf_clean", False)),
         "auto_audio_clean": bool(config.get("auto_audio_clean", False)),
         "auto_publish_after_clean": _normalize_auto_publish_after_clean(
@@ -183,6 +186,12 @@ def save_config(payload, cookie):
         "max_download_files": max_download_files,
         "skip_existing_downloads": True,
         "attachment_download_rules": attachment_download_rules,
+        "auto_video_dispatch": _normalize_auto_video_dispatch(
+            payload.get("auto_video_dispatch")
+            if "auto_video_dispatch" in payload
+            else previous.get("auto_video_dispatch"),
+            previous=previous.get("auto_video_dispatch"),
+        ),
         "auto_pdf_clean": bool(payload.get("auto_pdf_clean", previous.get("auto_pdf_clean", False))),
         "pdf_cleaner": payload.get("pdf_cleaner") if isinstance(payload.get("pdf_cleaner"), dict) else previous.get("pdf_cleaner", {}),
         "auto_audio_clean": bool(payload.get("auto_audio_clean", previous.get("auto_audio_clean", False))),
@@ -899,6 +908,30 @@ def _normalize_attachment_download_rules(value, jobs):
     return {
         "enabled": bool(enabled and rules),
         "rules": rules,
+    }
+
+
+def _normalize_auto_video_dispatch(value, previous=None):
+    previous = previous if isinstance(previous, dict) else {}
+    value = value if isinstance(value, dict) else {}
+    enabled = bool(value.get("enabled", previous.get("enabled", False)))
+    pdf_threshold = _bounded_int(
+        value.get("pdf_min_download_count", previous.get("pdf_min_download_count")),
+        default=DEFAULT_AUTO_VIDEO_PDF_THRESHOLD,
+        lower=0,
+        upper=1_000_000,
+    )
+    mp3_threshold = _bounded_int(
+        value.get("mp3_min_download_count", previous.get("mp3_min_download_count")),
+        default=DEFAULT_AUTO_VIDEO_MP3_THRESHOLD,
+        lower=0,
+        upper=1_000_000,
+    )
+    return {
+        "enabled": enabled,
+        "pdf_min_download_count": pdf_threshold,
+        "mp3_min_download_count": mp3_threshold,
+        "wait_for_completion": False,
     }
 
 

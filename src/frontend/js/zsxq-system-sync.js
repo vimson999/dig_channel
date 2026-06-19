@@ -9,6 +9,9 @@ const SYSTEM_SYNC_COUNT = 12;
 const SYSTEM_SYNC_MAX_DOWNLOAD_FILES = 40;
 const SYSTEM_SYNC_PDF_DOWNLOAD_THRESHOLD = 30;
 const SYSTEM_SYNC_MP3_DOWNLOAD_THRESHOLD = 15;
+const SYSTEM_SYNC_AUTO_VIDEO_DISPATCH = false;
+const SYSTEM_SYNC_PDF_VIDEO_THRESHOLD = 35;
+const SYSTEM_SYNC_MP3_VIDEO_THRESHOLD = 25;
 const SYSTEM_SYNC_AUTO_PDF_CLEAN = false;
 const SYSTEM_SYNC_AUTO_AUDIO_CLEAN = false;
 const SYSTEM_SYNC_AUTO_PUBLISH_AFTER_CLEAN = false;
@@ -91,6 +94,9 @@ const els = {
     configMaxDownloadFilesInput: document.getElementById('system-sync-max-download-files-input'),
     configPdfDownloadThresholdInput: document.getElementById('system-sync-pdf-download-threshold-input'),
     configMp3DownloadThresholdInput: document.getElementById('system-sync-mp3-download-threshold-input'),
+    configAutoVideoDispatchCheckbox: document.getElementById('system-sync-auto-video-dispatch-checkbox'),
+    configPdfVideoThresholdInput: document.getElementById('system-sync-pdf-video-threshold-input'),
+    configMp3VideoThresholdInput: document.getElementById('system-sync-mp3-video-threshold-input'),
     configAutoPdfCleanCheckbox: document.getElementById('system-sync-auto-pdf-clean-checkbox'),
     configAutoAudioCleanCheckbox: document.getElementById('system-sync-auto-audio-clean-checkbox'),
     configAutoPublishAfterCleanCheckbox: document.getElementById('system-sync-auto-publish-after-clean-checkbox'),
@@ -212,6 +218,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (els.configMp3DownloadThresholdInput) {
         els.configMp3DownloadThresholdInput.value = String(SYSTEM_SYNC_MP3_DOWNLOAD_THRESHOLD);
+    }
+    if (els.configAutoVideoDispatchCheckbox) {
+        els.configAutoVideoDispatchCheckbox.checked = SYSTEM_SYNC_AUTO_VIDEO_DISPATCH;
+    }
+    if (els.configPdfVideoThresholdInput) {
+        els.configPdfVideoThresholdInput.value = String(SYSTEM_SYNC_PDF_VIDEO_THRESHOLD);
+    }
+    if (els.configMp3VideoThresholdInput) {
+        els.configMp3VideoThresholdInput.value = String(SYSTEM_SYNC_MP3_VIDEO_THRESHOLD);
     }
     if (els.configAutoPdfCleanCheckbox) {
         els.configAutoPdfCleanCheckbox.checked = SYSTEM_SYNC_AUTO_PDF_CLEAN;
@@ -1228,6 +1243,39 @@ function downloadThresholdFromConfig(config, fileType, fallback) {
     return parseBoundedInt(matched?.min_download_count, fallback, 0, 100000);
 }
 
+function buildAutoVideoDispatchConfig(enabled, pdfThreshold, mp3Threshold) {
+    return {
+        enabled: Boolean(enabled),
+        pdf_min_download_count: Number(pdfThreshold),
+        mp3_min_download_count: Number(mp3Threshold),
+        wait_for_completion: false,
+    };
+}
+
+function autoVideoDispatchConfig(config = {}) {
+    const value = config.auto_video_dispatch;
+    if (!value || typeof value !== 'object') {
+        return buildAutoVideoDispatchConfig(
+            SYSTEM_SYNC_AUTO_VIDEO_DISPATCH,
+            SYSTEM_SYNC_PDF_VIDEO_THRESHOLD,
+            SYSTEM_SYNC_MP3_VIDEO_THRESHOLD,
+        );
+    }
+    return buildAutoVideoDispatchConfig(
+        value.enabled === true,
+        parseBoundedInt(value.pdf_min_download_count, SYSTEM_SYNC_PDF_VIDEO_THRESHOLD, 0, 100000),
+        parseBoundedInt(value.mp3_min_download_count, SYSTEM_SYNC_MP3_VIDEO_THRESHOLD, 0, 100000),
+    );
+}
+
+function formatAutoVideoDispatchText(config = {}) {
+    const value = autoVideoDispatchConfig(config);
+    if (!value.enabled) {
+        return '视频编排旁路未开启';
+    }
+    return `视频编排旁路：PDF≥${value.pdf_min_download_count}，MP3≥${value.mp3_min_download_count}`;
+}
+
 async function saveSystemSyncConfig() {
     const context = syncContext();
     if (!context.selectedGroupId) {
@@ -1267,6 +1315,23 @@ async function saveSystemSyncConfig() {
         0,
         100000,
     );
+    const pdfVideoThreshold = parseBoundedInt(
+        els.configPdfVideoThresholdInput?.value,
+        SYSTEM_SYNC_PDF_VIDEO_THRESHOLD,
+        0,
+        100000,
+    );
+    const mp3VideoThreshold = parseBoundedInt(
+        els.configMp3VideoThresholdInput?.value,
+        SYSTEM_SYNC_MP3_VIDEO_THRESHOLD,
+        0,
+        100000,
+    );
+    const autoVideoDispatch = buildAutoVideoDispatchConfig(
+        Boolean(els.configAutoVideoDispatchCheckbox?.checked),
+        pdfVideoThreshold,
+        mp3VideoThreshold,
+    );
     const attachmentDownloadRules = buildAttachmentDownloadRules(
         jobs,
         pdfDownloadThreshold,
@@ -1292,6 +1357,7 @@ async function saveSystemSyncConfig() {
             max_download_files: Number(maxDownloadFilesRaw),
             skip_existing_downloads: true,
             attachment_download_rules: attachmentDownloadRules,
+            auto_video_dispatch: autoVideoDispatch,
             auto_pdf_clean: Boolean(els.configAutoPdfCleanCheckbox?.checked),
             auto_audio_clean: Boolean(els.configAutoAudioCleanCheckbox?.checked),
             auto_publish_after_clean: {
@@ -1328,7 +1394,8 @@ async function saveSystemSyncConfig() {
             ].filter(Boolean);
             const workflowText = `同步索引${cleanParts.length ? ` → ${cleanParts.join('+')}` : ''}${cleanParts.length && config.auto_publish_after_clean?.enabled ? ' → 发布' : ''}`;
             const downloadText = formatThresholdDownloadText(config, serverMaxDownloadFiles || maxDownloadFilesRaw);
-            renderMessage('success', `配置已保存。${workflowText}；${downloadText}；间隔 ${serverInterval || intervalMinutes} 分钟，每目标 Tab ${serverCount || countRaw} 条，任务轮次：${formatConfigMaxRounds(config.max_rounds)}。`);
+            const videoDispatchText = formatAutoVideoDispatchText(config);
+            renderMessage('success', `配置已保存。${workflowText}；${downloadText}；${videoDispatchText}；间隔 ${serverInterval || intervalMinutes} 分钟，每目标 Tab ${serverCount || countRaw} 条，任务轮次：${formatConfigMaxRounds(config.max_rounds)}。`);
         }
         if (Number.isFinite(serverCount)) {
             els.configCountInput.value = String(serverCount);
@@ -1547,6 +1614,7 @@ function renderSyncSchedulerPanel() {
     const count = config.count || SYSTEM_SYNC_COUNT;
     const maxFiles = Number(config.max_download_files ?? SYSTEM_SYNC_MAX_DOWNLOAD_FILES);
     const downloadText = formatThresholdDownloadText(config, maxFiles);
+    const videoDispatchText = formatAutoVideoDispatchText(config);
     const autoPdfClean = config.auto_pdf_clean === true;
     const autoAudioClean = config.auto_audio_clean === true;
     const autoPublishAfterClean = config.auto_publish_after_clean?.enabled === true;
@@ -1566,6 +1634,7 @@ function renderSyncSchedulerPanel() {
         <div class="space-y-1">
             <div>进程状态：${escapeHtml(running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
             <div>计划配置：${escapeHtml(String(interval))} 分钟一次 · 每目标 Tab ${escapeHtml(String(count))} 条 · ${escapeHtml(downloadText)}</div>
+            <div>旁路任务：${escapeHtml(videoDispatchText)}</div>
             <div>工作流：同步 → ${escapeHtml(cleanText)}${escapeHtml(publishEnabled ? ' → 发布' : '')}</div>
             <div>轮次：${escapeHtml(rounds)}</div>
             <div>Cookie：${escapeHtml(cookieMode)}</div>
@@ -1628,7 +1697,8 @@ function renderSyncOverviewCard() {
     const cleanText = cleanParts.length ? cleanParts.join(' + ') : '不清洗';
     const autoPublishText = cleanParts.length && config.auto_publish_after_clean?.enabled === true ? '清洗后自动发帖开启' : '不自动发帖';
     const downloadText = formatThresholdDownloadText(config, config.max_download_files);
-    els.configDetail.textContent = `${downloadText} · 每目标 Tab ${config.count || SYSTEM_SYNC_COUNT} 条 · ${cleanText} · ${autoPublishText} · 任务来源：${cookieSourceText}。`;
+    const videoDispatchText = formatAutoVideoDispatchText(config);
+    els.configDetail.textContent = `${downloadText} · ${videoDispatchText} · 每目标 Tab ${config.count || SYSTEM_SYNC_COUNT} 条 · ${cleanText} · ${autoPublishText} · 任务来源：${cookieSourceText}。`;
     renderWorkspaceSnapshot();
 }
 
@@ -1677,6 +1747,17 @@ function hydrateSystemSyncRuntimeConfigInputs(config = {}) {
             'mp3',
             SYSTEM_SYNC_MP3_DOWNLOAD_THRESHOLD,
         ));
+    }
+
+    const autoVideoDispatch = autoVideoDispatchConfig(config);
+    if (els.configAutoVideoDispatchCheckbox) {
+        els.configAutoVideoDispatchCheckbox.checked = autoVideoDispatch.enabled === true;
+    }
+    if (els.configPdfVideoThresholdInput) {
+        els.configPdfVideoThresholdInput.value = String(autoVideoDispatch.pdf_min_download_count);
+    }
+    if (els.configMp3VideoThresholdInput) {
+        els.configMp3VideoThresholdInput.value = String(autoVideoDispatch.mp3_min_download_count);
     }
 
     if (els.configMaxRoundsInput) {

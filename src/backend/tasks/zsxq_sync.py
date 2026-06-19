@@ -42,6 +42,8 @@ def run_zsxq_sync(self, run_id, payload):
                 sync_meta=payload.get("sync_meta"),
                 manual_attachment_plan=payload.get("manual_attachment_plan"),
                 attachment_download_rules=payload.get("attachment_download_rules"),
+                auto_video_dispatch=payload.get("auto_video_dispatch"),
+                workflow_run_id=workflow_run_id,
             )
             if not workflow_run_id and _auto_pdf_clean_enabled(payload):
                 try:

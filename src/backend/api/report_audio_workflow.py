@@ -328,7 +328,6 @@ def list_jobs(current_user):
                 PublicationTask.error_message.label("error_message"),
                 PublicationTask.created_at.label("created_at"),
                 PublicationTask.completed_at.label("completed_at"),
-                PublicationTask.result.label("result"),
                 PublicationTask.report_audio_started_at.label("started_at"),
                 PublicationTask.report_audio_completed_at.label("result_completed_at"),
                 PublicationTask.report_audio_error.label("result_error"),
@@ -683,8 +682,6 @@ def _first_compact_title(*values):
 
 def _job_summary_payload(row, child_bundle=None):
     child_bundle = child_bundle or {}
-    result = row.result if isinstance(getattr(row, "result", None), dict) else {}
-    result_video = result.get("video") if isinstance(result.get("video"), dict) else {}
     pdf = {
         "filename": row.request_pdf_filename or row.result_pdf_filename,
         "bytes": _number_or_none(row.request_pdf_bytes or row.result_pdf_bytes, int),
@@ -710,30 +707,20 @@ def _job_summary_payload(row, child_bundle=None):
         audio_payload = {key: value for key, value in audio_payload.items() if value is not None}
 
     video_payload = None
-    vertical_video_path = result_video.get("vertical_video_path")
-    landscape_enabled = _bool_or_none(result_video.get("landscape_enabled"))
-    vertical_enabled = _bool_or_none(result_video.get("vertical_enabled"))
     if (
         row.video_enabled is not None
         or row.video_status
         or row.video_publisher_task_id
         or row.video_path
-        or vertical_video_path
-        or landscape_enabled is not None
-        or vertical_enabled is not None
     ):
         video_payload = {
             "enabled": _bool_or_none(row.video_enabled),
             "status": row.video_status,
             "publisher_task_id": row.video_publisher_task_id,
             "message": row.video_message,
-            "landscape_enabled": landscape_enabled,
-            "vertical_enabled": vertical_enabled,
         }
         if row.video_path and _path_exists(row.video_path):
             video_payload["video"] = {"download_url": f"/api/report-audio-workflows/jobs/{row.id}/download-video"}
-        if vertical_video_path and _path_exists(vertical_video_path):
-            video_payload["vertical_video"] = {"download_url": f"/api/report-audio-workflows/jobs/{row.id}/download-vertical-video"}
         if row.cover_path:
             video_payload["cover"] = {"download_url": f"/api/report-audio-workflows/jobs/{row.id}/download-cover"}
         video_payload = {key: value for key, value in video_payload.items() if value is not None}
@@ -774,7 +761,7 @@ def _job_summary_payload(row, child_bundle=None):
         "download_audio_url": f"/api/report-audio-workflows/jobs/{row.id}/download-audio" if row.audio_wav_path else None,
         "download_result_url": f"/api/report-audio-workflows/jobs/{row.id}/download-result" if row.output_path else None,
         "download_video_url": f"/api/report-audio-workflows/jobs/{row.id}/download-video" if row.video_path and _path_exists(row.video_path) else None,
-        "download_vertical_video_url": f"/api/report-audio-workflows/jobs/{row.id}/download-vertical-video" if vertical_video_path and _path_exists(vertical_video_path) else None,
+        "download_vertical_video_url": None,
         "download_cover_url": f"/api/report-audio-workflows/jobs/{row.id}/download-cover" if row.cover_path else None,
         "metadata": {"title": row.metadata_title} if row.metadata_title else {},
         "logs": [],
@@ -793,7 +780,6 @@ def _live_child_tasks(parent_id):
                 PublicationTask.progress.label("progress"),
                 PublicationTask.error_message.label("error_message"),
                 PublicationTask.feature.label("feature"),
-                PublicationTask.params.label("params"),
                 PublicationTask.parent_task_id.label("parent_task_id"),
                 PublicationTask.source_task_id.label("source_task_id"),
                 PublicationTask.task_title.label("task_title"),
@@ -843,7 +829,6 @@ def _child_summaries_for_parent_ids(parent_ids):
             PublicationTask.progress.label("progress"),
             PublicationTask.error_message.label("error_message"),
             PublicationTask.feature.label("feature"),
-            PublicationTask.params.label("params"),
             PublicationTask.parent_task_id.label("parent_task_id"),
             PublicationTask.source_task_id.label("source_task_id"),
             PublicationTask.task_title.label("task_title"),
@@ -888,11 +873,7 @@ def _child_summaries_for_parent_ids(parent_ids):
 
 def _child_task_summary_row(row, result_payload=None):
     result = result_payload if isinstance(result_payload, dict) else {}
-    params = getattr(row, "params", None)
-    params = params if isinstance(params, dict) else {}
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    if not metadata:
-        metadata = _child_metadata_from_params(params)
     audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
     metadata = dict(metadata)
     if row.task_title and not metadata.get("title"):

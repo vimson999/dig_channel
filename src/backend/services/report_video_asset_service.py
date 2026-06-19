@@ -9,6 +9,10 @@ from sqlalchemy import and_, or_
 from models import db
 from models.report_video import ReportVideoReport, ReportVideoTask
 from models.zsxq_sync import ZsxqAttachment, ZsxqSyncRun, ZsxqTopic
+from services.report_video_hash_lookup import (
+    lookup_existing_reports_by_source_hash,
+    source_hashes_from_report,
+)
 from services.report_video_service import PROJECT_ROOT, rel_path, report_code, report_dir, sanitize_filename
 from services.zsxq_sync_service import zsxq_sync_service
 
@@ -79,7 +83,7 @@ class ZsxqReportAssetService:
     def preview(self, payload):
         normalized = self._normalize_payload(payload)
         candidates = self._candidate_items(normalized)
-        existing_by_hash = self._existing_reports_by_hash()
+        existing_by_hash = self._existing_reports_by_hash(item.get("source_sha256") for item in candidates)
         items = [self._classify_candidate(item, existing_by_hash) for item in candidates]
         limited_items = items[: normalized["config"]["max_files"]]
         return self._summary(normalized, items, limited_items, task=None, created_reports=[])
@@ -87,7 +91,7 @@ class ZsxqReportAssetService:
     def create_batch(self, payload):
         normalized = self._normalize_payload(payload)
         candidates = self._candidate_items(normalized)
-        existing_by_hash = self._existing_reports_by_hash()
+        existing_by_hash = self._existing_reports_by_hash(item.get("source_sha256") for item in candidates)
         classified = [self._classify_candidate(item, existing_by_hash) for item in candidates]
         new_items = [item for item in classified if item["status"] == "new"][: normalized["config"]["max_files"]]
 
@@ -293,13 +297,8 @@ class ZsxqReportAssetService:
             }
         return {**item, "status": "new", "reason": "待入库并解析"}
 
-    def _existing_reports_by_hash(self):
-        result = {}
-        reports = ReportVideoReport.query.order_by(ReportVideoReport.created_at.desc()).limit(5000).all()
-        for report in reports:
-            for source_hash in _source_hashes_from_report(report):
-                result.setdefault(source_hash, report)
-        return result
+    def _existing_reports_by_hash(self, source_hashes=None):
+        return lookup_existing_reports_by_source_hash(source_hashes, limit=5000)
 
     def _create_report(self, task, index, item, normalized):
         code = report_code(index)
@@ -393,16 +392,7 @@ def classify_theme_hint(text):
 
 
 def _source_hashes_from_report(report):
-    hashes = []
-    candidates = []
-    meta = report.raw_meta if isinstance(report.raw_meta, dict) else {}
-    candidates.extend([meta.get("auto_asset"), meta.get("auto_scan")])
-    if report.task and isinstance(report.task.result, dict):
-        candidates.extend([report.task.result.get("auto_asset"), report.task.result.get("auto_scan")])
-    for item in candidates:
-        if isinstance(item, dict) and item.get("source_sha256"):
-            hashes.append(str(item["source_sha256"]))
-    return hashes
+    return source_hashes_from_report(report)
 
 
 def _resolve_existing_pdf(value):

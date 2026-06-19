@@ -6,6 +6,7 @@ from pathlib import Path
 
 from models import db
 from models.report_video import ReportVideoOutput, ReportVideoReport, ReportVideoTask
+from services.report_video_hash_lookup import lookup_existing_reports_by_source_hash
 from services.report_video_service import PROJECT_ROOT, rel_path, report_code, report_dir, sanitize_filename
 
 
@@ -127,18 +128,11 @@ def list_scan_candidates(config=None):
 def _existing_report_by_hash(source_hash):
     if not source_hash:
         return None
-    return _existing_reports_by_hash().get(source_hash)
+    return _existing_reports_by_hash([source_hash]).get(source_hash)
 
 
-def _existing_reports_by_hash():
-    result = {}
-    for report in ReportVideoReport.query.order_by(ReportVideoReport.created_at.desc()).limit(1000).all():
-        meta = report.raw_meta or {}
-        auto = meta.get("auto_scan") if isinstance(meta, dict) else None
-        source_hash = auto.get("source_sha256") if isinstance(auto, dict) else None
-        if source_hash and source_hash not in result:
-            result[source_hash] = report
-    return result
+def _existing_reports_by_hash(source_hashes=None):
+    return lookup_existing_reports_by_source_hash(source_hashes, limit=1000)
 
 
 def _report_has_completed_video(report):
@@ -167,7 +161,8 @@ def classify_pdf_for_auto_scan(path, existing_by_hash=None):
             "report_id": existing.id,
             "reason": "已生成过视频",
         }
-    if existing and existing.task and existing.task.status not in TERMINAL_FAILURE_STATUSES:
+    task_status = getattr(existing, "task_status", None) if existing else None
+    if existing and task_status not in TERMINAL_FAILURE_STATUSES:
         return {
             "path": str(source_path),
             "display_path": _safe_rel_or_abs(source_path),
@@ -176,7 +171,7 @@ def classify_pdf_for_auto_scan(path, existing_by_hash=None):
             "status": "queued_or_processing",
             "task_id": existing.task_id,
             "report_id": existing.id,
-            "reason": f"已有任务：{existing.task.status}",
+            "reason": f"已有任务：{task_status or '-'}",
         }
     return {
         "path": str(source_path),
@@ -191,8 +186,9 @@ def classify_pdf_for_auto_scan(path, existing_by_hash=None):
 def auto_scan_preview(config=None):
     config = config or load_auto_scan_config()
     candidates = list_scan_candidates(config)
-    existing_by_hash = _existing_reports_by_hash()
-    rows = [classify_pdf_for_auto_scan(path, existing_by_hash=existing_by_hash) for path in candidates]
+    rows = [_candidate_payload(path) for path in candidates]
+    existing_by_hash = _existing_reports_by_hash(row["source_sha256"] for row in rows)
+    rows = [_classify_candidate_payload(row, existing_by_hash=existing_by_hash) for row in rows]
     return {
         "config": config,
         "scan_dir_exists": Path(config["scan_dir_abs"]).is_dir(),
@@ -201,6 +197,43 @@ def auto_scan_preview(config=None):
         "completed_count": sum(1 for row in rows if row["status"] == "completed"),
         "queued_count": sum(1 for row in rows if row["status"] == "queued_or_processing"),
         "items": rows,
+    }
+
+
+def _candidate_payload(path):
+    source_path = Path(path).resolve()
+    return {
+        "path": str(source_path),
+        "display_path": _safe_rel_or_abs(source_path),
+        "file_name": source_path.name,
+        "source_sha256": _file_sha256(source_path),
+    }
+
+
+def _classify_candidate_payload(row, existing_by_hash=None):
+    source_hash = row["source_sha256"]
+    existing = (existing_by_hash or {}).get(source_hash) if existing_by_hash is not None else _existing_report_by_hash(source_hash)
+    if existing and _report_has_completed_video(existing):
+        return {
+            **row,
+            "status": "completed",
+            "task_id": existing.task_id,
+            "report_id": existing.id,
+            "reason": "已生成过视频",
+        }
+    task_status = getattr(existing, "task_status", None) if existing else None
+    if existing and task_status not in TERMINAL_FAILURE_STATUSES:
+        return {
+            **row,
+            "status": "queued_or_processing",
+            "task_id": existing.task_id,
+            "report_id": existing.id,
+            "reason": f"已有任务：{task_status or '-'}",
+        }
+    return {
+        **row,
+        "status": "new",
+        "reason": "待制作",
     }
 
 

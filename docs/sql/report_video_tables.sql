@@ -20,6 +20,12 @@ CREATE TABLE IF NOT EXISTS public.report_video_tasks (
 
 CREATE INDEX IF NOT EXISTS ix_report_video_tasks_status ON public.report_video_tasks (status);
 CREATE INDEX IF NOT EXISTS ix_report_video_tasks_created_at ON public.report_video_tasks (created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_report_video_tasks_auto_asset_sha256
+    ON public.report_video_tasks ((result #>> '{auto_asset,source_sha256}'))
+    WHERE (result #>> '{auto_asset,source_sha256}') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_report_video_tasks_auto_scan_sha256
+    ON public.report_video_tasks ((result #>> '{auto_scan,source_sha256}'))
+    WHERE (result #>> '{auto_scan,source_sha256}') IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.report_video_reports (
     id varchar(36) PRIMARY KEY,
@@ -45,6 +51,13 @@ CREATE TABLE IF NOT EXISTS public.report_video_reports (
 CREATE INDEX IF NOT EXISTS ix_report_video_reports_task_id ON public.report_video_reports (task_id);
 CREATE INDEX IF NOT EXISTS ix_report_video_reports_parse_status ON public.report_video_reports (parse_status);
 CREATE INDEX IF NOT EXISTS ix_report_video_reports_ai_status ON public.report_video_reports (ai_status);
+CREATE INDEX IF NOT EXISTS ix_report_video_reports_created_at_desc ON public.report_video_reports (created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_report_video_reports_auto_asset_sha256
+    ON public.report_video_reports ((raw_meta #>> '{auto_asset,source_sha256}'))
+    WHERE (raw_meta #>> '{auto_asset,source_sha256}') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_report_video_reports_auto_scan_sha256
+    ON public.report_video_reports ((raw_meta #>> '{auto_scan,source_sha256}'))
+    WHERE (raw_meta #>> '{auto_scan,source_sha256}') IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.report_video_analyses (
     id varchar(36) PRIMARY KEY,
@@ -141,6 +154,7 @@ CREATE TABLE IF NOT EXISTS public.report_video_outputs (
 CREATE INDEX IF NOT EXISTS ix_report_video_outputs_task_id ON public.report_video_outputs (task_id);
 CREATE INDEX IF NOT EXISTS ix_report_video_outputs_report_id ON public.report_video_outputs (report_id);
 CREATE INDEX IF NOT EXISTS ix_report_video_outputs_status ON public.report_video_outputs (status);
+CREATE INDEX IF NOT EXISTS ix_report_video_outputs_task_status ON public.report_video_outputs (task_id, status);
 
 -- Optional, if the creator role is different from the application role:
 -- GRANT SELECT, INSERT, UPDATE, DELETE ON

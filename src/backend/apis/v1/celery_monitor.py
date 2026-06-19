@@ -34,7 +34,7 @@ DEFAULT_WATCHDOG_SERVICES = (
 
 BUSINESS_TASK_FEATURES = {
     "render": ("publisher",),
-    "report_audio_workflow": ("report_audio_workflow",),
+    "report_audio_workflow": ("report_audio_workflow", "report_pdf_audio_workflow"),
     "mp3_video_workflow": ("mp3_video_workflow",),
     "content_pipeline": ("content_pdf_clean", "content_audio_clean"),
     "zsxq_publish": ("zsxq_clean_output_publish",),
@@ -1367,6 +1367,7 @@ def _business_task_fallback_title(row):
     labels = {
         "publisher": "视频合成任务",
         "report_audio_workflow": "研报转语音编排",
+        "report_pdf_audio_workflow": "研报转语音编排",
         "mp3_video_workflow": "MP3 视频编排",
         "content_pdf_clean": "PDF 清洗任务",
         "content_audio_clean": "音频清洗任务",

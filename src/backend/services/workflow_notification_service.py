@@ -335,6 +335,10 @@ class WorkflowNotificationService:
                 f" | 失败 {self._num(summary.get('attachments_failed'))}"
             )
             lines.extend(self._sync_audit_lines(summary))
+            auto_video_lines = self._auto_video_dispatch_lines(summary.get("auto_video_dispatch"))
+            if auto_video_lines:
+                lines.append("视频编排旁路：")
+                lines.extend(auto_video_lines)
             if sync.get("error"):
                 lines.append(f"同步错误：{sync.get('error')}")
 
@@ -502,6 +506,28 @@ class WorkflowNotificationService:
             )
         if len(tabs) > 8:
             lines.append(f"其余 {len(tabs) - 8} 个 Tab 已省略。")
+        return lines
+
+    def _auto_video_dispatch_lines(self, summary):
+        if not isinstance(summary, dict) or not summary.get("enabled"):
+            return []
+        lines = []
+        lines.append(
+            f"状态 {self._status_label(summary.get('status'))}；"
+            f"检查附件 {self._safe_int(summary.get('attachments_checked'))}，"
+            f"达阈值 {self._safe_int(summary.get('eligible_count'))}，"
+            f"已投递 {self._safe_int(summary.get('queued_count'))}，"
+            f"失败 {self._safe_int(summary.get('failed_count'))}。"
+        )
+        for label, key in (("PDF", "pdf"), ("MP3", "mp3")):
+            bucket = summary.get(key) if isinstance(summary.get(key), dict) else {}
+            if not bucket:
+                continue
+            lines.append(
+                f"{label}：阈值 {bucket.get('threshold') or 0}，检查 {self._safe_int(bucket.get('checked'))}，"
+                f"投递 {self._safe_int(bucket.get('queued'))}，已有任务 {self._safe_int(bucket.get('skipped_existing'))}，"
+                f"低于阈值 {self._safe_int(bucket.get('skipped_below_threshold'))}，失败 {self._safe_int(bucket.get('failed'))}。"
+            )
         return lines
 
     def _clean_counts(self, tasks):

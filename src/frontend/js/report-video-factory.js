@@ -187,15 +187,51 @@ const ReportVideoApp = {
     async loadTasks() {
         try {
             const data = await this.api('/report-video/tasks');
-            this.tasks = data.data || [];
+            this.tasks = this.mergeTaskSummaries(data.data || []);
             if (!this.activeTaskId && this.tasks.length) {
                 this.activeTaskId = this.tasks[0].id;
             }
+            this.renderTasks();
+            await this.ensureActiveTaskDetail();
             this.renderTasks();
             this.renderActiveTask();
         } catch (error) {
             this.renderError(this.els.taskList, error.message);
         }
+    },
+
+    mergeTaskSummaries(summaries) {
+        const existingById = new Map(this.tasks.map(task => [task.id, task]));
+        return summaries.map(summary => {
+            const existing = existingById.get(summary.id);
+            if (!existing || existing.summary_only) return summary;
+            return {
+                ...existing,
+                ...summary,
+                result: existing.result || {},
+                reports: existing.reports || [],
+                audios: existing.audios || [],
+                outputs: existing.outputs || [],
+                summary_only: false
+            };
+        });
+    },
+
+    async loadTaskDetail(taskId) {
+        if (!taskId) return null;
+        const data = await this.api(`/report-video/tasks/${taskId}`);
+        const task = {
+            ...(data.data || {}),
+            summary_only: false
+        };
+        this.upsertTask(task);
+        return task;
+    },
+
+    async ensureActiveTaskDetail() {
+        const task = this.getActiveTask();
+        if (!task || (!task.summary_only && Array.isArray(task.reports))) return task;
+        return this.loadTaskDetail(task.id);
     },
 
     async loadAutoScan() {
@@ -909,11 +945,18 @@ const ReportVideoApp = {
             </button>
         `).join('');
         this.els.taskList.querySelectorAll('[data-task-id]').forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('click', async () => {
                 this.activeTaskId = button.dataset.taskId;
                 this.selectedTopicId = null;
                 this.renderTasks();
                 this.renderActiveTask();
+                try {
+                    await this.ensureActiveTaskDetail();
+                    this.renderTasks();
+                    this.renderActiveTask();
+                } catch (error) {
+                    this.renderError(this.els.reportList, error.message);
+                }
             });
         });
     },
@@ -928,6 +971,21 @@ const ReportVideoApp = {
         this.els.activeTaskName.textContent = task.task_name;
         this.els.activeTaskMeta.textContent = `${this.formatVideoType(task.video_type)} · 默认 ${task.default_segment_count} 段 · ${task.output_ratios.join(' + ')}`;
         this.els.activeTaskStatus.textContent = this.formatStatus(task.status);
+        if (task.summary_only) {
+            this.els.reportSummary.textContent = `${task.report_count || 0} 篇`;
+            this.els.reportList.innerHTML = '<div class="rv-empty">正在加载任务详情...</div>';
+            this.els.scriptSummary.textContent = '加载中';
+            this.els.scriptList.innerHTML = '<div class="rv-empty">正在加载任务详情...</div>';
+            this.els.mindmapSummary.textContent = '加载中';
+            this.els.mindmapList.innerHTML = '<div class="rv-empty">正在加载任务详情...</div>';
+            this.els.ttsScriptSummary.textContent = '加载中';
+            this.els.ttsScriptList.innerHTML = '<div class="rv-empty">正在加载任务详情...</div>';
+            this.els.audioSummary.textContent = '加载中';
+            this.els.audioList.innerHTML = '<div class="rv-empty">正在加载任务详情...</div>';
+            this.els.videoSummary.textContent = '加载中';
+            this.els.videoOutputList.innerHTML = '<div class="rv-empty">正在加载任务详情...</div>';
+            return;
+        }
         this.els.reportSummary.textContent = `${reports.length} 篇`;
         this.renderReports(reports);
         this.renderTopicPlanning(task);

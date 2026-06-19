@@ -11,6 +11,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from services import zsxq_system_sync_test as system_sync_test  # noqa: E402
 from services.zsxq_sync_service import ZsxqTransientUpstreamError  # noqa: E402
+from services.zsxq_workflow_service import ZsxqWorkflowService  # noqa: E402
 
 
 class ZsxqSystemSyncTest(unittest.TestCase):
@@ -18,6 +19,58 @@ class ZsxqSystemSyncTest(unittest.TestCase):
         self.assertEqual(system_sync_test._topic_pages_for_count(12), 1)
         self.assertEqual(system_sync_test._topic_pages_for_count(40), 2)
         self.assertEqual(system_sync_test._topic_pages_for_count(50), 3)
+
+    def test_auto_video_dispatch_config_is_normalized(self):
+        normalized = system_sync_test._normalize_auto_video_dispatch({
+            "enabled": True,
+            "pdf_min_download_count": "35",
+            "mp3_min_download_count": "25",
+            "wait_for_completion": True,
+        })
+
+        self.assertTrue(normalized["enabled"])
+        self.assertEqual(normalized["pdf_min_download_count"], 35)
+        self.assertEqual(normalized["mp3_min_download_count"], 25)
+        self.assertFalse(normalized["wait_for_completion"])
+
+    def test_workflow_snapshot_carries_auto_video_dispatch(self):
+        service = ZsxqWorkflowService()
+        snapshot = service._build_system_snapshot(
+            config={
+                "group_id": "28888112822211",
+                "group_name": "前沿信息收录",
+                "count": 40,
+                "max_pages": 2,
+                "download_attachments": True,
+                "allow_attachment_downloads": True,
+                "auto_video_dispatch": {
+                    "enabled": True,
+                    "pdf_min_download_count": 35,
+                    "mp3_min_download_count": 25,
+                },
+            },
+            trigger="scheduler_start",
+            batch_id="20260619-150000",
+            batch_round=1,
+            max_rounds=None,
+            max_download_files=40,
+            jobs=[
+                {
+                    "key": "foreign_report",
+                    "file_type": "pdf",
+                    "tab": {"id": "tab-pdf", "label": "外资研报", "scope": "all"},
+                },
+                {
+                    "key": "research_memo_mp3",
+                    "file_type": "mp3",
+                    "tab": {"id": "tab-mp3", "label": "调研纪要", "scope": "all"},
+                },
+            ],
+        )
+
+        self.assertEqual(snapshot["system_sync"]["auto_video_dispatch"]["pdf_min_download_count"], 35)
+        self.assertEqual(snapshot["system_sync"]["auto_video_dispatch"]["mp3_min_download_count"], 25)
+        self.assertTrue(snapshot["sync"]["auto_video_dispatch"]["enabled"])
 
     def test_runtime_cookie_override_counts_as_configured(self):
         with patch.dict(

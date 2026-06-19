@@ -172,6 +172,29 @@ def _task_status_from_reports(task, reports=None):
     return "parsing"
 
 
+def _task_list_payload(row):
+    return {
+        "id": row.id,
+        "task_name": row.task_name,
+        "video_type": row.video_type,
+        "default_segment_count": row.default_segment_count,
+        "output_ratios": row.output_ratios or [],
+        "style": row.style,
+        "background_music_path": row.background_music_path,
+        "generate_subtitles": row.generate_subtitles,
+        "status": row.status,
+        "result": {},
+        "error_message": row.error_message,
+        "report_count": int(row.report_count or 0),
+        "reports": None,
+        "audios": None,
+        "outputs": None,
+        "summary_only": True,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
 def _parse_result_status(parsed):
     cleaned_chars = int(parsed.get("cleaned_text_chars") or 0)
     extraction_method = parsed.get("extraction_method") or "pdf_text"
@@ -1674,15 +1697,38 @@ def _match_audio_to_segments(task, audio_rows):
 
 @bp.route("/tasks", methods=["GET"])
 def list_tasks():
-    tasks = (
-        ReportVideoTask.query
+    report_counts = (
+        db.session.query(
+            ReportVideoReport.task_id.label("task_id"),
+            db.func.count(ReportVideoReport.id).label("report_count"),
+        )
+        .group_by(ReportVideoReport.task_id)
+        .subquery()
+    )
+    rows = (
+        db.session.query(
+            ReportVideoTask.id.label("id"),
+            ReportVideoTask.task_name.label("task_name"),
+            ReportVideoTask.video_type.label("video_type"),
+            ReportVideoTask.default_segment_count.label("default_segment_count"),
+            ReportVideoTask.output_ratios.label("output_ratios"),
+            ReportVideoTask.style.label("style"),
+            ReportVideoTask.background_music_path.label("background_music_path"),
+            ReportVideoTask.generate_subtitles.label("generate_subtitles"),
+            ReportVideoTask.status.label("status"),
+            ReportVideoTask.error_message.label("error_message"),
+            ReportVideoTask.created_at.label("created_at"),
+            ReportVideoTask.updated_at.label("updated_at"),
+            report_counts.c.report_count.label("report_count"),
+        )
+        .outerjoin(report_counts, report_counts.c.task_id == ReportVideoTask.id)
         .order_by(ReportVideoTask.created_at.desc())
         .limit(100)
         .all()
     )
     return jsonify({
         "success": True,
-        "data": [task.to_dict(include_reports=True, include_ai=True) for task in tasks],
+        "data": [_task_list_payload(row) for row in rows],
     })
 
 
@@ -1957,7 +2003,7 @@ def get_task(task_id):
     task, error = _task_or_404(task_id)
     if error:
         return error
-    return jsonify({"success": True, "data": task.to_dict(include_reports=True)})
+    return jsonify({"success": True, "data": task.to_dict(include_reports=True, include_ai=True)})
 
 
 @bp.route("/tasks/<task_id>", methods=["DELETE"])

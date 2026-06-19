@@ -28,6 +28,8 @@ QUEUED_STALE_MINUTES_ENV_NAME = "ZSXQ_WORKFLOW_QUEUED_STALE_MINUTES"
 DEFAULT_QUEUED_STALE_MINUTES = 20
 SCHEMA_CHECK_TTL_SECONDS_ENV_NAME = "ZSXQ_WORKFLOW_SCHEMA_CHECK_TTL_SECONDS"
 DEFAULT_SCHEMA_CHECK_TTL_SECONDS = 300
+DEFAULT_AUTO_VIDEO_PDF_THRESHOLD = 35
+DEFAULT_AUTO_VIDEO_MP3_THRESHOLD = 25
 TOPIC_PAGE_SIZE_HINT = 20
 
 
@@ -228,6 +230,7 @@ class ZsxqWorkflowService:
                 "workflow_run_id": workflow.id,
                 "manual_attachment_plan": sync_config.get("manual_attachment_plan"),
                 "attachment_download_rules": sync_config.get("attachment_download_rules"),
+                "auto_video_dispatch": sync_config.get("auto_video_dispatch"),
                 # Workflow owns downstream orchestration. Keep legacy direct
                 # sync->clean handoff off for workflow-triggered sync tasks.
                 "auto_pdf_clean": False,
@@ -847,6 +850,7 @@ class ZsxqWorkflowService:
         allow_attachment_downloads = bool(config.get("allow_attachment_downloads", False))
         download_attachments = requested_download_attachments and allow_attachment_downloads
         attachment_download_rules = self._normalize_attachment_download_rules(config.get("attachment_download_rules"))
+        auto_video_dispatch = self._normalize_auto_video_dispatch(config.get("auto_video_dispatch"))
         skip_existing_downloads = bool(config.get("skip_existing_downloads", True))
         count = _topic_count(config.get("count", 12))
         max_pages = _effective_topic_max_pages(count, config.get("max_pages", 1))
@@ -865,6 +869,7 @@ class ZsxqWorkflowService:
             "download_attachments": download_attachments,
             "allow_attachment_downloads": allow_attachment_downloads,
             "attachment_download_rules": attachment_download_rules,
+            "auto_video_dispatch": auto_video_dispatch,
             "skip_existing_downloads": skip_existing_downloads,
             "auto_pdf_clean": auto_pdf_clean,
             "auto_audio_clean": auto_audio_clean,
@@ -900,6 +905,7 @@ class ZsxqWorkflowService:
                 "download_file_types_by_tab": download_file_types_by_tab,
                 "max_download_files": max_download_files,
                 "attachment_download_rules": attachment_download_rules,
+                "auto_video_dispatch": auto_video_dispatch,
                 "skip_existing_downloads": skip_existing_downloads,
                 "mode": mode,
             },
@@ -1136,6 +1142,7 @@ class ZsxqWorkflowService:
             "attachments_limited_skipped": summary.get("attachments_limited_skipped"),
             "max_download_files": summary.get("max_download_files"),
             "download_limit_reached": summary.get("download_limit_reached"),
+            "auto_video_dispatch": summary.get("auto_video_dispatch"),
         }
         tabs = summary.get("tabs") if isinstance(summary.get("tabs"), list) else []
         compact["tabs"] = [self._sync_tab_summary(tab) for tab in tabs[:20] if isinstance(tab, dict)]
@@ -1261,6 +1268,25 @@ class ZsxqWorkflowService:
             "rules": rules,
         }
 
+    def _normalize_auto_video_dispatch(self, value):
+        value = value if isinstance(value, dict) else {}
+        return {
+            "enabled": bool(value.get("enabled", False)),
+            "pdf_min_download_count": _bounded_int(
+                value.get("pdf_min_download_count"),
+                default=DEFAULT_AUTO_VIDEO_PDF_THRESHOLD,
+                lower=0,
+                upper=1_000_000,
+            ),
+            "mp3_min_download_count": _bounded_int(
+                value.get("mp3_min_download_count"),
+                default=DEFAULT_AUTO_VIDEO_MP3_THRESHOLD,
+                lower=0,
+                upper=1_000_000,
+            ),
+            "wait_for_completion": False,
+        }
+
     def _now_iso(self):
         return datetime.utcnow().isoformat() + "Z"
 
@@ -1312,6 +1338,14 @@ def _safe_int(value):
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _bounded_int(value, *, default, lower, upper):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = int(default)
+    return min(max(number, int(lower)), int(upper))
 
 
 def _effective_topic_max_pages(target_count, requested_max_pages):

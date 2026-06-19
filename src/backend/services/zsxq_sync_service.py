@@ -78,6 +78,11 @@ ATTACHMENT_AUDIT_COUNTERS = (
     "attachments_reused_existing",
     "attachments_limited_skipped",
 )
+AUTO_VIDEO_DISPATCH_SOURCE = "zsxq_auto_video_dispatch"
+DEFAULT_AUTO_VIDEO_PDF_THRESHOLD = 35
+DEFAULT_AUTO_VIDEO_MP3_THRESHOLD = 25
+AUTO_VIDEO_AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
+AUTO_VIDEO_REPORT_AUDIO_FEATURES = ("report_pdf_audio_workflow", "report_audio_workflow")
 
 
 class ZsxqTransientUpstreamError(ValueError):
@@ -178,6 +183,8 @@ class ZsxqSyncService:
         sync_meta=None,
         manual_attachment_plan=None,
         attachment_download_rules=None,
+        auto_video_dispatch=None,
+        workflow_run_id=None,
     ):
         self.ensure_schema()
         tabs = self._normalize_tabs(tabs)
@@ -200,6 +207,7 @@ class ZsxqSyncService:
             attachment_download_rules,
             tabs=tabs,
         )
+        auto_video_dispatch = self._normalize_auto_video_dispatch(auto_video_dispatch)
         if manual_plan["items"] and max_download_files in (None, "", 0, "0"):
             max_download_files = len(manual_plan["items"])
         download_policy = self._attachment_download_policy(
@@ -219,6 +227,11 @@ class ZsxqSyncService:
             running_result["manual_attachment_plan"] = self._public_manual_attachment_plan(manual_plan)
         if download_rules.get("enabled"):
             running_result["attachment_download_rules"] = self._public_attachment_download_rules(download_rules)
+        if auto_video_dispatch.get("enabled"):
+            running_result["auto_video_dispatch"] = {
+                "status": "pending",
+                "config": auto_video_dispatch,
+            }
         running_result["attachment_download_policy"] = download_policy
 
         if run_id:
@@ -285,6 +298,11 @@ class ZsxqSyncService:
             result["manual_attachment_plan"] = self._public_manual_attachment_plan(manual_plan)
         if download_rules.get("enabled"):
             result["attachment_download_rules"] = self._public_attachment_download_rules(download_rules)
+        if auto_video_dispatch.get("enabled"):
+            result["auto_video_dispatch"] = {
+                "status": "pending",
+                "config": auto_video_dispatch,
+            }
 
         try:
             if manual_plan["items"]:
@@ -361,6 +379,14 @@ class ZsxqSyncService:
                     self._merge_downloaded_file_entries(result, tab_result)
                     if tab_result.get("download_limit_reached") or tab_result.get("stopped_by_download_limit"):
                         result["download_limit_reached"] = True
+
+            if auto_video_dispatch.get("enabled"):
+                result["auto_video_dispatch"] = self._submit_auto_video_dispatch_for_run(
+                    run=run,
+                    sync_result=result,
+                    config=auto_video_dispatch,
+                    workflow_run_id=workflow_run_id,
+                )
 
             run.status = "completed"
             run.completed_at = datetime.utcnow()
@@ -1188,6 +1214,629 @@ class ZsxqSyncService:
                 "attachment_id": metadata.get("attachment_id"),
             })
         return files
+
+    def _normalize_auto_video_dispatch(self, value):
+        value = value if isinstance(value, dict) else {}
+        return {
+            "enabled": self._truthy_text(value.get("enabled", False)),
+            "pdf_min_download_count": self._bounded_int(
+                value.get("pdf_min_download_count"),
+                default=DEFAULT_AUTO_VIDEO_PDF_THRESHOLD,
+                lower=0,
+                upper=1_000_000,
+            ),
+            "mp3_min_download_count": self._bounded_int(
+                value.get("mp3_min_download_count"),
+                default=DEFAULT_AUTO_VIDEO_MP3_THRESHOLD,
+                lower=0,
+                upper=1_000_000,
+            ),
+            "wait_for_completion": False,
+        }
+
+    def _submit_auto_video_dispatch_for_run(self, run, sync_result, config, workflow_run_id=None):
+        summary = self._new_auto_video_dispatch_summary(config, run, workflow_run_id)
+        try:
+            attachment_ids = self._downloaded_attachment_ids_from_sync_result(sync_result)
+            summary["attachments_checked"] = len(attachment_ids)
+            if not attachment_ids:
+                summary["status"] = "skipped"
+                summary["reason"] = "no_downloaded_attachments"
+                self._finalize_auto_video_dispatch_summary(summary)
+                self._send_auto_video_dispatch_email(run, summary)
+                return summary
+
+            attachments = (
+                ZsxqAttachment.query
+                .filter(ZsxqAttachment.id.in_(attachment_ids))
+                .all()
+            )
+            attachment_by_id = {item.id: item for item in attachments}
+            summary["attachments_loaded"] = len(attachment_by_id)
+            summary["missing_attachment_rows"] = max(0, len(attachment_ids) - len(attachment_by_id))
+
+            for attachment_id in attachment_ids:
+                attachment = attachment_by_id.get(attachment_id)
+                if not attachment:
+                    continue
+                kind = self._auto_video_attachment_kind(attachment)
+                if not kind:
+                    summary["skipped_non_target"] += 1
+                    continue
+                bucket = summary[kind]
+                bucket["checked"] += 1
+                threshold = (
+                    config["pdf_min_download_count"]
+                    if kind == "pdf"
+                    else config["mp3_min_download_count"]
+                )
+                item = self._auto_video_attachment_summary(attachment, kind, threshold)
+                download_count = self._int_or_none(attachment.download_count)
+                if download_count is None:
+                    bucket["skipped_missing_download_count"] += 1
+                    item.update({"status": "skipped", "reason": "missing_download_count"})
+                    bucket["items"].append(item)
+                    continue
+                if download_count < threshold:
+                    bucket["skipped_below_threshold"] += 1
+                    item.update({"status": "skipped", "reason": "below_threshold"})
+                    bucket["items"].append(item)
+                    continue
+                if attachment.download_status != "downloaded":
+                    bucket["skipped_not_downloaded"] += 1
+                    item.update({"status": "skipped", "reason": "not_downloaded"})
+                    bucket["items"].append(item)
+                    continue
+                local_path = self._absolute_local_path(attachment.local_path)
+                if not local_path or not local_path.exists() or not local_path.is_file():
+                    bucket["skipped_missing_file"] += 1
+                    item.update({"status": "skipped", "reason": "missing_local_file"})
+                    bucket["items"].append(item)
+                    continue
+                existing_task = self._find_existing_auto_video_task(attachment, kind)
+                if existing_task:
+                    bucket["skipped_existing"] += 1
+                    item.update({
+                        "status": "skipped",
+                        "reason": "existing_task",
+                        "existing_task": self._auto_video_task_summary(existing_task),
+                    })
+                    bucket["items"].append(item)
+                    continue
+
+                bucket["eligible"] += 1
+                try:
+                    if kind == "pdf":
+                        task_result = self._create_auto_report_audio_video_task(
+                            run=run,
+                            attachment=attachment,
+                            threshold=threshold,
+                            workflow_run_id=workflow_run_id,
+                        )
+                    else:
+                        task_result = self._create_auto_mp3_video_task(
+                            run=run,
+                            attachment=attachment,
+                            threshold=threshold,
+                            workflow_run_id=workflow_run_id,
+                        )
+                except Exception as exc:
+                    db.session.rollback()
+                    logger.exception(
+                        "[ZSXQ_SYNC] auto video dispatch item failed | run_id=%s attachment=%s kind=%s",
+                        run.id,
+                        attachment.id,
+                        kind,
+                    )
+                    bucket["failed"] += 1
+                    item.update({"status": "failed", "error": str(exc)})
+                    summary["errors"].append({
+                        "kind": kind,
+                        "attachment_id": attachment.id,
+                        "message": str(exc),
+                    })
+                    bucket["items"].append(item)
+                    continue
+
+                if task_result.get("queued"):
+                    bucket["queued"] += 1
+                    summary["queued_task_ids"].append(task_result.get("task_id"))
+                    item.update({
+                        "status": "queued",
+                        "task": task_result,
+                    })
+                else:
+                    bucket["failed"] += 1
+                    item.update({
+                        "status": "failed",
+                        "task": task_result,
+                        "error": task_result.get("error") or "任务入队失败",
+                    })
+                    summary["errors"].append({
+                        "kind": kind,
+                        "attachment_id": attachment.id,
+                        "task_id": task_result.get("task_id"),
+                        "message": task_result.get("error") or "任务入队失败",
+                    })
+                bucket["items"].append(item)
+
+            self._finalize_auto_video_dispatch_summary(summary)
+        except Exception as exc:
+            db.session.rollback()
+            summary["status"] = "failed"
+            summary["errors"].append({"message": str(exc)})
+            logger.exception("[ZSXQ_SYNC] auto video dispatch failed | run_id=%s", run.id)
+
+        self._send_auto_video_dispatch_email(run, summary)
+        return summary
+
+    def _new_auto_video_dispatch_summary(self, config, run, workflow_run_id=None):
+        return {
+            "enabled": bool(config.get("enabled")),
+            "status": "pending",
+            "source": AUTO_VIDEO_DISPATCH_SOURCE,
+            "config": dict(config),
+            "run_id": run.id,
+            "workflow_run_id": workflow_run_id,
+            "group_id": run.group_id,
+            "group_name": run.group_name,
+            "attachments_checked": 0,
+            "attachments_loaded": 0,
+            "missing_attachment_rows": 0,
+            "skipped_non_target": 0,
+            "queued_task_ids": [],
+            "errors": [],
+            "pdf": self._auto_video_dispatch_bucket(config.get("pdf_min_download_count")),
+            "mp3": self._auto_video_dispatch_bucket(config.get("mp3_min_download_count")),
+        }
+
+    def _auto_video_dispatch_bucket(self, threshold):
+        return {
+            "threshold": threshold,
+            "checked": 0,
+            "eligible": 0,
+            "queued": 0,
+            "failed": 0,
+            "skipped_existing": 0,
+            "skipped_below_threshold": 0,
+            "skipped_missing_download_count": 0,
+            "skipped_not_downloaded": 0,
+            "skipped_missing_file": 0,
+            "items": [],
+        }
+
+    def _downloaded_attachment_ids_from_sync_result(self, sync_result):
+        ids = []
+
+        def collect(items):
+            for item in items or []:
+                if not isinstance(item, dict):
+                    continue
+                attachment_id = str(item.get("attachment_id") or "").strip()
+                if attachment_id:
+                    ids.append(attachment_id)
+
+        collect((sync_result or {}).get("downloaded_files"))
+        collect((sync_result or {}).get("downloaded_pdf_files"))
+        for tab in (sync_result or {}).get("tabs") or []:
+            if not isinstance(tab, dict):
+                continue
+            collect(tab.get("downloaded_files"))
+            collect(tab.get("downloaded_pdf_files"))
+        return list(dict.fromkeys(ids))
+
+    def _auto_video_attachment_kind(self, attachment):
+        ext = str(
+            attachment.file_ext
+            or Path(str(attachment.local_path or attachment.name or "")).suffix.lstrip(".")
+        ).strip().lower().lstrip(".")
+        if ext == "pdf":
+            return "pdf"
+        if ext in AUTO_VIDEO_AUDIO_EXTENSIONS:
+            return "mp3"
+        return None
+
+    def _auto_video_attachment_summary(self, attachment, kind, threshold):
+        return {
+            "kind": kind,
+            "attachment_id": attachment.id,
+            "name": attachment.name,
+            "topic_id": attachment.topic_id,
+            "tab_id": attachment.tab_id,
+            "download_count": attachment.download_count,
+            "threshold": threshold,
+        }
+
+    def _find_existing_auto_video_task(self, attachment, kind):
+        if kind == "pdf":
+            task = (
+                PublicationTask.query
+                .filter(PublicationTask.feature.in_(AUTO_VIDEO_REPORT_AUDIO_FEATURES))
+                .filter(PublicationTask.status != "canceled")
+                .filter(or_(
+                    PublicationTask.source_task_id == attachment.id,
+                    PublicationTask.report_audio_pdf_attachment_id == attachment.id,
+                ))
+                .order_by(PublicationTask.created_at.desc())
+                .first()
+            )
+            return task
+
+        task = (
+            PublicationTask.query
+            .filter(PublicationTask.feature == "mp3_video_workflow")
+            .filter(PublicationTask.status != "canceled")
+            .filter(PublicationTask.source_task_id == attachment.id)
+            .order_by(PublicationTask.created_at.desc())
+            .first()
+        )
+        if task:
+            return task
+
+        recent_tasks = (
+            PublicationTask.query
+            .options(load_only(
+                PublicationTask.id,
+                PublicationTask.status,
+                PublicationTask.current_step,
+                PublicationTask.celery_task_id,
+                PublicationTask.params,
+                PublicationTask.created_at,
+            ))
+            .filter(PublicationTask.feature == "mp3_video_workflow")
+            .filter(PublicationTask.status != "canceled")
+            .order_by(PublicationTask.created_at.desc())
+            .limit(500)
+            .all()
+        )
+        for row in recent_tasks:
+            params = row.params if isinstance(row.params, dict) else {}
+            workflow = params.get("mp3_video_workflow") if isinstance(params.get("mp3_video_workflow"), dict) else {}
+            audio = workflow.get("audio") if isinstance(workflow.get("audio"), dict) else {}
+            if str(workflow.get("audio_asset_id") or "") == attachment.id:
+                return row
+            if str(audio.get("attachment_id") or "") == attachment.id:
+                return row
+        return None
+
+    def _auto_video_task_summary(self, task):
+        return {
+            "task_id": task.id,
+            "celery_task_id": task.celery_task_id,
+            "feature": task.feature,
+            "status": task.status,
+            "current_step": task.current_step,
+        }
+
+    def _create_auto_report_audio_video_task(self, *, run, attachment, threshold, workflow_run_id=None):
+        from services.report_audio_workflow import (
+            DEFAULT_INITIAL_PROMPT,
+            DEFAULT_REVIEW_PROMPT,
+            FEATURE_NAME,
+            QUEUE_NAME,
+        )
+        from tasks.report_audio_workflow import process_report_audio_workflow_job
+
+        pdf_meta = self._report_audio_pdf_meta_from_attachment(attachment, job_id=None)
+        title = pdf_meta.get("topic_title") or pdf_meta.get("filename") or "研报视频编排"
+        metadata = self._auto_video_dispatch_metadata(
+            run=run,
+            attachment=attachment,
+            threshold=threshold,
+            workflow_run_id=workflow_run_id,
+            title=title,
+        )
+        video_options = {
+            "enabled": True,
+            "vertical_enabled": True,
+            "bilibili_enabled": False,
+            "sub_burn_enabled": True,
+            "title": title,
+            "subtitle": "",
+            "tag_text": "研报播客",
+            "source": AUTO_VIDEO_DISPATCH_SOURCE,
+        }
+        task = PublicationTask(
+            status="pending",
+            current_step="queued",
+            progress=0,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "system",
+                "parent_feature": "zsxq_sync_run",
+                "parent_task_id": run.id,
+                "source_feature": "zsxq_attachment",
+                "source_task_id": attachment.id,
+                "report_audio_workflow": {
+                    "prompt": DEFAULT_INITIAL_PROMPT,
+                    "review_prompt": DEFAULT_REVIEW_PROMPT,
+                    "followups": [],
+                    "gemini_url": "",
+                    "metadata": metadata,
+                    "video": video_options,
+                    "pdf": None,
+                    "pdf_path": None,
+                },
+            },
+            result={
+                "metadata": metadata,
+                "pdf": None,
+                "children": {},
+                "structured_result": None,
+                "audio": None,
+                "video": None,
+                "logs": [],
+                "auto_video_dispatch": metadata["auto_video_dispatch"],
+            },
+        )
+        db.session.add(task)
+        db.session.flush()
+
+        pdf_meta = dict(pdf_meta)
+        pdf_meta["download_url"] = f"/api/report-audio-workflows/jobs/{task.id}/input-pdf"
+        params = dict(task.params or {})
+        workflow = dict(params.get("report_audio_workflow") or {})
+        workflow["pdf"] = pdf_meta
+        workflow["pdf_path"] = pdf_meta["path"]
+        params["report_audio_workflow"] = workflow
+        task.params = params
+        result = dict(task.result or {})
+        result["pdf"] = pdf_meta
+        task.result = result
+        db.session.commit()
+
+        try:
+            celery_task = process_report_audio_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+        except Exception as exc:
+            task.status = "failed"
+            task.current_step = "failed"
+            task.error_message = f"编排任务入队失败: {exc}"
+            task.completed_at = datetime.utcnow()
+            db.session.commit()
+            return {
+                "queued": False,
+                "task_id": task.id,
+                "feature": FEATURE_NAME,
+                "error": task.error_message,
+            }
+
+        task.celery_task_id = celery_task.id
+        db.session.commit()
+        return {
+            "queued": True,
+            "task_id": task.id,
+            "celery_task_id": celery_task.id,
+            "feature": FEATURE_NAME,
+            "queue": QUEUE_NAME,
+        }
+
+    def _create_auto_mp3_video_task(self, *, run, attachment, threshold, workflow_run_id=None):
+        from services.mp3_video_workflow import (
+            DEFAULT_GEMINI_URL,
+            FEATURE_NAME,
+            INFOGRAPHIC_PROMPT,
+            QUEUE_NAME,
+            audio_meta_from_zsxq_attachment,
+        )
+        from tasks.mp3_video_workflow import process_mp3_video_workflow_job
+
+        audio = audio_meta_from_zsxq_attachment(attachment.id)
+        title = audio.get("topic_title") or audio.get("filename") or "MP3 视频编排"
+        metadata = self._auto_video_dispatch_metadata(
+            run=run,
+            attachment=attachment,
+            threshold=threshold,
+            workflow_run_id=workflow_run_id,
+            title=title,
+        )
+        task = PublicationTask(
+            status="pending",
+            current_step="queued",
+            progress=0,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "system",
+                "parent_feature": "zsxq_sync_run",
+                "parent_task_id": run.id,
+                "source_feature": "zsxq_attachment",
+                "source_task_id": attachment.id,
+                FEATURE_NAME: {
+                    "audio_asset_id": attachment.id,
+                    "audio": audio,
+                    "gemini_url": DEFAULT_GEMINI_URL,
+                    "image_prompt": INFOGRAPHIC_PROMPT,
+                    "metadata": metadata,
+                },
+            },
+            result={
+                "metadata": metadata,
+                "audio": audio,
+                "children": {},
+                "logs": [],
+                "auto_video_dispatch": metadata["auto_video_dispatch"],
+            },
+        )
+        db.session.add(task)
+        db.session.commit()
+
+        try:
+            celery_task = process_mp3_video_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+        except Exception as exc:
+            task.status = "failed"
+            task.current_step = "failed"
+            task.error_message = f"编排任务入队失败: {exc}"
+            task.completed_at = datetime.utcnow()
+            db.session.commit()
+            return {
+                "queued": False,
+                "task_id": task.id,
+                "feature": FEATURE_NAME,
+                "error": task.error_message,
+            }
+
+        task.celery_task_id = celery_task.id
+        db.session.commit()
+        return {
+            "queued": True,
+            "task_id": task.id,
+            "celery_task_id": celery_task.id,
+            "feature": FEATURE_NAME,
+            "queue": QUEUE_NAME,
+        }
+
+    def _auto_video_dispatch_metadata(self, *, run, attachment, threshold, workflow_run_id=None, title=None):
+        return {
+            "title": title or attachment.name,
+            "source": AUTO_VIDEO_DISPATCH_SOURCE,
+            "auto_video_dispatch": {
+                "sync_run_id": run.id,
+                "workflow_run_id": workflow_run_id,
+                "group_id": run.group_id,
+                "group_name": run.group_name,
+                "attachment_id": attachment.id,
+                "topic_id": attachment.topic_id,
+                "tab_id": attachment.tab_id,
+                "download_count": attachment.download_count,
+                "threshold": threshold,
+                "queued_at": datetime.utcnow().isoformat() + "Z",
+            },
+        }
+
+    def _report_audio_pdf_meta_from_attachment(self, attachment, job_id=None):
+        if attachment.download_status != "downloaded":
+            raise ValueError("选择的同步 PDF 还没有下载完成")
+        path = self._absolute_local_path(attachment.local_path)
+        if not path or not path.exists() or not path.is_file() or path.suffix.lower() != ".pdf":
+            raise ValueError("选择的同步 PDF 本地文件不存在")
+        size = path.stat().st_size
+        if size <= 0:
+            raise ValueError("选择的同步 PDF 文件为空")
+        max_bytes = self._report_audio_max_pdf_bytes()
+        if size > max_bytes:
+            raise ValueError(f"PDF 超过 {self._report_audio_max_pdf_mb()}MB 限制")
+
+        topic = ZsxqTopic.query.filter_by(
+            group_id=attachment.group_id,
+            tab_id=attachment.tab_id,
+            topic_id=attachment.topic_id,
+        ).first()
+        return {
+            "filename": attachment.name or path.name,
+            "path": str(path),
+            "bytes": size,
+            "source": "zsxq_attachment",
+            "attachment_id": attachment.id,
+            "group_id": attachment.group_id,
+            "tab_id": attachment.tab_id,
+            "topic_id": attachment.topic_id,
+            "topic_title": topic.title if topic else None,
+            "tab_label": topic.tab_label if topic else None,
+            "download_url": f"/api/report-audio-workflows/jobs/{job_id}/input-pdf" if job_id else None,
+        }
+
+    def _report_audio_max_pdf_mb(self):
+        value = os.getenv("REPORT_AUDIO_WORKFLOW_MAX_PDF_MB", os.getenv("GEMINI_BROWSER_MAX_PDF_MB", "200"))
+        return self._bounded_int(value, default=200, lower=1, upper=10_000)
+
+    def _report_audio_max_pdf_bytes(self):
+        return self._report_audio_max_pdf_mb() * 1024 * 1024
+
+    def _finalize_auto_video_dispatch_summary(self, summary):
+        pdf = summary.get("pdf") or {}
+        mp3 = summary.get("mp3") or {}
+        queued = self._safe_int(pdf.get("queued")) + self._safe_int(mp3.get("queued"))
+        failed = self._safe_int(pdf.get("failed")) + self._safe_int(mp3.get("failed"))
+        eligible = self._safe_int(pdf.get("eligible")) + self._safe_int(mp3.get("eligible"))
+        checked = self._safe_int(pdf.get("checked")) + self._safe_int(mp3.get("checked"))
+        summary["queued_count"] = queued
+        summary["failed_count"] = failed
+        summary["eligible_count"] = eligible
+        if failed and queued:
+            summary["status"] = "partial"
+        elif failed:
+            summary["status"] = "failed"
+        elif queued:
+            summary["status"] = "completed"
+        elif checked:
+            summary["status"] = "skipped"
+            summary.setdefault("reason", "no_eligible_attachment")
+        else:
+            summary["status"] = "skipped"
+            summary.setdefault("reason", "no_target_attachment")
+
+    def _send_auto_video_dispatch_email(self, run, summary):
+        try:
+            from services.workflow_notification_service import workflow_notification_service
+
+            subject = f"[知识星球工作流] 视频编排旁路投递 · {run.group_name or run.group_id}"
+            lines = [
+                "事件：视频编排旁路投递",
+                f"星球：{run.group_name or run.group_id}",
+                f"状态：{self._auto_video_status_label(summary.get('status'))}",
+                f"同步 Run ID：{run.id}",
+                f"工作流 ID：{summary.get('workflow_run_id') or '-'}",
+                f"来源：{AUTO_VIDEO_DISPATCH_SOURCE}",
+                "",
+                "投递概览：",
+                f"检查附件：{summary.get('attachments_checked', 0)} 个，加载记录：{summary.get('attachments_loaded', 0)} 个，非目标类型跳过：{summary.get('skipped_non_target', 0)} 个。",
+                self._auto_video_email_bucket_line("PDF", summary.get("pdf") or {}),
+                self._auto_video_email_bucket_line("MP3", summary.get("mp3") or {}),
+            ]
+            if summary.get("reason"):
+                lines.append(f"原因：{summary.get('reason')}")
+            if summary.get("queued_task_ids"):
+                lines.append("")
+                lines.append("已投递任务：")
+                for task_id in summary.get("queued_task_ids")[:20]:
+                    lines.append(f"- {task_id}")
+            if summary.get("errors"):
+                lines.append("")
+                lines.append("异常明细：")
+                for item in summary.get("errors")[:20]:
+                    if not isinstance(item, dict):
+                        continue
+                    prefix = item.get("attachment_id") or item.get("task_id") or item.get("kind") or "dispatch"
+                    lines.append(f"- {prefix}: {item.get('message')}")
+            lines.extend([
+                "",
+                f"发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            ])
+            workflow_notification_service.send_email_message(subject, "\n".join(lines))
+            summary["email"] = {
+                "sent": True,
+                "sent_at": datetime.utcnow().isoformat() + "Z",
+            }
+        except Exception as exc:
+            logger.exception("[ZSXQ_SYNC] auto video dispatch email failed | run_id=%s", run.id)
+            summary["email"] = {
+                "sent": False,
+                "error": str(exc),
+                "failed_at": datetime.utcnow().isoformat() + "Z",
+            }
+
+    def _auto_video_email_bucket_line(self, label, bucket):
+        return (
+            f"{label}：阈值 {bucket.get('threshold')}，检查 {bucket.get('checked', 0)}，"
+            f"达阈值 {bucket.get('eligible', 0)}，投递 {bucket.get('queued', 0)}，"
+            f"已有任务 {bucket.get('skipped_existing', 0)}，低于阈值 {bucket.get('skipped_below_threshold', 0)}，"
+            f"缺少下载数 {bucket.get('skipped_missing_download_count', 0)}，"
+            f"文件缺失 {bucket.get('skipped_missing_file', 0)}，失败 {bucket.get('failed', 0)}。"
+        )
+
+    def _auto_video_status_label(self, status):
+        return {
+            "completed": "成功",
+            "partial": "部分成功",
+            "failed": "失败",
+            "skipped": "跳过",
+            "pending": "待处理",
+        }.get(str(status or ""), status or "-")
+
+    def _bounded_int(self, value, *, default, lower, upper):
+        number = self._int_or_none(value)
+        if number is None:
+            number = int(default)
+        return min(max(int(number), int(lower)), int(upper))
 
     def _merge_run_pipeline_result(self, run, pdf_clean_result):
         self._merge_run_content_pipeline_result(run, "pdf_clean", pdf_clean_result)

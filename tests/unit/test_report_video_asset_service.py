@@ -16,6 +16,7 @@ from models import db  # noqa: E402
 from models.report_video import ReportVideoReport, ReportVideoTask  # noqa: E402
 from models.zsxq_sync import ZsxqSyncRun, ZsxqTopic  # noqa: E402
 from services.report_video_asset_service import (  # noqa: E402
+    ZsxqReportAssetService,
     build_sync_run_asset_scan_payload,
     classify_theme_hint,
     _source_hashes_from_report,
@@ -58,6 +59,38 @@ class ReportVideoAssetServiceTest(unittest.TestCase):
         self.assertTrue(payload["parse_pdfs"])
         self.assertEqual(payload["config"]["max_files"], 200)
         self.assertEqual(payload["config"]["tab_label_keyword"], "外资研报")
+
+    def test_existing_reports_by_hash_filters_to_requested_hashes(self):
+        app = Flask(__name__)
+        app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
+        app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+        db.init_app(app)
+
+        with app.app_context():
+            db.create_all()
+            task = ReportVideoTask(
+                id="task-existing",
+                task_name="existing",
+                video_type="daily_digest",
+                status="completed",
+                result={"auto_scan": {"source_sha256": "task-hash"}},
+            )
+            report = ReportVideoReport(
+                id="report-existing",
+                task_id="task-existing",
+                report_code="R001",
+                file_name="existing.pdf",
+                file_path="/tmp/existing.pdf",
+                raw_meta={"auto_asset": {"source_sha256": "asset-hash"}},
+            )
+            db.session.add_all([task, report])
+            db.session.commit()
+
+            result = ZsxqReportAssetService()._existing_reports_by_hash(["asset-hash", "missing-hash"])
+
+            self.assertIn("asset-hash", result)
+            self.assertNotIn("missing-hash", result)
+            self.assertEqual(result["asset-hash"].task_status, "completed")
 
     def test_create_batch_from_sync_run_creates_daily_digest_asset_report(self):
         with tempfile.TemporaryDirectory() as temp_dir:
