@@ -326,7 +326,7 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
         }
     except ValueError as exc:
         disabled = False
-        if _is_placeholder_group_id(group_id):
+        if _is_placeholder_group_id(group_id) or _is_auth_validation_error(exc):
             config["enabled"] = False
             disabled = True
         snapshot = _record_invalid_group_skip(
@@ -598,10 +598,15 @@ def _invalid_group_skip_email_lines(*, attempt_id, trigger, group_id, group_name
         f"计划：{'；'.join(plan_parts)}。",
         "结果：本轮未入队，未创建 workflow，未执行下载、清洗、发布。",
         f"错误：{error}",
-        "处理：调度器已停止，请更新 Cookie 或星球配置后重启。",
     ]
     if disabled:
-        lines.append("备注：检测到占位 group_id，配置已自动停用。")
+        lines.append("处理：调度器已停止，请更新 Cookie 或星球配置后重启。")
+        if _is_placeholder_group_id(group_id or config.get("group_id")):
+            lines.append("备注：检测到占位 group_id，配置已自动停用。")
+        else:
+            lines.append("备注：检测到认证失效，配置已自动停用，避免持续失败。")
+    else:
+        lines.append("处理：本轮已跳过，调度器下一轮会继续预检。")
     return lines
 
 
@@ -808,6 +813,16 @@ def transient_validation_retry_timeout_seconds():
 
 def _is_placeholder_group_id(group_id):
     return bool(GROUP_ID_PLACEHOLDER_RE.match(str(group_id or "").strip()))
+
+
+def _is_auth_validation_error(error):
+    message = str(error or "").lower()
+    return (
+        "401" in message
+        or "unauthorized" in message
+        or "未授权" in message
+        or "登录" in message
+    )
 
 
 def _validate_group_id_local(group_id):
