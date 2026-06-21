@@ -50,7 +50,7 @@ class ZsxqWorkflowService:
                 "工作流状态表必须创建在远端 PostgreSQL 中。当前 DATABASE_URL 指向本地 SQLite，"
                 "请配置 PostgreSQL DATABASE_URL 后执行 docs/sql/zsxq_workflow_runs.sql。"
             )
-        inspector = inspect(db.engine)
+        inspector = inspect(db.session.connection())
         existing_tables = self._table_names(inspector)
         if ZsxqWorkflowRun.__tablename__ not in existing_tables:
             raise ValueError(
@@ -115,8 +115,7 @@ class ZsxqWorkflowService:
             },
         )
         db.session.add(workflow)
-        db.session.commit()
-        return workflow.to_dict()
+        return self._commit_and_payload(workflow)
 
     def create_manual_download_workflow(self, *, config, trigger):
         self.ensure_schema()
@@ -141,10 +140,9 @@ class ZsxqWorkflowService:
             },
         )
         db.session.add(workflow)
-        db.session.commit()
-        return workflow.to_dict()
+        return self._commit_and_payload(workflow)
 
-    def enqueue_workflow_task(self, workflow_run_id, *, cookie=None):
+    def enqueue_workflow_task(self, workflow_run_id, *, cookie=None, credential_id=None):
         self.ensure_schema()
         workflow = ZsxqWorkflowRun.query.get(str(workflow_run_id))
         if not workflow:
@@ -153,7 +151,17 @@ class ZsxqWorkflowService:
         from tasks.zsxq_workflow import run_zsxq_workflow
 
         async_result = run_zsxq_workflow.apply_async(
-            args=[workflow.id, {"cookie": cookie} if cookie else {}],
+            args=[
+                workflow.id,
+                {
+                    key: value
+                    for key, value in {
+                        "cookie": cookie,
+                        "credential_id": credential_id,
+                    }.items()
+                    if value
+                },
+            ],
             queue="zsxq_workflow",
             retry=False,
         )
@@ -166,11 +174,11 @@ class ZsxqWorkflowService:
         })
         stage_results["workflow"] = workflow_result
         workflow.stage_results = stage_results
-        db.session.commit()
+        workflow_payload = self._commit_and_payload(workflow)
         return {
-            "workflow_run_id": workflow.id,
+            "workflow_run_id": workflow_payload["id"],
             "celery_task_id": async_result.id,
-            "workflow": workflow.to_dict(),
+            "workflow": workflow_payload,
         }
 
     def start_workflow(self, workflow_run_id, runtime=None):
@@ -185,9 +193,16 @@ class ZsxqWorkflowService:
         snapshot = self._snapshot(workflow)
         sync_config = snapshot.get("sync") or {}
         cookie = runtime.get("cookie")
+        credential_id = (
+            runtime.get("credential_id")
+            or sync_config.get("credential_id")
+            or (snapshot.get("system_sync") or {}).get("credential_id")
+        )
         if not cookie:
-            from services.zsxq_system_sync_test import runtime_cookie
-            cookie = runtime_cookie()
+            from services.platform_credential_service import resolve_zsxq_cookie
+
+            credential = resolve_zsxq_cookie(account_id=credential_id, purpose="zsxq.sync", required=True)
+            credential_id = credential.get("credential_id") or credential_id
 
         workflow.status = "running"
         workflow.current_stage = "sync"
@@ -231,6 +246,7 @@ class ZsxqWorkflowService:
                 "manual_attachment_plan": sync_config.get("manual_attachment_plan"),
                 "attachment_download_rules": sync_config.get("attachment_download_rules"),
                 "auto_video_dispatch": sync_config.get("auto_video_dispatch"),
+                "credential_id": credential_id,
                 # Workflow owns downstream orchestration. Keep legacy direct
                 # sync->clean handoff off for workflow-triggered sync tasks.
                 "auto_pdf_clean": False,
@@ -255,8 +271,7 @@ class ZsxqWorkflowService:
             }
             workflow.stage_results = stage_results
             self._queue_notification(workflow, "workflow_started")
-            db.session.commit()
-            return workflow.to_dict()
+            return self._commit_and_payload(workflow)
         except Exception as exc:
             db.session.rollback()
             if _is_retryable_database_error(exc):
@@ -306,8 +321,7 @@ class ZsxqWorkflowService:
             workflow.completed_at = datetime.utcnow()
             self._queue_notification(workflow, "sync_failed")
             self._queue_notification(workflow, "workflow_failed")
-        db.session.commit()
-        return workflow.to_dict()
+        return self._commit_and_payload(workflow)
 
     def advance_workflow(self, workflow_run_id, reason=None):
         self.ensure_schema()
@@ -321,43 +335,49 @@ class ZsxqWorkflowService:
         workflow.started_at = workflow.started_at or datetime.utcnow()
 
         if not self._sync_completed(workflow):
-            db.session.commit()
-            return workflow.to_dict()
+            return self._commit_and_payload(workflow)
 
         clean_status = self._clean_stage_status(workflow)
         if clean_status in {None, "created"}:
             self._submit_clean_stage(workflow)
-            db.session.commit()
+            db.session.flush()
             clean_status = self._clean_stage_status(workflow)
             if clean_status in {"running", "queued"}:
-                return workflow.to_dict()
+                payload = workflow.to_dict()
+                db.session.commit()
+                return payload
 
         if clean_status in {"running", "queued"}:
             self._refresh_clean_stage(workflow)
-            db.session.commit()
+            db.session.flush()
             clean_status = self._clean_stage_status(workflow)
             if clean_status in {"running", "queued"}:
-                return workflow.to_dict()
+                payload = workflow.to_dict()
+                db.session.commit()
+                return payload
 
         if clean_status == "failed":
             self._mark_failed(workflow, "清洗阶段失败", stage="clean")
-            db.session.commit()
-            return workflow.to_dict()
+            return self._commit_and_payload(workflow)
 
         publish_status = self._publish_stage_status(workflow)
         if publish_status in {None, "created"}:
             self._submit_publish_stage(workflow)
-            db.session.commit()
+            db.session.flush()
             publish_status = self._publish_stage_status(workflow)
             if publish_status in {"running", "queued"}:
-                return workflow.to_dict()
+                payload = workflow.to_dict()
+                db.session.commit()
+                return payload
 
         if publish_status in {"running", "queued"}:
             self._refresh_publish_stage(workflow)
-            db.session.commit()
+            db.session.flush()
             publish_status = self._publish_stage_status(workflow)
             if publish_status in {"running", "queued"}:
-                return workflow.to_dict()
+                payload = workflow.to_dict()
+                db.session.commit()
+                return payload
 
         if publish_status == "failed":
             self._mark_failed(workflow, "发布阶段失败", stage="publish")
@@ -365,8 +385,7 @@ class ZsxqWorkflowService:
             self._mark_partial(workflow, "工作流部分成功")
         else:
             self._mark_completed(workflow)
-        db.session.commit()
-        return workflow.to_dict()
+        return self._commit_and_payload(workflow)
 
     def list_runs(self, group_id=None, limit=20):
         self.ensure_schema()
@@ -386,8 +405,7 @@ class ZsxqWorkflowService:
         if not workflow:
             return None
         self._mark_failed(workflow, message, stage=stage)
-        db.session.commit()
-        return workflow.to_dict()
+        return self._commit_and_payload(workflow)
 
     def pending_workflow(self, group_id=None, *, recover_stale=True):
         self.ensure_schema()
@@ -693,6 +711,7 @@ class ZsxqWorkflowService:
         group_id = str(config.get("group_id") or "").strip()
         if not group_id:
             raise ValueError("group_id 不能为空")
+        credential_id = config.get("credential_id") or config.get("_credential_id") or None
 
         raw_items = config.get("attachments") or config.get("items") or []
         tabs = self._manual_tabs_from_config(config, raw_items)
@@ -773,6 +792,7 @@ class ZsxqWorkflowService:
             "sync": {
                 "group_id": group_id,
                 "group_name": config.get("group_name") or "",
+                "credential_id": credential_id,
                 "tabs": tabs,
                 "count": 1,
                 "max_pages": 1,
@@ -862,6 +882,7 @@ class ZsxqWorkflowService:
             "continuous": max_rounds is None,
             "trigger": trigger,
             "queued_at": self._now_iso(),
+            "credential_id": config.get("credential_id") or None,
             "count": count,
             "max_pages": max_pages,
             "max_download_files": max_download_files,
@@ -895,6 +916,7 @@ class ZsxqWorkflowService:
             "sync": {
                 "group_id": str(config.get("group_id") or ""),
                 "group_name": config.get("group_name"),
+                "credential_id": config.get("credential_id") or None,
                 "tabs": tabs,
                 "count": count,
                 "max_pages": max_pages,
@@ -1229,6 +1251,12 @@ class ZsxqWorkflowService:
 
     def _stage_results(self, workflow):
         return dict(workflow.stage_results) if isinstance(workflow.stage_results, dict) else {}
+
+    def _commit_and_payload(self, workflow):
+        db.session.flush()
+        payload = workflow.to_dict()
+        db.session.commit()
+        return payload
 
     def _normalize_auto_publish(self, value):
         data = deepcopy(value) if isinstance(value, dict) else {}

@@ -44,11 +44,12 @@ class GeminiBrowserOptions:
     chrome_executable_path: str = ""
     chrome_channel: str = ""
     headless: bool = False
-    response_timeout_seconds: int = 180
+    response_timeout_seconds: int = 600
     image_timeout_seconds: int = 360
     response_stable_seconds: float = 3.0
-    total_timeout_seconds: int = 300
+    total_timeout_seconds: int = 900
     ready_timeout_seconds: int = 90
+    min_response_chars: int = 120
     selectors: Dict[str, List[str]] = field(default_factory=dict)
 
     @classmethod
@@ -64,11 +65,12 @@ class GeminiBrowserOptions:
             chrome_executable_path=_env("REPORT_PDF_GEMINI_CHROME_PATH", "GEMINI_BROWSER_CHROME_PATH", ""),
             chrome_channel=_env("REPORT_PDF_GEMINI_CHANNEL", "GEMINI_BROWSER_CHANNEL", ""),
             headless=_truthy_env("REPORT_PDF_GEMINI_HEADLESS", _truthy_env("GEMINI_BROWSER_HEADLESS", False)),
-            response_timeout_seconds=_int_env("REPORT_PDF_GEMINI_RESPONSE_TIMEOUT", _int_env("GEMINI_BROWSER_RESPONSE_TIMEOUT", 180)),
+            response_timeout_seconds=_int_env("REPORT_PDF_GEMINI_RESPONSE_TIMEOUT", _int_env("GEMINI_BROWSER_RESPONSE_TIMEOUT", 600)),
             image_timeout_seconds=_int_env("REPORT_PDF_GEMINI_IMAGE_TIMEOUT", _int_env("GEMINI_BROWSER_IMAGE_TIMEOUT", 360)),
             response_stable_seconds=_float_env("REPORT_PDF_GEMINI_RESPONSE_STABLE_SECONDS", _float_env("GEMINI_BROWSER_RESPONSE_STABLE_SECONDS", 3.0)),
-            total_timeout_seconds=_int_env("REPORT_PDF_GEMINI_TOTAL_TIMEOUT", _int_env("GEMINI_BROWSER_TOTAL_TIMEOUT", 300)),
+            total_timeout_seconds=_int_env("REPORT_PDF_GEMINI_TOTAL_TIMEOUT", _int_env("GEMINI_BROWSER_TOTAL_TIMEOUT", 900)),
             ready_timeout_seconds=_int_env("REPORT_PDF_GEMINI_READY_TIMEOUT", _int_env("GEMINI_BROWSER_READY_TIMEOUT", 90)),
+            min_response_chars=_int_env("REPORT_PDF_GEMINI_MIN_RESPONSE_CHARS", _int_env("GEMINI_BROWSER_MIN_RESPONSE_CHARS", 120)),
             selectors=_load_selectors_from_env(),
         )
 
@@ -457,6 +459,8 @@ class GeminiBrowserWorker:
 
         while _path_exists_or_symlink(lock_path):
             owner = _singleton_owner(lock_path)
+            if _clear_stale_singleton_files(user_data_dir, owner):
+                continue
             if time.monotonic() >= deadline:
                 owner_suffix = f"；占用信息: {owner}" if owner else ""
                 raise GeminiBrowserAutomationError(
@@ -489,11 +493,23 @@ class GeminiBrowserWorker:
         profile_lock.__enter__()
         try:
             self._wait_for_profile_singleton_release()
-            context = playwright.chromium.launch_persistent_context(user_data_dir, **kwargs)
+            context = self._launch_persistent_context_with_singleton_retry(playwright, user_data_dir, kwargs)
             return _LockedBrowserContext(context, profile_lock)
         except Exception:
             profile_lock.__exit__(None, None, None)
             raise
+
+    def _launch_persistent_context_with_singleton_retry(self, playwright, user_data_dir: str, kwargs: Dict[str, Any]):
+        try:
+            return playwright.chromium.launch_persistent_context(user_data_dir, **kwargs)
+        except Exception as exc:
+            if not _looks_like_singleton_launch_error(exc):
+                raise
+            profile_dir = Path(user_data_dir).expanduser()
+            owner = _singleton_owner(profile_dir / "SingletonLock")
+            if not _clear_stale_singleton_files(profile_dir, owner):
+                raise
+            return playwright.chromium.launch_persistent_context(user_data_dir, **kwargs)
 
     def _wait_for_interactive_page(self, page, started_at: float) -> None:
         deadline = time.monotonic() + self.options.ready_timeout_seconds
@@ -569,33 +585,10 @@ class GeminiBrowserWorker:
         while time.monotonic() < deadline:
             self._guard_total_timeout(started_at)
             self._raise_if_login_or_captcha(page)
-            state = page.evaluate(
-                """(filename) => {
-                    const text = (document.body && document.body.innerText || "").toLowerCase();
-                    const hasName = filename ? text.includes(filename.toLowerCase()) : false;
-                    const busyMarkers = [
-                        "uploading",
-                        "processing",
-                        "正在上传",
-                        "正在处理",
-                        "上传中",
-                        "处理中"
-                    ];
-                    const busy = busyMarkers.some((marker) => text.includes(marker));
-                    const sendButtons = Array.from(document.querySelectorAll("button")).filter((button) => {
-                        const label = [
-                            button.getAttribute("aria-label"),
-                            button.getAttribute("title"),
-                            button.innerText
-                        ].filter(Boolean).join(" ").toLowerCase();
-                        return label.includes("send") || label.includes("发送") || label.includes("submit");
-                    });
-                    const enabledSend = sendButtons.some((button) => !button.disabled);
-                    return { hasName, busy, enabledSend };
-                }""",
-                name,
-            )
-            if isinstance(state, dict) and (state.get("hasName") or state.get("enabledSend")) and not state.get("busy"):
+            state = self._composer_submit_state(page, name)
+            if isinstance(state, dict) and state.get("canceled"):
+                raise GeminiBrowserAutomationError("Gemini 文件上传被取消或失败")
+            if _upload_is_ready(state):
                 return
             time.sleep(1)
         raise GeminiBrowserAutomationError("等待 Gemini 文件上传完成超时")
@@ -627,17 +620,319 @@ class GeminiBrowserWorker:
                     prompt,
                 )
 
-        send_button = self._wait_for_send_button(page)
-        if send_button is not None:
-            send_button.click(timeout=10_000)
+        promptless = not _clean_text(prompt)
+        last_error = None
+        for attempt in range(3):
+            input_locator = self._last_visible(page, self._selectors("input")) or input_locator
+            send_button = self._wait_for_send_button(page)
+            clicked_send = False
+            try:
+                if send_button is not None:
+                    self._click_send_button(page, send_button, force=attempt > 0)
+                    clicked_send = True
+                elif promptless:
+                    last_error = GeminiBrowserAutomationError("未找到 Gemini 发送按钮")
+                else:
+                    input_locator.press("Enter", timeout=10_000)
+            except Exception as exc:
+                last_error = exc
+
+            if self._wait_for_prompt_submitted(page, prompt, timeout_seconds=8, clicked_send=clicked_send):
+                return
+
+            if promptless:
+                continue
+
+            try:
+                input_locator.press("Enter", timeout=10_000)
+            except Exception as exc:
+                last_error = exc
+            if self._wait_for_prompt_submitted(page, prompt, timeout_seconds=5):
+                return
+
+        state = self._composer_submit_state(page, "")
+        debug = _submit_state_summary(state, self._composer_text(page))
+        suffix_parts = []
+        if last_error:
+            suffix_parts.append(str(last_error))
+        if debug:
+            suffix_parts.append(debug)
+        suffix = f": {'; '.join(suffix_parts)}" if suffix_parts else ""
+        raise GeminiBrowserAutomationError(f"Gemini 提示词未成功提交{suffix}")
+
+    def _click_send_button(self, page, button, *, force: bool = False) -> None:
+        last_error = None
+        try:
+            button.click(timeout=3_000, force=force)
             return
-        input_locator.press("Enter", timeout=10_000)
+        except Exception as exc:
+            last_error = exc
+
+        try:
+            button.dispatch_event("click", timeout=2_000)
+            return
+        except Exception as exc:
+            last_error = exc
+
+        try:
+            button.evaluate(
+                """(node) => {
+                    node.focus();
+                    node.click();
+                }"""
+            )
+            return
+        except Exception as exc:
+            last_error = exc
+
+        try:
+            box = button.bounding_box(timeout=2_000)
+            if box:
+                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                return
+        except Exception as exc:
+            last_error = exc
+
+        if last_error:
+            raise last_error
+
+    def _wait_for_prompt_submitted(self, page, prompt: str, timeout_seconds: float = 8, *, clicked_send: bool = False) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        normalized_prompt = _clean_text(prompt)
+        while time.monotonic() < deadline:
+            generating = self._is_generating(page)
+            if generating:
+                return True
+            composer_text = _clean_text(self._composer_text(page))
+            if not normalized_prompt:
+                state = self._composer_submit_state(page, "")
+                if _promptless_submit_confirmed(state, composer_text, generating, clicked_send=clicked_send):
+                    return True
+            if normalized_prompt not in composer_text:
+                return True
+            time.sleep(0.5)
+        return False
+
+    def _composer_submit_state(self, page, filename: str = "") -> Dict[str, Any]:
+        try:
+            state = page.evaluate(
+                """(filename) => {
+                    const rawText = (document.body && document.body.innerText || "").toLowerCase();
+                    const normalize = (value) => String(value || "")
+                        .toLowerCase()
+                        .replace(/[\\s\\u00a0]+/g, " ")
+                        .trim();
+                    const compact = (value) => normalize(value).replace(/\\s+/g, "");
+                    const text = normalize(rawText);
+                    const compactText = compact(rawText);
+                    const normalizedName = normalize(filename);
+                    const stem = normalizedName.replace(/\\.[^.]+$/, "");
+                    const markers = [
+                        normalizedName,
+                        stem,
+                        stem ? stem.slice(0, Math.min(10, stem.length)) : "",
+                        stem ? stem.slice(Math.max(0, stem.length - 10)) : ""
+                    ].filter((marker) => compact(marker).length >= 4);
+                    const hasName = markers.some((marker) => {
+                        const normalizedMarker = normalize(marker);
+                        const compactMarker = compact(marker);
+                        return text.includes(normalizedMarker) || compactText.includes(compactMarker);
+                    });
+                    const busyMarkers = [
+                        "uploading",
+                        "processing",
+                        "正在上传",
+                        "正在处理",
+                        "上传中",
+                        "处理中"
+                    ];
+                    const canceledMarkers = [
+                        "canceled",
+                        "cancelled",
+                        "failed",
+                        "已取消",
+                        "上传失败",
+                        "处理失败"
+                    ];
+                    const busy = busyMarkers.some((marker) => text.includes(marker));
+                    const canceled = canceledMarkers.some((marker) => text.includes(marker));
+                    const visible = (node) => {
+                        const style = window.getComputedStyle(node);
+                        const rect = node.getBoundingClientRect();
+                        return style && style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+                    };
+                    const isTransparent = (value) => {
+                        const text = String(value || "").replace(/\\s+/g, "").toLowerCase();
+                        return !text || text === "transparent" || text === "rgba(0,0,0,0)";
+                    };
+                    const isLightNeutral = (value) => {
+                        const match = String(value || "").match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/i);
+                        if (!match) return false;
+                        const r = Number(match[1]);
+                        const g = Number(match[2]);
+                        const b = Number(match[3]);
+                        return r >= 235 && g >= 235 && b >= 235;
+                    };
+                    const isDisabled = (button) => {
+                        const ariaDisabled = String(button.getAttribute("aria-disabled") || "").toLowerCase();
+                        return button.disabled || ariaDisabled === "true";
+                    };
+                    const buttonLabel = (button) => [
+                        button.getAttribute("aria-label"),
+                        button.getAttribute("title"),
+                        button.innerText,
+                        button.textContent,
+                        button.innerHTML
+                    ].filter(Boolean).join(" ").toLowerCase();
+                    const looksLikeSubmit = (button) => {
+                        if (!visible(button) || isDisabled(button)) return false;
+                        const label = buttonLabel(button);
+                        const explicit = label.includes("send") ||
+                            label.includes("发送") ||
+                            label.includes("submit") ||
+                            label.includes("提交") ||
+                            label.includes("arrow_upward") ||
+                            label.includes("arrow-upward") ||
+                            label.includes("north");
+                        if (explicit) return true;
+
+                        const blocked = [
+                            "add",
+                            "attach",
+                            "upload",
+                            "mic",
+                            "microphone",
+                            "record",
+                            "添加",
+                            "附件",
+                            "上传",
+                            "麦克风",
+                            "语音"
+                        ].some((marker) => label.includes(marker));
+                        if (blocked) return false;
+
+                        const rect = button.getBoundingClientRect();
+                        const style = window.getComputedStyle(button);
+                        const colored = !isTransparent(style.backgroundColor) && !isLightNeutral(style.backgroundColor);
+                        const rightSide = rect.left > window.innerWidth * 0.55;
+                        const lowerHalf = rect.top > window.innerHeight * 0.45;
+                        const buttonSized = rect.width >= 28 && rect.height >= 28 && rect.width <= 80 && rect.height <= 80;
+                        return colored && rightSide && lowerHalf && buttonSized;
+                    };
+                    const sendButtons = Array.from(document.querySelectorAll("button")).filter(looksLikeSubmit);
+                    const enabledSend = sendButtons.length > 0;
+                    return { hasName, busy, canceled, enabledSend, sendButtonCount: sendButtons.length };
+                }""",
+                filename,
+            )
+            return state if isinstance(state, dict) else {}
+        except Exception:
+            return {}
+
+    def _submit_button_index(self, page) -> Optional[int]:
+        try:
+            index = page.evaluate(
+                """() => {
+                    const visible = (node) => {
+                        const style = window.getComputedStyle(node);
+                        const rect = node.getBoundingClientRect();
+                        return style && style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+                    };
+                    const isTransparent = (value) => {
+                        const text = String(value || "").replace(/\\s+/g, "").toLowerCase();
+                        return !text || text === "transparent" || text === "rgba(0,0,0,0)";
+                    };
+                    const isLightNeutral = (value) => {
+                        const match = String(value || "").match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/i);
+                        if (!match) return false;
+                        const r = Number(match[1]);
+                        const g = Number(match[2]);
+                        const b = Number(match[3]);
+                        return r >= 235 && g >= 235 && b >= 235;
+                    };
+                    const isDisabled = (button) => {
+                        const ariaDisabled = String(button.getAttribute("aria-disabled") || "").toLowerCase();
+                        return button.disabled || ariaDisabled === "true";
+                    };
+                    const buttonLabel = (button) => [
+                        button.getAttribute("aria-label"),
+                        button.getAttribute("title"),
+                        button.innerText,
+                        button.textContent,
+                        button.innerHTML
+                    ].filter(Boolean).join(" ").toLowerCase();
+                    const looksLikeSubmit = (button) => {
+                        if (!visible(button) || isDisabled(button)) return false;
+                        const label = buttonLabel(button);
+                        const explicit = label.includes("send") ||
+                            label.includes("发送") ||
+                            label.includes("submit") ||
+                            label.includes("提交") ||
+                            label.includes("arrow_upward") ||
+                            label.includes("arrow-upward") ||
+                            label.includes("north");
+                        if (explicit) return true;
+
+                        const blocked = [
+                            "add",
+                            "attach",
+                            "upload",
+                            "mic",
+                            "microphone",
+                            "record",
+                            "添加",
+                            "附件",
+                            "上传",
+                            "麦克风",
+                            "语音"
+                        ].some((marker) => label.includes(marker));
+                        if (blocked) return false;
+
+                        const rect = button.getBoundingClientRect();
+                        const style = window.getComputedStyle(button);
+                        const colored = !isTransparent(style.backgroundColor) && !isLightNeutral(style.backgroundColor);
+                        const rightSide = rect.left > window.innerWidth * 0.55;
+                        const lowerHalf = rect.top > window.innerHeight * 0.45;
+                        const buttonSized = rect.width >= 28 && rect.height >= 28 && rect.width <= 80 && rect.height <= 80;
+                        return colored && rightSide && lowerHalf && buttonSized;
+                    };
+                    return Array.from(document.querySelectorAll("button")).findIndex(looksLikeSubmit);
+                }"""
+            )
+            if isinstance(index, int) and index >= 0:
+                return index
+        except Exception:
+            return None
+        return None
+
+    def _composer_text(self, page) -> str:
+        input_locator = self._last_visible(page, self._selectors("input"))
+        if input_locator is None:
+            return ""
+        try:
+            text = input_locator.evaluate(
+                """(node) => {
+                    if ("value" in node) return node.value || "";
+                    return node.innerText || node.textContent || "";
+                }"""
+            )
+            return str(text or "")
+        except Exception:
+            return ""
 
     def _wait_for_send_button(self, page):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             button = self._last_visible(page, self._selectors("send"))
             if button is not None:
+                try:
+                    if button.is_enabled(timeout=500):
+                        return button
+                except Exception:
+                    return button
+            index = self._submit_button_index(page)
+            if index is not None:
+                button = page.locator("button").nth(index)
                 try:
                     if button.is_enabled(timeout=500):
                         return button
@@ -668,7 +963,9 @@ class GeminiBrowserWorker:
 
         if last_text:
             return {"text": last_text}
-        raise GeminiBrowserAutomationError("等待 Gemini 回复超时")
+        debug = _submit_state_summary(self._composer_submit_state(page, ""), self._composer_text(page))
+        suffix = f"; {debug}" if debug else ""
+        raise GeminiBrowserAutomationError(f"等待 Gemini 回复超时{suffix}")
 
     def _visible_image_keys(self, page) -> List[str]:
         records = self._visible_image_records(page)
@@ -875,6 +1172,8 @@ class GeminiBrowserWorker:
             return False
         if prompt and text == prompt:
             return False
+        if len(text) < max(0, int(self.options.min_response_chars or 0)):
+            return False
         return True
 
     def _is_generating(self, page) -> bool:
@@ -915,8 +1214,15 @@ class GeminiBrowserWorker:
                 "button[aria-label*='Send']",
                 "button[aria-label*='Submit']",
                 "button[aria-label*='发送']",
+                "button[aria-label*='提交']",
                 "button[title*='Send']",
+                "button[title*='Submit']",
                 "button[title*='发送']",
+                "button[title*='提交']",
+                "button:has-text('提交')",
+                "button:has-text('发送')",
+                "button:has(mat-icon:has-text('send'))",
+                "button:has(mat-icon:has-text('arrow_upward'))",
                 "[data-testid*='send']",
             ],
             "attach": [
@@ -1213,6 +1519,15 @@ def _path_exists_or_symlink(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
+def _looks_like_singleton_launch_error(exc: Any) -> bool:
+    text = str(exc or "").lower()
+    return (
+        "singletonlock" in text
+        or "processsingleton" in text
+        or ("profile directory" in text and "aborting" in text)
+    )
+
+
 def _singleton_owner(lock_path: Path) -> str:
     target = ""
     try:
@@ -1230,10 +1545,41 @@ def _singleton_owner(lock_path: Path) -> str:
     return f"{target}（pid {pid} {status}）"
 
 
+def _clear_stale_singleton_files(user_data_dir: Path, owner: str) -> bool:
+    if not _truthy_env("GEMINI_BROWSER_CLEAN_STALE_SINGLETON", True):
+        return False
+
+    pid = _singleton_pid(owner)
+    if pid is None or _pid_is_running(pid):
+        return False
+
+    cleared = False
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        path = user_data_dir / name
+        if not _path_exists_or_symlink(path):
+            continue
+        try:
+            path.unlink()
+            cleared = True
+        except OSError:
+            pass
+    return cleared
+
+
 def _singleton_pid(target: str) -> Optional[int]:
-    tail = str(target or "").rsplit("-", 1)[-1]
-    if tail.isdigit():
-        return int(tail)
+    text = str(target or "")
+    marker = "pid "
+    marker_index = text.find(marker)
+    if marker_index >= 0:
+        rest = text[marker_index + len(marker):].strip()
+        token = rest.split(None, 1)[0] if rest else ""
+        if token.isdigit():
+            return int(token)
+
+    tail = text.rsplit("-", 1)[-1]
+    digits = "".join(ch for ch in tail if ch.isdigit())
+    if digits and digits == tail.strip("）).,;: "):
+        return int(digits)
     return None
 
 
@@ -1247,6 +1593,41 @@ def _pid_is_running(pid: int) -> bool:
 
 def _clean_text(value: str) -> str:
     return " ".join(str(value or "").split()).strip()
+
+
+def _upload_is_ready(state: Any) -> bool:
+    if not isinstance(state, dict):
+        return False
+    if state.get("busy") or state.get("canceled"):
+        return False
+    return bool(state.get("hasName") or state.get("enabledSend"))
+
+
+def _promptless_submit_confirmed(state: Any, composer_text: str, generating: bool = False, *, clicked_send: bool = False) -> bool:
+    if generating:
+        return True
+    if _clean_text(composer_text):
+        return False
+    if not clicked_send:
+        return False
+    if not isinstance(state, dict):
+        return False
+    if state.get("busy"):
+        return True
+    return not bool(state.get("enabledSend"))
+
+
+def _submit_state_summary(state: Any, composer_text: str = "") -> str:
+    if not isinstance(state, dict):
+        return ""
+    parts = []
+    for key in ("hasName", "busy", "canceled", "enabledSend", "sendButtonCount"):
+        if key in state:
+            parts.append(f"{key}={state.get(key)}")
+    text = _clean_text(composer_text)
+    if text:
+        parts.append(f"composer_chars={len(text)}")
+    return "submit_state(" + ", ".join(parts) + ")" if parts else ""
 
 
 def _looks_like_page_shell_text(value: str) -> bool:

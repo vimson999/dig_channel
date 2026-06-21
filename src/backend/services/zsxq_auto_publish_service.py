@@ -9,6 +9,8 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
+from flask import has_app_context
+
 from services.zsxq_service import zsxq_service
 
 
@@ -407,24 +409,32 @@ def _snapshot_rule(rule):
 
 
 def _snapshot_config(config, include_secrets=False):
+    db_cookie_account_count = _db_publish_cookie_account_count(
+        group_id=(config or {}).get("group_id") if isinstance(config, dict) else None,
+    )
+    db_cookie_ready = db_cookie_account_count > 0
     if not config:
         return {
             "exists": False,
             "path": str(CONFIG_PATH),
             "cookie_env_name": COOKIE_ENV_NAME,
             "cookie_env_configured": bool(_strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME))),
+            "cookie_db_configured": db_cookie_ready,
             "cookie_accounts": [],
             "cookie_account_count": 0,
-            "active_cookie_account_count": 0,
-            "cookie_pool_ready": False,
-            "cookie_source_mode": "env" if bool(_strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME))) else None,
+            "db_cookie_account_count": db_cookie_account_count,
+            "active_cookie_account_count": db_cookie_account_count,
+            "cookie_pool_ready": db_cookie_ready,
+            "cookie_source_mode": "db" if db_cookie_ready else ("env" if bool(_strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME))) else None),
         }
     active_cookie_accounts = _eligible_cookie_accounts(config, config.get("group_id"))
+    effective_cookie_account_count = db_cookie_account_count or len(active_cookie_accounts)
     return {
         "exists": True,
         "path": str(CONFIG_PATH),
         "cookie_env_name": COOKIE_ENV_NAME,
         "cookie_env_configured": bool(_strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME))),
+        "cookie_db_configured": db_cookie_ready,
         "name": config.get("name"),
         "group_id": config.get("group_id"),
         "group_name": config.get("group_name"),
@@ -436,9 +446,10 @@ def _snapshot_config(config, include_secrets=False):
         "rules": [_snapshot_rule(rule) for rule in (config.get("rules") or [])],
         "cookie_accounts": [_snapshot_cookie_account(item, include_secrets=include_secrets) for item in (config.get("cookie_accounts") or [])],
         "cookie_account_count": len(config.get("cookie_accounts") or []),
-        "active_cookie_account_count": len(active_cookie_accounts),
-        "cookie_pool_ready": bool(active_cookie_accounts),
-        "cookie_source_mode": "pool" if active_cookie_accounts else ("env" if bool(_strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME))) else None),
+        "db_cookie_account_count": db_cookie_account_count,
+        "active_cookie_account_count": effective_cookie_account_count,
+        "cookie_pool_ready": bool(effective_cookie_account_count),
+        "cookie_source_mode": "db" if db_cookie_ready else ("pool" if active_cookie_accounts else ("env" if bool(_strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME))) else None)),
     }
 
 
@@ -461,13 +472,14 @@ def load_config(required=True):
 def save_config(payload, cookie=None):
     previous = load_config(required=False) or {}
     config = _normalize_config(payload, previous=previous)
-    validation_cookie = cookie or runtime_cookie(required=False)
+    db_accounts = _db_publish_cookie_accounts(group_id=config.get("group_id"), required=False)
+    validation_cookie = (db_accounts[0]["cookie"] if db_accounts else None) or cookie or runtime_cookie(required=False)
     if validation_cookie:
         validation_cookie = zsxq_service.normalize_cookie(validation_cookie)
         _validate_group(config.get("group_id"), validation_cookie)
     config["created_at"] = previous.get("created_at") or config["created_at"]
     _write_json(CONFIG_PATH, config)
-    return _snapshot_config(config, include_secrets=True)
+    return _snapshot_config(config, include_secrets=False)
 
 
 def runtime_cookie(required=True):
@@ -501,6 +513,10 @@ def _runtime_cookie_account(cookie, source, group_id):
 
 
 def _resolve_runtime_cookie_accounts(config, cookie_override=None, required=True):
+    db_accounts = _db_publish_cookie_accounts(group_id=config.get("group_id"), required=False)
+    if db_accounts:
+        return db_accounts, "db"
+
     pool_accounts = _eligible_cookie_accounts(config, config.get("group_id"))
     if pool_accounts:
         return pool_accounts, "pool"
@@ -512,6 +528,51 @@ def _resolve_runtime_cookie_accounts(config, cookie_override=None, required=True
     if cookie:
         return [_runtime_cookie_account(cookie, "env", config.get("group_id"))], "env"
     return [], None
+
+
+def _db_publish_cookie_accounts(group_id=None, required=False):
+    if not has_app_context():
+        return []
+    try:
+        from services.platform_credential_service import resolve_zsxq_cookie_accounts
+
+        return resolve_zsxq_cookie_accounts(
+            purpose="zsxq.publish",
+            group_id=group_id,
+            required=required,
+        )
+    except Exception:
+        if required:
+            raise
+        return []
+
+
+def _db_publish_cookie_account_count(group_id=None):
+    if not has_app_context():
+        return 0
+    try:
+        from models import db
+        from models.platform_credential import PlatformCredentialAccount
+
+        query = PlatformCredentialAccount.query.filter(
+            PlatformCredentialAccount.status == "active",
+            PlatformCredentialAccount.platform == "zsxq",
+            db.cast(PlatformCredentialAccount.purposes, db.String).ilike('%"zsxq.publish"%'),
+        )
+        accounts = query.all()
+        target_group_id = str(group_id or "").strip()
+        if not target_group_id:
+            return len(accounts)
+        count = 0
+        for account in accounts:
+            extra = account.extra if isinstance(account.extra, dict) else {}
+            allowed = extra.get("group_ids") or extra.get("allowed_group_ids") or []
+            allowed = [str(item).strip() for item in allowed if str(item).strip()]
+            if not allowed or target_group_id in allowed:
+                count += 1
+        return count
+    except Exception:
+        return 0
 
 
 def _append_publish_event(event_type, **payload):
@@ -537,7 +598,26 @@ def _quota_hint_from_error(error_text):
     return ""
 
 
+def _auth_hint_from_error(error_text):
+    try:
+        from services.platform_credential_service import is_auth_error
+
+        if is_auth_error(error_text):
+            return "认证失效"
+    except Exception:
+        logger.exception("[ZSXQ_AUTO_PUBLISH] auth error check failed")
+    return ""
+
+
 def _mark_cookie_account_used(account):
+    if account.get("credential_id"):
+        try:
+            from services.platform_credential_service import mark_credential_success
+
+            mark_credential_success(account.get("credential_id"))
+        except Exception:
+            logger.exception("[ZSXQ_AUTO_PUBLISH] credential used mark failed | credential=%s", account.get("credential_id"))
+        return
     if account.get("runtime_only"):
         return
     account["last_used_at"] = _now_iso()
@@ -545,6 +625,14 @@ def _mark_cookie_account_used(account):
 
 
 def _mark_cookie_account_success(account):
+    if account.get("credential_id"):
+        try:
+            from services.platform_credential_service import mark_credential_success
+
+            mark_credential_success(account.get("credential_id"))
+        except Exception:
+            logger.exception("[ZSXQ_AUTO_PUBLISH] credential success mark failed | credential=%s", account.get("credential_id"))
+        return
     if account.get("runtime_only"):
         return
     now = _now_iso()
@@ -554,6 +642,14 @@ def _mark_cookie_account_success(account):
 
 
 def _mark_cookie_account_limit(account, error_text):
+    if account.get("credential_id"):
+        try:
+            from services.platform_credential_service import is_auth_error, mark_credential_error
+
+            mark_credential_error(account.get("credential_id"), error_text, expired=is_auth_error(error_text))
+        except Exception:
+            logger.exception("[ZSXQ_AUTO_PUBLISH] credential error mark failed | credential=%s", account.get("credential_id"))
+        return
     if account.get("runtime_only"):
         return
     now = _now_iso()
@@ -562,6 +658,17 @@ def _mark_cookie_account_limit(account, error_text):
     account["last_limit_error"] = str(error_text or "").strip()[:1000]
     account["quota_hit_count"] = int(account.get("quota_hit_count") or 0) + 1
     account["updated_at"] = now
+
+
+def _mark_cookie_account_error(account, error_text):
+    if not account.get("credential_id"):
+        return
+    try:
+        from services.platform_credential_service import is_auth_error, mark_credential_error
+
+        mark_credential_error(account.get("credential_id"), error_text, expired=is_auth_error(error_text))
+    except Exception:
+        logger.exception("[ZSXQ_AUTO_PUBLISH] credential error mark failed | credential=%s", account.get("credential_id"))
 
 
 def _validate_group(group_id, cookie):
@@ -764,6 +871,7 @@ def preview_payload(payload, cookie=None):
             "eligible_count": len(scan["eligible"]),
             "skipped_count": len(scan["skipped"]),
             "skipped_reasons": skipped_counter,
+            "skipped": scan["skipped"][:100],
             "next_batch": scan["next_batch"],
         })
     return {
@@ -1054,6 +1162,7 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
             except Exception as exc:
                 upload_error = str(exc)
                 quota_hint = _quota_hint_from_error(upload_error)
+                auth_hint = _auth_hint_from_error(upload_error)
                 logger.warning(
                     "[ZSXQ_AUTO_PUBLISH] upload failed | run_id=%s rule=%s cookie=%s file=%s attempt=%s error=%s",
                     run_id,
@@ -1074,7 +1183,16 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
                     attempt=attempt,
                     error=upload_error,
                     quota_hint=quota_hint or "",
+                    auth_hint=auth_hint or "",
                 )
+                if auth_hint:
+                    _mark_cookie_account_error(cookie_account, upload_error)
+                    result["status"] = "retry_with_next_cookie"
+                    result["message"] = f"账号 {cookie_account_name} 上传鉴权失败（{auth_hint}），准备整批切换下一个账号重试。"
+                    result["auth_hint"] = auth_hint
+                    result["upload_error"] = upload_error
+                    result["files"] = file_results
+                    return result
                 if quota_hint:
                     _mark_cookie_account_limit(cookie_account, upload_error)
                     result["status"] = "retry_with_next_cookie"
@@ -1085,6 +1203,7 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
                 if attempt < max_upload_attempts:
                     time.sleep(1.5)
         if upload_error:
+            _mark_cookie_account_error(cookie_account, upload_error)
             deferred_marks.append({
                 "item": item,
                 "status": "failed",
@@ -1176,6 +1295,24 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
     except Exception as exc:
         error_text = str(exc)
         quota_hint = _quota_hint_from_error(error_text)
+        auth_hint = _auth_hint_from_error(error_text)
+        if auth_hint:
+            _mark_cookie_account_error(cookie_account, error_text)
+            _append_publish_event(
+                "publish_auth_switch",
+                run_id=run_id,
+                rule_id=rule.get("id"),
+                cookie_account_id=cookie_account_id,
+                cookie_account_name=cookie_account_name,
+                file_names=[item.get("name") for item in batch],
+                error=error_text,
+                auth_hint=auth_hint,
+            )
+            result["status"] = "retry_with_next_cookie"
+            result["message"] = f"账号 {cookie_account_name} 发布鉴权失败（{auth_hint}），准备整批切换下一个账号重试。"
+            result["auth_hint"] = auth_hint
+            result["publish_error"] = error_text
+            return result
         if quota_hint:
             _mark_cookie_account_limit(cookie_account, error_text)
             _append_publish_event(
@@ -1211,6 +1348,7 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
             file_names=[pair["item"]["name"] for pair in uploaded_assets],
             error=error_text,
         )
+        _mark_cookie_account_error(cookie_account, error_text)
         result["status"] = "failed"
         result["uploaded_count"] = 0
         result["failed_count"] = len(batch)
@@ -1257,6 +1395,7 @@ def _run_rule_batch(rule, config, cookie_accounts, state, run_id):
             "status": attempt_result.get("status"),
             "message": attempt_result.get("message"),
             "quota_hint": attempt_result.get("quota_hint") or "",
+            "auth_hint": attempt_result.get("auth_hint") or "",
         })
         if attempt_result.get("status") == "retry_with_next_cookie":
             last_retry_result = attempt_result
@@ -1265,7 +1404,17 @@ def _run_rule_batch(rule, config, cookie_accounts, state, run_id):
         return attempt_result
 
     result["status"] = "failed"
-    result["message"] = "当前账号池已全部触发限制或不可用，本批未发布。请根据 failure log 排查阈值标记。"
+    issue_parts = []
+    for attempt in result["cookie_attempts"]:
+        name = attempt.get("cookie_account_name") or attempt.get("cookie_account_id") or f"账号{attempt.get('index') or ''}"
+        if attempt.get("auth_hint"):
+            issue_parts.append(f"{name}: 认证失败/401")
+        elif attempt.get("quota_hint"):
+            issue_parts.append(f"{name}: {attempt.get('quota_hint')}")
+    result["message"] = (
+        "当前账号池已全部触发限制或认证失败，本批未发布。"
+        + (f"账号线索：{'；'.join(issue_parts[:6])}。" if issue_parts else "请根据 failure log 排查。")
+    )
     if last_retry_result:
         result["files"] = last_retry_result.get("files") or []
         result["uploaded_count"] = last_retry_result.get("uploaded_count") or 0

@@ -21,11 +21,23 @@ def run_zsxq_sync(self, run_id, payload):
     app = create_app()
     with app.app_context():
         workflow_run_id = payload.get("workflow_run_id")
+        credential_id = payload.get("credential_id") or payload.get("platform_credential_id")
         logger.info("[ZSXQ_SYNC_TASK] start | run_id=%s", run_id)
         try:
+            cookie = payload.get("cookie")
+            if not cookie:
+                from services.platform_credential_service import resolve_zsxq_cookie
+
+                credential = resolve_zsxq_cookie(
+                    account_id=credential_id,
+                    purpose="zsxq.sync",
+                    required=True,
+                )
+                cookie = credential.get("cookie")
+                credential_id = credential.get("credential_id") or credential_id
             result = zsxq_sync_service.sync_tabs(
                 run_id=run_id,
-                cookie=payload.get("cookie"),
+                cookie=cookie,
                 group_id=payload.get("group_id"),
                 group_name=payload.get("group_name"),
                 tabs=payload.get("tabs"),
@@ -117,9 +129,23 @@ def run_zsxq_sync(self, run_id, payload):
                         success=True,
                         error="同步完成，但工作流 finalizer 入队失败，可能无法进入清洗/发布阶段。",
                     )
+            if credential_id:
+                try:
+                    from services.platform_credential_service import mark_credential_success
+
+                    mark_credential_success(credential_id)
+                except Exception:
+                    logger.exception("[ZSXQ_SYNC_TASK] credential success mark failed | credential=%s", credential_id)
             logger.info("[ZSXQ_SYNC_TASK] complete | run_id=%s", run_id)
             return result
         except Exception as exc:
+            if credential_id:
+                try:
+                    from services.platform_credential_service import is_auth_error, mark_credential_error
+
+                    mark_credential_error(credential_id, exc, expired=is_auth_error(exc))
+                except Exception:
+                    logger.exception("[ZSXQ_SYNC_TASK] credential error mark failed | credential=%s", credential_id)
             if workflow_run_id:
                 queued_id = _notify_workflow_sync_finished(workflow_run_id, run_id, success=False, error=str(exc))
                 if not queued_id:

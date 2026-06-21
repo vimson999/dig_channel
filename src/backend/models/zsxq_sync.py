@@ -194,7 +194,18 @@ class ZsxqAttachment(db.Model):
         self.file_ext = _attachment_file_ext(self.name, self.local_path)
         return self
 
+    def effective_publish_status(self):
+        status = str(self.publish_status or "").strip()
+        if status == "published" and not self.publish_topic_id:
+            return "published_unverified"
+        return status
+
     def to_dict(self):
+        effective_publish_status = self.effective_publish_status()
+        publish_attention_required = (
+            self.download_status == "downloaded"
+            and effective_publish_status in {"publish_failed", "publish_skipped", "published_unverified"}
+        )
         return {
             "id": self.id,
             "group_id": self.group_id,
@@ -209,9 +220,11 @@ class ZsxqAttachment(db.Model):
             "file_ext": self.file_ext,
             "download_status": self.download_status,
             "error_message": self.error_message,
-            "publish_status": self.publish_status,
-            "published": self.publish_status == "published",
-            "publish_submitted": self.publish_status in {"submitted", "published"},
+            "publish_status": effective_publish_status,
+            "publish_raw_status": self.publish_status,
+            "published": effective_publish_status == "published",
+            "publish_submitted": effective_publish_status in {"submitted", "published"},
+            "publish_attention_required": publish_attention_required,
             "publish_task_id": self.publish_task_id,
             "publish_source_task_id": self.publish_source_task_id,
             "publish_topic_id": self.publish_topic_id,

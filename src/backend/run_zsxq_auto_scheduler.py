@@ -64,14 +64,14 @@ logging.basicConfig(
 logger = logging.getLogger("zsxq_auto_scheduler")
 
 
-def _write_runtime_pid_file():
+def _write_runtime_pid_file(cookie_source=None):
     payload = {
         "pid": os.getpid(),
         "started_at": datetime.utcnow().isoformat() + "Z",
         "command": " ".join(sys.argv),
         "log_path": str(LOG_PATH),
         "log_file_descriptor_opened": True,
-        "cookie_source": _cookie_source(),
+        "cookie_source": cookie_source or _cookie_source(),
     }
     try:
         PID_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -106,11 +106,17 @@ def _remove_runtime_pid_file():
 
 
 def _cookie_source():
+    try:
+        status = config_status()
+        if status.get("cookie_db_configured"):
+            return "db"
+    except Exception:
+        pass
     if (os.environ.get(COOKIE_OVERRIDE_ENV_NAME) or "").strip():
         return "page"
     if (os.environ.get(COOKIE_ENV_NAME) or "").strip():
         return "env"
-    return None
+    return "db"
 
 
 def _notify_scheduler_trigger_failure(*, attempt_id, trigger, reason, message=None, error=None, config=None, stopped=False):
@@ -205,7 +211,7 @@ class ZsxqAutoScheduler:
                     }
                 if not status.get("cookie_env_configured"):
                     logger.info(
-                        "[ZSXQ_AUTO_SYNC] trigger_skip | attempt_id=%s reason=missing_cookie_env env=%s elapsed=%.2fs",
+                        "[ZSXQ_AUTO_SYNC] trigger_skip | attempt_id=%s reason=missing_credential env=%s elapsed=%.2fs",
                         attempt_id,
                         status.get("cookie_env_name"),
                         time.monotonic() - started_at,
@@ -213,15 +219,15 @@ class ZsxqAutoScheduler:
                     _notify_scheduler_trigger_failure(
                         attempt_id=attempt_id,
                         trigger=trigger,
-                        reason="missing_cookie_env",
-                        message=f"未配置环境变量 {status.get('cookie_env_name')}，请先设置后再启动。",
+                        reason="missing_credential",
+                        message="未找到可用的知识星球同步凭据，请先在平台凭据管理里保存 zsxq.sync Cookie。",
                         config=status,
                     )
                     return {
                         "queued": False,
                         "skipped": True,
-                        "reason": "missing_cookie_env",
-                        "message": f"未配置环境变量 {status.get('cookie_env_name')}，请先设置后再启动。",
+                        "reason": "missing_credential",
+                        "message": "未找到可用的知识星球同步凭据，请先在平台凭据管理里保存 zsxq.sync Cookie。",
                         "config": status,
                     }
 
@@ -328,8 +334,8 @@ class ZsxqAutoScheduler:
             return f"触发尝试 {attempt_id}：已到达最大轮次，不再继续。"
         if reason == "missing_config":
             return "未找到系统计划配置，请先保存配置。"
-        if reason == "missing_cookie_env":
-            return "缺失系统 Cookie 环境变量配置。"
+        if reason in {"missing_cookie_env", "missing_credential"}:
+            return "缺失知识星球同步平台凭据。"
         if reason == "invalid_group":
             return "星球配置无效（占位/已下线/权限不足），请重新保存有效 group_id 后再启动。"
         if reason == "transient_upstream_error":
@@ -416,7 +422,9 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     if args.command == "start":
-        _write_runtime_pid_file()
+        with service.app.app_context():
+            cookie_source = _cookie_source()
+        _write_runtime_pid_file(cookie_source=cookie_source)
         try:
             service.start()
         finally:

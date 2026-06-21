@@ -5,11 +5,13 @@ class ReportAudioWorkflowPage {
         this.pdfAssetPage = 1;
         this.pdfAssetPerPage = 10;
         this.pdfAssetPagination = { page: 1, per_page: 10, has_more: false };
+        this.pdfAssetScope = 'all';
         this.pdfAssetSearchTimer = null;
         this.pdfAssetRequestSeq = 0;
         this.pdfAssetWorkflowSeq = 0;
         this.selectedPdfAsset = null;
         this.jobPage = this.initialJobPage();
+        this.jobStatus = this.initialJobStatus();
         this.jobPerPage = 10;
         this.jobPagination = { page: 1, per_page: 10, total: 0, pages: 0 };
         this.historyRequestSeq = 0;
@@ -26,6 +28,7 @@ class ReportAudioWorkflowPage {
             pdfUploadPanel: document.getElementById('pdf-upload-panel'),
             pdfAssetPanel: document.getElementById('pdf-asset-panel'),
             pdfInput: document.getElementById('pdf-input'),
+            pdfAssetTabs: document.getElementById('pdf-asset-tabs'),
             pdfAssetSearch: document.getElementById('pdf-asset-search'),
             pdfAssetRefreshBtn: document.getElementById('pdf-asset-refresh-btn'),
             pdfAssetSummary: document.getElementById('pdf-asset-summary'),
@@ -44,12 +47,14 @@ class ReportAudioWorkflowPage {
             refreshJobsBtn: document.getElementById('refresh-jobs-btn'),
             pollDelay: document.getElementById('poll-delay'),
             summaryText: document.getElementById('summary-text'),
+            jobStatusFilter: document.getElementById('job-status-filter'),
             jobList: document.getElementById('job-list'),
             jobPagination: document.getElementById('job-pagination'),
         };
         this.ensureDynamicElements();
         this.defaults();
         this.bind();
+        this.syncJobStatusFilter();
         this.updatePdfSourceUi();
         this.refreshStatus();
         this.loadPdfAssets({ silent: true });
@@ -98,12 +103,47 @@ class ReportAudioWorkflowPage {
         return Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
     }
 
+    initialJobStatus() {
+        const params = new URLSearchParams(window.location.search);
+        return this.normalizeJobFilterStatus(params.get('status') || params.get('job_status') || '');
+    }
+
+    jobStatusOptions() {
+        return [
+            { value: '', label: '全部' },
+            { value: 'queued', label: '排队中' },
+            { value: 'running', label: '运行中' },
+            { value: 'succeeded', label: '成功' },
+            { value: 'failed', label: '失败' },
+            { value: 'canceled', label: '已取消' },
+        ];
+    }
+
+    normalizeJobFilterStatus(status) {
+        const value = this.normalizeStatus(String(status || '').trim().toLowerCase());
+        const allowed = new Set(this.jobStatusOptions().map((item) => item.value));
+        return allowed.has(value) ? value : '';
+    }
+
+    jobStatusLabel(status = this.jobStatus) {
+        return this.jobStatusOptions().find((item) => item.value === status)?.label || '全部';
+    }
+
+    syncJobStatusFilter() {
+        if (!this.els.jobStatusFilter) return;
+        const nextValue = this.normalizeJobFilterStatus(this.jobStatus);
+        if (this.els.jobStatusFilter.value !== nextValue) {
+            this.els.jobStatusFilter.value = nextValue;
+        }
+    }
+
     bind() {
         this.els.refreshStatusBtn.addEventListener('click', () => this.refreshStatus());
         this.els.restartWorkerBtn.addEventListener('click', () => this.restartWorker());
         this.els.pdfSourceUpload.addEventListener('change', () => this.updatePdfSourceUi());
         this.els.pdfSourceAsset.addEventListener('change', () => this.updatePdfSourceUi());
         this.els.pdfAssetRefreshBtn.addEventListener('click', () => this.loadPdfAssets({ page: this.pdfAssetPage }));
+        this.els.pdfAssetTabs?.addEventListener('click', (event) => this.handlePdfAssetScopeClick(event));
         this.els.pdfAssetSearch.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') this.loadPdfAssets({ page: 1 });
         });
@@ -115,10 +155,12 @@ class ReportAudioWorkflowPage {
             if (event.key === 'Enter' || event.key === ' ') this.handlePdfAssetClick(event);
         });
         this.els.pdfAssetPagination.addEventListener('click', (event) => this.handlePdfAssetPageClick(event));
+        this.els.pdfAssetPagination.addEventListener('submit', (event) => this.handlePdfAssetPageJump(event));
         this.els.submitBtn.addEventListener('click', () => this.submit());
         this.els.loadHistoryBtn.addEventListener('click', () => this.loadHistory({ page: 1, force: true }));
         this.els.refreshJobsBtn.addEventListener('click', () => this.refreshJobs());
         this.els.pollDelay.addEventListener('change', () => this.resetPollTimer());
+        this.els.jobStatusFilter?.addEventListener('change', () => this.handleJobStatusFilterChange());
         this.els.jobList.addEventListener('click', (event) => this.handleJobAction(event));
         this.els.jobList.addEventListener('keydown', (event) => {
             if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -256,6 +298,7 @@ class ReportAudioWorkflowPage {
         const page = Math.max(1, Number(options.page || this.pdfAssetPage || 1));
         const requestSeq = ++this.pdfAssetRequestSeq;
         const showLoading = !options.silent;
+        this.renderPdfAssetTabs();
         if (showLoading) {
             this.els.pdfAssetRefreshBtn.disabled = true;
             this.els.pdfAssetRefreshBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>加载';
@@ -265,6 +308,7 @@ class ReportAudioWorkflowPage {
             const query = new URLSearchParams({
                 page: String(page),
                 per_page: String(this.pdfAssetPerPage),
+                scope: this.pdfAssetScope,
             });
             if (q) query.set('q', q);
             const result = await this.request(`/api/report-audio-workflows/pdf-assets?${query.toString()}`, { timeoutMs: 45000 });
@@ -277,6 +321,7 @@ class ReportAudioWorkflowPage {
                 page,
                 per_page: this.pdfAssetPerPage,
                 has_more: false,
+                scope: this.pdfAssetScope,
             };
             this.pdfAssetPage = Number(this.pdfAssetPagination.page || page);
             if (!this.pdfAssets.length && this.pdfAssetPage > 1) {
@@ -286,7 +331,7 @@ class ReportAudioWorkflowPage {
             this.renderPdfAssets();
             this.renderPdfAssetPagination();
             this.loadPdfAssetWorkflowStats(this.pdfAssets);
-            if (!options.silent) this.setNotice(`已加载第 ${this.pdfAssetPage} 页，共 ${this.pdfAssets.length} 个已同步 PDF。`, 'success');
+            if (!options.silent) this.setNotice(`已加载${this.pdfAssetScopeLabel()}第 ${this.pdfAssetPage} 页，共 ${this.pdfAssets.length} 个 PDF。`, 'success');
         } catch (error) {
             if (requestSeq !== this.pdfAssetRequestSeq) return;
             this.els.pdfAssetSummary.textContent = `加载已同步 PDF 失败：${error.message}`;
@@ -298,6 +343,31 @@ class ReportAudioWorkflowPage {
             this.els.pdfAssetRefreshBtn.disabled = false;
             this.els.pdfAssetRefreshBtn.innerHTML = '<i class="fas fa-rotate mr-1"></i>刷新';
         }
+    }
+
+    handlePdfAssetScopeClick(event) {
+        const button = event.target.closest('[data-pdf-asset-scope]');
+        if (!button) return;
+        const nextScope = button.dataset.pdfAssetScope === 'hot' ? 'hot' : 'all';
+        if (nextScope === this.pdfAssetScope) return;
+        this.pdfAssetScope = nextScope;
+        this.pdfAssetPage = 1;
+        this.selectedPdfAsset = null;
+        this.loadPdfAssets({ page: 1 });
+    }
+
+    pdfAssetScopeLabel() {
+        return this.pdfAssetScope === 'hot' ? '热门 PDF ' : '已同步 PDF ';
+    }
+
+    renderPdfAssetTabs() {
+        if (!this.els.pdfAssetTabs) return;
+        this.els.pdfAssetTabs.querySelectorAll('[data-pdf-asset-scope]').forEach((button) => {
+            const active = button.dataset.pdfAssetScope === this.pdfAssetScope;
+            button.className = active
+                ? 'rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-white shadow-sm transition'
+                : 'rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-600 transition hover:bg-slate-50';
+        });
     }
 
     async loadPdfAssetWorkflowStats(items) {
@@ -335,12 +405,16 @@ class ReportAudioWorkflowPage {
     }
 
     renderPdfAssets() {
+        this.renderPdfAssetTabs();
         const selectedId = this.selectedPdfAsset?.id || '';
         this.els.pdfAssetSummary.textContent = this.pdfAssets.length
-            ? `第 ${this.pdfAssetPage} 页 · 本页 ${this.pdfAssets.length} 个 PDF${this.selectedPdfAsset ? ` · 已选 ${this.selectedPdfAsset.filename}` : ''}`
-            : '没有找到已下载的同步 PDF。';
+            ? `${this.pdfAssetScopeLabel()}· 第 ${this.pdfAssetPage} 页 · 本页 ${this.pdfAssets.length} 个 PDF${this.selectedPdfAsset ? ` · 已选 ${this.selectedPdfAsset.filename}` : ''}`
+            : (this.pdfAssetScope === 'hot' ? '没有找到下载次数达到 30 次的热门 PDF。' : '没有找到已下载的同步 PDF。');
         if (!this.pdfAssets.length) {
-            this.els.pdfAssetList.innerHTML = '<div class="rounded-md border border-dashed border-slate-300 bg-white px-3 py-6 text-center text-xs text-slate-500">暂无可选 PDF。请先完成知识星球同步并下载附件。</div>';
+            const emptyText = this.pdfAssetScope === 'hot'
+                ? '暂无热门 PDF。当前筛选条件是下载次数 ≥ 30，且附件已下载到本地。'
+                : '暂无可选 PDF。请先完成知识星球同步并下载附件。';
+            this.els.pdfAssetList.innerHTML = `<div class="rounded-md border border-dashed border-slate-300 bg-white px-3 py-6 text-center text-xs text-slate-500">${this.escape(emptyText)}</div>`;
             this.renderPdfAssetPagination();
             return;
         }
@@ -353,6 +427,13 @@ class ReportAudioWorkflowPage {
                 ? `下载 ${Number(item.download_count)} 次`
                 : '下载 -';
             const workflowMeta = this.pdfAssetWorkflowMeta(item);
+            const syncTime = this.formatDateTime(item.topic_last_synced_at || item.updated_at);
+            const topicTime = this.formatDateTime(item.topic_create_time) || item.topic_create_time || '';
+            const metaLine = [
+                item.tab_label || '',
+                syncTime ? `同步 ${syncTime}` : '',
+                topicTime ? `发布 ${topicTime}` : '',
+            ].filter(Boolean).join(' · ');
             return `
                 <div role="button" tabindex="0" data-pdf-asset-id="${this.escape(item.id)}" title="${this.escape(itemTitle)}" class="w-full cursor-pointer rounded-md border px-3 py-2 text-left text-xs ${active ? 'border-indigo-300 bg-indigo-50 text-indigo-900' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}">
                     <div class="flex items-start justify-between gap-2">
@@ -365,7 +446,7 @@ class ReportAudioWorkflowPage {
                             ${previewUrl ? `<a data-pdf-preview-link href="${this.escape(previewUrl)}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-bold text-indigo-700 hover:bg-indigo-50"><i class="fas fa-eye mr-1"></i>预览</a>` : ''}
                         </div>
                     </div>
-                    <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(item.tab_label || '')}${item.topic_create_time ? ` · ${this.escape(item.topic_create_time)}` : ''}</div>
+                    <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(metaLine)}</div>
                     <div class="mt-2 flex flex-wrap items-center gap-1.5">
                         <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500">
                             <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
@@ -387,11 +468,17 @@ class ReportAudioWorkflowPage {
         const hasMore = Boolean(this.pdfAssetPagination?.has_more);
         const hasPrevious = page > 1;
         this.els.pdfAssetPagination.innerHTML = `
-            <div class="flex items-center justify-between gap-2 text-xs text-slate-500">
+            <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
                 <button type="button" data-pdf-asset-page="prev" class="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 font-bold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40" ${hasPrevious ? '' : 'disabled'}>
                     <i class="fas fa-chevron-left mr-1"></i>上一页
                 </button>
-                <span class="shrink-0 font-bold text-slate-500">第 ${page} 页</span>
+                <div class="flex shrink-0 items-center gap-2">
+                    <span class="font-bold text-slate-500">第 ${page} 页${hasMore ? ' · 还有更多' : ''}</span>
+                    <form class="flex items-center gap-1" data-pdf-asset-page-jump>
+                        <input name="pdf_asset_page" type="number" min="1" value="${page}" class="w-16 rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 focus:border-slate-500 focus:outline-none">
+                        <button type="submit" class="rounded-md bg-slate-900 px-2.5 py-1.5 font-bold text-white hover:bg-slate-700">跳页</button>
+                    </form>
+                </div>
                 <button type="button" data-pdf-asset-page="next" class="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 font-bold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40" ${hasMore ? '' : 'disabled'}>
                     下一页<i class="fas fa-chevron-right ml-1"></i>
                 </button>
@@ -418,6 +505,15 @@ class ReportAudioWorkflowPage {
         }
         if (direction === 'next' && this.pdfAssetPagination?.has_more) {
             this.loadPdfAssets({ page: this.pdfAssetPage + 1 });
+        }
+    }
+
+    handlePdfAssetPageJump(event) {
+        event.preventDefault();
+        const input = event.target.querySelector('input[name="pdf_asset_page"]');
+        const page = Number(input?.value || 1);
+        if (Number.isFinite(page) && page > 0) {
+            this.loadPdfAssets({ page: Math.floor(page) });
         }
     }
 
@@ -505,6 +601,8 @@ class ReportAudioWorkflowPage {
         const requestSeq = ++this.historyRequestSeq;
         const showLoading = !options.silent;
         this.jobPage = page;
+        this.jobStatus = this.normalizeJobFilterStatus(this.jobStatus);
+        this.syncJobStatusFilter();
         this.historyLoading = true;
         if (showLoading) {
             this.els.loadHistoryBtn.disabled = true;
@@ -515,6 +613,7 @@ class ReportAudioWorkflowPage {
                 page: String(page),
                 per_page: String(this.jobPerPage),
             });
+            if (this.jobStatus) query.set('status', this.jobStatus);
             const result = await this.request(`/api/report-audio-workflows/jobs?${query.toString()}`, { timeoutMs: 15000 });
             if (requestSeq !== this.historyRequestSeq) return;
             const items = result.data?.items || result.items || [];
@@ -543,6 +642,15 @@ class ReportAudioWorkflowPage {
                 this.els.loadHistoryBtn.innerHTML = '<i class="fas fa-clock-rotate-left mr-1.5"></i>加载历史';
             }
         }
+    }
+
+    handleJobStatusFilterChange() {
+        const nextStatus = this.normalizeJobFilterStatus(this.els.jobStatusFilter?.value || '');
+        if (nextStatus === this.jobStatus) return;
+        this.jobStatus = nextStatus;
+        this.jobPage = 1;
+        this.updateJobPageUrl(1);
+        this.loadHistory({ page: 1, force: true });
     }
 
     mergeJobSummary(incoming) {
@@ -728,7 +836,7 @@ class ReportAudioWorkflowPage {
 
     async retryJob(jobId) {
         if (!jobId) return;
-        if (!window.confirm('从失败处续跑这个编排？已完成的 Gemini 和豆包分段会尽量复用。')) return;
+        if (!window.confirm('从失败处续跑这个编排？已完成的 Gemini 和豆包浏览器朗读分段会尽量复用。')) return;
         const job = this.jobs.find((item) => item.job_id === jobId);
         if (job) {
             job.status = 'running';
@@ -804,18 +912,21 @@ class ReportAudioWorkflowPage {
     }
 
     render() {
+        this.syncJobStatusFilter();
         const total = this.jobs.length;
         const running = this.jobs.filter((job) => ['queued', 'running', 'submitting'].includes(job.status)).length;
         const succeeded = this.jobs.filter((job) => job.status === 'succeeded').length;
         const failed = this.jobs.filter((job) => job.status === 'failed').length;
         const historyTotal = Number(this.jobPagination?.total || 0);
         const pageCount = Number(this.jobPagination?.pages || 0);
+        const statusLabel = this.jobStatusLabel(this.jobStatus);
         this.els.summaryText.textContent = total
-            ? `全部 ${historyTotal || total} 条 · 第 ${this.jobPage}/${Math.max(1, pageCount || 1)} 页，本页 ${total} 条，运行中 ${running}，成功 ${succeeded}，失败 ${failed}。`
-            : '等待投递。';
+            ? `${statusLabel} ${historyTotal || total} 条 · 第 ${this.jobPage}/${Math.max(1, pageCount || 1)} 页，本页 ${total} 条，运行中 ${running}，成功 ${succeeded}，失败 ${failed}。`
+            : (this.jobStatus ? `暂无${statusLabel}状态的编排任务。` : '等待投递。');
 
         if (!this.jobs.length) {
-            this.els.jobList.innerHTML = '<div class="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-12 text-center text-sm text-slate-500">暂无编排任务。</div>';
+            const emptyText = this.jobStatus ? `暂无${statusLabel}状态的编排任务。` : '暂无编排任务。';
+            this.els.jobList.innerHTML = `<div class="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-12 text-center text-sm text-slate-500">${this.escape(emptyText)}</div>`;
             this.renderJobPagination();
             return;
         }
@@ -913,6 +1024,7 @@ class ReportAudioWorkflowPage {
     jobPageUrl(page) {
         const url = new URL(window.location.href);
         url.searchParams.set('job_page', String(Math.max(1, page)));
+        this.applyJobStatusToUrl(url);
         return `${url.pathname}${url.search}${url.hash}`;
     }
 
@@ -920,7 +1032,18 @@ class ReportAudioWorkflowPage {
         if (!window.history?.replaceState) return;
         const url = new URL(window.location.href);
         url.searchParams.set('job_page', String(Math.max(1, page)));
+        this.applyJobStatusToUrl(url);
         window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+    }
+
+    applyJobStatusToUrl(url) {
+        const status = this.normalizeJobFilterStatus(this.jobStatus);
+        if (status) {
+            url.searchParams.set('status', status);
+        } else {
+            url.searchParams.delete('status');
+        }
+        url.searchParams.delete('job_status');
     }
 
     jobSequenceNumber(index) {
@@ -955,6 +1078,8 @@ class ReportAudioWorkflowPage {
         const doubaoItems = job.doubao_browser_tts || [];
         const doubaoDisplayItems = this.doubaoDisplayItems(doubaoItems);
         const publisherChild = job.publisher_video || job.children?.publisher_video;
+        const retryState = job.retry_state || {};
+        const childAttempts = job.child_attempts || {};
         return `
             <article class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="flex items-start justify-between gap-3">
@@ -987,8 +1112,8 @@ class ReportAudioWorkflowPage {
                 ${pdf ? `<div class="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"><i class="fas fa-file-pdf mr-1.5 text-red-500"></i>${this.escape(pdf.filename || 'PDF')} · ${this.formatBytes(pdf.bytes)}</div>` : ''}
 
                 <div class="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
-                    ${this.renderChild('Gemini', geminiChild, parentStatus, this.stageDisplayStatus('gemini', job, geminiChild), this.childDetailRef(job, 'gemini', geminiChild))}
-                    ${doubaoDisplayItems.length ? doubaoDisplayItems.map((item, idx) => this.renderChild(this.doubaoChildLabel(item, idx, doubaoDisplayItems), item, parentStatus, this.stageDisplayStatus('doubao', job, item), this.childDetailRef(job, 'doubao', item, idx))).join('') : this.renderChild('豆包', null, parentStatus, this.stageDisplayStatus('doubao', job, null))}
+                    ${this.renderChild('Gemini', geminiChild, parentStatus, this.stageDisplayStatus('gemini', job, geminiChild), this.childDetailRef(job, 'gemini', geminiChild), this.retryInfo(retryState.gemini, childAttempts.gemini))}
+                    ${doubaoDisplayItems.length ? doubaoDisplayItems.map((item, idx) => this.renderChild(this.doubaoChildLabel(item, idx, doubaoDisplayItems), item, parentStatus, this.stageDisplayStatus('doubao', job, item), this.childDetailRef(job, 'doubao', item, idx))).join('') : this.renderChild('豆包浏览器朗读', null, parentStatus, this.stageDisplayStatus('doubao', job, null))}
                     ${this.renderChild('视频合成', publisherChild, parentStatus, this.stageDisplayStatus('publisher', job, publisherChild), this.childDetailRef(job, 'publisher', publisherChild))}
                 </div>
 
@@ -1099,7 +1224,12 @@ class ReportAudioWorkflowPage {
         if (!job) return null;
         const kind = ref.kind || '';
         if (kind === 'gemini') {
-            return { job, kind, label: 'Gemini', child: job.gemini || job.children?.gemini };
+            return {
+                job,
+                kind,
+                label: 'Gemini',
+                child: this.withRetryAttempts(job.gemini || job.children?.gemini, job.child_attempts?.gemini),
+            };
         }
         if (kind === 'publisher') {
             return { job, kind, label: '视频合成', child: job.publisher_video || job.children?.publisher_video };
@@ -1118,11 +1248,18 @@ class ReportAudioWorkflowPage {
             return {
                 job,
                 kind,
-                label: item ? this.doubaoChildLabel(item, index, items) : '豆包',
+                label: item ? this.doubaoChildLabel(item, index, items) : '豆包浏览器朗读',
                 child: item,
             };
         }
         return null;
+    }
+
+    withRetryAttempts(child, attempts = []) {
+        if (!Array.isArray(attempts) || !attempts.length) return child;
+        const base = child ? { ...child } : { job_id: attempts[attempts.length - 1]?.job_id || '' };
+        base.attempts = attempts;
+        return base;
     }
 
     showChildDetailLoading() {
@@ -1149,6 +1286,9 @@ class ReportAudioWorkflowPage {
         const rawResult = child?.raw_result || null;
         const audio = child?.audio || {};
         const audioUrl = audio.download_url ? `${this.apiRoot()}${audio.download_url}` : '';
+        const attemptLabel = metadata.chunk_attempt
+            ? `第 ${metadata.chunk_attempt} 次`
+            : (child?.attempt ? `第 ${child.attempt}${child.max_attempts ? `/${child.max_attempts}` : ''} 次` : (attempts.length ? `${attempts.length} 次记录` : '-'));
         this.els.childDetailModalContent.innerHTML = `
             <div class="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
                 <div class="min-w-0">
@@ -1172,7 +1312,7 @@ class ReportAudioWorkflowPage {
                     ${this.renderDetailStat('创建', this.formatDateTime(child?.created_at) || '-')}
                     ${this.renderDetailStat('完成', this.formatDateTime(child?.completed_at) || '-')}
                     ${this.renderDetailStat('分段', metadata.chunk_index ? `${metadata.chunk_index}/${metadata.chunk_total || '-'}` : '-')}
-                    ${this.renderDetailStat('尝试', metadata.chunk_attempt ? `第 ${metadata.chunk_attempt} 次` : '-')}
+                    ${this.renderDetailStat('尝试', attemptLabel)}
                 </div>
 
                 ${child?.error ? `<div class="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">${this.escape(child.error)}</div>` : ''}
@@ -1222,12 +1362,14 @@ class ReportAudioWorkflowPage {
                     ${attempts.map((attempt, index) => {
                         const metadata = attempt?.metadata || {};
                         const status = this.statusMeta(this.normalizeStatus(attempt?.status || ''));
-                        const attemptNo = metadata.chunk_attempt || index + 1;
+                        const attemptNo = metadata.chunk_attempt || attempt?.attempt || index + 1;
+                        const maxAttempts = attempt?.max_attempts || '';
+                        const retryIndex = Number(metadata.retry_index || Math.max(0, Number(attempt?.attempt || 1) - 1));
                         const detail = this.childDetail(attempt);
                         return `
                             <div class="px-3 py-2 text-xs">
                                 <div class="flex flex-wrap items-center justify-between gap-2">
-                                    <div class="font-black text-slate-700">第 ${this.escape(attemptNo)} 次${Number(metadata.retry_index || 0) > 0 ? ` · 重试 ${this.escape(metadata.retry_index)}` : ''}</div>
+                                    <div class="font-black text-slate-700">第 ${this.escape(attemptNo)}${maxAttempts ? `/${this.escape(maxAttempts)}` : ''} 次${retryIndex > 0 ? ` · 重试 ${this.escape(retryIndex)}` : ''}</div>
                                     <span class="rounded-full px-2 py-0.5 font-bold ${status.className}">${status.label}</span>
                                 </div>
                                 <div class="mt-1 truncate font-mono text-[11px] text-slate-400">${this.escape(attempt?.job_id || '-')}</div>
@@ -1277,11 +1419,12 @@ class ReportAudioWorkflowPage {
         };
     }
 
-    renderChild(label, child, parentStatus = '', statusOverride = '', detailRef = null) {
+    renderChild(label, child, parentStatus = '', statusOverride = '', detailRef = null, retryInfo = null) {
         const childStatus = child?.status ? this.normalizeStatus(child.status) : '';
         const meta = this.statusMeta(statusOverride || this.childDisplayStatus(childStatus, parentStatus, Boolean(child)));
         const detail = this.childDetail(child);
         const preview = this.compactTitle(child?.text_preview || '');
+        const retry = this.renderRetryInfo(retryInfo);
         const clickable = Boolean(detailRef?.jobId && detailRef?.childId);
         const detailAttrs = clickable
             ? `role="button" tabindex="0" data-child-detail="1" data-job-id="${this.escape(detailRef.jobId)}" data-child-kind="${this.escape(detailRef.kind)}" data-child-id="${this.escape(detailRef.childId)}" data-chunk-index="${this.escape(detailRef.chunkIndex || '')}" title="查看子任务详情"`
@@ -1294,9 +1437,47 @@ class ReportAudioWorkflowPage {
                 </div>
                 <div class="mt-1 truncate text-slate-400">${this.escape(child?.job_id || '-')}</div>
                 ${detail ? `<div class="mt-1 truncate text-slate-500">${this.escape(detail)}</div>` : ''}
+                ${retry}
                 ${preview ? `<div class="mt-1 text-slate-500" title="${this.escape(preview)}" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${this.escape(preview)}</div>` : ''}
             </div>
         `;
+    }
+
+    retryInfo(state = null, attempts = []) {
+        const list = Array.isArray(attempts) ? attempts : [];
+        const latest = state && typeof state === 'object' ? state : {};
+        const lastAttempt = list[list.length - 1] || {};
+        const maxAttempts = Number(latest.max_attempts || lastAttempt.max_attempts || 0);
+        const currentAttempt = Number(latest.attempt || lastAttempt.attempt || list.length || 0);
+        if (!maxAttempts && !list.length) return null;
+        const failedAttempts = list.filter((attempt) => String(attempt?.status || '').toLowerCase() === 'failed').length;
+        const status = String(latest.status || lastAttempt.status || '').toLowerCase();
+        const error = latest.error || lastAttempt.error || '';
+        return {
+            currentAttempt,
+            maxAttempts,
+            failedAttempts,
+            status,
+            error,
+        };
+    }
+
+    renderRetryInfo(info) {
+        if (!info) return '';
+        const current = info.currentAttempt || 0;
+        const max = info.maxAttempts || '?';
+        const failed = Number(info.failedAttempts || 0);
+        const status = String(info.status || '');
+        const tone = status === 'completed'
+            ? 'text-emerald-700'
+            : (failed > 0 || status === 'failed' ? 'text-amber-700' : 'text-slate-500');
+        const parts = [`自动重试 ${current || 1}/${max}`];
+        if (failed > 0) parts.push(`失败尝试 ${failed}`);
+        if (status === 'completed' && failed > 0) parts.push('已恢复');
+        if (status === 'failed') parts.push('待续跑');
+        const text = parts.join(' · ');
+        const title = info.error ? `${text}：${this.compactTitle(info.error)}` : text;
+        return `<div class="mt-1 truncate text-[11px] font-bold ${tone}" title="${this.escape(title)}"><i class="fas fa-rotate mr-1"></i>${this.escape(text)}</div>`;
     }
 
     childDetail(child) {
@@ -1393,7 +1574,7 @@ class ReportAudioWorkflowPage {
         const chunkIndex = Number.isFinite(rawChunk) && rawChunk > 0 ? rawChunk : index + 1;
         const rawTotal = Number(metadata.chunk_total);
         const chunkTotal = Number.isFinite(rawTotal) && rawTotal > 0 ? rawTotal : 0;
-        const base = `豆包 ${chunkIndex}${chunkTotal ? `/${chunkTotal}` : ''}`;
+        const base = `豆包朗读 ${chunkIndex}${chunkTotal ? `/${chunkTotal}` : ''}`;
         const retryCount = Number(item?.retry_count || metadata.retry_index || 0);
         const status = this.normalizeStatus(item?.status || '');
         if (retryCount > 0 && status === 'succeeded') return `${base} · 重试成功`;
@@ -1462,8 +1643,11 @@ class ReportAudioWorkflowPage {
     }
 
     normalizeStatus(status) {
+        const value = String(status || '').trim().toLowerCase();
         const map = { pending: 'queued', processing: 'running', completed: 'succeeded' };
-        return map[status] || status;
+        const normalized = map[value] || value;
+        if (normalized === 'cancelled') return 'canceled';
+        return normalized;
     }
 
     isTerminal(status) {

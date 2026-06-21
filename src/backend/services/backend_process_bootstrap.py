@@ -12,13 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_DIR = PROJECT_ROOT / "runtime"
 LOG_PATH = PROJECT_ROOT / "logs" / "backend_process_bootstrap.log"
 
-DEFAULT_SCHEDULERS = (
-    "zsxq_auto",
-    "zsxq_auto_publish",
-    "content_retention",
-    "report_video_asset",
-    "report_video_auto",
-)
+DEFAULT_SCHEDULERS = ()
 
 SCHEDULERS = {
     "zsxq_auto": {
@@ -243,7 +237,7 @@ def _selected_ids(raw, *, default, allowed):
     if not raw or raw.lower() in {"none", "off", "false", "0"}:
         return []
     if raw.lower() == "all":
-        return [item for item in default if item in allowed_set]
+        return [item for item in allowed if item in allowed_set]
 
     selected = []
     for item in raw.split(","):

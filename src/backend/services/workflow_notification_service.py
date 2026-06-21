@@ -659,8 +659,6 @@ class WorkflowNotificationService:
             counts = [self._safe_int(batch.get("submitted_count")) for batch in batches if isinstance(batch, dict)]
             counts = [count for count in counts if count > 0]
             submitted = self._first_number(item.get("submitted_count"), summary.get("submitted_count"), sum(counts))
-            if submitted <= 0:
-                continue
             batch_count = len(counts) or self._safe_int(summary.get("round_count")) or 1
             count_text = self._batch_count_text(counts, submitted)
             topic_count = self._first_number(item.get("topic_count"), summary.get("topic_count"))
@@ -668,12 +666,52 @@ class WorkflowNotificationService:
             pending = self._first_number(item.get("pending_verify_count"), summary.get("pending_verify_count"))
             failed = self._first_number(item.get("failed_count"), summary.get("failed_count"))
             label = self._file_type_label(item.get("file_type"))
+            issue_text = self._publish_issue_text(item)
+            if submitted <= 0:
+                if failed <= 0 and not issue_text:
+                    continue
+                lines.append(
+                    f"{label}：{batch_count} 批，发布失败 {failed} 个附件。"
+                    + (f"原因：{issue_text}。" if issue_text else "")
+                )
+                continue
             verify_text = self._publish_verify_text(submitted, verified, pending, failed)
             lines.append(
                 f"{label}：{batch_count} 批，{count_text} 个附件，"
                 f"{topic_count} 个 topic，{verify_text}。"
+                + (f"原因：{issue_text}。" if issue_text else "")
             )
         return lines
+
+    def _publish_issue_text(self, task):
+        runtime = task.get("publish_runtime") if isinstance(task.get("publish_runtime"), dict) else {}
+        attempts = []
+        for run in runtime.get("runs") or []:
+            if not isinstance(run, dict):
+                continue
+            for rule in run.get("rules") or []:
+                if not isinstance(rule, dict):
+                    continue
+                for attempt in rule.get("cookie_attempts") or []:
+                    if isinstance(attempt, dict):
+                        attempts.append(attempt)
+        if not attempts:
+            return ""
+
+        parts = []
+        for attempt in attempts:
+            name = attempt.get("cookie_account_name") or attempt.get("cookie_account_id") or f"账号{attempt.get('index') or ''}"
+            auth_hint = str(attempt.get("auth_hint") or "").strip()
+            quota_hint = str(attempt.get("quota_hint") or "").strip()
+            status = str(attempt.get("status") or "").strip()
+            if auth_hint:
+                parts.append(f"{name} 认证失败/401，需要更新 Cookie")
+            elif quota_hint:
+                parts.append(f"{name} 命中{quota_hint}")
+            elif status == "failed":
+                message = str(attempt.get("message") or "发布失败").strip()
+                parts.append(f"{name} {message}")
+        return "；".join(parts[:4])
 
     def _publish_recovered_note(self, tasks):
         if not isinstance(tasks, list):

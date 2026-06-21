@@ -4,12 +4,14 @@ class Mp3VideoWorkflowPage {
         this.audioAssetPage = 1;
         this.audioAssetPerPage = 10;
         this.audioAssetPagination = { page: 1, per_page: 10, has_more: false };
+        this.audioAssetScope = 'all';
         this.audioAssetSearchTimer = null;
         this.audioAssetRequestSeq = 0;
         this.audioAssetWorkflowSeq = 0;
         this.selectedAudioAsset = null;
         this.jobs = [];
         this.jobPage = this.initialJobPage();
+        this.jobStatus = this.initialJobStatus();
         this.jobPerPage = 10;
         this.jobPagination = { page: 1, per_page: 10, total: 0, pages: 0 };
         this.historyRequestSeq = 0;
@@ -21,6 +23,7 @@ class Mp3VideoWorkflowPage {
             restartWorkerBtn: document.getElementById('restart-worker-btn'),
             notice: document.getElementById('notice'),
             selectedBadge: document.getElementById('selected-badge'),
+            audioAssetTabs: document.getElementById('audio-asset-tabs'),
             audioAssetSearch: document.getElementById('audio-asset-search'),
             audioAssetRefreshBtn: document.getElementById('audio-asset-refresh-btn'),
             audioAssetSummary: document.getElementById('audio-asset-summary'),
@@ -37,11 +40,13 @@ class Mp3VideoWorkflowPage {
             refreshJobsBtn: document.getElementById('refresh-jobs-btn'),
             pollDelay: document.getElementById('poll-delay'),
             summaryText: document.getElementById('summary-text'),
+            jobStatusFilter: document.getElementById('job-status-filter'),
             jobList: document.getElementById('job-list'),
             jobPagination: document.getElementById('job-pagination'),
         };
         this.defaults();
         this.bind();
+        this.syncJobStatusFilter();
         this.refreshStatus();
         this.loadAudioAssets({ silent: true });
         this.loadHistory({ silent: true });
@@ -61,10 +66,47 @@ class Mp3VideoWorkflowPage {
         return Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
     }
 
+    initialJobStatus() {
+        const params = new URLSearchParams(window.location.search);
+        return this.normalizeJobStatus(params.get('status') || params.get('job_status') || '');
+    }
+
+    jobStatusOptions() {
+        return [
+            { value: '', label: '全部' },
+            { value: 'queued', label: '排队中' },
+            { value: 'running', label: '运行中' },
+            { value: 'succeeded', label: '成功' },
+            { value: 'failed', label: '失败' },
+            { value: 'canceled', label: '已取消' },
+        ];
+    }
+
+    normalizeJobStatus(status) {
+        const value = String(status || '').trim().toLowerCase();
+        const map = { pending: 'queued', processing: 'running', completed: 'succeeded', cancelled: 'canceled' };
+        const normalized = map[value] || value;
+        const allowed = new Set(this.jobStatusOptions().map((item) => item.value));
+        return allowed.has(normalized) ? normalized : '';
+    }
+
+    jobStatusFilterLabel(status = this.jobStatus) {
+        return this.jobStatusOptions().find((item) => item.value === status)?.label || '全部';
+    }
+
+    syncJobStatusFilter() {
+        if (!this.els.jobStatusFilter) return;
+        const status = this.normalizeJobStatus(this.jobStatus);
+        if (this.els.jobStatusFilter.value !== status) {
+            this.els.jobStatusFilter.value = status;
+        }
+    }
+
     bind() {
         this.els.refreshStatusBtn.addEventListener('click', () => this.refreshStatus());
         this.els.restartWorkerBtn.addEventListener('click', () => this.restartWorker());
         this.els.audioAssetRefreshBtn.addEventListener('click', () => this.loadAudioAssets({ page: this.audioAssetPage }));
+        this.els.audioAssetTabs?.addEventListener('click', (event) => this.handleAudioAssetScopeClick(event));
         this.els.audioAssetSearch.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') this.loadAudioAssets({ page: 1 });
         });
@@ -80,6 +122,7 @@ class Mp3VideoWorkflowPage {
         this.els.loadHistoryBtn.addEventListener('click', () => this.loadHistory({ page: 1, force: true }));
         this.els.refreshJobsBtn.addEventListener('click', () => this.refreshJobs());
         this.els.pollDelay.addEventListener('change', () => this.resetPollTimer());
+        this.els.jobStatusFilter?.addEventListener('change', () => this.handleJobStatusFilterChange());
         this.els.jobList.addEventListener('click', (event) => this.handleJobAction(event));
         this.els.jobPagination.addEventListener('click', (event) => this.handleJobPageClick(event));
         this.els.jobPagination.addEventListener('submit', (event) => this.handleJobPageJump(event));
@@ -192,11 +235,13 @@ class Mp3VideoWorkflowPage {
     async loadAudioAssets({ page = this.audioAssetPage, silent = false } = {}) {
         const seq = ++this.audioAssetRequestSeq;
         const q = this.els.audioAssetSearch.value.trim();
-        if (!silent) this.els.audioAssetSummary.textContent = '加载已同步 MP3 中...';
+        this.renderAudioAssetTabs();
+        if (!silent) this.els.audioAssetSummary.textContent = `加载${this.audioAssetScopeLabel()}中...`;
         try {
             const params = new URLSearchParams({
                 page: String(page),
                 per_page: String(this.audioAssetPerPage),
+                scope: this.audioAssetScope,
             });
             if (q) params.set('q', q);
             const result = await this.request(`/api/mp3-video-workflows/audio-assets?${params.toString()}`, { timeoutMs: 20000 });
@@ -205,7 +250,7 @@ class Mp3VideoWorkflowPage {
                 ...item,
                 workflow_loading: true,
             }));
-            this.audioAssetPagination = result.data?.pagination || { page, per_page: this.audioAssetPerPage, has_more: false };
+            this.audioAssetPagination = result.data?.pagination || { page, per_page: this.audioAssetPerPage, has_more: false, scope: this.audioAssetScope };
             this.audioAssetPage = this.audioAssetPagination.page || page;
             this.renderAudioAssets();
             this.loadAudioAssetWorkflowStats(this.audioAssets);
@@ -215,6 +260,32 @@ class Mp3VideoWorkflowPage {
             this.els.audioAssetList.innerHTML = '';
             this.els.audioAssetPagination.innerHTML = '';
         }
+    }
+
+    handleAudioAssetScopeClick(event) {
+        const button = event.target.closest('[data-audio-asset-scope]');
+        if (!button) return;
+        const nextScope = button.dataset.audioAssetScope === 'hot' ? 'hot' : 'all';
+        if (nextScope === this.audioAssetScope) return;
+        this.audioAssetScope = nextScope;
+        this.audioAssetPage = 1;
+        this.selectedAudioAsset = null;
+        this.updateSelectedAudioPanel();
+        this.loadAudioAssets({ page: 1 });
+    }
+
+    audioAssetScopeLabel() {
+        return this.audioAssetScope === 'hot' ? '热门 MP3 ' : '已同步 MP3 ';
+    }
+
+    renderAudioAssetTabs() {
+        if (!this.els.audioAssetTabs) return;
+        this.els.audioAssetTabs.querySelectorAll('[data-audio-asset-scope]').forEach((button) => {
+            const active = button.dataset.audioAssetScope === this.audioAssetScope;
+            button.className = active
+                ? 'rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-white shadow-sm transition'
+                : 'rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-600 transition hover:bg-slate-50';
+        });
     }
 
     async loadAudioAssetWorkflowStats(items) {
@@ -334,9 +405,12 @@ class Mp3VideoWorkflowPage {
 
     async loadHistory({ page = this.jobPage, silent = false } = {}) {
         const seq = ++this.historyRequestSeq;
+        this.jobStatus = this.normalizeJobStatus(this.jobStatus);
+        this.syncJobStatusFilter();
         if (!silent) this.els.summaryText.textContent = '加载任务中...';
         try {
             const params = new URLSearchParams({ page: String(page), per_page: String(this.jobPerPage) });
+            if (this.jobStatus) params.set('status', this.jobStatus);
             const result = await this.request(`/api/mp3-video-workflows/jobs?${params.toString()}`, { timeoutMs: 20000 });
             if (seq !== this.historyRequestSeq) return;
             this.jobs = result.data?.items || result.items || [];
@@ -351,6 +425,15 @@ class Mp3VideoWorkflowPage {
         }
     }
 
+    handleJobStatusFilterChange() {
+        const nextStatus = this.normalizeJobStatus(this.els.jobStatusFilter?.value || '');
+        if (nextStatus === this.jobStatus) return;
+        this.jobStatus = nextStatus;
+        this.jobPage = 1;
+        this.updateJobPageUrl(1);
+        this.loadHistory({ page: 1, force: true });
+    }
+
     async refreshJobs() {
         await this.loadHistory({ page: this.jobPage, force: true });
     }
@@ -359,14 +442,21 @@ class Mp3VideoWorkflowPage {
         const button = event.target.closest('[data-job-page]');
         if (!button || button.disabled) return;
         const page = Number(button.dataset.jobPage);
-        if (Number.isFinite(page) && page > 0) this.loadHistory({ page });
+        if (Number.isFinite(page) && page > 0) {
+            this.updateJobPageUrl(page);
+            this.loadHistory({ page });
+        }
     }
 
     handleJobPageJump(event) {
         event.preventDefault();
         const input = event.target.querySelector('input[name="job_page"]');
         const page = Number(input?.value || 1);
-        if (Number.isFinite(page) && page > 0) this.loadHistory({ page: Math.floor(page) });
+        if (Number.isFinite(page) && page > 0) {
+            const targetPage = Math.floor(page);
+            this.updateJobPageUrl(targetPage);
+            this.loadHistory({ page: targetPage });
+        }
     }
 
     async handleJobAction(event) {
@@ -445,12 +535,16 @@ class Mp3VideoWorkflowPage {
     }
 
     renderAudioAssets() {
+        this.renderAudioAssetTabs();
         const page = this.audioAssetPagination.page || this.audioAssetPage;
         const scanned = this.audioAssetPagination.scanned || 0;
         const skipped = this.audioAssetPagination.skipped_missing || 0;
-        this.els.audioAssetSummary.textContent = `第 ${page} 页 · ${this.audioAssets.length} 个可用 MP3 · 扫描 ${scanned} 条 · 跳过缺失 ${skipped} 条`;
+        this.els.audioAssetSummary.textContent = `${this.audioAssetScopeLabel()}· 第 ${page} 页 · ${this.audioAssets.length} 个可用 MP3 · 扫描 ${scanned} 条 · 跳过缺失 ${skipped} 条`;
         if (!this.audioAssets.length) {
-            this.els.audioAssetList.innerHTML = '<div class="rounded-md border border-dashed border-slate-300 p-4 text-sm text-slate-500">没有找到已下载的 MP3。</div>';
+            const emptyText = this.audioAssetScope === 'hot'
+                ? '暂无热门 MP3。当前筛选条件是下载次数 ≥ 20，且附件已下载到本地。'
+                : '没有找到已下载的 MP3。';
+            this.els.audioAssetList.innerHTML = `<div class="rounded-md border border-dashed border-slate-300 p-4 text-sm text-slate-500">${this.escape(emptyText)}</div>`;
         } else {
             this.els.audioAssetList.innerHTML = this.audioAssets.map((asset) => this.renderAudioAssetCard(asset)).join('');
         }
@@ -608,9 +702,17 @@ class Mp3VideoWorkflowPage {
 
     renderJobs() {
         const total = this.jobPagination.total || this.jobs.length;
-        this.els.summaryText.textContent = total ? `共 ${total} 个 MP3 视频编排任务。` : '还没有任务。';
+        const statusLabel = this.jobStatusFilterLabel(this.jobStatus);
+        const running = this.jobs.filter((job) => ['queued', 'running', 'pending', 'processing'].includes(job.status)).length;
+        const succeeded = this.jobs.filter((job) => ['succeeded', 'completed'].includes(job.status)).length;
+        const failed = this.jobs.filter((job) => job.status === 'failed').length;
+        this.syncJobStatusFilter();
+        this.els.summaryText.textContent = total
+            ? `${statusLabel} ${total} 个 MP3 视频编排任务 · 本页 ${this.jobs.length} 个，运行中 ${running}，成功 ${succeeded}，失败 ${failed}。`
+            : (this.jobStatus ? `暂无${statusLabel}状态的 MP3 视频编排任务。` : '还没有任务。');
         if (!this.jobs.length) {
-            this.els.jobList.innerHTML = '<div class="rounded-md border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">暂无任务。</div>';
+            const emptyText = this.jobStatus ? `暂无${statusLabel}状态的 MP3 视频编排任务。` : '暂无任务。';
+            this.els.jobList.innerHTML = `<div class="rounded-md border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">${this.escape(emptyText)}</div>`;
         } else {
             this.els.jobList.innerHTML = this.jobs.map((job) => this.renderJobCard(job)).join('');
         }
@@ -652,10 +754,55 @@ class Mp3VideoWorkflowPage {
                     <span>${job.progress || 0}%</span>
                     ${job.error ? `<span class="text-rose-600">${this.escape(job.error)}</span>` : ''}
                 </div>
+                ${this.renderGeminiRetry(job)}
                 ${this.renderPlan(job)}
                 ${this.renderDownloads(job)}
                 ${this.renderLogs(job.logs || [])}
             </article>
+        `;
+    }
+
+    renderGeminiRetry(job) {
+        const attempts = Array.isArray(job.retry_attempts?.gemini) ? job.retry_attempts.gemini : [];
+        const state = job.retry_state?.gemini || {};
+        const lastAttempt = attempts[attempts.length - 1] || {};
+        const maxAttempts = Number(state.max_attempts || lastAttempt.max_attempts || 0);
+        const currentAttempt = Number(state.attempt || lastAttempt.attempt || attempts.length || 0);
+        if (!maxAttempts && !attempts.length) return '';
+        const failedAttempts = attempts.filter((attempt) => String(attempt?.status || '').toLowerCase() === 'failed').length;
+        const statusText = String(state.status || lastAttempt.status || '');
+        const summary = [
+            `Gemini 自动重试 ${currentAttempt || 1}/${maxAttempts || '?'}`,
+            failedAttempts ? `失败尝试 ${failedAttempts}` : '',
+            statusText === 'completed' && failedAttempts ? '已恢复' : '',
+            statusText === 'failed' ? '待续跑' : '',
+        ].filter(Boolean).join(' · ');
+        return `
+            <div class="mt-3 rounded-md border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <div class="flex flex-wrap items-center gap-2 font-black">
+                    <i class="fas fa-rotate"></i>
+                    <span>${this.escape(summary)}</span>
+                </div>
+                ${attempts.length > 1 ? `
+                    <div class="mt-2 grid gap-1 md:grid-cols-2">
+                        ${attempts.map((attempt, index) => {
+                            const attemptNo = attempt?.attempt || index + 1;
+                            const maxNo = attempt?.max_attempts || maxAttempts || '';
+                            const error = attempt?.error ? this.compactText(attempt.error, 120) : '';
+                            return `
+                                <div class="rounded border border-amber-100 bg-white/70 px-2 py-1">
+                                    <div class="flex flex-wrap items-center justify-between gap-2">
+                                        <span class="font-black">第 ${this.escape(attemptNo)}${maxNo ? `/${this.escape(maxNo)}` : ''} 次</span>
+                                        <span>${this.escape(attempt?.status || '-')}</span>
+                                    </div>
+                                    <div class="mt-0.5 truncate font-mono text-[11px] text-amber-600">${this.escape(attempt?.job_id || '-')}</div>
+                                    ${error ? `<div class="mt-0.5 text-rose-700" title="${this.escape(attempt.error)}">${this.escape(error)}</div>` : ''}
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                ` : ''}
+            </div>
         `;
     }
 
@@ -733,6 +880,31 @@ class Mp3VideoWorkflowPage {
                 </div>
             </div>
         `;
+    }
+
+    jobPageUrl(page) {
+        const url = new URL(window.location.href);
+        url.searchParams.set('job_page', String(Math.max(1, page)));
+        this.applyJobStatusToUrl(url);
+        return `${url.pathname}${url.search}${url.hash}`;
+    }
+
+    updateJobPageUrl(page) {
+        if (!window.history?.replaceState) return;
+        const url = new URL(window.location.href);
+        url.searchParams.set('job_page', String(Math.max(1, page)));
+        this.applyJobStatusToUrl(url);
+        window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+    }
+
+    applyJobStatusToUrl(url) {
+        const status = this.normalizeJobStatus(this.jobStatus);
+        if (status) {
+            url.searchParams.set('status', status);
+        } else {
+            url.searchParams.delete('status');
+        }
+        url.searchParams.delete('job_status');
     }
 
     setBadge(el, text, type) {
@@ -861,6 +1033,12 @@ class Mp3VideoWorkflowPage {
             index += 1;
         }
         return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+    }
+
+    compactText(value, maxLength = 120) {
+        const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+        if (text.length <= maxLength) return text;
+        return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
     }
 
     escape(value) {

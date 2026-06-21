@@ -301,6 +301,7 @@ function renderSystemSyncAttachmentDetails(attachments) {
         <div class="zsxq-attachment-detail-list">
             ${attachments.map(item => {
                 const status = attachmentStatusMeta(item);
+                const publishStatus = publishStatusMeta(item);
                 return `
                     <div class="zsxq-attachment-detail">
                         <div class="min-w-0">
@@ -311,7 +312,10 @@ function renderSystemSyncAttachmentDetails(attachments) {
                             ${item.local_path ? `<div class="zsxq-attachment-detail__path">${escapeHtml(item.local_path)}</div>` : ''}
                             ${item.error_message ? `<div class="zsxq-attachment-detail__error">${escapeHtml(item.error_message)}</div>` : ''}
                         </div>
-                        <span class="zsxq-attachment-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
+                        <div class="flex shrink-0 flex-wrap justify-end gap-2">
+                            <span class="zsxq-attachment-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
+                            ${publishStatus.label ? `<span class="zsxq-attachment-status" data-tone="${escapeHtml(publishStatus.tone)}" title="${escapeHtml(publishStatus.title)}">${escapeHtml(publishStatus.label)}</span>` : ''}
+                        </div>
                     </div>
                 `;
             }).join('')}
@@ -390,6 +394,31 @@ function attachmentStatusMeta(item) {
         return { label: '已跳过', tone: 'muted' };
     }
     return { label: '待处理', tone: 'warning' };
+}
+
+function publishStatusMeta(item) {
+    const status = String(item?.publish_status || '').toLowerCase();
+    const updatedAt = item?.publish_updated_at ? ` · ${formatZsxqTime(item.publish_updated_at)}` : '';
+    const taskText = item?.publish_task_id ? `发布任务 ${item.publish_task_id}${updatedAt}` : `发布状态${updatedAt}`;
+    if (status === 'published') {
+        return { label: '已发布', tone: 'success', title: `${taskText}，已确认可见。` };
+    }
+    if (status === 'published_unverified') {
+        return { label: '发布待核验', tone: 'warning', title: `${taskText}，缺少发布主题 ID，需要人工确认。` };
+    }
+    if (status === 'submitted') {
+        return { label: '已提交', tone: 'info', title: `${taskText}，已提交发布。` };
+    }
+    if (status === 'publishing') {
+        return { label: '发布中', tone: 'warning', title: `${taskText}，发布任务仍在执行。` };
+    }
+    if (status === 'publish_failed') {
+        return { label: '发布失败', tone: 'danger', title: `${taskText}，上次发布失败。` };
+    }
+    if (status === 'publish_skipped') {
+        return { label: '发布跳过', tone: 'warning', title: `${taskText}，发布流程跳过了这个附件。` };
+    }
+    return { label: '', tone: 'muted', title: '' };
 }
 
 function escapeHtml(value) {

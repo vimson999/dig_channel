@@ -39,6 +39,34 @@ DEFAULT_DB_RETRIES = 5
 DEFAULT_DB_RETRY_DELAY_SECONDS = 60
 DB_RETRIES_ENV_NAME = "REPORT_AUDIO_WORKFLOW_DB_RETRIES"
 DB_RETRY_DELAY_ENV_NAME = "REPORT_AUDIO_WORKFLOW_DB_RETRY_DELAY_SECONDS"
+GEMINI_RETRY_LIMIT_ENV_NAME = "REPORT_AUDIO_GEMINI_RETRY_LIMIT"
+DEFAULT_GEMINI_RETRY_LIMIT = 2
+
+RETRYABLE_CHILD_ERROR_FRAGMENTS = (
+    "超时",
+    "子任务仍在执行",
+    "timeout",
+    "timed out",
+    "文件上传失败",
+    "上传完成超时",
+    "上传被取消",
+    "提示词未成功提交",
+    "未成功提交",
+    "发送按钮",
+    "等待 Gemini",
+    "页面自动化超时",
+    "Locator.click",
+    "Target closed",
+    "Browser closed",
+    "Protocol error",
+    "net::ERR",
+)
+NON_RETRYABLE_CHILD_ERROR_FRAGMENTS = (
+    "父编排任务已取消",
+    "子任务不存在",
+    "任务不存在",
+    "PDF 文件不能为空",
+)
 
 
 TASK_STATE_COLUMNS = (
@@ -81,10 +109,20 @@ def _load_task(task_id, *columns):
 TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 CURRENT_STEP_MAX_LENGTH = 20
+WORKFLOW_QUEUE_NAME = "report_audio_workflow"
 LEADING_COVER_PUNCTUATION = "，,、。.;；:：!！?？)]）】》> "
 TRAILING_COVER_PUNCTUATION = "，,、。.;；:：!！?？([（【《< "
 MAX_COVER_TITLE_LINE_CHARS = 18
 MAX_COVER_SUBTITLE_CHARS = 34
+
+
+class ChildTaskStillRunning(RuntimeError):
+    def __init__(self, label, child_id, status="", step=""):
+        self.label = label
+        self.child_id = child_id
+        self.status = status
+        self.step = step
+        super().__init__(f"子任务仍在执行: {label} {child_id} ({status or '-'} / {step or '-'})")
 
 BANK_ALIASES = [
     ("Morgan Stanley", "大摩"),
@@ -199,15 +237,21 @@ def _process_job(task_id):
         followups.append(review_prompt)
 
     result = dict(task.result or {})
+    resume_waiting_child = isinstance(result.get("waiting_child"), dict)
+    started_at = datetime.utcnow().isoformat() + "Z"
+    if not resume_waiting_child:
+        result.pop("resumed_at", None)
     result.update({
-        "started_at": datetime.utcnow().isoformat() + "Z",
+        "started_at": (result.get("started_at") or started_at) if resume_waiting_child else started_at,
         "error": None,
         "logs": result.get("logs") or [],
         "children": result.get("children") or {},
     })
+    if resume_waiting_child:
+        result["resumed_at"] = started_at
     task.status = "processing"
-    task.current_step = "start"
-    task.progress = 2
+    task.current_step = task.current_step if resume_waiting_child and task.current_step else "start"
+    task.progress = max(int(task.progress or 0), 2) if resume_waiting_child else 2
     task.error_message = None
     task.completed_at = None
     task.result = result
@@ -218,6 +262,7 @@ def _process_job(task_id):
         _queue_notification(workflow_task_id, "report_audio_started", "研报 PDF 到语音编排已启动")
         structured = _valid_structured_result(result)
         gemini_task = _completed_gemini_task(workflow_task_id, result)
+        active_gemini_task = None if gemini_task else _active_gemini_task(workflow_task_id, result)
         if structured:
             _emit(workflow_task_id, "reuse_structured_result", 58, "复用已有 Gemini 结构化结果")
             gemini_result = gemini_task.result if gemini_task else {}
@@ -229,15 +274,26 @@ def _process_job(task_id):
                 _emit(workflow_task_id, "reuse_gemini_result", 52, "复用已完成的 Gemini 子任务")
                 _record_child(workflow_task_id, "gemini", gemini_task)
                 _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
-            else:
-                _emit(workflow_task_id, "submit_gemini", 8, "创建研报 PDF Gem 解析子任务")
-                gemini_task = _create_gemini_task(parent_ref, pdf, pdf_path, prompt, followups, payload)
-                _record_child(workflow_task_id, "gemini", gemini_task)
-                _queue_notification(workflow_task_id, "report_audio_gemini_submitted", "研报 PDF Gem 解析子任务已入队")
-
-                gemini_task = _wait_child(workflow_task_id, gemini_task.id, "gemini", start_progress=10, end_progress=52)
+            elif active_gemini_task:
+                _emit(workflow_task_id, "gemini_wait_existing", 10, "继续等待已提交的研报 PDF Gem 解析子任务")
+                _record_child(workflow_task_id, "gemini", active_gemini_task)
+                gemini_task = _wait_child(workflow_task_id, active_gemini_task.id, "gemini", start_progress=10, end_progress=52)
                 if gemini_task.status != "completed":
-                    raise RuntimeError(f"Gemini 子任务失败: {gemini_task.error_message or (gemini_task.result or {}).get('error')}")
+                    raise RuntimeError(f"Gemini 子任务失败: {_child_error_message(gemini_task)}")
+                _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
+                _queue_notification(workflow_task_id, "report_audio_gemini_completed", "研报 PDF Gem 第一轮解析和自审追问已完成")
+            else:
+                _queue_notification(workflow_task_id, "report_audio_gemini_submitted", "研报 PDF Gem 解析子任务已入队")
+                gemini_task = _run_gemini_task_with_retries(
+                    parent_ref,
+                    pdf=pdf,
+                    pdf_path=pdf_path,
+                    prompt=prompt,
+                    followups=followups,
+                    payload=payload,
+                    start_progress=10,
+                    end_progress=52,
+                )
                 _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
                 _queue_notification(workflow_task_id, "report_audio_gemini_completed", "研报 PDF Gem 第一轮解析和自审追问已完成")
 
@@ -250,6 +306,12 @@ def _process_job(task_id):
             initial_text = gemini_result.get("initial_response_text") or ""
             if not raw_final:
                 raise RuntimeError("Gemini 子任务没有返回 final_response_text")
+            final_chars = len(_plain_text(raw_final))
+            min_final_chars = _min_gemini_final_chars()
+            if final_chars < min_final_chars:
+                raise RuntimeError(
+                    f"Gemini 子任务返回内容过短: {final_chars} 字，低于 {min_final_chars} 字，疑似未抓到有效研报解析结果"
+                )
 
             _emit(workflow_task_id, "normalize_result", 58, "使用结构化解析器整理 Gemini 结果")
             structured = normalize_for_tts(
@@ -264,6 +326,12 @@ def _process_job(task_id):
         chunks = split_tts_text(structured.get("final_script_for_tts") or "")
         if not chunks:
             raise RuntimeError("结构化结果没有可朗读正文")
+        tts_chars = len(_plain_text(structured.get("final_script_for_tts") or ""))
+        min_final_chars = _min_gemini_final_chars()
+        if tts_chars < min_final_chars:
+            raise RuntimeError(
+                f"结构化可朗读正文过短: {tts_chars} 字，低于 {min_final_chars} 字，停止进入豆包浏览器朗读"
+            )
 
         _update_result(workflow_task_id, {
             "gemini": _task_public_summary(gemini_task),
@@ -286,7 +354,7 @@ def _process_job(task_id):
         for index, chunk in enumerate(chunks, start=1):
             start = 60 + int((index - 1) / max(1, len(chunks)) * 28)
             end = 60 + int(index / max(1, len(chunks)) * 28)
-            reusable_tts_task = _completed_tts_task_for_chunk(workflow_task_id, index)
+            reusable_tts_task = _completed_tts_task_for_chunk(workflow_task_id, index, chunk)
             if reusable_tts_task:
                 wav_path = _task_audio_wav_path(reusable_tts_task)
                 tts_tasks.append(reusable_tts_task)
@@ -299,6 +367,24 @@ def _process_job(task_id):
                     f"复用豆包浏览器朗读子任务 {index}/{len(chunks)}",
                 )
                 continue
+            active_tts_task = _active_tts_task_for_chunk(workflow_task_id, index, chunk)
+            if active_tts_task:
+                tts_tasks.append(active_tts_task)
+                _record_child(workflow_task_id, f"doubao_browser_{index}", active_tts_task)
+                _emit(
+                    workflow_task_id,
+                    f"doubao_browser_{index}_wait_existing",
+                    start,
+                    f"继续等待已提交的豆包浏览器朗读子任务 {index}/{len(chunks)}",
+                )
+                tts_task = _wait_child(workflow_task_id, active_tts_task.id, f"doubao_browser_{index}", start_progress=start, end_progress=end)
+                if tts_task.status == "completed":
+                    wav_path = _task_audio_wav_path(tts_task)
+                    if wav_path:
+                        wav_paths.append(wav_path)
+                        continue
+                    raise RuntimeError("豆包浏览器朗读子任务完成但没有返回 WAV 路径")
+                raise RuntimeError(f"豆包浏览器朗读子任务失败: {_child_error_message(tts_task)}")
             last_error = None
             for attempt in range(1, doubao_retry_limit + 2):
                 retry_suffix = "" if attempt == 1 else f"（重试 {attempt - 1}/{doubao_retry_limit}）"
@@ -351,16 +437,22 @@ def _process_job(task_id):
                 pdf_first_page_image_path_for_job(workflow_task_id, workflow_created_at),
             )
             _update_result(workflow_task_id, {"pdf_first_page_image": pdf_screenshot})
-            _emit(workflow_task_id, "submit_publisher_video", 95, "提交视频合成子任务")
-            publisher_task = _create_publisher_video_task(
-                parent_ref,
-                audio=audio,
-                structured=structured,
-                pdf=pdf,
-                pdf_screenshot=pdf_screenshot,
-                payload=payload,
-            )
-            _record_child(workflow_task_id, "publisher_video", publisher_task)
+            current_result = _fresh_result(workflow_task_id)
+            publisher_task = _existing_child_from_result(current_result, "publisher_video")
+            if publisher_task and publisher_task.status not in {"failed", "canceled"}:
+                _emit(workflow_task_id, "publisher_video_wait_existing", 95, "继续等待已提交的视频合成子任务")
+                _record_child(workflow_task_id, "publisher_video", publisher_task)
+            else:
+                _emit(workflow_task_id, "submit_publisher_video", 95, "提交视频合成子任务")
+                publisher_task = _create_publisher_video_task(
+                    parent_ref,
+                    audio=audio,
+                    structured=structured,
+                    pdf=pdf,
+                    pdf_screenshot=pdf_screenshot,
+                    payload=payload,
+                )
+                _record_child(workflow_task_id, "publisher_video", publisher_task)
             publisher_task = _wait_child(workflow_task_id, publisher_task.id, "publisher_video", start_progress=95, end_progress=99)
             if publisher_task.status != "completed":
                 raise RuntimeError(f"视频合成子任务失败: {publisher_task.error_message or (publisher_task.result or {}).get('error')}")
@@ -418,6 +510,11 @@ def _process_job(task_id):
         _queue_notification(workflow_task_id, "report_audio_completed", "研报转语音编排完成，最终 WAV 和 JSON 已生成")
         logger.info("Report audio workflow completed: %s", task_id)
         return True
+    except ChildTaskStillRunning as exc:
+        db.session.rollback()
+        _defer_parent_retry(task_id, exc)
+        logger.info("Report audio workflow deferred: %s", exc)
+        return True
     except Exception as exc:
         db.session.rollback()
         task = _load_task(task_id, *TASK_STATE_COLUMNS)
@@ -436,7 +533,82 @@ def _process_job(task_id):
         return False
 
 
-def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload):
+def _run_gemini_task_with_retries(parent, *, pdf, pdf_path, prompt, followups, payload, start_progress, end_progress):
+    retry_limit = _retry_limit(GEMINI_RETRY_LIMIT_ENV_NAME, DEFAULT_GEMINI_RETRY_LIMIT)
+    max_attempts = retry_limit + 1
+    last_error = None
+    last_task = None
+
+    for attempt in range(1, max_attempts + 1):
+        retry_suffix = "" if attempt == 1 else f"（自动重试 {attempt - 1}/{retry_limit}）"
+        _emit(parent.id, "submit_gemini", 8, f"创建研报 PDF Gem 解析子任务{retry_suffix}")
+        gemini_task = _create_gemini_task(
+            parent,
+            pdf,
+            pdf_path,
+            prompt,
+            followups,
+            payload,
+            attempt=attempt,
+            max_attempts=max_attempts,
+        )
+        last_task = gemini_task
+        _record_child(parent.id, "gemini", gemini_task)
+        _record_child_attempt(parent.id, "gemini", gemini_task, attempt, max_attempts, "running")
+
+        try:
+            gemini_task = _wait_child(
+                parent.id,
+                gemini_task.id,
+                "gemini",
+                start_progress=start_progress,
+                end_progress=end_progress,
+            )
+        except ChildTaskStillRunning:
+            _record_child(parent.id, "gemini", _load_task(gemini_task.id, *TASK_CHILD_COLUMNS) or gemini_task)
+            raise
+        except Exception as exc:
+            last_error = str(exc)
+            latest = _load_task(gemini_task.id, *TASK_CHILD_COLUMNS) or gemini_task
+            if latest and latest.status not in TERMINAL_STATUSES:
+                _revoke_child_task(latest)
+                _mark_child_failed(latest, last_error)
+                latest = _load_task(latest.id, *TASK_CHILD_COLUMNS) or latest
+            last_task = latest
+            _record_child_attempt(parent.id, "gemini", latest, attempt, max_attempts, "failed", error=last_error)
+        else:
+            last_task = gemini_task
+            _record_child(parent.id, "gemini", gemini_task)
+            if gemini_task.status == "completed":
+                _record_child_attempt(parent.id, "gemini", gemini_task, attempt, max_attempts, "completed")
+                return gemini_task
+            last_error = _child_error_message(gemini_task)
+            _record_child_attempt(parent.id, "gemini", gemini_task, attempt, max_attempts, "failed", error=last_error)
+
+        if attempt < max_attempts and _is_retryable_child_error("gemini", last_error):
+            _emit(
+                parent.id,
+                "gemini_retry",
+                max(start_progress, 10),
+                f"Gemini 子任务失败，准备自动重试 {attempt}/{retry_limit}: {_compact_error(last_error)}",
+            )
+            continue
+        break
+
+    if last_task:
+        _record_child(parent.id, "gemini", last_task)
+    raise RuntimeError(f"Gemini 子任务失败: {last_error or '未知错误'}")
+
+
+def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload, *, attempt=1, max_attempts=1):
+    retry_index = max(0, int(attempt or 1) - 1)
+    metadata = {
+        "source": FEATURE_NAME,
+        "parent_task_id": parent.id,
+        "attempt": int(attempt or 1),
+        "max_attempts": int(max_attempts or 1),
+        "retry_index": retry_index,
+    }
     child = PublicationTask(
         status="pending",
         current_step="queued",
@@ -450,19 +622,13 @@ def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload):
                 "prompt": prompt,
                 "followups": followups,
                 "url": (payload.get("gemini_url") or payload.get("url") or "").strip(),
-                "metadata": {
-                    "source": FEATURE_NAME,
-                    "parent_task_id": parent.id,
-                },
+                "metadata": metadata,
                 "pdf": pdf,
                 "pdf_path": pdf_path,
             },
         },
         result={
-            "metadata": {
-                "source": FEATURE_NAME,
-                "parent_task_id": parent.id,
-            },
+            "metadata": metadata,
             "response_text": None,
             "turns": [],
             "pdf": pdf,
@@ -484,7 +650,10 @@ def _valid_structured_result(result):
     structured = result.get("structured_result") if isinstance(result, dict) else None
     if not isinstance(structured, dict):
         return None
-    if not str(structured.get("final_script_for_tts") or "").strip():
+    script = str(structured.get("final_script_for_tts") or "").strip()
+    if not script:
+        return None
+    if len(_plain_text(script)) < _min_gemini_final_chars():
         return None
     return structured
 
@@ -501,16 +670,65 @@ def _completed_gemini_task(parent_id, result):
             candidate_ids.append(str(child["job_id"]))
     for candidate_id in dict.fromkeys(candidate_ids):
         task = _load_task(candidate_id, *TASK_CHILD_COLUMNS)
-        if task and task.status == "completed":
+        if task and task.status == "completed" and _valid_gemini_task_result(task.result):
             return task
-    return PublicationTask.query.filter(
+    candidates = PublicationTask.query.filter(
         PublicationTask.feature == gemini_service.FEATURE_NAME,
         PublicationTask.parent_task_id == parent_id,
         PublicationTask.status == "completed",
-    ).options(load_only(*TASK_CHILD_COLUMNS)).order_by(PublicationTask.created_at.desc()).first()
+    ).options(load_only(*TASK_CHILD_COLUMNS)).order_by(PublicationTask.created_at.desc()).limit(10).all()
+    for task in candidates:
+        if _valid_gemini_task_result(task.result):
+            return task
+    return None
 
 
-def _completed_tts_task_for_chunk(parent_id, chunk_index):
+def _active_gemini_task(parent_id, result):
+    candidate_ids = []
+    children = result.get("children") if isinstance(result, dict) and isinstance(result.get("children"), dict) else {}
+    gemini = children.get("gemini") if isinstance(children.get("gemini"), dict) else {}
+    if gemini.get("job_id"):
+        candidate_ids.append(str(gemini["job_id"]))
+    for candidate_id in dict.fromkeys(candidate_ids):
+        task = _load_task(candidate_id, *TASK_CHILD_COLUMNS)
+        if task and task.status not in TERMINAL_STATUSES and task.feature == gemini_service.FEATURE_NAME:
+            return task
+    candidates = PublicationTask.query.filter(
+        PublicationTask.feature == gemini_service.FEATURE_NAME,
+        PublicationTask.parent_task_id == parent_id,
+        PublicationTask.status.notin_(list(TERMINAL_STATUSES)),
+    ).options(load_only(*TASK_CHILD_COLUMNS)).order_by(PublicationTask.created_at.desc()).limit(10).all()
+    return candidates[0] if candidates else None
+
+
+def _valid_gemini_task_result(result):
+    if not isinstance(result, dict):
+        return False
+    raw_text = result.get("final_response_text") or result.get("response_text") or ""
+    return len(_plain_text(raw_text)) >= _min_gemini_final_chars()
+
+
+def _fresh_result(parent_id):
+    fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
+    return dict(fresh.result or {}) if fresh and isinstance(fresh.result, dict) else {}
+
+
+def _existing_child_from_result(result, label):
+    child_id = _child_id_from_result(result, label)
+    if not child_id:
+        return None
+    return _load_task(child_id, *TASK_CHILD_COLUMNS)
+
+
+def _child_id_from_result(result, label):
+    children = result.get("children") if isinstance(result.get("children"), dict) else {}
+    child_summary = children.get(label) if isinstance(children.get(label), dict) else {}
+    direct_summary = result.get(label) if isinstance(result.get(label), dict) else {}
+    child_id = child_summary.get("job_id") or direct_summary.get("job_id")
+    return str(child_id).strip() if child_id else None
+
+
+def _completed_tts_task_for_chunk(parent_id, chunk_index, expected_text):
     candidates = PublicationTask.query.filter(
         PublicationTask.feature == doubao_service.FEATURE_NAME,
         PublicationTask.parent_task_id == parent_id,
@@ -519,9 +737,26 @@ def _completed_tts_task_for_chunk(parent_id, chunk_index):
     for candidate in candidates:
         if _task_chunk_index(candidate) != chunk_index:
             continue
+        if _plain_text(_task_tts_text(candidate)) != _plain_text(expected_text):
+            continue
         wav_path = _task_audio_wav_path(candidate)
         if wav_path and os.path.exists(wav_path):
             return candidate
+    return None
+
+
+def _active_tts_task_for_chunk(parent_id, chunk_index, expected_text):
+    candidates = PublicationTask.query.filter(
+        PublicationTask.feature == doubao_service.FEATURE_NAME,
+        PublicationTask.parent_task_id == parent_id,
+        PublicationTask.status.notin_(list(TERMINAL_STATUSES)),
+    ).options(load_only(*TASK_CHILD_COLUMNS)).order_by(PublicationTask.created_at.desc()).limit(50).all()
+    for candidate in candidates:
+        if _task_chunk_index(candidate) != chunk_index:
+            continue
+        if _plain_text(_task_tts_text(candidate)) != _plain_text(expected_text):
+            continue
+        return candidate
     return None
 
 
@@ -542,6 +777,12 @@ def _task_audio_wav_path(task):
     result = task.result or {}
     audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
     return audio.get("wav_path") or result.get("wav_path")
+
+
+def _task_tts_text(task):
+    params = task.params or {}
+    doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
+    return str(doubao_payload.get("text") or "")
 
 
 def _create_doubao_tts_task(parent, text, index, total, payload, *, attempt=1):
@@ -593,6 +834,10 @@ def _create_doubao_tts_task(parent, text, index, total, payload, *, attempt=1):
 
 
 def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screenshot, payload):
+    existing = _find_existing_publisher_video_task(parent.id, pdf_screenshot)
+    if existing:
+        return existing
+
     video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
     main_title = _publisher_main_title(structured, video_options)
     sub_title = _publisher_sub_title(structured, video_options)
@@ -700,6 +945,57 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
     return _load_task(child_id, *TASK_CHILD_COLUMNS)
 
 
+def _find_existing_publisher_video_task(parent_id, pdf_screenshot):
+    candidates = (
+        PublicationTask.query
+        .filter(PublicationTask.feature == "publisher")
+        .filter(PublicationTask.source_task_id == parent_id)
+        .options(load_only(*TASK_CHILD_COLUMNS))
+        .order_by(PublicationTask.created_at.desc())
+        .limit(30)
+        .all()
+    )
+    if not candidates:
+        return None
+
+    for task in candidates:
+        if task.status == "completed" and _publisher_video_output_ready(task, pdf_screenshot):
+            _cancel_duplicate_publisher_tasks(candidates, keep_id=task.id)
+            return task
+
+    active = [task for task in candidates if task.status not in TERMINAL_STATUSES]
+    if active:
+        keep = active[0]
+        _cancel_duplicate_publisher_tasks(active[1:], keep_id=keep.id)
+        return keep
+    return None
+
+
+def _publisher_video_output_ready(task, pdf_screenshot):
+    summary = _publisher_result_summary(task, pdf_screenshot)
+    path = summary.get("video_path") or summary.get("landscape_video_path") or summary.get("vertical_video_path")
+    return bool(path and os.path.exists(path))
+
+
+def _cancel_duplicate_publisher_tasks(tasks, *, keep_id):
+    changed = False
+    for task in tasks:
+        if not task or task.id == keep_id or task.status in TERMINAL_STATUSES:
+            continue
+        _revoke_child_task(task)
+        result = dict(task.result or {})
+        result["error"] = f"重复视频子任务已取消，保留 {keep_id}"
+        task.status = "canceled"
+        task.current_step = "canceled"
+        task.error_message = result["error"]
+        task.completed_at = datetime.utcnow()
+        task.result = result
+        flag_modified(task, "result")
+        changed = True
+    if changed:
+        db.session.commit()
+
+
 def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
     timeout = _int_env("REPORT_AUDIO_CHILD_TIMEOUT_SECONDS", 1800)
     poll_seconds = max(1, _int_env("REPORT_AUDIO_CHILD_POLL_SECONDS", 3))
@@ -712,22 +1008,85 @@ def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
         child = _load_task(child_id, *TASK_CHILD_COLUMNS)
         if not child:
             raise RuntimeError(f"子任务不存在: {child_id}")
-        result = child.result or {}
         if child.current_step != last_step:
             last_step = child.current_step
             child_progress = int(child.progress or 0)
             mapped = start_progress + int((end_progress - start_progress) * child_progress / 100)
             _emit(parent_id, f"{label}_{child.current_step}", mapped, f"{label}: {child.current_step}")
+            _record_child(parent_id, label, child)
         if child.status in TERMINAL_STATUSES:
+            _clear_waiting_child(parent_id, label)
             return child
         celery_failure = _celery_child_failure_message(child)
         if celery_failure:
             _mark_child_failed(child, celery_failure)
             db.session.expire_all()
+            _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_CHILD_COLUMNS)
         time.sleep(poll_seconds)
         db.session.expire_all()
+    child = _load_task(child_id, *TASK_CHILD_COLUMNS)
+    if child and child.status not in TERMINAL_STATUSES:
+        _record_child(parent_id, label, child)
+        raise ChildTaskStillRunning(label, child.id, child.status or "", child.current_step or "")
     raise RuntimeError(f"等待子任务超时: {label} {child_id}")
+
+
+def _defer_parent_retry(parent_id, exc):
+    delay = max(30, _int_env("REPORT_AUDIO_PARENT_RETRY_DELAY_SECONDS", 300))
+    max_defers = max(1, _int_env("REPORT_AUDIO_PARENT_MAX_DEFERS", 144))
+    fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
+    if not fresh or fresh.status == "canceled":
+        return
+
+    result = dict(fresh.result or {})
+    deferred_waits = dict(result.get("deferred_waits") or {})
+    state = dict(deferred_waits.get(exc.label) or {})
+    count = int(state.get("defer_count") or state.get("count") or 0) + 1
+    if count > max_defers:
+        raise RuntimeError(f"等待子任务超过最大续跑次数: {exc.label} {exc.child_id}")
+
+    waiting_child = {
+        "label": exc.label,
+        "child_id": exc.child_id,
+        "status": exc.status,
+        "step": exc.step,
+        "retry_delay_seconds": delay,
+        "defer_count": count,
+        "max_defers": max_defers,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    deferred_waits[exc.label] = waiting_child
+    result["waiting_child"] = waiting_child
+    result["deferred_waits"] = deferred_waits
+    fresh.status = "processing"
+    fresh.current_step = _current_step_code(f"{exc.label}_waiting")
+    fresh.progress = max(int(fresh.progress or 0), 95 if exc.label == "publisher_video" else int(fresh.progress or 0))
+    fresh.error_message = None
+    fresh.result = result
+    flag_modified(fresh, "result")
+    db.session.commit()
+
+    celery_app.send_task(
+        "tasks.report_audio_workflow.process_job",
+        args=[parent_id],
+        queue=WORKFLOW_QUEUE_NAME,
+        countdown=delay,
+    )
+
+
+def _clear_waiting_child(parent_id, label):
+    fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
+    if not fresh or not isinstance(fresh.result, dict):
+        return
+    result = dict(fresh.result or {})
+    waiting_child = result.get("waiting_child")
+    if not isinstance(waiting_child, dict) or waiting_child.get("label") != label:
+        return
+    result.pop("waiting_child", None)
+    fresh.result = result
+    flag_modified(fresh, "result")
+    db.session.commit()
 
 
 def _celery_child_failure_message(child):
@@ -779,6 +1138,40 @@ def _record_child(parent_id, label, child):
     db.session.commit()
 
 
+def _record_child_attempt(parent_id, label, child, attempt, max_attempts, status, *, error=None):
+    fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
+    if not fresh:
+        return
+    result = dict(fresh.result or {})
+    attempts = dict(result.get("child_attempts") or {})
+    items = list(attempts.get(label) or [])
+    summary = _task_public_summary(child) or {}
+    updated_at = datetime.utcnow().isoformat() + "Z"
+    summary.update({
+        "attempt": int(attempt or 1),
+        "max_attempts": int(max_attempts or 1),
+        "attempt_status": status,
+        "error": error or summary.get("error"),
+        "updated_at": updated_at,
+    })
+    items = [item for item in items if int(item.get("attempt") or 0) != int(attempt or 1)]
+    items.append(summary)
+    attempts[label] = items[-int(max_attempts or 1):]
+    result["child_attempts"] = attempts
+    retry_state = dict(result.get("retry_state") or {})
+    retry_state[label] = {
+        "attempt": int(attempt or 1),
+        "max_attempts": int(max_attempts or 1),
+        "status": status,
+        "error": error or summary.get("error"),
+        "updated_at": updated_at,
+    }
+    result["retry_state"] = retry_state
+    fresh.result = result
+    flag_modified(fresh, "result")
+    db.session.commit()
+
+
 def _update_result(parent_id, values):
     fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
     if not fresh:
@@ -788,6 +1181,44 @@ def _update_result(parent_id, values):
     fresh.result = result
     flag_modified(fresh, "result")
     db.session.commit()
+
+
+def _child_error_message(child):
+    if not child:
+        return "子任务不存在"
+    result = child.result if isinstance(child.result, dict) else {}
+    return child.error_message or result.get("error") or f"子任务状态异常: {child.status or '-'} / {child.current_step or '-'}"
+
+
+def _is_retryable_child_error(label, message):
+    text = str(message or "")
+    if not text:
+        return False
+    lower_text = text.lower()
+    if any(fragment.lower() in lower_text for fragment in NON_RETRYABLE_CHILD_ERROR_FRAGMENTS):
+        return False
+    return any(fragment.lower() in lower_text for fragment in RETRYABLE_CHILD_ERROR_FRAGMENTS)
+
+
+def _retry_limit(env_name, default):
+    return max(0, min(_int_env(env_name, default), 5))
+
+
+def _revoke_child_task(child):
+    celery_task_id = getattr(child, "celery_task_id", None)
+    if not celery_task_id:
+        return
+    try:
+        celery_app.control.revoke(celery_task_id, terminate=False)
+    except Exception as exc:
+        logger.warning("撤销子任务失败: child=%s celery=%s error=%s", child.id, celery_task_id, exc)
+
+
+def _compact_error(message, limit=180):
+    text = re.sub(r"\s+", " ", str(message or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
 
 
 def _emit(parent_id, step, progress, message):
@@ -1621,6 +2052,17 @@ def _db_retry_delay_seconds(retry_index):
         upper=600,
     )
     return min(base * max(int(retry_index or 0) + 1, 1), 600)
+
+
+def _plain_text(value):
+    return re.sub(r"\s+", "", str(value or ""))
+
+
+def _min_gemini_final_chars():
+    return max(0, _int_env(
+        "REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS",
+        _int_env("REPORT_PDF_GEMINI_MIN_RESPONSE_CHARS", 120),
+    ))
 
 
 def _bounded_int(value, *, default, lower, upper):

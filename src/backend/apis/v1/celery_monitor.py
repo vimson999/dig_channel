@@ -6,7 +6,7 @@ import subprocess
 import threading
 import time
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import redis
@@ -22,14 +22,18 @@ WATCHDOG_STATE_FILE = RUNTIME_DIR / "watchdog_state.json"
 WATCHDOG_LOG_FILE = LOG_DIR / "celery_watchdog.log"
 WATCHDOG_SCRIPT = PROJECT_ROOT / "scripts" / "dev" / "run-celery-watchdog.sh"
 DEFAULT_WATCHDOG_SERVICES = (
-    "zsxq_workflow",
-    "zsxq_sync",
-    "content_pipeline",
-    "zsxq_publish",
+    "render",
+    "cloud_tts",
     "doubao_browser_tts",
     "report_pdf_gemini",
     "report_audio_workflow",
     "mp3_video_workflow",
+    "zsxq_sync",
+    "zsxq_workflow",
+    "zsxq_publish",
+    "podcast_visualizer",
+    "report_video",
+    "content_pipeline",
 )
 
 BUSINESS_TASK_FEATURES = {
@@ -42,6 +46,7 @@ BUSINESS_TASK_FEATURES = {
 ZSXQ_BUSINESS_TASK_SERVICES = ("zsxq_sync", "zsxq_workflow")
 ZSXQ_ACTIVE_STATUSES = ("queued", "running", "pending", "processing")
 BUSINESS_TASK_ACTIVE_STATUSES = ("pending", "processing")
+BUSINESS_TASK_CONSUMER_GRACE_SECONDS_DEFAULT = 1800
 BUSINESS_TASK_LIMIT_PER_SERVICE = 8
 BUSINESS_TASK_UUID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
@@ -65,7 +70,7 @@ SERVICES = {
         "description": "豆包语音合成队列",
     },
     "doubao_browser_tts": {
-        "label": "豆包网页朗读捕获",
+        "label": "豆包浏览器朗读捕获",
         "queue": "doubao_browser_tts",
         "hostname_prefix": "doubao_browser_tts@",
         "run_script": "scripts/dev/run-celery-doubao-browser-tts.sh",
@@ -214,9 +219,9 @@ def _int_env(name, default):
         return default
 
 
-STATUS_CACHE_TTL_SECONDS = float(os.environ.get("CELERY_MONITOR_STATUS_CACHE_TTL", "5"))
+STATUS_CACHE_TTL_SECONDS = float(os.environ.get("CELERY_MONITOR_STATUS_CACHE_TTL", "20"))
 REPORT_VIDEO_STATS_CACHE_TTL_SECONDS = float(os.environ.get("CELERY_MONITOR_REPORT_VIDEO_STATS_CACHE_TTL", "60"))
-BUSINESS_TASKS_CACHE_TTL_SECONDS = float(os.environ.get("CELERY_MONITOR_BUSINESS_TASKS_CACHE_TTL", "30"))
+BUSINESS_TASKS_CACHE_TTL_SECONDS = float(os.environ.get("CELERY_MONITOR_BUSINESS_TASKS_CACHE_TTL", "75"))
 BUSINESS_TASKS_AUTO_CLEAN_STALE = _truthy_env("CELERY_MONITOR_AUTO_CLEAN_STALE_BUSINESS_TASKS", False)
 BUSINESS_TASKS_STALE_PENDING_SECONDS = max(3600, _int_env("CELERY_MONITOR_STALE_PENDING_MINUTES", 120) * 60)
 BUSINESS_TASKS_STALE_PROCESSING_SECONDS = max(7200, _int_env("CELERY_MONITOR_STALE_PROCESSING_MINUTES", 240) * 60)
@@ -647,7 +652,10 @@ def _purge_queue(queue_name):
 def _watchdog_services():
     raw = os.environ.get("CELERY_AUTO_HEAL_SERVICES")
     if raw:
-        service_ids = [item.strip() for item in raw.split(",") if item.strip()]
+        if raw.strip().lower() == "all":
+            service_ids = list(SERVICES.keys())
+        else:
+            service_ids = [item.strip() for item in raw.split(",") if item.strip()]
     else:
         service_ids = list(DEFAULT_WATCHDOG_SERVICES)
     return [service_id for service_id in service_ids if service_id in SERVICES]
@@ -714,6 +722,39 @@ def _watchdog_notify(subject, body):
 
 def _consumer_stuck(status):
     return bool(status.get("consumer_warning"))
+
+
+def _parse_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except (TypeError, ValueError):
+        return None
+
+
+def _business_tasks_recently_active(tasks, now=None):
+    now = now or datetime.utcnow()
+    grace_seconds = max(
+        60,
+        _int_env("CELERY_AUTO_HEAL_BUSINESS_GRACE_SECONDS", BUSINESS_TASK_CONSUMER_GRACE_SECONDS_DEFAULT),
+    )
+    for task in tasks or []:
+        status = str(task.get("status") or "").lower()
+        if status not in {"processing", "running"}:
+            continue
+        updated_at = _parse_iso_datetime(task.get("updated_at") or task.get("created_at"))
+        if not updated_at:
+            return True
+        if (now - updated_at).total_seconds() <= grace_seconds:
+            return True
+    return False
 
 
 def run_watchdog_once():
@@ -1402,7 +1443,11 @@ def _service_status(
     reserved_count = len(tasks.get("reserved") or [])
     scheduled_count = len(tasks.get("scheduled") or [])
     consumer_warning = None
-    if (
+    consumer_note = None
+    business_recently_active = _business_tasks_recently_active(business_tasks)
+    if not processes:
+        consumer_warning = "Worker 未运行；看门狗将按自愈策略拉起该队列 worker。"
+    elif (
         processes
         and queue_len
         and queue_len > 0
@@ -1411,7 +1456,10 @@ def _service_status(
         and scheduled_count == 0
         and not inspect_error
     ):
-        consumer_warning = "Worker 在线但未领取积压任务，消费连接可能卡住；建议重启该队列 worker。"
+        if business_recently_active:
+            consumer_note = "队列有积压，但业务任务近期仍在推进，暂不判定为消费异常。"
+        else:
+            consumer_warning = "Worker 在线但未领取积压任务，消费连接可能卡住；建议重启该队列 worker。"
 
     status = {
         "id": service_id,
@@ -1435,6 +1483,7 @@ def _service_status(
         "business_tasks_error": business_task_error,
         "inspect_error": None,
         "consumer_warning": consumer_warning,
+        "consumer_note": consumer_note,
         "updated_at": datetime.utcnow().isoformat() + "Z",
     }
     if service_id == "report_video":

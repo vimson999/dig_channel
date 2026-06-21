@@ -5,7 +5,11 @@
 提供统一的认证方法，方便在整个应用中使用
 """
 
+import os
+import time
 from functools import wraps
+from threading import Lock
+
 from flask import request, session, current_app
 import jwt
 from sqlalchemy.orm import load_only
@@ -30,12 +34,83 @@ LIGHT_USER_COLUMNS = (
 )
 
 
+def _float_env(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+_DEV_FALLBACK_USER_CACHE_TTL = max(0.0, _float_env("DEV_FALLBACK_USER_CACHE_TTL", 30))
+_DEV_FALLBACK_USER_CACHE = {"expires_at": 0.0, "user": None}
+_DEV_FALLBACK_USER_CACHE_LOCK = Lock()
+
+
+class DevFallbackUser:
+    def __init__(self, user):
+        self.id = user.id
+        self.username = user.username
+        self.email = user.email
+        self.display_name = user.display_name
+        self.avatar_url = user.avatar_url
+        self.is_active = user.is_active
+        self.is_verified = user.is_verified
+        self.is_admin = user.is_admin
+        self.timezone = user.timezone
+        self.language = user.language
+        self.created_at = user.created_at
+        self.updated_at = user.updated_at
+        self.last_login_at = user.last_login_at
+
+    def to_dict(self, include_sensitive=False):
+        return {
+            'id': self.id,
+            'username': self.username,
+            'email': self.email if include_sensitive else None,
+            'display_name': self.display_name,
+            'avatar_url': self.avatar_url,
+            'is_active': self.is_active,
+            'is_verified': self.is_verified,
+            'is_admin': self.is_admin,
+            'timezone': self.timezone,
+            'language': self.language,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'last_login_at': self.last_login_at.isoformat() if self.last_login_at else None,
+        }
+
+    def to_safe_dict(self):
+        return self.to_dict(include_sensitive=False)
+
+    def has_permission(self, _permission):
+        return bool(self.is_admin)
+
+
 def _light_user_query():
     return User.query.options(load_only(*LIGHT_USER_COLUMNS))
 
 
 def _get_light_user_by_id(user_id):
     return _light_user_query().filter(User.id == user_id).first()
+
+
+def _cache_dev_fallback_user(user):
+    fallback_user = DevFallbackUser(user)
+    if _DEV_FALLBACK_USER_CACHE_TTL > 0:
+        with _DEV_FALLBACK_USER_CACHE_LOCK:
+            _DEV_FALLBACK_USER_CACHE["user"] = fallback_user
+            _DEV_FALLBACK_USER_CACHE["expires_at"] = time.time() + _DEV_FALLBACK_USER_CACHE_TTL
+    return fallback_user
+
+
+def _get_cached_dev_fallback_user():
+    if _DEV_FALLBACK_USER_CACHE_TTL <= 0:
+        return None
+    with _DEV_FALLBACK_USER_CACHE_LOCK:
+        cached = _DEV_FALLBACK_USER_CACHE.get("user")
+        if cached and _DEV_FALLBACK_USER_CACHE.get("expires_at", 0.0) > time.time():
+            return cached
+    return None
 
 
 def get_current_user():
@@ -112,12 +187,17 @@ def require_login(f):
         
         # 开发环境：如果没有用户，使用admin用户或创建默认用户
         if not current_user and current_app.config.get('DEBUG', False):
+            cached_user = _get_cached_dev_fallback_user()
+            if cached_user:
+                current_user = cached_user
+
+        if not current_user and current_app.config.get('DEBUG', False):
             try:
                 # 优先使用已有的admin用户(通常有数据)
                 admin_user = _light_user_query().filter_by(username='admin').first()
                 if admin_user and admin_user.is_active:
                     print(f"🔧 [开发模式] 使用admin用户: {admin_user.username} (ID: {admin_user.id})")
-                    current_user = admin_user
+                    current_user = _cache_dev_fallback_user(admin_user)
                 else:
                     # 如果没有admin用户，则查找或创建test_user
                     test_user = _light_user_query().filter_by(username='test_user').first()
@@ -141,7 +221,7 @@ def require_login(f):
                     
                     if test_user:
                         print(f"🔧 [开发模式] 使用测试用户: {test_user.username} (ID: {test_user.id})")
-                        current_user = test_user
+                        current_user = _cache_dev_fallback_user(test_user)
             except Exception as db_error:
                 print(f"🔧 [开发模式] 数据库连接失败，创建临时用户对象: {db_error}")
                 # 数据库连接失败时，创建一个临时用户对象

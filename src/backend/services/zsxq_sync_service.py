@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 TRANSIENT_UPSTREAM_CODES = {"1059"}
 ATTACHMENT_DOWNLOADS_ENABLED_ENV = "ZSXQ_SYNC_ATTACHMENT_DOWNLOADS_ENABLED"
 ATTACHMENT_DOWNLOAD_LIMIT_ENV = "ZSXQ_SYNC_ATTACHMENT_DOWNLOAD_LIMIT"
+ATTACHMENT_PUBLISH_FALLBACK_ENV = "ZSXQ_ATTACHMENT_PUBLISH_FALLBACK_ENABLED"
 MANUAL_ATTACHMENT_PLAN_LIMIT_ENV = "ZSXQ_MANUAL_DOWNLOAD_PLAN_LIMIT"
 MANUAL_ATTACHMENT_PLAN_HARD_LIMIT_ENV = "ZSXQ_MANUAL_DOWNLOAD_PLAN_HARD_LIMIT"
 DEFAULT_SAFE_ATTACHMENT_DOWNLOAD_LIMIT = 1
@@ -116,7 +117,7 @@ class ZsxqSyncService:
             "zsxq_attachments",
             "zsxq_sync_cursors",
         }
-        inspector = inspect(db.engine)
+        inspector = inspect(db.session.connection())
         existing_tables = self._table_names(inspector)
         missing_tables = sorted(required_tables - existing_tables)
         if missing_tables:
@@ -1418,11 +1419,13 @@ class ZsxqSyncService:
 
         collect((sync_result or {}).get("downloaded_files"))
         collect((sync_result or {}).get("downloaded_pdf_files"))
+        collect((sync_result or {}).get("auto_video_dispatch_files"))
         for tab in (sync_result or {}).get("tabs") or []:
             if not isinstance(tab, dict):
                 continue
             collect(tab.get("downloaded_files"))
             collect(tab.get("downloaded_pdf_files"))
+            collect(tab.get("auto_video_dispatch_files"))
         return list(dict.fromkeys(ids))
 
     def _auto_video_attachment_kind(self, attachment):
@@ -1905,7 +1908,7 @@ class ZsxqSyncService:
             "tables_ready": True,
         }
 
-    def list_cached_topics(self, group_id, tab_id=None, count=20, end_time=None):
+    def list_cached_topics(self, group_id, tab_id=None, count=20, end_time=None, publish_filter=None):
         if not self._sync_tables_ready():
             return {
                 "succeeded": True,
@@ -1942,12 +1945,34 @@ class ZsxqSyncService:
         base_query = ZsxqTopic.query.filter(ZsxqTopic.group_id == group_id)
         if tab_id:
             base_query = base_query.filter(ZsxqTopic.tab_id == tab_id)
+        if str(publish_filter or "").strip().lower() == "attention":
+            attachment_query = db.session.query(ZsxqAttachment.topic_id).filter(
+                ZsxqAttachment.group_id == group_id,
+                ZsxqAttachment.download_status == "downloaded",
+                or_(
+                    ZsxqAttachment.publish_status.in_(["publish_failed", "publish_skipped"]),
+                    and_(
+                        ZsxqAttachment.publish_status == "published",
+                        or_(
+                            ZsxqAttachment.publish_topic_id.is_(None),
+                            ZsxqAttachment.publish_topic_id == "",
+                        ),
+                    ),
+                ),
+            )
+            if tab_id:
+                attachment_query = attachment_query.filter(ZsxqAttachment.tab_id == tab_id)
+            base_query = base_query.filter(ZsxqTopic.topic_id.in_(attachment_query))
 
         page_query = base_query
         if end_time:
             page_query = page_query.filter(ZsxqTopic.create_time < str(end_time))
 
-        total = self._cached_topic_total(group_id, tab_id)
+        total = (
+            base_query.with_entities(db.func.count(ZsxqTopic.id)).scalar()
+            if str(publish_filter or "").strip().lower() == "attention"
+            else self._cached_topic_total(group_id, tab_id)
+        )
         rows = page_query.options(
             load_only(
                 ZsxqTopic.id,
@@ -2219,10 +2244,13 @@ class ZsxqSyncService:
         ]
         if not payloads:
             return
-        if all(item.get("publish_status") for item in payloads):
+        missing_payloads = [item for item in payloads if not item.get("publish_status")]
+        if not missing_payloads:
+            return
+        if not self._attachment_publish_fallback_enabled():
             return
 
-        match_index = self._attachment_publish_match_index(payloads)
+        match_index = self._attachment_publish_match_index(missing_payloads)
         if not any(match_index.values()):
             return
 
@@ -2235,6 +2263,12 @@ class ZsxqSyncService:
                     continue
                 for payload in self._matched_attachment_payloads(source_ref, match_index):
                     self._merge_publish_status(payload, source_status)
+
+    def _attachment_publish_fallback_enabled(self):
+        config_value = current_app.config.get("ZSXQ_ATTACHMENT_PUBLISH_FALLBACK_ENABLED") if has_app_context() else None
+        if config_value is not None:
+            return self._truthy(config_value)
+        return self._truthy(os.getenv(ATTACHMENT_PUBLISH_FALLBACK_ENV))
 
     def _recent_publish_status_context(self):
         now = time.time()
@@ -2482,8 +2516,10 @@ class ZsxqSyncService:
         incoming = str(status.get("publish_status") or "")
         if not incoming:
             return False
+        if incoming == "published" and not str(status.get("publish_topic_id") or "").strip():
+            incoming = "submitted"
         current = str(attachment.publish_status or "")
-        if not self._should_replace_publish_status(current, incoming):
+        if not self._should_replace_attachment_publish_status(attachment, incoming):
             return False
 
         updated_at = status.get("publish_updated_at_dt")
@@ -2504,8 +2540,15 @@ class ZsxqSyncService:
                 changed = True
         return changed
 
+    def _should_replace_attachment_publish_status(self, attachment, incoming):
+        current = str(attachment.publish_status or "")
+        if current == "published" and not attachment.publish_topic_id and incoming in {"publish_failed", "publish_skipped"}:
+            return True
+        return self._should_replace_publish_status(current, incoming)
+
     def _should_replace_publish_status(self, current, incoming):
         rank = {
+            "publish_skipped": 1,
             "publish_failed": 1,
             "publishing": 2,
             "submitted": 3,
@@ -2608,6 +2651,7 @@ class ZsxqSyncService:
         result = publish_task.result if isinstance(publish_task.result, dict) else {}
         by_path = {}
         by_name = {}
+        task_snapshot = self._publish_task_status_snapshot(publish_task) or {}
         for rule in self._iter_publish_result_rules(result):
             rule_status = self._publish_rule_status(rule)
             for file_item in rule.get("files") or []:
@@ -2617,15 +2661,18 @@ class ZsxqSyncService:
                 status = {
                     "failed": "publish_failed",
                     "publish_failed": "publish_failed",
+                    "skipped": "publish_skipped",
+                    "publish_skipped": "publish_skipped",
                     "uploaded": rule_status,
                     "published": "published",
                 }.get(file_status, rule_status)
                 if not status:
                     continue
                 snapshot = {
-                    **self._publish_task_status_snapshot(publish_task),
+                    **task_snapshot,
                     "publish_status": status,
                     "publish_file_status": file_status,
+                    "publish_skip_reason": file_item.get("skip_reason") or file_item.get("reason") or "",
                     "publish_topic_id": str(rule.get("topic_id") or ""),
                 }
                 path_key = self._path_key(file_item.get("path"))
@@ -2634,6 +2681,20 @@ class ZsxqSyncService:
                 name = str(file_item.get("name") or "").strip()
                 if name:
                     by_name[name] = snapshot
+        for file_item in self._iter_publish_preview_skipped_files(result):
+            snapshot = {
+                **task_snapshot,
+                "publish_status": "publish_skipped",
+                "publish_file_status": "skipped",
+                "publish_skip_reason": file_item.get("skip_reason") or file_item.get("reason") or "",
+                "publish_topic_id": "",
+            }
+            path_key = self._path_key(file_item.get("path"))
+            if path_key and path_key not in by_path:
+                by_path[path_key] = snapshot
+            name = str(file_item.get("name") or "").strip()
+            if name and name not in by_name:
+                by_name[name] = snapshot
         return {"by_path": by_path, "by_name": by_name}
 
     def _iter_publish_result_rules(self, result):
@@ -2665,7 +2726,18 @@ class ZsxqSyncService:
             return "submitted"
         if failed > 0 or status == "failed":
             return "publish_failed"
+        if status == "skipped":
+            return "publish_skipped"
         return ""
+
+    def _iter_publish_preview_skipped_files(self, result):
+        preview = result.get("preview") if isinstance(result.get("preview"), dict) else {}
+        rules = preview.get("rules") if isinstance(preview.get("rules"), list) else []
+        for rule in rules:
+            for item in rule.get("skipped") or []:
+                reason = str((item or {}).get("reason") or (item or {}).get("skip_reason") or "").strip().lower()
+                if isinstance(item, dict) and reason not in {"published"}:
+                    yield item
 
     def _status_for_source_ref(self, source_ref, task_status, outcomes):
         for output_path in source_ref.get("output_paths") or []:
@@ -2676,6 +2748,8 @@ class ZsxqSyncService:
             matched = outcomes.get("by_name", {}).get(output_name)
             if matched:
                 return matched
+        if source_ref.get("output_paths"):
+            return None
         return task_status
 
     def _publish_task_status_snapshot(self, task):
@@ -2695,6 +2769,8 @@ class ZsxqSyncService:
             publish_status = "publishing"
         elif failed > 0 or raw_status == "failed" or task.status == "failed":
             publish_status = "publish_failed"
+        elif raw_status == "skipped" or str(result.get("reason") or "").lower() in {"no_eligible_files", "disabled"}:
+            publish_status = "publish_skipped"
         else:
             return None
 
@@ -2715,15 +2791,23 @@ class ZsxqSyncService:
     def _merge_publish_status(self, payload, status):
         current = str(payload.get("publish_status") or "")
         incoming = str(status.get("publish_status") or "")
+        if incoming == "published" and not str(status.get("publish_topic_id") or "").strip():
+            incoming = "submitted"
         if not self._should_replace_publish_status(current, incoming):
             return
-        payload.update({
+        merged = {
             key: value
             for key, value in status.items()
             if key != "publish_updated_at_dt"
-        })
+        }
+        merged["publish_status"] = incoming
+        payload.update(merged)
         payload["published"] = incoming == "published"
         payload["publish_submitted"] = incoming in {"submitted", "published"}
+        payload["publish_attention_required"] = (
+            payload.get("download_status") == "downloaded"
+            and incoming in {"publish_failed", "publish_skipped"}
+        )
 
     def _publish_source_task_id(self, task):
         params = task.params if isinstance(task.params, dict) else {}
@@ -2914,7 +2998,7 @@ class ZsxqSyncService:
             "zsxq_attachments",
             "zsxq_sync_cursors",
         }
-        inspector = inspect(db.engine)
+        inspector = inspect(db.session.connection())
         existing_tables = self._table_names(inspector)
         if not required_tables.issubset(existing_tables):
             return False
@@ -3212,6 +3296,13 @@ class ZsxqSyncService:
         self._append_unique_file_entry(stats["downloaded_files"], entry)
         if entry["path"].lower().endswith(".pdf"):
             self._append_unique_file_entry(stats["downloaded_pdf_files"], entry)
+
+    def _append_auto_video_dispatch_file_entry(self, stats, record, local_path):
+        entry = self._downloaded_file_entry(record, local_path)
+        if not entry:
+            return
+        stats.setdefault("auto_video_dispatch_files", [])
+        self._append_unique_file_entry(stats["auto_video_dispatch_files"], entry)
 
     def _commit_manual_running_progress(self, run, tab, topic_id, tab_result, manual_plan):
         run.updated_at = datetime.utcnow()
@@ -3660,6 +3751,7 @@ class ZsxqSyncService:
             "attachments_limited_skipped": 0,
             "downloaded_files": [],
             "downloaded_pdf_files": [],
+            "auto_video_dispatch_files": [],
             "stopped_by_download_limit": False,
             "download_limit_reached": False,
         }
@@ -3692,6 +3784,7 @@ class ZsxqSyncService:
                 stats["attachments_skipped"] += 1
                 stats["attachments_already_downloaded_skipped"] += 1
                 stats["attachments_reused_local"] += 1
+                self._append_auto_video_dispatch_file_entry(stats, record, record.local_path)
                 continue
             existing_download = self._find_existing_downloaded_attachment(record)
             if existing_download:
@@ -3701,6 +3794,7 @@ class ZsxqSyncService:
                 stats["attachments_skipped"] += 1
                 stats["attachments_already_downloaded_skipped"] += 1
                 stats["attachments_reused_existing"] += 1
+                self._append_auto_video_dispatch_file_entry(stats, record, record.local_path)
                 continue
             if remaining_downloads is not None and remaining_downloads <= 0:
                 stats["stopped_by_download_limit"] = True
@@ -3778,7 +3872,7 @@ class ZsxqSyncService:
     def _merge_downloaded_file_entries(self, target, stats):
         if not stats:
             return
-        for key in ("downloaded_files", "downloaded_pdf_files"):
+        for key in ("downloaded_files", "downloaded_pdf_files", "auto_video_dispatch_files"):
             target.setdefault(key, [])
             for item in stats.get(key) or []:
                 self._append_unique_file_entry(target[key], item)

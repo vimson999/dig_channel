@@ -1,5 +1,9 @@
 import logging
+import os
 import re
+import time
+from copy import deepcopy
+from threading import Lock
 from urllib.parse import quote
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
@@ -38,12 +42,66 @@ bp = Blueprint("zsxq", __name__, url_prefix="/api/v1/zsxq")
 logger = logging.getLogger(__name__)
 
 
-def _payload():
+def _float_env(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _int_value(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+SYSTEM_SYNC_BATCHES_CACHE_TTL_SECONDS = max(0.0, _float_env("ZSXQ_SYSTEM_SYNC_BATCHES_CACHE_TTL", 60))
+_SYSTEM_SYNC_BATCHES_CACHE = {}
+_SYSTEM_SYNC_BATCHES_CACHE_LOCK = Lock()
+
+
+def _clear_system_sync_batches_cache():
+    if not _SYSTEM_SYNC_BATCHES_CACHE:
+        return
+    with _SYSTEM_SYNC_BATCHES_CACHE_LOCK:
+        _SYSTEM_SYNC_BATCHES_CACHE.clear()
+
+
+def _payload(purpose="zsxq.sync", prefer_db=True):
     data = request.get_json(silent=True) or {}
-    cookie = (data.get("cookie") or "").strip()
-    if not cookie:
-        raise ValueError("请先填写知识星球 Cookie")
+    cookie = _resolve_request_cookie(data, purpose=purpose, prefer_db=prefer_db)
     return data, cookie
+
+
+def _resolve_request_cookie(data, *, purpose="zsxq.sync", prefer_db=True, form=None):
+    form = form or {}
+    credential_id = (
+        data.get("credential_id")
+        or data.get("platform_credential_id")
+        or form.get("credential_id")
+        or form.get("platform_credential_id")
+    )
+    inline_cookie = ((data.get("cookie") if isinstance(data, dict) else None) or form.get("cookie") or "").strip()
+    if prefer_db or credential_id or not inline_cookie:
+        try:
+            from services.platform_credential_service import resolve_zsxq_cookie
+
+            credential = resolve_zsxq_cookie(
+                account_id=str(credential_id).strip() if credential_id else None,
+                purpose=purpose,
+                required=True,
+            )
+            data["_credential_id"] = credential.get("credential_id")
+            data["_credential_source"] = credential.get("credential_source")
+            return credential["cookie"]
+        except Exception:
+            if not inline_cookie:
+                raise
+            logger.warning("[ZSXQ] DB credential unavailable, falling back to inline cookie for purpose=%s", purpose)
+    if not inline_cookie:
+        raise ValueError("请先在平台凭据管理里保存知识星球 Cookie")
+    return inline_cookie
 
 
 def _safe_error(error):
@@ -130,6 +188,7 @@ def local_topics():
             tab_id=data.get("tab_id"),
             count=data.get("count", 20),
             end_time=data.get("end_time"),
+            publish_filter=data.get("publish_filter"),
         )
         return jsonify({"success": True, "data": result})
     except Exception as e:
@@ -251,14 +310,12 @@ def download():
 def publish():
     """Upload files/images and publish one topic to the selected ZSXQ group."""
     try:
-        cookie = (request.form.get("cookie") or "").strip()
+        cookie = _resolve_request_cookie({}, purpose="zsxq.publish", prefer_db=True, form=request.form)
         group_id = (request.form.get("group_id") or "").strip()
         text = request.form.get("text") or ""
         hashtag_id = (request.form.get("hashtag_id") or "").strip() or None
         hashtag_title = (request.form.get("hashtag_title") or "").strip() or None
 
-        if not cookie:
-            return handle_api_error(400, "请先填写知识星球 Cookie")
         if not group_id:
             return handle_api_error(400, "group_id 不能为空")
 
@@ -298,7 +355,7 @@ def publish():
 def sync():
     """Queue selected ZSXQ tabs into the dedicated Celery sync worker."""
     try:
-        data, cookie = _payload()
+        data, cookie = _payload(purpose="zsxq.sync", prefer_db=True)
         group_id = data.get("group_id")
         if not group_id:
             return handle_api_error(400, "group_id 不能为空")
@@ -314,7 +371,8 @@ def sync():
             mode=mode,
         )
         payload = {
-            "cookie": cookie,
+            "cookie": None if data.get("_credential_source") == "db" else cookie,
+            "credential_id": data.get("_credential_id") or data.get("credential_id"),
             "group_id": group_id,
             "group_name": data.get("group_name"),
             "tabs": tabs,
@@ -436,6 +494,7 @@ def system_sync_test_config():
             len(data.get("jobs") or []),
         )
         result = save_config(data, cookie)
+        _clear_system_sync_batches_cache()
         return jsonify({"success": True, "data": {"config": result}})
     except ValueError as e:
         return handle_api_error(400, str(e))
@@ -449,10 +508,26 @@ def system_sync_test_batches():
     """List project-scheduler sync batches with per-run attachment details."""
     try:
         data = request.get_json(silent=True) or {}
+        group_id = data.get("group_id")
+        limit = data.get("limit", 10)
+        force_refresh = str(data.get("refresh") or "").lower() in {"1", "true", "yes"}
+        cache_key = (str(group_id or ""), _int_value(limit, 10))
+        if SYSTEM_SYNC_BATCHES_CACHE_TTL_SECONDS > 0 and not force_refresh:
+            with _SYSTEM_SYNC_BATCHES_CACHE_LOCK:
+                cached = _SYSTEM_SYNC_BATCHES_CACHE.get(cache_key)
+                if cached and cached["expires_at"] > time.time():
+                    return jsonify({"success": True, "data": {"batches": deepcopy(cached["batches"])}})
+
         result = zsxq_sync_service.list_system_sync_batches(
-            group_id=data.get("group_id"),
-            limit=data.get("limit", 10),
+            group_id=group_id,
+            limit=limit,
         )
+        if SYSTEM_SYNC_BATCHES_CACHE_TTL_SECONDS > 0:
+            with _SYSTEM_SYNC_BATCHES_CACHE_LOCK:
+                _SYSTEM_SYNC_BATCHES_CACHE[cache_key] = {
+                    "expires_at": time.time() + SYSTEM_SYNC_BATCHES_CACHE_TTL_SECONDS,
+                    "batches": deepcopy(result),
+                }
         return jsonify({"success": True, "data": {"batches": result}})
     except Exception as e:
         return jsonify({"success": True, "data": {"batches": [], "error": _safe_error(e)}})
@@ -482,7 +557,7 @@ def system_sync_test_batch_detail():
 def manual_download_workflows():
     """Create a workflow from explicitly selected ZSXQ attachments."""
     try:
-        data, cookie = _payload()
+        data, cookie = _payload(purpose="zsxq.sync", prefer_db=True)
         group_id = data.get("group_id")
         if not group_id:
             return handle_api_error(400, "group_id 不能为空")
@@ -497,7 +572,7 @@ def manual_download_workflows():
         try:
             queued = zsxq_workflow_service.enqueue_workflow_task(
                 workflow["id"],
-                cookie=cookie,
+                credential_id=data.get("_credential_id") or data.get("credential_id"),
             )
         except Exception as exc:
             logger.exception("[ZSXQ_WORKFLOW] manual download workflow queue failed | workflow=%s", workflow.get("id"))
@@ -508,6 +583,7 @@ def manual_download_workflows():
             )
             return handle_api_error(502, f"人工计划工作流入队失败：{exc}")
 
+        _clear_system_sync_batches_cache()
         return jsonify({
             "success": True,
             "data": {
@@ -575,9 +651,8 @@ def system_sync_scheduler_status_endpoint():
 def system_sync_scheduler_start():
     """Start the long-running ZSXQ scheduler process."""
     try:
-        data = request.get_json(silent=True) or {}
-        cookie = (data.get("cookie") or "").strip() or None
-        result = start_system_sync_scheduler(cookie_override=cookie)
+        result = start_system_sync_scheduler(cookie_override=None)
+        _clear_system_sync_batches_cache()
         return jsonify({"success": True, "data": {"scheduler": result}})
     except Exception as e:
         logger.exception("[ZSXQ_SYSTEM_SYNC_SCHEDULER] start failed")
@@ -589,6 +664,7 @@ def system_sync_scheduler_stop():
     """Stop the long-running ZSXQ scheduler process."""
     try:
         result = stop_system_sync_scheduler()
+        _clear_system_sync_batches_cache()
         return jsonify({"success": True, "data": {"scheduler": result}})
     except Exception as e:
         logger.exception("[ZSXQ_SYSTEM_SYNC_SCHEDULER] stop failed")
@@ -599,9 +675,8 @@ def system_sync_scheduler_stop():
 def system_sync_scheduler_restart():
     """Restart the long-running ZSXQ scheduler process."""
     try:
-        data = request.get_json(silent=True) or {}
-        cookie = (data.get("cookie") or "").strip() or None
-        result = restart_system_sync_scheduler(cookie_override=cookie)
+        result = restart_system_sync_scheduler(cookie_override=None)
+        _clear_system_sync_batches_cache()
         return jsonify({"success": True, "data": {"scheduler": result}})
     except Exception as e:
         logger.exception("[ZSXQ_SYSTEM_SYNC_SCHEDULER] restart failed")
@@ -612,9 +687,9 @@ def system_sync_scheduler_restart():
 def system_sync_scheduler_run_once():
     """Trigger one scheduler round immediately (non-loop)."""
     try:
-        data = request.get_json(silent=True) or {}
-        cookie = (data.get("cookie") or "").strip() or None
-        result = trigger_once_system_sync_scheduler(cookie_override=cookie)
+        _clear_system_sync_batches_cache()
+        result = trigger_once_system_sync_scheduler(cookie_override=None)
+        _clear_system_sync_batches_cache()
         return jsonify({"success": True, "data": {"scheduler": result}})
     except Exception as e:
         logger.exception("[ZSXQ_SYSTEM_SYNC_SCHEDULER] run once failed")
@@ -647,14 +722,13 @@ def auto_publish_config():
     """Read or save ZSXQ auto publish strategy config."""
     if request.method == "GET":
         try:
-            return jsonify({"success": True, "data": {"config": auto_publish_config_status(include_secrets=True)}})
+            return jsonify({"success": True, "data": {"config": auto_publish_config_status(include_secrets=False)}})
         except Exception as e:
             return handle_api_error(502, f"读取自动发帖配置失败: {e}")
 
     try:
         data = request.get_json(silent=True) or {}
-        cookie = (data.get("cookie") or "").strip() or None
-        result = auto_publish_save_config(data, cookie=cookie)
+        result = auto_publish_save_config(data, cookie=None)
         return jsonify({"success": True, "data": {"config": result}})
     except ValueError as e:
         return handle_api_error(400, str(e))
@@ -668,8 +742,7 @@ def auto_publish_preview():
     """Preview the next publish batch for current strategy payload."""
     try:
         data = request.get_json(silent=True) or {}
-        cookie = (data.get("cookie") or "").strip() or None
-        result = auto_publish_preview_payload(data, cookie=cookie)
+        result = auto_publish_preview_payload(data, cookie=None)
         return jsonify({"success": True, "data": result})
     except ValueError as e:
         return handle_api_error(400, str(e))
@@ -706,9 +779,7 @@ def auto_publish_scheduler_status_endpoint():
 def auto_publish_scheduler_start():
     """Start auto publish scheduler."""
     try:
-        data = request.get_json(silent=True) or {}
-        cookie = (data.get("cookie") or "").strip() or None
-        result = start_auto_publish_scheduler(cookie_override=cookie)
+        result = start_auto_publish_scheduler(cookie_override=None)
         return jsonify({"success": True, "data": {"scheduler": result}})
     except Exception as e:
         logger.exception("[ZSXQ_AUTO_PUBLISH] start scheduler failed")
@@ -730,9 +801,7 @@ def auto_publish_scheduler_stop():
 def auto_publish_scheduler_restart():
     """Restart auto publish scheduler."""
     try:
-        data = request.get_json(silent=True) or {}
-        cookie = (data.get("cookie") or "").strip() or None
-        result = restart_auto_publish_scheduler(cookie_override=cookie)
+        result = restart_auto_publish_scheduler(cookie_override=None)
         return jsonify({"success": True, "data": {"scheduler": result}})
     except Exception as e:
         logger.exception("[ZSXQ_AUTO_PUBLISH] restart scheduler failed")
@@ -743,9 +812,7 @@ def auto_publish_scheduler_restart():
 def auto_publish_scheduler_run_once():
     """Trigger one background auto publish run."""
     try:
-        data = request.get_json(silent=True) or {}
-        cookie = (data.get("cookie") or "").strip() or None
-        result = trigger_once_auto_publish_scheduler(cookie_override=cookie)
+        result = trigger_once_auto_publish_scheduler(cookie_override=None)
         return jsonify({"success": True, "data": {"scheduler": result}})
     except Exception as e:
         logger.exception("[ZSXQ_AUTO_PUBLISH] run once failed")

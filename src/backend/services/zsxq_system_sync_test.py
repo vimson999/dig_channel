@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 import redis
+from flask import has_app_context
 from sqlalchemy import text
 
 from celery_config import celery_app
@@ -52,6 +53,7 @@ def config_status():
             "path": str(CONFIG_PATH),
             "cookie_env_name": COOKIE_ENV_NAME,
             "cookie_env_configured": _runtime_cookie_configured(),
+            "cookie_db_configured": _runtime_db_cookie_configured(),
             "cookie_source_mode": _runtime_cookie_source(),
         }
 
@@ -72,8 +74,10 @@ def _snapshot_config(config):
         "path": str(CONFIG_PATH),
         "updated_at": config.get("updated_at"),
         "enabled": enabled,
+        "credential_id": config.get("credential_id") or None,
         "cookie_env_name": COOKIE_ENV_NAME,
         "cookie_env_configured": _runtime_cookie_configured(),
+        "cookie_db_configured": _runtime_db_cookie_configured(),
         "cookie_source_mode": _runtime_cookie_source(),
         "interval_minutes": _scheduler_interval_minutes(config.get("interval_minutes")),
         "group_id": group_id,
@@ -125,7 +129,17 @@ def save_config(payload, cookie):
     if not group_id:
         raise ValueError("group_id 不能为空")
 
-    if cookie:
+    previous = load_config(required=False) or {}
+    credential_id = (
+        str(payload.get("credential_id") or payload.get("platform_credential_id") or "").strip()
+        or previous.get("credential_id")
+        or None
+    )
+    cookie_info = runtime_cookie_info(account_id=credential_id, required=False)
+    if cookie_info.get("cookie"):
+        cookie = cookie_info["cookie"]
+        credential_id = cookie_info.get("credential_id") or credential_id
+    elif cookie:
         cookie = zsxq_service.normalize_cookie(cookie)
     else:
         env_cookie = _strip_wrapped_quotes((os.environ.get(COOKIE_ENV_NAME) or "").strip())
@@ -141,7 +155,6 @@ def save_config(payload, cookie):
         raise ValueError("系统计划测试至少需要一个同步目标")
 
     now = datetime.utcnow().isoformat() + "Z"
-    previous = load_config(required=False) or {}
     max_download_files = _bounded_int(
         payload.get("max_download_files"),
         default=DEFAULT_MAX_DOWNLOAD_FILES,
@@ -171,6 +184,7 @@ def save_config(payload, cookie):
         "enabled": True,
         "created_at": previous.get("created_at") or now,
         "updated_at": now,
+        "credential_id": credential_id,
         "cookie_env_name": COOKIE_ENV_NAME,
         "group_id": group_id,
         "group_name": payload.get("group_name") or "",
@@ -292,7 +306,9 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
     validation_retry_count = _transient_validation_retry_count()
     validation_retry_delay = _transient_validation_retry_delay_seconds()
     try:
-        cookie = runtime_cookie()
+        cookie_info = runtime_cookie_info(account_id=config.get("credential_id"), required=True)
+        cookie = cookie_info["cookie"]
+        credential_id = cookie_info.get("credential_id")
         _validate_group_id_with_retry(
             group_id,
             cookie=cookie,
@@ -329,6 +345,16 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
         if _is_placeholder_group_id(group_id) or _is_auth_validation_error(exc):
             config["enabled"] = False
             disabled = True
+            if locals().get("credential_id"):
+                try:
+                    from services.platform_credential_service import mark_credential_error
+
+                    mark_credential_error(credential_id, exc, expired=True)
+                except Exception:
+                    logger.exception(
+                        "[ZSXQ_SYSTEM_SYNC_TEST] credential error mark failed | credential=%s",
+                        credential_id,
+                    )
         snapshot = _record_invalid_group_skip(
             config,
             attempt_id=attempt_id,
@@ -379,7 +405,7 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
         )
         queued_workflow = zsxq_workflow_service.enqueue_workflow_task(
             workflow["id"],
-            cookie=cookie,
+            credential_id=credential_id,
         )
         queued = [{
             "batch_id": batch_id,
@@ -678,25 +704,66 @@ def _pending_system_sync_work(group_id):
     }
 
 
-def runtime_cookie():
+def runtime_cookie(account_id=None):
+    return runtime_cookie_info(account_id=account_id, required=True)["cookie"]
+
+
+def runtime_cookie_info(account_id=None, required=True):
+    try:
+        from services.platform_credential_service import resolve_zsxq_cookie
+
+        info = resolve_zsxq_cookie(account_id=account_id, purpose="zsxq.sync", required=required)
+        if info.get("cookie"):
+            return info
+    except Exception:
+        if required:
+            raise
+
     override = _strip_wrapped_quotes((os.environ.get(COOKIE_OVERRIDE_ENV_NAME) or "").strip())
     if override:
-        return zsxq_service.normalize_cookie(override)
+        return {
+            "cookie": zsxq_service.normalize_cookie(override),
+            "credential_id": None,
+            "credential_name": "页面 Cookie",
+            "credential_source": "page",
+        }
 
     cookie = _strip_wrapped_quotes((os.environ.get(COOKIE_ENV_NAME) or "").strip())
     if not cookie:
-        raise ValueError(f"环境变量 {COOKIE_ENV_NAME} 未配置，系统计划任务无法访问知识星球")
-    return zsxq_service.normalize_cookie(cookie)
+        if required:
+            raise ValueError("未找到可用的知识星球同步凭据，请先在平台凭据管理里保存 zsxq.sync Cookie")
+        return {}
+    return {
+        "cookie": zsxq_service.normalize_cookie(cookie),
+        "credential_id": None,
+        "credential_name": "环境变量 Cookie",
+        "credential_source": "env",
+    }
 
 
 def _runtime_cookie_configured():
     return bool(
+        _runtime_db_cookie_configured()
+        or
         _strip_wrapped_quotes(os.environ.get(COOKIE_OVERRIDE_ENV_NAME) or "")
         or _strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME) or "")
     )
 
 
+def _runtime_db_cookie_configured():
+    if not has_app_context():
+        return False
+    try:
+        from services.platform_credential_service import has_active_credential
+
+        return bool(has_active_credential(platform="zsxq", purpose="zsxq.sync"))
+    except Exception:
+        return False
+
+
 def _runtime_cookie_source():
+    if _runtime_db_cookie_configured():
+        return "db"
     if _strip_wrapped_quotes(os.environ.get(COOKIE_OVERRIDE_ENV_NAME) or ""):
         return "page"
     if _strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME) or ""):

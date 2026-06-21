@@ -13,7 +13,7 @@ class DevelopmentConfig(BaseConfig):
     """开发环境配置"""
     
     DEBUG = True
-    SQLALCHEMY_ECHO = True  # 开发环境下显示SQL语句
+    SQLALCHEMY_ECHO = os.environ.get('SQLALCHEMY_ECHO', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
     
     # 开发环境下放宽CORS限制
     CORS_ORIGINS = ["*"]
@@ -25,8 +25,8 @@ class DevelopmentConfig(BaseConfig):
     DEBUG_TB_ENABLED = True
     DEBUG_TB_INTERCEPT_REDIRECTS = False
     
-    # 开发环境通常同时跑后端、多个 Celery worker 和 scheduler；每个进程独立建池。
-    # 本地队列较多时连接池会成倍放大，默认只保留 1 个连接，避免打满远端 PostgreSQL。
+    # 开发环境经常同时跑后端和多个 Celery worker；每个进程都有独立连接池。
+    # 默认只保留 1 个连接，避免本地进程把远端 PostgreSQL 连接槽打满。
     SQLALCHEMY_ENGINE_OPTIONS = _postgres_engine_options(
         BaseConfig.SQLALCHEMY_DATABASE_URI,
         pool_size=_int_env('DB_POOL_SIZE', 1, 1),

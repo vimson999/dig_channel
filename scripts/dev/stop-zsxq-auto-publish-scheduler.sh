@@ -31,7 +31,8 @@ PY
 
 if [ -f "$PID_FILE" ]; then
   PID="$(read_pid_from_json "$PID_FILE" || true)"
-  if [ -n "${PID}" ] && kill -0 "$PID" 2>/dev/null; then
+  PID="$(printf '%s' "${PID:-}" | tr -cd '0-9')"
+  if [ -n "${PID:-}" ] && kill -0 "$PID" 2>/dev/null; then
     echo "✅ 发现运行中的进程：$PID，尝试优雅退出..."
     kill -TERM "$PID" || true
 
@@ -63,11 +64,11 @@ fi
 PIDS="$(pgrep -f 'run_zsxq_auto_publish_scheduler.py' || true)"
 if [ -n "$PIDS" ]; then
   echo "⚠️ 未发现 PID 文件，尝试按脚本名清理残留进程：$PIDS"
-  echo "$PIDS" | xargs kill -TERM
+  echo "$PIDS" | xargs -r kill -TERM
   sleep 0.5
   PENDING="$(pgrep -f 'run_zsxq_auto_publish_scheduler.py' || true)"
   if [ -n "$PENDING" ]; then
-    echo "$PENDING" | xargs kill -KILL
+    echo "$PENDING" | xargs -r kill -KILL
   fi
   echo "✅ 调度器残留进程已清理。"
 else

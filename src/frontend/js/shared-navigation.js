@@ -92,6 +92,8 @@ class SharedNavigation {
             return 'downloads';
         } else if (filename === 'content-retention-cleanup.html') {
             return 'content-retention-cleanup';
+        } else if (filename === 'platform-credentials.html') {
+            return 'platform-credentials';
         }
         return 'dashboard';
     }
@@ -135,7 +137,8 @@ class SharedNavigation {
             'video-editor': '高级剪辑工作台',
             'batch-transcription': '批量音频转文案',
             'downloads': '素材下载中心',
-            'content-retention-cleanup': '历史文件清理'
+            'content-retention-cleanup': '历史文件清理',
+            'platform-credentials': '平台凭据管理'
         };
         return titles[this.currentPage] || '智能数据分析平台';
     }
@@ -463,6 +466,12 @@ class SharedNavigation {
                         name: '历史文件清理',
                         icon: 'fas fa-broom',
                         href: 'content-retention-cleanup.html'
+                    },
+                    {
+                        id: 'platform-credentials',
+                        name: '平台凭据',
+                        icon: 'fas fa-key',
+                        href: 'platform-credentials.html'
                     },
                     {
                         id: 'document-converter',

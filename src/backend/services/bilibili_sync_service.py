@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 
 from .bilibili import BiliUploader, load_metadata, extract_cover
 from config.base import BaseConfig
-from services.config_service import ConfigService
+from services.platform_credential_service import resolve_bilibili_auth
 
 logger = logging.getLogger("bilibili")
 
@@ -31,12 +31,14 @@ class BilibiliSyncService:
             d.mkdir(parents=True, exist_ok=True)
             
         # Initialize Uploader
+        auth = resolve_bilibili_auth(required=True)
         self.uploader = BiliUploader(
-            sessdata=ConfigService.get('sessdata', 'bilibili_auth'),
-            bili_jct=ConfigService.get('bili_jct', 'bilibili_auth'),
-            buvid3=ConfigService.get('buvid3', 'bilibili_auth'),
-            dedeuserid=ConfigService.get('dedeuserid', 'bilibili_auth')
+            sessdata=auth.get('sessdata'),
+            bili_jct=auth.get('bili_jct'),
+            buvid3=auth.get('buvid3'),
+            dedeuserid=auth.get('dedeuserid')
         )
+        self.credential_id = auth.get("credential_id")
 
     async def process_video(self, video_path: Path):
         """
@@ -74,6 +76,12 @@ class BilibiliSyncService:
                 delay_time=meta.delay_time,
                 season_id=meta.season_id
             )
+            try:
+                from services.platform_credential_service import mark_credential_success
+
+                mark_credential_success(self.credential_id)
+            except Exception:
+                logger.exception("Failed to mark Bilibili credential success")
             
             # On Success: Move to processed
             destination = self.processed_dir / filename
@@ -86,6 +94,12 @@ class BilibiliSyncService:
             
         except Exception as e:
             logger.error(f"Failed to upload {filename} to Bilibili: {e}")
+            try:
+                from services.platform_credential_service import is_auth_error, mark_credential_error
+
+                mark_credential_error(self.credential_id, e, expired=is_auth_error(e))
+            except Exception:
+                logger.exception("Failed to mark Bilibili credential error")
             destination = self.failed_dir / filename
             try:
                 shutil.move(str(video_path), str(destination))

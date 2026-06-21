@@ -28,18 +28,18 @@ stop_by_pattern() {
   local pids
   pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
   if [ -z "$pids" ]; then
-    echo "✅ 未发现 $label。"
+    echo "✅ 未发现 ${label}。"
     return 0
   fi
 
-  echo "⚠️ 发现 $label: $pids"
+  echo "⚠️ 发现 ${label}: $pids"
   echo "$pids" | xargs kill -TERM 2>/dev/null || true
   sleep 0.8
 
   local pending
   pending="$(pgrep -f "$pattern" 2>/dev/null || true)"
   if [ -n "$pending" ]; then
-    echo "⚠️ $label 未及时退出，强制清理: $pending"
+    echo "⚠️ ${label} 未及时退出，强制清理: $pending"
     echo "$pending" | xargs kill -KILL 2>/dev/null || true
   fi
 }

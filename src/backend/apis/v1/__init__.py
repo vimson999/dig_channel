@@ -99,6 +99,10 @@ def register_blueprints(app):
     from .content_pipeline import bp as content_pipeline_bp
     app.register_blueprint(content_pipeline_bp)
 
+    # 注册平台凭据管理 API
+    from .platform_credentials import bp as platform_credentials_bp
+    app.register_blueprint(platform_credentials_bp)
+
 __all__ = [
     'auth_bp',
     'channels_bp',

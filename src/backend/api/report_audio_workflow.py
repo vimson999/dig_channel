@@ -1,7 +1,10 @@
 import json
 import os
+import time
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 
 from flask import Blueprint, jsonify, request, send_file
 from sqlalchemy import and_, or_
@@ -28,6 +31,18 @@ from utils.auth_utils import require_login
 report_audio_workflow_bp = Blueprint("report_audio_workflow", __name__, url_prefix="/api/report-audio-workflows")
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
+
+def _float_env(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS = max(0.0, _float_env("REPORT_AUDIO_JOBS_CACHE_TTL", 15))
+_REPORT_AUDIO_JOBS_CACHE = {}
+_REPORT_AUDIO_JOBS_CACHE_LOCK = Lock()
+
 STATUS_MAP = {
     "pending": "queued",
     "processing": "running",
@@ -35,6 +50,32 @@ STATUS_MAP = {
     "failed": "failed",
     "canceled": "canceled",
 }
+SYSTEM_USER_ID = "system"
+
+
+def _visible_user_ids(current_user_or_id):
+    if hasattr(current_user_or_id, "id"):
+        raw_user_id = getattr(current_user_or_id, "id", None)
+    else:
+        raw_user_id = current_user_or_id
+    user_id = str(raw_user_id or "").strip()
+    values = {SYSTEM_USER_ID}
+    if user_id:
+        values.add(user_id)
+    return values
+
+
+def _clear_jobs_summary_cache(user_id=None):
+    if not _REPORT_AUDIO_JOBS_CACHE:
+        return
+    user_id = str(user_id or "").strip()
+    with _REPORT_AUDIO_JOBS_CACHE_LOCK:
+        if not user_id:
+            _REPORT_AUDIO_JOBS_CACHE.clear()
+            return
+        for key in list(_REPORT_AUDIO_JOBS_CACHE):
+            if key[0] == user_id:
+                _REPORT_AUDIO_JOBS_CACHE.pop(key, None)
 
 
 @report_audio_workflow_bp.route("/status", methods=["GET"])
@@ -63,7 +104,14 @@ def list_pdf_assets(_current_user):
     q = (request.args.get("q") or "").strip()
     group_id = (request.args.get("group_id") or "").strip()
     tab_id = (request.args.get("tab_id") or "").strip()
+    scope = (request.args.get("scope") or "all").strip().lower()
+    hot_download_threshold = 30
 
+    topic_join = (
+        (ZsxqTopic.group_id == ZsxqAttachment.group_id)
+        & (ZsxqTopic.tab_id == ZsxqAttachment.tab_id)
+        & (ZsxqTopic.topic_id == ZsxqAttachment.topic_id)
+    )
     query = (
         db.session.query(
             ZsxqAttachment.id.label("attachment_id"),
@@ -75,23 +123,26 @@ def list_pdf_assets(_current_user):
             ZsxqAttachment.group_id.label("group_id"),
             ZsxqAttachment.tab_id.label("tab_id"),
             ZsxqAttachment.topic_id.label("topic_id"),
+            ZsxqTopic.title.label("topic_title"),
+            ZsxqTopic.tab_label.label("tab_label"),
+            ZsxqTopic.author_name.label("topic_author"),
+            ZsxqTopic.create_time.label("topic_create_time"),
+            ZsxqTopic.first_synced_at.label("topic_first_synced_at"),
+            ZsxqTopic.last_synced_at.label("topic_last_synced_at"),
         )
+        .outerjoin(ZsxqTopic, topic_join)
         .filter(ZsxqAttachment.download_status == "downloaded")
         .filter(ZsxqAttachment.local_path.isnot(None))
         .filter(or_(ZsxqAttachment.name.ilike("%.pdf"), ZsxqAttachment.local_path.ilike("%.pdf")))
     )
+    if scope in {"hot", "popular"}:
+        query = query.filter(ZsxqAttachment.download_count >= hot_download_threshold)
     if group_id:
         query = query.filter(ZsxqAttachment.group_id == group_id)
     if tab_id:
         query = query.filter(ZsxqAttachment.tab_id == tab_id)
     if q:
         pattern = f"%{q}%"
-        query = query.outerjoin(
-            ZsxqTopic,
-            (ZsxqTopic.group_id == ZsxqAttachment.group_id)
-            & (ZsxqTopic.tab_id == ZsxqAttachment.tab_id)
-            & (ZsxqTopic.topic_id == ZsxqAttachment.topic_id),
-        )
         query = query.filter(or_(
             ZsxqAttachment.name.ilike(pattern),
             ZsxqTopic.title.ilike(pattern),
@@ -101,7 +152,17 @@ def list_pdf_assets(_current_user):
     target_count = page * per_page + 1
     chunk_size = min(max(per_page * 4, 40), 120)
     scan_limit = min(max(target_count * 5, 120), 2000)
-    ordered = query.order_by(ZsxqAttachment.updated_at.desc(), ZsxqAttachment.created_at.desc())
+    sync_time_order = db.func.coalesce(
+        ZsxqTopic.last_synced_at,
+        ZsxqAttachment.updated_at,
+        ZsxqAttachment.created_at,
+    )
+    ordered = query.order_by(
+        sync_time_order.desc(),
+        ZsxqTopic.create_time.desc(),
+        ZsxqAttachment.updated_at.desc(),
+        ZsxqAttachment.created_at.desc(),
+    )
     valid_items = []
     skipped_missing = 0
     scanned = 0
@@ -123,7 +184,6 @@ def list_pdf_assets(_current_user):
     start = (page - 1) * per_page
     end = start + per_page
     items = valid_items[start:end]
-    _attach_pdf_asset_topics(items)
     has_more = len(valid_items) > end or scanned >= scan_limit
     return jsonify({
         "success": True,
@@ -135,6 +195,8 @@ def list_pdf_assets(_current_user):
                 "has_more": has_more,
                 "skipped_missing": skipped_missing,
                 "scanned": scanned,
+                "scope": "hot" if scope in {"hot", "popular"} else "all",
+                "hot_download_threshold": hot_download_threshold,
             },
         },
         "items": items,
@@ -277,10 +339,12 @@ def create_job(current_user):
         task.error_message = f"编排任务入队失败: {exc}"
         task.completed_at = datetime.utcnow()
         db.session.commit()
+        _clear_jobs_summary_cache(user_id)
         return jsonify({"success": False, "message": task.error_message}), 502
 
     task.celery_task_id = celery_task.id
     db.session.commit()
+    _clear_jobs_summary_cache(user_id)
 
     return jsonify({
         "success": True,
@@ -297,10 +361,19 @@ def list_jobs(current_user):
     per_page = _bounded_int(request.args.get("per_page"), 20, 1, 100)
     status = (request.args.get("status") or "").strip()
     include_detail = str(request.args.get("detail") or "").lower() in {"1", "true", "yes"}
+    user_id = str(getattr(current_user, "id", None))
+
+    visible_user_ids = _visible_user_ids(current_user)
+    cache_key = ("+".join(sorted(visible_user_ids)), page, per_page, status)
+    if not include_detail and REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS > 0:
+        with _REPORT_AUDIO_JOBS_CACHE_LOCK:
+            cached = _REPORT_AUDIO_JOBS_CACHE.get(cache_key)
+            if cached and cached["expires_at"] > time.time():
+                return jsonify(deepcopy(cached["payload"]))
 
     query = PublicationTask.query.filter(
         PublicationTask.feature == FEATURE_NAME,
-        PublicationTask.user_id == str(getattr(current_user, "id", None)),
+        PublicationTask.user_id.in_(visible_user_ids),
     )
     if status:
         reverse_status = {value: key for key, value in STATUS_MAP.items()}
@@ -359,7 +432,7 @@ def list_jobs(current_user):
         child_summaries = _child_summaries_for_parent_ids([row.id for row in rows])
         items = [_job_summary_payload(row, child_summaries.get(row.id)) for row in rows]
         pages = ((total + per_page - 1) // per_page) if total else 0
-    return jsonify({
+    payload = {
         "success": True,
         "data": {
             "items": items,
@@ -371,7 +444,14 @@ def list_jobs(current_user):
             },
         },
         "items": items,
-    })
+    }
+    if not include_detail and REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS > 0:
+        with _REPORT_AUDIO_JOBS_CACHE_LOCK:
+            _REPORT_AUDIO_JOBS_CACHE[cache_key] = {
+                "expires_at": time.time() + REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS,
+                "payload": deepcopy(payload),
+            }
+    return jsonify(payload)
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>", methods=["GET"])
@@ -516,6 +596,7 @@ def cancel_job(current_user, job_id):
     task.result = result
     flag_modified(task, "result")
     db.session.commit()
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
 
     payload = _job_payload(task)
     return jsonify({"success": True, "message": "任务已取消", **payload, "data": payload})
@@ -561,10 +642,12 @@ def retry_job(current_user, job_id):
         task.error_message = f"续跑任务入队失败: {exc}"
         task.completed_at = datetime.utcnow()
         db.session.commit()
+        _clear_jobs_summary_cache(getattr(current_user, "id", None))
         return jsonify({"success": False, "message": task.error_message}), 502
 
     task.celery_task_id = celery_task.id
     db.session.commit()
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
     payload = _job_payload(task)
     return jsonify({"success": True, "message": "任务已从失败处续跑", **payload, "data": payload})
 
@@ -588,8 +671,8 @@ def _get_owned_task(current_user, job_id):
     ).get(job_id)
     if not task or (task.feature or (task.params or {}).get("feature")) != FEATURE_NAME:
         return None
-    task_user_id = task.user_id or (task.params or {}).get("user_id")
-    if str(task_user_id) != str(getattr(current_user, "id", None)):
+    task_user_id = str(task.user_id or (task.params or {}).get("user_id") or "").strip()
+    if task_user_id not in _visible_user_ids(current_user):
         return None
     return task
 
@@ -629,6 +712,8 @@ def _job_payload(task, include_raw=False):
         },
         "pdf": _public_pdf(task.id, request_payload.get("pdf") or result.get("pdf")),
         "children": result.get("children") or {},
+        "child_attempts": result.get("child_attempts") or {},
+        "retry_state": result.get("retry_state") or {},
         "gemini": result.get("gemini"),
         "doubao_browser_tts": live_doubao_items or result.get("doubao_browser_tts") or [],
         "structured_result": structured_result,
@@ -769,7 +854,7 @@ def _job_summary_payload(row, child_bundle=None):
 
 
 def _live_child_tasks(parent_id):
-    def child_query(column):
+    try:
         return (
             PublicationTask.query
             .with_entities(
@@ -790,21 +875,10 @@ def _live_child_tasks(parent_id):
                 PublicationTask.created_at.label("created_at"),
                 PublicationTask.completed_at.label("completed_at"),
             )
-            .filter(column == parent_id)
+            .filter(or_(PublicationTask.parent_task_id == parent_id, PublicationTask.source_task_id == parent_id))
             .order_by(PublicationTask.created_at.asc())
             .all()
         )
-
-    try:
-        rows = []
-        seen = set()
-        for child in child_query(PublicationTask.parent_task_id) + child_query(PublicationTask.source_task_id):
-            if child.id in seen:
-                continue
-            seen.add(child.id)
-            rows.append(child)
-        rows.sort(key=lambda item: item.created_at or datetime.min)
-        return rows
     except Exception:
         return []
 
@@ -839,15 +913,12 @@ def _child_summaries_for_parent_ids(parent_ids):
             PublicationTask.created_at.label("created_at"),
             PublicationTask.completed_at.label("completed_at"),
         )
-        rows = []
-        seen = set()
-        for column in (PublicationTask.parent_task_id, PublicationTask.source_task_id):
-            for row in base_query.filter(column.in_(ids)).order_by(PublicationTask.created_at.asc()).all():
-                if row.id in seen:
-                    continue
-                seen.add(row.id)
-                rows.append(row)
-        rows.sort(key=lambda row: row.created_at or datetime.min)
+        rows = (
+            base_query
+            .filter(or_(PublicationTask.parent_task_id.in_(ids), PublicationTask.source_task_id.in_(ids)))
+            .order_by(PublicationTask.created_at.asc())
+            .all()
+        )
     except Exception:
         return grouped
 
@@ -1170,6 +1241,8 @@ def _pdf_asset_payload(attachment, topic=None):
         "topic_title": topic.title if topic else None,
         "topic_author": topic.author_name if topic else None,
         "topic_create_time": topic.create_time if topic else None,
+        "topic_first_synced_at": topic.first_synced_at.isoformat() + "Z" if topic and topic.first_synced_at else None,
+        "topic_last_synced_at": topic.last_synced_at.isoformat() + "Z" if topic and topic.last_synced_at else None,
         "tab_label": topic.tab_label if topic else None,
         "local_path": str(path),
         "preview_url": f"/api/report-audio-workflows/pdf-assets/{attachment.id}/preview",
@@ -1199,10 +1272,20 @@ def _pdf_asset_row_payload(row):
         "topic_title": getattr(row, "topic_title", None),
         "topic_author": getattr(row, "topic_author", None),
         "topic_create_time": getattr(row, "topic_create_time", None),
+        "topic_first_synced_at": _isoformat_z(getattr(row, "topic_first_synced_at", None)),
+        "topic_last_synced_at": _isoformat_z(getattr(row, "topic_last_synced_at", None)),
         "tab_label": getattr(row, "tab_label", None),
         "local_path": str(path),
         "preview_url": f"/api/report-audio-workflows/pdf-assets/{row.attachment_id}/preview",
     }
+
+
+def _isoformat_z(value):
+    if not value:
+        return None
+    if isinstance(value, str):
+        return value
+    return value.isoformat() + "Z"
 
 
 def _attach_pdf_asset_topics(items):
@@ -1279,7 +1362,7 @@ def _pdf_asset_workflow_stats(asset_ids, user_id=None):
         .filter(PublicationTask.report_audio_pdf_attachment_id.in_(ids))
     )
     if user_id:
-        rows = rows.filter(PublicationTask.user_id == user_id)
+        rows = rows.filter(PublicationTask.user_id.in_(_visible_user_ids(user_id)))
 
     stats = {asset_id: _empty_pdf_asset_workflow_stats() for asset_id in ids}
     for row in rows.order_by(PublicationTask.created_at.desc()).all():

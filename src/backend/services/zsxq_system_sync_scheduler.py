@@ -38,12 +38,13 @@ def start_scheduler(cookie_override=None):
             "scheduler": status,
         }
 
-    has_cookie_override = bool((cookie_override or "").strip())
+    has_db_cookie = bool(status.get("cookie_db_configured"))
+    has_cookie_override = bool((cookie_override or "").strip()) and not has_db_cookie
     if not status.get("cookie_env_configured") and not has_cookie_override:
         return {
             "started": False,
             "running": False,
-            "message": f"未配置环境变量 {COOKIE_ENV_NAME}，且当前页面也没有传入 Cookie，无法启动系统同步调度器。",
+            "message": "未找到可用的知识星球同步凭据，请先在平台凭据管理里保存 zsxq.sync Cookie。",
             "scheduler": scheduler_status(),
         }
 
@@ -87,7 +88,7 @@ def start_scheduler(cookie_override=None):
         "command": " ".join(command),
         "log_path": str(LOG_PATH),
         "log_file_descriptor_opened": True,
-        "cookie_source": "page" if has_cookie_override else "env",
+        "cookie_source": "db" if has_db_cookie else ("page" if has_cookie_override else "env"),
     }
     _write_pid_file(metadata)
 
@@ -105,7 +106,9 @@ def start_scheduler(cookie_override=None):
     return {
         "started": True,
         "running": True,
-        "message": "计划任务已启动，按配置每隔一定间隔执行。" if not has_cookie_override else "计划任务已启动，当前使用页面里选择的 Cookie。",
+        "message": "计划任务已启动，当前使用 DB 平台凭据。" if has_db_cookie else (
+            "计划任务已启动，按配置每隔一定间隔执行。" if not has_cookie_override else "计划任务已启动，当前使用页面里选择的 Cookie。"
+        ),
         "scheduler": scheduler_status(),
     }
 
@@ -224,18 +227,20 @@ def trigger_once(cookie_override=None):
             "message": "未找到系统计划配置，请先保存配置。",
             "config": config,
         }
-    if not cookie_override and not config.get("cookie_env_configured"):
+    has_db_cookie = bool(config.get("cookie_db_configured"))
+    effective_cookie_override = cookie_override if not has_db_cookie else None
+    if not effective_cookie_override and not config.get("cookie_env_configured"):
         return {
             "queued": False,
             "skipped": True,
             "reason": "missing_cookie_env",
-            "message": f"当前既没有传入 Cookie，也未配置环境变量 {COOKIE_ENV_NAME}。",
+            "message": "未找到可用的知识星球同步凭据，请先在平台凭据管理里保存 zsxq.sync Cookie。",
             "config": config,
         }
 
     extra_env = {}
-    if cookie_override:
-        extra_env[COOKIE_OVERRIDE_ENV_NAME] = cookie_override.strip()
+    if effective_cookie_override:
+        extra_env[COOKIE_OVERRIDE_ENV_NAME] = effective_cookie_override.strip()
 
     process = subprocess.run(
         [
@@ -343,6 +348,9 @@ def scheduler_status():
     if not log_path:
         log_path = str(LOG_PATH)
     next_run = _guess_next_run(config, started_at)
+    cookie_source = config.get("cookie_source_mode")
+    if not cookie_source and isinstance(pid_info, dict):
+        cookie_source = pid_info.get("cookie_source")
 
     return {
         "exists": bool(running or config.get("exists")),
@@ -351,8 +359,8 @@ def scheduler_status():
         "started_at": started_at,
         "alive": alive,
         "log_path": log_path,
-        "cookie_source": pid_info.get("cookie_source") if isinstance(pid_info, dict) else None,
-        "cookie_override_active": bool(isinstance(pid_info, dict) and pid_info.get("cookie_source") == "page"),
+        "cookie_source": cookie_source,
+        "cookie_override_active": cookie_source == "page",
         "next_run": next_run,
         "config": config,
         "interval_minutes": config.get("interval_minutes"),

@@ -1,23 +1,41 @@
+import base64
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from services.gemini_browser import GeminiBrowserOptions, GeminiBrowserWorker, _looks_like_page_shell_text
+from services.gemini_browser import (
+    GeminiBrowserOptions,
+    GeminiBrowserWorker,
+    _clear_stale_singleton_files,
+    _looks_like_page_shell_text,
+    _looks_like_singleton_launch_error,
+    _promptless_submit_confirmed,
+    _submit_state_summary,
+    _upload_is_ready,
+)
 from services.mp3_video_workflow import (
+    DEFAULT_GEMINI_INITIAL_PROMPT,
     DEFAULT_SPEED,
     PLANNER_VERSION,
+    Mp3VideoWorkflowError,
+    VISUAL_ARTIFACT_EXPECTED_SIZES,
     VISUAL_ARTIFACT_KEYS,
     VISUAL_ARTIFACT_VERSION,
+    _child_id_from_result,
+    _is_retryable_gemini_error,
     _visual_artifacts_ready,
+    _write_data_url,
     audio_segment_from_plan,
     draw_audio_background,
     draw_closed_door_cover,
     draw_finance_cover,
     fallback_plan,
     gemini_options_from_env,
+    initial_gemini_prompt,
     validate_plan,
 )
 
@@ -91,8 +109,7 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
             artifacts = {}
             for key in VISUAL_ARTIFACT_KEYS:
                 path = os.path.join(tmpdir, f"{key}.jpg")
-                with open(path, "wb") as handle:
-                    handle.write(b"ok")
+                Image.new("RGB", VISUAL_ARTIFACT_EXPECTED_SIZES[key], "white").save(path)
                 artifacts[key] = {"path": path, "template_version": VISUAL_ARTIFACT_VERSION}
 
             self.assertTrue(_visual_artifacts_ready(artifacts))
@@ -105,11 +122,20 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
             artifacts = {}
             for key in VISUAL_ARTIFACT_KEYS:
                 path = os.path.join(tmpdir, f"{key}.jpg")
-                with open(path, "wb") as handle:
-                    handle.write(b"ok")
+                Image.new("RGB", VISUAL_ARTIFACT_EXPECTED_SIZES[key], "white").save(path)
                 artifacts[key] = {"path": path, "template_version": "old"}
 
             self.assertFalse(_visual_artifacts_ready(artifacts))
+
+    def test_write_data_url_rejects_wrong_image_size(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source.png"
+            output = Path(tmpdir) / "output.png"
+            Image.new("RGB", (64, 64), "white").save(source)
+            data_url = "data:image/png;base64," + base64.b64encode(source.read_bytes()).decode("ascii")
+
+            with self.assertRaises(Mp3VideoWorkflowError):
+                _write_data_url(data_url, str(output), expected_size=(1280, 720), label="test")
 
     def test_gemini_response_detection_rejects_page_shell(self):
         shell_text = (
@@ -118,10 +144,16 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             worker = GeminiBrowserWorker(GeminiBrowserOptions(user_data_dir=tmpdir))
+            valid_response = (
+                "这份音频的核心结论是 AI 算力资产被系统性低估。报告先解释需求端的训练和推理增长，"
+                "再讨论供给端的数据中心、电力、网络和芯片约束，最后给出市场可能重新定价的路径，"
+                "整体内容具有明确观点、事实链条和可用于视频策划的结构化信息。并且包含足够长的正文，"
+                "用于区分真实回答和页面外壳。"
+            )
 
             self.assertTrue(_looks_like_page_shell_text(shell_text))
             self.assertFalse(worker._looks_like_response(shell_text, ""))
-            self.assertTrue(worker._looks_like_response("这份音频的核心结论是 AI 算力资产被系统性低估。", ""))
+            self.assertTrue(worker._looks_like_response(valid_response, ""))
 
     def test_mp3_gemini_defaults_wait_for_long_audio(self):
         with patch.dict(os.environ, {
@@ -134,6 +166,80 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertGreaterEqual(options.response_timeout_seconds, 900)
         self.assertGreaterEqual(options.image_timeout_seconds, 900)
         self.assertGreaterEqual(options.total_timeout_seconds, 2400)
+
+    def test_mp3_gemini_initial_prompt_is_never_empty(self):
+        self.assertEqual(initial_gemini_prompt({}), DEFAULT_GEMINI_INITIAL_PROMPT)
+        self.assertEqual(initial_gemini_prompt({"gemini_prompt": "请处理这个音频"}), "请处理这个音频")
+
+    def test_mp3_gemini_retryable_error_classification(self):
+        self.assertTrue(_is_retryable_gemini_error("等待 Gemini 生成图片超时"))
+        self.assertTrue(_is_retryable_gemini_error("页面自动化超时: Locator.click: Timeout 10000ms exceeded"))
+        self.assertTrue(_is_retryable_gemini_error("Gemini 提示词未成功提交: 未找到 Gemini 发送按钮"))
+        self.assertFalse(_is_retryable_gemini_error("音频文件不存在: demo.mp3"))
+
+    def test_gemini_upload_ready_accepts_enabled_submit_button(self):
+        self.assertTrue(_upload_is_ready({"hasName": False, "busy": False, "canceled": False, "enabledSend": True}))
+        self.assertTrue(_upload_is_ready({"hasName": True, "busy": False, "canceled": False, "enabledSend": False}))
+        self.assertFalse(_upload_is_ready({"hasName": True, "busy": True, "canceled": False, "enabledSend": True}))
+        self.assertFalse(_upload_is_ready({"hasName": False, "busy": False, "canceled": False, "enabledSend": False}))
+
+    def test_promptless_submit_wait_does_not_treat_ready_button_as_submitted(self):
+        self.assertFalse(_promptless_submit_confirmed({"enabledSend": True}, "", generating=False))
+        self.assertFalse(_promptless_submit_confirmed({"enabledSend": False}, "", generating=False))
+        self.assertTrue(_promptless_submit_confirmed({"enabledSend": False}, "", generating=False, clicked_send=True))
+        self.assertTrue(_promptless_submit_confirmed({"enabledSend": True}, "", generating=True))
+        self.assertFalse(_promptless_submit_confirmed({"enabledSend": False}, "还在输入框里", generating=False, clicked_send=True))
+
+    def test_submit_state_summary_keeps_compact_diagnostics(self):
+        summary = _submit_state_summary(
+            {"hasName": True, "busy": False, "canceled": False, "enabledSend": False, "sendButtonCount": 0},
+            "还在输入框里",
+        )
+
+        self.assertIn("enabledSend=False", summary)
+        self.assertIn("sendButtonCount=0", summary)
+        self.assertIn("composer_chars=6", summary)
+
+    def test_stale_gemini_singleton_files_are_cleared(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_dir = Path(tmpdir)
+            for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                (profile_dir / name).write_text("stale", encoding="utf-8")
+
+            cleared = _clear_stale_singleton_files(profile_dir, "host-99999999（pid 99999999 未运行/疑似残留）")
+
+            self.assertTrue(cleared)
+            self.assertFalse((profile_dir / "SingletonLock").exists())
+            self.assertFalse((profile_dir / "SingletonCookie").exists())
+            self.assertFalse((profile_dir / "SingletonSocket").exists())
+
+    def test_running_gemini_singleton_files_are_not_cleared(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_dir = Path(tmpdir)
+            lock_path = profile_dir / "SingletonLock"
+            lock_path.write_text("active", encoding="utf-8")
+
+            cleared = _clear_stale_singleton_files(profile_dir, f"host-{os.getpid()}（pid {os.getpid()} 运行中）")
+
+            self.assertFalse(cleared)
+            self.assertTrue(lock_path.exists())
+
+    def test_singleton_launch_error_detection_is_specific(self):
+        self.assertTrue(_looks_like_singleton_launch_error("Failed to create /tmp/profile/SingletonLock: File exists"))
+        self.assertTrue(_looks_like_singleton_launch_error("Failed to create a ProcessSingleton for your profile directory. Aborting now"))
+        self.assertFalse(_looks_like_singleton_launch_error("Target page, context or browser has been closed"))
+
+    def test_video_child_id_can_be_recovered_for_deferred_resume(self):
+        result = {
+            "children": {
+                "vertical_video": {
+                    "job_id": "child-vertical",
+                    "status": "processing",
+                }
+            }
+        }
+
+        self.assertEqual(_child_id_from_result(result, "vertical_video"), "child-vertical")
 
 
 if __name__ == "__main__":

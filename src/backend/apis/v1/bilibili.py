@@ -1,4 +1,3 @@
-import os
 import asyncio
 import logging
 import threading
@@ -48,10 +47,10 @@ def get_status():
             logger.info(f"Checking Bili Credentials: SESSDATA={'Set' if cred.sessdata else 'Missing'}, JCT={'Set' if cred.bili_jct else 'Missing'}")
             
             if not (cred.sessdata and cred.bili_jct):
-                 return {'configured': False, 'message': 'Missing credentials in environment'}
+                 return {'configured': False, 'message': 'Missing Bilibili credential in DB'}
             
             # Fetch user info
-            u = user.User(credential=cred, uid=int(os.environ.get('BILI_DEDEUSERID', 0)))
+            u = user.User(credential=cred, uid=int(service.uploader.dedeuserid or 0))
             # If UID is not set, we might need to fetch 'get_self_info' but User requires uid?
             # actually user.get_self_info() is a method on User class but needs an instance or check API.
             # 'get_self_info' is a static/class method or requires an instance? 
@@ -90,7 +89,7 @@ def get_seasons():
             if not (cred.sessdata and cred.bili_jct):
                  return []
             
-            u = user.User(credential=cred, uid=int(os.environ.get('BILI_DEDEUSERID', 0)))
+            u = user.User(credential=cred, uid=int(service.uploader.dedeuserid or 0))
             channels = await u.get_channels()
             
             seasons = []

@@ -160,7 +160,11 @@ class ZsxqSystemSyncTest(unittest.TestCase):
 
         with patch.object(system_sync_test, "load_config", return_value=config):
             with patch.object(system_sync_test, "_pending_system_sync_work", return_value={"pending": False}):
-                with patch.object(system_sync_test, "runtime_cookie", return_value="zsxq_access_token=token"):
+                with patch.object(
+                    system_sync_test,
+                    "runtime_cookie_info",
+                    return_value={"cookie": "zsxq_access_token=token", "credential_id": "cred-1"},
+                ):
                     with patch.object(
                         system_sync_test,
                         "_validate_group_id_with_retry",

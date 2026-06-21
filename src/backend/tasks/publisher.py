@@ -21,7 +21,7 @@ from services.video_editor import video_editor_service
 from services.thumbnail_service import thumbnail_service
 from services.bilibili.uploader import BiliUploader, DEFAULT_NEUTRAL_MARK
 from services.youtube.uploader import YouTubeUploader
-from services.config_service import ConfigService
+from services.platform_credential_service import resolve_bilibili_auth
 from config import get_config
 from sqlalchemy.orm import load_only
 
@@ -164,6 +164,9 @@ def run_publication_pipeline(self, task_id):
         task = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
         if not task:
             logger.error(f"Task {task_id} not found in DB")
+            return
+        if task.status == "canceled":
+            logger.info("Task %s is canceled before publisher start; skipping.", task_id)
             return
     
         try:
@@ -529,12 +532,16 @@ def run_publication_pipeline(self, task_id):
                     logger.error(f"❌ [UPLOAD] 找不到可上传的视频文件: {upload_path}")
                     raise FileNotFoundError(f"找不到上传视频: {upload_path}")
 
-                # 从数据库读取 B 站凭证
+                # 从平台凭据表读取 B 站凭证
+                bili_auth = resolve_bilibili_auth(
+                    account_id=bili_params.get("credential_id") or bili_params.get("platform_credential_id"),
+                    required=True,
+                )
                 uploader = BiliUploader(
-                    sessdata=ConfigService.get('sessdata', 'bilibili_auth'),
-                    bili_jct=ConfigService.get('bili_jct', 'bilibili_auth'),
-                    buvid3=ConfigService.get('buvid3', 'bilibili_auth'),
-                    dedeuserid=ConfigService.get('dedeuserid', 'bilibili_auth')
+                    sessdata=bili_auth.get('sessdata'),
+                    bili_jct=bili_auth.get('bili_jct'),
+                    buvid3=bili_auth.get('buvid3'),
+                    dedeuserid=bili_auth.get('dedeuserid')
                 )
                 
                 async def _do_upload():
@@ -565,7 +572,26 @@ def run_publication_pipeline(self, task_id):
                         )
                     )
                 
-                upload_result = asyncio.run(_do_upload())
+                try:
+                    upload_result = asyncio.run(_do_upload())
+                    try:
+                        from services.platform_credential_service import mark_credential_success
+
+                        mark_credential_success(bili_auth.get("credential_id"))
+                    except Exception:
+                        logger.exception("[PUBLISHER] Bilibili credential success mark failed")
+                except Exception as exc:
+                    try:
+                        from services.platform_credential_service import is_auth_error, mark_credential_error
+
+                        mark_credential_error(
+                            bili_auth.get("credential_id"),
+                            exc,
+                            expired=is_auth_error(exc),
+                        )
+                    except Exception:
+                        logger.exception("[PUBLISHER] Bilibili credential error mark failed")
+                    raise
                 
                 result_state = {**result_state, 'bilibili_result': upload_result}
                 task = update_task_record(task_id, result=result_state)

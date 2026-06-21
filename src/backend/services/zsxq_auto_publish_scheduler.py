@@ -22,6 +22,16 @@ PID_PATH = RUNTIME_DIR / "zsxq_auto_publish_scheduler.pid"
 LOG_PATH = PROJECT_ROOT / "logs" / "zsxq_auto_publish.log"
 
 
+def _float_env(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+STOP_GRACE_SECONDS = max(1.0, _float_env("ZSXQ_AUTO_PUBLISH_SCHEDULER_STOP_GRACE_SECONDS", 3))
+
+
 def _scheduler_env(extra=None):
     env = dict(os.environ)
     env.setdefault("PYTHONPATH", str(PROJECT_ROOT / "src" / "backend"))
@@ -95,13 +105,14 @@ def start_scheduler(cookie_override=None):
             "running": False,
             "message": f"未找到自动发帖配置，请先保存策略。配置路径：{CONFIG_PATH}",
         }
-    has_cookie_override = bool((cookie_override or "").strip())
+    has_db_cookie = bool(config.get("cookie_db_configured"))
+    has_cookie_override = bool((cookie_override or "").strip()) and not has_db_cookie
     has_cookie_pool = bool(config.get("cookie_pool_ready"))
     if not has_cookie_pool and not config.get("cookie_env_configured") and not has_cookie_override:
         return {
             "started": False,
             "running": False,
-            "message": f"未配置环境变量 {COOKIE_ENV_NAME}，且当前页面也没有传入 Cookie，无法启动自动发帖调度器。",
+            "message": "未找到可用的知识星球发帖凭据，请先在平台凭据管理里保存 zsxq.publish Cookie。",
             "scheduler": scheduler_status(),
         }
 
@@ -142,15 +153,18 @@ def start_scheduler(cookie_override=None):
         "started_at": started_at,
         "command": " ".join(command),
         "log_path": str(LOG_PATH),
-        "cookie_source": "pool" if has_cookie_pool else ("page" if has_cookie_override else "env"),
+        "cookie_source": "db" if has_db_cookie else ("pool" if has_cookie_pool else ("page" if has_cookie_override else "env")),
     })
     return {
         "started": True,
         "running": True,
         "message": (
-            "自动发帖调度器已启动，当前优先使用策略账号池。"
+            "自动发帖调度器已启动，当前使用 DB 平台凭据。"
+            if has_db_cookie
+            else ("自动发帖调度器已启动，当前优先使用策略账号池。"
             if has_cookie_pool
             else ("自动发帖调度器已启动，当前使用页面里选择的 Cookie。" if has_cookie_override else "自动发帖调度器已启动。")
+            )
         ),
         "scheduler": scheduler_status(),
     }
@@ -167,7 +181,7 @@ def stop_scheduler():
     pid = status.get("pid")
     if pid:
         _terminate_process(pid)
-    deadline = time.time() + 10
+    deadline = time.time() + STOP_GRACE_SECONDS
     while time.time() < deadline:
         if not _is_pid_running(pid):
             break
@@ -222,18 +236,20 @@ def trigger_once(cookie_override=None):
             "reason": "missing_config",
             "message": "未找到自动发帖配置，请先保存策略。",
         }
+    has_db_cookie = bool(config.get("cookie_db_configured"))
     has_cookie_pool = bool(config.get("cookie_pool_ready"))
-    if not has_cookie_pool and not cookie_override and not config.get("cookie_env_configured"):
+    effective_cookie_override = cookie_override if not has_db_cookie else None
+    if not has_cookie_pool and not effective_cookie_override and not config.get("cookie_env_configured"):
         return {
             "queued": False,
             "skipped": True,
             "reason": "missing_cookie",
-            "message": f"当前既没有传入 Cookie，也未配置环境变量 {COOKIE_ENV_NAME}。",
+            "message": "未找到可用的知识星球发帖凭据，请先在平台凭据管理里保存 zsxq.publish Cookie。",
         }
 
     extra_env = {}
-    if cookie_override:
-        extra_env[COOKIE_OVERRIDE_ENV_NAME] = cookie_override
+    if effective_cookie_override:
+        extra_env[COOKIE_OVERRIDE_ENV_NAME] = effective_cookie_override
     command = [
         sys.executable,
         str(PROJECT_ROOT / "src" / "backend" / "run_zsxq_auto_publish_scheduler.py"),
@@ -291,6 +307,15 @@ def scheduler_status():
             next_run = (datetime.now(timezone.utc) + timedelta(minutes=int(interval))).isoformat().replace("+00:00", "Z")
         except Exception:
             next_run = None
+    cookie_source = config.get("cookie_source_mode")
+    if not cookie_source:
+        cookie_source = (
+            "db"
+            if config.get("cookie_db_configured")
+            else ("pool" if config.get("cookie_pool_ready") else ("env" if config.get("cookie_env_configured") else None))
+        )
+    if not cookie_source:
+        cookie_source = pid_info.get("cookie_source")
     return {
         "running": running,
         "pid": pid,
@@ -298,8 +323,8 @@ def scheduler_status():
         "interval_minutes": interval,
         "next_run": next_run,
         "log_path": str(LOG_PATH),
-        "cookie_source": pid_info.get("cookie_source") or ("pool" if config.get("cookie_pool_ready") else ("env" if config.get("cookie_env_configured") else None)),
-        "cookie_override_active": pid_info.get("cookie_source") == "page",
+        "cookie_source": cookie_source,
+        "cookie_override_active": cookie_source == "page",
         "config": config,
         "message": "运行中" if running else "未运行",
     }

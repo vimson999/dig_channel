@@ -3,6 +3,13 @@
 This directory holds local development entrypoints for the frontend, backend, Celery worker, and scheduler.
 
 Run them from the project root or by path, for example `./scripts/dev/run-backend.sh`.
+
+Full local restart:
+
+- `./scripts/dev/restart-dev-stack.sh` 先停止 Flask 后端，再停止所有 Celery worker、Watchdog 和计划任务，最后后台启动后端；后端启动后默认补齐所有 Celery worker，但不启动 scheduler
+- `./scripts/dev/stop-backend.sh` 只停止本地 Flask 后端，默认端口 `5001`
+- `./scripts/dev/stop-all-background-jobs.sh` 只停止 Celery worker、Watchdog 和计划任务，不停止 Flask 后端
+
 For ZSXQ scheduler lifecycle:
 
 - `./scripts/dev/run-zsxq-auto-scheduler.sh` 启动 `run_zsxq_auto_scheduler.py`
@@ -25,7 +32,7 @@ Runtime configuration should come from `.env` or shell environment variables. Do
 Backend startup bootstrap:
 
 - `./scripts/dev/run-backend.sh` 默认启用 `BACKEND_PROCESS_BOOTSTRAP_ENABLED=1`
-- 默认 `BACKEND_PROCESS_BOOTSTRAP_MODE=ensure`，后端启动后只补启动缺失的 worker、Celery watchdog 和已配置的调度器；已在线的 worker 不会被重启，避免打断长任务
-- 临时强制重启全部托管进程：`BACKEND_PROCESS_BOOTSTRAP_MODE=restart ./scripts/dev/run-backend.sh`
+- 默认 `BACKEND_PROCESS_BOOTSTRAP_MODE=ensure`，后端启动后补启动缺失的托管 worker；开发默认 `DB_POOL_SIZE=1`、`DB_MAX_OVERFLOW=0`，避免把远端 PostgreSQL 连接槽打满
+- 临时强制重启托管进程：`BACKEND_PROCESS_BOOTSTRAP_MODE=restart ./scripts/dev/run-backend.sh`
 - 临时关闭自动恢复：`BACKEND_PROCESS_BOOTSTRAP_ENABLED=0 ./scripts/dev/run-backend.sh`
-- 可用 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES` 和 `BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS` 指定逗号分隔的服务列表
+- 默认托管队列是 `all`，watchdog 默认跟随 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`；默认不启动 scheduler。可用 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`、`CELERY_AUTO_HEAL_SERVICES` 和 `BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS` 指定逗号分隔的服务列表

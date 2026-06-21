@@ -12,6 +12,7 @@ from .indie_navigator import OpportunitySignal, UserOpportunityInteraction, Coll
 from .task import PublicationTask
 from .download_task import DownloadTask
 from .system_config import SystemConfig
+from .platform_credential import PlatformCredentialAccount, PlatformCredentialBinding
 from .tts import TTSArticle, TTSSegment
 from .zsxq_sync import ZsxqSyncRun, ZsxqTopic, ZsxqAttachment, ZsxqSyncCursor
 from .zsxq_workflow import ZsxqWorkflowRun
@@ -37,6 +38,8 @@ __all__ = [
     'PublicationTask',
     'DownloadTask',
     'SystemConfig',
+    'PlatformCredentialAccount',
+    'PlatformCredentialBinding',
     'TTSArticle',
     'TTSSegment',
     'ZsxqSyncRun',

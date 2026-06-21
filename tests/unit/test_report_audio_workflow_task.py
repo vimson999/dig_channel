@@ -9,9 +9,11 @@ if str(BACKEND_DIR) not in sys.path:
 
 from tasks.report_audio_workflow import (  # noqa: E402
     CURRENT_STEP_MAX_LENGTH,
+    _child_id_from_result,
     _current_step_code,
     _format_cover_subtitle,
     _format_cover_title,
+    _is_retryable_child_error,
     _publisher_script_subtitles,
     _publisher_sub_burn_enabled,
     _publisher_result_summary,
@@ -122,6 +124,26 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertEqual(subtitles[0]["start"], 0)
         self.assertEqual(subtitles[-1]["end"], 8.0)
         self.assertIn("仿制药", "".join(item["text"] for item in subtitles))
+
+    def test_gemini_browser_failures_are_retryable_but_cancel_is_not(self):
+        self.assertTrue(_is_retryable_child_error("gemini", "文件上传失败: 等待 Gemini 文件上传完成超时"))
+        self.assertTrue(_is_retryable_child_error("gemini", "页面自动化超时: Locator.click: Timeout 10000ms exceeded"))
+        self.assertTrue(_is_retryable_child_error("gemini", "Gemini 提示词未成功提交: 未找到 Gemini 发送按钮"))
+        self.assertTrue(_is_retryable_child_error("gemini", "子任务仍在执行: gemini child-1"))
+        self.assertFalse(_is_retryable_child_error("gemini", "父编排任务已取消"))
+
+    def test_publisher_child_id_can_be_recovered_for_deferred_resume(self):
+        result = {
+            "children": {
+                "publisher_video": {
+                    "job_id": "publisher-child",
+                    "status": "pending",
+                }
+            }
+        }
+
+        self.assertEqual(_child_id_from_result(result, "publisher_video"), "publisher-child")
+        self.assertLessEqual(len(_current_step_code("publisher_video_waiting")), CURRENT_STEP_MAX_LENGTH)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -83,6 +84,62 @@ class ZsxqAutoPublishServiceTest(unittest.TestCase):
         self.assertEqual(result["expected_file_count"], 8)
         append_event.assert_called_once()
         self.assertEqual(append_event.call_args.args[0], "publish_verify_pending")
+
+    def test_upload_auth_failure_rotates_to_next_cookie(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio = Path(temp_dir) / "a.mp3"
+            audio.write_bytes(b"audio")
+            rule = {
+                "id": "audio",
+                "file_type": "audio",
+                "enabled": True,
+                "source_dir": temp_dir,
+                "extensions": [".mp3"],
+                "batch_size": 1,
+                "upload_retry_count": 0,
+                "publish_verify_attempts": 1,
+                "publish_verify_delay_seconds": 0,
+            }
+            config = {"group_id": "group-1"}
+            accounts = [
+                {"id": "cookie-1", "name": "失效账号", "cookie": "bad"},
+                {"id": "cookie-2", "name": "可用账号", "cookie": "good"},
+            ]
+
+            with patch.object(auto_publish, "_append_publish_event"):
+                with patch.object(auto_publish.zsxq_service, "normalize_cookie", side_effect=lambda value: value):
+                    with patch.object(
+                        auto_publish.zsxq_service,
+                        "upload_topic_asset",
+                        side_effect=[Exception("401 Client Error: Unauthorized"), {"id": "file-1"}],
+                    ) as upload:
+                        with patch.object(
+                            auto_publish.zsxq_service,
+                            "publish_topic",
+                            return_value={"succeeded": True, "resp_data": {"topic": {"topic_id": "topic-1"}}},
+                        ):
+                            with patch.object(
+                                auto_publish.zsxq_service,
+                                "get_topic",
+                                return_value={
+                                    "succeeded": True,
+                                    "resp_data": {
+                                        "topic": {
+                                            "topic_id": "topic-1",
+                                            "talk": {"files": [{"file_id": "file-1", "name": "a.mp3"}]},
+                                        }
+                                    },
+                                },
+                            ):
+                                result = auto_publish._run_rule_batch(rule, config, accounts, {}, "run-1")
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(upload.call_count, 2)
+        self.assertEqual(result["uploaded_count"], 1)
+        self.assertEqual(result["verified_count"], 1)
+        self.assertEqual(result["cookie_attempts"][0]["status"], "retry_with_next_cookie")
+        self.assertEqual(result["cookie_attempts"][0]["auth_hint"], "认证失效")
+        self.assertEqual(result["cookie_attempts"][1]["status"], "success")
 
 
 if __name__ == "__main__":

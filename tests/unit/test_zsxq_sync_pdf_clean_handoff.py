@@ -11,6 +11,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services.zsxq_sync_service import zsxq_sync_service  # noqa: E402
+from models.zsxq_sync import ZsxqAttachment  # noqa: E402
 
 
 class ZsxqSyncPdfCleanHandoffTest(unittest.TestCase):
@@ -120,6 +121,72 @@ class ZsxqSyncPdfCleanHandoffTest(unittest.TestCase):
             self.assertIsNone(
                 zsxq_sync_service._downloaded_file_entry(record, str(tmp_path / "missing.pdf"))
             )
+
+    def test_attachment_publish_status_fallback_is_disabled_by_default(self):
+        payload = {"topic-1": [{"id": "attachment-1", "name": "report.pdf"}]}
+
+        with patch.dict("os.environ", {}, clear=True):
+            with patch.object(
+                zsxq_sync_service,
+                "_recent_publish_status_context",
+                side_effect=AssertionError("slow JSON fallback should stay disabled"),
+            ):
+                zsxq_sync_service._add_attachment_publish_statuses(payload)
+
+        self.assertNotIn("publish_status", payload["topic-1"][0])
+
+    def test_attachment_publish_status_fallback_can_be_enabled(self):
+        payload = {"topic-1": [{"id": "attachment-1", "name": "report.pdf"}]}
+        context = {
+            "status": {
+                "publish_status": "submitted",
+                "publish_task_id": "publish-1",
+                "publish_source_task_id": "clean-1",
+            },
+            "outcomes": {"by_path": {}, "by_name": {}},
+            "source_refs": [{"attachment_id": "attachment-1"}],
+        }
+
+        with patch.dict("os.environ", {"ZSXQ_ATTACHMENT_PUBLISH_FALLBACK_ENABLED": "1"}, clear=True):
+            with patch.object(zsxq_sync_service, "_recent_publish_status_context", return_value=[context]) as recent:
+                zsxq_sync_service._add_attachment_publish_statuses(payload)
+
+        recent.assert_called_once_with()
+        self.assertEqual(payload["topic-1"][0]["publish_status"], "submitted")
+        self.assertEqual(payload["topic-1"][0]["publish_task_id"], "publish-1")
+
+    def test_source_ref_with_clean_output_requires_file_level_publish_match(self):
+        status = {"publish_status": "published", "publish_task_id": "publish-1"}
+        source_ref = {
+            "attachment_id": "attachment-1",
+            "output_paths": ["/tmp/cleaned/report.pdf"],
+        }
+
+        self.assertIsNone(
+            zsxq_sync_service._status_for_source_ref(
+                source_ref,
+                status,
+                {"by_path": {}, "by_name": {}},
+            )
+        )
+
+    def test_attachment_published_without_topic_is_attention_status(self):
+        attachment = ZsxqAttachment(
+            group_id="group-1",
+            tab_id="tab-1",
+            topic_id="topic-1",
+            attachment_key="file-1",
+            name="report.pdf",
+            download_status="downloaded",
+            publish_status="published",
+            publish_topic_id=None,
+        )
+
+        payload = attachment.to_dict()
+
+        self.assertEqual(payload["publish_status"], "published_unverified")
+        self.assertFalse(payload["published"])
+        self.assertTrue(payload["publish_attention_required"])
 
 
 if __name__ == "__main__":

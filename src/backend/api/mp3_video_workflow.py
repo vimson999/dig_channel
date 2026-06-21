@@ -17,6 +17,7 @@ from services.mp3_video_workflow import (
     INFOGRAPHIC_PROMPT,
     QUEUE_NAME,
     audio_meta_from_zsxq_attachment,
+    initial_gemini_prompt,
     list_audio_assets,
     status_payload as workflow_status_payload,
 )
@@ -33,6 +34,19 @@ STATUS_MAP = {
     "failed": "failed",
     "canceled": "canceled",
 }
+SYSTEM_USER_ID = "system"
+
+
+def _visible_user_ids(current_user_or_id):
+    if hasattr(current_user_or_id, "id"):
+        raw_user_id = getattr(current_user_or_id, "id", None)
+    else:
+        raw_user_id = current_user_or_id
+    user_id = str(raw_user_id or "").strip()
+    values = {SYSTEM_USER_ID}
+    if user_id:
+        values.add(user_id)
+    return values
 
 
 @mp3_video_workflow_bp.route("/status", methods=["GET"])
@@ -62,6 +76,7 @@ def audio_assets(_current_user):
         q=(request.args.get("q") or "").strip(),
         group_id=(request.args.get("group_id") or "").strip(),
         tab_id=(request.args.get("tab_id") or "").strip(),
+        scope=(request.args.get("scope") or "all").strip(),
     )
     return jsonify({"success": True, "data": payload, "items": payload["items"]})
 
@@ -122,6 +137,7 @@ def create_job(current_user):
         return jsonify({"success": False, "message": str(exc)}), 400
 
     image_prompt = (data.get("image_prompt") or INFOGRAPHIC_PROMPT).strip()
+    gemini_prompt = initial_gemini_prompt({"gemini_prompt": data.get("gemini_prompt")})
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     task = PublicationTask(
         status="pending",
@@ -134,6 +150,7 @@ def create_job(current_user):
                 "audio_asset_id": audio_asset_id,
                 "audio": audio,
                 "gemini_url": gemini_url,
+                "gemini_prompt": gemini_prompt,
                 "image_prompt": image_prompt,
                 "metadata": metadata,
             },
@@ -176,7 +193,7 @@ def list_jobs(current_user):
     status = (request.args.get("status") or "").strip()
     query = PublicationTask.query.filter(
         PublicationTask.feature == FEATURE_NAME,
-        PublicationTask.user_id == str(getattr(current_user, "id", None)),
+        PublicationTask.user_id.in_(_visible_user_ids(current_user)),
     )
     if status:
         reverse_status = {value: key for key, value in STATUS_MAP.items()}
@@ -368,8 +385,8 @@ def _get_owned_task(current_user, job_id):
     ).get(job_id)
     if not task or (task.feature or (task.params or {}).get("feature")) != FEATURE_NAME:
         return None
-    task_user_id = task.user_id or (task.params or {}).get("user_id")
-    if str(task_user_id) != str(getattr(current_user, "id", None)):
+    task_user_id = str(task.user_id or (task.params or {}).get("user_id") or "").strip()
+    if task_user_id not in _visible_user_ids(current_user):
         return None
     return task
 
@@ -405,7 +422,7 @@ def _audio_asset_workflow_stats(asset_ids, user_id=None):
         .filter(PublicationTask.feature == FEATURE_NAME)
     )
     if user_id:
-        query = query.filter(PublicationTask.user_id == user_id)
+        query = query.filter(PublicationTask.user_id.in_(_visible_user_ids(user_id)))
 
     for row in query.order_by(PublicationTask.created_at.desc()).all():
         params = row.params if isinstance(row.params, dict) else {}
@@ -464,6 +481,8 @@ def _job_payload(task, include_raw=False):
         "infographic": infographic,
         "artifacts": artifacts,
         "children": result.get("children") or {},
+        "retry_attempts": result.get("retry_attempts") or {},
+        "retry_state": result.get("retry_state") or {},
         "landscape_video": result.get("landscape_video"),
         "vertical_video": result.get("vertical_video"),
         "logs": result.get("logs") or [],

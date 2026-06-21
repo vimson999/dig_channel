@@ -1454,7 +1454,11 @@ async function loadSystemSyncSchedulerStatus(options = {}) {
 async function loadSystemSyncBatches(groupId = syncContext().selectedGroupId, options = {}) {
     try {
         const [batchResult, configResult] = await Promise.all([
-            apiPost('/zsxq/system-sync-test/batches', { group_id: groupId || null, limit: 10 }),
+            apiPost('/zsxq/system-sync-test/batches', {
+                group_id: groupId || null,
+                limit: 10,
+                refresh: Boolean(options.refresh),
+            }),
             apiGet('/zsxq/system-sync-test/config'),
         ]);
         state.batches = batchResult?.batches || [];

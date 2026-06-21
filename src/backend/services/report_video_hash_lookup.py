@@ -21,6 +21,8 @@ def source_hashes_from_report(report):
 
 def lookup_existing_reports_by_source_hash(source_hashes=None, limit=5000):
     hashes = _normalize_hashes(source_hashes)
+    if not hashes:
+        return {}
     if _is_postgres():
         return _lookup_existing_reports_postgres(hashes, limit=limit)
     return _lookup_existing_reports_fallback(hashes, limit=limit)
@@ -47,15 +49,12 @@ def _lookup_existing_reports_postgres(hashes, *, limit):
         .outerjoin(ReportVideoTask, ReportVideoTask.id == ReportVideoReport.task_id)
         .order_by(ReportVideoReport.created_at.desc())
     )
-    if hashes:
-        query = query.filter(or_(
-            report_asset_hash.in_(hashes),
-            report_scan_hash.in_(hashes),
-            task_asset_hash.in_(hashes),
-            task_scan_hash.in_(hashes),
-        ))
-    else:
-        query = query.limit(limit)
+    query = query.filter(or_(
+        report_asset_hash.in_(hashes),
+        report_scan_hash.in_(hashes),
+        task_asset_hash.in_(hashes),
+        task_scan_hash.in_(hashes),
+    )).limit(limit)
 
     result = {}
     for row in query.all():
@@ -80,24 +79,37 @@ def _lookup_existing_reports_postgres(hashes, *, limit):
 
 def _lookup_existing_reports_fallback(hashes, *, limit):
     rows = (
-        ReportVideoReport.query
+        db.session.query(
+            ReportVideoReport.id.label("id"),
+            ReportVideoReport.task_id.label("task_id"),
+            ReportVideoReport.parse_status.label("parse_status"),
+            ReportVideoReport.ai_status.label("ai_status"),
+            ReportVideoReport.raw_meta.label("raw_meta"),
+            ReportVideoTask.status.label("task_status"),
+            ReportVideoTask.result.label("task_result"),
+        )
+        .outerjoin(ReportVideoTask, ReportVideoTask.id == ReportVideoReport.task_id)
         .order_by(ReportVideoReport.created_at.desc())
         .limit(limit)
         .all()
     )
     result = {}
     hash_set = set(hashes)
-    for report in rows:
+    for row in rows:
+        report = SimpleNamespace(
+            raw_meta=row.raw_meta,
+            task=SimpleNamespace(result=row.task_result) if row.task_result is not None else None,
+        )
         report_hashes = source_hashes_from_report(report)
         if hash_set and not hash_set.intersection(report_hashes):
             continue
         snapshot = SimpleNamespace(
-            id=report.id,
-            task_id=report.task_id,
-            parse_status=report.parse_status,
-            ai_status=report.ai_status,
-            task_status=report.task.status if report.task else None,
-            task=report.task,
+            id=row.id,
+            task_id=row.task_id,
+            parse_status=row.parse_status,
+            ai_status=row.ai_status,
+            task_status=row.task_status,
+            task=None,
         )
         for source_hash in report_hashes:
             result.setdefault(source_hash, snapshot)

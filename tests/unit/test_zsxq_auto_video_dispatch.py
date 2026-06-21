@@ -26,6 +26,25 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
             celery_monitor.BUSINESS_TASK_FEATURES["report_audio_workflow"],
         )
 
+    def test_dispatch_collects_reused_downloaded_attachment_candidates(self):
+        sync_result = {
+            "downloaded_files": [{"attachment_id": "new-pdf"}],
+            "auto_video_dispatch_files": [{"attachment_id": "reused-root"}],
+            "tabs": [
+                {
+                    "downloaded_files": [{"attachment_id": "new-pdf"}],
+                    "auto_video_dispatch_files": [
+                        {"attachment_id": "reused-tab"},
+                        {"attachment_id": "reused-root"},
+                    ],
+                }
+            ],
+        }
+
+        ids = ZsxqSyncService()._downloaded_attachment_ids_from_sync_result(sync_result)
+
+        self.assertEqual(ids, ["new-pdf", "reused-root", "reused-tab"])
+
     def test_dispatch_queues_pdf_and_mp3_workflow_tasks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)

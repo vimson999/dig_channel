@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from sqlalchemy import or_
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
 from celery_config import celery_app
@@ -33,10 +34,12 @@ logger = logging.getLogger(__name__)
 FEATURE_NAME = "mp3_video_workflow"
 QUEUE_NAME = "mp3_video_workflow"
 DEFAULT_GEMINI_URL = "https://gemini.google.com/gem/f9e84d5e215c"
+DEFAULT_GEMINI_INITIAL_PROMPT = "请基于我已上传的音频文件开始处理，严格按照当前 Gem 的既定流程输出结果。"
 DEFAULT_SPEED = 1.2
 TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
+HOT_AUDIO_DOWNLOAD_THRESHOLD = 20
 PLANNER_VERSION = "mp3_video_planner_20260618_v2"
 VISUAL_ARTIFACT_KEYS = (
     "finance_cover",
@@ -44,7 +47,100 @@ VISUAL_ARTIFACT_KEYS = (
     "xiaojunjun_cover",
     "xiaojunjun_background",
 )
-VISUAL_ARTIFACT_VERSION = "mp3_video_visuals_20260618_v3"
+VISUAL_ARTIFACT_VERSION = "mp3_video_visuals_20260618_v4"
+VISUAL_ARTIFACT_EXPECTED_SIZES = {
+    "finance_cover": (1280, 720),
+    "audio_background": (1080, 1920),
+    "xiaojunjun_cover": (1280, 720),
+    "xiaojunjun_background": (1280, 720),
+}
+GEMINI_RETRY_LIMIT_ENV_NAME = "MP3_VIDEO_GEMINI_RETRY_LIMIT"
+DEFAULT_GEMINI_RETRY_LIMIT = 2
+RETRYABLE_GEMINI_ERROR_FRAGMENTS = (
+    "超时",
+    "timeout",
+    "timed out",
+    "文件上传失败",
+    "上传完成超时",
+    "上传被取消",
+    "提示词未成功提交",
+    "未成功提交",
+    "发送按钮",
+    "等待 Gemini",
+    "等待第一轮",
+    "生成图片超时",
+    "页面自动化超时",
+    "Locator.click",
+    "Target closed",
+    "Browser closed",
+    "Protocol error",
+    "net::ERR",
+)
+NON_RETRYABLE_GEMINI_ERROR_FRAGMENTS = (
+    "任务不存在",
+    "音频文件不存在",
+    "父编排任务已取消",
+)
+TASK_WORKFLOW_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.feature,
+    PublicationTask.user_id,
+    PublicationTask.created_at,
+    PublicationTask.completed_at,
+)
+TASK_RESULT_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.result,
+)
+TASK_PROGRESS_RESULT_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.result,
+)
+TASK_STATUS_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+)
+TASK_PUBLIC_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.feature,
+    PublicationTask.created_at,
+    PublicationTask.completed_at,
+)
+TASK_FAIL_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.completed_at,
+)
+TASK_NOTIFICATION_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.created_at,
+    PublicationTask.completed_at,
+)
 
 INFOGRAPHIC_PROMPT = (
     "根据以上内容\n"
@@ -59,8 +155,24 @@ class Mp3VideoWorkflowError(RuntimeError):
     pass
 
 
+class ChildTaskStillRunning(RuntimeError):
+    def __init__(self, label: str, child_id: str, status: str = "", step: str = ""):
+        self.label = label
+        self.child_id = child_id
+        self.status = status
+        self.step = step
+        super().__init__(f"子任务仍在执行: {label} {child_id} ({status or '-'} / {step or '-'})")
+
+
 def project_root() -> Path:
     return Path(__file__).resolve().parents[3]
+
+
+def _load_task(task_id: Any, *columns: Any) -> Optional[PublicationTask]:
+    query = PublicationTask.query
+    if columns:
+        query = query.options(load_only(*columns))
+    return query.get(str(task_id))
 
 
 def storage_dir_for_job(job_id: str, created_at: Optional[datetime] = None) -> Path:
@@ -102,6 +214,14 @@ def gemini_options_from_env() -> GeminiBrowserOptions:
     return options
 
 
+def initial_gemini_prompt(workflow: Optional[Dict[str, Any]] = None) -> str:
+    workflow = workflow if isinstance(workflow, dict) else {}
+    prompt = str(workflow.get("gemini_prompt") or "").strip()
+    if prompt:
+        return prompt
+    return _env("MP3_VIDEO_GEMINI_INITIAL_PROMPT", "GEMINI_MP3_VIDEO_INITIAL_PROMPT", DEFAULT_GEMINI_INITIAL_PROMPT).strip()
+
+
 def list_audio_assets(
     *,
     page: int = 1,
@@ -109,12 +229,14 @@ def list_audio_assets(
     q: str = "",
     group_id: str = "",
     tab_id: str = "",
+    scope: str = "all",
 ) -> Dict[str, Any]:
     page = max(1, int(page or 1))
     per_page = max(1, min(int(per_page or 30), 100))
     q = (q or "").strip()
     group_id = (group_id or "").strip()
     tab_id = (tab_id or "").strip()
+    scope = (scope or "all").strip().lower()
 
     topic_join = (
         (ZsxqTopic.group_id == ZsxqAttachment.group_id)
@@ -142,6 +264,8 @@ def list_audio_assets(
         .filter(ZsxqAttachment.local_path.isnot(None))
         .filter(_audio_asset_filter())
     )
+    if scope in {"hot", "popular"}:
+        query = query.filter(ZsxqAttachment.download_count >= HOT_AUDIO_DOWNLOAD_THRESHOLD)
     if group_id:
         query = query.filter(ZsxqAttachment.group_id == group_id)
     if tab_id:
@@ -187,6 +311,8 @@ def list_audio_assets(
             "has_more": len(valid_items) > end or scanned >= scan_limit,
             "skipped_missing": skipped_missing,
             "scanned": scanned,
+            "scope": "hot" if scope in {"hot", "popular"} else "all",
+            "hot_download_threshold": HOT_AUDIO_DOWNLOAD_THRESHOLD,
         },
     }
 
@@ -234,7 +360,7 @@ def audio_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
 
 
 def process_job(task_id: str) -> bool:
-    task = PublicationTask.query.get(task_id)
+    task = _load_task(task_id, *TASK_WORKFLOW_COLUMNS)
     if not task:
         raise Mp3VideoWorkflowError(f"MP3 视频编排任务不存在: {task_id}")
     if not isinstance(task.params, dict) or task.params.get("feature") != FEATURE_NAME:
@@ -268,23 +394,13 @@ def process_job(task_id: str) -> bool:
                 "infographic": _public_artifact(infographic, "Gemini 横向信息图"),
             })
         else:
-            _emit(task.id, "gemini_upload_audio", 8, "上传 MP3 到 Gemini Gem 并等待第一轮返回")
             _queue_notification(task.id, "mp3_video_gemini_started", "上传 MP3 到 Gemini Gem 并等待第一轮返回")
-            gemini_result = GeminiBrowserWorker(gemini_options_from_env()).generate_from_file(
-                job_id=task.id,
-                file_path=str(audio_path),
+            gemini_result = _generate_gemini_with_retries(
+                task_id=task.id,
+                audio_path=audio_path,
                 output_path=gemini_result_path,
-                prompt="",
-                target_url=(workflow.get("gemini_url") or DEFAULT_GEMINI_URL),
-                image_followup_prompt=(workflow.get("image_prompt") or INFOGRAPHIC_PROMPT),
+                workflow=workflow,
                 image_output_path=image_path,
-                progress_callback=lambda event: _emit(
-                    task.id,
-                    f"gemini_{event.get('step') or 'running'}",
-                    min(54, 8 + int((event.get("progress") or 0) * 0.46)),
-                    event.get("message") or "Gemini 自动化执行中",
-                    result=event.get("result"),
-                ),
             )
             first_response = gemini_result.get("initial_response_text") or gemini_result.get("response_text") or ""
             infographic = gemini_result.get("image") or {"path": image_path}
@@ -331,18 +447,23 @@ def process_job(task_id: str) -> bool:
                 _record_child(task.id, "landscape_video", landscape_task)
             _update_result(task.id, {"landscape_video": landscape_summary})
         else:
-            _emit(task.id, "submit_landscape_video", 78, "提交小君君横屏视频合成任务")
-            landscape_task = create_publisher_video_task(
-                parent_id=task.id,
-                user_id=user_id,
-                audio=audio,
-                plan=plan,
-                image_path=artifacts["xiaojunjun_background"]["path"],
-                role="xiaojunjun_landscape",
-                aspect_ratio="16:9",
-            )
-            _record_child(task.id, "landscape_video", landscape_task)
-            _queue_notification(task.id, "mp3_video_landscape_submitted", "小君君横屏视频合成任务已提交")
+            landscape_task = _active_child_from_result(existing, "landscape_video")
+            if landscape_task:
+                _emit(task.id, "landscape_video_wait_existing", 80, "继续等待已提交的小君君横屏视频")
+                _record_child(task.id, "landscape_video", landscape_task)
+            else:
+                _emit(task.id, "submit_landscape_video", 78, "提交小君君横屏视频合成任务")
+                landscape_task = create_publisher_video_task(
+                    parent_id=task.id,
+                    user_id=user_id,
+                    audio=audio,
+                    plan=plan,
+                    image_path=artifacts["xiaojunjun_background"]["path"],
+                    role="xiaojunjun_landscape",
+                    aspect_ratio="16:9",
+                )
+                _record_child(task.id, "landscape_video", landscape_task)
+                _queue_notification(task.id, "mp3_video_landscape_submitted", "小君君横屏视频合成任务已提交")
             landscape_task = _wait_child(task.id, landscape_task.id, "landscape_video", start_progress=80, end_progress=90)
             if landscape_task.status != "completed":
                 raise RuntimeError(f"横屏视频子任务失败: {landscape_task.error_message or (landscape_task.result or {}).get('error')}")
@@ -358,18 +479,23 @@ def process_job(task_id: str) -> bool:
                 _record_child(task.id, "vertical_video", vertical_task)
             _update_result(task.id, {"vertical_video": vertical_summary})
         else:
-            _emit(task.id, "submit_vertical_video", 91, "提交此刻此声竖屏视频合成任务")
-            vertical_task = create_publisher_video_task(
-                parent_id=task.id,
-                user_id=user_id,
-                audio=audio,
-                plan=plan,
-                image_path=artifacts["audio_background"]["path"],
-                role="ciketc_vertical",
-                aspect_ratio="9:16",
-            )
-            _record_child(task.id, "vertical_video", vertical_task)
-            _queue_notification(task.id, "mp3_video_vertical_submitted", "此刻此声竖屏视频合成任务已提交")
+            vertical_task = _active_child_from_result(existing, "vertical_video")
+            if vertical_task:
+                _emit(task.id, "vertical_video_wait_existing", 92, "继续等待已提交的此刻此声竖屏视频")
+                _record_child(task.id, "vertical_video", vertical_task)
+            else:
+                _emit(task.id, "submit_vertical_video", 91, "提交此刻此声竖屏视频合成任务")
+                vertical_task = create_publisher_video_task(
+                    parent_id=task.id,
+                    user_id=user_id,
+                    audio=audio,
+                    plan=plan,
+                    image_path=artifacts["audio_background"]["path"],
+                    role="ciketc_vertical",
+                    aspect_ratio="9:16",
+                )
+                _record_child(task.id, "vertical_video", vertical_task)
+                _queue_notification(task.id, "mp3_video_vertical_submitted", "此刻此声竖屏视频合成任务已提交")
             vertical_task = _wait_child(task.id, vertical_task.id, "vertical_video", start_progress=92, end_progress=99)
             if vertical_task.status != "completed":
                 raise RuntimeError(f"竖屏视频子任务失败: {vertical_task.error_message or (vertical_task.result or {}).get('error')}")
@@ -378,7 +504,7 @@ def process_job(task_id: str) -> bool:
         _queue_notification(task.id, "mp3_video_vertical_completed", "此刻此声竖屏视频已完成")
 
         output_path = storage_path_for_job(task.id, created_at)
-        fresh = PublicationTask.query.get(task.id)
+        fresh = _load_task(task.id, *TASK_RESULT_COLUMNS)
         final_result = dict(fresh.result or {})
         final_result.update({
             "output_path": output_path,
@@ -405,10 +531,129 @@ def process_job(task_id: str) -> bool:
         db.session.commit()
         _queue_notification(task.id, "mp3_video_completed", "MP3 视频编排完成，横屏和竖屏视频均已生成")
         return True
+    except ChildTaskStillRunning as exc:
+        _defer_parent_retry(task_id, exc)
+        logger.info("MP3 video workflow deferred: %s", exc)
+        return True
     except Exception as exc:
         mark_job_failed_safely(task_id, str(exc), notify=True)
         logger.error("MP3 video workflow failed: %s", exc, exc_info=True)
         return False
+
+
+def _generate_gemini_with_retries(
+    *,
+    task_id: str,
+    audio_path: Path,
+    output_path: str,
+    workflow: Dict[str, Any],
+    image_output_path: str,
+) -> Dict[str, Any]:
+    retry_limit = _retry_limit(GEMINI_RETRY_LIMIT_ENV_NAME, DEFAULT_GEMINI_RETRY_LIMIT)
+    max_attempts = retry_limit + 1
+    last_error = None
+
+    for attempt in range(1, max_attempts + 1):
+        retry_suffix = "" if attempt == 1 else f"（自动重试 {attempt - 1}/{retry_limit}）"
+        _emit(task_id, "gemini_upload_audio", 10, f"上传 MP3 到 Gemini Gem 并等待第一轮返回{retry_suffix}")
+        _record_retry_attempt(task_id, "gemini", attempt, max_attempts, "running")
+
+        def progress_callback(event: Dict[str, Any]) -> None:
+            message = event.get("message") or "Gemini 自动化执行中"
+            if attempt > 1:
+                message = f"第 {attempt}/{max_attempts} 次尝试：{message}"
+            _emit(
+                task_id,
+                f"gemini_{event.get('step') or 'running'}",
+                min(54, 8 + int((event.get("progress") or 0) * 0.46)),
+                message,
+                result=event.get("result"),
+            )
+
+        try:
+            gemini_result = GeminiBrowserWorker(gemini_options_from_env()).generate_from_file(
+                job_id=task_id,
+                file_path=str(audio_path),
+                output_path=output_path,
+                prompt=initial_gemini_prompt(workflow),
+                target_url=(workflow.get("gemini_url") or DEFAULT_GEMINI_URL),
+                image_followup_prompt=(workflow.get("image_prompt") or INFOGRAPHIC_PROMPT),
+                image_output_path=image_output_path,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            last_error = str(exc)
+            _record_retry_attempt(task_id, "gemini", attempt, max_attempts, "failed", error=last_error)
+            if attempt < max_attempts and _is_retryable_gemini_error(last_error):
+                _emit(
+                    task_id,
+                    "gemini_retry",
+                    8,
+                    f"Gemini 自动化失败，准备自动重试 {attempt}/{retry_limit}: {_compact_error(last_error)}",
+                )
+                continue
+            raise
+
+        _record_retry_attempt(task_id, "gemini", attempt, max_attempts, "completed")
+        return gemini_result
+
+    raise Mp3VideoWorkflowError(f"Gemini 自动化失败: {last_error or '未知错误'}")
+
+
+def _record_retry_attempt(
+    task_id: str,
+    label: str,
+    attempt: int,
+    max_attempts: int,
+    status: str,
+    *,
+    error: Optional[str] = None,
+) -> None:
+    fresh = _load_task(task_id, *TASK_RESULT_COLUMNS)
+    if not fresh:
+        return
+    result = dict(fresh.result or {})
+    attempts = dict(result.get("retry_attempts") or {})
+    items = list(attempts.get(label) or [])
+    updated_at = datetime.utcnow().isoformat() + "Z"
+    entry = {
+        "attempt": int(attempt or 1),
+        "max_attempts": int(max_attempts or 1),
+        "status": status,
+        "error": error,
+        "updated_at": updated_at,
+    }
+    items = [item for item in items if int(item.get("attempt") or 0) != int(attempt or 1)]
+    items.append(entry)
+    attempts[label] = items[-int(max_attempts or 1):]
+    result["retry_attempts"] = attempts
+    retry_state = dict(result.get("retry_state") or {})
+    retry_state[label] = entry
+    result["retry_state"] = retry_state
+    fresh.result = result
+    flag_modified(fresh, "result")
+    db.session.commit()
+
+
+def _is_retryable_gemini_error(message: Any) -> bool:
+    text = str(message or "")
+    if not text:
+        return False
+    lower_text = text.lower()
+    if any(fragment.lower() in lower_text for fragment in NON_RETRYABLE_GEMINI_ERROR_FRAGMENTS):
+        return False
+    return any(fragment.lower() in lower_text for fragment in RETRYABLE_GEMINI_ERROR_FRAGMENTS)
+
+
+def _retry_limit(env_name: str, default: int) -> int:
+    return max(0, min(_int_env(env_name, default), 5))
+
+
+def _compact_error(message: Any, limit: int = 180) -> str:
+    text = re.sub(r"\s+", " ", str(message or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
 
 
 def plan_from_first_response(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, Any]:
@@ -576,6 +821,7 @@ def generate_visual_artifacts_with_browser(
             function_name="renderWorkflowFinanceCover",
             payload=_finance_cover_payload(plan),
             output_path=finance_cover,
+            expected_size=VISUAL_ARTIFACT_EXPECTED_SIZES["finance_cover"],
         )
         _render_canvas_artifact(
             context,
@@ -583,6 +829,7 @@ def generate_visual_artifacts_with_browser(
             function_name="renderWorkflowThumbnail",
             payload=_audio_background_payload(plan, infographic_data_url),
             output_path=audio_background,
+            expected_size=VISUAL_ARTIFACT_EXPECTED_SIZES["audio_background"],
         )
         _render_canvas_artifact(
             context,
@@ -590,6 +837,7 @@ def generate_visual_artifacts_with_browser(
             function_name="renderWorkflowClosedDoorCover",
             payload=_closed_door_payload(plan, include_date=True),
             output_path=xiaojunjun_cover,
+            expected_size=VISUAL_ARTIFACT_EXPECTED_SIZES["xiaojunjun_cover"],
         )
         _render_canvas_artifact(
             context,
@@ -597,6 +845,7 @@ def generate_visual_artifacts_with_browser(
             function_name="renderWorkflowClosedDoorCover",
             payload=_closed_door_payload(plan, include_date=False),
             output_path=xiaojunjun_background,
+            expected_size=VISUAL_ARTIFACT_EXPECTED_SIZES["xiaojunjun_background"],
         )
 
     return {
@@ -617,9 +866,10 @@ def _cover_browser_context():
         def __enter__(self):
             self._playwright = sync_playwright().start()
             headless = _bool_env("MP3_VIDEO_COVER_BROWSER_HEADLESS", True)
+            args = ["--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox"]
             kwargs = {
                 "headless": headless,
-                "args": ["--disable-dev-shm-usage", "--no-sandbox"],
+                "args": args,
             }
             chrome_path = _cover_chrome_executable_path()
             chrome_channel = _env(
@@ -633,10 +883,7 @@ def _cover_browser_context():
                 kwargs["channel"] = chrome_channel
             else:
                 kwargs["channel"] = "chrome"
-            if headless and (chrome_path or kwargs.get("channel")):
-                kwargs["headless"] = False
-                kwargs["args"].append("--headless=new")
-            self._browser = self._playwright.chromium.launch(**kwargs)
+            self._browser = _launch_cover_browser(self._playwright.chromium, kwargs)
             self._context = self._browser.new_context(
                 viewport={"width": 1440, "height": 1000},
                 device_scale_factor=1,
@@ -654,6 +901,29 @@ def _cover_browser_context():
                     self._playwright.stop()
 
     return _ContextManager()
+
+
+def _launch_cover_browser(chromium, kwargs: Dict[str, Any]):
+    attempts = [dict(kwargs)]
+    if kwargs.get("executable_path"):
+        chrome_channel = dict(kwargs)
+        chrome_channel.pop("executable_path", None)
+        chrome_channel["channel"] = "chrome"
+        attempts.append(chrome_channel)
+    if kwargs.get("executable_path") or kwargs.get("channel"):
+        fallback = dict(kwargs)
+        fallback.pop("executable_path", None)
+        fallback.pop("channel", None)
+        attempts.append(fallback)
+
+    errors = []
+    for index, attempt in enumerate(attempts, start=1):
+        try:
+            return chromium.launch(**attempt)
+        except Exception as exc:
+            target = attempt.get("executable_path") or attempt.get("channel") or "bundled-chromium"
+            errors.append(f"{index}:{target}: {str(exc).splitlines()[0]}")
+    raise Mp3VideoWorkflowError(f"封面生成浏览器启动失败: {' | '.join(errors)}")
 
 
 def _cover_chrome_executable_path() -> str:
@@ -677,27 +947,36 @@ def _cover_chrome_executable_path() -> str:
     return ""
 
 
-def _render_canvas_artifact(context, *, page_name: str, function_name: str, payload: Dict[str, Any], output_path: str) -> None:
+def _render_canvas_artifact(
+    context,
+    *,
+    page_name: str,
+    function_name: str,
+    payload: Dict[str, Any],
+    output_path: str,
+    expected_size: Optional[Tuple[int, int]] = None,
+) -> None:
     page = context.new_page()
     try:
-        _goto_frontend_page(page, page_name)
-        page.wait_for_function(f"() => typeof window.{function_name} === 'function'")
-        result = page.evaluate(f"(payload) => window.{function_name}(payload)", payload)
-        data_url = result.get("dataUrl") if isinstance(result, dict) else None
-        _write_data_url(data_url, output_path)
+        last_error: Optional[Exception] = None
+        for url in _frontend_page_urls(page_name):
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=_int_env("MP3_VIDEO_COVER_PAGE_TIMEOUT_MS", 25000))
+                page.wait_for_function(f"() => typeof window.{function_name} === 'function'")
+                result = page.evaluate(f"(payload) => window.{function_name}(payload)", payload)
+                data_url = result.get("dataUrl") if isinstance(result, dict) else None
+                returned_size = _canvas_result_size(result)
+                if expected_size and returned_size and returned_size != expected_size:
+                    raise Mp3VideoWorkflowError(
+                        f"前端封面生成器返回尺寸异常: {page_name} {returned_size[0]}x{returned_size[1]}，期望 {expected_size[0]}x{expected_size[1]}"
+                    )
+                _write_data_url(data_url, output_path, expected_size=expected_size, label=page_name)
+                return
+            except Exception as exc:
+                last_error = exc
+        raise Mp3VideoWorkflowError(f"无法调用前端封面页面 {page_name} / {function_name}: {last_error}")
     finally:
         page.close()
-
-
-def _goto_frontend_page(page, page_name: str) -> str:
-    last_error: Optional[Exception] = None
-    for url in _frontend_page_urls(page_name):
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=_int_env("MP3_VIDEO_COVER_PAGE_TIMEOUT_MS", 25000))
-            return url
-        except Exception as exc:
-            last_error = exc
-    raise Mp3VideoWorkflowError(f"无法打开前端封面页面 {page_name}: {last_error}")
 
 
 def _frontend_page_urls(page_name: str) -> List[str]:
@@ -709,6 +988,17 @@ def _frontend_page_urls(page_name: str) -> List[str]:
     if local_path.exists():
         urls.append(local_path.resolve().as_uri())
     return urls
+
+
+def _canvas_result_size(result: Any) -> Optional[Tuple[int, int]]:
+    if not isinstance(result, dict):
+        return None
+    try:
+        width = int(result.get("width") or 0)
+        height = int(result.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    return (width, height) if width > 0 and height > 0 else None
 
 
 def _finance_cover_payload(plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -775,12 +1065,27 @@ def _closed_door_reference_data_url() -> str:
     return _image_data_url(str(path)) if path.exists() else ""
 
 
-def _write_data_url(data_url: Optional[str], output_path: str) -> None:
+def _write_data_url(
+    data_url: Optional[str],
+    output_path: str,
+    *,
+    expected_size: Optional[Tuple[int, int]] = None,
+    label: str = "前端封面生成器",
+) -> None:
     if not data_url or "," not in data_url:
         raise Mp3VideoWorkflowError("前端封面生成器未返回有效图片")
-    _, encoded = data_url.split(",", 1)
+    header, encoded = data_url.split(",", 1)
+    if not header.lower().startswith("data:image/"):
+        raise Mp3VideoWorkflowError(f"{label} 返回的不是图片 dataURL")
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(output_path).write_bytes(base64.b64decode(encoded))
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise Mp3VideoWorkflowError(f"{label} 返回的图片 dataURL 无法解码") from exc
+    Path(output_path).write_bytes(payload)
+    if not _image_file_ready(output_path, expected_size=expected_size):
+        expected = f"，期望 {expected_size[0]}x{expected_size[1]}" if expected_size else ""
+        raise Mp3VideoWorkflowError(f"{label} 生成的图片不可用或尺寸异常{expected}: {output_path}")
 
 
 def create_publisher_video_task(
@@ -793,6 +1098,10 @@ def create_publisher_video_task(
     role: str,
     aspect_ratio: str,
 ) -> PublicationTask:
+    existing = _find_existing_publisher_video_task(parent_id, role=role, aspect_ratio=aspect_ratio)
+    if existing:
+        return existing
+
     audio_segment = audio_segment_from_plan(audio, plan)
     title = plan.get("title") or "MP3 视频编排"
     subtitle_y = 84 if aspect_ratio == "9:16" else 86
@@ -852,6 +1161,78 @@ def create_publisher_video_task(
     child.celery_task_id = async_result.id
     db.session.commit()
     return child
+
+
+def _find_existing_publisher_video_task(parent_id: str, *, role: str, aspect_ratio: str) -> Optional[PublicationTask]:
+    candidates = (
+        PublicationTask.query
+        .filter(PublicationTask.feature == "publisher")
+        .filter(or_(PublicationTask.source_task_id == parent_id, PublicationTask.parent_task_id == parent_id))
+        .options(load_only(*TASK_PUBLIC_COLUMNS))
+        .order_by(PublicationTask.created_at.desc())
+        .limit(30)
+        .all()
+    )
+    matching = [
+        task for task in candidates
+        if _publisher_child_role(task) == role and _publisher_child_aspect_ratio(task) == aspect_ratio
+    ]
+    if not matching:
+        return None
+
+    for task in matching:
+        if task.status == "completed" and _video_summary_ready(_publisher_result_summary(task)):
+            _cancel_duplicate_publisher_tasks(matching, keep_id=task.id)
+            return task
+
+    active = [task for task in matching if task.status not in TERMINAL_STATUSES]
+    if active:
+        keep = active[0]
+        _cancel_duplicate_publisher_tasks(active[1:], keep_id=keep.id)
+        return keep
+    return None
+
+
+def _publisher_child_role(task: PublicationTask) -> str:
+    params = task.params if isinstance(task.params, dict) else {}
+    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    result = task.result if isinstance(task.result, dict) else {}
+    result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    return str(metadata.get("role") or result_metadata.get("role") or "").strip()
+
+
+def _publisher_child_aspect_ratio(task: PublicationTask) -> str:
+    params = task.params if isinstance(task.params, dict) else {}
+    return str(params.get("aspect_ratio") or "").strip()
+
+
+def _cancel_duplicate_publisher_tasks(tasks: List[PublicationTask], *, keep_id: str) -> None:
+    changed = False
+    for task in tasks:
+        if not task or task.id == keep_id or task.status in TERMINAL_STATUSES:
+            continue
+        _revoke_celery_task(task)
+        result = dict(task.result or {})
+        result["error"] = f"重复视频子任务已取消，保留 {keep_id}"
+        task.status = "canceled"
+        task.current_step = "canceled"
+        task.error_message = result["error"]
+        task.completed_at = datetime.utcnow()
+        task.result = result
+        flag_modified(task, "result")
+        changed = True
+    if changed:
+        db.session.commit()
+
+
+def _revoke_celery_task(task: PublicationTask) -> None:
+    celery_task_id = getattr(task, "celery_task_id", None)
+    if not celery_task_id:
+        return
+    try:
+        celery_app.control.revoke(celery_task_id, terminate=False)
+    except Exception as exc:
+        logger.warning("撤销重复 Celery 子任务失败: task=%s celery=%s error=%s", task.id, celery_task_id, exc)
 
 
 def audio_segment_from_plan(audio: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -1059,7 +1440,7 @@ def extract_subtitle(text: str) -> str:
 
 
 def _fresh_result(parent_id: str) -> Dict[str, Any]:
-    fresh = PublicationTask.query.get(parent_id)
+    fresh = _load_task(parent_id, *TASK_RESULT_COLUMNS)
     return dict(fresh.result or {}) if fresh and isinstance(fresh.result, dict) else {}
 
 
@@ -1076,10 +1457,11 @@ def _clear_invalid_gemini_shell_result(parent_id: str, result: Dict[str, Any]) -
     turns = result.get("turns") if isinstance(result.get("turns"), list) else gemini.get("turns")
     if isinstance(turns, list):
         candidates.extend(item.get("response_text") for item in turns if isinstance(item, dict))
-    if not any(_looks_like_page_shell_text(str(item or "")) for item in candidates):
+    has_shell_text = any(_looks_like_page_shell_text(str(item or "")) for item in candidates)
+    if not has_shell_text:
         return result
 
-    fresh = PublicationTask.query.get(parent_id)
+    fresh = _load_task(parent_id, *TASK_RESULT_COLUMNS)
     if not fresh:
         return result
     current = dict(fresh.result or {})
@@ -1143,9 +1525,11 @@ def _visual_artifacts_ready(artifacts: Any) -> bool:
         return False
     for key in VISUAL_ARTIFACT_KEYS:
         artifact = artifacts.get(key)
-        if not isinstance(artifact, dict) or not _path_ready(artifact.get("path")):
+        if not isinstance(artifact, dict):
             return False
         if artifact.get("template_version") != VISUAL_ARTIFACT_VERSION:
+            return False
+        if not _image_file_ready(artifact.get("path"), expected_size=VISUAL_ARTIFACT_EXPECTED_SIZES.get(key)):
             return False
     return True
 
@@ -1163,14 +1547,30 @@ def _reusable_video_summary(result: Dict[str, Any], label: str) -> Tuple[Optiona
     return None, None
 
 
-def _completed_child_from_result(result: Dict[str, Any], label: str) -> Optional[PublicationTask]:
+def _active_child_from_result(result: Dict[str, Any], label: str) -> Optional[PublicationTask]:
+    child = _child_from_result(result, label)
+    if child and child.status not in TERMINAL_STATUSES:
+        return child
+    return None
+
+
+def _child_from_result(result: Dict[str, Any], label: str) -> Optional[PublicationTask]:
+    child_id = _child_id_from_result(result, label)
+    if not child_id:
+        return None
+    return _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+
+
+def _child_id_from_result(result: Dict[str, Any], label: str) -> Optional[str]:
     children = result.get("children") if isinstance(result.get("children"), dict) else {}
     child_summary = children.get(label) if isinstance(children.get(label), dict) else {}
     direct_summary = result.get(label) if isinstance(result.get(label), dict) else {}
     child_id = child_summary.get("job_id") or direct_summary.get("job_id")
-    if not child_id:
-        return None
-    child = PublicationTask.query.get(child_id)
+    return str(child_id).strip() if child_id else None
+
+
+def _completed_child_from_result(result: Dict[str, Any], label: str) -> Optional[PublicationTask]:
+    child = _child_from_result(result, label)
     if child and child.status == "completed":
         return child
     return None
@@ -1191,6 +1591,22 @@ def _path_ready(path: Any) -> bool:
     return bool(resolved and resolved.exists() and resolved.is_file() and resolved.stat().st_size > 0)
 
 
+def _image_file_ready(path: Any, *, expected_size: Optional[Tuple[int, int]] = None) -> bool:
+    text = str(path or "").strip()
+    resolved = _resolve_project_path(text) if text else None
+    if not resolved or not resolved.exists() or not resolved.is_file() or resolved.stat().st_size <= 0:
+        return False
+    try:
+        with Image.open(resolved) as img:
+            size = img.size
+            img.verify()
+    except Exception:
+        return False
+    if expected_size and size != expected_size:
+        return False
+    return True
+
+
 def _load_json_file(path: Any) -> Optional[Dict[str, Any]]:
     try:
         with open(str(path), "r", encoding="utf-8") as handle:
@@ -1206,10 +1622,10 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
     deadline = time.monotonic() + timeout
     last_step = None
     while time.monotonic() < deadline:
-        parent = PublicationTask.query.get(parent_id)
+        parent = _load_task(parent_id, *TASK_STATUS_COLUMNS)
         if not parent or parent.status == "canceled":
             raise RuntimeError("父编排任务已取消")
-        child = PublicationTask.query.get(child_id)
+        child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
         if not child:
             raise RuntimeError(f"子任务不存在: {child_id}")
         if child.current_step != last_step:
@@ -1219,22 +1635,86 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
             _emit(parent_id, f"{label}_{child.current_step}", mapped, f"{label}: {child.current_step}")
             _record_child(parent_id, label, child)
         if child.status in TERMINAL_STATUSES:
+            _clear_waiting_child(parent_id, label)
             return child
         celery_failure = _celery_failure_message(child)
         if celery_failure:
             _mark_child_failed(child, celery_failure)
             db.session.expire_all()
-            return PublicationTask.query.get(child_id)
+            _clear_waiting_child(parent_id, label)
+            return _load_task(child_id, *TASK_PUBLIC_COLUMNS)
         time.sleep(poll_seconds)
         db.session.expire_all()
+    child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+    if child and child.status not in TERMINAL_STATUSES:
+        _record_child(parent_id, label, child)
+        raise ChildTaskStillRunning(label, child.id, child.status or "", child.current_step or "")
     raise RuntimeError(f"等待子任务超时: {label} {child_id}")
+
+
+def _defer_parent_retry(parent_id: str, exc: ChildTaskStillRunning) -> None:
+    delay = max(30, _int_env("MP3_VIDEO_PARENT_RETRY_DELAY_SECONDS", 300))
+    max_defers = max(1, _int_env("MP3_VIDEO_PARENT_MAX_DEFERS", 144))
+    fresh = _load_task(parent_id, *TASK_PROGRESS_RESULT_COLUMNS, PublicationTask.status, PublicationTask.error_message)
+    if not fresh or fresh.status == "canceled":
+        return
+
+    result = dict(fresh.result or {})
+    deferred_waits = dict(result.get("deferred_waits") or {})
+    state = dict(deferred_waits.get(exc.label) or {})
+    count = int(state.get("defer_count") or state.get("count") or 0) + 1
+    if count > max_defers:
+        raise RuntimeError(f"等待子任务超过最大续跑次数: {exc.label} {exc.child_id}")
+
+    waiting_child = {
+        "label": exc.label,
+        "child_id": exc.child_id,
+        "status": exc.status,
+        "step": exc.step,
+        "retry_delay_seconds": delay,
+        "defer_count": count,
+        "max_defers": max_defers,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    deferred_waits[exc.label] = waiting_child
+    result["waiting_child"] = waiting_child
+    result["deferred_waits"] = deferred_waits
+    fresh.status = "processing"
+    fresh.current_step = _safe_step_code(f"{exc.label}_waiting")
+    fresh.progress = max(int(fresh.progress or 0), 80 if exc.label == "landscape_video" else 92)
+    fresh.error_message = None
+    fresh.result = result
+    flag_modified(fresh, "result")
+    db.session.commit()
+
+    celery_app.send_task(
+        "tasks.mp3_video_workflow.process_job",
+        args=[parent_id],
+        queue=QUEUE_NAME,
+        countdown=delay,
+    )
+
+
+def _clear_waiting_child(parent_id: str, label: str) -> None:
+    fresh = _load_task(parent_id, *TASK_PROGRESS_RESULT_COLUMNS)
+    if not fresh or not isinstance(fresh.result, dict):
+        return
+    result = dict(fresh.result or {})
+    waiting_child = result.get("waiting_child")
+    if not isinstance(waiting_child, dict) or waiting_child.get("label") != label:
+        return
+    result.pop("waiting_child", None)
+    fresh.result = result
+    flag_modified(fresh, "result")
+    db.session.commit()
 
 
 def _start_task(task: PublicationTask) -> None:
     result = dict(task.result or {})
     started_at = datetime.utcnow().isoformat() + "Z"
+    resume_waiting_child = isinstance(result.get("waiting_child"), dict)
     notifications = result.get("notifications") if isinstance(result.get("notifications"), dict) else {}
-    if notifications:
+    if notifications and not resume_waiting_child:
         history = list(result.get("notification_history") or [])
         history.append({
             "archived_at": started_at,
@@ -1242,17 +1722,22 @@ def _start_task(task: PublicationTask) -> None:
             "notifications": notifications,
         })
         result["notification_history"] = history[-8:]
-    result["notifications"] = {}
+    if not resume_waiting_child:
+        result["notifications"] = {}
     result.pop("completed_at", None)
+    if not resume_waiting_child:
+        result.pop("resumed_at", None)
     result.update({
-        "started_at": started_at,
+        "started_at": (result.get("started_at") or started_at) if resume_waiting_child else started_at,
         "error": None,
         "logs": result.get("logs") or [],
         "children": result.get("children") or {},
     })
+    if resume_waiting_child:
+        result["resumed_at"] = started_at
     task.status = "processing"
-    task.current_step = "start"
-    task.progress = 2
+    task.current_step = task.current_step if resume_waiting_child and task.current_step else "start"
+    task.progress = max(int(task.progress or 0), 2) if resume_waiting_child else 2
     task.error_message = None
     task.completed_at = None
     task.result = result
@@ -1261,7 +1746,7 @@ def _start_task(task: PublicationTask) -> None:
 
 
 def _emit(parent_id: str, step: str, progress: int, message: str, *, result: Optional[Dict[str, Any]] = None) -> None:
-    fresh = PublicationTask.query.get(parent_id)
+    fresh = _load_task(parent_id, *TASK_PROGRESS_RESULT_COLUMNS)
     if not fresh:
         return
     current = dict(fresh.result or {})
@@ -1283,7 +1768,9 @@ def _emit(parent_id: str, step: str, progress: int, message: str, *, result: Opt
 
 
 def _update_result(parent_id: str, values: Dict[str, Any]) -> None:
-    fresh = PublicationTask.query.get(parent_id)
+    fresh = _load_task(parent_id, *TASK_RESULT_COLUMNS)
+    if not fresh:
+        return
     result = dict(fresh.result or {})
     result.update(values)
     fresh.result = result
@@ -1292,7 +1779,9 @@ def _update_result(parent_id: str, values: Dict[str, Any]) -> None:
 
 
 def _record_child(parent_id: str, label: str, child: PublicationTask) -> None:
-    fresh = PublicationTask.query.get(parent_id)
+    fresh = _load_task(parent_id, *TASK_RESULT_COLUMNS)
+    if not fresh:
+        return
     result = dict(fresh.result or {})
     children = dict(result.get("children") or {})
     children[label] = _task_public_summary(child)
@@ -1325,7 +1814,7 @@ def mark_job_failed_safely(task_id: str, message: str, *, notify: bool = True) -
     persisted = False
     persist_error = None
     try:
-        fresh = PublicationTask.query.get(task_id)
+        fresh = _load_task(task_id, *TASK_FAIL_COLUMNS)
         if not fresh or fresh.status == "canceled":
             if notify and not fresh:
                 _send_direct_mp3_workflow_failure_email(
@@ -1375,7 +1864,7 @@ def mark_job_failed_if_unfinished(task_id: str, message: str, *, notify: bool = 
     except Exception:
         pass
     try:
-        fresh = PublicationTask.query.get(task_id)
+        fresh = _load_task(task_id, *TASK_STATUS_COLUMNS)
         if not fresh or fresh.status in TERMINAL_STATUSES:
             return False
     except Exception:
@@ -1403,7 +1892,7 @@ def _mark_child_failed(child: PublicationTask, message: str) -> None:
 
 def _queue_notification(task_id: str, event_type: str, message: Optional[str] = None) -> bool:
     try:
-        fresh = PublicationTask.query.get(task_id)
+        fresh = _load_task(task_id, *TASK_NOTIFICATION_COLUMNS)
         if not fresh:
             return False
         result = dict(fresh.result or {})

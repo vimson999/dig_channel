@@ -32,7 +32,7 @@ const els = {
 document.addEventListener('DOMContentLoaded', () => {
     bindEvents();
     refreshStatus({ loadLogs: true });
-    state.refreshTimer = setInterval(() => refreshStatus({ silent: true }), 5000);
+    state.refreshTimer = setInterval(() => refreshStatus({ silent: true }), 15000);
 });
 
 function bindEvents() {
@@ -392,7 +392,7 @@ function renderTaskPanel(service) {
                 ${renderTaskCount('执行中', active.length, 'text-emerald-700')}
                 ${renderTaskCount('已领取', reserved.length, 'text-blue-700')}
                 ${renderTaskCount('定时', scheduled.length, 'text-slate-700')}
-                ${renderTaskCount('业务未收尾', businessTasks.length, businessTasks.length ? 'text-indigo-700' : 'text-slate-700')}
+                ${renderTaskCount('业务进行中', businessTasks.length, businessTasks.length ? 'text-indigo-700' : 'text-slate-700')}
             </div>
             ${consumerWarning ? `<div class="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 font-bold leading-5 text-amber-700">${escapeHtml(consumerWarning)}</div>` : ''}
             ${businessError ? `<div class="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 font-bold leading-5 text-amber-700">业务任务读取失败：${escapeHtml(businessError)}</div>` : ''}
@@ -401,9 +401,9 @@ function renderTaskPanel(service) {
                     ${renderTaskRows('执行中', active, 'border-emerald-200 bg-emerald-50')}
                     ${renderTaskRows('已领取', reserved, 'border-blue-200 bg-blue-50')}
                     ${renderTaskRows('定时', scheduled, 'border-slate-200 bg-white')}
-                    ${renderBusinessTaskRows('业务未收尾', businessTasks, 'border-indigo-200 bg-indigo-50')}
+                    ${renderBusinessTaskRows('业务进行中', businessTasks, 'border-indigo-200 bg-indigo-50')}
                 </div>
-            ` : '<div class="mt-2 text-slate-400">当前没有 worker 已领取或业务表未收尾任务。</div>'}
+            ` : '<div class="mt-2 text-slate-400">当前没有 worker 已领取或业务进行中的任务。</div>'}
         </div>
     `;
 }
@@ -612,7 +612,7 @@ function renderServiceCard(service) {
                     <div class="mt-1 font-black ${risk ? 'text-red-600' : 'text-slate-700'}">${service.queue_length ?? '-'}</div>
                 </div>
                 <div class="rounded-md bg-slate-50 px-3 py-2">
-                    <div class="text-slate-400">业务未收尾</div>
+                    <div class="text-slate-400">业务进行中</div>
                     <div class="mt-1 font-black ${businessActive ? 'text-indigo-700' : 'text-slate-700'}">${businessActive}</div>
                 </div>
             </div>
@@ -700,7 +700,7 @@ function renderServiceList() {
                     <span class="h-2.5 w-2.5 rounded-full ${running ? 'bg-emerald-500' : 'bg-slate-300'}"></span>
                 </div>
                 <div class="mt-1 text-xs text-slate-500">队列 ${escapeHtml(service.queue)} · 积压 ${service.queue_length ?? '-'}</div>
-                <div class="mt-1 text-xs ${active || businessActive ? 'font-bold text-emerald-700' : 'text-slate-400'}">执行 ${active} · 已领取 ${reserved} · 定时 ${scheduled} · 未收尾 ${businessActive}</div>
+                <div class="mt-1 text-xs ${active || businessActive ? 'font-bold text-emerald-700' : 'text-slate-400'}">执行 ${active} · 已领取 ${reserved} · 定时 ${scheduled} · 业务 ${businessActive}</div>
             </button>
         `;
     }).join('');

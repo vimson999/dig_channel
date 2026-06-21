@@ -218,7 +218,11 @@ function bindEvents() {
         }
         state.selectedTopicKeys.clear();
         state.selectedAttachmentKeys.clear();
-        renderTopics(state.currentTopics, activeTabState());
+        if (state.selectedGroup) {
+            loadActiveTabPage({ reset: true });
+        } else {
+            renderTopics(state.currentTopics, activeTabState());
+        }
         renderSyncIntro();
     });
     els.copyTopicsJsonBtn?.addEventListener('click', copyLastTopicsJson);
@@ -1788,6 +1792,7 @@ function buildTopicsRequest(tab, tabState) {
 }
 
 function buildLocalTopicsRequest(tab, tabState) {
+    const publishFilter = currentAttachmentViewFilter() === 'publish_attention' ? 'attention' : '';
     return {
         group_id: state.selectedGroup.group_id,
         tab_id: tab.id,
@@ -1795,6 +1800,7 @@ function buildLocalTopicsRequest(tab, tabState) {
         scope: tab.scope || 'all',
         end_time: tabState.endTime || null,
         hashtag_id: tab.hashtagId || '',
+        publish_filter: publishFilter,
     };
 }
 
@@ -2299,11 +2305,13 @@ function currentAttachmentViewFilter() {
 
 function filterTopicsByAttachmentView(topics, filter = currentAttachmentViewFilter()) {
     if (filter === 'all') return topics;
+    if (filter === 'publish_attention') return topics;
     return topics.filter(topic => topicFiles(topic).some(file => fileTypeForFile(file) === filter));
 }
 
 function filterFilesByAttachmentView(files, filter = currentAttachmentViewFilter()) {
     if (filter === 'all') return files;
+    if (filter === 'publish_attention') return files;
     return files.filter(file => fileTypeForFile(file) === filter);
 }
 
@@ -2311,6 +2319,7 @@ function attachmentViewEmptyText(filter = currentAttachmentViewFilter()) {
     const map = {
         mp3: '当前列表里没有 MP3 附件。',
         pdf: '当前列表里没有 PDF 附件。',
+        publish_attention: '当前列表里没有需要人工处理的发布异常附件。',
         all: '这个筛选下没有主题。',
     };
     return map[filter] || map.all;
@@ -2527,6 +2536,7 @@ async function refreshAttachmentStatusBadges() {
         const matched = matchAttachmentStatus(records, entry);
         updateFileRowDownloadStatus(row, matched);
     });
+    applyAttachmentViewStatusFilter();
 }
 
 function mergeAttachmentStatusRecords(existing, incoming) {
@@ -2591,6 +2601,8 @@ function updateFileRowDownloadStatus(row, matched) {
     const downloaded = matched?.download_status === 'downloaded';
     const failed = matched?.download_status === 'failed';
     const publishBadge = publishBadgeState(matched);
+    const publishAttention = isPublishAttentionRecord(matched);
+    row.dataset.publishAttention = publishAttention ? '1' : '0';
 
     if (downloadedBadge) {
         downloadedBadge.classList.toggle('hidden', !downloaded);
@@ -2611,6 +2623,8 @@ function updateFileRowDownloadStatus(row, matched) {
         errorText.textContent = message;
         errorText.classList.toggle('hidden', !message);
     }
+    row.classList.toggle('border-amber-300', publishAttention);
+    row.classList.toggle('bg-amber-50', publishAttention);
     if (button && !button.disabled) {
         if (failed) {
             button.className = 'download-file-btn rounded-md bg-amber-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-700';
@@ -2626,6 +2640,13 @@ function publishBadgeState(matched) {
     const status = String(matched?.publish_status || '').toLowerCase();
     const updatedAt = matched?.publish_updated_at ? ` · ${formatZsxqTime(matched.publish_updated_at)}` : '';
     const taskText = matched?.publish_task_id ? `发布任务 ${matched.publish_task_id}${updatedAt}` : `发布状态${updatedAt}`;
+    if (status === 'published_unverified') {
+        return {
+            label: '发布待核验',
+            className: 'border-amber-200 bg-amber-50 text-amber-700',
+            title: `${taskText}，DB 曾标记已发布，但缺少发布主题 ID，需要人工确认。`,
+        };
+    }
     if (status === 'published' || matched?.published === true) {
         return {
             label: '已发布',
@@ -2654,7 +2675,45 @@ function publishBadgeState(matched) {
             title: `${taskText}，上次发布失败。`,
         };
     }
+    if (status === 'publish_skipped') {
+        return {
+            label: '发布跳过',
+            className: 'border-amber-200 bg-amber-50 text-amber-700',
+            title: `${taskText}，发布流程跳过了这个附件。`,
+        };
+    }
     return { label: '', className: 'hidden', title: '' };
+}
+
+function isPublishAttentionRecord(matched) {
+    const status = String(matched?.publish_status || '').toLowerCase();
+    return matched?.download_status === 'downloaded'
+        && (
+            matched?.publish_attention_required === true
+            || ['publish_failed', 'publish_skipped', 'published_unverified'].includes(status)
+        );
+}
+
+function applyAttachmentViewStatusFilter() {
+    if (currentAttachmentViewFilter() !== 'publish_attention') return;
+    let visibleRows = 0;
+    els.topicsList.querySelectorAll('.zsxq-file-row').forEach(row => {
+        const visible = row.dataset.publishAttention === '1';
+        row.classList.toggle('hidden', !visible);
+        if (visible) visibleRows += 1;
+    });
+    els.topicsList.querySelectorAll('article[data-topic-key]').forEach(article => {
+        const hasVisibleFile = Boolean(article.querySelector('.zsxq-file-row:not(.hidden)'));
+        article.classList.toggle('hidden', !hasVisibleFile);
+    });
+    const existingEmpty = document.getElementById('publish-attention-empty-card');
+    if (existingEmpty) existingEmpty.remove();
+    if (!visibleRows && els.topicsList) {
+        els.topicsList.insertAdjacentHTML(
+            'afterbegin',
+            `<div id="publish-attention-empty-card">${emptyCard(attachmentViewEmptyText('publish_attention'), 'warning')}</div>`
+        );
+    }
 }
 
 function matchAttachmentStatus(records, entry) {
@@ -2738,6 +2797,7 @@ function attachmentTypeText(type) {
     const map = {
         pdf: 'PDF 附件',
         mp3: 'MP3 附件',
+        publish_attention: '待人工发布附件',
         all: '全部附件',
     };
     return map[type] || '匹配附件';
