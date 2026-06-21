@@ -34,6 +34,13 @@ STOP_GRACE_SECONDS = max(1.0, _float_env("ZSXQ_AUTO_PUBLISH_SCHEDULER_STOP_GRACE
 
 def _scheduler_env(extra=None):
     env = dict(os.environ)
+    env["DB_PROCESS_ROLE"] = "scheduler"
+    env.setdefault("DATABASE_TYPE", "postgresql")
+    env.setdefault("DB_POOL_SIZE", "1")
+    env.setdefault("DB_MAX_OVERFLOW", "0")
+    env.setdefault("DB_CONNECT_TIMEOUT", "5")
+    env.setdefault("SCHEDULER_DB_POOL_SIZE", "1")
+    env.setdefault("SCHEDULER_DB_MAX_OVERFLOW", "0")
     env.setdefault("PYTHONPATH", str(PROJECT_ROOT / "src" / "backend"))
     env.setdefault("FLASK_DEBUG", "0")
     env.setdefault("FLASK_USE_RELOADER", "0")

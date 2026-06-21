@@ -219,6 +219,22 @@ def _int_env(name, default):
         return default
 
 
+def _apply_db_process_role(env, role):
+    normalized_role = "scheduler" if role == "watchdog" else role
+    env["DB_PROCESS_ROLE"] = normalized_role
+    env.setdefault("DATABASE_TYPE", "postgresql")
+    env.setdefault("DB_POOL_SIZE", "1")
+    env.setdefault("DB_MAX_OVERFLOW", "0")
+    env.setdefault("DB_CONNECT_TIMEOUT", "5")
+    env.setdefault("WEB_DB_POOL_SIZE", "4")
+    env.setdefault("WEB_DB_MAX_OVERFLOW", "0")
+    env.setdefault("WORKER_DB_POOL_SIZE", "1")
+    env.setdefault("WORKER_DB_MAX_OVERFLOW", "0")
+    env.setdefault("SCHEDULER_DB_POOL_SIZE", "1")
+    env.setdefault("SCHEDULER_DB_MAX_OVERFLOW", "0")
+    return env
+
+
 STATUS_CACHE_TTL_SECONDS = float(os.environ.get("CELERY_MONITOR_STATUS_CACHE_TTL", "20"))
 REPORT_VIDEO_STATS_CACHE_TTL_SECONDS = float(os.environ.get("CELERY_MONITOR_REPORT_VIDEO_STATS_CACHE_TTL", "60"))
 BUSINESS_TASKS_CACHE_TTL_SECONDS = float(os.environ.get("CELERY_MONITOR_BUSINESS_TASKS_CACHE_TTL", "75"))
@@ -441,7 +457,7 @@ def _start_scheduler(scheduler_id, scheduler):
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    env.setdefault("DATABASE_TYPE", "postgresql")
+    _apply_db_process_role(env, "scheduler")
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src" / "backend")
 
     with log_path.open("ab") as log:
@@ -507,7 +523,7 @@ def _start_watchdog():
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    env.setdefault("DATABASE_TYPE", "postgresql")
+    _apply_db_process_role(env, "watchdog")
     with WATCHDOG_LOG_FILE.open("ab") as log:
         log.write(f"\n\n===== UI START {datetime.now().isoformat()} service=celery_watchdog =====\n".encode("utf-8"))
         proc = subprocess.Popen(
@@ -1549,7 +1565,7 @@ def _start_service(service_id, service):
     log_path = _log_path(service)
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    env.setdefault("DATABASE_TYPE", "postgresql")
+    _apply_db_process_role(env, "worker")
 
     with log_path.open("ab") as log:
         log.write(f"\n\n===== UI START {datetime.now().isoformat()} service={service_id} =====\n".encode("utf-8"))

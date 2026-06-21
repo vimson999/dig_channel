@@ -6,18 +6,61 @@
 """
 
 import os
+import sys
 from dotenv import load_dotenv
 
 # 加载环境变量
 load_dotenv()
 
 
-def _int_env(name, default, minimum=0):
+def _coerce_int(value, default, minimum=0):
     try:
-        value = int(os.environ.get(name, default))
+        value = int(value)
     except (TypeError, ValueError):
         value = default
     return max(value, minimum)
+
+
+def _int_env(name, default, minimum=0):
+    return _coerce_int(os.environ.get(name, default), default, minimum)
+
+
+def _db_process_role():
+    raw = (os.environ.get('DB_PROCESS_ROLE') or os.environ.get('APP_PROCESS_ROLE') or '').strip().lower()
+    aliases = {
+        'api': 'web',
+        'backend': 'web',
+        'flask': 'web',
+        'web': 'web',
+        'celery': 'worker',
+        'worker': 'worker',
+        'workers': 'worker',
+        'scheduler': 'scheduler',
+        'schedulers': 'scheduler',
+        'watchdog': 'scheduler',
+    }
+    if raw in aliases:
+        return aliases[raw]
+
+    command = ' '.join(str(item) for item in sys.argv).lower()
+    if 'celery' in command:
+        return 'worker'
+    if 'scheduler' in command or 'watchdog' in command:
+        return 'scheduler'
+    return 'web'
+
+
+def _db_int_env(suffix, default, minimum=0):
+    role_prefix = {
+        'web': 'WEB',
+        'worker': 'WORKER',
+        'scheduler': 'SCHEDULER',
+    }.get(_db_process_role())
+    if role_prefix:
+        role_name = f'{role_prefix}_DB_{suffix}'
+        if os.environ.get(role_name) is not None:
+            return _coerce_int(os.environ.get(role_name), default, minimum)
+    return _int_env(f'DB_{suffix}', default, minimum)
 
 
 def _postgres_engine_options(database_uri, *, pool_size, max_overflow, pool_timeout, pool_recycle, connect_timeout, statement_timeout_ms=None):
@@ -55,11 +98,11 @@ class BaseConfig:
     # 数据库连接池配置。每个 Flask/Celery/scheduler 进程都有独立连接池，默认值要克制。
     SQLALCHEMY_ENGINE_OPTIONS = _postgres_engine_options(
         SQLALCHEMY_DATABASE_URI,
-        pool_size=_int_env('DB_POOL_SIZE', 2, 1),
-        max_overflow=_int_env('DB_MAX_OVERFLOW', 1, 0),
-        pool_timeout=_int_env('DB_POOL_TIMEOUT', 10, 1),
-        pool_recycle=_int_env('DB_POOL_RECYCLE', 1800, 60),
-        connect_timeout=_int_env('DB_CONNECT_TIMEOUT', 10, 1),
+        pool_size=_db_int_env('POOL_SIZE', 2, 1),
+        max_overflow=_db_int_env('MAX_OVERFLOW', 1, 0),
+        pool_timeout=_db_int_env('POOL_TIMEOUT', 10, 1),
+        pool_recycle=_db_int_env('POOL_RECYCLE', 1800, 60),
+        connect_timeout=_db_int_env('CONNECT_TIMEOUT', 10, 1),
         statement_timeout_ms=os.environ.get('DB_STATEMENT_TIMEOUT_MS'),
     )
     

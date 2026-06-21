@@ -32,7 +32,8 @@ Runtime configuration should come from `.env` or shell environment variables. Do
 Backend startup bootstrap:
 
 - `./scripts/dev/run-backend.sh` 默认启用 `BACKEND_PROCESS_BOOTSTRAP_ENABLED=1`
-- 默认 `BACKEND_PROCESS_BOOTSTRAP_MODE=ensure`，后端启动后补启动缺失的托管 worker；开发默认 `DB_POOL_SIZE=1`、`DB_MAX_OVERFLOW=0`，避免把远端 PostgreSQL 连接槽打满
+- 默认 `BACKEND_PROCESS_BOOTSTRAP_MODE=ensure`，后端启动后补启动缺失的托管 worker；开发环境按进程角色分配数据库池：Web 后端 `WEB_DB_POOL_SIZE=4`，Celery worker `WORKER_DB_POOL_SIZE=1`，scheduler/watchdog `SCHEDULER_DB_POOL_SIZE=1`，且默认 `*_DB_MAX_OVERFLOW=0`
+- 每个 Flask/Celery/scheduler 进程都有独立 SQLAlchemy pool，`DB_POOL_SIZE=1` 仅作为未设置角色变量时的兜底值
 - 临时强制重启托管进程：`BACKEND_PROCESS_BOOTSTRAP_MODE=restart ./scripts/dev/run-backend.sh`
 - 临时关闭自动恢复：`BACKEND_PROCESS_BOOTSTRAP_ENABLED=0 ./scripts/dev/run-backend.sh`
 - 默认托管队列是 `all`，watchdog 默认跟随 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`；默认不启动 scheduler。可用 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`、`CELERY_AUTO_HEAL_SERVICES` 和 `BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS` 指定逗号分隔的服务列表
