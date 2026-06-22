@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 import base64
 import hashlib
@@ -960,8 +961,10 @@ class GeminiBrowserWorker:
 
     def _wait_for_response(self, page, prompt: str, baseline_text: str, started_at: float) -> Dict[str, Any]:
         deadline = time.monotonic() + self.options.response_timeout_seconds
+        incomplete_extra_wait = max(0, _int_env("GEMINI_BROWSER_INCOMPLETE_RESPONSE_EXTRA_WAIT", 90))
         last_text = ""
         stable_since = time.monotonic()
+        incomplete_since = None
 
         while time.monotonic() < deadline:
             self._guard_total_timeout(started_at)
@@ -971,10 +974,17 @@ class GeminiBrowserWorker:
                 if candidate != last_text:
                     last_text = candidate
                     stable_since = time.monotonic()
+                    incomplete_since = None
                 elif (
                     time.monotonic() - stable_since >= self.options.response_stable_seconds
                     and not self._is_generating(page)
                 ):
+                    if _looks_like_incomplete_response(candidate):
+                        if incomplete_since is None:
+                            incomplete_since = time.monotonic()
+                        if time.monotonic() - incomplete_since < incomplete_extra_wait:
+                            time.sleep(1)
+                            continue
                     return {"text": candidate}
             time.sleep(1)
 
@@ -1618,6 +1628,28 @@ def _upload_is_ready(state: Any) -> bool:
     if state.get("busy") or state.get("canceled"):
         return False
     return bool(state.get("hasName") and state.get("enabledSend"))
+
+
+def _looks_like_incomplete_response(text: Any) -> bool:
+    clean = _clean_text(str(text or ""))
+    if not clean:
+        return True
+    if clean.endswith((":", "：")):
+        return True
+    token = r"\d{1,2}:\d{2}(?::\d{2})?"
+    if re.search(rf"(?:开始|起始)(?:时间戳|时间)?\s*[:：]\s*{token}\s*$", clean):
+        has_end = re.search(rf"(?:结束|截止|终止)(?:时间戳|时间)?\s*[:：]\s*{token}", clean)
+        has_range = re.search(rf"{token}\s*(?:-|~|～|至|到)\s*{token}", clean)
+        if not has_end and not has_range:
+            return True
+    dangling_re = re.compile(
+        r"(?:"
+        r"版本[一二三四五六七八九十A-Za-z0-9]+|"
+        r"推荐截取时间戳|推荐截取时间|开始时间戳|结束时间戳|"
+        r"精华片段提取|内容概述与看点"
+        r")\s*[:：]?\s*$"
+    )
+    return bool(dangling_re.search(clean))
 
 
 def _promptless_submit_confirmed(state: Any, composer_text: str, generating: bool = False, *, clicked_send: bool = False) -> bool:

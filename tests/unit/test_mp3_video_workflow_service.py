@@ -12,6 +12,7 @@ from services.gemini_browser import (
     GeminiBrowserWorker,
     _clear_stale_singleton_files,
     _looks_like_page_shell_text,
+    _looks_like_incomplete_response,
     _looks_like_singleton_launch_error,
     _promptless_submit_confirmed,
     _submit_state_summary,
@@ -84,6 +85,50 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertEqual(audio_range, (70.0, 585.0))
         self.assertEqual(plan["audio"]["start_seconds"], 70)
         self.assertEqual(plan["audio"]["end_seconds"], 585)
+
+    def test_fallback_plan_extracts_version_titles_and_separate_timestamps(self):
+        response = """
+        1. 长标题（3个版本）
+        版本一： 内资闭门会 | AI风口引爆有色板块 | 铜铝镍锂估值修复 | 下半场Alpha个股机会 | 260621
+        版本二： 内资闭门会 | 顺周期迎AI催化 | 黄金与海运双重红利 | 寻找性价比空间 | 260621
+        版本三： 内资闭门会 | 供给硬约束+需求刚性 | 有色高景气度标的 | 资金回流防御首选 | 260621
+
+        4. 精华片段提取
+        开始时间戳：00:36
+        结束时间戳：02:41
+        """
+
+        plan = fallback_plan(response, audio={"filename": "demo.mp3", "duration_seconds": 229})
+
+        self.assertEqual(
+            plan["title"],
+            "AI风口引爆有色板块 | 铜铝镍锂估值修复 | 下半场Alpha个股机会",
+        )
+        self.assertEqual(plan["audio"]["start_seconds"], 36)
+        self.assertEqual(plan["audio"]["end_seconds"], 161)
+
+    def test_fallback_plan_extracts_flattened_gemini_version_titles(self):
+        response = (
+            "1. 长标题（投资者视角，高信息密度） "
+            "版本一： 内资闭门会 | AI狂飙引爆有色板块 | 参股控股资源标的迎来重估 | 寻找黄金与铜的个股Alpha | 260621 "
+            "版本二： 内资闭门会 | 顺周期高景气度+AI催化 | 有色板块兼具红利与进攻属性 | 海运放开预期下的估值弹性 | 260621 "
+            "版本三： 内资闭门会 | AI二三线标的全面补涨 | 资源加工材料估值洼地怎么选 | 黄金、铜、稀土的赔率与策略 | 260621 "
+            "4. 精华片段提取 开始时间戳： 01:00 结束时间戳： 02:40"
+        )
+
+        plan = fallback_plan(response, audio={"filename": "demo.mp3", "duration_seconds": 229})
+
+        self.assertEqual(
+            plan["title"],
+            "AI狂飙引爆有色板块 | 参股控股资源标的迎来重估 | 寻找黄金与铜的个股Alpha",
+        )
+        self.assertEqual(plan["title_options"][:3], [
+            "AI狂飙引爆有色板块 | 参股控股资源标的迎来重估 | 寻找黄金与铜的个股Alpha",
+            "顺周期高景气度+AI催化 | 有色板块兼具红利与进攻属性 | 海运放开预期下的估值弹性",
+            "AI二三线标的全面补涨 | 资源加工材料估值洼地怎么选 | 黄金、铜、稀土的赔率与策略",
+        ])
+        self.assertEqual(plan["audio"]["start_seconds"], 60)
+        self.assertEqual(plan["audio"]["end_seconds"], 160)
 
     def test_validate_plan_preserves_local_clip_range_when_planner_omits_it(self):
         fallback = fallback_plan(
@@ -239,6 +284,11 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertTrue(_upload_is_ready({"hasName": True, "busy": False, "canceled": False, "enabledSend": True}))
         self.assertFalse(_upload_is_ready({"hasName": True, "busy": True, "canceled": False, "enabledSend": True}))
         self.assertFalse(_upload_is_ready({"hasName": False, "busy": False, "canceled": False, "enabledSend": False}))
+
+    def test_gemini_response_wait_rejects_dangling_timestamp(self):
+        self.assertTrue(_looks_like_incomplete_response("4. 精华片段提取 开始时间戳： 00:36"))
+        self.assertFalse(_looks_like_incomplete_response("4. 精华片段提取 开始时间戳： 00:36 结束时间戳：02:41"))
+        self.assertFalse(_looks_like_incomplete_response("推荐截取时间戳：01:10 - 09:45 （预估时长约 8分35秒）"))
 
     def test_promptless_submit_wait_does_not_treat_ready_button_as_submitted(self):
         self.assertFalse(_promptless_submit_confirmed({"enabledSend": True}, "", generating=False))

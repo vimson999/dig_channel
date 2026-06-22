@@ -40,7 +40,7 @@ TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
 HOT_AUDIO_DOWNLOAD_THRESHOLD = 20
-PLANNER_VERSION = "mp3_video_planner_20260622_v3"
+PLANNER_VERSION = "mp3_video_planner_20260622_v4"
 VISUAL_ARTIFACT_KEYS = (
     "finance_cover",
     "audio_background",
@@ -1449,6 +1449,17 @@ def planner_model() -> str:
 def extract_title_candidates(text: str) -> List[str]:
     text = str(text or "")
     candidates: List[str] = []
+    compact_text = _clean_line(text)
+    pipe_title_re = re.compile(
+        r"(?:内资闭门会(?:议)?|内资闭门|投研闭门会|投研会议|内部交流)\s*[|｜]\s*"
+        r"(?P<title>.+?)"
+        r"\s*[|｜]\s*(?:\d{6}|\d{8}|[12]\d{3}[./-]\d{1,2}[./-]\d{1,2})(?=\s|$)"
+    )
+    for match in pipe_title_re.finditer(compact_text):
+        candidate = _normalize_title_candidate(match.group("title"))
+        if _looks_like_title_candidate(candidate, prefer_long=True):
+            candidates.append(candidate)
+
     lines = [_clean_line(line) for line in text.replace("\r", "\n").split("\n")]
     in_investor_title_section = False
     section_stop_re = re.compile(r"^\s*\d+\.\s*(?:精简|音频|优化|核心|金句|片段|摘要|总结|结论)")
@@ -1517,6 +1528,20 @@ def extract_audio_range(text: str) -> Optional[Tuple[float, float]]:
         if start is None or end is None or end <= start:
             continue
         return float(start), float(end)
+
+    start_re = re.compile(rf"(?:开始|起始)(?:时间戳|时间)?\s*:\s*(?P<start>{token})")
+    end_re = re.compile(rf"(?:结束|截止|终止)(?:时间戳|时间)?\s*:\s*(?P<end>{token})")
+    start_match = start_re.search(normalized)
+    end_match = end_re.search(normalized)
+    if start_match and end_match:
+        context_start = max(0, min(start_match.start(), end_match.start()) - 120)
+        context_end = min(len(normalized), max(start_match.end(), end_match.end()) + 120)
+        context = normalized[context_start:context_end]
+        if re.search(r"截取|剪辑|片段|精华|时间戳|时段|时间段|推荐", context):
+            start = _parse_seconds(start_match.group("start"), default=None)
+            end = _parse_seconds(end_match.group("end"), default=None)
+            if start is not None and end is not None and end > start:
+                return float(start), float(end)
     return None
 
 
@@ -1526,7 +1551,11 @@ def _normalize_title_candidate(value: Any) -> str:
     clean = re.sub(r"^(?:[-*•·●○o]\s*)+", "", clean, flags=re.I).strip()
     clean = re.sub(r"^\d+\s*[.、)]\s*", "", clean).strip()
     clean = re.sub(r"^[(（]\s*\d+\s*[)）]\s*", "", clean).strip()
-    clean = re.sub(r"^(?:标题|题目|版本|方案|候选标题|封面标题)\s*\d*\s*[:：-]\s*", "", clean).strip()
+    clean = re.sub(
+        r"^(?:标题|题目|版本|方案|候选标题|封面标题)\s*[一二三四五六七八九十A-Za-z\d]*\s*[:：-]\s*",
+        "",
+        clean,
+    ).strip()
     clean = re.sub(r"^(?:内资闭门会(?:议)?|内资闭门|投研闭门会|投研会议|内部交流)\s*[|｜]\s*", "", clean).strip()
     clean = re.sub(r"\s*[|｜]\s*(?:\d{6}|\d{8}|[12]\d{3}[./-]\d{1,2}[./-]\d{1,2})\s*$", "", clean).strip()
     clean = re.sub(r"\s+(?:\d{6}|\d{8})\s*$", "", clean).strip()
