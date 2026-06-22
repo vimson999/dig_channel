@@ -223,13 +223,17 @@ def _apply_db_process_role(env, role):
     normalized_role = "scheduler" if role == "watchdog" else role
     env["DB_PROCESS_ROLE"] = normalized_role
     env.setdefault("DATABASE_TYPE", "postgresql")
+    env.setdefault("DB_POOL_MODE", "queue")
     env.setdefault("DB_POOL_SIZE", "1")
     env.setdefault("DB_MAX_OVERFLOW", "0")
     env.setdefault("DB_CONNECT_TIMEOUT", "5")
+    env.setdefault("WEB_DB_POOL_MODE", "queue")
     env.setdefault("WEB_DB_POOL_SIZE", "4")
     env.setdefault("WEB_DB_MAX_OVERFLOW", "0")
+    env.setdefault("WORKER_DB_POOL_MODE", "null")
     env.setdefault("WORKER_DB_POOL_SIZE", "1")
     env.setdefault("WORKER_DB_MAX_OVERFLOW", "0")
+    env.setdefault("SCHEDULER_DB_POOL_MODE", "null")
     env.setdefault("SCHEDULER_DB_POOL_SIZE", "1")
     env.setdefault("SCHEDULER_DB_MAX_OVERFLOW", "0")
     return env

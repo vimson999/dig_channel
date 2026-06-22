@@ -7,7 +7,7 @@
 
 import os
 
-from .base import BaseConfig, _db_int_env, _db_process_role, _postgres_engine_options
+from .base import BaseConfig, _db_int_env, _db_process_role, _db_text_env, _postgres_engine_options
 
 
 def _development_pool_size_default():
@@ -16,6 +16,11 @@ def _development_pool_size_default():
         'worker': 1,
         'scheduler': 1,
     }.get(_db_process_role(), 1)
+
+
+def _development_pool_mode_default():
+    return 'queue' if _db_process_role() == 'web' else 'null'
+
 
 class DevelopmentConfig(BaseConfig):
     """开发环境配置"""
@@ -43,4 +48,5 @@ class DevelopmentConfig(BaseConfig):
         pool_recycle=_db_int_env('POOL_RECYCLE', 1800, 60),
         connect_timeout=_db_int_env('CONNECT_TIMEOUT', 5, 1),
         statement_timeout_ms=os.environ.get('DB_STATEMENT_TIMEOUT_MS', '30000'),
+        pool_mode=_db_text_env('POOL_MODE', _development_pool_mode_default()),
     )

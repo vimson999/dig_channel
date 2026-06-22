@@ -8,6 +8,7 @@
 import os
 import sys
 from dotenv import load_dotenv
+from sqlalchemy.pool import NullPool
 
 # 加载环境变量
 load_dotenv()
@@ -63,16 +64,57 @@ def _db_int_env(suffix, default, minimum=0):
     return _int_env(f'DB_{suffix}', default, minimum)
 
 
-def _postgres_engine_options(database_uri, *, pool_size, max_overflow, pool_timeout, pool_recycle, connect_timeout, statement_timeout_ms=None):
+def _db_text_env(suffix, default):
+    role_prefix = {
+        'web': 'WEB',
+        'worker': 'WORKER',
+        'scheduler': 'SCHEDULER',
+    }.get(_db_process_role())
+    if role_prefix:
+        role_name = f'{role_prefix}_DB_{suffix}'
+        value = os.environ.get(role_name)
+        if value is not None:
+            return str(value).strip().lower()
+    value = os.environ.get(f'DB_{suffix}')
+    return str(value if value is not None else default).strip().lower()
+
+
+def _db_application_name():
+    prefix = os.environ.get('DB_APPLICATION_NAME_PREFIX', 'dig_ytb')
+    role = _db_process_role()
+    command = os.path.basename(sys.argv[0] or 'python').replace('.', '_')
+    raw = f'{prefix}_{role}_{command}_{os.getpid()}'
+    return ''.join(ch if ch.isalnum() or ch in {'_', '-'} else '_' for ch in raw)[:63]
+
+
+def _postgres_engine_options(
+    database_uri,
+    *,
+    pool_size,
+    max_overflow,
+    pool_timeout,
+    pool_recycle,
+    connect_timeout,
+    statement_timeout_ms=None,
+    pool_mode='queue',
+):
     if not str(database_uri or '').startswith(('postgresql', 'postgres://')):
         return {}
 
     connect_args = {
         'connect_timeout': connect_timeout,
         'sslmode': 'prefer',
+        'application_name': _db_application_name(),
     }
     if statement_timeout_ms:
         connect_args['options'] = f'-c statement_timeout={statement_timeout_ms}'
+
+    if str(pool_mode or '').strip().lower() in {'null', 'none', 'disabled', 'off'}:
+        return {
+            'poolclass': NullPool,
+            'pool_pre_ping': True,
+            'connect_args': connect_args,
+        }
 
     return {
         'pool_size': pool_size,
@@ -80,6 +122,7 @@ def _postgres_engine_options(database_uri, *, pool_size, max_overflow, pool_time
         'pool_timeout': pool_timeout,
         'pool_recycle': pool_recycle,
         'pool_pre_ping': True,
+        'pool_use_lifo': True,
         'connect_args': connect_args,
     }
 
@@ -104,6 +147,7 @@ class BaseConfig:
         pool_recycle=_db_int_env('POOL_RECYCLE', 1800, 60),
         connect_timeout=_db_int_env('CONNECT_TIMEOUT', 10, 1),
         statement_timeout_ms=os.environ.get('DB_STATEMENT_TIMEOUT_MS'),
+        pool_mode=_db_text_env('POOL_MODE', 'queue'),
     )
     
     # Redis配置

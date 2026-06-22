@@ -26,6 +26,8 @@ TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "partial", "skipped"}
 TERMINAL_TASK_STATUSES = {"completed", "failed"}
 QUEUED_STALE_MINUTES_ENV_NAME = "ZSXQ_WORKFLOW_QUEUED_STALE_MINUTES"
 DEFAULT_QUEUED_STALE_MINUTES = 20
+CLEAN_STALE_MINUTES_ENV_NAME = "ZSXQ_WORKFLOW_CLEAN_STALE_MINUTES"
+DEFAULT_CLEAN_STALE_MINUTES = 360
 SCHEMA_CHECK_TTL_SECONDS_ENV_NAME = "ZSXQ_WORKFLOW_SCHEMA_CHECK_TTL_SECONDS"
 DEFAULT_SCHEMA_CHECK_TTL_SECONDS = 300
 DEFAULT_AUTO_VIDEO_PDF_THRESHOLD = 35
@@ -411,6 +413,7 @@ class ZsxqWorkflowService:
         self.ensure_schema()
         if recover_stale:
             self.recover_stale_initial_workflows(group_id=group_id)
+            self.recover_stale_running_clean_workflows(group_id=group_id)
         query = ZsxqWorkflowRun.query.filter(ZsxqWorkflowRun.status.in_(("queued", "running")))
         if group_id:
             query = query.filter(ZsxqWorkflowRun.group_id == str(group_id))
@@ -450,6 +453,80 @@ class ZsxqWorkflowService:
             group_id or "-",
             len(recovered),
             [item.get("id") for item in recovered],
+        )
+        return recovered
+
+    def recover_stale_running_clean_workflows(self, group_id=None, stale_minutes=None):
+        self.ensure_schema()
+        stale_minutes = _workflow_clean_stale_minutes(stale_minutes)
+        cutoff = datetime.utcnow() - timedelta(minutes=stale_minutes)
+        query = ZsxqWorkflowRun.query.filter(
+            ZsxqWorkflowRun.status == "running",
+            ZsxqWorkflowRun.current_stage == "clean",
+        )
+        if group_id:
+            query = query.filter(ZsxqWorkflowRun.group_id == str(group_id))
+
+        workflows = query.order_by(ZsxqWorkflowRun.updated_at.asc(), ZsxqWorkflowRun.created_at.asc()).limit(20).all()
+        recovered = []
+        workflow_ids_to_advance = []
+        now = datetime.utcnow()
+        for workflow in workflows:
+            task_ids = [str(item) for item in (workflow.clean_task_ids or []) if item]
+            if not task_ids:
+                continue
+            tasks = PublicationTask.query.filter(PublicationTask.id.in_(task_ids)).all()
+            stale_tasks = []
+            for task in tasks:
+                if not task or task.status in TERMINAL_TASK_STATUSES:
+                    continue
+                last_touched = task.updated_at or task.created_at or now
+                if last_touched < cutoff:
+                    stale_tasks.append(task)
+
+            if not stale_tasks:
+                continue
+
+            for task in stale_tasks:
+                message = (
+                    f"清洗子任务长时间停留在 {task.status}/{task.current_step or '-'} "
+                    f"（超过 {stale_minutes} 分钟），已自动标记失败，避免阻塞后续星球同步。"
+                )
+                result = dict(task.result or {})
+                result["error"] = message
+                result["stale_recovered"] = True
+                result["stale_recovered_at"] = self._now_iso()
+                task.status = "failed"
+                task.current_step = "failed"
+                task.error_message = message
+                task.completed_at = now
+                task.result = result
+                flag_modified(task, "result")
+                recovered.append({
+                    "workflow_id": workflow.id,
+                    "task_id": task.id,
+                    "feature": task.feature or (task.params or {}).get("feature"),
+                    "message": message,
+                })
+            workflow_ids_to_advance.append(workflow.id)
+
+        if not recovered:
+            return []
+
+        db.session.commit()
+        advanced = []
+        for workflow_id in workflow_ids_to_advance:
+            try:
+                advanced.append(self.advance_workflow(workflow_id, reason="stale_clean_task_recovered"))
+            except Exception:
+                logger.exception("[ZSXQ_WORKFLOW] failed to advance stale clean workflow | workflow=%s", workflow_id)
+
+        logger.warning(
+            "[ZSXQ_WORKFLOW] stale running clean tasks marked failed | group_id=%s count=%s workflow_ids=%s advanced=%s",
+            group_id or "-",
+            len(recovered),
+            workflow_ids_to_advance,
+            len(advanced),
         )
         return recovered
 
@@ -1344,6 +1421,14 @@ def _workflow_queued_stale_minutes(value=None):
     except (TypeError, ValueError):
         minutes = DEFAULT_QUEUED_STALE_MINUTES
     return max(5, min(24 * 60, minutes))
+
+
+def _workflow_clean_stale_minutes(value=None):
+    try:
+        minutes = int(value if value is not None else os.environ.get(CLEAN_STALE_MINUTES_ENV_NAME))
+    except (TypeError, ValueError):
+        minutes = DEFAULT_CLEAN_STALE_MINUTES
+    return max(30, min(7 * 24 * 60, minutes))
 
 
 def _schema_check_ttl_seconds():
