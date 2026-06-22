@@ -1056,6 +1056,16 @@ def _verify_published_topic(cookie, topic_id, *, expected_file_count, run_id, ru
                 if topic:
                     file_count = _topic_file_count(topic)
                     last_file_count = file_count
+                    review_issue = _topic_review_issue(topic)
+                    if review_issue:
+                        consecutive_confirmations = 0
+                        last_error = (
+                            f"内容仍处于审核/处理状态（{review_issue}），"
+                            f"附件数 {file_count}/{expected_file_count}"
+                        )
+                        if attempt < attempts:
+                            time.sleep(delay_seconds)
+                        continue
                     if file_count >= int(expected_file_count or 0):
                         consecutive_confirmations += 1
                         if consecutive_confirmations >= required_confirmations:
@@ -1151,6 +1161,20 @@ def _topic_file_count(topic):
         elif isinstance(current, list):
             stack.extend(current)
     return count
+
+
+def _topic_review_issue(topic):
+    if not isinstance(topic, dict):
+        return ""
+    ok_statuses = {"approved", "passed", "published", "success", "succeeded", "normal", "done"}
+    for key in ("process_status", "review_status", "audit_status"):
+        value = str(topic.get(key) or "").strip()
+        if not value:
+            continue
+        if value.lower() in ok_statuses:
+            continue
+        return f"{key}={value}"
+    return ""
 
 
 def _commit_deferred_marks(state, deferred_marks):
