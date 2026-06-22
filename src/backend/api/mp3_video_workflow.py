@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_file
+from sqlalchemy import String, cast, or_
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -35,6 +36,19 @@ STATUS_MAP = {
     "canceled": "canceled",
 }
 SYSTEM_USER_ID = "system"
+
+
+def _normalize_search_query(value, max_length=80):
+    return " ".join(str(value or "").strip().split())[:max_length]
+
+
+def _escape_like(value):
+    return (
+        str(value or "")
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
 
 
 def _visible_user_ids(current_user_or_id):
@@ -191,6 +205,9 @@ def list_jobs(current_user):
     page = _bounded_int(request.args.get("page"), 1, 1, 100000)
     per_page = _bounded_int(request.args.get("per_page"), 20, 1, 100)
     status = (request.args.get("status") or "").strip()
+    search = _normalize_search_query(
+        request.args.get("q") or request.args.get("search") or request.args.get("job_search")
+    )
     query = PublicationTask.query.filter(
         PublicationTask.feature == FEATURE_NAME,
         PublicationTask.user_id.in_(_visible_user_ids(current_user)),
@@ -198,6 +215,13 @@ def list_jobs(current_user):
     if status:
         reverse_status = {value: key for key, value in STATUS_MAP.items()}
         query = query.filter(PublicationTask.status == reverse_status.get(status, status))
+    if search:
+        pattern = f"%{_escape_like(search)}%"
+        query = query.filter(or_(
+            PublicationTask.task_title.ilike(pattern, escape="\\"),
+            cast(PublicationTask.params, String).ilike(pattern, escape="\\"),
+            cast(PublicationTask.result, String).ilike(pattern, escape="\\"),
+        ))
     pagination = query.order_by(PublicationTask.created_at.desc()).paginate(
         page=page,
         per_page=per_page,
@@ -213,6 +237,7 @@ def list_jobs(current_user):
                 "per_page": per_page,
                 "total": pagination.total,
                 "pages": pagination.pages,
+                "q": search,
             },
         },
         "items": items,

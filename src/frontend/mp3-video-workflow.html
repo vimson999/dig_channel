@@ -111,7 +111,12 @@
                         <h2 class="text-base font-black">编排结果</h2>
                         <p id="summary-text" class="mt-1 text-xs text-slate-500">等待投递。</p>
                     </div>
-                    <div class="flex items-center gap-2 text-xs">
+                    <div class="flex flex-wrap items-center justify-end gap-2 text-xs">
+                        <label for="job-name-search" class="sr-only">按名称搜索</label>
+                        <div class="relative">
+                            <i class="fas fa-magnifying-glass pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"></i>
+                            <input id="job-name-search" type="search" class="h-9 w-64 rounded-md border border-slate-200 bg-white pl-8 pr-3 text-xs font-bold text-slate-700 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none" placeholder="按名称 / MP3 / 主题搜索">
+                        </div>
                         <label for="job-status-filter" class="font-bold text-slate-500">状态</label>
                         <select id="job-status-filter" class="h-9 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-bold text-slate-700 focus:border-slate-500 focus:outline-none">
                             <option value="">全部</option>
@@ -131,6 +136,6 @@
 
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260618-mp3-video-workflow"></script>
-    <script src="js/mp3-video-workflow.js?v=20260621-job-status-filter"></script>
+    <script src="js/mp3-video-workflow.js?v=20260622-job-name-search"></script>
 </body>
 </html>

@@ -33,6 +33,13 @@ class DoubaoBrowserTTSAutomationError(DoubaoBrowserTTSError):
     pass
 
 
+class DoubaoBrowserTTSCaptchaError(DoubaoBrowserTTSAutomationError):
+    def __init__(self, message: str, *, screenshot: str = "", page_url: str = ""):
+        super().__init__(message)
+        self.screenshot = screenshot
+        self.page_url = page_url
+
+
 @dataclass
 class DoubaoBrowserTTSOptions:
     doubao_url: str = DEFAULT_DOUBAO_URL
@@ -138,24 +145,28 @@ class DoubaoBrowserTTSWorker:
 
             try:
                 page.goto(self.options.doubao_url, wait_until="domcontentloaded", timeout=45_000)
+                self._raise_if_login_or_captcha(page, job_id)
                 self._guard_total_timeout(started)
 
                 self._emit(progress_callback, "clear_audio_cache", 12, "清空插件音频缓存")
                 self._clear_audio(page)
+                self._raise_if_login_or_captcha(page, job_id)
 
                 self._emit(progress_callback, "submit_text", 25, "提交文本到豆包")
-                self._submit_text(page, text)
+                self._submit_text(page, text, job_id)
+                self._raise_if_login_or_captcha(page, job_id)
                 self._guard_total_timeout(started)
 
                 self._emit(progress_callback, "wait_response", 45, "等待豆包回复完成")
-                read_button = self._wait_for_read_button(page)
+                read_button = self._wait_for_read_button(page, job_id)
                 self._guard_total_timeout(started)
 
                 self._emit(progress_callback, "start_reading", 62, "触发朗读")
+                self._raise_if_login_or_captcha(page, job_id)
                 read_button.click(timeout=10_000)
 
                 self._emit(progress_callback, "capture_audio", 72, "等待音频捕获")
-                audio = self._wait_for_audio(page, started)
+                audio = self._wait_for_audio(page, started, job_id)
 
                 self._emit(progress_callback, "download_wav", 88, "导出 WAV")
                 wav_bytes = self._export_wav_bytes(page, output, job_id)
@@ -177,9 +188,17 @@ class DoubaoBrowserTTSWorker:
                 self._emit(progress_callback, "save_file", 96, "WAV 已保存", result=result)
                 return result
             except PlaywrightTimeoutError as exc:
+                captcha_error = self._captcha_error(page, job_id)
+                if captcha_error:
+                    raise captcha_error from exc
                 screenshot = self._save_failure_screenshot(page, job_id)
                 raise DoubaoBrowserTTSAutomationError(f"页面自动化超时: {exc}; screenshot={screenshot}") from exc
+            except DoubaoBrowserTTSCaptchaError:
+                raise
             except Exception:
+                captcha_error = self._captcha_error(page, job_id)
+                if captcha_error:
+                    raise captcha_error
                 self._save_failure_screenshot(page, job_id)
                 raise
             finally:
@@ -245,7 +264,8 @@ class DoubaoBrowserTTSWorker:
         if not ok:
             raise DoubaoBrowserTTSAutomationError("豆包音频捕获插件未注入或缺少 window.clearDoubaoAudio")
 
-    def _submit_text(self, page, text: str) -> None:
+    def _submit_text(self, page, text: str, job_id: str) -> None:
+        self._raise_if_login_or_captcha(page, job_id)
         input_locator = self._first_visible(page, self._selectors("input"))
         if input_locator is None:
             raise DoubaoBrowserTTSAutomationError("未找到豆包输入框")
@@ -273,22 +293,24 @@ class DoubaoBrowserTTSWorker:
             input_locator.press("Enter", timeout=10_000)
         else:
             send_button.click(timeout=10_000)
+        self._raise_if_login_or_captcha(page, job_id)
 
-    def _wait_for_read_button(self, page):
+    def _wait_for_read_button(self, page, job_id: str):
         deadline = time.monotonic() + self.options.response_timeout_seconds
         while time.monotonic() < deadline:
             button = self._last_visible(page, self._selectors("read"))
             if button is not None:
                 return button
-            self._raise_if_login_or_captcha(page)
+            self._raise_if_login_or_captcha(page, job_id)
             time.sleep(1)
         raise DoubaoBrowserTTSAutomationError("等待豆包回复或朗读按钮超时")
 
-    def _wait_for_audio(self, page, started_at: float) -> Dict[str, Any]:
+    def _wait_for_audio(self, page, started_at: float, job_id: str) -> Dict[str, Any]:
         first_audio_deadline = time.monotonic() + self.options.audio_start_timeout_seconds
         last_stats = self._audio_stats(page)
         while time.monotonic() < first_audio_deadline:
             self._guard_total_timeout(started_at)
+            self._raise_if_login_or_captcha(page, job_id)
             stats = self._audio_stats(page)
             if int(stats.get("chunks") or 0) > 0:
                 last_stats = stats
@@ -302,6 +324,7 @@ class DoubaoBrowserTTSWorker:
         last_chunks = int(last_stats.get("chunks") or 0)
         while time.monotonic() < capture_deadline:
             self._guard_total_timeout(started_at)
+            self._raise_if_login_or_captcha(page, job_id)
             stats = self._audio_stats(page)
             chunks = int(stats.get("chunks") or 0)
             if chunks != last_chunks:
@@ -403,9 +426,13 @@ class DoubaoBrowserTTSWorker:
                 "text=验证码",
             ],
             "captcha": [
-                "text=验证码",
+                "text=人机验证",
                 "text=安全验证",
                 "text=验证身份",
+                "text=请选择所有符合上文描述的图片",
+                "text=拖拽到这里",
+                "text=拖动滑块",
+                "text=滑块验证",
             ],
         }
         configured = self.options.selectors.get(key) or []
@@ -434,9 +461,20 @@ class DoubaoBrowserTTSWorker:
                 continue
         return None
 
-    def _raise_if_login_or_captcha(self, page) -> None:
-        if self._first_visible(page, self._selectors("captcha")) is not None:
-            raise DoubaoBrowserTTSAutomationError("豆包页面出现验证码或安全验证，需要人工处理")
+    def _captcha_error(self, page, job_id: str) -> Optional[DoubaoBrowserTTSCaptchaError]:
+        if self._first_visible(page, self._selectors("captcha")) is None:
+            return None
+        screenshot = self._save_failure_screenshot(page, job_id)
+        return DoubaoBrowserTTSCaptchaError(
+            "豆包页面触发人机验证，浏览器自动化已被阻塞，需要人工进入浏览器完成验证后再重试",
+            screenshot=screenshot,
+            page_url=getattr(page, "url", "") or "",
+        )
+
+    def _raise_if_login_or_captcha(self, page, job_id: str = "") -> None:
+        captcha_error = self._captcha_error(page, job_id)
+        if captcha_error:
+            raise captcha_error
         if self._first_visible(page, self._selectors("login")) is not None:
             raise DoubaoBrowserTTSAutomationError("豆包登录态失效，需要先在浏览器 profile 中登录")
 

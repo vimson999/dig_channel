@@ -798,6 +798,8 @@ class WorkflowNotificationService:
             "succeeded": "成功",
             "partial": "部分成功",
             "failed": "失败",
+            "blocked": "已阻塞",
+            "blocked_by_captcha": "人机验证阻塞",
             "skipped": "跳过",
             "created": "已创建",
             "processing": "处理中",

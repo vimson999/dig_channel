@@ -12,6 +12,8 @@ class ReportAudioWorkflowPage {
         this.selectedPdfAsset = null;
         this.jobPage = this.initialJobPage();
         this.jobStatus = this.initialJobStatus();
+        this.jobSearch = this.initialJobSearch();
+        this.jobSearchTimer = null;
         this.jobPerPage = 10;
         this.jobPagination = { page: 1, per_page: 10, total: 0, pages: 0 };
         this.historyRequestSeq = 0;
@@ -47,6 +49,7 @@ class ReportAudioWorkflowPage {
             refreshJobsBtn: document.getElementById('refresh-jobs-btn'),
             pollDelay: document.getElementById('poll-delay'),
             summaryText: document.getElementById('summary-text'),
+            jobNameSearch: document.getElementById('job-name-search'),
             jobStatusFilter: document.getElementById('job-status-filter'),
             jobList: document.getElementById('job-list'),
             jobPagination: document.getElementById('job-pagination'),
@@ -55,6 +58,7 @@ class ReportAudioWorkflowPage {
         this.defaults();
         this.bind();
         this.syncJobStatusFilter();
+        this.syncJobSearchInput();
         this.updatePdfSourceUi();
         this.refreshStatus();
         this.loadPdfAssets({ silent: true });
@@ -108,6 +112,11 @@ class ReportAudioWorkflowPage {
         return this.normalizeJobFilterStatus(params.get('status') || params.get('job_status') || '');
     }
 
+    initialJobSearch() {
+        const params = new URLSearchParams(window.location.search);
+        return this.normalizeJobSearch(params.get('q') || params.get('search') || params.get('job_search') || '');
+    }
+
     jobStatusOptions() {
         return [
             { value: '', label: '全部' },
@@ -129,11 +138,23 @@ class ReportAudioWorkflowPage {
         return this.jobStatusOptions().find((item) => item.value === status)?.label || '全部';
     }
 
+    normalizeJobSearch(value) {
+        return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    }
+
     syncJobStatusFilter() {
         if (!this.els.jobStatusFilter) return;
         const nextValue = this.normalizeJobFilterStatus(this.jobStatus);
         if (this.els.jobStatusFilter.value !== nextValue) {
             this.els.jobStatusFilter.value = nextValue;
+        }
+    }
+
+    syncJobSearchInput() {
+        if (!this.els.jobNameSearch) return;
+        const nextValue = this.normalizeJobSearch(this.jobSearch);
+        if (this.els.jobNameSearch.value !== nextValue) {
+            this.els.jobNameSearch.value = nextValue;
         }
     }
 
@@ -161,6 +182,15 @@ class ReportAudioWorkflowPage {
         this.els.refreshJobsBtn.addEventListener('click', () => this.refreshJobs());
         this.els.pollDelay.addEventListener('change', () => this.resetPollTimer());
         this.els.jobStatusFilter?.addEventListener('change', () => this.handleJobStatusFilterChange());
+        this.els.jobNameSearch?.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                this.applyJobSearch({ force: true });
+            }
+        });
+        this.els.jobNameSearch?.addEventListener('input', () => this.scheduleJobSearch());
+        this.els.jobNameSearch?.addEventListener('search', () => this.applyJobSearch({ force: true }));
+        this.els.jobNameSearch?.addEventListener('change', () => this.applyJobSearch({ force: true }));
         this.els.jobList.addEventListener('click', (event) => this.handleJobAction(event));
         this.els.jobList.addEventListener('keydown', (event) => {
             if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -602,7 +632,9 @@ class ReportAudioWorkflowPage {
         const showLoading = !options.silent;
         this.jobPage = page;
         this.jobStatus = this.normalizeJobFilterStatus(this.jobStatus);
+        this.jobSearch = this.normalizeJobSearch(this.jobSearch);
         this.syncJobStatusFilter();
+        this.syncJobSearchInput();
         this.historyLoading = true;
         if (showLoading) {
             this.els.loadHistoryBtn.disabled = true;
@@ -614,6 +646,7 @@ class ReportAudioWorkflowPage {
                 per_page: String(this.jobPerPage),
             });
             if (this.jobStatus) query.set('status', this.jobStatus);
+            if (this.jobSearch) query.set('q', this.jobSearch);
             const result = await this.request(`/api/report-audio-workflows/jobs?${query.toString()}`, { timeoutMs: 15000 });
             if (requestSeq !== this.historyRequestSeq) return;
             const items = result.data?.items || result.items || [];
@@ -648,6 +681,24 @@ class ReportAudioWorkflowPage {
         const nextStatus = this.normalizeJobFilterStatus(this.els.jobStatusFilter?.value || '');
         if (nextStatus === this.jobStatus) return;
         this.jobStatus = nextStatus;
+        this.jobPage = 1;
+        this.updateJobPageUrl(1);
+        this.loadHistory({ page: 1, force: true });
+    }
+
+    scheduleJobSearch() {
+        if (this.jobSearchTimer) window.clearTimeout(this.jobSearchTimer);
+        this.jobSearchTimer = window.setTimeout(() => this.applyJobSearch(), 350);
+    }
+
+    applyJobSearch(options = {}) {
+        if (this.jobSearchTimer) {
+            window.clearTimeout(this.jobSearchTimer);
+            this.jobSearchTimer = null;
+        }
+        const nextSearch = this.normalizeJobSearch(this.els.jobNameSearch?.value || '');
+        if (!options.force && nextSearch === this.jobSearch) return;
+        this.jobSearch = nextSearch;
         this.jobPage = 1;
         this.updateJobPageUrl(1);
         this.loadHistory({ page: 1, force: true });
@@ -913,6 +964,7 @@ class ReportAudioWorkflowPage {
 
     render() {
         this.syncJobStatusFilter();
+        this.syncJobSearchInput();
         const total = this.jobs.length;
         const running = this.jobs.filter((job) => ['queued', 'running', 'submitting'].includes(job.status)).length;
         const succeeded = this.jobs.filter((job) => job.status === 'succeeded').length;
@@ -920,12 +972,17 @@ class ReportAudioWorkflowPage {
         const historyTotal = Number(this.jobPagination?.total || 0);
         const pageCount = Number(this.jobPagination?.pages || 0);
         const statusLabel = this.jobStatusLabel(this.jobStatus);
+        const searchText = this.normalizeJobSearch(this.jobSearch);
+        const scopeLabel = [
+            searchText ? `搜索“${searchText}”` : '',
+            this.jobStatus ? statusLabel : '',
+        ].filter(Boolean).join(' · ');
         this.els.summaryText.textContent = total
-            ? `${statusLabel} ${historyTotal || total} 条 · 第 ${this.jobPage}/${Math.max(1, pageCount || 1)} 页，本页 ${total} 条，运行中 ${running}，成功 ${succeeded}，失败 ${failed}。`
-            : (this.jobStatus ? `暂无${statusLabel}状态的编排任务。` : '等待投递。');
+            ? `${scopeLabel || '全部'} ${historyTotal || total} 条 · 第 ${this.jobPage}/${Math.max(1, pageCount || 1)} 页，本页 ${total} 条，运行中 ${running}，成功 ${succeeded}，失败 ${failed}。`
+            : (scopeLabel ? `暂无${scopeLabel}的编排任务。` : '等待投递。');
 
         if (!this.jobs.length) {
-            const emptyText = this.jobStatus ? `暂无${statusLabel}状态的编排任务。` : '暂无编排任务。';
+            const emptyText = scopeLabel ? `暂无${scopeLabel}的编排任务。` : '暂无编排任务。';
             this.els.jobList.innerHTML = `<div class="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-12 text-center text-sm text-slate-500">${this.escape(emptyText)}</div>`;
             this.renderJobPagination();
             return;
@@ -1044,6 +1101,14 @@ class ReportAudioWorkflowPage {
             url.searchParams.delete('status');
         }
         url.searchParams.delete('job_status');
+        const search = this.normalizeJobSearch(this.jobSearch);
+        if (search) {
+            url.searchParams.set('q', search);
+        } else {
+            url.searchParams.delete('q');
+        }
+        url.searchParams.delete('search');
+        url.searchParams.delete('job_search');
     }
 
     jobSequenceNumber(index) {
@@ -1644,14 +1709,14 @@ class ReportAudioWorkflowPage {
 
     normalizeStatus(status) {
         const value = String(status || '').trim().toLowerCase();
-        const map = { pending: 'queued', processing: 'running', completed: 'succeeded' };
+        const map = { pending: 'queued', processing: 'running', completed: 'succeeded', blocked_by_captcha: 'blocked' };
         const normalized = map[value] || value;
         if (normalized === 'cancelled') return 'canceled';
         return normalized;
     }
 
     isTerminal(status) {
-        return ['succeeded', 'failed', 'canceled'].includes(status);
+        return ['succeeded', 'failed', 'blocked', 'canceled'].includes(status);
     }
 
     statusMeta(status) {
@@ -1660,6 +1725,7 @@ class ReportAudioWorkflowPage {
             queued: { label: '排队中', className: 'bg-amber-50 text-amber-700', dot: 'bg-amber-500', bar: 'bg-amber-500' },
             running: { label: '运行中', className: 'bg-blue-50 text-blue-700', dot: 'bg-blue-500', bar: 'bg-blue-600' },
             succeeded: { label: '成功', className: 'bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500', bar: 'bg-emerald-600' },
+            blocked: { label: '人机验证阻塞', className: 'bg-amber-50 text-amber-800', dot: 'bg-amber-500', bar: 'bg-amber-500' },
             failed: { label: '失败', className: 'bg-red-50 text-red-700', dot: 'bg-red-500', bar: 'bg-red-600' },
             canceled: { label: '已取消', className: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400', bar: 'bg-slate-500' },
             skipped: { label: '未执行', className: 'bg-slate-100 text-slate-500', dot: 'bg-slate-300', bar: 'bg-slate-400' },

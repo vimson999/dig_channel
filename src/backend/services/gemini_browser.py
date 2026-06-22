@@ -49,6 +49,7 @@ class GeminiBrowserOptions:
     response_stable_seconds: float = 3.0
     total_timeout_seconds: int = 900
     ready_timeout_seconds: int = 90
+    upload_timeout_seconds: int = 300
     min_response_chars: int = 120
     selectors: Dict[str, List[str]] = field(default_factory=dict)
 
@@ -70,6 +71,7 @@ class GeminiBrowserOptions:
             response_stable_seconds=_float_env("REPORT_PDF_GEMINI_RESPONSE_STABLE_SECONDS", _float_env("GEMINI_BROWSER_RESPONSE_STABLE_SECONDS", 3.0)),
             total_timeout_seconds=_int_env("REPORT_PDF_GEMINI_TOTAL_TIMEOUT", _int_env("GEMINI_BROWSER_TOTAL_TIMEOUT", 900)),
             ready_timeout_seconds=_int_env("REPORT_PDF_GEMINI_READY_TIMEOUT", _int_env("GEMINI_BROWSER_READY_TIMEOUT", 90)),
+            upload_timeout_seconds=_int_env("REPORT_PDF_GEMINI_UPLOAD_TIMEOUT", _int_env("GEMINI_BROWSER_UPLOAD_TIMEOUT", 300)),
             min_response_chars=_int_env("REPORT_PDF_GEMINI_MIN_RESPONSE_CHARS", _int_env("GEMINI_BROWSER_MIN_RESPONSE_CHARS", 120)),
             selectors=_load_selectors_from_env(),
         )
@@ -99,6 +101,7 @@ def status_payload(options: Optional[GeminiBrowserOptions] = None) -> Dict[str, 
         "chrome_path_configured": bool(options.chrome_executable_path),
         "chrome_path_exists": bool(chrome_path and chrome_path.exists()),
         "chrome_channel": options.chrome_channel,
+        "upload_timeout_seconds": options.upload_timeout_seconds,
         "mode": "real_browser",
         "business_feature": FEATURE_NAME,
         "automation_engine": "gemini_browser",
@@ -310,6 +313,7 @@ class GeminiBrowserWorker:
                 self._emit(progress_callback, "upload_file", 18, f"上传文件到 Gemini：{source_file.name}")
                 self._upload_file(page, str(source_file), started)
                 self._guard_total_timeout(started)
+                self._emit(progress_callback, "upload_ready", 25, f"Gemini 文件上传完成：{source_file.name}")
 
                 self._emit(progress_callback, "submit_initial", 28, "提交 Gemini 初始任务")
                 self._submit_prompt(page, prompt)
@@ -580,18 +584,31 @@ class GeminiBrowserWorker:
             raise GeminiBrowserAutomationError(f"文件上传失败: {exc}") from exc
 
     def _wait_for_upload_ready(self, page, filename: str, started_at: float) -> None:
-        deadline = time.monotonic() + 90
+        timeout_seconds = max(30, int(getattr(self.options, "upload_timeout_seconds", 300) or 300))
+        settle_seconds = max(0.0, _float_env("GEMINI_BROWSER_UPLOAD_READY_SETTLE_SECONDS", 1.5))
+        deadline = time.monotonic() + timeout_seconds
         name = filename.lower()
+        ready_since = None
+        last_state: Dict[str, Any] = {}
         while time.monotonic() < deadline:
             self._guard_total_timeout(started_at)
             self._raise_if_login_or_captcha(page)
             state = self._composer_submit_state(page, name)
+            last_state = state if isinstance(state, dict) else {}
             if isinstance(state, dict) and state.get("canceled"):
                 raise GeminiBrowserAutomationError("Gemini 文件上传被取消或失败")
             if _upload_is_ready(state):
-                return
-            time.sleep(1)
-        raise GeminiBrowserAutomationError("等待 Gemini 文件上传完成超时")
+                if ready_since is None:
+                    ready_since = time.monotonic()
+                if time.monotonic() - ready_since >= settle_seconds:
+                    return
+            else:
+                ready_since = None
+            time.sleep(0.75)
+        summary = _submit_state_summary(last_state, "")
+        raise GeminiBrowserAutomationError(
+            f"等待 Gemini 文件上传完成超时: {filename} ({timeout_seconds}s); {summary}"
+        )
 
     def _submit_prompt(self, page, prompt: str) -> None:
         input_locator = self._last_visible(page, self._selectors("input"))
@@ -1600,7 +1617,7 @@ def _upload_is_ready(state: Any) -> bool:
         return False
     if state.get("busy") or state.get("canceled"):
         return False
-    return bool(state.get("hasName") or state.get("enabledSend"))
+    return bool(state.get("hasName") and state.get("enabledSend"))
 
 
 def _promptless_submit_confirmed(state: Any, composer_text: str, generating: bool = False, *, clicked_send: bool = False) -> bool:

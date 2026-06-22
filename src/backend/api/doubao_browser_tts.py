@@ -24,6 +24,7 @@ STATUS_MAP = {
     "processing": "running",
     "completed": "succeeded",
     "failed": "failed",
+    "blocked_by_captcha": "blocked",
     "canceled": "canceled",
 }
 
@@ -194,7 +195,7 @@ def cancel_job(current_user, job_id):
     task = _get_owned_task(current_user, job_id)
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    if task.status in {"completed", "failed", "canceled"}:
+    if task.status in {"completed", "failed", "blocked_by_captcha", "canceled"}:
         payload = _job_payload(task)
         return jsonify({"success": True, "message": "任务已结束", **payload, "data": payload})
 
@@ -238,6 +239,9 @@ def _job_payload(task, include_raw=False):
         "started_at": result.get("started_at"),
         "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else result.get("completed_at"),
         "error": task.error_message or result.get("error"),
+        "error_type": result.get("error_type"),
+        "blocked_reason": result.get("blocked_reason"),
+        "captcha_blocked": result.get("captcha_blocked") or None,
         "text": request_payload.get("text"),
         "request": {
             "text": request_payload.get("text"),

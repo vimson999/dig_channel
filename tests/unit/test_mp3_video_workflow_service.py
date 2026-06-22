@@ -33,6 +33,8 @@ from services.mp3_video_workflow import (
     draw_audio_background,
     draw_closed_door_cover,
     draw_finance_cover,
+    extract_audio_range,
+    extract_title_candidates,
     fallback_plan,
     gemini_options_from_env,
     initial_gemini_prompt,
@@ -53,6 +55,57 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertEqual(plan["cover_main_title"], "内资闭门会议")
         self.assertEqual(plan["xiaojunjun_title"], "内资闭门会议")
         self.assertEqual(plan["planner_version"], PLANNER_VERSION)
+
+    def test_fallback_plan_extracts_gemini_investor_titles_and_clip_range(self):
+        response = """
+        1. 投资者视角长标题（3个版本）
+        这三个标题兼顾了高信息密度与吸引力。
+
+        内资闭门会 | 航空基本面拐点确立现价进入买入窗口 | 估值极寒跌至历史1%分位 | 油价大跌释放超额红利 | 260622
+        内资闭门会 | 揭秘航空股左侧布局时机 | 隐形供给瓶颈引爆戴维斯双击 | 票价背后的真实需求反转 | 260622
+        内资闭门会 | 油价骤降叠加运力断供危机 | 航空业供需错配红利即将兑现 | 现价步入绝佳抄底区间 | 260622
+
+        4. 音频精华片段提取
+        推荐截取时间戳：01:10 - 09:45 （预估时长约 8分35秒）
+        """
+
+        titles = extract_title_candidates(response)
+        audio_range = extract_audio_range(response)
+        plan = fallback_plan(response, audio={"filename": "demo.mp3", "duration_seconds": 800})
+
+        self.assertEqual(
+            titles[0],
+            "航空基本面拐点确立现价进入买入窗口 | 估值极寒跌至历史1%分位 | 油价大跌释放超额红利",
+        )
+        self.assertIn(
+            "揭秘航空股左侧布局时机 | 隐形供给瓶颈引爆戴维斯双击 | 票价背后的真实需求反转",
+            titles,
+        )
+        self.assertEqual(audio_range, (70.0, 585.0))
+        self.assertEqual(plan["audio"]["start_seconds"], 70)
+        self.assertEqual(plan["audio"]["end_seconds"], 585)
+
+    def test_validate_plan_preserves_local_clip_range_when_planner_omits_it(self):
+        fallback = fallback_plan(
+            "内资闭门会 | 油价骤降叠加运力断供危机 | 航空业供需错配红利即将兑现 | 现价步入绝佳抄底区间 | 260622\n"
+            "推荐截取时间戳：01:10 - 09:45",
+            audio={"duration_seconds": 800},
+        )
+        plan = validate_plan(
+            {
+                "title": "内资闭门会 | 油价骤降叠加运力断供危机 | 航空业供需错配红利即将兑现 | 现价步入绝佳抄底区间 | 260622",
+                "audio": {},
+            },
+            fallback=fallback,
+            audio={"duration_seconds": 800},
+        )
+
+        self.assertEqual(
+            plan["title"],
+            "油价骤降叠加运力断供危机 | 航空业供需错配红利即将兑现 | 现价步入绝佳抄底区间",
+        )
+        self.assertEqual(plan["audio"]["start_seconds"], 70)
+        self.assertEqual(plan["audio"]["end_seconds"], 585)
 
     def test_validate_plan_clamps_audio_range(self):
         fallback = fallback_plan("标题方案：CPO 时代预期差。", audio={"duration_seconds": 60})
@@ -160,12 +213,15 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
             "MP3_VIDEO_GEMINI_RESPONSE_TIMEOUT": "",
             "MP3_VIDEO_GEMINI_IMAGE_TIMEOUT": "",
             "MP3_VIDEO_GEMINI_TOTAL_TIMEOUT": "",
+            "MP3_VIDEO_GEMINI_UPLOAD_TIMEOUT": "",
+            "GEMINI_MP3_VIDEO_UPLOAD_TIMEOUT": "",
         }, clear=False):
             options = gemini_options_from_env()
 
         self.assertGreaterEqual(options.response_timeout_seconds, 900)
         self.assertGreaterEqual(options.image_timeout_seconds, 900)
         self.assertGreaterEqual(options.total_timeout_seconds, 2400)
+        self.assertGreaterEqual(options.upload_timeout_seconds, 900)
 
     def test_mp3_gemini_initial_prompt_is_never_empty(self):
         self.assertEqual(initial_gemini_prompt({}), DEFAULT_GEMINI_INITIAL_PROMPT)
@@ -177,9 +233,10 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertTrue(_is_retryable_gemini_error("Gemini 提示词未成功提交: 未找到 Gemini 发送按钮"))
         self.assertFalse(_is_retryable_gemini_error("音频文件不存在: demo.mp3"))
 
-    def test_gemini_upload_ready_accepts_enabled_submit_button(self):
-        self.assertTrue(_upload_is_ready({"hasName": False, "busy": False, "canceled": False, "enabledSend": True}))
-        self.assertTrue(_upload_is_ready({"hasName": True, "busy": False, "canceled": False, "enabledSend": False}))
+    def test_gemini_upload_ready_requires_file_name_and_enabled_submit_button(self):
+        self.assertFalse(_upload_is_ready({"hasName": False, "busy": False, "canceled": False, "enabledSend": True}))
+        self.assertFalse(_upload_is_ready({"hasName": True, "busy": False, "canceled": False, "enabledSend": False}))
+        self.assertTrue(_upload_is_ready({"hasName": True, "busy": False, "canceled": False, "enabledSend": True}))
         self.assertFalse(_upload_is_ready({"hasName": True, "busy": True, "canceled": False, "enabledSend": True}))
         self.assertFalse(_upload_is_ready({"hasName": False, "busy": False, "canceled": False, "enabledSend": False}))
 

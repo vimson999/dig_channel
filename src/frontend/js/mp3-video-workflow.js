@@ -12,6 +12,8 @@ class Mp3VideoWorkflowPage {
         this.jobs = [];
         this.jobPage = this.initialJobPage();
         this.jobStatus = this.initialJobStatus();
+        this.jobSearch = this.initialJobSearch();
+        this.jobSearchTimer = null;
         this.jobPerPage = 10;
         this.jobPagination = { page: 1, per_page: 10, total: 0, pages: 0 };
         this.historyRequestSeq = 0;
@@ -40,6 +42,7 @@ class Mp3VideoWorkflowPage {
             refreshJobsBtn: document.getElementById('refresh-jobs-btn'),
             pollDelay: document.getElementById('poll-delay'),
             summaryText: document.getElementById('summary-text'),
+            jobNameSearch: document.getElementById('job-name-search'),
             jobStatusFilter: document.getElementById('job-status-filter'),
             jobList: document.getElementById('job-list'),
             jobPagination: document.getElementById('job-pagination'),
@@ -47,6 +50,7 @@ class Mp3VideoWorkflowPage {
         this.defaults();
         this.bind();
         this.syncJobStatusFilter();
+        this.syncJobSearchInput();
         this.refreshStatus();
         this.loadAudioAssets({ silent: true });
         this.loadHistory({ silent: true });
@@ -69,6 +73,11 @@ class Mp3VideoWorkflowPage {
     initialJobStatus() {
         const params = new URLSearchParams(window.location.search);
         return this.normalizeJobStatus(params.get('status') || params.get('job_status') || '');
+    }
+
+    initialJobSearch() {
+        const params = new URLSearchParams(window.location.search);
+        return this.normalizeJobSearch(params.get('q') || params.get('search') || params.get('job_search') || '');
     }
 
     jobStatusOptions() {
@@ -94,11 +103,23 @@ class Mp3VideoWorkflowPage {
         return this.jobStatusOptions().find((item) => item.value === status)?.label || '全部';
     }
 
+    normalizeJobSearch(value) {
+        return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    }
+
     syncJobStatusFilter() {
         if (!this.els.jobStatusFilter) return;
         const status = this.normalizeJobStatus(this.jobStatus);
         if (this.els.jobStatusFilter.value !== status) {
             this.els.jobStatusFilter.value = status;
+        }
+    }
+
+    syncJobSearchInput() {
+        if (!this.els.jobNameSearch) return;
+        const search = this.normalizeJobSearch(this.jobSearch);
+        if (this.els.jobNameSearch.value !== search) {
+            this.els.jobNameSearch.value = search;
         }
     }
 
@@ -123,6 +144,15 @@ class Mp3VideoWorkflowPage {
         this.els.refreshJobsBtn.addEventListener('click', () => this.refreshJobs());
         this.els.pollDelay.addEventListener('change', () => this.resetPollTimer());
         this.els.jobStatusFilter?.addEventListener('change', () => this.handleJobStatusFilterChange());
+        this.els.jobNameSearch?.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                this.applyJobSearch({ force: true });
+            }
+        });
+        this.els.jobNameSearch?.addEventListener('input', () => this.scheduleJobSearch());
+        this.els.jobNameSearch?.addEventListener('search', () => this.applyJobSearch({ force: true }));
+        this.els.jobNameSearch?.addEventListener('change', () => this.applyJobSearch({ force: true }));
         this.els.jobList.addEventListener('click', (event) => this.handleJobAction(event));
         this.els.jobPagination.addEventListener('click', (event) => this.handleJobPageClick(event));
         this.els.jobPagination.addEventListener('submit', (event) => this.handleJobPageJump(event));
@@ -406,11 +436,14 @@ class Mp3VideoWorkflowPage {
     async loadHistory({ page = this.jobPage, silent = false } = {}) {
         const seq = ++this.historyRequestSeq;
         this.jobStatus = this.normalizeJobStatus(this.jobStatus);
+        this.jobSearch = this.normalizeJobSearch(this.jobSearch);
         this.syncJobStatusFilter();
+        this.syncJobSearchInput();
         if (!silent) this.els.summaryText.textContent = '加载任务中...';
         try {
             const params = new URLSearchParams({ page: String(page), per_page: String(this.jobPerPage) });
             if (this.jobStatus) params.set('status', this.jobStatus);
+            if (this.jobSearch) params.set('q', this.jobSearch);
             const result = await this.request(`/api/mp3-video-workflows/jobs?${params.toString()}`, { timeoutMs: 20000 });
             if (seq !== this.historyRequestSeq) return;
             this.jobs = result.data?.items || result.items || [];
@@ -429,6 +462,24 @@ class Mp3VideoWorkflowPage {
         const nextStatus = this.normalizeJobStatus(this.els.jobStatusFilter?.value || '');
         if (nextStatus === this.jobStatus) return;
         this.jobStatus = nextStatus;
+        this.jobPage = 1;
+        this.updateJobPageUrl(1);
+        this.loadHistory({ page: 1, force: true });
+    }
+
+    scheduleJobSearch() {
+        if (this.jobSearchTimer) clearTimeout(this.jobSearchTimer);
+        this.jobSearchTimer = setTimeout(() => this.applyJobSearch(), 350);
+    }
+
+    applyJobSearch(options = {}) {
+        if (this.jobSearchTimer) {
+            clearTimeout(this.jobSearchTimer);
+            this.jobSearchTimer = null;
+        }
+        const nextSearch = this.normalizeJobSearch(this.els.jobNameSearch?.value || '');
+        if (!options.force && nextSearch === this.jobSearch) return;
+        this.jobSearch = nextSearch;
         this.jobPage = 1;
         this.updateJobPageUrl(1);
         this.loadHistory({ page: 1, force: true });
@@ -703,15 +754,21 @@ class Mp3VideoWorkflowPage {
     renderJobs() {
         const total = this.jobPagination.total || this.jobs.length;
         const statusLabel = this.jobStatusFilterLabel(this.jobStatus);
+        const searchText = this.normalizeJobSearch(this.jobSearch);
+        const scopeLabel = [
+            searchText ? `搜索“${searchText}”` : '',
+            this.jobStatus ? statusLabel : '',
+        ].filter(Boolean).join(' · ');
         const running = this.jobs.filter((job) => ['queued', 'running', 'pending', 'processing'].includes(job.status)).length;
         const succeeded = this.jobs.filter((job) => ['succeeded', 'completed'].includes(job.status)).length;
         const failed = this.jobs.filter((job) => job.status === 'failed').length;
         this.syncJobStatusFilter();
+        this.syncJobSearchInput();
         this.els.summaryText.textContent = total
-            ? `${statusLabel} ${total} 个 MP3 视频编排任务 · 本页 ${this.jobs.length} 个，运行中 ${running}，成功 ${succeeded}，失败 ${failed}。`
-            : (this.jobStatus ? `暂无${statusLabel}状态的 MP3 视频编排任务。` : '还没有任务。');
+            ? `${scopeLabel || '全部'} ${total} 个 MP3 视频编排任务 · 本页 ${this.jobs.length} 个，运行中 ${running}，成功 ${succeeded}，失败 ${failed}。`
+            : (scopeLabel ? `暂无${scopeLabel}的 MP3 视频编排任务。` : '还没有任务。');
         if (!this.jobs.length) {
-            const emptyText = this.jobStatus ? `暂无${statusLabel}状态的 MP3 视频编排任务。` : '暂无任务。';
+            const emptyText = scopeLabel ? `暂无${scopeLabel}的 MP3 视频编排任务。` : '暂无任务。';
             this.els.jobList.innerHTML = `<div class="rounded-md border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">${this.escape(emptyText)}</div>`;
         } else {
             this.els.jobList.innerHTML = this.jobs.map((job) => this.renderJobCard(job)).join('');
@@ -905,6 +962,14 @@ class Mp3VideoWorkflowPage {
             url.searchParams.delete('status');
         }
         url.searchParams.delete('job_status');
+        const search = this.normalizeJobSearch(this.jobSearch);
+        if (search) {
+            url.searchParams.set('q', search);
+        } else {
+            url.searchParams.delete('q');
+        }
+        url.searchParams.delete('search');
+        url.searchParams.delete('job_search');
     }
 
     setBadge(el, text, type) {

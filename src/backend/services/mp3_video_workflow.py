@@ -40,7 +40,7 @@ TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
 HOT_AUDIO_DOWNLOAD_THRESHOLD = 20
-PLANNER_VERSION = "mp3_video_planner_20260618_v2"
+PLANNER_VERSION = "mp3_video_planner_20260622_v3"
 VISUAL_ARTIFACT_KEYS = (
     "finance_cover",
     "audio_background",
@@ -211,6 +211,10 @@ def gemini_options_from_env() -> GeminiBrowserOptions:
     options.response_timeout_seconds = _int_env("MP3_VIDEO_GEMINI_RESPONSE_TIMEOUT", max(options.response_timeout_seconds, 900))
     options.image_timeout_seconds = _int_env("MP3_VIDEO_GEMINI_IMAGE_TIMEOUT", max(options.image_timeout_seconds, 900))
     options.total_timeout_seconds = _int_env("MP3_VIDEO_GEMINI_TOTAL_TIMEOUT", max(options.total_timeout_seconds, 2400))
+    options.upload_timeout_seconds = _int_env(
+        "MP3_VIDEO_GEMINI_UPLOAD_TIMEOUT",
+        _int_env("GEMINI_MP3_VIDEO_UPLOAD_TIMEOUT", max(options.upload_timeout_seconds, 900)),
+    )
     return options
 
 
@@ -282,7 +286,16 @@ def list_audio_assets(
     target_count = page * per_page + 1
     chunk_size = min(max(per_page * 4, 40), 120)
     scan_limit = min(max(target_count * 5, 120), 2500)
-    ordered = query.order_by(ZsxqAttachment.updated_at.desc(), ZsxqAttachment.created_at.desc())
+    sync_time_order = db.func.coalesce(
+        ZsxqTopic.last_synced_at,
+        ZsxqAttachment.updated_at,
+    )
+    ordered = query.order_by(
+        ZsxqTopic.create_time.desc().nullslast(),
+        sync_time_order.desc(),
+        ZsxqAttachment.updated_at.desc(),
+        ZsxqAttachment.created_at.desc(),
+    )
     valid_items: List[Dict[str, Any]] = []
     skipped_missing = 0
     scanned = 0
@@ -313,6 +326,7 @@ def list_audio_assets(
             "scanned": scanned,
             "scope": "hot" if scope in {"hot", "popular"} else "all",
             "hot_download_threshold": HOT_AUDIO_DOWNLOAD_THRESHOLD,
+            "order": "published_desc",
         },
     }
 
@@ -676,12 +690,20 @@ def deepseek_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
     base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     timeout = _int_env("MP3_VIDEO_PLANNER_TIMEOUT", 120)
     duration = float(audio.get("duration_seconds") or 0)
+    local_titles = extract_title_candidates(first_response)[:5]
+    local_audio_range = extract_audio_range(first_response)
+    local_audio_hint = ""
+    if local_audio_range:
+        local_audio_hint = f"{local_audio_range[0]:.3f}-{local_audio_range[1]:.3f} 秒"
     system_prompt = (
         "你是财经音频视频编排策划器。你只能基于输入的 Gemini 第一轮返回做选择和规整，"
         "不得新增事实。输出严格 JSON，不要 Markdown，不要解释。"
     )
     user_prompt = "\n".join([
         "请从 Gemini 第一轮返回中选择一个最适合成片的标题版本，并规划视频封面与音频截取。",
+        "标题规则：如果原文包含“投资者视角长标题（3个版本）”或类似小节，必须优先从该小节的长标题中选择或融合；",
+        "如果候选标题形如“内资闭门会 | 内容标题 | 260622”，title/title_options 必须去掉开头栏目词和末尾日期，只保留中间内容标题。",
+        "音频规则：如果原文出现“推荐截取时间戳：01:10 - 09:45”这类明确范围，audio.start_seconds/audio.end_seconds 必须使用该范围。",
         "必须输出 JSON 字段：",
         "- title: 最终视频标题，优先选择原文中已给出的标题版本，可轻微润色",
         "- title_options: 字符串数组，最多 5 个候选标题",
@@ -697,6 +719,8 @@ def deepseek_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
         "",
         f"音频文件名：{audio.get('filename') or audio.get('name') or ''}",
         f"音频总时长秒：{duration:.3f}" if duration else "音频总时长秒：未知",
+        "本地已识别候选标题：" + ("；".join(local_titles) if local_titles else "无"),
+        "本地已识别推荐截取：" + (local_audio_hint or "无"),
         "",
         "【Gemini 第一轮返回】",
         _compact_text(first_response, _int_env("MP3_VIDEO_PLANNER_INPUT_CHARS", 18000)),
@@ -730,6 +754,11 @@ def fallback_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
     title = candidates[0] if candidates else _clip_text(_clean_line(first_response), 36) or "此刻此声精选"
     subtitle = extract_subtitle(first_response)
     duration = float(audio.get("duration_seconds") or 0)
+    audio_range = extract_audio_range(first_response)
+    audio_plan = {"start_seconds": 0, "end_seconds": None if duration else None, "speed": DEFAULT_SPEED}
+    if audio_range:
+        audio_plan["start_seconds"] = round(audio_range[0], 3)
+        audio_plan["end_seconds"] = round(audio_range[1], 3)
     return {
         "title": title,
         "title_options": candidates[:5],
@@ -741,7 +770,7 @@ def fallback_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
         "xiaojunjun_subtitle": _cover_lines(subtitle or title, max_chars=18, max_lines=3),
         "date_text": datetime.now().strftime("%Y.%m.%d"),
         "emotion": "bull",
-        "audio": {"start_seconds": 0, "end_seconds": None if duration else None, "speed": DEFAULT_SPEED},
+        "audio": audio_plan,
         "provider": "local_fallback",
         "planner_version": PLANNER_VERSION,
     }
@@ -750,14 +779,18 @@ def fallback_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
 def validate_plan(payload: Dict[str, Any], *, fallback: Dict[str, Any], audio: Dict[str, Any]) -> Dict[str, Any]:
     payload = payload if isinstance(payload, dict) else {}
     duration = float(audio.get("duration_seconds") or 0)
-    title = _clip_text(payload.get("title") or fallback["title"], 80)
+    raw_title = payload.get("title") or fallback["title"]
+    title = _clip_text(_normalize_title_candidate(raw_title) or raw_title, 120)
     subtitle = _clip_text(payload.get("subtitle") or fallback.get("subtitle"), 60)
     cover_main_title = _clip_text(payload.get("cover_main_title") or fallback.get("cover_main_title") or "内资闭门会议", 16)
     cover_title = _clean_multiline(payload.get("cover_title") or fallback.get("cover_title"))
     x_title = _clean_multiline(payload.get("xiaojunjun_title") or fallback.get("xiaojunjun_title"))
     plan_audio = payload.get("audio") if isinstance(payload.get("audio"), dict) else {}
-    start = _parse_seconds(plan_audio.get("start_seconds"), default=0.0)
-    end = _parse_seconds(plan_audio.get("end_seconds"), default=None)
+    fallback_audio = fallback.get("audio") if isinstance(fallback.get("audio"), dict) else {}
+    fallback_start = _parse_seconds(fallback_audio.get("start_seconds"), default=0.0)
+    fallback_end = _parse_seconds(fallback_audio.get("end_seconds"), default=None)
+    start = _parse_seconds(plan_audio.get("start_seconds"), default=fallback_start)
+    end = _parse_seconds(plan_audio.get("end_seconds"), default=fallback_end)
     start = max(0.0, start or 0.0)
     if duration and start >= duration:
         start = 0.0
@@ -767,10 +800,21 @@ def validate_plan(payload: Dict[str, Any], *, fallback: Dict[str, Any], audio: D
             end = min(duration, end)
         if end <= start + 0.1:
             end = None
-    title_options = payload.get("title_options") if isinstance(payload.get("title_options"), list) else fallback.get("title_options", [])
+    title_options = []
+    if isinstance(payload.get("title_options"), list):
+        title_options.extend(payload.get("title_options") or [])
+    title_options.extend(fallback.get("title_options", []))
+    normalized_options = []
+    seen_options = set()
+    for item in title_options:
+        normalized = _normalize_title_candidate(item)
+        if not normalized or normalized in seen_options:
+            continue
+        seen_options.add(normalized)
+        normalized_options.append(normalized)
     return {
         "title": title,
-        "title_options": [_clip_text(item, 80) for item in title_options if _clean_line(item)][:5],
+        "title_options": [_clip_text(item, 120) for item in normalized_options if _clean_line(item)][:5],
         "subtitle": subtitle,
         "cover_main_title": cover_main_title or "内资闭门会议",
         "cover_title": _cover_lines(cover_title or title, max_chars=10),
@@ -1405,29 +1449,121 @@ def planner_model() -> str:
 def extract_title_candidates(text: str) -> List[str]:
     text = str(text or "")
     candidates: List[str] = []
-    for line in text.replace("\r", "\n").split("\n"):
-        clean = _clean_line(line).strip("#-—:： ")
+    lines = [_clean_line(line) for line in text.replace("\r", "\n").split("\n")]
+    in_investor_title_section = False
+    section_stop_re = re.compile(r"^\s*\d+\.\s*(?:精简|音频|优化|核心|金句|片段|摘要|总结|结论)")
+
+    for line in lines:
+        clean = line.strip("#-—:： ")
         if not clean:
             continue
+        if re.search(r"投资者视角长标题|长标题\s*[（(]?\s*\d*\s*个版本|长标题", clean):
+            in_investor_title_section = True
+            continue
+        if in_investor_title_section and section_stop_re.search(clean):
+            in_investor_title_section = False
+
+        if in_investor_title_section:
+            candidate = _normalize_title_candidate(clean)
+            if _looks_like_title_candidate(candidate, prefer_long=True):
+                candidates.append(candidate)
+
+    for line in lines:
+        clean = line.strip("#-—:： ")
+        if not clean:
+            continue
+        normalized = _normalize_title_candidate(clean)
+        if "｜" in clean or "|" in clean:
+            if _looks_like_title_candidate(normalized, prefer_long=True):
+                candidates.append(normalized)
         if re.search(r"标题|题目|选题|封面", clean):
             clean = re.sub(r"^(?:候选|标准|短|封面)?标题(?:方案)?\s*\d*\s*[:：-]?", "", clean).strip()
             for piece in re.split(r"[。；;]", clean):
-                piece = _clean_line(piece).strip("：:，,。 ")
-                if 4 <= len(piece) <= 42:
+                piece = _normalize_title_candidate(piece)
+                if _looks_like_title_candidate(piece):
                     candidates.append(piece)
-        if 4 <= len(clean) <= 42 and not clean.lower().startswith(("http", "source", "参考")):
-            candidates.append(clean)
-    for match in re.finditer(r"[“\"《](.{4,36}?)[”\"》]", text):
-        candidates.append(_clean_line(match.group(1)))
+        if _looks_like_title_candidate(normalized):
+            candidates.append(normalized)
+    for match in re.finditer(r"[“\"《](.{4,80}?)[”\"》]", text):
+        candidate = _normalize_title_candidate(match.group(1))
+        if _looks_like_title_candidate(candidate):
+            candidates.append(candidate)
     seen = set()
     unique = []
     for item in candidates:
-        item = _clean_line(item).strip("：:，,。 ")
+        item = _normalize_title_candidate(item)
         if not item or item in seen:
             continue
         seen.add(item)
         unique.append(item)
+    pipe_titles = [item for item in unique if "|" in item or "｜" in item]
+    if len(pipe_titles) >= 3:
+        return pipe_titles[:8]
     return unique[:8]
+
+
+def extract_audio_range(text: str) -> Optional[Tuple[float, float]]:
+    normalized = str(text or "").replace("：", ":").replace("–", "-").replace("—", "-")
+    token = r"\d{1,2}:\d{2}(?::\d{2})?"
+    range_re = re.compile(
+        rf"(?P<start>{token})\s*(?:-|~|～|至|到)\s*(?P<end>{token})"
+    )
+    for match in range_re.finditer(normalized):
+        context = normalized[max(0, match.start() - 80): min(len(normalized), match.end() + 80)]
+        if not re.search(r"截取|剪辑|片段|精华|时间戳|时段|时间段|推荐", context):
+            continue
+        start = _parse_seconds(match.group("start"), default=None)
+        end = _parse_seconds(match.group("end"), default=None)
+        if start is None or end is None or end <= start:
+            continue
+        return float(start), float(end)
+    return None
+
+
+def _normalize_title_candidate(value: Any) -> str:
+    clean = _clean_line(value)
+    clean = clean.strip(" \t\r\n：:，,。；;|｜")
+    clean = re.sub(r"^(?:[-*•·●○o]\s*)+", "", clean, flags=re.I).strip()
+    clean = re.sub(r"^\d+\s*[.、)]\s*", "", clean).strip()
+    clean = re.sub(r"^[(（]\s*\d+\s*[)）]\s*", "", clean).strip()
+    clean = re.sub(r"^(?:标题|题目|版本|方案|候选标题|封面标题)\s*\d*\s*[:：-]\s*", "", clean).strip()
+    clean = re.sub(r"^(?:内资闭门会(?:议)?|内资闭门|投研闭门会|投研会议|内部交流)\s*[|｜]\s*", "", clean).strip()
+    clean = re.sub(r"\s*[|｜]\s*(?:\d{6}|\d{8}|[12]\d{3}[./-]\d{1,2}[./-]\d{1,2})\s*$", "", clean).strip()
+    clean = re.sub(r"\s+(?:\d{6}|\d{8})\s*$", "", clean).strip()
+    return clean.strip("“”\"'《》：:，,。；;|｜ ")
+
+
+def _looks_like_title_candidate(value: Any, *, prefer_long: bool = False) -> bool:
+    clean = _clean_line(value)
+    if not clean or clean.lower().startswith(("http", "source", "参考")):
+        return False
+    if len(clean) < 4 or len(clean) > 120:
+        return False
+    bad_fragments = (
+        "投资者视角长标题",
+        "精简短标题",
+        "优化标题",
+        "音频精华片段",
+        "这三个标题",
+        "兼顾了",
+        "好的，很高兴",
+        "根据您的要求",
+        "推荐截取",
+        "时间戳",
+        "预估时长",
+        "内容概述",
+        "核心金句",
+        "可以直接用于",
+        "输出结果",
+        "字段",
+    )
+    if any(fragment in clean for fragment in bad_fragments):
+        return False
+    if ("|" not in clean and "｜" not in clean) and len(clean) > 60:
+        return False
+    if prefer_long and ("|" not in clean and "｜" not in clean) and len(clean) > 42:
+        return False
+    return True
 
 
 def extract_subtitle(text: str) -> str:

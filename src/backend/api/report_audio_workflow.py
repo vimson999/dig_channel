@@ -39,6 +39,19 @@ def _float_env(name, default):
         return float(default)
 
 
+def _normalize_search_query(value, max_length=80):
+    return " ".join(str(value or "").strip().split())[:max_length]
+
+
+def _escape_like(value):
+    return (
+        str(value or "")
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
 REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS = max(0.0, _float_env("REPORT_AUDIO_JOBS_CACHE_TTL", 15))
 _REPORT_AUDIO_JOBS_CACHE = {}
 _REPORT_AUDIO_JOBS_CACHE_LOCK = Lock()
@@ -155,11 +168,10 @@ def list_pdf_assets(_current_user):
     sync_time_order = db.func.coalesce(
         ZsxqTopic.last_synced_at,
         ZsxqAttachment.updated_at,
-        ZsxqAttachment.created_at,
     )
     ordered = query.order_by(
+        ZsxqTopic.create_time.desc().nullslast(),
         sync_time_order.desc(),
-        ZsxqTopic.create_time.desc(),
         ZsxqAttachment.updated_at.desc(),
         ZsxqAttachment.created_at.desc(),
     )
@@ -197,6 +209,7 @@ def list_pdf_assets(_current_user):
                 "scanned": scanned,
                 "scope": "hot" if scope in {"hot", "popular"} else "all",
                 "hot_download_threshold": hot_download_threshold,
+                "order": "published_desc",
             },
         },
         "items": items,
@@ -360,11 +373,14 @@ def list_jobs(current_user):
     page = _bounded_int(request.args.get("page"), 1, 1, 100000)
     per_page = _bounded_int(request.args.get("per_page"), 20, 1, 100)
     status = (request.args.get("status") or "").strip()
+    search = _normalize_search_query(
+        request.args.get("q") or request.args.get("search") or request.args.get("job_search")
+    )
     include_detail = str(request.args.get("detail") or "").lower() in {"1", "true", "yes"}
     user_id = str(getattr(current_user, "id", None))
 
     visible_user_ids = _visible_user_ids(current_user)
-    cache_key = ("+".join(sorted(visible_user_ids)), page, per_page, status)
+    cache_key = ("+".join(sorted(visible_user_ids)), page, per_page, status, search)
     if not include_detail and REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS > 0:
         with _REPORT_AUDIO_JOBS_CACHE_LOCK:
             cached = _REPORT_AUDIO_JOBS_CACHE.get(cache_key)
@@ -378,6 +394,19 @@ def list_jobs(current_user):
     if status:
         reverse_status = {value: key for key, value in STATUS_MAP.items()}
         query = query.filter(PublicationTask.status == reverse_status.get(status, status))
+    if search:
+        pattern = f"%{_escape_like(search)}%"
+        query = query.filter(or_(
+            PublicationTask.task_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_pdf_filename.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_pdf_topic_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_result_pdf_filename.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_result_pdf_topic_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_metadata_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_video_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_cover_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_structured_title.ilike(pattern, escape="\\"),
+        ))
 
     ordered = query.order_by(PublicationTask.created_at.desc())
     if include_detail:
@@ -441,6 +470,7 @@ def list_jobs(current_user):
                 "per_page": per_page,
                 "total": total,
                 "pages": pages,
+                "q": search,
             },
         },
         "items": items,

@@ -106,7 +106,7 @@ def _load_task(task_id, *columns):
         attrs.append(column)
     return PublicationTask.query.options(load_only(*attrs)).get(task_id)
 
-TERMINAL_STATUSES = {"completed", "failed", "canceled"}
+TERMINAL_STATUSES = {"completed", "failed", "blocked_by_captcha", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 CURRENT_STEP_MAX_LENGTH = 20
 WORKFLOW_QUEUE_NAME = "report_audio_workflow"
@@ -384,6 +384,8 @@ def _process_job(task_id):
                         wav_paths.append(wav_path)
                         continue
                     raise RuntimeError("豆包浏览器朗读子任务完成但没有返回 WAV 路径")
+                if _is_doubao_captcha_blocked(tts_task):
+                    raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {_child_error_message(tts_task)}")
                 raise RuntimeError(f"豆包浏览器朗读子任务失败: {_child_error_message(tts_task)}")
             last_error = None
             for attempt in range(1, doubao_retry_limit + 2):
@@ -409,6 +411,8 @@ def _process_job(task_id):
                     last_error = "豆包浏览器朗读子任务完成但没有返回 WAV 路径"
                 else:
                     last_error = tts_task.error_message or (tts_task.result or {}).get("error") or "未知错误"
+                    if _is_doubao_captcha_blocked(tts_task):
+                        raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {last_error}")
                 if attempt <= doubao_retry_limit:
                     _emit(
                         workflow_task_id,
@@ -783,6 +787,17 @@ def _task_tts_text(task):
     params = task.params or {}
     doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
     return str(doubao_payload.get("text") or "")
+
+
+def _is_doubao_captcha_blocked(task):
+    if not task:
+        return False
+    result = task.result if isinstance(task.result, dict) else {}
+    return (
+        task.status == "blocked_by_captcha"
+        or result.get("error_type") == "blocked_by_captcha"
+        or result.get("blocked_reason") == "captcha"
+    )
 
 
 def _create_doubao_tts_task(parent, text, index, total, payload, *, attempt=1):
@@ -1761,6 +1776,8 @@ def _child_stage_status(child):
     if not isinstance(child, dict) or not child:
         return "pending"
     status = str(child.get("status") or "").lower()
+    if status in {"blocked", "blocked_by_captcha"}:
+        return "blocked"
     if status == "completed":
         return "completed"
     if status in {"failed", "canceled"}:
@@ -1778,6 +1795,8 @@ def _children_stage_status(children):
         return "pending"
     if any(status == "failed" for status in statuses):
         return "failed"
+    if any(status == "blocked" for status in statuses):
+        return "blocked"
     if any(status == "canceled" for status in statuses):
         return "canceled"
     if all(status == "completed" for status in statuses):
@@ -1793,6 +1812,7 @@ def _notification_status(status):
         "processing": "running",
         "completed": "completed",
         "failed": "failed",
+        "blocked_by_captcha": "blocked",
         "canceled": "canceled",
     }
     return mapping.get(status or "", status or "-")
@@ -1833,8 +1853,14 @@ def _doubao_message(children, tts_text):
     total = tts_text.get("chunks") if isinstance(tts_text, dict) else None
     if children:
         completed = sum(1 for child in children if _child_stage_status(child) == "completed")
+        blocked = sum(1 for child in children if _child_stage_status(child) == "blocked")
         failed = sum(1 for child in children if _child_stage_status(child) == "failed")
-        return f"子任务 {len(children)} 个，完成 {completed}，失败 {failed}"
+        parts = [f"子任务 {len(children)} 个", f"完成 {completed}"]
+        if blocked:
+            parts.append(f"阻塞 {blocked}")
+        if failed:
+            parts.append(f"失败 {failed}")
+        return "，".join(parts)
     if total:
         return f"等待 {total} 段朗读"
     return None
@@ -1912,6 +1938,9 @@ def _task_public_summary(task):
         "step": task.current_step,
         "progress": task.progress or 0,
         "error": task.error_message,
+        "error_type": result.get("error_type"),
+        "blocked_reason": result.get("blocked_reason"),
+        "captcha_blocked": result.get("captcha_blocked"),
         "metadata": result.get("metadata") or {},
         "audio": result.get("audio"),
         "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
