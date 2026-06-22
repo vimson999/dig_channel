@@ -231,6 +231,7 @@ def _build_transient_publish_config(*, file_type, source_dir, options):
         "publish_retry_delay_seconds",
         "publish_verify_attempts",
         "publish_verify_delay_seconds",
+        "publish_verify_confirmations",
         "max_run_attempts",
         "max_file_size_mb",
     ):

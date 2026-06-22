@@ -34,6 +34,7 @@ DEFAULT_PUBLISH_RETRIES = 5
 DEFAULT_PUBLISH_RETRY_DELAY_SECONDS = 60
 DEFAULT_PUBLISH_VERIFY_ATTEMPTS = 6
 DEFAULT_PUBLISH_VERIFY_DELAY_SECONDS = 30
+DEFAULT_PUBLISH_VERIFY_CONFIRMATIONS = 2
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RUNS_LIMIT = 20
 MAX_HISTORY_RUNS = 200
@@ -105,6 +106,16 @@ def _bounded_int(value, default, lower=None, upper=None):
     if upper is not None:
         number = min(upper, number)
     return number
+
+
+def _first_config_value(primary, fallback, key):
+    for source in (primary, fallback):
+        if not isinstance(source, dict) or key not in source:
+            continue
+        value = source.get(key)
+        if value is not None and str(value).strip() != "":
+            return value
+    return None
 
 
 def _normalize_extensions(raw, file_type):
@@ -329,6 +340,12 @@ def _normalize_rule(item, index):
             lower=0,
             upper=600,
         ),
+        "publish_verify_confirmations": _bounded_int(
+            item.get("publish_verify_confirmations"),
+            default=DEFAULT_PUBLISH_VERIFY_CONFIRMATIONS,
+            lower=1,
+            upper=5,
+        ),
         "max_run_attempts": _bounded_int(item.get("max_run_attempts"), default=DEFAULT_MAX_ATTEMPTS, lower=1, upper=10),
         "max_file_size_mb": min(
             _bounded_int(item.get("max_file_size_mb"), default=_default_max_file_size_mb(file_type), lower=1, upper=1024),
@@ -403,6 +420,7 @@ def _snapshot_rule(rule):
         "publish_retry_delay_seconds": rule.get("publish_retry_delay_seconds"),
         "publish_verify_attempts": rule.get("publish_verify_attempts"),
         "publish_verify_delay_seconds": rule.get("publish_verify_delay_seconds"),
+        "publish_verify_confirmations": rule.get("publish_verify_confirmations"),
         "max_run_attempts": rule.get("max_run_attempts"),
         "max_file_size_mb": rule.get("max_file_size_mb"),
     }
@@ -841,6 +859,10 @@ def _scan_rule(rule, state):
             item["reason"] = "published"
             skipped.append(item)
             continue
+        if record.get("status") == "pending_verify":
+            item["reason"] = "pending_verify"
+            skipped.append(item)
+            continue
         if record.get("status") in {"failed", "publish_failed"} and int(record.get("attempts") or 0) >= int(rule.get("max_run_attempts") or DEFAULT_MAX_ATTEMPTS):
             item["reason"] = "max_attempts"
             skipped.append(item)
@@ -889,7 +911,7 @@ def _mark_record(state, item, status, **extra):
     attempts = int(current.get("attempts") or 0)
     if status in {"failed", "publish_failed"}:
         attempts += 1
-    elif status == "published":
+    elif status in {"published", "pending_verify"}:
         attempts = attempts + 1 if attempts else 1
     payload = {
         "path": item.get("path"),
@@ -996,43 +1018,71 @@ def _verify_published_topic(cookie, topic_id, *, expected_file_count, run_id, ru
     if not topic_id:
         raise ValueError("知识星球发帖返回缺少 topic_id")
 
+    rule = rule or {}
+    cookie_account = cookie_account or {}
+    attempts_value = _first_config_value(rule, cookie_account, "publish_verify_attempts")
     attempts = _bounded_int(
-        (rule or {}).get("publish_verify_attempts") or cookie_account.get("publish_verify_attempts"),
+        attempts_value,
         DEFAULT_PUBLISH_VERIFY_ATTEMPTS,
         lower=1,
         upper=20,
     )
+    delay_value = _first_config_value(rule, cookie_account, "publish_verify_delay_seconds")
     delay_seconds = _bounded_int(
-        (rule or {}).get("publish_verify_delay_seconds") or cookie_account.get("publish_verify_delay_seconds"),
+        delay_value,
         DEFAULT_PUBLISH_VERIFY_DELAY_SECONDS,
         lower=0,
         upper=600,
     )
+    confirmations_value = _first_config_value(rule, cookie_account, "publish_verify_confirmations")
+    required_confirmations = _bounded_int(
+        confirmations_value,
+        DEFAULT_PUBLISH_VERIFY_CONFIRMATIONS,
+        lower=1,
+        upper=5,
+    )
+    required_confirmations = min(required_confirmations, attempts)
     last_error = None
+    last_file_count = 0
+    consecutive_confirmations = 0
     for attempt in range(1, attempts + 1):
         try:
             response = zsxq_service.get_topic(cookie, topic_id)
             if isinstance(response, dict) and response.get("succeeded") is False:
                 last_error = f"code={response.get('code')}: {response.get('error') or response.get('message')}"
+                consecutive_confirmations = 0
             else:
                 topic = ((response or {}).get("resp_data") or {}).get("topic") if isinstance(response, dict) else None
                 if topic:
                     file_count = _topic_file_count(topic)
+                    last_file_count = file_count
                     if file_count >= int(expected_file_count or 0):
-                        return {
-                            "topic_id": topic_id,
-                            "status": "verified",
-                            "confirmed": True,
-                            "file_count": file_count,
-                            "expected_file_count": int(expected_file_count or 0),
-                            "attempts": attempt,
-                            "verified_at": _now_iso(),
-                        }
-                    last_error = f"附件数量不匹配，期望 {expected_file_count}，实际 {file_count}"
+                        consecutive_confirmations += 1
+                        if consecutive_confirmations >= required_confirmations:
+                            return {
+                                "topic_id": topic_id,
+                                "status": "verified",
+                                "confirmed": True,
+                                "file_count": file_count,
+                                "expected_file_count": int(expected_file_count or 0),
+                                "attempts": attempt,
+                                "confirmations": consecutive_confirmations,
+                                "required_confirmations": required_confirmations,
+                                "verified_at": _now_iso(),
+                            }
+                        last_error = (
+                            f"等待连续回查确认，当前 {consecutive_confirmations}/"
+                            f"{required_confirmations}，附件数 {file_count}/{expected_file_count}"
+                        )
+                    else:
+                        consecutive_confirmations = 0
+                        last_error = f"附件数量不匹配，期望 {expected_file_count}，实际 {file_count}"
                 else:
+                    consecutive_confirmations = 0
                     last_error = "接口返回中缺少 topic"
         except Exception as exc:
             last_error = str(exc)
+            consecutive_confirmations = 0
 
         if attempt < attempts:
             time.sleep(delay_seconds)
@@ -1053,9 +1103,11 @@ def _verify_published_topic(cookie, topic_id, *, expected_file_count, run_id, ru
         "topic_id": topic_id,
         "status": "pending",
         "confirmed": False,
-        "file_count": 0,
+        "file_count": last_file_count,
         "expected_file_count": int(expected_file_count or 0),
         "attempts": attempts,
+        "confirmations": consecutive_confirmations,
+        "required_confirmations": required_confirmations,
         "checked_at": _now_iso(),
         "reason": "pending_review_or_indexing",
         "last_error": last_error,
@@ -1256,11 +1308,12 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
         _commit_deferred_marks(state, deferred_marks)
         verified_count = len(uploaded_assets) if verification.get("confirmed") else 0
         pending_verify_count = max(0, len(uploaded_assets) - verified_count)
+        record_status = "published" if verification.get("confirmed") else "pending_verify"
         for pair in uploaded_assets:
             _mark_record(
                 state,
                 pair["item"],
-                "published",
+                record_status,
                 rule_id=rule.get("id"),
                 topic_id=topic_id,
                 group_id=config.get("group_id"),
@@ -1279,17 +1332,17 @@ def _attempt_rule_batch_with_cookie(rule, config, cookie_account, state, run_id,
         result["failed_count"] = fail_count
         result["topic_id"] = str(topic_id or "")
         result["verification"] = verification
-        result["status"] = "partial" if fail_count else "success"
+        result["status"] = "partial" if (fail_count or pending_verify_count) else "success"
         if pending_verify_count:
             result["message"] = (
                 f"选中 {len(batch)} 个，已提交发布 {success_count} 个，"
-                f"已确认 {verified_count} 个，待审核/待确认 {pending_verify_count} 个，失败 {fail_count} 个。"
+                f"回查确认 {verified_count} 个，待审核/待复核 {pending_verify_count} 个，失败 {fail_count} 个。"
             )
         else:
             result["message"] = (
-                f"选中 {len(batch)} 个，已提交并确认 {success_count} 个，失败 {fail_count} 个。"
+                f"选中 {len(batch)} 个，已提交并回查确认 {success_count} 个，失败 {fail_count} 个。"
                 if fail_count
-                else f"已提交并确认 {success_count} 个附件。"
+                else f"已提交并回查确认 {success_count} 个附件。"
             )
         return result
     except Exception as exc:

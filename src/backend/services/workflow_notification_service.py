@@ -315,8 +315,8 @@ class WorkflowNotificationService:
                 "总量："
                 f"下载 {totals['downloaded']} 个，下载失败 {totals['download_failed']} 个"
                 f" | 清洗成功 {totals['clean_success']} 个，清洗失败 {totals['clean_failed']} 个"
-                f" | 发布已提交 {totals['publish_submitted']} 个，已确认可见 {totals['publish_verified']} 个"
-                f"，待审核/待确认 {totals['publish_pending']} 个，发布失败 {totals['publish_failed']} 个"
+                f" | 发布已提交 {totals['publish_submitted']} 个，发布后回查确认 {totals['publish_verified']} 个"
+                f"，待审核/待复核 {totals['publish_pending']} 个，发布失败 {totals['publish_failed']} 个"
             )
             business_summary = self._business_summary_text(totals)
             if business_summary:
@@ -589,8 +589,8 @@ class WorkflowNotificationService:
         if not counts or not any(counts.values()):
             return ""
         return (
-            f" | 已提交 {counts['submitted']}，已确认 {counts['verified']}，"
-            f"待审核/待确认 {counts['pending']}，失败 {counts['failed']}"
+            f" | 已提交 {counts['submitted']}，回查确认 {counts['verified']}，"
+            f"待审核/待复核 {counts['pending']}，失败 {counts['failed']}"
         )
 
     def _business_summary_text(self, totals):
@@ -598,7 +598,7 @@ class WorkflowNotificationService:
             return ""
         text = (
             f"业务结论：下载 {totals['downloaded']} 个，清洗成功 {totals['clean_success']} 个，"
-            f"发布确认 {totals['publish_verified']} 个。"
+            f"发布后回查确认 {totals['publish_verified']} 个。"
         )
         extras = []
         if totals.get("download_failed"):
@@ -609,7 +609,7 @@ class WorkflowNotificationService:
         if totals.get("clean_failed"):
             extras.append(f"清洗失败 {totals['clean_failed']} 个")
         if totals.get("publish_pending"):
-            extras.append(f"发布待审核/待确认 {totals['publish_pending']} 个")
+            extras.append(f"发布待审核/待复核 {totals['publish_pending']} 个")
         if totals.get("publish_failed"):
             extras.append(f"发布失败 {totals['publish_failed']} 个")
         if extras:
@@ -667,6 +667,9 @@ class WorkflowNotificationService:
             failed = self._first_number(item.get("failed_count"), summary.get("failed_count"))
             label = self._file_type_label(item.get("file_type"))
             issue_text = self._publish_issue_text(item)
+            recovered_text = self._publish_recovered_issue_text(item)
+            topic_text = self._publish_topic_trace_text(item)
+            target_text = self._publish_target_text(item)
             if submitted <= 0:
                 if failed <= 0 and not issue_text:
                     continue
@@ -676,30 +679,161 @@ class WorkflowNotificationService:
                 )
                 continue
             verify_text = self._publish_verify_text(submitted, verified, pending, failed)
+            extra_parts = []
+            if target_text:
+                extra_parts.append(f"发布目标：{target_text}")
+            if topic_text:
+                extra_parts.append(f"Topic：{topic_text}")
+            if issue_text and (failed > 0 or pending > 0):
+                extra_parts.append(f"原因：{issue_text}")
+            if recovered_text:
+                extra_parts.append(f"账号切换：{recovered_text}")
+            extra_text = "".join(f"{part}。" for part in extra_parts)
             lines.append(
                 f"{label}：{batch_count} 批，{count_text} 个附件，"
                 f"{topic_count} 个 topic，{verify_text}。"
-                + (f"原因：{issue_text}。" if issue_text else "")
+                + extra_text
             )
         return lines
 
     def _publish_issue_text(self, task):
-        runtime = task.get("publish_runtime") if isinstance(task.get("publish_runtime"), dict) else {}
-        attempts = []
-        for run in runtime.get("runs") or []:
-            if not isinstance(run, dict):
-                continue
-            for rule in run.get("rules") or []:
-                if not isinstance(rule, dict):
-                    continue
-                for attempt in rule.get("cookie_attempts") or []:
-                    if isinstance(attempt, dict):
-                        attempts.append(attempt)
-        if not attempts:
-            return ""
-
         parts = []
-        for attempt in attempts:
+        rules = self._publish_rule_items(task)
+        for rule in rules:
+            if self._publish_rule_confirmed(rule):
+                continue
+            parts.extend(self._publish_attempt_issue_parts(rule.get("cookie_attempts")))
+            verification = rule.get("verification") if isinstance(rule.get("verification"), dict) else {}
+            if verification.get("status") == "pending" and verification.get("last_error"):
+                parts.append(f"回查待复核：{verification.get('last_error')}")
+            status = str(rule.get("status") or "").lower()
+            if status in {"failed", "partial"} and rule.get("message"):
+                parts.append(str(rule.get("message")).strip())
+        if not parts:
+            attempts = self._publish_attempts(task)
+            parts.extend(self._publish_attempt_issue_parts(attempts))
+        return "；".join(parts[:4])
+
+    def _publish_recovered_issue_text(self, task):
+        parts = []
+        for rule in self._publish_rule_items(task):
+            if not self._publish_rule_confirmed(rule):
+                continue
+            final_account = rule.get("cookie_account_name") or ""
+            attempts = rule.get("cookie_attempts") if isinstance(rule.get("cookie_attempts"), list) else []
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    continue
+                status = str(attempt.get("status") or "").strip()
+                if status != "retry_with_next_cookie":
+                    continue
+                name = attempt.get("cookie_account_name") or attempt.get("cookie_account_id") or f"账号{attempt.get('index') or ''}"
+                auth_hint = str(attempt.get("auth_hint") or "").strip()
+                quota_hint = str(attempt.get("quota_hint") or "").strip()
+                if auth_hint:
+                    text = f"{name} 认证失败/401"
+                elif quota_hint:
+                    text = f"{name} 命中{quota_hint}"
+                else:
+                    text = f"{name} 切换下一个账号"
+                if final_account:
+                    text += f"，已切换到{final_account}发布"
+                if text not in parts:
+                    parts.append(text)
+        return "；".join(parts[:4])
+
+    def _publish_topic_trace_text(self, task):
+        parts = []
+        for rule in self._publish_rule_items(task):
+            topic_id = str(rule.get("topic_id") or "").strip()
+            if not topic_id:
+                continue
+            account = str(rule.get("cookie_account_name") or "").strip()
+            verification = rule.get("verification") if isinstance(rule.get("verification"), dict) else {}
+            expected = self._safe_int(verification.get("expected_file_count") or rule.get("submitted_count"))
+            file_count = self._safe_int(verification.get("file_count") or rule.get("verified_count"))
+            status = str(verification.get("status") or "").strip()
+            if status == "verified":
+                verify_text = f"{file_count}/{expected} 回查确认" if expected else "回查确认"
+            elif status == "pending":
+                verify_text = f"{file_count}/{expected} 待复核" if expected else "待复核"
+            else:
+                verify_text = f"{file_count}/{expected}" if expected else status
+            prefix = f"{account}/" if account else ""
+            text = f"{prefix}{topic_id}"
+            if verify_text:
+                text += f"（{verify_text}）"
+            parts.append(text)
+        return "；".join(parts[:6])
+
+    def _publish_target_text(self, task):
+        targets = []
+        for run in self._publish_runs(task):
+            group_name = str(run.get("group_name") or "").strip()
+            group_id = str(run.get("group_id") or "").strip()
+            text = group_name or group_id
+            if text and text not in targets:
+                targets.append(text)
+        return "；".join(targets[:4])
+
+    def _publish_rule_items(self, task):
+        if not isinstance(task, dict):
+            return []
+        rules = []
+        for run in self._publish_runs(task):
+            for rule in run.get("rules") or []:
+                if isinstance(rule, dict):
+                    rules.append(rule)
+        if not rules and (task.get("topic_id") or task.get("cookie_attempts")):
+            rules.append(task)
+        return rules
+
+    def _publish_runs(self, task):
+        if not isinstance(task, dict):
+            return []
+        sources = []
+        runtime = task.get("publish_runtime") if isinstance(task.get("publish_runtime"), dict) else None
+        result = task.get("publish_result") if isinstance(task.get("publish_result"), dict) else None
+        if runtime:
+            sources.append(runtime)
+        if result:
+            sources.append(result)
+        if isinstance(task.get("rounds"), list):
+            sources.append(task)
+
+        runs = []
+        for source in sources:
+            if isinstance(source.get("runs"), list):
+                runs.extend(source.get("runs") or [])
+            if isinstance(source.get("rounds"), list):
+                runs.extend(source.get("rounds") or [])
+        return [run for run in runs if isinstance(run, dict)]
+
+    def _publish_attempts(self, task):
+        attempts = []
+        for rule in self._publish_rule_items(task):
+            for attempt in rule.get("cookie_attempts") or []:
+                if isinstance(attempt, dict):
+                    attempts.append(attempt)
+        return attempts
+
+    def _publish_rule_confirmed(self, rule):
+        if not isinstance(rule, dict):
+            return False
+        submitted = self._safe_int(rule.get("submitted_count") or rule.get("uploaded_count"))
+        verified = self._safe_int(rule.get("verified_count"))
+        pending = self._safe_int(rule.get("pending_verify_count"))
+        failed = self._safe_int(rule.get("failed_count"))
+        status = str(rule.get("status") or "").lower()
+        verification = rule.get("verification") if isinstance(rule.get("verification"), dict) else {}
+        verification_ok = verification.get("confirmed") is True or verification.get("status") == "verified"
+        return submitted > 0 and verified >= submitted and pending <= 0 and failed <= 0 and status == "success" and verification_ok
+
+    def _publish_attempt_issue_parts(self, attempts):
+        parts = []
+        for attempt in attempts or []:
+            if not isinstance(attempt, dict):
+                continue
             name = attempt.get("cookie_account_name") or attempt.get("cookie_account_id") or f"账号{attempt.get('index') or ''}"
             auth_hint = str(attempt.get("auth_hint") or "").strip()
             quota_hint = str(attempt.get("quota_hint") or "").strip()
@@ -711,7 +845,7 @@ class WorkflowNotificationService:
             elif status == "failed":
                 message = str(attempt.get("message") or "发布失败").strip()
                 parts.append(f"{name} {message}")
-        return "；".join(parts[:4])
+        return parts
 
     def _publish_recovered_note(self, tasks):
         if not isinstance(tasks, list):
@@ -728,7 +862,7 @@ class WorkflowNotificationService:
         if not failed_with_runtime:
             return ""
         return (
-            f"说明：有 {failed_with_runtime} 个发布子任务状态为失败，但本地发布运行记录显示已有内容确认可见，"
+            f"说明：有 {failed_with_runtime} 个发布子任务状态为失败，但本地发布运行记录显示已有内容发布后回查确认，"
             "通常是结果回写数据库超时导致的状态误报。"
         )
 
@@ -741,12 +875,12 @@ class WorkflowNotificationService:
 
     def _publish_verify_text(self, submitted, verified, pending, failed):
         if failed:
-            return f"已确认可见 {verified}，待审核/待确认 {pending}，失败 {failed}"
+            return f"回查确认 {verified}，待审核/待复核 {pending}，失败 {failed}"
         if pending:
-            return f"已确认可见 {verified}，待审核/待确认 {pending}"
+            return f"回查确认 {verified}，待审核/待复核 {pending}"
         if verified >= submitted:
-            return "全部确认可见"
-        return f"已确认可见 {verified}"
+            return "全部发布后回查确认"
+        return f"回查确认 {verified}"
 
     def _file_type_label(self, value):
         labels = {
