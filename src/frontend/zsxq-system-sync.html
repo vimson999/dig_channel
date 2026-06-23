@@ -52,7 +52,7 @@
             </div>
 
             <p class="zsxq-inline-tip">
-                系统同步和自动发帖现在各自维护独立的 Cookie 与星球上下文。两边持续调度默认分别依赖 <span class="font-mono">ZSXQ_SYNC_TEST_COOKIE</span> 和 <span class="font-mono">ZSXQ_AUTO_PUBLISH_COOKIE</span>，但你也可以直接使用当前模式下页面里的 Cookie 启动或试跑。
+                系统同步和自动发帖现在各自维护独立的 DB Cookie 与星球上下文。持续调度会优先使用平台凭据数据库里的知识星球 Cookie，再回退到环境变量。
             </p>
         </section>
 
@@ -70,7 +70,7 @@
                         <div class="zsxq-block-head">
                             <div>
                                 <div class="zsxq-block-title">Cookie 账户</div>
-                                <div class="zsxq-block-subtitle">支持保存多个账号并快速切换。</div>
+                                <div class="zsxq-block-subtitle">从平台凭据数据库读取，支持快速切换。</div>
                             </div>
                             <button id="new-cookie-btn" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors">
                                 新增
@@ -79,25 +79,25 @@
 
                         <div class="grid grid-cols-[minmax(0,1fr)] gap-2">
                             <select id="cookie-profile-select" class="min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
-                                <option value="">未保存 Cookie</option>
+                                <option value="">读取 DB Cookie 中...</option>
                             </select>
                         </div>
 
-                        <p id="cookie-summary" class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">未保存 Cookie</p>
+                        <p id="cookie-summary" class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">正在读取平台凭据...</p>
 
                         <div id="cookie-editor" class="hidden space-y-2">
                             <input id="cookie-name-input" type="text" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="Cookie 名称，例如：主账号 / 备用账号">
-                            <textarea id="cookie-input" rows="5" class="w-full rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm font-mono outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="支持两种格式：完整 Cookie 请求头，或浏览器导出的 Cookie JSON 数组"></textarea>
+                            <textarea id="cookie-input" rows="5" class="w-full rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm font-mono outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="粘贴完整 Cookie 请求头，或浏览器导出的 Cookie JSON 数组；保存后会加密写入平台凭据 DB。"></textarea>
                             <div class="flex gap-2">
                                 <button id="save-cookie-btn" class="flex-1 rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-900 transition-colors">
-                                    <i class="fas fa-floppy-disk mr-2"></i>保存当前 Cookie
+                                    <i class="fas fa-floppy-disk mr-2"></i>保存到 DB
                                 </button>
                                 <button id="delete-cookie-btn" class="rounded-lg border border-red-200 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 transition-colors">
                                     删除
                                 </button>
                             </div>
                             <p id="cookie-format-hint" class="hidden text-xs text-blue-600"></p>
-                            <p class="text-xs text-slate-400">Cookie 只保存在当前浏览器本地。</p>
+                            <p class="text-xs text-slate-400">下拉框读取平台凭据数据库中的知识星球 Cookie。新增或更新时才需要粘贴明文。</p>
                         </div>
 
                         <button id="toggle-cookie-btn" class="rounded-md border border-slate-300 px-2.5 py-1 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors w-fit">
@@ -577,7 +577,7 @@
                                 <div class="zsxq-card-head">
                                     <div>
                                         <h4 class="zsxq-card-title">发帖调度</h4>
-                                        <p class="zsxq-card-subtitle">优先使用策略里的发帖账号表；若未配置账号表，再回退到页面 Cookie 或环境变量。</p>
+                                        <p class="zsxq-card-subtitle">优先使用 DB publish 凭据池，其次使用策略里的发帖账号表，再回退到环境变量。</p>
                                     </div>
                                     <span id="ap-scheduler-status-badge" class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-500">未运行</span>
                                 </div>
@@ -644,6 +644,6 @@
     <script src="js/env.js"></script>
     <script src="js/config.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/zsxq-system-sync.js?v=20260619-auto-video-dispatch-config"></script>
+    <script src="js/zsxq-system-sync.js?v=20260623-db-credential-cookie"></script>
 </body>
 </html>

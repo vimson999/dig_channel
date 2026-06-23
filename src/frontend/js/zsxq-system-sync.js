@@ -1,8 +1,6 @@
-const COOKIE_STORAGE_KEY = 'zsxq_cookie';
-const COOKIE_PROFILES_STORAGE_KEY = 'zsxq_cookie_profiles';
-const ACTIVE_COOKIE_ID_STORAGE_KEY = 'zsxq_active_cookie_id';
-const SYNC_ACTIVE_COOKIE_ID_STORAGE_KEY = 'zsxq_sync_active_cookie_id';
-const PUBLISH_ACTIVE_COOKIE_ID_STORAGE_KEY = 'zsxq_publish_active_cookie_id';
+const ACTIVE_CREDENTIAL_ID_STORAGE_KEY = 'zsxq_active_credential_id';
+const SYNC_ACTIVE_CREDENTIAL_ID_STORAGE_KEY = 'zsxq_sync_active_credential_id';
+const PUBLISH_ACTIVE_CREDENTIAL_ID_STORAGE_KEY = 'zsxq_publish_active_credential_id';
 const SYSTEM_SYNC_INTERVAL_MINUTES = 25;
 const SYSTEM_SYNC_MAX_ROUNDS = 0;
 const SYSTEM_SYNC_COUNT = 12;
@@ -21,13 +19,14 @@ const AUTO_PUBLISH_LOG_LINES = 160;
 
 const state = {
     cookieProfiles: [],
+    credentialLoadError: '',
     activeMode: 'sync',
     contexts: {
         sync: {
             cookie: '',
             draftName: '',
-            activeCookieId: localStorage.getItem(SYNC_ACTIVE_COOKIE_ID_STORAGE_KEY)
-                || localStorage.getItem(ACTIVE_COOKIE_ID_STORAGE_KEY)
+            activeCookieId: localStorage.getItem(SYNC_ACTIVE_CREDENTIAL_ID_STORAGE_KEY)
+                || localStorage.getItem(ACTIVE_CREDENTIAL_ID_STORAGE_KEY)
                 || '',
             groups: [],
             selectedGroupId: '',
@@ -36,7 +35,7 @@ const state = {
         publish: {
             cookie: '',
             draftName: '',
-            activeCookieId: localStorage.getItem(PUBLISH_ACTIVE_COOKIE_ID_STORAGE_KEY) || '',
+            activeCookieId: localStorage.getItem(PUBLISH_ACTIVE_CREDENTIAL_ID_STORAGE_KEY) || '',
             groups: [],
             selectedGroupId: '',
             summaryText: '请先获取星球，系统会自动识别可用 hashtag。',
@@ -197,7 +196,9 @@ function publishContext() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    initializeCookieProfiles();
+    renderCookieProfiles(true);
+    updateCookieSummary('正在读取平台凭据...', 'muted');
+    setCookieEditorOpen(false);
     renderDefaultConfigSummary();
     bindEvents();
 
@@ -248,6 +249,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     resetAutoPublishCookieAccountForm();
 
+    initializeCookieProfiles();
     setActiveMode(resolveModeFromHash(window.location.hash), { updateHash: false });
     const initialLoadTasks = [
         loadSystemSyncSchedulerStatus({ render: false }),
@@ -355,7 +357,7 @@ function setActiveMode(mode, options = {}) {
     renderContextPanel();
     updateCookieFormatHint();
     updateCookieSummary();
-    setCookieEditorOpen(!currentCookieValue(state.activeMode));
+    setCookieEditorOpen(!hasRequestCredential(state.activeMode));
 
     if (options.updateHash === false) {
         return;
@@ -384,23 +386,27 @@ function apiBaseUrl() {
 }
 
 async function apiPost(endpoint, payload) {
-    const response = await fetch(`${apiBaseUrl()}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-    });
-    const data = await response.json();
-    if (!response.ok || !data.success) {
-        const message = data?.error?.message || data?.message || `HTTP ${response.status}`;
-        throw new Error(message);
-    }
-    return data.data;
+    return apiRequest(endpoint, { method: 'POST', payload });
 }
 
 async function apiGet(endpoint) {
-    const response = await fetch(`${apiBaseUrl()}${endpoint}`, { method: 'GET' });
-    const data = await response.json();
-    if (!response.ok || !data.success) {
+    return apiRequest(endpoint);
+}
+
+async function apiRequest(endpoint, options = {}) {
+    const requestOptions = { method: options.method || 'GET' };
+    if (options.payload !== undefined) {
+        requestOptions.headers = { 'Content-Type': 'application/json' };
+        requestOptions.body = JSON.stringify(options.payload);
+    }
+    const response = await fetch(`${apiBaseUrl()}${endpoint}`, requestOptions);
+    let data = {};
+    try {
+        data = await response.json();
+    } catch {
+        data = {};
+    }
+    if (!response.ok || data.success === false) {
         const message = data?.error?.message || data?.message || `HTTP ${response.status}`;
         throw new Error(message);
     }
@@ -413,28 +419,17 @@ function defaultContextSummary(mode) {
         : '请先获取星球，系统会自动识别可用于同步的 tab。';
 }
 
-function initializeCookieProfiles() {
-    state.cookieProfiles = loadCookieProfiles();
+async function initializeCookieProfiles() {
+    state.credentialLoadError = '';
+    renderCookieProfiles(true);
     const syncCtx = syncContext();
     const publishCtx = publishContext();
-    const oldCookie = localStorage.getItem(COOKIE_STORAGE_KEY) || sessionStorage.getItem('zsxq_cookie') || '';
-    if (oldCookie && !state.cookieProfiles.length) {
-        const id = newCookieProfileId();
-        state.cookieProfiles = [{
-            id,
-            name: '默认 Cookie',
-            cookie: oldCookie,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-        }];
-        if (!syncCtx.activeCookieId) {
-            syncCtx.activeCookieId = id;
-        }
-        if (!publishCtx.activeCookieId) {
-            publishCtx.activeCookieId = id;
-        }
-        localStorage.removeItem(COOKIE_STORAGE_KEY);
-        sessionStorage.removeItem('zsxq_cookie');
+
+    try {
+        state.cookieProfiles = await loadCookieProfiles();
+    } catch (error) {
+        state.cookieProfiles = [];
+        state.credentialLoadError = error.message || '平台凭据读取失败';
     }
 
     [syncCtx, publishCtx].forEach((context, index) => {
@@ -447,44 +442,50 @@ function initializeCookieProfiles() {
     if (!syncCtx.activeCookieId && state.cookieProfiles.length) {
         syncCtx.activeCookieId = state.cookieProfiles[0].id;
     }
+    if (!publishCtx.activeCookieId && state.cookieProfiles.length) {
+        publishCtx.activeCookieId = state.cookieProfiles[0].id;
+    }
 
     applyActiveCookieProfile('sync');
     applyActiveCookieProfile('publish');
     persistCookieProfiles();
+    renderCookieProfiles();
+    updateCookieFormatHint();
+    updateCookieSummary();
+    setCookieEditorOpen(!hasRequestCredential());
+    renderWorkspaceSnapshot();
 }
 
-function loadCookieProfiles() {
-    try {
-        const parsed = JSON.parse(localStorage.getItem(COOKIE_PROFILES_STORAGE_KEY) || '[]');
-        return Array.isArray(parsed)
-            ? parsed.filter(profile => profile && profile.id && profile.cookie)
-            : [];
-    } catch {
-        return [];
-    }
+async function loadCookieProfiles() {
+    const params = new URLSearchParams({
+        platform: 'zsxq',
+        status: 'active',
+        per_page: '100',
+    });
+    const data = await apiGet(`/platform-credentials?${params.toString()}`);
+    return Array.isArray(data?.items) ? data.items : [];
 }
 
 function persistCookieProfiles() {
-    localStorage.setItem(COOKIE_PROFILES_STORAGE_KEY, JSON.stringify(state.cookieProfiles));
     const syncActiveId = syncContext().activeCookieId;
     const publishActiveId = publishContext().activeCookieId;
 
     if (syncActiveId) {
-        localStorage.setItem(ACTIVE_COOKIE_ID_STORAGE_KEY, syncActiveId);
+        localStorage.setItem(ACTIVE_CREDENTIAL_ID_STORAGE_KEY, syncActiveId);
     } else {
-        localStorage.removeItem(ACTIVE_COOKIE_ID_STORAGE_KEY);
+        localStorage.removeItem(ACTIVE_CREDENTIAL_ID_STORAGE_KEY);
     }
 
     if (syncActiveId) {
-        localStorage.setItem(SYNC_ACTIVE_COOKIE_ID_STORAGE_KEY, syncActiveId);
+        localStorage.setItem(SYNC_ACTIVE_CREDENTIAL_ID_STORAGE_KEY, syncActiveId);
     } else {
-        localStorage.removeItem(SYNC_ACTIVE_COOKIE_ID_STORAGE_KEY);
+        localStorage.removeItem(SYNC_ACTIVE_CREDENTIAL_ID_STORAGE_KEY);
     }
 
     if (publishActiveId) {
-        localStorage.setItem(PUBLISH_ACTIVE_COOKIE_ID_STORAGE_KEY, publishActiveId);
+        localStorage.setItem(PUBLISH_ACTIVE_CREDENTIAL_ID_STORAGE_KEY, publishActiveId);
     } else {
-        localStorage.removeItem(PUBLISH_ACTIVE_COOKIE_ID_STORAGE_KEY);
+        localStorage.removeItem(PUBLISH_ACTIVE_CREDENTIAL_ID_STORAGE_KEY);
     }
 }
 
@@ -496,27 +497,44 @@ function activeCookieProfile(mode = state.activeMode) {
 function applyActiveCookieProfile(mode = state.activeMode) {
     const context = modeContext(mode);
     const profile = activeCookieProfile(mode);
-    if (profile) {
-        context.cookie = profile.cookie || '';
-        context.draftName = profile.name || '';
-    } else {
-        context.cookie = context.cookie || '';
-        context.draftName = context.draftName || '';
-    }
+    context.cookie = '';
+    context.draftName = profile?.name || '';
 
     if (mode === currentModeKey()) {
         if (els.cookieNameInput) {
             els.cookieNameInput.value = context.draftName || '';
         }
         if (els.cookieInput) {
-            els.cookieInput.value = context.cookie || '';
+            els.cookieInput.value = '';
+            els.cookieInput.placeholder = profile
+                ? '如需更新这个 DB Cookie，请粘贴新的 Cookie 请求头或浏览器导出 JSON；留空只更新名称。'
+                : '粘贴完整 Cookie 请求头，或浏览器导出的 Cookie JSON 数组；保存后会加密写入平台凭据 DB。';
         }
     }
 }
 
-function renderCookieProfiles() {
-    const emptyOption = '<option value="">新增/未保存 Cookie</option>';
+function renderCookieProfiles(loading = false) {
     if (!els.cookieProfileSelect) return;
+    if (loading) {
+        els.cookieProfileSelect.innerHTML = '<option value="">读取 DB Cookie 中...</option>';
+        els.cookieProfileSelect.value = '';
+        if (els.deleteCookieBtn) {
+            els.deleteCookieBtn.disabled = true;
+            els.deleteCookieBtn.classList.add('opacity-50');
+        }
+        return;
+    }
+    if (state.credentialLoadError) {
+        els.cookieProfileSelect.innerHTML = '<option value="">DB Cookie 读取失败</option>';
+        els.cookieProfileSelect.value = '';
+        if (els.deleteCookieBtn) {
+            els.deleteCookieBtn.disabled = true;
+            els.deleteCookieBtn.classList.add('opacity-50');
+        }
+        return;
+    }
+
+    const emptyOption = '<option value="">新增 DB Cookie</option>';
     if (!state.cookieProfiles.length) {
         els.cookieProfileSelect.innerHTML = emptyOption;
         els.cookieProfileSelect.value = '';
@@ -528,8 +546,7 @@ function renderCookieProfiles() {
     }
 
     els.cookieProfileSelect.innerHTML = emptyOption + state.cookieProfiles.map(profile => {
-        const token = extractCookieToken(profile.cookie);
-        const label = `${profile.name || '未命名 Cookie'}${token ? ` (${maskToken(token)})` : ''}`;
+        const label = credentialProfileLabel(profile);
         return `<option value="${escapeHtml(profile.id)}">${escapeHtml(label)}</option>`;
     }).join('');
     els.cookieProfileSelect.value = modeContext().activeCookieId || '';
@@ -546,7 +563,7 @@ function switchCookieProfile() {
     persistCookieProfiles();
     updateCookieFormatHint();
     updateCookieSummary();
-    setCookieEditorOpen(false);
+    setCookieEditorOpen(!hasRequestCredential());
     resetWorkspaceForMode();
 }
 
@@ -565,89 +582,99 @@ function startNewCookieProfile() {
         els.cookieInput.value = '';
     }
     persistCookieProfiles();
+    renderCookieProfiles();
     updateCookieFormatHint();
     updateCookieSummary();
     setCookieEditorOpen(true);
     resetWorkspaceForMode();
 }
 
-function saveCookieProfile() {
+async function saveCookieProfile() {
     const cookie = (els.cookieInput.value || '').trim();
-    if (!cookie) {
-        updateCookieSummary('请先填写 Cookie', 'error');
+    const context = modeContext();
+    const existing = activeCookieProfile();
+    if (!cookie && !existing) {
+        updateCookieSummary('新增 DB Cookie 需要填写 Cookie / JSON。', 'error');
         return;
     }
 
-    const context = modeContext();
-    const now = new Date().toISOString();
-    const existing = activeCookieProfile();
     const token = extractCookieToken(cookie);
-    const existingToken = extractCookieToken(existing?.cookie || '');
-    const sameTokenProfile = token
-        ? state.cookieProfiles.find(profile => extractCookieToken(profile.cookie) === token)
-        : null;
     const name = (els.cookieNameInput.value || '').trim()
-        || (existing && (!token || token === existingToken) ? existing.name : '')
+        || existing?.name
         || context.draftName
         || (token ? `Cookie ${maskToken(token)}` : '未命名 Cookie');
-
-    if (sameTokenProfile) {
-        sameTokenProfile.name = name;
-        sameTokenProfile.cookie = cookie;
-        sameTokenProfile.updated_at = now;
-        context.activeCookieId = sameTokenProfile.id;
-    } else if (existing && (!token || token === existingToken)) {
-        existing.name = name;
-        existing.cookie = cookie;
-        existing.updated_at = now;
-    } else {
-        const id = newCookieProfileId();
-        state.cookieProfiles.push({
-            id,
-            name,
-            cookie,
-            created_at: now,
-            updated_at: now,
-        });
-        context.activeCookieId = id;
+    const payload = {
+        platform: 'zsxq',
+        name,
+        credential_type: cookie ? credentialTypeForPayload(cookie) : (existing?.credential_type || 'cookie_header'),
+        purposes: Array.isArray(existing?.purposes) && existing.purposes.length
+            ? existing.purposes
+            : ['zsxq.publish', 'zsxq.sync'],
+        status: existing?.status && existing.status !== 'deleted' ? existing.status : 'active',
+        priority: Number.isFinite(Number(existing?.priority)) ? Number(existing.priority) : 100,
+        owner_label: existing?.owner_label || '',
+        notes: existing?.notes || '',
+        extra: existing?.extra && typeof existing.extra === 'object' ? existing.extra : {},
+    };
+    if (cookie) {
+        payload.payload = cookie;
     }
 
-    context.cookie = cookie;
-    context.draftName = name;
-    persistCookieProfiles();
-    applyActiveCookieProfile();
-    renderCookieProfiles();
-    updateCookieSummary('已保存当前 Cookie', 'success');
-    setCookieEditorOpen(false);
+    const originalHTML = els.saveCookieBtn.innerHTML;
+    setLoading(els.saveCookieBtn, true, '保存中...');
+    try {
+        const result = await apiRequest(
+            existing ? `/platform-credentials/${encodeURIComponent(existing.id)}` : '/platform-credentials',
+            {
+                method: existing ? 'PUT' : 'POST',
+                payload,
+            },
+        );
+        const account = result?.account;
+        context.activeCookieId = account?.id || existing?.id || '';
+        context.cookie = '';
+        context.draftName = name;
+        persistCookieProfiles();
+        await initializeCookieProfiles();
+        updateCookieSummary('DB Cookie 已保存', 'success');
+        setCookieEditorOpen(false);
+    } catch (error) {
+        updateCookieSummary(`保存失败：${error.message}`, 'error');
+    } finally {
+        setLoading(els.saveCookieBtn, false, originalHTML);
+    }
 }
 
-function deleteCookieProfile() {
+async function deleteCookieProfile() {
     const currentId = modeContext().activeCookieId;
     if (!currentId) {
         return;
     }
+    const profile = activeCookieProfile();
+    const label = credentialProfileLabel(profile);
+    if (!window.confirm(`确认删除 DB Cookie「${label}」？`)) return;
 
-    state.cookieProfiles = state.cookieProfiles.filter(profile => profile.id !== currentId);
-    const fallbackId = state.cookieProfiles[0]?.id || '';
-    Object.values(state.contexts).forEach((context) => {
-        if (context.activeCookieId === currentId) {
-            context.activeCookieId = fallbackId;
-            context.cookie = '';
-            context.draftName = '';
-        }
-    });
-    persistCookieProfiles();
-    applyActiveCookieProfile('sync');
-    applyActiveCookieProfile('publish');
-    renderCookieProfiles();
-    updateCookieFormatHint();
-    updateCookieSummary();
-    setCookieEditorOpen(!currentCookieValue());
-    resetWorkspaceForMode();
-}
-
-function newCookieProfileId() {
-    return `cookie_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const originalHTML = els.deleteCookieBtn.innerHTML;
+    setLoading(els.deleteCookieBtn, true, '删除中...');
+    try {
+        await apiRequest(`/platform-credentials/${encodeURIComponent(currentId)}`, { method: 'DELETE' });
+        Object.values(state.contexts).forEach((context) => {
+            if (context.activeCookieId === currentId) {
+                context.activeCookieId = '';
+                context.cookie = '';
+                context.draftName = '';
+            }
+        });
+        persistCookieProfiles();
+        await initializeCookieProfiles();
+        updateCookieSummary('DB Cookie 已删除', 'success');
+        resetWorkspaceForMode();
+    } catch (error) {
+        updateCookieSummary(`删除失败：${error.message}`, 'error');
+    } finally {
+        setLoading(els.deleteCookieBtn, false, originalHTML);
+        renderCookieProfiles();
+    }
 }
 
 function currentCookieValue(mode = state.activeMode) {
@@ -662,22 +689,45 @@ function currentCookieValue(mode = state.activeMode) {
             context.draftName = draftName;
         }
     }
-    return String(context.cookie || activeCookieProfile(mode)?.cookie || '').trim();
+    return String(context.cookie || '').trim();
 }
 
 function resolveContextCookieMeta(mode) {
-    const cookie = currentCookieValue(mode);
     const context = modeContext(mode);
     const profile = activeCookieProfile(mode);
+    const cookie = currentCookieValue(mode);
     const token = extractCookieToken(cookie);
     const name = (mode === currentModeKey()
         ? (els.cookieNameInput?.value || '').trim()
         : context.draftName) || profile?.name || '';
 
     return {
-        text: cookie ? (name || (token ? maskToken(token) : '已填写')) : '未准备',
-        tone: cookie ? 'success' : 'idle',
+        text: profile
+            ? credentialProfileLabel(profile)
+            : (cookie ? (name || (token ? maskToken(token) : '待保存')) : '未准备'),
+        tone: profile || cookie ? 'success' : 'idle',
     };
+}
+
+function hasRequestCredential(mode = currentModeKey()) {
+    return Boolean(modeContext(mode).activeCookieId);
+}
+
+function credentialRequestPayload(mode = currentModeKey()) {
+    const credentialId = modeContext(mode).activeCookieId;
+    return credentialId ? { credential_id: credentialId } : {};
+}
+
+function credentialTypeForPayload(value) {
+    const text = String(value || '').trim();
+    return text.startsWith('[') || text.startsWith('{') ? 'cookie_json' : 'cookie_header';
+}
+
+function credentialProfileLabel(profile) {
+    if (!profile) return '未选择 Cookie';
+    const name = profile.owner_label || profile.name || '未命名 Cookie';
+    const summary = profile.masked_summary ? ` · ${profile.masked_summary}` : '';
+    return `${name}${summary}`;
 }
 
 function resolveContextGroupMeta(mode) {
@@ -847,26 +897,45 @@ function updateCookieSummary(message = '', type = '') {
     if (message) {
         const classByType = type === 'error'
             ? 'border-red-200 bg-red-50 text-red-600'
-            : 'border-emerald-200 bg-emerald-50 text-emerald-700';
+            : type === 'success'
+            ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+            : 'border-slate-200 bg-slate-50 text-slate-600';
         els.cookieSummary.className = `mt-2 rounded-lg border px-3 py-2 text-xs ${classByType}`;
         els.cookieSummary.textContent = message;
         renderWorkspaceSnapshot();
         return;
     }
 
+    if (state.credentialLoadError) {
+        els.cookieSummary.className = 'mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600';
+        els.cookieSummary.textContent = `平台凭据读取失败：${state.credentialLoadError}`;
+        renderWorkspaceSnapshot();
+        return;
+    }
+
+    const profile = activeCookieProfile();
+    if (profile) {
+        els.cookieSummary.className = 'mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700';
+        els.cookieSummary.textContent = value
+            ? `将更新 DB Cookie：${credentialProfileLabel(profile)}`
+            : `使用 DB Cookie：${credentialProfileLabel(profile)}`;
+        renderWorkspaceSnapshot();
+        return;
+    }
+
     if (!value) {
         els.cookieSummary.className = 'mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500';
-        els.cookieSummary.textContent = '未保存 Cookie';
+        els.cookieSummary.textContent = '未选择 DB Cookie';
         renderWorkspaceSnapshot();
         return;
     }
 
     const token = extractCookieToken(value);
-    const name = (els.cookieNameInput.value || activeCookieProfile()?.name || '').trim();
-    els.cookieSummary.className = 'mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700';
+    const name = (els.cookieNameInput.value || '').trim();
+    els.cookieSummary.className = 'mt-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700';
     els.cookieSummary.textContent = token
-        ? `${name ? `${name} · ` : ''}zsxq_access_token：${maskToken(token)}`
-        : '已保存 Cookie';
+        ? `待保存到 DB：${name ? `${name} · ` : ''}zsxq_access_token：${maskToken(token)}`
+        : '待保存到 DB Cookie';
     renderWorkspaceSnapshot();
 }
 
@@ -916,22 +985,20 @@ function maskToken(token) {
 
 async function loadGroups(mode = currentModeKey()) {
     const context = modeContext(mode);
-    const cookie = getActiveCookieForRequest(mode);
-    if (!cookie) {
+    if (!hasRequestCredential(mode)) {
         if (mode === 'publish') {
-            showAutoPublishMessage('warning', '无法获取星球', '请先填写 Cookie（或先配置环境变量）。');
+            showAutoPublishMessage('warning', '无法获取星球', '请先选择 DB Cookie，或新增保存 Cookie。');
         } else {
-            renderMessage('warning', '请先填写 Cookie（或先配置环境变量）。');
+            renderMessage('warning', '请先选择 DB Cookie，或新增保存 Cookie。');
         }
         return;
     }
 
     setLoading(els.loadGroupsBtn, true, '获取中...');
     setLoading(els.loadGroupsRefreshBtn, true, '获取中...');
-    context.cookie = cookie;
 
     try {
-        const result = await apiPost('/zsxq/groups', { cookie, count: 50 });
+        const result = await apiPost('/zsxq/groups', { ...credentialRequestPayload(mode), count: 50 });
         context.groups = result?.resp_data?.groups || [];
         renderGroups();
         if (context.groups.length) {
@@ -965,15 +1032,6 @@ async function loadGroups(mode = currentModeKey()) {
         setLoading(els.loadGroupsBtn, false, '<i class="fas fa-satellite-dish mr-2"></i>获取星球');
         setLoading(els.loadGroupsRefreshBtn, false, '<i class="fas fa-rotate mr-2"></i>刷新');
     }
-}
-
-function getActiveCookieForRequest(mode = currentModeKey()) {
-    const context = modeContext(mode);
-    if (mode === currentModeKey()) {
-        context.cookie = (els.cookieInput.value || '').trim() || context.cookie;
-        context.draftName = (els.cookieNameInput.value || '').trim() || context.draftName;
-    }
-    return context.cookie || activeCookieProfile(mode)?.cookie || '';
 }
 
 function renderGroups() {
@@ -1028,11 +1086,10 @@ async function onGroupChange(mode = currentModeKey()) {
         return;
     }
 
-    const cookie = getActiveCookieForRequest(mode);
-    if (!cookie) {
+    if (!hasRequestCredential(mode)) {
         context.summaryText = mode === 'publish'
-            ? '当前无 Cookie，无法加载标签菜单。可先保存/输入 Cookie 或使用环境变量先测试。'
-            : '当前无 Cookie，无法加载星球 tab。可先保存/输入 Cookie 或使用环境变量先测试。';
+            ? '当前未选择 DB Cookie，无法加载标签菜单。'
+            : '当前未选择 DB Cookie，无法加载星球 tab。';
         renderContextPanel();
         renderAutoPublishCurrentGroup();
         renderWorkspaceSnapshot();
@@ -1042,7 +1099,7 @@ async function onGroupChange(mode = currentModeKey()) {
     setLoading(els.saveConfigBtn, true, '检测中...');
     try {
         const menuResult = await apiPost('/zsxq/menus', {
-            cookie,
+            ...credentialRequestPayload(mode),
             group_id: groupId,
         });
         const menus = menuResult?.resp_data?.menus || [];
@@ -1339,7 +1396,6 @@ async function saveSystemSyncConfig() {
     );
     const thresholdedDownloadEnabled = Number(maxDownloadFilesRaw) > 0 && attachmentDownloadRules.rules.length > 0;
     const group = selectedGroup('sync');
-    const cookie = getActiveCookieForRequest('sync');
 
     const original = els.saveConfigBtn.innerHTML;
     setLoading(els.saveConfigBtn, true, '保存中...');
@@ -1372,9 +1428,7 @@ async function saveSystemSyncConfig() {
                 tab: job.tab,
             })),
         };
-        if (cookie) {
-            payload.cookie = cookie;
-        }
+        Object.assign(payload, credentialRequestPayload('sync'));
 
         const result = await apiPost('/zsxq/system-sync-test/config', payload);
         const config = result?.config || {};
@@ -1490,9 +1544,7 @@ async function startSystemSyncScheduler() {
     const original = els.startBtn.innerHTML;
     setLoading(els.startBtn, true, '启动中...');
     try {
-        const result = await apiPost('/zsxq/system-sync-scheduler/start', {
-            cookie: getActiveCookieForRequest('sync') || '',
-        });
+        const result = await apiPost('/zsxq/system-sync-scheduler/start', credentialRequestPayload('sync'));
         state.schedulerStatus = result?.scheduler || null;
         renderMessage('success', result?.scheduler?.message || '启动请求已提交。');
         await loadSystemSyncBatches(syncContext().selectedGroupId, { render: false });
@@ -1524,9 +1576,7 @@ async function runSystemSyncOnce() {
     const original = els.runOnceBtn.innerHTML;
     setLoading(els.runOnceBtn, true, '执行中...');
     try {
-        const result = await apiPost('/zsxq/system-sync-scheduler/run-once', {
-            cookie: getActiveCookieForRequest('sync') || '',
-        });
+        const result = await apiPost('/zsxq/system-sync-scheduler/run-once', credentialRequestPayload('sync'));
         const scheduler = result?.scheduler || {};
         const statusText = scheduler.skipped ? `未提交（原因：${scheduler.reason || '系统跳过'}）` : '已触发';
         renderMessage(scheduler.skipped ? 'muted' : 'success', scheduler.message || statusText);
@@ -1608,9 +1658,7 @@ function renderSyncSchedulerPanel() {
     const scheduler = state.schedulerStatus || {};
     const config = scheduler.config || state.syncConfig || {};
     const running = Boolean(scheduler.running);
-    const cookieMode = scheduler.cookie_source === 'page'
-        ? '当前运行实例使用页面 Cookie'
-        : (config.cookie_env_configured ? '环境变量已配置' : '环境变量未配置');
+    const cookieMode = systemSyncCookieSourceText(config, scheduler);
 
     els.schedulerStatusBadge.textContent = running ? '运行中' : '未运行';
     els.schedulerStatusBadge.className = `rounded-full px-2 py-1 text-[10px] font-black ${running ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`;
@@ -1685,11 +1733,9 @@ function renderSyncOverviewCard() {
     const rounds = config.max_rounds
         ? `${config.rounds_completed || 0}/${config.max_rounds} 轮`
         : `持续模式（已运行 ${config.rounds_completed || 0} 轮）`;
-    const cookieSourceText = scheduler.cookie_source === 'page'
-        ? '页面 Cookie（当前运行）'
-        : (config.cookie_env_name || 'ZSXQ_SYNC_TEST_COOKIE');
-    const hasRuntimeCookie = scheduler.cookie_source === 'page' || config.cookie_env_configured;
-    els.configBadge.textContent = scheduler.cookie_source === 'page' ? '页面 Cookie' : (config.cookie_env_configured ? '已配置' : '缺少 Cookie');
+    const cookieSourceText = systemSyncCookieSourceText(config, scheduler);
+    const hasRuntimeCookie = systemSyncCookieReady(config, scheduler);
+    els.configBadge.textContent = hasRuntimeCookie ? '已配置' : '缺少 Cookie';
     els.configBadge.className = `rounded-full px-2 py-1 text-[10px] font-black ${hasRuntimeCookie ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`;
     els.configSummary.textContent = `${config.interval_minutes || SYSTEM_SYNC_INTERVAL_MINUTES} 分钟一次 · 目标星球：${config.group_name || config.group_id || '-'} · ${rounds}`;
     const autoPdfClean = config.auto_pdf_clean === true;
@@ -1704,6 +1750,52 @@ function renderSyncOverviewCard() {
     const videoDispatchText = formatAutoVideoDispatchText(config);
     els.configDetail.textContent = `${downloadText} · ${videoDispatchText} · 每目标 Tab ${config.count || SYSTEM_SYNC_COUNT} 条 · ${cleanText} · ${autoPublishText} · 任务来源：${cookieSourceText}。`;
     renderWorkspaceSnapshot();
+}
+
+function systemSyncCookieReady(config = {}, scheduler = {}) {
+    return Boolean(
+        scheduler.cookie_source === 'db'
+        || config.credential_id
+        || config.cookie_db_configured
+        || scheduler.cookie_source === 'env'
+        || config.cookie_env_configured
+        || scheduler.cookie_source === 'page'
+    );
+}
+
+function systemSyncCookieSourceText(config = {}, scheduler = {}) {
+    if (scheduler.cookie_source === 'db' || config.credential_id || config.cookie_db_configured) {
+        return config.credential_id ? `DB 凭据 ${shortId(config.credential_id)}` : 'DB 凭据';
+    }
+    if (scheduler.cookie_source === 'page') {
+        return '旧页面 Cookie（当前运行）';
+    }
+    if (scheduler.cookie_source === 'env' || config.cookie_env_configured) {
+        return `环境变量 ${config.cookie_env_name || 'ZSXQ_SYNC_TEST_COOKIE'}`;
+    }
+    return '未配置';
+}
+
+function autoPublishCookieSourceText(config = {}, scheduler = {}) {
+    const source = scheduler.cookie_source || config.cookie_source_mode;
+    if (source === 'db' || config.cookie_db_configured) {
+        return `DB publish 凭据池（${config.db_cookie_account_count || config.active_cookie_account_count || 0} 个可用）`;
+    }
+    if (source === 'pool' || config.cookie_pool_ready) {
+        return `策略账号池（${config.active_cookie_account_count || 0} 个可用）`;
+    }
+    if (source === 'page') {
+        return '旧页面 Cookie（当前运行）';
+    }
+    if (source === 'env' || config.cookie_env_configured) {
+        return `环境变量 ${config.cookie_env_name || 'ZSXQ_AUTO_PUBLISH_COOKIE'}`;
+    }
+    return '未配置';
+}
+
+function shortId(value) {
+    const text = String(value || '');
+    return text.length <= 8 ? text : `${text.slice(0, 8)}...`;
 }
 
 function hydrateSystemSyncRuntimeConfigInputs(config = {}) {
@@ -2096,10 +2188,9 @@ async function pickAutoPublishDirectory(ruleType) {
 }
 
 async function loadAutoPublishTags() {
-    const cookie = getActiveCookieForRequest('publish');
     const groupId = currentAutoPublishGroupId();
-    if (!cookie) {
-        showAutoPublishMessage('warning', '无法读取标签', '请先准备 Cookie。');
+    if (!hasRequestCredential('publish')) {
+        showAutoPublishMessage('warning', '无法读取标签', '请先选择 DB Cookie，或新增保存 Cookie。');
         return;
     }
     if (!groupId) {
@@ -2111,7 +2202,7 @@ async function loadAutoPublishTags() {
     setLoading(els.autoPublishLoadTagsBtn, true, '读取中...');
     try {
         const result = await apiPost('/zsxq/menus', {
-            cookie,
+            ...credentialRequestPayload('publish'),
             group_id: groupId,
         });
         const menus = result?.resp_data?.menus || result?.resp_data?.group_menus || [];
@@ -2241,18 +2332,15 @@ function resetAutoPublishCookieAccountForm() {
 }
 
 function fillAutoPublishAccountWithCurrentCookie() {
-    const cookie = getActiveCookieForRequest('publish');
-    if (!cookie) {
-        showAutoPublishMessage('warning', '当前没有可填充的 Cookie', '请先在页面顶部准备好自动发帖用的 Cookie。');
-        return;
-    }
-    if (els.autoPublishAccountCookieInput) {
-        els.autoPublishAccountCookieInput.value = cookie;
-    }
     if (els.autoPublishAccountNameInput && !els.autoPublishAccountNameInput.value.trim()) {
         const profile = activeCookieProfile('publish');
         els.autoPublishAccountNameInput.value = profile?.name || `发布账号 ${state.autoPublishCookieAccounts.length + 1}`;
     }
+    showAutoPublishMessage(
+        'warning',
+        'DB Cookie 不会回填明文',
+        '顶部下拉框现在只保存凭据 id。自动发帖运行会优先使用 DB publish 凭据池；如需维护策略账号池，请手动粘贴对应 Cookie。'
+    );
 }
 
 function fillAutoPublishAccountWithCurrentGroup() {
@@ -2576,7 +2664,7 @@ function applyAutoPublishConfigToForm(config = {}) {
 
 async function persistAutoPublishConfig() {
     const payload = collectAutoPublishPayload();
-    payload.cookie = getActiveCookieForRequest('publish');
+    Object.assign(payload, credentialRequestPayload('publish'));
     const result = await apiPost('/zsxq/auto-publish/config', payload);
     state.autoPublishConfig = result?.config || null;
     applyAutoPublishConfigToForm(state.autoPublishConfig || {});
@@ -2598,7 +2686,7 @@ async function saveAutoPublishConfig() {
                 : (
                     result?.config?.cookie_env_configured
                         ? '配置已写入本地 runtime。当前未配置账号池，持续调度会回退到后端环境变量 Cookie。'
-                        : `配置已保存。当前既没有可用账号池，也还没有检测到 ${result?.config?.cookie_env_name || 'ZSXQ_AUTO_PUBLISH_COOKIE'}，但你仍然可以在本页直接试跑，系统会临时使用页面里选中的 Cookie。`
+                        : `配置已保存。当前既没有可用账号池，也还没有检测到 ${result?.config?.cookie_env_name || 'ZSXQ_AUTO_PUBLISH_COOKIE'}。建议在平台凭据里保存 zsxq.publish Cookie。`
                 )
         );
         await refreshAutoPublishRuntime();
@@ -2614,7 +2702,7 @@ async function previewAutoPublish() {
     setLoading(els.autoPublishPreviewBtn, true, '预览中...');
     try {
         const payload = collectAutoPublishPayload();
-        payload.cookie = getActiveCookieForRequest('publish');
+        Object.assign(payload, credentialRequestPayload('publish'));
         const result = await apiPost('/zsxq/auto-publish/preview', payload);
         state.autoPublishPreview = result?.preview || null;
         renderAutoPublishPreviewPanel();
@@ -2633,9 +2721,7 @@ async function runAutoPublishOnce() {
     setLoading(els.autoPublishSchedulerRunOnceBtn, true, '提交中...');
     try {
         await persistAutoPublishConfig();
-        const result = await apiPost('/zsxq/auto-publish/scheduler/run-once', {
-            cookie: getActiveCookieForRequest('publish') || '',
-        });
+        const result = await apiPost('/zsxq/auto-publish/scheduler/run-once', credentialRequestPayload('publish'));
         showAutoPublishMessage('success', '试跑已提交', result?.scheduler?.message || '后台子进程已启动，请稍后刷新历史记录。');
         await refreshAutoPublishRuntime();
     } catch (error) {
@@ -2651,9 +2737,7 @@ async function startAutoPublishScheduler() {
     setLoading(els.autoPublishSchedulerStartBtn, true, '启动中...');
     try {
         await persistAutoPublishConfig();
-        const result = await apiPost('/zsxq/auto-publish/scheduler/start', {
-            cookie: getActiveCookieForRequest('publish') || '',
-        });
+        const result = await apiPost('/zsxq/auto-publish/scheduler/start', credentialRequestPayload('publish'));
         showAutoPublishMessage('success', '调度器已处理', result?.scheduler?.message || '启动请求已提交。');
         await refreshAutoPublishRuntime();
     } catch (error) {
@@ -2681,11 +2765,7 @@ function renderAutoPublishSchedulerPanel() {
     const scheduler = state.autoPublishScheduler || {};
     const config = scheduler.config || state.autoPublishConfig || {};
     const running = Boolean(scheduler.running);
-    const cookieMode = scheduler.cookie_source === 'pool'
-        ? `策略账号池（${config.active_cookie_account_count || 0} 个可用）`
-        : scheduler.cookie_source === 'page'
-            ? '当前运行实例使用页面 Cookie'
-            : (config.cookie_env_configured ? '环境变量已配置' : '环境变量未配置');
+    const cookieMode = autoPublishCookieSourceText(config, scheduler);
     if (els.autoPublishSchedulerStatusBadge) {
         els.autoPublishSchedulerStatusBadge.textContent = running ? '运行中' : '未运行';
         els.autoPublishSchedulerStatusBadge.className = `rounded-full px-2 py-1 text-[10px] font-black ${running ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`;
