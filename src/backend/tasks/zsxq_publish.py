@@ -15,6 +15,11 @@ from celery_config import celery_app
 from models import db
 from models.task import PublicationTask
 from services.content_pipeline.auto_publish_handoff import publish_clean_output
+from services.runtime_guard import (
+    guard_publication_task_start,
+    is_retryable_db_error,
+    retry_exception_types,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -67,7 +72,9 @@ def run_publish_clean_output_task(self, task_id):
 
 def _run_publish_task_with_guard(celery_task, task_id):
     try:
-        return _run_publish_clean_output_task_impl(task_id)
+        return _run_publish_clean_output_task_impl(task_id, celery_task=celery_task)
+    except retry_exception_types():
+        raise
     except Exception as exc:
         if _is_retryable_db_error(exc) and celery_task.request.retries < _db_retry_count():
             countdown = _db_retry_delay_seconds(celery_task.request.retries)
@@ -102,13 +109,20 @@ def _run_publish_task_with_guard(celery_task, task_id):
         return False
 
 
-def _run_publish_clean_output_task_impl(task_id):
+def _run_publish_clean_output_task_impl(task_id, celery_task=None):
     app = _create_zsxq_publish_app()
     with app.app_context():
         task = _load_task(task_id, *TASK_UPDATE_COLUMNS)
         if not task:
             logger.error("ZSXQ publish task not found: %s", task_id)
             return False
+        if celery_task is not None:
+            guard_publication_task_start(
+                celery_task,
+                task_id,
+                feature="zsxq_clean_output_publish",
+                queue="zsxq_publish",
+            )
 
         params = task.params or {}
         publish_params = params.get("zsxq_publish") or {}
@@ -306,22 +320,7 @@ def _send_direct_publish_failure_email(
 
 
 def _is_retryable_db_error(exc):
-    if isinstance(exc, OperationalError):
-        return True
-    if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
-        return True
-
-    text = str(exc).lower()
-    retryable_fragments = (
-        "timeout expired",
-        "connection to server",
-        "server closed the connection unexpectedly",
-        "could not connect to server",
-        "connection refused",
-        "terminating connection",
-        "connection not open",
-    )
-    return any(fragment in text for fragment in retryable_fragments)
+    return is_retryable_db_error(exc)
 
 
 def _db_retry_count():

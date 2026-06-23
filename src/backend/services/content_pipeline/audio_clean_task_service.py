@@ -3,6 +3,7 @@ from pathlib import Path
 
 from models import db
 from models.task import PublicationTask
+from services.runtime_guard import maybe_guarded_apply_async
 from tasks.content_pipeline import run_audio_clean_task
 
 
@@ -73,7 +74,15 @@ def submit_audio_clean_task(
     db.session.commit()
 
     try:
-        celery_task = run_audio_clean_task.apply_async(args=[task.id], queue="content_pipeline", retry=False)
+        submit_result = maybe_guarded_apply_async(
+            run_audio_clean_task,
+            args=[task.id],
+            queue="content_pipeline",
+            feature="content_audio_clean",
+            task=task,
+            retry=False,
+        )
+        celery_task = submit_result["async_result"]
     except Exception as exc:
         logger.exception("音频清洗任务入队失败: %s", task.id)
         task.status = "failed"
@@ -84,7 +93,10 @@ def submit_audio_clean_task(
 
     task.celery_task_id = celery_task.id
     db.session.commit()
-    return task.to_dict()
+    payload = task.to_dict()
+    payload["deferred"] = bool(submit_result.get("deferred"))
+    payload["admission"] = submit_result.get("admission")
+    return payload
 
 
 def _normalize_audio_files(files):

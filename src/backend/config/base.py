@@ -87,6 +87,18 @@ def _db_application_name():
     return ''.join(ch if ch.isalnum() or ch in {'_', '-'} else '_' for ch in raw)[:63]
 
 
+def _db_pool_size_default():
+    return {
+        'web': 4,
+        'worker': 1,
+        'scheduler': 1,
+    }.get(_db_process_role(), 1)
+
+
+def _db_pool_mode_default():
+    return 'queue' if _db_process_role() == 'web' else 'null'
+
+
 def _postgres_engine_options(
     database_uri,
     *,
@@ -141,13 +153,13 @@ class BaseConfig:
     # 数据库连接池配置。每个 Flask/Celery/scheduler 进程都有独立连接池，默认值要克制。
     SQLALCHEMY_ENGINE_OPTIONS = _postgres_engine_options(
         SQLALCHEMY_DATABASE_URI,
-        pool_size=_db_int_env('POOL_SIZE', 2, 1),
-        max_overflow=_db_int_env('MAX_OVERFLOW', 1, 0),
+        pool_size=_db_int_env('POOL_SIZE', _db_pool_size_default(), 1),
+        max_overflow=_db_int_env('MAX_OVERFLOW', 0, 0),
         pool_timeout=_db_int_env('POOL_TIMEOUT', 10, 1),
         pool_recycle=_db_int_env('POOL_RECYCLE', 1800, 60),
         connect_timeout=_db_int_env('CONNECT_TIMEOUT', 10, 1),
         statement_timeout_ms=os.environ.get('DB_STATEMENT_TIMEOUT_MS'),
-        pool_mode=_db_text_env('POOL_MODE', 'queue'),
+        pool_mode=_db_text_env('POOL_MODE', _db_pool_mode_default()),
     )
     
     # Redis配置

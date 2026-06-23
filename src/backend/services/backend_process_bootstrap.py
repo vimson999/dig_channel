@@ -121,6 +121,7 @@ def _run_and_log(app):
 def _bootstrap_celery_services(app, mode):
     from apis.v1.celery_monitor import (
         SERVICES,
+        _is_service_paused,
         _service_status,
         _start_service,
         _stop_service,
@@ -142,10 +143,14 @@ def _bootstrap_celery_services(app, mode):
             "ok": False,
         }
         try:
+            if _is_service_paused(service_id):
+                item.update({"action": "paused", "ok": True, "skipped": True})
+                results.append(item)
+                continue
             if mode == "restart":
                 item["stop"] = _stop_service(service_id, service)
                 time.sleep(0.2)
-                item["start"] = _start_service(service_id, service)
+                item["start"] = _start_service(service_id, service, clear_pause=False)
             else:
                 status = _service_status(service_id, service, include_logs=False)
                 if status.get("running"):
@@ -153,7 +158,7 @@ def _bootstrap_celery_services(app, mode):
                     item["status"] = {"running": True, "pids": status.get("pids")}
                 else:
                     item["action"] = "start"
-                    item["start"] = _start_service(service_id, service)
+                    item["start"] = _start_service(service_id, service, clear_pause=False)
             item["ok"] = True
         except Exception as exc:
             item["error"] = str(exc)

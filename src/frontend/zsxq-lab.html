@@ -19,7 +19,7 @@
         <section class="zsxq-page-header flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
             <div>
                 <h2 class="text-3xl font-black tracking-tight">知识星球实验台</h2>
-                <p class="text-sm text-slate-500 mt-1">低频验证移动端 API，可获取星球列表和主题内容；Cookie 仅保存在当前浏览器本地。</p>
+                <p class="text-sm text-slate-500 mt-1">低频验证移动端 API，可获取星球列表和主题内容；Cookie 从平台凭据数据库读取并加密保存。</p>
             </div>
             <div class="zsxq-safety-note flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
                 <i class="fas fa-triangle-exclamation"></i>
@@ -38,28 +38,28 @@
                     </div>
                     <div class="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
                         <select id="cookie-profile-select" class="min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
-                            <option value="">未保存 Cookie</option>
+                            <option value="">读取 DB Cookie 中...</option>
                         </select>
                         <button id="new-cookie-btn" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors">
                             新增
                         </button>
                     </div>
                     <div id="cookie-summary" class="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
-                        未保存 Cookie
+                        正在读取平台凭据...
                     </div>
                     <div id="cookie-editor" class="mt-2 space-y-2">
                         <input id="cookie-name-input" type="text" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="Cookie 名称，例如：主账号 / 备用账号">
-                        <textarea id="cookie-input" rows="5" class="w-full rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm font-mono outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="支持两种格式：完整 Cookie 请求头，或浏览器导出的 Cookie JSON 数组"></textarea>
+                        <textarea id="cookie-input" rows="5" class="w-full rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm font-mono outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="粘贴完整 Cookie 请求头，或浏览器导出的 Cookie JSON 数组；保存后会加密写入平台凭据 DB。"></textarea>
                         <div class="flex gap-2">
                             <button id="save-cookie-btn" class="flex-1 rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-900 transition-colors">
-                                保存当前 Cookie
+                                保存到 DB
                             </button>
                             <button id="delete-cookie-btn" class="rounded-lg border border-red-200 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 transition-colors">
                                 删除
                             </button>
                         </div>
                     </div>
-                    <p class="mt-2 text-xs text-slate-400">Cookie 保存在当前浏览器本地。可保存多个账号，通过下拉框切换。</p>
+                    <p class="mt-2 text-xs text-slate-400">下拉框读取平台凭据数据库中的知识星球 Cookie。新增或更新时才需要粘贴明文。</p>
                     <p id="cookie-format-hint" class="mt-2 hidden text-xs text-blue-600"></p>
                 </div>
 
@@ -232,6 +232,6 @@
     <script src="js/env.js"></script>
     <script src="js/config.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/zsxq-lab.js?v=20260618-per-target-download-limit"></script>
+    <script src="js/zsxq-lab.js?v=20260623-db-credential-cookie"></script>
 </body>
 </html>

@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 LOG_DIR = PROJECT_ROOT / "logs" / "celery"
 RUNTIME_DIR = PROJECT_ROOT / "runtime" / "celery"
 WATCHDOG_STATE_FILE = RUNTIME_DIR / "watchdog_state.json"
+PAUSED_SERVICES_FILE = RUNTIME_DIR / "paused_services.json"
 WATCHDOG_LOG_FILE = LOG_DIR / "celery_watchdog.log"
 WATCHDOG_SCRIPT = PROJECT_ROOT / "scripts" / "dev" / "run-celery-watchdog.sh"
 DEFAULT_WATCHDOG_SERVICES = (
@@ -297,6 +298,64 @@ def _clear_status_cache():
 def _ensure_dirs():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _env_paused_services():
+    raw = os.environ.get("CELERY_PAUSED_SERVICES", "")
+    if not raw:
+        return set()
+    if raw.strip().lower() in {"none", "off", "false", "0"}:
+        return set()
+    return {item.strip() for item in raw.split(",") if item.strip() in SERVICES}
+
+
+def _load_paused_services():
+    paused = {}
+    if PAUSED_SERVICES_FILE.exists():
+        try:
+            data = json.loads(PAUSED_SERVICES_FILE.read_text())
+            if isinstance(data, dict):
+                paused.update({
+                    key: value if isinstance(value, dict) else {"reason": str(value)}
+                    for key, value in data.items()
+                    if key in SERVICES
+                })
+        except (OSError, json.JSONDecodeError):
+            paused = {}
+    for service_id in _env_paused_services():
+        paused.setdefault(service_id, {
+            "reason": "CELERY_PAUSED_SERVICES",
+            "source": "env",
+        })
+    return paused
+
+
+def _is_service_paused(service_id):
+    return service_id in _load_paused_services()
+
+
+def _set_service_paused(service_id, paused, reason=None):
+    if service_id not in SERVICES:
+        raise ValueError(f"未知 Celery 服务: {service_id}")
+    _ensure_dirs()
+    data = {}
+    if PAUSED_SERVICES_FILE.exists():
+        try:
+            raw = json.loads(PAUSED_SERVICES_FILE.read_text())
+            if isinstance(raw, dict):
+                data.update(raw)
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    if paused:
+        data[service_id] = {
+            "paused_at": datetime.utcnow().isoformat() + "Z",
+            "reason": reason or "manual",
+        }
+    else:
+        data.pop(service_id, None)
+    PAUSED_SERVICES_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    _clear_status_cache()
+    return _load_paused_services()
 
 
 def _pid_file(service_id):
@@ -682,10 +741,12 @@ def _watchdog_services():
 
 
 def _watchdog_config():
+    paused = _load_paused_services()
     return {
         "enabled": _truthy_env("CELERY_AUTO_HEAL_ENABLED", False),
         "notify_enabled": _truthy_env("CELERY_AUTO_HEAL_NOTIFY_ENABLED", True),
         "services": _watchdog_services(),
+        "paused_services": sorted(paused.keys()),
         "confirmations": max(1, _int_env("CELERY_AUTO_HEAL_CONFIRMATIONS", 3)),
         "cooldown_seconds": max(60, _int_env("CELERY_AUTO_HEAL_COOLDOWN_SECONDS", 900)),
         "poll_seconds": max(10, _int_env("CELERY_AUTO_HEAL_POLL_SECONDS", 60)),
@@ -789,6 +850,21 @@ def run_watchdog_once():
 
     for service_id in config["services"]:
         service = SERVICES[service_id]
+        paused = _load_paused_services().get(service_id)
+        if paused:
+            item_state = services_state.setdefault(service_id, {})
+            item_state["stuck_count"] = 0
+            item_state["first_seen_at"] = None
+            item_state["last_seen_at"] = None
+            results.append({
+                "service_id": service_id,
+                "label": service["label"],
+                "stuck": False,
+                "action": "paused",
+                "paused": paused,
+                "warning": "服务已暂停，看门狗不会自动拉起。",
+            })
+            continue
         status = _service_status(
             service_id,
             service,
@@ -848,7 +924,7 @@ def run_watchdog_once():
         try:
             stop_result = _stop_service(service_id, service)
             time.sleep(0.6)
-            start_result = _start_service(service_id, service)
+            start_result = _start_service(service_id, service, clear_pause=False)
             item_state["last_action_ts"] = now
             item_state["last_action_at"] = datetime.utcnow().isoformat() + "Z"
             item_state["stuck_count"] = 0
@@ -1452,6 +1528,7 @@ def _service_status(
 ):
     process_source = all_processes if all_processes is not None else _list_processes()
     processes = [proc for proc in process_source if _matches_service(proc, service)]
+    paused = _load_paused_services().get(service_id)
     if queue_lengths and service["queue"] in queue_lengths:
         queue_len, queue_error = queue_lengths[service["queue"]]
     else:
@@ -1465,7 +1542,11 @@ def _service_status(
     consumer_warning = None
     consumer_note = None
     business_recently_active = _business_tasks_recently_active(business_tasks)
-    if not processes:
+    if paused and not processes:
+        consumer_note = "服务已暂停；看门狗不会自动拉起该队列 worker。"
+    elif paused and processes:
+        consumer_note = "服务已暂停，但当前仍有 worker 进程在线。"
+    elif not processes:
         consumer_warning = "Worker 未运行；看门狗将按自愈策略拉起该队列 worker。"
     elif (
         processes
@@ -1487,6 +1568,8 @@ def _service_status(
         "queue": service["queue"],
         "description": service["description"],
         "running": bool(processes),
+        "paused": bool(paused),
+        "pause": paused,
         "processes": processes,
         "pids": [proc["pid"] for proc in processes],
         "starter_pid": starter_pid if _process_exists(starter_pid) else None,
@@ -1515,8 +1598,11 @@ def _service_status(
     return status
 
 
-def _stop_service(service_id, service):
+def _stop_service(service_id, service, *, pause=False, reason=None):
     _ensure_dirs()
+    pause_state = None
+    if pause:
+        pause_state = _set_service_paused(service_id, True, reason=reason or "manual_stop")
     processes = _service_processes(service)
     pids = [proc["pid"] for proc in processes]
     starter_pid = _read_pid_file(service_id)
@@ -1549,11 +1635,21 @@ def _stop_service(service_id, service):
     except OSError:
         pass
 
-    return {"terminated_pids": pids, "force_killed_pids": killed}
+    return {"terminated_pids": pids, "force_killed_pids": killed, "paused": pause_state.get(service_id) if pause_state else None}
 
 
-def _start_service(service_id, service):
+def _start_service(service_id, service, *, clear_pause=True):
     _ensure_dirs()
+    paused = _load_paused_services().get(service_id)
+    if paused and not clear_pause:
+        return {
+            "skipped": True,
+            "reason": "paused",
+            "pause": paused,
+            "log_file": str(_log_path(service).relative_to(PROJECT_ROOT)),
+        }
+    if paused and clear_pause:
+        _set_service_paused(service_id, False)
     existing = _service_processes(service)
     if existing:
         return {
@@ -1767,7 +1863,7 @@ def start(service_id):
     if error:
         return error
     try:
-        result = _start_service(service_id, service)
+        result = _start_service(service_id, service, clear_pause=True)
         result["status"] = _service_status(service_id, service, include_logs=True)
         return jsonify({"success": True, "data": result})
     except Exception as exc:
@@ -1780,9 +1876,50 @@ def stop(service_id):
     if error:
         return error
     try:
-        result = _stop_service(service_id, service)
+        data = request.get_json(silent=True) or {}
+        pause = bool(data.get("pause", True))
+        reason = data.get("reason") or "manual_stop"
+        result = _stop_service(service_id, service, pause=pause, reason=reason)
         result["status"] = _service_status(service_id, service, include_logs=True)
         return jsonify({"success": True, "data": result})
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@bp.route("/pause/<service_id>", methods=["POST"])
+def pause(service_id):
+    service, error = _service_or_404(service_id)
+    if error:
+        return error
+    try:
+        data = request.get_json(silent=True) or {}
+        paused = _set_service_paused(service_id, True, reason=data.get("reason") or "manual_pause")
+        return jsonify({
+            "success": True,
+            "data": {
+                "service": service_id,
+                "pause": paused.get(service_id),
+                "status": _service_status(service_id, service, include_logs=True),
+            },
+        })
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@bp.route("/resume/<service_id>", methods=["POST"])
+def resume(service_id):
+    service, error = _service_or_404(service_id)
+    if error:
+        return error
+    try:
+        _set_service_paused(service_id, False)
+        return jsonify({
+            "success": True,
+            "data": {
+                "service": service_id,
+                "status": _service_status(service_id, service, include_logs=True),
+            },
+        })
     except Exception as exc:
         return jsonify({"success": False, "message": str(exc)}), 500
 
@@ -1795,7 +1932,7 @@ def restart(service_id):
     try:
         stop_result = _stop_service(service_id, service)
         time.sleep(0.6)
-        start_result = _start_service(service_id, service)
+        start_result = _start_service(service_id, service, clear_pause=True)
         return jsonify({
             "success": True,
             "data": {
@@ -1814,12 +1951,22 @@ def restart_all():
     try:
         data = request.get_json(silent=True) or {}
         start_all_schedulers = bool(data.get("start_all_schedulers"))
+        include_paused = bool(data.get("include_paused"))
         celery_results = {}
         scheduler_results = {}
 
         watchdog_stop = _stop_watchdog()
 
+        paused_services = _load_paused_services()
         for service_id, service in SERVICES.items():
+            if service_id in paused_services and not include_paused:
+                celery_results[service_id] = {
+                    "label": service.get("label") or service_id,
+                    "skipped": True,
+                    "reason": "paused",
+                    "pause": paused_services.get(service_id),
+                }
+                continue
             celery_results[service_id] = {
                 "label": service.get("label") or service_id,
                 "stop": _stop_service(service_id, service),
@@ -1837,7 +1984,13 @@ def restart_all():
         time.sleep(0.8)
 
         for service_id, service in SERVICES.items():
-            celery_results[service_id]["start"] = _start_service(service_id, service)
+            if celery_results.get(service_id, {}).get("skipped"):
+                continue
+            celery_results[service_id]["start"] = _start_service(
+                service_id,
+                service,
+                clear_pause=include_paused,
+            )
 
         watchdog_start = _start_watchdog()
 

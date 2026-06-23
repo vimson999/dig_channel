@@ -34,6 +34,9 @@ Backend startup bootstrap:
 - `./scripts/dev/run-backend.sh` 默认启用 `BACKEND_PROCESS_BOOTSTRAP_ENABLED=1`
 - 默认 `BACKEND_PROCESS_BOOTSTRAP_MODE=ensure`，后端启动后补启动缺失的托管 worker；开发环境按进程角色分配数据库连接：Web 后端 `WEB_DB_POOL_SIZE=4` 保留小连接池，Celery worker 与 scheduler/watchdog 默认 `WORKER_DB_POOL_MODE=null` / `SCHEDULER_DB_POOL_MODE=null`，用完即释放连接，且默认 `*_DB_MAX_OVERFLOW=0`
 - 每个 Flask/Celery/scheduler 进程都会独立初始化 SQLAlchemy engine，`DB_POOL_SIZE=1` 仅作为未设置角色变量时的兜底值；连接会设置 `application_name`，便于在 `pg_stat_activity` 中定位占用来源
+- 任务准入保护默认启用：数据库压力过高或同类任务超过预算时，任务会进入 `deferred_db_pressure` / `deferred_capacity` 并自动延迟重试，不会继续压数据库
+- 手动停止 worker 会写入暂停状态；看门狗和后端启动自举不会自动拉起已暂停的服务。恢复时使用监控页启动按钮或接口 `/api/v1/celery/resume/<service_id>`
+- 默认 `LOCAL_PGBOUNCER_ENABLED=1`，`run-backend.sh` 会确保本地 PgBouncer 启动；真实直连库地址保存到 `.env` 的 `DIRECT_DATABASE_URL`，应用侧 `DATABASE_URL` 指向 `127.0.0.1:6432`
 - 临时强制重启托管进程：`BACKEND_PROCESS_BOOTSTRAP_MODE=restart ./scripts/dev/run-backend.sh`
 - 临时关闭自动恢复：`BACKEND_PROCESS_BOOTSTRAP_ENABLED=0 ./scripts/dev/run-backend.sh`
 - 默认托管队列是 `all`，watchdog 默认跟随 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`；默认不启动 scheduler。可用 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`、`CELERY_AUTO_HEAL_SERVICES` 和 `BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS` 指定逗号分隔的服务列表

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from models import db
 from models.task import PublicationTask
+from services.runtime_guard import maybe_guarded_apply_async
 from services.zsxq_auto_publish_service import (
     list_runs as auto_publish_list_runs,
     load_config as load_auto_publish_config,
@@ -79,11 +80,15 @@ def submit_publish_clean_output_task(
     try:
         from tasks.zsxq_publish import run_publish_clean_output_task
 
-        celery_task = run_publish_clean_output_task.apply_async(
+        submit_result = maybe_guarded_apply_async(
+            run_publish_clean_output_task,
             args=[task.id],
             queue="zsxq_publish",
+            feature="zsxq_clean_output_publish",
+            task=task,
             retry=False,
         )
+        celery_task = submit_result["async_result"]
     except Exception as exc:
         logger.exception("知识星球发布任务入队失败: %s", task.id)
         task.status = "failed"
@@ -102,9 +107,11 @@ def submit_publish_clean_output_task(
     task.celery_task_id = celery_task.id
     task.result = {
         **(task.result or {}),
-        "queued": True,
+        "queued": not bool(submit_result.get("deferred")),
+        "deferred": bool(submit_result.get("deferred")),
         "task_id": task.id,
         "celery_task_id": celery_task.id,
+        "admission": submit_result.get("admission"),
         "message": "知识星球发布任务已提交。",
     }
     db.session.commit()

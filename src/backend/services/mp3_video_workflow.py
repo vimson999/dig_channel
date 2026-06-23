@@ -26,6 +26,7 @@ from services.gemini_browser import (
     _looks_like_page_shell_text,
     is_configured as gemini_is_configured,
 )
+from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
 from services.workflow_notification_service import workflow_notification_service
 from tasks.publisher import run_publication_pipeline
 
@@ -120,6 +121,7 @@ TASK_PUBLIC_COLUMNS = (
     PublicationTask.error_message,
     PublicationTask.feature,
     PublicationTask.created_at,
+    PublicationTask.updated_at,
     PublicationTask.completed_at,
 )
 TASK_FAIL_COLUMNS = (
@@ -1808,6 +1810,11 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+        child, requeued = maybe_requeue_stale_publisher_child(child, log=logger)
+        if requeued:
+            _emit(parent_id, f"{label}_requeued", start_progress, f"{label}: requeued")
+            _record_child(parent_id, label, child)
+            last_step = None
         time.sleep(poll_seconds)
         db.session.expire_all()
     child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)

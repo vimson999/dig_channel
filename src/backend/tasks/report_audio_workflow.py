@@ -27,6 +27,13 @@ from services.report_audio_workflow import (
     split_tts_text,
     storage_path_for_job,
 )
+from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
+from services.runtime_guard import (
+    guard_publication_task_start,
+    is_retryable_db_error,
+    release_db_session_quietly,
+    retry_exception_types,
+)
 from services.workflow_notification_service import workflow_notification_service
 from tasks.doubao_browser_tts import process_doubao_browser_tts_job
 from tasks.gemini_browser import process_report_pdf_gemini_job
@@ -41,6 +48,21 @@ DB_RETRIES_ENV_NAME = "REPORT_AUDIO_WORKFLOW_DB_RETRIES"
 DB_RETRY_DELAY_ENV_NAME = "REPORT_AUDIO_WORKFLOW_DB_RETRY_DELAY_SECONDS"
 GEMINI_RETRY_LIMIT_ENV_NAME = "REPORT_AUDIO_GEMINI_RETRY_LIMIT"
 DEFAULT_GEMINI_RETRY_LIMIT = 2
+GENERIC_COVER_TITLE_NORMALIZED = {
+    "pdf",
+    "mp3",
+    "音频",
+    "视频",
+    "外资",
+    "外资研报",
+    "研报",
+    "调研",
+    "调研纪要",
+    "纪要",
+    "研报播客",
+    "研报视频",
+    "研报视频编排",
+}
 
 RETRYABLE_CHILD_ERROR_FRAGMENTS = (
     "超时",
@@ -78,6 +100,7 @@ TASK_STATE_COLUMNS = (
     PublicationTask.result,
     PublicationTask.error_message,
     PublicationTask.created_at,
+    PublicationTask.updated_at,
     PublicationTask.completed_at,
 )
 TASK_PAYLOAD_COLUMNS = (
@@ -198,7 +221,15 @@ def process_report_audio_workflow_job(self, task_id):
     try:
         app = create_app()
         with app.app_context():
+            guard_publication_task_start(
+                self,
+                task_id,
+                feature=FEATURE_NAME,
+                queue=WORKFLOW_QUEUE_NAME,
+            )
             return _process_job(task_id)
+    except retry_exception_types():
+        raise
     except Exception as exc:
         return _handle_report_audio_task_failure(self, task_id, exc)
 
@@ -1038,8 +1069,14 @@ def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_CHILD_COLUMNS)
+        if label == "publisher_video":
+            child, requeued = maybe_requeue_stale_publisher_child(child, log=logger)
+            if requeued:
+                _emit(parent_id, "publisher_video_requeued", start_progress, "重新入队视频合成子任务")
+                _record_child(parent_id, label, child)
+                last_step = None
+        release_db_session_quietly()
         time.sleep(poll_seconds)
-        db.session.expire_all()
     child = _load_task(child_id, *TASK_CHILD_COLUMNS)
     if child and child.status not in TERMINAL_STATUSES:
         _record_child(parent_id, label, child)
@@ -1315,9 +1352,21 @@ def _video_stage_enabled(payload):
     return _landscape_video_enabled(payload) or _vertical_video_enabled(payload)
 
 
+def _is_generic_cover_title_override(value):
+    text = _single_line(value).strip()
+    if not text:
+        return False
+    compact = re.sub(r"[\s#＃:：|｜/_\\-]+", "", text).lower()
+    if compact in GENERIC_COVER_TITLE_NORMALIZED:
+        return True
+    if text.startswith(("#", "＃")) and len(compact) <= 6 and not re.search(r"\d", compact):
+        return True
+    return False
+
+
 def _publisher_main_title(structured, video_options):
     override = str(video_options.get("title") or video_options.get("main_title") or "").strip()
-    if override:
+    if override and not _is_generic_cover_title_override(override):
         return _format_cover_title(override)
     cover_title = str((structured or {}).get("cover_title") or "").strip()
     if cover_title:
@@ -1330,6 +1379,8 @@ def _publisher_main_title(structured, video_options):
         values = titles.get(key)
         if isinstance(values, list) and values:
             return _format_cover_title(str(values[0]))
+    if override:
+        return _format_cover_title(override)
     return "研报核心观点解读"
 
 
@@ -2051,22 +2102,7 @@ def _send_direct_report_audio_failure_email(
 
 
 def _is_retryable_db_error(exc):
-    if isinstance(exc, OperationalError):
-        return True
-    if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
-        return True
-
-    text = str(exc).lower()
-    retryable_fragments = (
-        "timeout expired",
-        "connection to server",
-        "server closed the connection unexpectedly",
-        "could not connect to server",
-        "connection refused",
-        "terminating connection",
-        "connection not open",
-    )
-    return any(fragment in text for fragment in retryable_fragments)
+    return is_retryable_db_error(exc)
 
 
 def _db_retry_count():

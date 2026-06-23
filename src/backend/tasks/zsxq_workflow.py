@@ -10,6 +10,7 @@ if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 from celery_config import celery_app
+from services.runtime_guard import is_retryable_db_error, retry_exception_types
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,8 @@ def run_zsxq_workflow(self, workflow_run_id, runtime=None):
         logger.info("[ZSXQ_WORKFLOW_TASK] start | workflow=%s", workflow_run_id)
         try:
             return zsxq_workflow_service.start_workflow(workflow_run_id, runtime=runtime or {})
+        except retry_exception_types():
+            raise
         except Exception as exc:
             _handle_task_failure(
                 self,
@@ -52,6 +55,8 @@ def advance_zsxq_workflow(self, workflow_run_id, reason=None):
         logger.info("[ZSXQ_WORKFLOW_TASK] advance | workflow=%s reason=%s", workflow_run_id, reason or "-")
         try:
             return zsxq_workflow_service.advance_workflow(workflow_run_id, reason=reason)
+        except retry_exception_types():
+            raise
         except Exception as exc:
             _handle_task_failure(
                 self,
@@ -85,6 +90,8 @@ def finalize_zsxq_sync_stage(self, workflow_run_id, run_id, *, success, result=N
                 error=error,
             )
             return zsxq_workflow_service.advance_workflow(workflow_run_id, reason="sync_finished")
+        except retry_exception_types():
+            raise
         except Exception as exc:
             _handle_task_failure(
                 self,
@@ -177,22 +184,7 @@ def _send_direct_workflow_failure_email(
 
 
 def _is_retryable_db_error(exc):
-    if isinstance(exc, OperationalError):
-        return True
-    if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
-        return True
-
-    text = str(exc).lower()
-    retryable_fragments = (
-        "timeout expired",
-        "connection to server",
-        "server closed the connection unexpectedly",
-        "could not connect to server",
-        "connection refused",
-        "terminating connection",
-        "connection not open",
-    )
-    return any(fragment in text for fragment in retryable_fragments)
+    return is_retryable_db_error(exc)
 
 
 def _db_retry_count():

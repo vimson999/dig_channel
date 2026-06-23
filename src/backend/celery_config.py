@@ -1,6 +1,7 @@
 import os
 import sys
 from celery import Celery
+from celery.signals import task_failure, task_postrun, task_retry
 from kombu import Exchange, Queue
 from dotenv import load_dotenv
 
@@ -129,3 +130,17 @@ def make_celery(app_name=__name__):
     return celery
 
 celery_app = make_celery('youtube_tracker_worker')
+
+
+def _cleanup_sqlalchemy_session(**_kwargs):
+    try:
+        from models import db
+
+        db.session.remove()
+    except Exception:
+        pass
+
+
+task_postrun.connect(_cleanup_sqlalchemy_session, weak=False)
+task_failure.connect(_cleanup_sqlalchemy_session, weak=False)
+task_retry.connect(_cleanup_sqlalchemy_session, weak=False)

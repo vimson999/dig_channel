@@ -4,6 +4,8 @@ from sqlalchemy.exc import OperationalError
 
 from app import create_app
 from celery_config import celery_app
+from models import db
+from services.runtime_guard import guard_publication_task_start, retry_exception_types
 from services.mp3_video_workflow import mark_job_failed_if_unfinished, mark_job_failed_safely, process_job
 
 
@@ -23,11 +25,21 @@ def process_mp3_video_workflow_job(self, task_id):
     app = create_app()
     with app.app_context():
         try:
+            guard_publication_task_start(
+                self,
+                task_id,
+                feature="mp3_video_workflow",
+                queue="mp3_video_workflow",
+            )
             result = process_job(task_id)
             if result is False:
                 mark_job_failed_if_unfinished(task_id, "MP3 视频编排任务异常结束，未写入失败状态", notify=True)
             return result
+        except retry_exception_types():
+            raise
         except Exception as exc:
             logger.error("MP3 video workflow failed: %s", exc, exc_info=True)
             mark_job_failed_safely(task_id, str(exc), notify=True)
             return False
+        finally:
+            db.session.remove()

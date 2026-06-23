@@ -1,5 +1,8 @@
 # YouTube Analytics 生产环境部署文档
 
+> 当前业务工作流依赖 PostgreSQL、Redis、Celery worker 与浏览器自动化。数据库和任务队列的生产加固要求见
+> [`docs/production-hardening.md`](../../docs/production-hardening.md)。旧版 SQLite 部署只适合轻量演示，不适合自动同步、清洗、发布流水线。
+
 ## 部署架构
 
 ### 目标环境
@@ -7,7 +10,7 @@
 - **用户**: ubuntu
 - **应用目录**: `/code/bot_app/youtube-analytics`
 - **日志目录**: `/logs/youtube_analytics`
-- **数据库**: SQLite @ `/code/bot_app/youtube-analytics/instance/youtube_tracker.db`
+- **数据库**: PostgreSQL，应用侧建议连接 PgBouncer transaction pool
 - **监控**: Loki @ 10.0.16.19:3100, Grafana @ 10.0.16.19:3000
 
 ## 调度策略

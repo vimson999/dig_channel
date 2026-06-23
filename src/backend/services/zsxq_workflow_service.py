@@ -17,6 +17,7 @@ from services.content_pipeline.auto_publish_handoff import (
     summarize_publish_runs_for_request,
 )
 from services.workflow_notification_service import workflow_notification_service
+from services.runtime_guard import is_retryable_db_error
 from services.zsxq_sync_service import zsxq_sync_service
 
 
@@ -1397,22 +1398,7 @@ class ZsxqWorkflowService:
 
 
 def _is_retryable_database_error(exc):
-    if isinstance(exc, OperationalError):
-        return True
-    if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
-        return True
-
-    text = str(exc).lower()
-    retryable_fragments = (
-        "timeout expired",
-        "connection to server",
-        "server closed the connection unexpectedly",
-        "could not connect to server",
-        "connection refused",
-        "terminating connection",
-        "connection not open",
-    )
-    return any(fragment in text for fragment in retryable_fragments)
+    return is_retryable_db_error(exc)
 
 
 def _workflow_queued_stale_minutes(value=None):

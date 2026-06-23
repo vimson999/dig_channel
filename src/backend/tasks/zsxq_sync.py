@@ -7,6 +7,8 @@ if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
 from celery_config import celery_app
+from models import db
+from services.runtime_guard import retry_exception_types
 
 
 logger = logging.getLogger(__name__)
@@ -138,6 +140,8 @@ def run_zsxq_sync(self, run_id, payload):
                     logger.exception("[ZSXQ_SYNC_TASK] credential success mark failed | credential=%s", credential_id)
             logger.info("[ZSXQ_SYNC_TASK] complete | run_id=%s", run_id)
             return result
+        except retry_exception_types():
+            raise
         except Exception as exc:
             if credential_id:
                 try:
@@ -156,6 +160,8 @@ def run_zsxq_sync(self, run_id, payload):
                         error=str(exc),
                     )
             raise
+        finally:
+            db.session.remove()
 
 
 def _auto_pdf_clean_enabled(payload):

@@ -4,7 +4,9 @@ import sys
 import logging
 import json
 import subprocess
+import time
 from datetime import datetime
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 # Ensure src/backend is in sys.path for Celery worker
 backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,10 +24,20 @@ from services.thumbnail_service import thumbnail_service
 from services.bilibili.uploader import BiliUploader, DEFAULT_NEUTRAL_MARK
 from services.youtube.uploader import YouTubeUploader
 from services.platform_credential_service import resolve_bilibili_auth
+from services.runtime_guard import (
+    guard_publication_task_start,
+    is_retryable_db_error,
+    retry_exception_types,
+)
 from config import get_config
 from sqlalchemy.orm import load_only
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_DB_RETRIES = 5
+DEFAULT_DB_RETRY_DELAY_SECONDS = 3
+DB_RETRIES_ENV_NAME = "PUBLISHER_DB_RETRIES"
+DB_RETRY_DELAY_ENV_NAME = "PUBLISHER_DB_RETRY_DELAY_SECONDS"
 
 TASK_UPDATE_COLUMNS = (
     PublicationTask.id,
@@ -49,6 +61,48 @@ TASK_PAYLOAD_COLUMNS = (
 def _load_task(task_id, *columns):
     attrs = columns or TASK_PAYLOAD_COLUMNS
     return PublicationTask.query.options(load_only(*attrs)).get(task_id)
+
+
+def _load_task_with_retries(task_id, *columns):
+    retries = _bounded_int(os.environ.get(DB_RETRIES_ENV_NAME), DEFAULT_DB_RETRIES, lower=1, upper=20)
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            db.session.rollback()
+            return _load_task(task_id, *columns)
+        except Exception as exc:
+            last_error = exc
+            db.session.rollback()
+            if not _is_retryable_db_error(exc) or attempt >= retries:
+                raise
+            delay = _db_retry_delay_seconds(attempt - 1)
+            logger.warning(
+                "Task %s initial DB load failed (%s/%s), retrying in %ss: %s",
+                task_id,
+                attempt,
+                retries,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+    raise last_error
+
+
+def _is_retryable_db_error(exc):
+    return is_retryable_db_error(exc)
+
+
+def _db_retry_delay_seconds(retry_index):
+    base = _bounded_int(os.environ.get(DB_RETRY_DELAY_ENV_NAME), DEFAULT_DB_RETRY_DELAY_SECONDS, lower=1, upper=60)
+    return min(base * max(int(retry_index or 0) + 1, 1), 60)
+
+
+def _bounded_int(value, default, *, lower, upper):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = int(default)
+    return min(max(parsed, lower), upper)
 
 def update_task_record(task_id, retries=3, **fields):
     """Persist task state in a short transaction with rollback/retry.
@@ -156,18 +210,23 @@ def run_publication_pipeline(self, task_id):
         sys.path.insert(0, backend_dir)
         
     from app import create_app
-    import time
     overall_start = time.time()
     app = create_app()
     
     with app.app_context():
-        task = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
+        task = _load_task_with_retries(task_id, *TASK_PAYLOAD_COLUMNS)
         if not task:
             logger.error(f"Task {task_id} not found in DB")
             return
         if task.status == "canceled":
             logger.info("Task %s is canceled before publisher start; skipping.", task_id)
             return
+        guard_publication_task_start(
+            self,
+            task_id,
+            feature=task.feature or "publisher",
+            queue="render",
+        )
     
         try:
             overall_start = time.time()
@@ -640,6 +699,8 @@ def run_publication_pipeline(self, task_id):
             total_duration = time.time() - overall_start
             logger.info(f"✨ [TASK] 任务 {task_id} 全部处理完成! 总耗时: {total_duration:.2f}s")
     
+        except retry_exception_types():
+            raise
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}", exc_info=True)
             try:

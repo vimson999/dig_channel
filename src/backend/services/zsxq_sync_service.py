@@ -17,6 +17,7 @@ from sqlalchemy.orm import load_only
 from models import db
 from models.task import PublicationTask
 from models.zsxq_sync import ZsxqAttachment, ZsxqSyncCursor, ZsxqSyncRun, ZsxqTopic
+from services.runtime_guard import maybe_guarded_apply_async
 from services.zsxq_service import zsxq_service
 
 
@@ -84,6 +85,27 @@ DEFAULT_AUTO_VIDEO_PDF_THRESHOLD = 35
 DEFAULT_AUTO_VIDEO_MP3_THRESHOLD = 25
 AUTO_VIDEO_AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
 AUTO_VIDEO_REPORT_AUDIO_FEATURES = ("report_pdf_audio_workflow", "report_audio_workflow")
+GENERIC_AUTO_VIDEO_TOPIC_TITLE_NORMALIZED = {
+    "pdf",
+    "外资",
+    "外资研报",
+    "研报",
+    "调研",
+    "调研纪要",
+    "纪要",
+}
+
+
+def _is_generic_auto_video_topic_title(value):
+    text = str(value or "").strip()
+    if not text:
+        return False
+    compact = re.sub(r"[\s#＃:：|｜/_\\-]+", "", text).lower()
+    if compact in GENERIC_AUTO_VIDEO_TOPIC_TITLE_NORMALIZED:
+        return True
+    if text.startswith(("#", "＃")) and len(compact) <= 6 and not re.search(r"\d", compact):
+        return True
+    return False
 
 
 class ZsxqTransientUpstreamError(ValueError):
@@ -1521,7 +1543,13 @@ class ZsxqSyncService:
         from tasks.report_audio_workflow import process_report_audio_workflow_job
 
         pdf_meta = self._report_audio_pdf_meta_from_attachment(attachment, job_id=None)
-        title = pdf_meta.get("topic_title") or pdf_meta.get("filename") or "研报视频编排"
+        topic_title = str(pdf_meta.get("topic_title") or "").strip()
+        filename_title = str(pdf_meta.get("filename") or "").strip()
+        title = (
+            topic_title
+            if topic_title and not _is_generic_auto_video_topic_title(topic_title)
+            else filename_title or "研报视频编排"
+        )
         metadata = self._auto_video_dispatch_metadata(
             run=run,
             attachment=attachment,
@@ -1534,7 +1562,7 @@ class ZsxqSyncService:
             "vertical_enabled": True,
             "bilibili_enabled": False,
             "sub_burn_enabled": True,
-            "title": title,
+            "title": "",
             "subtitle": "",
             "tag_text": "研报播客",
             "source": AUTO_VIDEO_DISPATCH_SOURCE,
@@ -1589,7 +1617,15 @@ class ZsxqSyncService:
         db.session.commit()
 
         try:
-            celery_task = process_report_audio_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+            submit_result = maybe_guarded_apply_async(
+                process_report_audio_workflow_job,
+                args=[task.id],
+                queue=QUEUE_NAME,
+                feature=FEATURE_NAME,
+                task=task,
+                retry=False,
+            )
+            celery_task = submit_result["async_result"]
         except Exception as exc:
             task.status = "failed"
             task.current_step = "failed"
@@ -1605,12 +1641,15 @@ class ZsxqSyncService:
 
         task.celery_task_id = celery_task.id
         db.session.commit()
+        deferred = bool(submit_result.get("deferred"))
         return {
-            "queued": True,
+            "queued": not deferred,
+            "deferred": deferred,
             "task_id": task.id,
             "celery_task_id": celery_task.id,
             "feature": FEATURE_NAME,
             "queue": QUEUE_NAME,
+            "admission": submit_result.get("admission"),
         }
 
     def _create_auto_mp3_video_task(self, *, run, attachment, threshold, workflow_run_id=None):
@@ -1663,7 +1702,15 @@ class ZsxqSyncService:
         db.session.commit()
 
         try:
-            celery_task = process_mp3_video_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+            submit_result = maybe_guarded_apply_async(
+                process_mp3_video_workflow_job,
+                args=[task.id],
+                queue=QUEUE_NAME,
+                feature=FEATURE_NAME,
+                task=task,
+                retry=False,
+            )
+            celery_task = submit_result["async_result"]
         except Exception as exc:
             task.status = "failed"
             task.current_step = "failed"
@@ -1679,12 +1726,15 @@ class ZsxqSyncService:
 
         task.celery_task_id = celery_task.id
         db.session.commit()
+        deferred = bool(submit_result.get("deferred"))
         return {
-            "queued": True,
+            "queued": not deferred,
+            "deferred": deferred,
             "task_id": task.id,
             "celery_task_id": celery_task.id,
             "feature": FEATURE_NAME,
             "queue": QUEUE_NAME,
+            "admission": submit_result.get("admission"),
         }
 
     def _auto_video_dispatch_metadata(self, *, run, attachment, threshold, workflow_run_id=None, title=None):
