@@ -22,9 +22,21 @@ from services.report_audio_workflow import (
     DEFAULT_REVIEW_PROMPT,
     FEATURE_NAME,
     QUEUE_NAME,
+    pdf_first_page_image_path_for_job,
+    render_pdf_first_page_image,
     status_payload as workflow_status_payload,
 )
-from tasks.report_audio_workflow import process_report_audio_workflow_job
+from tasks.publisher import run_publication_pipeline
+from tasks.report_audio_workflow import (
+    _publisher_cta,
+    _publisher_date_text,
+    _publisher_main_title,
+    _publisher_script_subtitles,
+    _publisher_sub_burn_enabled,
+    _publisher_sub_title,
+    _publisher_video_transform,
+    process_report_audio_workflow_job,
+)
 from utils.auth_utils import require_login
 
 
@@ -64,6 +76,8 @@ STATUS_MAP = {
     "canceled": "canceled",
 }
 SYSTEM_USER_ID = "system"
+TERMINAL_STATUSES = {"completed", "failed", "canceled"}
+VERTICAL_BACKFILL_SOURCE = "report_audio_workflow_vertical_backfill"
 
 
 def _visible_user_ids(current_user_or_id):
@@ -571,8 +585,7 @@ def download_vertical_video(current_user, job_id):
     task = _get_owned_task(current_user, job_id)
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    video = (task.result or {}).get("video") or {}
-    video_path = video.get("vertical_video_path")
+    video_path = _vertical_video_path_for_task(task)
     if not video_path or not os.path.exists(video_path):
         return jsonify({"success": False, "message": "竖屏视频文件不存在"}), 404
     return send_file(video_path, mimetype="video/mp4", as_attachment=True, download_name=f"{task.id}-vertical.mp4")
@@ -602,7 +615,50 @@ def download_input_pdf(current_user, job_id):
     pdf_path = payload.get("pdf_path") or pdf.get("path")
     if not pdf_path or not os.path.exists(pdf_path):
         return jsonify({"success": False, "message": "PDF 文件不存在"}), 404
-    return send_file(pdf_path, mimetype="application/pdf", as_attachment=True, download_name=pdf.get("filename") or f"{task.id}.pdf")
+    preview = _truthy(request.args.get("preview"), False)
+    return send_file(
+        pdf_path,
+        mimetype="application/pdf",
+        as_attachment=not preview,
+        download_name=pdf.get("filename") or f"{task.id}.pdf",
+        conditional=True,
+    )
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/generate-vertical-video", methods=["POST"])
+@require_login
+def generate_vertical_video(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    existing_path = _vertical_video_path_for_task(task)
+    if existing_path:
+        payload = _job_payload(task)
+        return jsonify({"success": True, "message": "竖屏 MP4 已存在", **payload, "data": payload})
+
+    existing_child = _latest_vertical_video_child(task.id)
+    if existing_child and existing_child.status not in TERMINAL_STATUSES:
+        payload = _job_payload(task)
+        return jsonify({"success": True, "message": "竖屏 MP4 已在生成队列中", **payload, "data": payload})
+
+    try:
+        child = _create_vertical_video_backfill_task(task)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"success": False, "message": f"竖屏 MP4 入队失败: {exc}"}), 502
+
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
+    payload = _job_payload(task)
+    return jsonify({
+        "success": True,
+        "message": "竖屏 MP4 已提交生成",
+        "vertical_video_task": _child_task_summary(child),
+        **payload,
+        "data": payload,
+    })
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/cancel", methods=["POST"])
@@ -707,6 +763,254 @@ def _get_owned_task(current_user, job_id):
     return task
 
 
+def _create_vertical_video_backfill_task(parent):
+    result = parent.result if isinstance(parent.result, dict) else {}
+    params = parent.params if isinstance(parent.params, dict) else {}
+    payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
+    audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
+    audio_path = audio.get("wav_path")
+    if not audio_path or not os.path.exists(audio_path):
+        raise ValueError("音频文件不存在，无法后补竖屏 MP4")
+
+    structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
+    pdf = payload.get("pdf") if isinstance(payload.get("pdf"), dict) else {}
+    if not pdf:
+        pdf = result.get("pdf") if isinstance(result.get("pdf"), dict) else {}
+    pdf_screenshot = _ensure_pdf_first_page_image(parent)
+    screenshot_path = pdf_screenshot.get("path") if isinstance(pdf_screenshot, dict) else None
+    if not screenshot_path or not os.path.exists(screenshot_path):
+        raise ValueError("PDF 首屏图不存在，无法后补竖屏 MP4")
+
+    video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+    main_title = _publisher_main_title(structured, video_options)
+    sub_title = _publisher_sub_title(structured, video_options)
+    date_text = (
+        str(video_options.get("date_text") or "").strip()
+        or _publisher_date_text(parent.created_at)
+    )
+
+    metadata = {
+        "source": VERTICAL_BACKFILL_SOURCE,
+        "parent_task_id": parent.id,
+        "pdf": pdf,
+    }
+    task_params = {
+        "feature": "publisher",
+        "source_feature": FEATURE_NAME,
+        "source_task_id": parent.id,
+        "audio_segments": [
+            {
+                "path": audio_path,
+                "subtitle": _publisher_script_subtitles(structured, audio),
+                "start": 0,
+                "end_offset": 0,
+                "speed": 1.0,
+            }
+        ],
+        "video": {
+            "enabled": False,
+            "sub_burn_enabled": _publisher_sub_burn_enabled(video_options),
+            "asr_model": str(video_options.get("asr_model") or "base"),
+            "video_path": "",
+            "audio_path": audio_path,
+            "image_path": screenshot_path,
+            "audio_start": 0,
+            "audio_end_offset": 0,
+            "transform": _publisher_video_transform(video_options),
+            "cta": _publisher_cta(video_options),
+        },
+        "vertical_video": {
+            "enabled": True,
+            "asr_model": str(video_options.get("asr_model") or "base"),
+            "audio_path": audio_path,
+            "image_path": screenshot_path,
+            "subtitles": [],
+        },
+        "vertical_video_2": {"enabled": False, "image_path": ""},
+        "vertical_thumbnail": {
+            "enabled": True,
+            "main_title": main_title,
+            "sub_title": sub_title,
+            "date_text": date_text,
+            "screenshot_path": screenshot_path,
+        },
+        "bilibili": {
+            "enabled": False,
+            "title": " ".join(str(main_title or "").split())[:80],
+        },
+        "youtube": {"enabled": False},
+        "metadata": metadata,
+    }
+
+    child = PublicationTask(
+        status="pending",
+        current_step="queued",
+        progress=0,
+        params=task_params,
+        result={
+            "metadata": metadata,
+            "source_task_id": parent.id,
+            "pdf_first_page_image": pdf_screenshot,
+            "video_path": None,
+            "vertical_video_path": None,
+            "cover_path": None,
+        },
+    )
+    db.session.add(child)
+    db.session.flush()
+    child_id = child.id
+    db.session.commit()
+
+    try:
+        async_result = run_publication_pipeline.apply_async(args=[child_id], queue="render", retry=False)
+    except Exception:
+        child = db.session.get(PublicationTask, child_id)
+        if child:
+            child.status = "failed"
+            child.current_step = "failed"
+            child.completed_at = datetime.utcnow()
+            child.error_message = "竖屏 MP4 入队失败"
+            db.session.commit()
+        raise
+
+    child = db.session.get(PublicationTask, child_id)
+    child.celery_task_id = async_result.id
+    db.session.commit()
+    return child
+
+
+def _ensure_pdf_first_page_image(task):
+    result = task.result if isinstance(task.result, dict) else {}
+    video = result.get("video") if isinstance(result.get("video"), dict) else {}
+    candidates = [
+        result.get("pdf_first_page_image"),
+        video.get("pdf_first_page_image"),
+    ]
+    for image in candidates:
+        if isinstance(image, dict) and _path_exists(image.get("path")):
+            return image
+
+    params = task.params if isinstance(task.params, dict) else {}
+    payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
+    request_pdf = payload.get("pdf") if isinstance(payload.get("pdf"), dict) else {}
+    result_pdf = result.get("pdf") if isinstance(result.get("pdf"), dict) else {}
+    pdf_path = payload.get("pdf_path") or request_pdf.get("path") or result_pdf.get("path")
+    if not pdf_path or not os.path.exists(pdf_path):
+        raise ValueError("PDF 文件不存在，无法生成竖屏物料")
+
+    image = render_pdf_first_page_image(
+        pdf_path,
+        pdf_first_page_image_path_for_job(task.id, task.created_at),
+    )
+    updated_result = dict(result)
+    updated_result["pdf_first_page_image"] = image
+    task.result = updated_result
+    flag_modified(task, "result")
+    db.session.commit()
+    return image
+
+
+def _latest_vertical_video_child(parent_id):
+    candidates = (
+        PublicationTask.query.options(
+            load_only(
+                PublicationTask.id,
+                PublicationTask.celery_task_id,
+                PublicationTask.status,
+                PublicationTask.current_step,
+                PublicationTask.progress,
+                PublicationTask.params,
+                PublicationTask.result,
+                PublicationTask.error_message,
+                PublicationTask.feature,
+                PublicationTask.parent_task_id,
+                PublicationTask.source_task_id,
+                PublicationTask.created_at,
+                PublicationTask.completed_at,
+            )
+        )
+        .filter(PublicationTask.feature == "publisher")
+        .filter(PublicationTask.source_task_id == parent_id)
+        .order_by(PublicationTask.created_at.desc())
+        .limit(30)
+        .all()
+    )
+    vertical_children = [task for task in candidates if _is_vertical_backfill_child(task)]
+    if not vertical_children:
+        return None
+    for task in vertical_children:
+        if task.status not in TERMINAL_STATUSES:
+            return task
+    for task in vertical_children:
+        if task.status == "completed" and _path_exists(_vertical_video_path_from_child(task)):
+            return task
+    return vertical_children[0]
+
+
+def _is_vertical_backfill_child(task):
+    params = task.params if isinstance(task.params, dict) else {}
+    result = task.result if isinstance(task.result, dict) else {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if not metadata:
+        metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    if metadata.get("source") == VERTICAL_BACKFILL_SOURCE:
+        return True
+    video = params.get("video") if isinstance(params.get("video"), dict) else {}
+    vertical = params.get("vertical_video") if isinstance(params.get("vertical_video"), dict) else {}
+    return _truthy(vertical.get("enabled"), False) and not _truthy(video.get("enabled"), False)
+
+
+def _vertical_video_path_from_child(child):
+    result = child.result if isinstance(child.result, dict) else {}
+    return result.get("vertical_video_path") or result.get("video_path")
+
+
+def _vertical_video_path_for_task(task):
+    result = task.result if isinstance(task.result, dict) else {}
+    video = result.get("video") if isinstance(result.get("video"), dict) else {}
+    if _path_exists(video.get("vertical_video_path")):
+        return video.get("vertical_video_path")
+    child = _latest_vertical_video_child(task.id)
+    if child and child.status == "completed":
+        path = _vertical_video_path_from_child(child)
+        if _path_exists(path):
+            return path
+    return None
+
+
+def _video_result_with_vertical_backfill(task):
+    result = task.result if isinstance(task.result, dict) else {}
+    video = dict(result.get("video") or {}) if isinstance(result.get("video"), dict) else {}
+    child = _latest_vertical_video_child(task.id)
+    if not child:
+        return video
+
+    child_path = _vertical_video_path_from_child(child)
+    if child.status == "completed" and _path_exists(child_path):
+        video["enabled"] = True
+        video["status"] = video.get("status") or "completed"
+        video["vertical_enabled"] = True
+        video["vertical_video_path"] = child_path
+        video["vertical_publisher_task_id"] = child.id
+        child_result = child.result if isinstance(child.result, dict) else {}
+        if isinstance(child_result.get("pdf_first_page_image"), dict) and not video.get("pdf_first_page_image"):
+            video["pdf_first_page_image"] = child_result.get("pdf_first_page_image")
+    return video
+
+
+def _vertical_child_summary(task, parent_job_id=None):
+    if not task:
+        return None
+    payload = _child_task_summary(task)
+    path = _vertical_video_path_from_child(task)
+    if task.status == "completed" and _path_exists(path):
+        payload["vertical_video"] = {
+            "bytes": os.path.getsize(path),
+            "download_url": f"/api/report-audio-workflows/jobs/{parent_job_id or task.source_task_id}/download-vertical-video",
+        }
+    return payload
+
+
 def _job_payload(task, include_raw=False):
     result = task.result or {}
     params = task.params or {}
@@ -722,6 +1026,11 @@ def _job_payload(task, include_raw=False):
         _child_task_summary_row(child)
         for child in live_doubao_children
     ]
+    video_result = _video_result_with_vertical_backfill(task)
+    vertical_child = _latest_vertical_video_child(task.id)
+    children = dict(result.get("children") or {})
+    if vertical_child:
+        children["publisher_vertical_video"] = _vertical_child_summary(vertical_child, task.id)
     payload = {
         "job_id": task.id,
         "status": status,
@@ -741,7 +1050,7 @@ def _job_payload(task, include_raw=False):
             "metadata": request_payload.get("metadata") or {},
         },
         "pdf": _public_pdf(task.id, request_payload.get("pdf") or result.get("pdf")),
-        "children": result.get("children") or {},
+        "children": children,
         "child_attempts": result.get("child_attempts") or {},
         "retry_state": result.get("retry_state") or {},
         "gemini": result.get("gemini"),
@@ -752,13 +1061,14 @@ def _job_payload(task, include_raw=False):
         "cover_subtitle": (structured_result or {}).get("cover_subtitle") or "",
         "tts_text": result.get("tts_text"),
         "audio": _public_audio(task.id, audio),
-        "video": _public_video(task.id, result.get("video")),
+        "video": _public_video(task.id, video_result),
         "publisher_video": result.get("publisher_video"),
+        "publisher_vertical_video": children.get("publisher_vertical_video"),
         "pdf_first_page_image": _public_image(task.id, result.get("pdf_first_page_image")),
         "download_audio_url": f"/api/report-audio-workflows/jobs/{task.id}/download-audio" if audio and audio.get("wav_path") else None,
         "download_result_url": f"/api/report-audio-workflows/jobs/{task.id}/download-result" if result.get("output_path") else None,
         "download_video_url": f"/api/report-audio-workflows/jobs/{task.id}/download-video" if _path_exists((result.get("video") or {}).get("video_path")) else None,
-        "download_vertical_video_url": f"/api/report-audio-workflows/jobs/{task.id}/download-vertical-video" if _path_exists((result.get("video") or {}).get("vertical_video_path")) else None,
+        "download_vertical_video_url": f"/api/report-audio-workflows/jobs/{task.id}/download-vertical-video" if _path_exists(video_result.get("vertical_video_path")) else None,
         "download_cover_url": f"/api/report-audio-workflows/jobs/{task.id}/download-cover" if _path_exists((result.get("video") or {}).get("cover_path")) else None,
         "metadata": result.get("metadata") or request_payload.get("metadata") or {},
         "notifications": result.get("notifications") or {},
@@ -805,6 +1115,7 @@ def _job_summary_payload(row, child_bundle=None):
     pdf = {key: value for key, value in pdf.items() if value is not None}
     if pdf:
         pdf["download_url"] = f"/api/report-audio-workflows/jobs/{row.id}/input-pdf"
+        pdf["preview_url"] = f"/api/report-audio-workflows/jobs/{row.id}/input-pdf?preview=1"
 
     structured_result = {
         "cover_title": row.cover_title,
@@ -852,6 +1163,7 @@ def _job_summary_payload(row, child_bundle=None):
     )
     status = STATUS_MAP.get(row.status, row.status or "queued")
     result_error = row.result_error
+    vertical_child = child_bundle.get("publisher_vertical_video") or {}
     return {
         "job_id": row.id,
         "status": status,
@@ -876,7 +1188,7 @@ def _job_summary_payload(row, child_bundle=None):
         "download_audio_url": f"/api/report-audio-workflows/jobs/{row.id}/download-audio" if row.audio_wav_path else None,
         "download_result_url": f"/api/report-audio-workflows/jobs/{row.id}/download-result" if row.output_path else None,
         "download_video_url": f"/api/report-audio-workflows/jobs/{row.id}/download-video" if row.video_path and _path_exists(row.video_path) else None,
-        "download_vertical_video_url": None,
+        "download_vertical_video_url": f"/api/report-audio-workflows/jobs/{row.id}/download-vertical-video" if vertical_child.get("vertical_video") else None,
         "download_cover_url": f"/api/report-audio-workflows/jobs/{row.id}/download-cover" if row.cover_path else None,
         "metadata": {"title": row.metadata_title} if row.metadata_title else {},
         "logs": [],
@@ -967,9 +1279,70 @@ def _child_summaries_for_parent_ids(parent_ids):
             grouped[parent_id]["doubao_browser_tts"].append(summary)
             grouped[parent_id]["children"]["doubao_browser_tts"] = grouped[parent_id]["doubao_browser_tts"]
         elif feature == "publisher":
-            grouped[parent_id]["publisher_video"] = summary
-            grouped[parent_id]["children"]["publisher_video"] = summary
+            if not grouped[parent_id].get("publisher_video"):
+                grouped[parent_id]["publisher_video"] = summary
+                grouped[parent_id]["children"]["publisher_video"] = summary
+    vertical_summaries = _vertical_child_summaries_for_parent_ids(ids)
+    for parent_id, summary in vertical_summaries.items():
+        if parent_id not in grouped:
+            continue
+        grouped[parent_id]["publisher_vertical_video"] = summary
+        grouped[parent_id]["children"]["publisher_vertical_video"] = summary
     return grouped
+
+
+def _vertical_child_summaries_for_parent_ids(parent_ids):
+    ids = {str(item or "").strip() for item in parent_ids if str(item or "").strip()}
+    if not ids:
+        return {}
+    try:
+        candidates = (
+            PublicationTask.query.options(
+                load_only(
+                    PublicationTask.id,
+                    PublicationTask.celery_task_id,
+                    PublicationTask.status,
+                    PublicationTask.current_step,
+                    PublicationTask.progress,
+                    PublicationTask.params,
+                    PublicationTask.result,
+                    PublicationTask.error_message,
+                    PublicationTask.feature,
+                    PublicationTask.parent_task_id,
+                    PublicationTask.source_task_id,
+                    PublicationTask.created_at,
+                    PublicationTask.completed_at,
+                )
+            )
+            .filter(PublicationTask.feature == "publisher")
+            .filter(PublicationTask.source_task_id.in_(ids))
+            .order_by(PublicationTask.created_at.desc())
+            .all()
+        )
+    except Exception:
+        return {}
+
+    selected = {}
+    for task in candidates:
+        parent_id = str(task.source_task_id or "").strip()
+        if parent_id not in ids or not _is_vertical_backfill_child(task):
+            continue
+        current = selected.get(parent_id)
+        if not current or _vertical_child_priority(task) > _vertical_child_priority(current):
+            selected[parent_id] = task
+
+    return {
+        parent_id: _vertical_child_summary(task, parent_id)
+        for parent_id, task in selected.items()
+    }
+
+
+def _vertical_child_priority(task):
+    if task.status not in TERMINAL_STATUSES:
+        return 3
+    if task.status == "completed" and _path_exists(_vertical_video_path_from_child(task)):
+        return 2
+    return 1
 
 
 def _child_task_summary_row(row, result_payload=None):
@@ -1453,6 +1826,7 @@ def _public_pdf(job_id, pdf):
     }
     if pdf.get("path"):
         public["download_url"] = f"/api/report-audio-workflows/jobs/{job_id}/input-pdf"
+        public["preview_url"] = f"/api/report-audio-workflows/jobs/{job_id}/input-pdf?preview=1"
     return {key: value for key, value in public.items() if value is not None}
 
 

@@ -118,6 +118,13 @@
 
 等待子任务时，父任务应把子任务进度映射到自己的阶段进度区间，并定期刷新 `children`。
 
+长耗时等待必须遵守数据库会话纪律：
+
+- 跨等待阶段只保存子任务 ID，不保存 `PublicationTask` ORM 实例。
+- 等待循环中需要读取状态时，用短生命周期查询重新加载子任务。
+- 释放 SQLAlchemy session 后，禁止继续访问旧 ORM 对象的 `status`、`result`、`params` 等属性。
+- 如等待时间可能达到分钟级，应优先设计为 `waiting_*` 状态 + 恢复调度，避免父 worker 长时间占坑。
+
 ## 通知标准
 
 每条编排都要接入 `workflow_notification_service`：
