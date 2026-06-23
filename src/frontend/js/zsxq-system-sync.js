@@ -459,6 +459,7 @@ async function initializeCookieProfiles() {
 async function loadCookieProfiles() {
     const params = new URLSearchParams({
         platform: 'zsxq',
+        purpose: 'zsxq.sync',
         status: 'active',
         per_page: '100',
     });
