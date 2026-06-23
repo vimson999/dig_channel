@@ -26,6 +26,7 @@ from services.report_audio_workflow import (
     render_pdf_first_page_image,
     status_payload as workflow_status_payload,
 )
+from services.thumbnail_service import thumbnail_service
 from tasks.publisher import run_publication_pipeline
 from tasks.report_audio_workflow import (
     _publisher_cta,
@@ -604,6 +605,37 @@ def download_cover(current_user, job_id):
     return send_file(cover_path, mimetype="image/jpeg", as_attachment=True, download_name=f"{task.id}.jpg")
 
 
+@report_audio_workflow_bp.route("/jobs/<job_id>/regenerate-cover", methods=["POST"])
+@require_login
+def regenerate_cover(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    data = request.get_json(silent=True) or {}
+    title = _normalize_cover_text(data.get("title") or data.get("main_title"), 120)
+    subtitle = _normalize_cover_text(data.get("subtitle") or data.get("sub_title"), 180)
+    if not title:
+        return jsonify({"success": False, "message": "请填写封皮标题"}), 400
+
+    try:
+        cover = _regenerate_cover_for_task(task, title=title, subtitle=subtitle)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"success": False, "message": f"封皮重生成失败: {exc}"}), 502
+
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
+    payload = _job_payload(task)
+    return jsonify({
+        "success": True,
+        "message": "封皮已重新生成",
+        "cover": cover,
+        **payload,
+        "data": payload,
+    })
+
+
 @report_audio_workflow_bp.route("/jobs/<job_id>/input-pdf", methods=["GET"])
 @require_login
 def download_input_pdf(current_user, job_id):
@@ -761,6 +793,89 @@ def _get_owned_task(current_user, job_id):
     if task_user_id not in _visible_user_ids(current_user):
         return None
     return task
+
+
+def _normalize_cover_text(value, max_length):
+    text = " ".join(str(value or "").replace("\r", "\n").split())
+    return text[:max_length]
+
+
+def _regenerate_cover_for_task(task, *, title, subtitle=""):
+    result = task.result if isinstance(task.result, dict) else {}
+    params = task.params if isinstance(task.params, dict) else {}
+    payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
+    video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+    pdf_screenshot = _ensure_pdf_first_page_image(task)
+    screenshot_path = pdf_screenshot.get("path") if isinstance(pdf_screenshot, dict) else None
+    if not screenshot_path or not os.path.exists(screenshot_path):
+        raise ValueError("PDF 首屏图不存在，无法重新生成封皮")
+
+    date_text = str(video_options.get("date_text") or "").strip() or _publisher_date_text(task.created_at)
+    tag_text = str(video_options.get("tag_text") or "").strip() or "研报播客"
+    try:
+        overlay_opacity = float(video_options.get("overlay_opacity") or 0.5)
+    except (TypeError, ValueError):
+        overlay_opacity = 0.5
+    filename = f"report_audio_cover_{task.id[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.jpg"
+    cover_path = thumbnail_service.generate_thumbnail(
+        main_title=title,
+        sub_title=subtitle,
+        date_text=date_text,
+        tag_text=tag_text,
+        bg_preset_index=_bounded_int(video_options.get("bg_index"), 0, 0, 1000),
+        layout="left",
+        output_filename=filename,
+        custom_bg_path=screenshot_path,
+        overlay_opacity=overlay_opacity,
+        transform=video_options.get("cover_transform") or {"x": 0, "y": 0, "scale": 1},
+        mode="screenshot",
+    )
+    if not cover_path or not os.path.exists(cover_path):
+        raise RuntimeError("封皮文件未生成")
+
+    refreshed = task.result if isinstance(task.result, dict) else result
+    updated_result = dict(refreshed)
+    video = dict(updated_result.get("video") or {}) if isinstance(updated_result.get("video"), dict) else {}
+    structured = (
+        dict(updated_result.get("structured_result") or {})
+        if isinstance(updated_result.get("structured_result"), dict)
+        else {}
+    )
+    previous_cover = {
+        "cover_path": video.get("cover_path"),
+        "title": structured.get("cover_title") or video.get("cover_title"),
+        "subtitle": structured.get("cover_subtitle") or video.get("cover_subtitle"),
+        "replaced_at": datetime.utcnow().isoformat() + "Z",
+    }
+    history = list(updated_result.get("cover_regenerations") or [])
+    if previous_cover.get("cover_path"):
+        history.append(previous_cover)
+
+    now = datetime.utcnow().isoformat() + "Z"
+    video.update({
+        "enabled": True if video.get("enabled") is None else video.get("enabled"),
+        "cover_path": cover_path,
+        "cover_title": title,
+        "cover_subtitle": subtitle,
+        "cover_regenerated_at": now,
+    })
+    structured["cover_title"] = title
+    structured["cover_subtitle"] = subtitle
+    updated_result["video"] = video
+    updated_result["structured_result"] = structured
+    updated_result["cover_regenerations"] = history[-20:]
+
+    task.result = updated_result
+    flag_modified(task, "result")
+    db.session.commit()
+    return {
+        "path": cover_path,
+        "bytes": os.path.getsize(cover_path),
+        "title": title,
+        "subtitle": subtitle,
+        "download_url": f"/api/report-audio-workflows/jobs/{task.id}/download-cover",
+        "updated_at": now,
+    }
 
 
 def _create_vertical_video_backfill_task(parent):
@@ -1854,6 +1969,9 @@ def _public_video(job_id, video):
         "message": video.get("message"),
         "landscape_enabled": video.get("landscape_enabled"),
         "vertical_enabled": video.get("vertical_enabled"),
+        "cover_title": video.get("cover_title"),
+        "cover_subtitle": video.get("cover_subtitle"),
+        "cover_regenerated_at": video.get("cover_regenerated_at"),
         "bilibili_result": video.get("bilibili_result"),
     }
     video_path = video.get("video_path")

@@ -20,6 +20,8 @@ class ReportAudioWorkflowPage {
         this.historyLoading = false;
         this.pollTimer = null;
         this.verticalVideoRequestIds = new Set();
+        this.coverRegeneratingIds = new Set();
+        this.coverRegenerateJobId = '';
         this.els = {
             providerStatus: document.getElementById('provider-status'),
             workerStatus: document.getElementById('worker-status'),
@@ -94,8 +96,51 @@ class ReportAudioWorkflowPage {
                 </div>
             `);
         }
+        if (!document.getElementById('cover-regenerate-modal')) {
+            document.body.insertAdjacentHTML('beforeend', `
+                <div id="cover-regenerate-modal" class="fixed inset-0 z-50 hidden bg-slate-950/45 p-4">
+                    <div class="mx-auto flex h-full max-w-xl items-center justify-center">
+                        <form id="cover-regenerate-form" class="w-full rounded-lg bg-white p-5 shadow-2xl">
+                            <div class="mb-4 flex items-start justify-between gap-3">
+                                <div>
+                                    <h2 class="text-base font-black text-slate-900">重做封皮</h2>
+                                    <p id="cover-regenerate-job-title" class="mt-1 truncate text-xs text-slate-500"></p>
+                                </div>
+                                <button type="button" data-cover-regenerate-close class="rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-50">
+                                    <i class="fas fa-xmark"></i>
+                                </button>
+                            </div>
+                            <div class="space-y-3">
+                                <label class="block text-xs font-black text-slate-600">
+                                    主标题
+                                    <input id="cover-regenerate-title" name="title" type="text" maxlength="120" class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm font-bold text-slate-800 focus:border-indigo-400 focus:outline-none" required>
+                                </label>
+                                <label class="block text-xs font-black text-slate-600">
+                                    副标题
+                                    <input id="cover-regenerate-subtitle" name="subtitle" type="text" maxlength="180" class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-400 focus:outline-none">
+                                </label>
+                                <div id="cover-regenerate-error" class="hidden rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"></div>
+                            </div>
+                            <div class="mt-5 flex justify-end gap-2">
+                                <button type="button" data-cover-regenerate-close class="rounded-md border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50">取消</button>
+                                <button id="cover-regenerate-submit" type="submit" class="rounded-md bg-indigo-700 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-800">
+                                    <i class="fas fa-wand-magic-sparkles mr-1"></i>生成封皮
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `);
+        }
         this.els.childDetailModal = document.getElementById('child-detail-modal');
         this.els.childDetailModalContent = document.getElementById('child-detail-modal-content');
+        this.els.coverRegenerateModal = document.getElementById('cover-regenerate-modal');
+        this.els.coverRegenerateForm = document.getElementById('cover-regenerate-form');
+        this.els.coverRegenerateTitle = document.getElementById('cover-regenerate-title');
+        this.els.coverRegenerateSubtitle = document.getElementById('cover-regenerate-subtitle');
+        this.els.coverRegenerateJobTitle = document.getElementById('cover-regenerate-job-title');
+        this.els.coverRegenerateError = document.getElementById('cover-regenerate-error');
+        this.els.coverRegenerateSubmit = document.getElementById('cover-regenerate-submit');
     }
 
     defaults() {
@@ -206,8 +251,17 @@ class ReportAudioWorkflowPage {
                 this.closeChildDetailModal();
             }
         });
+        this.els.coverRegenerateModal.addEventListener('click', (event) => {
+            if (event.target === this.els.coverRegenerateModal || event.target.closest('[data-cover-regenerate-close]')) {
+                this.closeCoverRegenerateModal();
+            }
+        });
+        this.els.coverRegenerateForm.addEventListener('submit', (event) => this.submitCoverRegeneration(event));
         document.addEventListener('keydown', (event) => {
-            if (event.key === 'Escape') this.closeChildDetailModal();
+            if (event.key === 'Escape') {
+                this.closeChildDetailModal();
+                this.closeCoverRegenerateModal();
+            }
         });
     }
 
@@ -855,6 +909,7 @@ class ReportAudioWorkflowPage {
         if (action === 'refresh') this.refreshJob(jobId);
         if (action === 'retry') this.retryJob(jobId);
         if (action === 'generate-vertical') this.generateVerticalVideo(jobId);
+        if (action === 'open-cover-regenerate') this.openCoverRegenerateModal(jobId);
         if (action === 'remove') {
             this.jobs = this.jobs.filter((job) => (job.job_id || job.local_id) !== jobId);
             this.render();
@@ -958,6 +1013,99 @@ class ReportAudioWorkflowPage {
             this.render();
         } finally {
             this.verticalVideoRequestIds.delete(jobId);
+        }
+    }
+
+    openCoverRegenerateModal(jobId) {
+        if (!jobId) return;
+        const job = this.jobs.find((item) => item.job_id === jobId);
+        if (!job) return;
+        this.coverRegenerateJobId = jobId;
+        this.els.coverRegenerateJobTitle.textContent = this.jobDisplayTitle(job, jobId);
+        this.els.coverRegenerateTitle.value = this.coverTitleForEdit(job);
+        this.els.coverRegenerateSubtitle.value = this.coverSubtitleForEdit(job);
+        this.setCoverRegenerateError('');
+        this.els.coverRegenerateModal.classList.remove('hidden');
+        window.setTimeout(() => this.els.coverRegenerateTitle.focus(), 0);
+    }
+
+    closeCoverRegenerateModal() {
+        if (!this.els.coverRegenerateModal) return;
+        this.els.coverRegenerateModal.classList.add('hidden');
+        this.coverRegenerateJobId = '';
+        this.setCoverRegenerateError('');
+    }
+
+    setCoverRegenerateError(message) {
+        if (!this.els.coverRegenerateError) return;
+        const text = String(message || '').trim();
+        this.els.coverRegenerateError.textContent = text;
+        this.els.coverRegenerateError.classList.toggle('hidden', !text);
+    }
+
+    coverTitleForEdit(job) {
+        const candidates = [
+            job?.video?.cover_title,
+            job?.structured_result?.cover_title,
+            job?.cover_title,
+            this.jobDisplayTitle(job, ''),
+        ];
+        for (const value of candidates) {
+            const text = this.compactTitle(value);
+            if (text) return text;
+        }
+        return '';
+    }
+
+    coverSubtitleForEdit(job) {
+        const candidates = [
+            job?.video?.cover_subtitle,
+            job?.structured_result?.cover_subtitle,
+            job?.cover_subtitle,
+            job?.structured_result?.summary,
+        ];
+        for (const value of candidates) {
+            const text = this.compactTitle(value);
+            if (text) return text;
+        }
+        return '';
+    }
+
+    async submitCoverRegeneration(event) {
+        event.preventDefault();
+        const jobId = this.coverRegenerateJobId;
+        if (!jobId || this.coverRegeneratingIds.has(jobId)) return;
+        const title = this.compactTitle(this.els.coverRegenerateTitle.value);
+        const subtitle = this.compactTitle(this.els.coverRegenerateSubtitle.value);
+        if (!title) {
+            this.setCoverRegenerateError('请填写主标题。');
+            this.els.coverRegenerateTitle.focus();
+            return;
+        }
+
+        this.coverRegeneratingIds.add(jobId);
+        this.els.coverRegenerateSubmit.disabled = true;
+        this.els.coverRegenerateSubmit.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>生成中';
+        this.setCoverRegenerateError('');
+        try {
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/regenerate-cover`, {
+                method: 'POST',
+                body: JSON.stringify({ title, subtitle }),
+                timeoutMs: 30000,
+            });
+            const payload = result.data || result;
+            const index = this.jobs.findIndex((item) => item.job_id === jobId);
+            if (index >= 0) this.jobs[index] = { ...this.jobs[index], ...payload };
+            this.closeCoverRegenerateModal();
+            this.setNotice(result.message || '封皮已重新生成。', 'success');
+            this.render();
+        } catch (error) {
+            this.setCoverRegenerateError(error.message || String(error));
+            this.setNotice(`封皮重生成失败：${error.message || error}`, 'error');
+        } finally {
+            this.coverRegeneratingIds.delete(jobId);
+            this.els.coverRegenerateSubmit.disabled = false;
+            this.els.coverRegenerateSubmit.innerHTML = '<i class="fas fa-wand-magic-sparkles mr-1"></i>生成封皮';
         }
     }
 
@@ -1181,6 +1329,7 @@ class ReportAudioWorkflowPage {
             : (video?.vertical_video?.download_url ? `${this.apiRoot()}${video.vertical_video.download_url}` : '');
         const showLandscapeVideoUrl = Boolean(videoUrl && video?.landscape_enabled !== false);
         const coverUrl = job.download_cover_url ? `${this.apiRoot()}${job.download_cover_url}` : '';
+        const coverRegenerating = this.coverRegeneratingIds.has(job.job_id);
         const pdf = job.pdf || job.request?.pdf || null;
         const parentStatus = job.status || '';
         const geminiChild = job.gemini || job.children?.gemini;
@@ -1245,7 +1394,7 @@ class ReportAudioWorkflowPage {
                     <div class="mt-3 rounded-md border border-blue-100 bg-blue-50 p-3 text-sm text-blue-800">
                         <div class="flex flex-wrap items-center justify-between gap-2">
                             <span>${this.escape(job.audio?.seconds ? `${Math.round(job.audio.seconds)}s` : '音频已生成')} · ${this.formatBytes(job.audio?.bytes)}</span>
-                            <div class="flex items-center gap-2">
+                            <div class="flex flex-wrap items-center justify-end gap-2">
                                 ${resultUrl ? `<a href="${resultUrl}" download class="rounded-md border border-blue-200 bg-white px-3 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-50"><i class="fas fa-file-code mr-1"></i>JSON</a>` : ''}
                                 <a href="${audioUrl}" download class="rounded-md bg-blue-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-blue-800"><i class="fas fa-download mr-1"></i>WAV</a>
                             </div>
@@ -1257,8 +1406,9 @@ class ReportAudioWorkflowPage {
                     <div class="mt-3 rounded-md border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-800">
                         <div class="flex flex-wrap items-center justify-between gap-2">
                             <span>${this.videoSummary(video)}</span>
-                            <div class="flex items-center gap-2">
+                            <div class="flex flex-wrap items-center justify-end gap-2">
                                 ${coverUrl ? `<a href="${coverUrl}" download class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50"><i class="fas fa-image mr-1"></i>封面</a>` : ''}
+                                ${coverUrl ? `<button type="button" data-job-action="open-cover-regenerate" data-job-id="${this.escape(job.job_id)}" ${coverRegenerating ? 'disabled' : ''} class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60"><i class="fas ${coverRegenerating ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${coverRegenerating ? '生成中' : '重做封面'}</button>` : ''}
                                 ${showLandscapeVideoUrl ? `<a href="${videoUrl}" download class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800"><i class="fas fa-film mr-1"></i>横屏 MP4</a>` : ''}
                                 ${verticalVideoUrl ? `<a href="${verticalVideoUrl}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : ''}
                                 ${verticalPublisherActive ? `<button type="button" disabled class="cursor-wait rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700"><i class="fas fa-spinner fa-spin mr-1"></i>竖屏生成中</button>` : ''}

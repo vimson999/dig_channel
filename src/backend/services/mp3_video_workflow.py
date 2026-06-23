@@ -37,6 +37,12 @@ QUEUE_NAME = "mp3_video_workflow"
 DEFAULT_GEMINI_URL = "https://gemini.google.com/gem/f9e84d5e215c"
 DEFAULT_GEMINI_INITIAL_PROMPT = "请基于我已上传的音频文件开始处理，严格按照当前 Gem 的既定流程输出结果。"
 DEFAULT_SPEED = 1.2
+DEFAULT_CHILD_TIMEOUT_SECONDS = 2400
+DEFAULT_PUBLISHER_INLINE_WAIT_SECONDS = 5
+DEFAULT_PARENT_RETRY_DELAY_SECONDS = 300
+DEFAULT_PUBLISHER_PARENT_RETRY_DELAY_SECONDS = 60
+DEFAULT_PARENT_MAX_DEFERS = 144
+DEFAULT_PUBLISHER_PARENT_MAX_DEFERS = 180
 TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
@@ -1784,7 +1790,7 @@ def _load_json_file(path: Any) -> Optional[Dict[str, Any]]:
 
 
 def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: int, end_progress: int) -> PublicationTask:
-    timeout = _int_env("MP3_VIDEO_CHILD_TIMEOUT_SECONDS", 2400)
+    timeout = _child_inline_wait_seconds(label)
     poll_seconds = max(1, _int_env("MP3_VIDEO_CHILD_POLL_SECONDS", 3))
     deadline = time.monotonic() + timeout
     last_step = None
@@ -1825,8 +1831,8 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
 
 
 def _defer_parent_retry(parent_id: str, exc: ChildTaskStillRunning) -> None:
-    delay = max(30, _int_env("MP3_VIDEO_PARENT_RETRY_DELAY_SECONDS", 300))
-    max_defers = max(1, _int_env("MP3_VIDEO_PARENT_MAX_DEFERS", 144))
+    delay = _parent_retry_delay_seconds(exc.label)
+    max_defers = _parent_max_defers(exc.label)
     fresh = _load_task(parent_id, *TASK_PROGRESS_RESULT_COLUMNS, PublicationTask.status, PublicationTask.error_message)
     if not fresh or fresh.status == "canceled":
         return
@@ -1844,6 +1850,7 @@ def _defer_parent_retry(parent_id: str, exc: ChildTaskStillRunning) -> None:
         "status": exc.status,
         "step": exc.step,
         "retry_delay_seconds": delay,
+        "inline_wait_seconds": _child_inline_wait_seconds(exc.label),
         "defer_count": count,
         "max_defers": max_defers,
         "updated_at": datetime.utcnow().isoformat() + "Z",
@@ -1865,6 +1872,34 @@ def _defer_parent_retry(parent_id: str, exc: ChildTaskStillRunning) -> None:
         queue=QUEUE_NAME,
         countdown=delay,
     )
+
+
+def _is_publisher_video_label(label: str) -> bool:
+    return str(label or "").strip() in {"landscape_video", "vertical_video"}
+
+
+def _child_inline_wait_seconds(label: str) -> int:
+    if _is_publisher_video_label(label):
+        return max(1, _int_env("MP3_VIDEO_PUBLISHER_INLINE_WAIT_SECONDS", DEFAULT_PUBLISHER_INLINE_WAIT_SECONDS))
+    return max(1, _int_env("MP3_VIDEO_CHILD_TIMEOUT_SECONDS", DEFAULT_CHILD_TIMEOUT_SECONDS))
+
+
+def _parent_retry_delay_seconds(label: str) -> int:
+    if _is_publisher_video_label(label):
+        return max(
+            10,
+            _int_env(
+                "MP3_VIDEO_PUBLISHER_PARENT_RETRY_DELAY_SECONDS",
+                DEFAULT_PUBLISHER_PARENT_RETRY_DELAY_SECONDS,
+            ),
+        )
+    return max(30, _int_env("MP3_VIDEO_PARENT_RETRY_DELAY_SECONDS", DEFAULT_PARENT_RETRY_DELAY_SECONDS))
+
+
+def _parent_max_defers(label: str) -> int:
+    if _is_publisher_video_label(label):
+        return max(1, _int_env("MP3_VIDEO_PUBLISHER_PARENT_MAX_DEFERS", DEFAULT_PUBLISHER_PARENT_MAX_DEFERS))
+    return max(1, _int_env("MP3_VIDEO_PARENT_MAX_DEFERS", DEFAULT_PARENT_MAX_DEFERS))
 
 
 def _clear_waiting_child(parent_id: str, label: str) -> None:

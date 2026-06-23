@@ -1,6 +1,8 @@
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -10,14 +12,19 @@ if str(BACKEND_DIR) not in sys.path:
 from tasks.report_audio_workflow import (  # noqa: E402
     CURRENT_STEP_MAX_LENGTH,
     _child_id_from_result,
+    _child_inline_wait_seconds,
     _current_step_code,
     _format_cover_subtitle,
     _format_cover_title,
     _is_retryable_child_error,
+    _parent_max_defers,
+    _parent_retry_delay_seconds,
+    _parse_utc_datetime,
     _publisher_script_subtitles,
     _publisher_sub_burn_enabled,
     _publisher_result_summary,
     _publisher_video_transform,
+    _task_chunk_attempt,
     _video_stage_enabled,
 )
 
@@ -144,6 +151,44 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
 
         self.assertEqual(_child_id_from_result(result, "publisher_video"), "publisher-child")
         self.assertLessEqual(len(_current_step_code("publisher_video_waiting")), CURRENT_STEP_MAX_LENGTH)
+
+    def test_heavy_children_use_short_inline_waits_and_deferred_resume(self):
+        env_keys = [
+            "REPORT_AUDIO_DOUBAO_INLINE_WAIT_SECONDS",
+            "REPORT_AUDIO_PUBLISHER_INLINE_WAIT_SECONDS",
+            "REPORT_AUDIO_DOUBAO_PARENT_RETRY_DELAY_SECONDS",
+            "REPORT_AUDIO_PUBLISHER_PARENT_RETRY_DELAY_SECONDS",
+            "REPORT_AUDIO_DOUBAO_PARENT_MAX_DEFERS",
+            "REPORT_AUDIO_PUBLISHER_PARENT_MAX_DEFERS",
+        ]
+        with patch.dict(os.environ, {key: "" for key in env_keys}, clear=False):
+            for key in env_keys:
+                os.environ.pop(key, None)
+            self.assertEqual(_child_inline_wait_seconds("doubao_browser_1"), 5)
+            self.assertEqual(_child_inline_wait_seconds("publisher_video"), 5)
+            self.assertEqual(_parent_retry_delay_seconds("doubao_browser_1"), 30)
+            self.assertEqual(_parent_retry_delay_seconds("publisher_video"), 60)
+            self.assertEqual(_parent_max_defers("doubao_browser_1"), 240)
+            self.assertEqual(_parent_max_defers("publisher_video"), 180)
+            self.assertEqual(_child_inline_wait_seconds("gemini"), 1800)
+            self.assertEqual(_parent_retry_delay_seconds("gemini"), 300)
+
+    def test_tts_chunk_attempt_can_be_read_from_result_or_params(self):
+        class ResultTask:
+            result = {"metadata": {"chunk_attempt": "3"}}
+            params = {}
+
+        class ParamsTask:
+            result = {}
+            params = {"doubao_browser_tts": {"metadata": {"chunk_attempt": 2}}}
+
+        self.assertEqual(_task_chunk_attempt(ResultTask()), 3)
+        self.assertEqual(_task_chunk_attempt(ParamsTask()), 2)
+
+    def test_parse_utc_datetime_accepts_z_suffix_and_offsets(self):
+        self.assertEqual(_parse_utc_datetime("2026-06-23T01:02:03Z").isoformat(), "2026-06-23T01:02:03")
+        self.assertEqual(_parse_utc_datetime("2026-06-23T09:02:03+08:00").isoformat(), "2026-06-23T01:02:03")
+        self.assertIsNone(_parse_utc_datetime(""))
 
 
 if __name__ == "__main__":

@@ -95,6 +95,74 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertNotIn("thumbnail", child.params)
         self.assertEqual(child.result["metadata"]["source"], report_audio_api.VERTICAL_BACKFILL_SOURCE)
 
+    def test_regenerate_cover_updates_parent_result_and_keeps_history(self):
+        root = Path(self.tmpdir.name)
+        screenshot_path = root / "page.jpg"
+        old_cover_path = root / "old-cover.jpg"
+        new_cover_path = root / "new-cover.jpg"
+        screenshot_path.write_bytes(b"jpeg")
+        old_cover_path.write_bytes(b"old")
+
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"filename": "sample.pdf", "path": str(root / "sample.pdf")},
+                    "video": {
+                        "enabled": True,
+                        "tag_text": "研报播客",
+                        "overlay_opacity": "0.6",
+                        "cover_transform": {"x": 1, "y": 2, "scale": 1.1},
+                    },
+                },
+            },
+            result={
+                "structured_result": {
+                    "cover_title": "旧标题",
+                    "cover_subtitle": "旧副标题",
+                },
+                "pdf_first_page_image": {"path": str(screenshot_path), "bytes": 4},
+                "video": {
+                    "video_path": str(root / "landscape.mp4"),
+                    "cover_path": str(old_cover_path),
+                },
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        def fake_generate_thumbnail(**kwargs):
+            self.assertEqual(kwargs["main_title"], "新标题")
+            self.assertEqual(kwargs["sub_title"], "新副标题")
+            self.assertEqual(kwargs["custom_bg_path"], str(screenshot_path))
+            self.assertEqual(kwargs["mode"], "screenshot")
+            self.assertEqual(kwargs["transform"], {"x": 1, "y": 2, "scale": 1.1})
+            new_cover_path.write_bytes(b"new")
+            return str(new_cover_path)
+
+        with patch.object(report_audio_api.thumbnail_service, "generate_thumbnail", side_effect=fake_generate_thumbnail):
+            cover = report_audio_api._regenerate_cover_for_task(parent, title="新标题", subtitle="新副标题")
+
+        self.assertEqual(cover["path"], str(new_cover_path))
+        self.assertEqual(cover["title"], "新标题")
+        self.assertEqual(cover["subtitle"], "新副标题")
+
+        db.session.refresh(parent)
+        result = parent.result
+        self.assertEqual(result["video"]["cover_path"], str(new_cover_path))
+        self.assertEqual(result["video"]["cover_title"], "新标题")
+        self.assertEqual(result["video"]["cover_subtitle"], "新副标题")
+        self.assertEqual(result["structured_result"]["cover_title"], "新标题")
+        self.assertEqual(result["structured_result"]["cover_subtitle"], "新副标题")
+        self.assertEqual(result["cover_regenerations"][-1]["cover_path"], str(old_cover_path))
+        self.assertEqual(result["cover_regenerations"][-1]["title"], "旧标题")
+        self.assertEqual(parent.report_audio_cover_title, "新标题")
+        self.assertEqual(parent.report_audio_cover_path, str(new_cover_path))
+
 
 if __name__ == "__main__":
     unittest.main()

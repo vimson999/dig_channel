@@ -26,8 +26,11 @@ from services.mp3_video_workflow import (
     VISUAL_ARTIFACT_EXPECTED_SIZES,
     VISUAL_ARTIFACT_KEYS,
     VISUAL_ARTIFACT_VERSION,
+    _child_inline_wait_seconds,
     _child_id_from_result,
     _is_retryable_gemini_error,
+    _parent_max_defers,
+    _parent_retry_delay_seconds,
     _visual_artifacts_ready,
     _write_data_url,
     audio_segment_from_plan,
@@ -347,6 +350,33 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         }
 
         self.assertEqual(_child_id_from_result(result, "vertical_video"), "child-vertical")
+
+    def test_publisher_video_children_use_short_inline_wait_and_deferred_resume(self):
+        with patch.dict(os.environ, {
+            "MP3_VIDEO_PUBLISHER_INLINE_WAIT_SECONDS": "",
+            "MP3_VIDEO_PUBLISHER_PARENT_RETRY_DELAY_SECONDS": "",
+            "MP3_VIDEO_PUBLISHER_PARENT_MAX_DEFERS": "",
+            "MP3_VIDEO_CHILD_TIMEOUT_SECONDS": "",
+            "MP3_VIDEO_PARENT_RETRY_DELAY_SECONDS": "",
+            "MP3_VIDEO_PARENT_MAX_DEFERS": "",
+        }, clear=False):
+            self.assertEqual(_child_inline_wait_seconds("landscape_video"), 5)
+            self.assertEqual(_child_inline_wait_seconds("vertical_video"), 5)
+            self.assertEqual(_parent_retry_delay_seconds("landscape_video"), 60)
+            self.assertEqual(_parent_max_defers("vertical_video"), 180)
+            self.assertEqual(_child_inline_wait_seconds("gemini"), 2400)
+            self.assertEqual(_parent_retry_delay_seconds("gemini"), 300)
+            self.assertEqual(_parent_max_defers("gemini"), 144)
+
+    def test_publisher_video_wait_settings_can_be_overridden(self):
+        with patch.dict(os.environ, {
+            "MP3_VIDEO_PUBLISHER_INLINE_WAIT_SECONDS": "12",
+            "MP3_VIDEO_PUBLISHER_PARENT_RETRY_DELAY_SECONDS": "45",
+            "MP3_VIDEO_PUBLISHER_PARENT_MAX_DEFERS": "9",
+        }, clear=False):
+            self.assertEqual(_child_inline_wait_seconds("landscape_video"), 12)
+            self.assertEqual(_parent_retry_delay_seconds("vertical_video"), 45)
+            self.assertEqual(_parent_max_defers("landscape_video"), 9)
 
 
 if __name__ == "__main__":

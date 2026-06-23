@@ -124,6 +124,9 @@
 - 等待循环中需要读取状态时，用短生命周期查询重新加载子任务。
 - 释放 SQLAlchemy session 后，禁止继续访问旧 ORM 对象的 `status`、`result`、`params` 等属性。
 - 如等待时间可能达到分钟级，应优先设计为 `waiting_*` 状态 + 恢复调度，避免父 worker 长时间占坑。
+- 豆包多分段朗读、publisher 视频合成这类重子任务默认只能短暂 inline 检查状态，随后通过父任务延迟恢复继续推进。
+- 恢复调度必须写入 `result.waiting_child` 和 `result.deferred_waits`，并限制最大恢复次数，避免无限循环。
+- 已知重子任务的默认策略必须偏生产：研报音频编排的豆包分段与 publisher 视频、MP3 视频编排的横屏/竖屏 publisher 视频，父编排默认只 inline 等几秒，后续由延迟任务恢复；本地调试如需拉长等待，必须通过显式环境变量覆盖。
 
 ## 通知标准
 

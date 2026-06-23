@@ -2,7 +2,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from sqlalchemy.exc import DBAPIError, OperationalError
@@ -48,6 +48,15 @@ DB_RETRIES_ENV_NAME = "REPORT_AUDIO_WORKFLOW_DB_RETRIES"
 DB_RETRY_DELAY_ENV_NAME = "REPORT_AUDIO_WORKFLOW_DB_RETRY_DELAY_SECONDS"
 GEMINI_RETRY_LIMIT_ENV_NAME = "REPORT_AUDIO_GEMINI_RETRY_LIMIT"
 DEFAULT_GEMINI_RETRY_LIMIT = 2
+DEFAULT_CHILD_TIMEOUT_SECONDS = 1800
+DEFAULT_DOUBAO_INLINE_WAIT_SECONDS = 5
+DEFAULT_PUBLISHER_INLINE_WAIT_SECONDS = 5
+DEFAULT_PARENT_RETRY_DELAY_SECONDS = 300
+DEFAULT_DOUBAO_PARENT_RETRY_DELAY_SECONDS = 30
+DEFAULT_PUBLISHER_PARENT_RETRY_DELAY_SECONDS = 60
+DEFAULT_PARENT_MAX_DEFERS = 144
+DEFAULT_DOUBAO_PARENT_MAX_DEFERS = 240
+DEFAULT_PUBLISHER_PARENT_MAX_DEFERS = 180
 GENERIC_COVER_TITLE_NORMALIZED = {
     "pdf",
     "mp3",
@@ -291,11 +300,13 @@ def _process_job(task_id):
 
     try:
         _queue_notification(workflow_task_id, "report_audio_started", "研报 PDF 到语音编排已启动")
+        retry_requested_at = result.get("retry_requested_at")
         structured = _valid_structured_result(result)
         gemini_task = _completed_gemini_task(workflow_task_id, result)
         active_gemini_task = None if gemini_task else _active_gemini_task(workflow_task_id, result)
         gemini_task_id = gemini_task.id if gemini_task else None
         if structured:
+            _clear_waiting_child(workflow_task_id, "gemini")
             _emit(workflow_task_id, "reuse_structured_result", 58, "复用已有 Gemini 结构化结果")
             gemini_result = gemini_task.result if gemini_task else {}
             if gemini_task:
@@ -303,6 +314,7 @@ def _process_job(task_id):
                 _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
         else:
             if gemini_task:
+                _clear_waiting_child(workflow_task_id, "gemini")
                 _emit(workflow_task_id, "reuse_gemini_result", 52, "复用已完成的 Gemini 子任务")
                 _record_child(workflow_task_id, "gemini", gemini_task)
                 _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
@@ -390,6 +402,7 @@ def _process_job(task_id):
             end = 60 + int(index / max(1, len(chunks)) * 28)
             reusable_tts_task = _completed_tts_task_for_chunk(workflow_task_id, index, chunk)
             if reusable_tts_task:
+                _clear_waiting_child(workflow_task_id, f"doubao_browser_{index}")
                 wav_path = _task_audio_wav_path(reusable_tts_task)
                 tts_task_ids.append(reusable_tts_task.id)
                 wav_paths.append(wav_path)
@@ -421,8 +434,35 @@ def _process_job(task_id):
                 if _is_doubao_captcha_blocked(tts_task):
                     raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {_child_error_message(tts_task)}")
                 raise RuntimeError(f"豆包浏览器朗读子任务失败: {_child_error_message(tts_task)}")
+            failed_tts_tasks = _failed_tts_tasks_for_chunk(
+                workflow_task_id,
+                index,
+                chunk,
+                since=retry_requested_at,
+            )
+            max_attempts = doubao_retry_limit + 1
+            next_attempt = 1
+            if failed_tts_tasks:
+                _clear_waiting_child(workflow_task_id, f"doubao_browser_{index}")
+                for failed_task in failed_tts_tasks:
+                    failed_attempt = _task_chunk_attempt(failed_task) or 1
+                    _record_child_attempt(
+                        workflow_task_id,
+                        f"doubao_browser_{index}",
+                        failed_task,
+                        failed_attempt,
+                        max_attempts,
+                        "failed",
+                        error=_child_error_message(failed_task),
+                    )
+                latest_failed = failed_tts_tasks[-1]
+                if _is_doubao_captcha_blocked(latest_failed):
+                    raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {_child_error_message(latest_failed)}")
+                next_attempt = max(_task_chunk_attempt(task) or 1 for task in failed_tts_tasks) + 1
+                if next_attempt > max_attempts:
+                    raise RuntimeError(f"豆包浏览器朗读子任务失败: {_child_error_message(latest_failed)}")
             last_error = None
-            for attempt in range(1, doubao_retry_limit + 2):
+            for attempt in range(next_attempt, max_attempts + 1):
                 retry_suffix = "" if attempt == 1 else f"（重试 {attempt - 1}/{doubao_retry_limit}）"
                 _emit(
                     workflow_task_id,
@@ -800,6 +840,38 @@ def _active_tts_task_for_chunk(parent_id, chunk_index, expected_text):
     return None
 
 
+def _failed_tts_tasks_for_chunk(parent_id, chunk_index, expected_text, *, since=None):
+    cutoff = _parse_utc_datetime(since)
+    candidates = PublicationTask.query.filter(
+        PublicationTask.feature == doubao_service.FEATURE_NAME,
+        PublicationTask.parent_task_id == parent_id,
+        PublicationTask.status.in_(["failed", "blocked_by_captcha"]),
+    ).options(load_only(*TASK_CHILD_COLUMNS)).order_by(PublicationTask.created_at.asc()).all()
+    matched = []
+    for candidate in candidates:
+        if cutoff and candidate.created_at and candidate.created_at < cutoff:
+            continue
+        if _task_chunk_index(candidate) != chunk_index:
+            continue
+        if _plain_text(_task_tts_text(candidate)) != _plain_text(expected_text):
+            continue
+        matched.append(candidate)
+    return matched
+
+
+def _parse_utc_datetime(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
 def _task_chunk_index(task):
     result = task.result or {}
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
@@ -809,6 +881,19 @@ def _task_chunk_index(task):
         metadata = doubao_payload.get("metadata") if isinstance(doubao_payload.get("metadata"), dict) else {}
     try:
         return int(metadata.get("chunk_index") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _task_chunk_attempt(task):
+    result = task.result or {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if not metadata:
+        params = task.params or {}
+        doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
+        metadata = doubao_payload.get("metadata") if isinstance(doubao_payload.get("metadata"), dict) else {}
+    try:
+        return int(metadata.get("chunk_attempt") or 0)
     except (TypeError, ValueError):
         return 0
 
@@ -1048,11 +1133,11 @@ def _cancel_duplicate_publisher_tasks(tasks, *, keep_id):
 
 
 def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
-    timeout = _int_env("REPORT_AUDIO_CHILD_TIMEOUT_SECONDS", 1800)
+    timeout = _child_inline_wait_seconds(label)
     poll_seconds = max(1, _int_env("REPORT_AUDIO_CHILD_POLL_SECONDS", 3))
     deadline = time.monotonic() + timeout
     last_step = None
-    while time.monotonic() < deadline:
+    while True:
         parent = _load_task(parent_id, PublicationTask.status)
         if not parent or parent.status == "canceled":
             raise RuntimeError("父编排任务已取消")
@@ -1080,18 +1165,45 @@ def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
                 _emit(parent_id, "publisher_video_requeued", start_progress, "重新入队视频合成子任务")
                 _record_child(parent_id, label, child)
                 last_step = None
+        if time.monotonic() >= deadline:
+            _record_child(parent_id, label, child)
+            raise ChildTaskStillRunning(label, child.id, child.status or "", child.current_step or "")
         release_db_session_quietly()
-        time.sleep(poll_seconds)
-    child = _load_task(child_id, *TASK_CHILD_COLUMNS)
-    if child and child.status not in TERMINAL_STATUSES:
-        _record_child(parent_id, label, child)
-        raise ChildTaskStillRunning(label, child.id, child.status or "", child.current_step or "")
-    raise RuntimeError(f"等待子任务超时: {label} {child_id}")
+        sleep_seconds = min(poll_seconds, max(0.2, deadline - time.monotonic()))
+        time.sleep(sleep_seconds)
+
+
+def _child_inline_wait_seconds(label):
+    if _is_doubao_child_label(label):
+        return max(0, _int_env("REPORT_AUDIO_DOUBAO_INLINE_WAIT_SECONDS", DEFAULT_DOUBAO_INLINE_WAIT_SECONDS))
+    if label == "publisher_video":
+        return max(0, _int_env("REPORT_AUDIO_PUBLISHER_INLINE_WAIT_SECONDS", DEFAULT_PUBLISHER_INLINE_WAIT_SECONDS))
+    return max(1, _int_env("REPORT_AUDIO_CHILD_TIMEOUT_SECONDS", DEFAULT_CHILD_TIMEOUT_SECONDS))
+
+
+def _parent_retry_delay_seconds(label):
+    if _is_doubao_child_label(label):
+        return max(5, _int_env("REPORT_AUDIO_DOUBAO_PARENT_RETRY_DELAY_SECONDS", DEFAULT_DOUBAO_PARENT_RETRY_DELAY_SECONDS))
+    if label == "publisher_video":
+        return max(5, _int_env("REPORT_AUDIO_PUBLISHER_PARENT_RETRY_DELAY_SECONDS", DEFAULT_PUBLISHER_PARENT_RETRY_DELAY_SECONDS))
+    return max(30, _int_env("REPORT_AUDIO_PARENT_RETRY_DELAY_SECONDS", DEFAULT_PARENT_RETRY_DELAY_SECONDS))
+
+
+def _parent_max_defers(label):
+    if _is_doubao_child_label(label):
+        return max(1, _int_env("REPORT_AUDIO_DOUBAO_PARENT_MAX_DEFERS", DEFAULT_DOUBAO_PARENT_MAX_DEFERS))
+    if label == "publisher_video":
+        return max(1, _int_env("REPORT_AUDIO_PUBLISHER_PARENT_MAX_DEFERS", DEFAULT_PUBLISHER_PARENT_MAX_DEFERS))
+    return max(1, _int_env("REPORT_AUDIO_PARENT_MAX_DEFERS", DEFAULT_PARENT_MAX_DEFERS))
+
+
+def _is_doubao_child_label(label):
+    return str(label or "").startswith("doubao_browser_")
 
 
 def _defer_parent_retry(parent_id, exc):
-    delay = max(30, _int_env("REPORT_AUDIO_PARENT_RETRY_DELAY_SECONDS", 300))
-    max_defers = max(1, _int_env("REPORT_AUDIO_PARENT_MAX_DEFERS", 144))
+    delay = _parent_retry_delay_seconds(exc.label)
+    max_defers = _parent_max_defers(exc.label)
     fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
     if not fresh or fresh.status == "canceled":
         return

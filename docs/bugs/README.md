@@ -8,6 +8,7 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-06-23 | [MP3 视频编排父任务长等待 render 子任务](2026-06-23-mp3-video-parent-long-wait.md) | mp3 video workflow | 已优化 |
 | 2026-06-23 | [研报音频编排父任务等待子任务后访问 detached ORM 对象](2026-06-23-report-audio-detached-session.md) | report audio workflow | 已修复 |
 
 ## 新增记录模板
@@ -39,4 +40,3 @@
 
 ## 后续事项
 ```
-
