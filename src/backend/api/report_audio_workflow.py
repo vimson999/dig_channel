@@ -458,6 +458,7 @@ def list_jobs(current_user):
                 PublicationTask.report_audio_metadata_title.label("metadata_title"),
                 PublicationTask.report_audio_video_title.label("video_title"),
                 PublicationTask.report_audio_cover_title.label("cover_title"),
+                PublicationTask.report_audio_cover_subtitle.label("cover_subtitle"),
                 PublicationTask.report_audio_structured_title.label("structured_title"),
                 PublicationTask.report_audio_wav_path.label("audio_wav_path"),
                 PublicationTask.report_audio_seconds.label("audio_seconds"),
@@ -468,7 +469,6 @@ def list_jobs(current_user):
                 PublicationTask.report_audio_video_message.label("video_message"),
                 PublicationTask.report_audio_video_path.label("video_path"),
                 PublicationTask.report_audio_cover_path.label("cover_path"),
-                PublicationTask.result.label("result_payload"),
             )
             .offset(offset)
             .limit(per_page)
@@ -1227,18 +1227,9 @@ def _first_compact_title(*values):
     return ""
 
 
-def _cover_subtitle_from_result_payload(result):
-    if not isinstance(result, dict):
-        return ""
-    structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
-    video = result.get("video") if isinstance(result.get("video"), dict) else {}
-    return _normalize_cover_text(structured.get("cover_subtitle") or video.get("cover_subtitle"), 220)
-
-
 def _job_summary_payload(row, child_bundle=None):
     child_bundle = child_bundle or {}
-    result_payload = row.result_payload if isinstance(getattr(row, "result_payload", None), dict) else {}
-    cover_subtitle = _cover_subtitle_from_result_payload(result_payload)
+    cover_subtitle = _normalize_cover_text(getattr(row, "cover_subtitle", "") or "", 220)
     pdf = {
         "filename": row.request_pdf_filename or row.result_pdf_filename,
         "bytes": _number_or_none(row.request_pdf_bytes or row.result_pdf_bytes, int),
@@ -1312,7 +1303,6 @@ def _job_summary_payload(row, child_bundle=None):
         "title": title,
         "request": {"pdf": pdf or None, "metadata": {"title": row.metadata_title} if row.metadata_title else {}},
         "pdf": pdf or None,
-        "children": child_bundle.get("children") or {},
         "gemini": child_bundle.get("gemini"),
         "doubao_browser_tts": child_bundle.get("doubao_browser_tts") or [],
         "structured_result": structured_result or None,
@@ -1321,6 +1311,7 @@ def _job_summary_payload(row, child_bundle=None):
         "audio": audio_payload,
         "video": video_payload,
         "publisher_video": child_bundle.get("publisher_video"),
+        "publisher_vertical_video": vertical_child or None,
         "download_audio_url": f"/api/report-audio-workflows/jobs/{row.id}/download-audio" if row.audio_wav_path else None,
         "download_result_url": f"/api/report-audio-workflows/jobs/{row.id}/download-result" if row.output_path else None,
         "download_video_url": f"/api/report-audio-workflows/jobs/{row.id}/download-video" if row.video_path and _path_exists(row.video_path) else None,

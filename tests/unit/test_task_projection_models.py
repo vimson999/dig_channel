@@ -31,7 +31,11 @@ class TaskProjectionModelTest(unittest.TestCase):
             result={
                 "started_at": "2026-06-17T01:02:03Z",
                 "pdf": {"filename": "clean.pdf", "bytes": 456, "topic_title": "结果标题"},
-                "structured_result": {"cover_title": "封面标题", "title": "结构化标题"},
+                "structured_result": {
+                    "cover_title": "封面标题",
+                    "cover_subtitle": "封面副标题",
+                    "title": "结构化标题",
+                },
                 "audio": {"wav_path": "/tmp/audio.wav", "seconds": 12.5, "bytes": 789},
                 "video": {
                     "enabled": "true",
@@ -51,6 +55,7 @@ class TaskProjectionModelTest(unittest.TestCase):
         self.assertEqual(task.report_audio_pdf_filename, "sample.pdf")
         self.assertEqual(task.report_audio_result_pdf_filename, "clean.pdf")
         self.assertEqual(task.report_audio_cover_title, "封面标题")
+        self.assertEqual(task.report_audio_cover_subtitle, "封面副标题")
         self.assertEqual(task.report_audio_wav_path, "/tmp/audio.wav")
         self.assertTrue(task.report_audio_video_enabled)
         self.assertEqual(task.report_audio_video_path, "/tmp/video.mp4")

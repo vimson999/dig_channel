@@ -161,6 +161,7 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(result["cover_regenerations"][-1]["cover_path"], str(old_cover_path))
         self.assertEqual(result["cover_regenerations"][-1]["title"], "旧标题")
         self.assertEqual(parent.report_audio_cover_title, "新标题")
+        self.assertEqual(parent.report_audio_cover_subtitle, "新副标题")
         self.assertEqual(parent.report_audio_cover_path, str(new_cover_path))
 
     def test_normalize_cover_text_preserves_manual_line_breaks(self):
@@ -168,7 +169,7 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
 
         self.assertEqual(text, "第一行 标题\n第二行 标题\n第三行")
 
-    def test_job_summary_payload_includes_cover_subtitle_from_result(self):
+    def test_job_summary_payload_includes_cover_subtitle_from_projection(self):
         row = SimpleNamespace(
             id="job-1",
             request_pdf_filename="sample.pdf",
@@ -178,12 +179,8 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             request_pdf_topic_title="PDF 标题",
             result_pdf_topic_title=None,
             cover_title="封面主标题",
+            cover_subtitle="第一行 副标题\n第二行 副标题",
             structured_title="结构化标题",
-            result_payload={
-                "structured_result": {
-                    "cover_subtitle": "第一行 副标题\n第二行 副标题",
-                },
-            },
             audio_wav_path=None,
             audio_seconds=None,
             audio_bytes=None,
@@ -212,6 +209,7 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(payload["cover_subtitle"], "第一行 副标题\n第二行 副标题")
         self.assertEqual(payload["structured_result"]["cover_subtitle"], "第一行 副标题\n第二行 副标题")
         self.assertEqual(payload["video"]["cover_subtitle"], "第一行 副标题\n第二行 副标题")
+        self.assertNotIn("children", payload)
 
 
 if __name__ == "__main__":

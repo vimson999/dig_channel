@@ -28,6 +28,7 @@ ALTER TABLE public.publication_tasks ADD COLUMN IF NOT EXISTS report_audio_resul
 ALTER TABLE public.publication_tasks ADD COLUMN IF NOT EXISTS report_audio_metadata_title varchar(500);
 ALTER TABLE public.publication_tasks ADD COLUMN IF NOT EXISTS report_audio_video_title varchar(500);
 ALTER TABLE public.publication_tasks ADD COLUMN IF NOT EXISTS report_audio_cover_title varchar(500);
+ALTER TABLE public.publication_tasks ADD COLUMN IF NOT EXISTS report_audio_cover_subtitle varchar(220);
 ALTER TABLE public.publication_tasks ADD COLUMN IF NOT EXISTS report_audio_structured_title varchar(500);
 ALTER TABLE public.publication_tasks ADD COLUMN IF NOT EXISTS report_audio_started_at varchar(64);
 ALTER TABLE public.publication_tasks ADD COLUMN IF NOT EXISTS report_audio_completed_at varchar(64);
@@ -95,6 +96,7 @@ SET
     report_audio_metadata_title = LEFT(NULLIF(params #>> '{report_audio_workflow,metadata,title}', ''), 500),
     report_audio_video_title = LEFT(NULLIF(params #>> '{report_audio_workflow,video,title}', ''), 500),
     report_audio_cover_title = LEFT(NULLIF(result #>> '{structured_result,cover_title}', ''), 500),
+    report_audio_cover_subtitle = LEFT(NULLIF(COALESCE(result #>> '{structured_result,cover_subtitle}', result #>> '{video,cover_subtitle}'), ''), 220),
     report_audio_structured_title = LEFT(NULLIF(result #>> '{structured_result,title}', ''), 500),
     report_audio_started_at = LEFT(NULLIF(result ->> 'started_at', ''), 64),
     report_audio_completed_at = LEFT(NULLIF(result ->> 'completed_at', ''), 64),

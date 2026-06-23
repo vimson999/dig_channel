@@ -89,6 +89,7 @@ class PublicationTask(db.Model):
     report_audio_metadata_title = db.Column(db.String(500), nullable=True)
     report_audio_video_title = db.Column(db.String(500), nullable=True)
     report_audio_cover_title = db.Column(db.String(500), nullable=True)
+    report_audio_cover_subtitle = db.Column(db.String(220), nullable=True)
     report_audio_structured_title = db.Column(db.String(500), nullable=True)
     report_audio_started_at = db.Column(db.String(64), nullable=True)
     report_audio_completed_at = db.Column(db.String(64), nullable=True)
@@ -178,6 +179,10 @@ class PublicationTask(db.Model):
         self.report_audio_metadata_title = _compact_text(_nested(workflow, 'metadata', 'title'), 500)
         self.report_audio_video_title = _compact_text(_nested(workflow, 'video', 'title'), 500)
         self.report_audio_cover_title = _compact_text(structured.get('cover_title'), 500)
+        self.report_audio_cover_subtitle = _compact_text(
+            structured.get('cover_subtitle') or video.get('cover_subtitle'),
+            220,
+        )
         self.report_audio_structured_title = _compact_text(structured.get('title'), 500)
         self.report_audio_started_at = _compact_text(result.get('started_at'), 64)
         self.report_audio_completed_at = _compact_text(result.get('completed_at'), 64)
