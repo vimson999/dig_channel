@@ -143,6 +143,13 @@ youtube-analytics/
 
 👉 **[一键发布台部署指南 (DEPLOYMENT_GUIDE.md)](DEPLOYMENT_GUIDE.md)**
 
+### 运行与排障纪律
+
+- [工作流运行经验与事故处理纪律](WORKFLOW_RUNTIME_OPERATIONS_PLAYBOOK.md)：数据库连接池、PgBouncer、worker/watchdog、scheduler、封皮标题、发布确认与排队任务处理经验。
+- [生产级运行加固](production-hardening.md)：生产/本地 PgBouncer、SQLAlchemy 连接策略、任务准入保护与观测项。
+- [编排任务开发标准](WORKFLOW_ORCHESTRATION_STANDARD.md)：编排任务状态、续跑、子任务、通知与前端标准。
+- [故障排除指南](TROUBLESHOOTING.md)：通用依赖、数据库、认证和 API 连接问题。
+
 **关键启动命令 (macOS):**
 ```bash
 # 在 src/backend 目录下启动 Worker

@@ -2,6 +2,8 @@
 
 这套系统不能靠“把 SQLAlchemy pool 调大”解决连接问题。生产策略是：应用少持有连接，PgBouncer 复用连接，任务入口按全局预算准入，数据库压力高时延迟而不是硬冲。
 
+事故排查、重启、暂停、封皮标题、发布成功判定等运行纪律见 [工作流运行经验与事故处理纪律](WORKFLOW_RUNTIME_OPERATIONS_PLAYBOOK.md)。
+
 ## 数据库连接
 
 - 应用连接 `PgBouncer:6432`，PgBouncer 再连接 PostgreSQL。
