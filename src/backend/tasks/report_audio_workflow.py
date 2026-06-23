@@ -26,6 +26,7 @@ from services.report_audio_workflow import (
     render_pdf_first_page_image,
     split_tts_text,
     storage_path_for_job,
+    structured_result_quality_issue,
 )
 from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
 from services.runtime_guard import (
@@ -732,6 +733,10 @@ def _valid_structured_result(result):
         return None
     script = str(structured.get("final_script_for_tts") or "").strip()
     if not script:
+        return None
+    quality_issue = structured_result_quality_issue(structured)
+    if quality_issue:
+        logger.warning("Skip cached structured result with quality issue: %s", quality_issue)
         return None
     if len(_plain_text(script)) < _min_gemini_final_chars():
         return None

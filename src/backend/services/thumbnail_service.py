@@ -513,7 +513,19 @@ class ThumbnailService:
 
             if sub_title:
                 sub_color = '#FFFFFF' if is_screenshot_style else theme['sub']
-                self._draw_halo_text(draw, sub_title, (base_x, current_y), font_sub, sub_color, None if is_screenshot_style else self._parse_rgba(theme['stroke']), 56 * 0.04)
+                for line in str(sub_title).split('\n'):
+                    if not line.strip():
+                        continue
+                    self._draw_halo_text(
+                        draw,
+                        line,
+                        (base_x, current_y),
+                        font_sub,
+                        sub_color,
+                        None if is_screenshot_style else self._parse_rgba(theme['stroke']),
+                        56 * 0.04,
+                    )
+                    current_y += int(56 * 1.25)
 
             # 落款回归左下角
             if date_text:

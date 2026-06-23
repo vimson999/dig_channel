@@ -28,6 +28,16 @@ DEFAULT_FEATURE_LIMITS = {
     "zsxq_clean_output_publish": 1,
 }
 
+DEFAULT_FEATURE_BACKLOG_LIMITS = {
+    "publisher": 12,
+    "report_audio_workflow": 10,
+    "report_pdf_audio_workflow": 10,
+    "mp3_video_workflow": 5,
+    "content_pdf_clean": 10,
+    "content_audio_clean": 5,
+    "zsxq_clean_output_publish": 5,
+}
+
 FEATURE_ALIASES = {
     "report_audio_workflow": ("report_audio_workflow", "report_pdf_audio_workflow"),
     "report_pdf_audio_workflow": ("report_audio_workflow", "report_pdf_audio_workflow"),
@@ -63,7 +73,7 @@ def check_publication_task_admission(feature, *, task_id=None, mode="start"):
             pressure=pressure,
         )
 
-    limit = _feature_limit(feature)
+    limit = _feature_backlog_limit(feature) if mode == "submit" else _feature_limit(feature)
     if limit is None:
         return _allowed("no_limit", feature=feature, task_id=task_id, pressure=pressure)
 
@@ -73,14 +83,18 @@ def check_publication_task_admission(feature, *, task_id=None, mode="start"):
         mode=mode,
     )
     if active_count >= limit:
+        is_backlog = mode == "submit"
+        reason = "feature_backlog" if is_backlog else "feature_capacity"
+        limit_label = "排队/运行积压上限" if is_backlog else "当前运行上限"
         return _denied(
-            "feature_capacity",
-            f"系统保护：{feature} 同类任务达到并发/积压上限 {limit}，稍后自动重试。",
+            reason,
+            f"系统保护：{feature} 同类任务达到{limit_label} {limit}，稍后自动重试。",
             feature=feature,
             task_id=task_id,
             pressure=pressure,
             active_count=active_count,
             limit=limit,
+            mode=mode,
         )
 
     return _allowed(
@@ -90,6 +104,7 @@ def check_publication_task_admission(feature, *, task_id=None, mode="start"):
         pressure=pressure,
         active_count=active_count,
         limit=limit,
+        mode=mode,
     )
 
 
@@ -116,7 +131,7 @@ def guard_publication_task_start(celery_task, task_id, *, feature, queue):
     raise celery_task.retry(
         exc=TaskAdmissionDenied(admission),
         countdown=countdown,
-        max_retries=None,
+        max_retries=_admission_retry_max_retries(),
     )
 
 
@@ -315,7 +330,7 @@ def _mark_publication_task_deferred(task_id, *, admission, queue, countdown):
         task.current_step = (
             "deferred_db_pressure"
             if str(admission.get("reason") or "").startswith("db_")
-            else "deferred_capacity"
+            else ("deferred_backlog" if admission.get("reason") == "feature_backlog" else "deferred_capacity")
         )
         task.error_message = admission.get("message")
         task.completed_at = None
@@ -338,6 +353,10 @@ def _retry_delay_seconds(admission):
     return _int_env("TASK_ADMISSION_RETRY_DELAY_SECONDS", default, lower=30, upper=3600)
 
 
+def _admission_retry_max_retries():
+    return _int_env("TASK_ADMISSION_MAX_RETRIES", 100000, lower=1, upper=1000000)
+
+
 def _feature_limit(feature):
     overrides = _feature_limit_overrides()
     if feature in overrides:
@@ -349,8 +368,19 @@ def _feature_limit(feature):
     return DEFAULT_FEATURE_LIMITS.get(feature)
 
 
-def _feature_limit_overrides():
-    raw = os.environ.get("TASK_ADMISSION_FEATURE_LIMITS", "").strip()
+def _feature_backlog_limit(feature):
+    overrides = _feature_limit_overrides("TASK_ADMISSION_FEATURE_BACKLOG_LIMITS")
+    if feature in overrides:
+        return overrides[feature]
+    aliases = FEATURE_ALIASES.get(feature, (feature,))
+    for item in aliases:
+        if item in overrides:
+            return overrides[item]
+    return DEFAULT_FEATURE_BACKLOG_LIMITS.get(feature)
+
+
+def _feature_limit_overrides(env_name="TASK_ADMISSION_FEATURE_LIMITS"):
+    raw = os.environ.get(env_name, "").strip()
     if not raw:
         return {}
     try:

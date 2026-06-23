@@ -155,6 +155,11 @@ if __name__ == '__main__':
     os.environ.setdefault("TASK_ADMISSION_DB_MAX_USED_RATIO", "0.85")
     os.environ.setdefault("TASK_ADMISSION_DB_MAX_IDLE_IN_TX", "5")
     os.environ.setdefault("TASK_ADMISSION_RETRY_DELAY_SECONDS", "180")
+    os.environ.setdefault(
+        "TASK_ADMISSION_FEATURE_BACKLOG_LIMITS",
+        "publisher=12,report_audio_workflow=10,report_pdf_audio_workflow=10,mp3_video_workflow=5,"
+        "content_pdf_clean=10,content_audio_clean=5,zsxq_clean_output_publish=5",
+    )
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_ENABLED", "1")
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_MODE", "ensure")
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES", "all")

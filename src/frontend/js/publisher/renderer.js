@@ -196,7 +196,8 @@ const CanvasRenderer = {
             currentY += mainFontSize * (isPodcast ? 1.55 : 1.3); 
         });
 
-        if (config.subTitle) {
+        const subTitleLines = String(config.subTitle || '').split('\n').map(l => l.trim()).filter(Boolean);
+        if (subTitleLines.length) {
             // 【段距优化】：播客模式显著增加主副标题间距
             currentY += (isPodcast ? 60 : 15); 
             const targetX = isPodcast ? centerX : leftMargin;
@@ -206,13 +207,16 @@ const CanvasRenderer = {
             const subColor = isScreenshotStyle ? '#FFFFFF' : this.themes.sub;
             const subFontSize = 56;
             ctx.font = `${subFontSize}px ${FONT_STACK}`;
-            if (isScreenshotStyle) { 
-                ctx.fillStyle = subColor; 
-                ctx.fillText(config.subTitle, targetX, currentY); 
-            }
-            else { 
-                this.drawHaloText(ctx, config.subTitle, targetX, currentY, subColor, this.themes.stroke, subFontSize, "normal"); 
-            }
+            subTitleLines.forEach(line => {
+                if (isScreenshotStyle) {
+                    ctx.fillStyle = subColor;
+                    ctx.fillText(line, targetX, currentY);
+                }
+                else {
+                    this.drawHaloText(ctx, line, targetX, currentY, subColor, this.themes.stroke, subFontSize, "normal");
+                }
+                currentY += subFontSize * 1.25;
+            });
         }
 
         // 4. 页脚日期

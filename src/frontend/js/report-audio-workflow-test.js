@@ -113,11 +113,11 @@ class ReportAudioWorkflowPage {
                             <div class="space-y-3">
                                 <label class="block text-xs font-black text-slate-600">
                                     主标题
-                                    <input id="cover-regenerate-title" name="title" type="text" maxlength="120" class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm font-bold text-slate-800 focus:border-indigo-400 focus:outline-none" required>
+                                    <textarea id="cover-regenerate-title" name="title" rows="3" maxlength="160" class="mt-1 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm font-bold leading-6 text-slate-800 focus:border-indigo-400 focus:outline-none" required></textarea>
                                 </label>
                                 <label class="block text-xs font-black text-slate-600">
                                     副标题
-                                    <input id="cover-regenerate-subtitle" name="subtitle" type="text" maxlength="180" class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-indigo-400 focus:outline-none">
+                                    <textarea id="cover-regenerate-subtitle" name="subtitle" rows="2" maxlength="220" class="mt-1 w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm leading-6 text-slate-800 focus:border-indigo-400 focus:outline-none"></textarea>
                                 </label>
                                 <div id="cover-regenerate-error" class="hidden rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"></div>
                             </div>
@@ -1051,7 +1051,7 @@ class ReportAudioWorkflowPage {
             this.jobDisplayTitle(job, ''),
         ];
         for (const value of candidates) {
-            const text = this.compactTitle(value);
+            const text = this.compactMultilineCoverText(value);
             if (text) return text;
         }
         return '';
@@ -1065,7 +1065,7 @@ class ReportAudioWorkflowPage {
             job?.structured_result?.summary,
         ];
         for (const value of candidates) {
-            const text = this.compactTitle(value);
+            const text = this.compactMultilineCoverText(value);
             if (text) return text;
         }
         return '';
@@ -1075,8 +1075,8 @@ class ReportAudioWorkflowPage {
         event.preventDefault();
         const jobId = this.coverRegenerateJobId;
         if (!jobId || this.coverRegeneratingIds.has(jobId)) return;
-        const title = this.compactTitle(this.els.coverRegenerateTitle.value);
-        const subtitle = this.compactTitle(this.els.coverRegenerateSubtitle.value);
+        const title = this.compactMultilineCoverText(this.els.coverRegenerateTitle.value);
+        const subtitle = this.compactMultilineCoverText(this.els.coverRegenerateSubtitle.value);
         if (!title) {
             this.setCoverRegenerateError('请填写主标题。');
             this.els.coverRegenerateTitle.focus();
@@ -1712,6 +1712,16 @@ class ReportAudioWorkflowPage {
         return String(value ?? '')
             .replace(/\s*\n\s*/g, ' / ')
             .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    compactMultilineCoverText(value) {
+        return String(value ?? '')
+            .replace(/\r/g, '\n')
+            .split('\n')
+            .map((line) => line.replace(/\s+/g, ' ').trim())
+            .filter(Boolean)
+            .join('\n')
             .trim();
     }
 

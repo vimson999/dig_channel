@@ -468,6 +468,7 @@ def list_jobs(current_user):
                 PublicationTask.report_audio_video_message.label("video_message"),
                 PublicationTask.report_audio_video_path.label("video_path"),
                 PublicationTask.report_audio_cover_path.label("cover_path"),
+                PublicationTask.result.label("result_payload"),
             )
             .offset(offset)
             .limit(per_page)
@@ -612,8 +613,8 @@ def regenerate_cover(current_user, job_id):
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
     data = request.get_json(silent=True) or {}
-    title = _normalize_cover_text(data.get("title") or data.get("main_title"), 120)
-    subtitle = _normalize_cover_text(data.get("subtitle") or data.get("sub_title"), 180)
+    title = _normalize_cover_text(data.get("title") or data.get("main_title"), 160)
+    subtitle = _normalize_cover_text(data.get("subtitle") or data.get("sub_title"), 220)
     if not title:
         return jsonify({"success": False, "message": "请填写封皮标题"}), 400
 
@@ -796,8 +797,13 @@ def _get_owned_task(current_user, job_id):
 
 
 def _normalize_cover_text(value, max_length):
-    text = " ".join(str(value or "").replace("\r", "\n").split())
-    return text[:max_length]
+    lines = [
+        " ".join(line.split())
+        for line in str(value or "").replace("\r", "\n").split("\n")
+        if line.strip()
+    ]
+    text = "\n".join(lines).strip()
+    return text[:max_length].rstrip()
 
 
 def _regenerate_cover_for_task(task, *, title, subtitle=""):
@@ -1146,6 +1152,7 @@ def _job_payload(task, include_raw=False):
     children = dict(result.get("children") or {})
     if vertical_child:
         children["publisher_vertical_video"] = _vertical_child_summary(vertical_child, task.id)
+    cover_subtitle = (structured_result or {}).get("cover_subtitle") or video_result.get("cover_subtitle") or ""
     payload = {
         "job_id": task.id,
         "status": status,
@@ -1173,7 +1180,7 @@ def _job_payload(task, include_raw=False):
         "structured_result": structured_result,
         "title": _display_title_from_structured(structured_result),
         "cover_title": (structured_result or {}).get("cover_title") or "",
-        "cover_subtitle": (structured_result or {}).get("cover_subtitle") or "",
+        "cover_subtitle": cover_subtitle,
         "tts_text": result.get("tts_text"),
         "audio": _public_audio(task.id, audio),
         "video": _public_video(task.id, video_result),
@@ -1220,8 +1227,18 @@ def _first_compact_title(*values):
     return ""
 
 
+def _cover_subtitle_from_result_payload(result):
+    if not isinstance(result, dict):
+        return ""
+    structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
+    video = result.get("video") if isinstance(result.get("video"), dict) else {}
+    return _normalize_cover_text(structured.get("cover_subtitle") or video.get("cover_subtitle"), 220)
+
+
 def _job_summary_payload(row, child_bundle=None):
     child_bundle = child_bundle or {}
+    result_payload = row.result_payload if isinstance(getattr(row, "result_payload", None), dict) else {}
+    cover_subtitle = _cover_subtitle_from_result_payload(result_payload)
     pdf = {
         "filename": row.request_pdf_filename or row.result_pdf_filename,
         "bytes": _number_or_none(row.request_pdf_bytes or row.result_pdf_bytes, int),
@@ -1234,6 +1251,7 @@ def _job_summary_payload(row, child_bundle=None):
 
     structured_result = {
         "cover_title": row.cover_title,
+        "cover_subtitle": cover_subtitle,
         "title": row.structured_title,
     }
     structured_result = {key: value for key, value in structured_result.items() if value}
@@ -1253,12 +1271,15 @@ def _job_summary_payload(row, child_bundle=None):
         or row.video_status
         or row.video_publisher_task_id
         or row.video_path
+        or row.cover_path
     ):
         video_payload = {
             "enabled": _bool_or_none(row.video_enabled),
             "status": row.video_status,
             "publisher_task_id": row.video_publisher_task_id,
             "message": row.video_message,
+            "cover_title": row.cover_title,
+            "cover_subtitle": cover_subtitle,
         }
         if row.video_path and _path_exists(row.video_path):
             video_payload["video"] = {"download_url": f"/api/report-audio-workflows/jobs/{row.id}/download-video"}
@@ -1296,7 +1317,7 @@ def _job_summary_payload(row, child_bundle=None):
         "doubao_browser_tts": child_bundle.get("doubao_browser_tts") or [],
         "structured_result": structured_result or None,
         "cover_title": row.cover_title or "",
-        "cover_subtitle": "",
+        "cover_subtitle": cover_subtitle,
         "audio": audio_payload,
         "video": video_payload,
         "publisher_video": child_bundle.get("publisher_video"),

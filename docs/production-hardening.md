@@ -29,9 +29,10 @@ SELECT pg_reload_conf();
 - DB 空闲连接低于 `TASK_ADMISSION_DB_MIN_FREE_CONNECTIONS` 时延迟任务。
 - DB 使用率超过 `TASK_ADMISSION_DB_MAX_USED_RATIO` 时延迟任务。
 - `idle in transaction` 超过 `TASK_ADMISSION_DB_MAX_IDLE_IN_TX` 时延迟任务。
-- 同类任务超过 `TASK_ADMISSION_FEATURE_LIMITS` 时延迟任务。
+- 同类运行任务超过 `TASK_ADMISSION_FEATURE_LIMITS` 时延迟启动。
+- 同类排队/运行任务超过 `TASK_ADMISSION_FEATURE_BACKLOG_LIMITS` 时延迟提交。
 
-延迟不是失败。任务会保持 `pending`，步骤会标为 `deferred_db_pressure` 或 `deferred_capacity`，并在 `result.runtime_guard` 写入原因。
+延迟不是失败。任务会保持 `pending`，步骤会标为 `deferred_db_pressure`、`deferred_capacity` 或 `deferred_backlog`，并在 `result.runtime_guard` 写入原因。
 
 ## 看门狗暂停语义
 

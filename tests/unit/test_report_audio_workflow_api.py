@@ -163,6 +163,56 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(parent.report_audio_cover_title, "新标题")
         self.assertEqual(parent.report_audio_cover_path, str(new_cover_path))
 
+    def test_normalize_cover_text_preserves_manual_line_breaks(self):
+        text = report_audio_api._normalize_cover_text("  第一行  标题 \r\n 第二行\t标题  \n\n第三行", 80)
+
+        self.assertEqual(text, "第一行 标题\n第二行 标题\n第三行")
+
+    def test_job_summary_payload_includes_cover_subtitle_from_result(self):
+        row = SimpleNamespace(
+            id="job-1",
+            request_pdf_filename="sample.pdf",
+            result_pdf_filename=None,
+            request_pdf_bytes="123",
+            result_pdf_bytes=None,
+            request_pdf_topic_title="PDF 标题",
+            result_pdf_topic_title=None,
+            cover_title="封面主标题",
+            structured_title="结构化标题",
+            result_payload={
+                "structured_result": {
+                    "cover_subtitle": "第一行 副标题\n第二行 副标题",
+                },
+            },
+            audio_wav_path=None,
+            audio_seconds=None,
+            audio_bytes=None,
+            video_enabled=True,
+            video_status="completed",
+            video_publisher_task_id="publisher-1",
+            video_message=None,
+            video_path=None,
+            cover_path="/tmp/cover.jpg",
+            video_title=None,
+            metadata_title=None,
+            status="completed",
+            current_step="done",
+            progress=100,
+            created_at=None,
+            started_at=None,
+            completed_at=None,
+            result_completed_at=None,
+            error_message=None,
+            result_error=None,
+            output_path=None,
+        )
+
+        payload = report_audio_api._job_summary_payload(row)
+
+        self.assertEqual(payload["cover_subtitle"], "第一行 副标题\n第二行 副标题")
+        self.assertEqual(payload["structured_result"]["cover_subtitle"], "第一行 副标题\n第二行 副标题")
+        self.assertEqual(payload["video"]["cover_subtitle"], "第一行 副标题\n第二行 副标题")
+
 
 if __name__ == "__main__":
     unittest.main()

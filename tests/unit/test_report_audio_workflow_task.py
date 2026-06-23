@@ -25,6 +25,7 @@ from tasks.report_audio_workflow import (  # noqa: E402
     _publisher_result_summary,
     _publisher_video_transform,
     _task_chunk_attempt,
+    _valid_structured_result,
     _video_stage_enabled,
 )
 
@@ -184,6 +185,23 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
 
         self.assertEqual(_task_chunk_attempt(ResultTask()), 3)
         self.assertEqual(_task_chunk_attempt(ParamsTask()), 2)
+
+    def test_cached_structured_result_with_capture_artifacts_is_not_reused(self):
+        bad_script = (
+            "研报pdf解析视频文案 自定义 Gem 研报pdf解析视频文案说 "
+            + "这是一段正文。" * 40
+        )
+        result = {"structured_result": {"final_script_for_tts": bad_script}}
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "10"}, clear=False):
+            self.assertIsNone(_valid_structured_result(result))
+
+    def test_clean_cached_structured_result_can_be_reused(self):
+        good_script = "这是一段已经清洗干净、可以直接交给豆包朗读的正文。" * 8
+        result = {"structured_result": {"final_script_for_tts": good_script}}
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "10"}, clear=False):
+            self.assertIs(_valid_structured_result(result), result["structured_result"])
 
     def test_parse_utc_datetime_accepts_z_suffix_and_offsets(self):
         self.assertEqual(_parse_utc_datetime("2026-06-23T01:02:03Z").isoformat(), "2026-06-23T01:02:03")

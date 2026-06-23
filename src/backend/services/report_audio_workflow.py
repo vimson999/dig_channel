@@ -22,6 +22,20 @@ DEFAULT_REVIEW_PROMPT = (
     "确认事实准确、逻辑清晰、表达规范，列出每条修正点及依据，并给出最终优化后的信息版本，"
     "附上核对过程说明和参考来源。"
 )
+GEMINI_CAPTURE_ARTIFACT_MARKERS = (
+    "自定义 Gem",
+    "研报pdf解析视频文案说",
+    "研报 pdf 解析视频文案说",
+    "【研报气质】",
+    "【Hook策略】",
+    "【结尾情绪基调】",
+    "Gemini 是一款 AI 工具",
+)
+GEMINI_CAPTURE_LABELS = (
+    "研报气质",
+    "Hook策略",
+    "结尾情绪基调",
+)
 
 
 class ReportAudioWorkflowError(RuntimeError):
@@ -99,6 +113,13 @@ def normalize_for_tts(raw_text: str, *, initial_text: str = "", metadata: Option
     if not payload:
         payload = _fallback_normalize(raw_text)
     return _validate_structured_result(payload, raw_text)
+
+
+def structured_result_quality_issue(structured: Dict[str, Any]) -> str:
+    if not isinstance(structured, dict):
+        return ""
+    script = str(structured.get("final_script_for_tts") or "").strip()
+    return _tts_script_quality_issue(script)
 
 
 def split_tts_text(text: str, max_chars: Optional[int] = None) -> List[str]:
@@ -272,6 +293,9 @@ def _validate_structured_result(payload: Dict[str, Any], raw_text: str) -> Dict[
         script = _clean_tts_script(_extract_final_script(raw_text))
     if not script:
         raise ReportAudioWorkflowError("结构化结果缺少 final_script_for_tts")
+    quality_issue = _tts_script_quality_issue(script)
+    if quality_issue:
+        raise ReportAudioWorkflowError(f"结构化结果不可用于朗读: {quality_issue}")
 
     result = {
         "title": _clean_text(payload.get("title") or "")[:300],
@@ -328,7 +352,7 @@ def _extract_final_script(raw_text: str) -> str:
     end_positions = [text.find(marker) for marker in end_markers if text.find(marker) > 200]
     if end_positions:
         text = text[:min(end_positions)].strip()
-    return text
+    return _strip_gemini_capture_artifacts(text)
 
 
 def _extract_fallback_title_pack(raw_text: str) -> Dict[str, Any]:
@@ -402,9 +426,44 @@ def _clean_text(value: Any) -> str:
 
 
 def _clean_tts_script(value: Any) -> str:
-    text = _clean_text(value)
+    text = _strip_gemini_capture_artifacts(value)
     text = re.sub(r"(^|\s)PDF(?:\s*\+\s*\d+)?(?=\s|$)", " ", text, flags=re.I)
     return _clean_text(text)
+
+
+def _strip_gemini_capture_artifacts(value: Any) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    text = re.sub(
+        r"^\s*(?:研报\s*pdf\s*解析视频文案\s*)?(?:自定义\s*Gem\s*)?(?:研报\s*pdf\s*解析视频文案说\s*)?",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    for label in GEMINI_CAPTURE_LABELS:
+        text = re.sub(rf"【{re.escape(label)}】\s*[\w\u4e00-\u9fff-]{{1,16}}", " ", text)
+        text = re.sub(rf"【{re.escape(label)}】", " ", text)
+    text = re.sub(r"Gemini\s+是一款\s+AI\s+工具.*$", " ", text, flags=re.I)
+    text = re.sub(r"(?<![A-Za-z0-9])PDF\s*\+\s*\d+(?![A-Za-z0-9])", " ", text, flags=re.I)
+    return _clean_text(text)
+
+
+def _tts_script_quality_issue(value: Any) -> str:
+    text = _clean_text(value)
+    if not text:
+        return "正文为空"
+    compact = re.sub(r"\s+", "", text).lower()
+    if re.search(r"研报\s*pdf\s*解析视频文案\s*自定义\s*gem", text, flags=re.I):
+        return "包含 Gemini 页面标题残留"
+    if re.search(r"研报\s*pdf\s*解析视频文案说", text, flags=re.I):
+        return "包含 Gemini 回复区页面残留"
+    for marker in GEMINI_CAPTURE_ARTIFACT_MARKERS:
+        if re.sub(r"\s+", "", marker).lower() in compact:
+            return f"包含页面/提示词残留: {marker}"
+    if re.search(r"(?<![A-Za-z0-9])PDF\s*\+\s*\d+(?![A-Za-z0-9])", text, flags=re.I):
+        return "包含 PDF 上传控件残留"
+    return ""
 
 
 def _clean_multiline_text(value: Any) -> str:
