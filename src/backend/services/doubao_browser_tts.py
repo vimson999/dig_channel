@@ -166,7 +166,7 @@ class DoubaoBrowserTTSWorker:
                 read_button.click(timeout=10_000)
 
                 self._emit(progress_callback, "capture_audio", 72, "等待音频捕获")
-                audio = self._wait_for_audio(page, started, job_id)
+                audio = self._wait_for_audio(page, started, job_id, text=text)
 
                 self._emit(progress_callback, "download_wav", 88, "导出 WAV")
                 wav_bytes = self._export_wav_bytes(page, output, job_id)
@@ -305,7 +305,9 @@ class DoubaoBrowserTTSWorker:
             time.sleep(1)
         raise DoubaoBrowserTTSAutomationError("等待豆包回复或朗读按钮超时")
 
-    def _wait_for_audio(self, page, started_at: float, job_id: str) -> Dict[str, Any]:
+    def _wait_for_audio(self, page, started_at: float, job_id: str, *, text: str = "") -> Dict[str, Any]:
+        chars = len(re.sub(r"\s+", "", str(text or "")))
+        minimum_seconds = _minimum_expected_audio_seconds(chars)
         first_audio_deadline = time.monotonic() + self.options.audio_start_timeout_seconds
         last_stats = self._audio_stats(page)
         while time.monotonic() < first_audio_deadline:
@@ -319,16 +321,26 @@ class DoubaoBrowserTTSWorker:
         else:
             raise DoubaoBrowserTTSAutomationError("朗读已触发但未捕获到 PCM 音频")
 
-        capture_deadline = time.monotonic() + self.options.audio_capture_timeout_seconds
+        capture_timeout = max(
+            float(self.options.audio_capture_timeout_seconds),
+            minimum_seconds + float(self.options.audio_stable_seconds) + 10.0,
+        )
+        capture_deadline = time.monotonic() + capture_timeout
         stable_since = time.monotonic()
         last_chunks = int(last_stats.get("chunks") or 0)
+        last_seconds = _float_value(last_stats.get("seconds"))
         while time.monotonic() < capture_deadline:
             self._guard_total_timeout(started_at)
             self._raise_if_login_or_captcha(page, job_id)
             stats = self._audio_stats(page)
             chunks = int(stats.get("chunks") or 0)
-            if chunks != last_chunks:
+            seconds = _float_value(stats.get("seconds"))
+            if chunks != last_chunks or abs(seconds - last_seconds) >= 0.05:
                 last_chunks = chunks
+                last_seconds = seconds
+                stable_since = time.monotonic()
+                last_stats = stats
+            elif minimum_seconds > 0 and seconds < minimum_seconds:
                 stable_since = time.monotonic()
                 last_stats = stats
             elif time.monotonic() - stable_since >= self.options.audio_stable_seconds:

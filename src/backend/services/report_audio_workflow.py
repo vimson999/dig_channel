@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import wave
@@ -11,6 +12,7 @@ import requests
 
 FEATURE_NAME = "report_pdf_audio_workflow"
 QUEUE_NAME = "report_audio_workflow"
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_INITIAL_PROMPT = (
     "请解析上传的研报 PDF，提取核心观点、关键数据、风险提示和可用于口播的摘要。"
@@ -86,7 +88,14 @@ def normalize_for_tts(raw_text: str, *, initial_text: str = "", metadata: Option
     if not raw_text:
         raise ReportAudioWorkflowError("Gemini 结果为空，无法结构化")
 
-    payload = _deepseek_normalize(raw_text, initial_text=initial_text, metadata=metadata or {})
+    try:
+        payload = _deepseek_normalize(raw_text, initial_text=initial_text, metadata=metadata or {})
+    except ReportAudioWorkflowError as exc:
+        LOGGER.warning("DeepSeek normalizer failed, using local fallback: %s", exc)
+        payload = None
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as exc:
+        LOGGER.warning("DeepSeek normalizer returned unusable response, using local fallback: %s", exc)
+        payload = None
     if not payload:
         payload = _fallback_normalize(raw_text)
     return _validate_structured_result(payload, raw_text)
@@ -231,8 +240,25 @@ def _deepseek_normalize(raw_text: str, *, initial_text: str, metadata: Dict[str,
     except requests.HTTPError as exc:
         body = response.text[:800] if response is not None else ""
         raise ReportAudioWorkflowError(f"DeepSeek 结构化失败: HTTP {response.status_code} {body}") from exc
-    content = response.json()["choices"][0]["message"]["content"]
-    payload = _json_from_text(content)
+    try:
+        data = response.json()
+    except ValueError as exc:
+        body = response.text[:800] if response is not None else ""
+        raise ReportAudioWorkflowError(f"DeepSeek 结构化失败: 返回非 JSON 响应 {body}") from exc
+
+    content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    if not content:
+        LOGGER.warning("DeepSeek normalizer returned empty content; using local fallback")
+        return None
+
+    try:
+        payload = _json_from_text(content)
+    except (json.JSONDecodeError, TypeError) as exc:
+        LOGGER.warning(
+            "DeepSeek normalizer returned non-JSON content; using local fallback. preview=%r",
+            _compact_text(content, 500),
+        )
+        return None
     if isinstance(payload, dict):
         payload["provider"] = "deepseek"
     return payload
@@ -241,9 +267,9 @@ def _deepseek_normalize(raw_text: str, *, initial_text: str, metadata: Dict[str,
 def _validate_structured_result(payload: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         payload = {}
-    script = _clean_text(payload.get("final_script_for_tts") or "")
+    script = _clean_tts_script(payload.get("final_script_for_tts") or "")
     if not script:
-        script = _extract_final_script(raw_text)
+        script = _clean_tts_script(_extract_final_script(raw_text))
     if not script:
         raise ReportAudioWorkflowError("结构化结果缺少 final_script_for_tts")
 
@@ -265,17 +291,18 @@ def _validate_structured_result(payload: Dict[str, Any], raw_text: str) -> Dict[
 
 
 def _fallback_normalize(raw_text: str) -> Dict[str, Any]:
+    title_pack = _extract_fallback_title_pack(raw_text)
     return {
-        "title": "",
+        "title": title_pack.get("title") or "",
         "summary": "",
-        "cover_title": "",
-        "cover_subtitle": "",
+        "cover_title": title_pack.get("cover_title") or "",
+        "cover_subtitle": title_pack.get("cover_subtitle") or "",
         "final_script_for_tts": _extract_final_script(raw_text) or raw_text,
         "corrections": [],
-        "titles": {"standard": [], "short": []},
+        "titles": title_pack.get("titles") or {"standard": [], "short": []},
         "sources": [],
         "risk_notes": [],
-        "editor_notes": "未配置 DeepSeek，使用本地规则抽取最终口播正文。",
+        "editor_notes": "DeepSeek 未配置或返回不可用结果，使用本地规则抽取最终口播正文。",
         "provider": "local_fallback",
     }
 
@@ -297,11 +324,51 @@ def _extract_final_script(raw_text: str) -> str:
     if start >= 0:
         text = text[start:].strip(" ：:。")
 
-    end_markers = ["标题与包装方案", "标准版标题方案", "16字以内", "核对过程说明"]
+    end_markers = ["标题与包装方案", "标准版标题方案", "标题方案", "16字以内", "核对过程说明"]
     end_positions = [text.find(marker) for marker in end_markers if text.find(marker) > 200]
     if end_positions:
         text = text[:min(end_positions)].strip()
     return text
+
+
+def _extract_fallback_title_pack(raw_text: str) -> Dict[str, Any]:
+    text = _clean_text(raw_text)
+    standard_titles = _extract_labeled_values(
+        text,
+        r"主标题[:：]\s*(.+?)(?=\s+副标题[:：]|\s+节目介绍[:：]|\s+方案[A-C一二三]|\s+版本[一二三\d]|$)",
+        limit=5,
+    )
+    short_titles = _extract_labeled_values(
+        text,
+        r"版本[一二三\d]+\s+主标题[:：]\s*(.+?)(?=\s+副标题[:：]|\s+版本[一二三\d]|$)",
+        limit=5,
+    )
+    subtitles = _extract_labeled_values(
+        text,
+        r"副标题[:：]\s*(.+?)(?=\s+节目介绍[:：]|\s+方案[A-C一二三]|\s+版本[一二三\d]|$)",
+        limit=3,
+    )
+    title = (standard_titles or short_titles or [""])[0]
+    return {
+        "title": title,
+        "cover_title": title,
+        "cover_subtitle": subtitles[0] if subtitles else "",
+        "titles": {
+            "standard": standard_titles,
+            "short": short_titles,
+        },
+    }
+
+
+def _extract_labeled_values(text: str, pattern: str, *, limit: int) -> List[str]:
+    values: List[str] = []
+    for match in re.finditer(pattern, text, flags=re.S):
+        value = _clean_text(match.group(1))
+        if value and value not in values:
+            values.append(value[:300])
+        if len(values) >= limit:
+            break
+    return values
 
 
 def _json_from_text(value: str) -> Dict[str, Any]:
@@ -332,6 +399,12 @@ def _safe_list(value: Any, limit: int) -> List[Any]:
 
 def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _clean_tts_script(value: Any) -> str:
+    text = _clean_text(value)
+    text = re.sub(r"(^|\s)PDF(?:\s*\+\s*\d+)?(?=\s|$)", " ", text, flags=re.I)
+    return _clean_text(text)
 
 
 def _clean_multiline_text(value: Any) -> str:
