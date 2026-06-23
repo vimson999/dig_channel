@@ -38,6 +38,7 @@ QueuePool limit of size 1 overflow 0 reached, connection timed out
 - Web 使用小 QueuePool：`WEB_DB_POOL_SIZE=4`，`WEB_DB_MAX_OVERFLOW=0`。
 - Worker、scheduler 使用 `NullPool`，任务用完即释放连接。
 - 父编排轮询子任务时必须周期性 `release_db_session_quietly()`。
+- 父编排释放 session 后，不能继续持有并读取旧 ORM 对象；跨等待、跨轮询只保存 `task_id`，需要展示或落库摘要时重新加载。
 - Celery `task_postrun`、`task_failure`、`task_retry` 必须清理 SQLAlchemy session。
 - 所有任务入口和自动入队入口接入 `services.runtime_guard`，数据库压力大时延迟任务，而不是硬冲。
 
@@ -227,6 +228,31 @@ Watchdog 的目标是守护所有被声明为托管的关键 worker，而不是�
 8. 验证通过后再恢复 scheduler。
 
 不要在未定位根因时“重投全部”。
+
+## 编排任务 ORM 对象纪律
+
+### 现象
+
+研报 PDF 音频/视频编排在 Gemini 与豆包朗读都成功后，父任务停在视频合成前后，页面显示：
+
+```text
+Instance <PublicationTask ...> is not bound to a Session; attribute refresh operation cannot proceed
+```
+
+### 根因
+
+父编排为了避免数据库连接长期占用，会在等待子任务期间释放 SQLAlchemy session。释放后，先前保存在列表里的 `PublicationTask` ORM 对象可能已经 detached；后续再读取 `task.result`、`task.status` 等属性时，SQLAlchemy 会尝试 refresh，但对象已经不属于任何 session，于是抛出 DetachedInstanceError。
+
+### 固定解法
+
+- 编排任务跨 `_wait_child()`、长轮询、视频合成、浏览器自动化等待时，只保存子任务 ID。
+- 生成 UI 摘要、最终结果 JSON、通知邮件内容前，用子任务 ID 重新加载数据库对象。
+- 可以短时间使用刚创建或刚加载的 ORM 对象做立即判断，但不能把它放进长期列表后再跨 session 读取。
+- 修复后必须用失败任务原地重试验证，确认可以复用已完成子任务并继续后续阶段。
+
+### 验证样例
+
+本次验证用例为任务 `5692cd61-9dc0-4772-80fa-f9d01d52a88c`：原失败点为 87%，修复后原地重试，复用 1 个 Gemini 子任务和 6 个豆包朗读子任务，最终父任务 `completed / done / 100`，视频合成子任务 `a60dd50f-8411-4b7e-889c-1584214b6787` 完成。
 
 ## 变更验证清单
 

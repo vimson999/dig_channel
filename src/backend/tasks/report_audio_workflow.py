@@ -294,6 +294,7 @@ def _process_job(task_id):
         structured = _valid_structured_result(result)
         gemini_task = _completed_gemini_task(workflow_task_id, result)
         active_gemini_task = None if gemini_task else _active_gemini_task(workflow_task_id, result)
+        gemini_task_id = gemini_task.id if gemini_task else None
         if structured:
             _emit(workflow_task_id, "reuse_structured_result", 58, "复用已有 Gemini 结构化结果")
             gemini_result = gemini_task.result if gemini_task else {}
@@ -309,6 +310,7 @@ def _process_job(task_id):
                 _emit(workflow_task_id, "gemini_wait_existing", 10, "继续等待已提交的研报 PDF Gem 解析子任务")
                 _record_child(workflow_task_id, "gemini", active_gemini_task)
                 gemini_task = _wait_child(workflow_task_id, active_gemini_task.id, "gemini", start_progress=10, end_progress=52)
+                gemini_task_id = gemini_task.id
                 if gemini_task.status != "completed":
                     raise RuntimeError(f"Gemini 子任务失败: {_child_error_message(gemini_task)}")
                 _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
@@ -325,6 +327,7 @@ def _process_job(task_id):
                     start_progress=10,
                     end_progress=52,
                 )
+                gemini_task_id = gemini_task.id
                 _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
                 _queue_notification(workflow_task_id, "report_audio_gemini_completed", "研报 PDF Gem 第一轮解析和自审追问已完成")
 
@@ -350,7 +353,7 @@ def _process_job(task_id):
                 initial_text=initial_text,
                 metadata={
                     "workflow_task_id": workflow_task_id,
-                    "gemini_task_id": gemini_task.id,
+                    "gemini_task_id": gemini_task_id,
                     "pdf_filename": pdf.get("filename"),
                 },
             )
@@ -378,7 +381,7 @@ def _process_job(task_id):
             f"结构化整理完成，可朗读正文 {len(structured.get('final_script_for_tts') or '')} 字，拆分 {len(chunks)} 段",
         )
 
-        tts_tasks = []
+        tts_task_ids = []
         wav_paths = []
         doubao_submitted_notified = False
         doubao_retry_limit = max(0, min(_int_env("REPORT_AUDIO_DOUBAO_RETRY_LIMIT", 2), 5))
@@ -388,7 +391,7 @@ def _process_job(task_id):
             reusable_tts_task = _completed_tts_task_for_chunk(workflow_task_id, index, chunk)
             if reusable_tts_task:
                 wav_path = _task_audio_wav_path(reusable_tts_task)
-                tts_tasks.append(reusable_tts_task)
+                tts_task_ids.append(reusable_tts_task.id)
                 wav_paths.append(wav_path)
                 _record_child(workflow_task_id, f"doubao_browser_{index}", reusable_tts_task)
                 _emit(
@@ -400,7 +403,7 @@ def _process_job(task_id):
                 continue
             active_tts_task = _active_tts_task_for_chunk(workflow_task_id, index, chunk)
             if active_tts_task:
-                tts_tasks.append(active_tts_task)
+                tts_task_ids.append(active_tts_task.id)
                 _record_child(workflow_task_id, f"doubao_browser_{index}", active_tts_task)
                 _emit(
                     workflow_task_id,
@@ -428,7 +431,7 @@ def _process_job(task_id):
                     f"创建豆包浏览器朗读子任务 {index}/{len(chunks)}{retry_suffix}",
                 )
                 tts_task = _create_doubao_tts_task(parent_ref, chunk, index, len(chunks), payload, attempt=attempt)
-                tts_tasks.append(tts_task)
+                tts_task_ids.append(tts_task.id)
                 _record_child(workflow_task_id, f"doubao_browser_{index}", tts_task)
                 if not doubao_submitted_notified:
                     doubao_submitted_notified = True
@@ -453,7 +456,7 @@ def _process_job(task_id):
                     )
                     continue
                 raise RuntimeError(f"豆包浏览器朗读子任务失败: {last_error}")
-        _update_result(workflow_task_id, {"doubao_browser_tts": [_task_public_summary(item) for item in tts_tasks]})
+        _update_result(workflow_task_id, {"doubao_browser_tts": _task_public_summaries_by_ids(tts_task_ids)})
         _queue_notification(workflow_task_id, "report_audio_doubao_completed", f"豆包浏览器朗读完成，共生成 {len(wav_paths)} 段 WAV")
 
         _emit(workflow_task_id, "combine_audio", 92, "合并豆包浏览器朗读音频")
@@ -464,6 +467,7 @@ def _process_job(task_id):
         )
         _update_result(workflow_task_id, {"audio": audio})
         publisher_task = None
+        publisher_task_id = None
         video_result = None
         if _video_stage_enabled(payload):
             _emit(workflow_task_id, "render_pdf_first_page", 94, "生成 PDF 首屏截图")
@@ -491,9 +495,10 @@ def _process_job(task_id):
             publisher_task = _wait_child(workflow_task_id, publisher_task.id, "publisher_video", start_progress=95, end_progress=99)
             if publisher_task.status != "completed":
                 raise RuntimeError(f"视频合成子任务失败: {publisher_task.error_message or (publisher_task.result or {}).get('error')}")
+            publisher_task_id = publisher_task.id
             video_result = _publisher_result_summary(publisher_task, pdf_screenshot)
             _update_result(workflow_task_id, {
-                "publisher_video": _task_public_summary(publisher_task),
+                "publisher_video": _task_public_summary_by_id(publisher_task_id),
                 "video": video_result,
             })
             _emit(workflow_task_id, "publisher_video_done", 99, "视频合成完成")
@@ -505,9 +510,9 @@ def _process_job(task_id):
         output_path = storage_path_for_job(workflow_task_id, workflow_created_at)
         final_payload = {
             "workflow_task_id": workflow_task_id,
-            "gemini_task_id": gemini_task.id if gemini_task else None,
-            "doubao_browser_task_ids": [item.id for item in tts_tasks],
-            "publisher_task_id": publisher_task.id if publisher_task else None,
+            "gemini_task_id": gemini_task_id,
+            "doubao_browser_task_ids": tts_task_ids,
+            "publisher_task_id": publisher_task_id,
             "structured_result": structured,
             "audio": audio,
             "video": video_result,
@@ -522,9 +527,9 @@ def _process_job(task_id):
         current = _load_task(workflow_task_id, *TASK_STATE_COLUMNS)
         final_result = dict((current.result if current else {}) or {})
         final_result.update({
-            "gemini": _task_public_summary(gemini_task),
-            "doubao_browser_tts": [_task_public_summary(item) for item in tts_tasks],
-            "publisher_video": _task_public_summary(publisher_task) if publisher_task else None,
+            "gemini": _task_public_summary_by_id(gemini_task_id) if gemini_task_id else None,
+            "doubao_browser_tts": _task_public_summaries_by_ids(tts_task_ids),
+            "publisher_video": _task_public_summary_by_id(publisher_task_id) if publisher_task_id else None,
             "structured_result": structured,
             "audio": audio,
             "video": video_result,
@@ -1997,6 +2002,25 @@ def _task_public_summary(task):
         "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
         "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else None,
     }
+
+
+def _task_public_summary_by_id(task_id):
+    if not task_id:
+        return None
+    return _task_public_summary(_load_task(task_id, *TASK_CHILD_COLUMNS))
+
+
+def _task_public_summaries_by_ids(task_ids):
+    summaries = []
+    seen = set()
+    for task_id in task_ids or []:
+        if not task_id or task_id in seen:
+            continue
+        seen.add(task_id)
+        summary = _task_public_summary_by_id(task_id)
+        if summary:
+            summaries.append(summary)
+    return summaries
 
 
 def _mark_failed(task, message):
