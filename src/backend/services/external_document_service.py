@@ -19,13 +19,7 @@ from models import db
 from models.external_document import ExternalDocument, ZsxqTopicExternalDocument
 from models.task import PublicationTask
 from models.zsxq_sync import ZsxqTopic
-from services.platform_credential_service import (
-    CredentialError,
-    is_auth_error,
-    mark_credential_error,
-    mark_credential_success,
-    resolve_feishu_cookie,
-)
+from services import platform_credential_service as credential_service
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +34,37 @@ TRACKING_QUERY_KEYS = {"from", "from_copylink", "share_token", "timestamp", "utm
 
 class ExternalDocumentError(ValueError):
     pass
+
+
+def _resolve_feishu_cookie(*, account_id: Optional[str] = None, required: bool = True) -> Dict[str, Any]:
+    resolver = getattr(credential_service, "resolve_feishu_cookie", None)
+    if not callable(resolver):
+        raise ExternalDocumentError(
+            "飞书凭据解析函数未加载。当前 Celery worker 可能仍缓存旧代码，请滚动重启 worker 后重试。"
+        )
+    return resolver(account_id=account_id, required=required)
+
+
+def _mark_credential_success(credential_id: Optional[str]) -> None:
+    marker = getattr(credential_service, "mark_credential_success", None)
+    if callable(marker):
+        marker(credential_id)
+
+
+def _mark_credential_error(credential_id: Optional[str], error: Any, *, expired: bool = False) -> None:
+    marker = getattr(credential_service, "mark_credential_error", None)
+    if callable(marker):
+        marker(credential_id, error, expired=expired)
+
+
+def _is_auth_error(error: Any) -> bool:
+    checker = getattr(credential_service, "is_auth_error", None)
+    return bool(checker(error)) if callable(checker) else False
+
+
+def _credential_error(message: str) -> Exception:
+    error_cls = getattr(credential_service, "CredentialError", ExternalDocumentError)
+    return error_cls(message)
 
 
 def extract_external_links_from_topic(topic: Any) -> List[Dict[str, str]]:
@@ -301,7 +326,7 @@ class ExternalDocumentService:
 
         credential = {}
         try:
-            credential = resolve_feishu_cookie(account_id=credential_id, required=True)
+            credential = _resolve_feishu_cookie(account_id=credential_id, required=True)
             fetched = self._fetch_feishu_document(document, credential["cookie"])
             now = datetime.utcnow()
             document.title = fetched.get("title") or document.title
@@ -318,7 +343,7 @@ class ExternalDocumentService:
             if document.summary_status in {"completed", "failed"} and _document_summary_stale(document):
                 document.summary_status = "pending"
                 document.summary_error = None
-            mark_credential_success(credential.get("credential_id"))
+            _mark_credential_success(credential.get("credential_id"))
             db.session.commit()
             return document
         except Exception as exc:
@@ -327,8 +352,8 @@ class ExternalDocumentService:
             if document:
                 document.fetch_status = "failed"
                 document.fetch_error = str(exc)[:2000]
-                if credential.get("credential_id") and is_auth_error(exc):
-                    mark_credential_error(credential.get("credential_id"), exc, expired=True)
+                if credential.get("credential_id") and _is_auth_error(exc):
+                    _mark_credential_error(credential.get("credential_id"), exc, expired=True)
                 db.session.commit()
             raise
 
@@ -598,7 +623,7 @@ class ExternalDocumentService:
             allow_redirects=True,
         )
         if response.status_code in {401, 403}:
-            raise CredentialError(f"飞书访问被拒绝 HTTP {response.status_code}")
+            raise _credential_error(f"飞书访问被拒绝 HTTP {response.status_code}")
         if response.status_code >= 400:
             raise ExternalDocumentError(f"飞书抓取失败 HTTP {response.status_code}: {response.text[:300]}")
         response.encoding = response.encoding or "utf-8"

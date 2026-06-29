@@ -53,6 +53,18 @@ Python worker 进程已加载旧版 `services.platform_credential_service` 到 `
 
 ## 实际方案
 
+代码防线：
+
+- `external_document_service` 不再在模块导入期直接 `from services.platform_credential_service import resolve_feishu_cookie`。
+- 改为导入 `platform_credential_service` 模块，并在真正执行飞书抓取时通过 `_resolve_feishu_cookie()` 懒解析。
+- 如果旧 worker 里凭证模块仍缺少该函数，只让飞书抓取动作返回明确错误：
+
+```text
+飞书凭据解析函数未加载。当前 Celery worker 可能仍缓存旧代码，请滚动重启 worker 后重试。
+```
+
+- 这样 `create_app()` 注册 API 蓝图时不会因为飞书凭证函数缺失而拖垮无关的 publisher / report audio workflow 任务。
+
 2026-06-28 现场处置：
 
 - 重启 `zsxq_publish` worker。
@@ -82,6 +94,12 @@ Python worker 进程已加载旧版 `services.platform_credential_service` 到 `
 ```text
 resolve_feishu_cookie True
 external_document_service True
+```
+
+- 新增单元测试覆盖缺少 `resolve_feishu_cookie` 时只在懒解析阶段失败：
+
+```text
+PYTHONPATH=src/backend venv/bin/python -m unittest tests.unit.test_external_document_service
 ```
 
 - 新 `report_audio_workflow` worker 日志显示收到重投任务：
