@@ -25,6 +25,10 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
             "report_pdf_audio_workflow",
             celery_monitor.BUSINESS_TASK_FEATURES["report_audio_workflow"],
         )
+        self.assertIn(
+            "report_script_material_workflow",
+            celery_monitor.BUSINESS_TASK_FEATURES["report_script_material_workflow"],
+        )
 
     def test_dispatch_collects_reused_downloaded_attachment_candidates(self):
         sync_result = {
@@ -171,6 +175,204 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
 
                 db.session.remove()
                 db.drop_all()
+
+    def test_script_material_dispatch_queues_script_only_pdf_workflow(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "report.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\nfixture")
+
+            app = Flask(__name__)
+            app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
+            app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+            db.init_app(app)
+
+            with app.app_context():
+                db.create_all()
+                run = ZsxqSyncRun(
+                    id="run-script-material",
+                    group_id="group-1",
+                    group_name="前沿信息收录",
+                    result={},
+                )
+                topic = ZsxqTopic(
+                    group_id="group-1",
+                    group_name="前沿信息收录",
+                    tab_id="tab-pdf",
+                    tab_label="外资研报",
+                    topic_id="topic-pdf",
+                    title="AI 算力深度报告",
+                )
+                attachment = ZsxqAttachment(
+                    id="att-script-material",
+                    group_id="group-1",
+                    tab_id="tab-pdf",
+                    topic_id="topic-pdf",
+                    attachment_key="pdf-key",
+                    name="report.pdf",
+                    download_count=40,
+                    local_path=str(pdf_path),
+                    download_status="downloaded",
+                )
+                db.session.add_all([run, topic, attachment])
+                db.session.commit()
+
+                sync_result = {
+                    "downloaded_files": [{"path": str(pdf_path), "attachment_id": "att-script-material"}],
+                    "downloaded_pdf_files": [{"path": str(pdf_path), "attachment_id": "att-script-material"}],
+                }
+                config = {
+                    "enabled": True,
+                    "pdf_min_download_count": 40,
+                    "wait_for_completion": False,
+                }
+
+                with patch(
+                    "tasks.report_script_material_workflow.process_report_script_material_workflow_job.apply_async",
+                    return_value=SimpleNamespace(id="celery-script-material"),
+                ) as report_apply:
+                    summary = ZsxqSyncService()._submit_auto_script_material_dispatch_for_run(
+                        run=run,
+                        sync_result=sync_result,
+                        config=config,
+                        workflow_run_id="workflow-1",
+                    )
+
+                self.assertEqual(summary["status"], "completed")
+                self.assertEqual(summary["pdf"]["queued"], 1)
+                self.assertEqual(summary["queued_count"], 1)
+                report_apply.assert_called_once()
+
+                task = PublicationTask.query.one()
+                self.assertEqual(task.feature, "report_script_material_workflow")
+                self.assertEqual(task.parent_feature, "zsxq_sync_run")
+                self.assertEqual(task.parent_task_id, "run-script-material")
+                self.assertEqual(task.source_feature, "zsxq_attachment")
+                self.assertEqual(task.source_task_id, "att-script-material")
+                self.assertEqual(task.report_audio_pdf_attachment_id, "att-script-material")
+                workflow = task.params["report_script_material_workflow"]
+                self.assertFalse(workflow["video"]["enabled"])
+                self.assertFalse(workflow["video"]["vertical_enabled"])
+                self.assertEqual(task.result["script_material"]["status"], "pending")
+                self.assertEqual(
+                    task.result["auto_script_material_dispatch"]["threshold"],
+                    40,
+                )
+
+                db.session.remove()
+                db.drop_all()
+
+    def test_script_material_dispatch_reports_deferred_as_queued_work_not_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "report.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\nfixture")
+
+            app = Flask(__name__)
+            app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
+            app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+            db.init_app(app)
+
+            with app.app_context():
+                db.create_all()
+                run = ZsxqSyncRun(id="run-script-material-deferred", group_id="group-1", result={})
+                topic = ZsxqTopic(
+                    group_id="group-1",
+                    tab_id="tab-pdf",
+                    topic_id="topic-pdf",
+                    title="AI 算力深度报告",
+                )
+                attachment = ZsxqAttachment(
+                    id="att-script-material-deferred",
+                    group_id="group-1",
+                    tab_id="tab-pdf",
+                    topic_id="topic-pdf",
+                    attachment_key="pdf-key",
+                    name="report.pdf",
+                    download_count=40,
+                    local_path=str(pdf_path),
+                    download_status="downloaded",
+                )
+                db.session.add_all([run, topic, attachment])
+                db.session.commit()
+
+                sync_result = {
+                    "downloaded_files": [{"path": str(pdf_path), "attachment_id": "att-script-material-deferred"}],
+                }
+                config = {
+                    "enabled": True,
+                    "pdf_min_download_count": 40,
+                    "wait_for_completion": False,
+                }
+
+                with patch(
+                    "services.zsxq_sync_service.maybe_guarded_apply_async",
+                    return_value={
+                        "async_result": SimpleNamespace(id="celery-deferred"),
+                        "deferred": True,
+                        "admission": {"allowed": False, "reason": "feature_backlog"},
+                    },
+                ):
+                    summary = ZsxqSyncService()._submit_auto_script_material_dispatch_for_run(
+                        run=run,
+                        sync_result=sync_result,
+                        config=config,
+                        workflow_run_id="workflow-1",
+                    )
+
+                self.assertEqual(summary["status"], "completed")
+                self.assertEqual(summary["pdf"]["queued"], 0)
+                self.assertEqual(summary["pdf"]["deferred"], 1)
+                self.assertEqual(summary["pdf"]["failed"], 0)
+                self.assertEqual(summary["queued_count"], 0)
+                self.assertEqual(summary["deferred_count"], 1)
+                self.assertEqual(summary["dispatched_count"], 1)
+                self.assertEqual(summary["failed_count"], 0)
+
+                db.session.remove()
+                db.drop_all()
+
+    def test_auto_video_dispatch_ignores_existing_script_material_only_task(self):
+        app = Flask(__name__)
+        app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
+        app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+        db.init_app(app)
+
+        with app.app_context():
+            db.create_all()
+            attachment = ZsxqAttachment(
+                id="att-pdf",
+                group_id="group-1",
+                tab_id="tab-pdf",
+                topic_id="topic-pdf",
+                attachment_key="pdf-key",
+                name="report.pdf",
+                download_count=40,
+                local_path="/tmp/report.pdf",
+                download_status="downloaded",
+            )
+            material_task = PublicationTask(
+                status="pending",
+                current_step="queued",
+                progress=0,
+                params={
+                    "feature": "report_pdf_audio_workflow",
+                    "source_feature": "zsxq_attachment",
+                    "source_task_id": "att-pdf",
+                    "report_audio_workflow": {
+                        "script_material_only": True,
+                        "pdf": {"attachment_id": "att-pdf", "filename": "report.pdf"},
+                    },
+                },
+                result={"script_material": {"status": "pending"}},
+            )
+            db.session.add_all([attachment, material_task])
+            db.session.commit()
+
+            existing = ZsxqSyncService()._find_existing_auto_video_task(attachment, "pdf")
+
+            self.assertIsNone(existing)
+
+            db.session.remove()
+            db.drop_all()
 
 
 if __name__ == "__main__":

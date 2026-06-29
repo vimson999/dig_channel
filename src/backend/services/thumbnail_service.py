@@ -176,15 +176,15 @@ class ThumbnailService:
 
     def _vertical_title_lines(self, draw, title: str, max_width: int, max_lines: int):
         compact = "".join(str(title or "").split())
-        base_size = 82 if len(compact) <= 18 else 76 if len(compact) <= 26 else 68
-        for size in range(base_size, 55, -4):
+        base_size = 66 if len(compact) <= 18 else 60 if len(compact) <= 26 else 56
+        for size in range(base_size, 47, -4):
             font = self._font(size)
             lines = self._wrap_vertical_text(draw, title, font, max_width, max_lines)
-            line_gap = int(size * 1.15)
-            if len(lines) * line_gap <= 390:
+            line_gap = int(size * 1.18)
+            if len(lines) * line_gap <= 310:
                 return lines, font, size, line_gap
-        font = self._font(56)
-        return self._wrap_vertical_text(draw, title, font, max_width, max_lines), font, 56, 66
+        font = self._font(48)
+        return self._wrap_vertical_text(draw, title, font, max_width, max_lines), font, 48, 58
 
     def _draw_vertical_title_line(self, draw, x: int, y: int, line: str, font, *, accent=(226, 198, 82, 255), text=(245, 248, 252, 255)):
         value = str(line or "")
@@ -232,10 +232,10 @@ class ThumbnailService:
         """Generate the 9:16 vertical background used by vertical video synthesis."""
         try:
             width, height = 1080, 1920
-            preview_h = 600
-            content_top = preview_h + 86
-            left_padding = 76
-            right_padding = 76
+            preview_h = 520
+            content_top = preview_h + 132
+            left_padding = 86
+            right_padding = 86
             max_text_width = width - left_padding - right_padding
             navy_top = (7, 23, 39)
             navy_bottom = (3, 10, 22)
@@ -264,17 +264,30 @@ class ThumbnailService:
 
             overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
             overlay_draw = ImageDraw.Draw(overlay)
-            fade_start = preview_h - 210
-            fade_end = preview_h + 64
+            fade_start = preview_h - 180
+            fade_end = preview_h + 112
             for y in range(fade_start, fade_end):
                 ratio = (y - fade_start) / max(1, fade_end - fade_start)
                 alpha = int(238 * ratio)
                 overlay_draw.line((0, y, width, y), fill=(*navy_top, alpha))
             img = Image.alpha_composite(img, overlay)
+
+            focus = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            focus_draw = ImageDraw.Draw(focus)
+            focus_draw.ellipse(
+                [left_padding - 360, content_top - 170, left_padding + 650, content_top + 520],
+                fill=(226, 198, 82, 18),
+            )
+            focus_draw.ellipse(
+                [width - 430, height - 560, width + 260, height + 180],
+                fill=(20, 74, 112, 22),
+            )
+            focus = focus.filter(ImageFilter.GaussianBlur(radius=96))
+            img = Image.alpha_composite(img, focus)
             draw = ImageDraw.Draw(img)
 
-            draw.line((left_padding, content_top - 38, left_padding + 152, content_top - 38), fill=gold, width=6)
-            draw.line((0, preview_h, width, preview_h), fill=(226, 198, 82, 74), width=2)
+            draw.line((left_padding, content_top - 52, left_padding + 136, content_top - 52), fill=gold, width=5)
+            draw.line((0, preview_h, width, preview_h), fill=(226, 198, 82, 42), width=2)
 
             title_lines, main_font, main_font_size, line_gap = self._vertical_title_lines(
                 draw,
@@ -287,19 +300,52 @@ class ThumbnailService:
                 self._draw_vertical_title_line(draw, left_padding, current_y, line, main_font, accent=gold, text=white)
                 current_y += line_gap
 
-            sub_font = self._font(42)
-            date_font = self._font(34)
+            sub_font = self._font(34)
+            date_font = self._font(28)
             sub_lines = self._wrap_vertical_text(draw, sub_title, sub_font, max_text_width, 2)
             if sub_lines:
-                current_y += 34
+                current_y += 24
                 for line in sub_lines[:2]:
                     draw.text((left_padding, current_y), line, font=sub_font, fill=muted)
-                    current_y += int(42 * 1.25)
+                    current_y += int(34 * 1.28)
 
             if date_text:
-                footer_y = min(max(current_y + 78, 1368), 1440)
-                draw.rectangle([left_padding, footer_y - 38, left_padding + 108, footer_y - 35], fill=(255, 255, 255, 150))
-                draw.text((left_padding, footer_y - 16), str(date_text), font=date_font, fill=(235, 239, 245, 178))
+                footer_y = min(current_y + 46, 1120)
+                draw.rectangle([left_padding, footer_y - 25, left_padding + 92, footer_y - 22], fill=(255, 255, 255, 145))
+                draw.text((left_padding, footer_y - 6), str(date_text), font=date_font, fill=(235, 239, 245, 178))
+
+            lower_top = min(max((footer_y if date_text else current_y) + 84, 1090), 1240)
+            caption_top = height - 430
+            caption_bottom = height - 156
+            stage_overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            stage_draw = ImageDraw.Draw(stage_overlay)
+            for y in range(lower_top, height):
+                ratio = (y - lower_top) / max(1, height - lower_top)
+                alpha = int(10 + 58 * ratio)
+                stage_draw.line((0, y, width, y), fill=(1, 6, 14, alpha))
+
+            rail_top = lower_top + 18
+            rail_bottom = caption_top - 94
+            if rail_bottom > rail_top:
+                stage_draw.line((left_padding, rail_top, left_padding, rail_bottom), fill=(226, 198, 82, 34), width=2)
+                stage_draw.ellipse(
+                    [left_padding - 5, rail_top - 5, left_padding + 5, rail_top + 5],
+                    fill=(226, 198, 82, 86),
+                )
+                for index, y in enumerate((rail_top, rail_top + 96, rail_top + 192)):
+                    if y < rail_bottom - 20:
+                        alpha = 22 - index * 5
+                        stage_draw.line((left_padding + 26, y, left_padding + 150, y), fill=(148, 163, 184, alpha), width=1)
+
+            stage_draw.line((left_padding, caption_top, width - right_padding, caption_top), fill=(226, 198, 82, 42), width=2)
+            stage_draw.line((left_padding, caption_bottom, width - right_padding, caption_bottom), fill=(148, 163, 184, 24), width=1)
+            stage_draw.line((left_padding, caption_top, left_padding, caption_top + 74), fill=(226, 198, 82, 34), width=2)
+            stage_draw.line((width - right_padding, caption_top, width - right_padding, caption_top + 74), fill=(226, 198, 82, 18), width=2)
+            stage_draw.line((left_padding, caption_bottom - 64, left_padding, caption_bottom), fill=(148, 163, 184, 22), width=1)
+            stage_draw.line((width - right_padding, caption_bottom - 64, width - right_padding, caption_bottom), fill=(148, 163, 184, 16), width=1)
+            for y in (caption_top + 92, caption_top + 174):
+                stage_draw.line((left_padding + 34, y, width - right_padding - 34, y), fill=(148, 163, 184, 10), width=1)
+            img = Image.alpha_composite(img, stage_overlay)
 
             if not output_filename:
                 output_filename = f"vertical_thumbnail_{uuid.uuid4().hex[:8]}.jpg"

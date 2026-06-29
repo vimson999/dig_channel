@@ -1,3 +1,5 @@
+import json
+import hashlib
 import logging
 import os
 import re
@@ -73,6 +75,11 @@ GENERIC_COVER_TITLE_NORMALIZED = {
     "研报视频",
     "研报视频编排",
 }
+MATERIAL_REUSE_FEATURES = (
+    "report_script_material_workflow",
+    "report_audio_workflow",
+    FEATURE_NAME,
+)
 
 RETRYABLE_CHILD_ERROR_FRAGMENTS = (
     "超时",
@@ -303,73 +310,93 @@ def _process_job(task_id):
         _queue_notification(workflow_task_id, "report_audio_started", "研报 PDF 到语音编排已启动")
         retry_requested_at = result.get("retry_requested_at")
         structured = _valid_structured_result(result)
-        gemini_task = _completed_gemini_task(workflow_task_id, result)
-        active_gemini_task = None if gemini_task else _active_gemini_task(workflow_task_id, result)
-        gemini_task_id = gemini_task.id if gemini_task else None
-        if structured:
+        reused_material = None
+        gemini_task = None
+        active_gemini_task = None
+        gemini_task_id = None
+        gemini_result = None
+        script_material_result = result.get("script_material") if isinstance(result.get("script_material"), dict) else None
+        audio_reuse_result = result.get("audio_reuse") if isinstance(result.get("audio_reuse"), dict) else None
+        if not structured:
+            reused_material = _reusable_material_for_pdf(pdf, exclude_task_id=workflow_task_id)
+        if reused_material:
+            structured = reused_material["structured_result"]
+            script_material_result = _script_material_reuse_payload(reused_material, pdf, structured)
             _clear_waiting_child(workflow_task_id, "gemini")
-            _emit(workflow_task_id, "reuse_structured_result", 58, "复用已有 Gemini 结构化结果")
-            gemini_result = gemini_task.result if gemini_task else {}
-            if gemini_task:
-                _record_child(workflow_task_id, "gemini", gemini_task)
-                _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
+            _emit(workflow_task_id, "reuse_script_material", 58, "复用同 PDF 已完成基础文案物料，跳过 Gemini 解析")
+            _update_result(workflow_task_id, {
+                "structured_result": structured,
+                "script_material": script_material_result,
+                "gemini": None,
+            })
         else:
-            if gemini_task:
+            gemini_task = _completed_gemini_task(workflow_task_id, result)
+            active_gemini_task = None if gemini_task else _active_gemini_task(workflow_task_id, result)
+            gemini_task_id = gemini_task.id if gemini_task else None
+            if structured:
                 _clear_waiting_child(workflow_task_id, "gemini")
-                _emit(workflow_task_id, "reuse_gemini_result", 52, "复用已完成的 Gemini 子任务")
-                _record_child(workflow_task_id, "gemini", gemini_task)
-                _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
-            elif active_gemini_task:
-                _emit(workflow_task_id, "gemini_wait_existing", 10, "继续等待已提交的研报 PDF Gem 解析子任务")
-                _record_child(workflow_task_id, "gemini", active_gemini_task)
-                gemini_task = _wait_child(workflow_task_id, active_gemini_task.id, "gemini", start_progress=10, end_progress=52)
-                gemini_task_id = gemini_task.id
-                if gemini_task.status != "completed":
-                    raise RuntimeError(f"Gemini 子任务失败: {_child_error_message(gemini_task)}")
-                _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
-                _queue_notification(workflow_task_id, "report_audio_gemini_completed", "研报 PDF Gem 第一轮解析和自审追问已完成")
+                _emit(workflow_task_id, "reuse_structured_result", 58, "复用已有 Gemini 结构化结果")
+                gemini_result = gemini_task.result if gemini_task else {}
+                if gemini_task:
+                    _record_child(workflow_task_id, "gemini", gemini_task)
+                    _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
             else:
-                _queue_notification(workflow_task_id, "report_audio_gemini_submitted", "研报 PDF Gem 解析子任务已入队")
-                gemini_task = _run_gemini_task_with_retries(
-                    parent_ref,
-                    pdf=pdf,
-                    pdf_path=pdf_path,
-                    prompt=prompt,
-                    followups=followups,
-                    payload=payload,
-                    start_progress=10,
-                    end_progress=52,
-                )
-                gemini_task_id = gemini_task.id
-                _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
-                _queue_notification(workflow_task_id, "report_audio_gemini_completed", "研报 PDF Gem 第一轮解析和自审追问已完成")
+                if gemini_task:
+                    _clear_waiting_child(workflow_task_id, "gemini")
+                    _emit(workflow_task_id, "reuse_gemini_result", 52, "复用已完成的 Gemini 子任务")
+                    _record_child(workflow_task_id, "gemini", gemini_task)
+                    _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
+                elif active_gemini_task:
+                    _emit(workflow_task_id, "gemini_wait_existing", 10, "继续等待已提交的研报 PDF Gem 解析子任务")
+                    _record_child(workflow_task_id, "gemini", active_gemini_task)
+                    gemini_task = _wait_child(workflow_task_id, active_gemini_task.id, "gemini", start_progress=10, end_progress=52)
+                    gemini_task_id = gemini_task.id
+                    if gemini_task.status != "completed":
+                        raise RuntimeError(f"Gemini 子任务失败: {_child_error_message(gemini_task)}")
+                    _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
+                    _queue_notification(workflow_task_id, "report_audio_gemini_completed", "研报 PDF Gem 第一轮解析和自审追问已完成")
+                else:
+                    _queue_notification(workflow_task_id, "report_audio_gemini_submitted", "研报 PDF Gem 解析子任务已入队")
+                    gemini_task = _run_gemini_task_with_retries(
+                        parent_ref,
+                        pdf=pdf,
+                        pdf_path=pdf_path,
+                        prompt=prompt,
+                        followups=followups,
+                        payload=payload,
+                        start_progress=10,
+                        end_progress=52,
+                    )
+                    gemini_task_id = gemini_task.id
+                    _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
+                    _queue_notification(workflow_task_id, "report_audio_gemini_completed", "研报 PDF Gem 第一轮解析和自审追问已完成")
 
-            gemini_result = gemini_task.result or {}
-            raw_final = (
-                gemini_result.get("final_response_text")
-                or gemini_result.get("response_text")
-                or ""
-            )
-            initial_text = gemini_result.get("initial_response_text") or ""
-            if not raw_final:
-                raise RuntimeError("Gemini 子任务没有返回 final_response_text")
-            final_chars = len(_plain_text(raw_final))
-            min_final_chars = _min_gemini_final_chars()
-            if final_chars < min_final_chars:
-                raise RuntimeError(
-                    f"Gemini 子任务返回内容过短: {final_chars} 字，低于 {min_final_chars} 字，疑似未抓到有效研报解析结果"
+                gemini_result = gemini_task.result or {}
+                raw_final = (
+                    gemini_result.get("final_response_text")
+                    or gemini_result.get("response_text")
+                    or ""
                 )
+                initial_text = gemini_result.get("initial_response_text") or ""
+                if not raw_final:
+                    raise RuntimeError("Gemini 子任务没有返回 final_response_text")
+                final_chars = len(_plain_text(raw_final))
+                min_final_chars = _min_gemini_final_chars()
+                if final_chars < min_final_chars:
+                    raise RuntimeError(
+                        f"Gemini 子任务返回内容过短: {final_chars} 字，低于 {min_final_chars} 字，疑似未抓到有效研报解析结果"
+                    )
 
-            _emit(workflow_task_id, "normalize_result", 58, "使用结构化解析器整理 Gemini 结果")
-            structured = normalize_for_tts(
-                raw_final,
-                initial_text=initial_text,
-                metadata={
-                    "workflow_task_id": workflow_task_id,
-                    "gemini_task_id": gemini_task_id,
-                    "pdf_filename": pdf.get("filename"),
-                },
-            )
+                _emit(workflow_task_id, "normalize_result", 58, "使用结构化解析器整理 Gemini 结果")
+                structured = normalize_for_tts(
+                    raw_final,
+                    initial_text=initial_text,
+                    metadata={
+                        "workflow_task_id": workflow_task_id,
+                        "gemini_task_id": gemini_task_id,
+                        "pdf_filename": pdf.get("filename"),
+                    },
+                )
         chunks = split_tts_text(structured.get("final_script_for_tts") or "")
         if not chunks:
             raise RuntimeError("结构化结果没有可朗读正文")
@@ -380,133 +407,80 @@ def _process_job(task_id):
                 f"结构化可朗读正文过短: {tts_chars} 字，低于 {min_final_chars} 字，停止进入豆包浏览器朗读"
             )
 
-        _update_result(workflow_task_id, {
+        structured_update = {
             "gemini": _task_public_summary(gemini_task),
             "structured_result": structured,
             "tts_text": {
                 "chars": len(structured.get("final_script_for_tts") or ""),
                 "chunks": len(chunks),
             },
-        })
+        }
+        if script_material_result:
+            structured_update["script_material"] = script_material_result
+        _update_result(workflow_task_id, structured_update)
         _queue_notification(
             workflow_task_id,
             "report_audio_normalized",
             f"结构化整理完成，可朗读正文 {len(structured.get('final_script_for_tts') or '')} 字，拆分 {len(chunks)} 段",
         )
-
-        tts_task_ids = []
-        wav_paths = []
-        doubao_submitted_notified = False
-        doubao_retry_limit = max(0, min(_int_env("REPORT_AUDIO_DOUBAO_RETRY_LIMIT", 2), 5))
-        for index, chunk in enumerate(chunks, start=1):
-            start = 60 + int((index - 1) / max(1, len(chunks)) * 28)
-            end = 60 + int(index / max(1, len(chunks)) * 28)
-            reusable_tts_task = _completed_tts_task_for_chunk(workflow_task_id, index, chunk)
-            if reusable_tts_task:
-                _clear_waiting_child(workflow_task_id, f"doubao_browser_{index}")
-                wav_path = _task_audio_wav_path(reusable_tts_task)
-                tts_task_ids.append(reusable_tts_task.id)
-                wav_paths.append(wav_path)
-                _record_child(workflow_task_id, f"doubao_browser_{index}", reusable_tts_task)
-                _emit(
-                    workflow_task_id,
-                    f"doubao_browser_{index}_reuse",
-                    end,
-                    f"复用豆包浏览器朗读子任务 {index}/{len(chunks)}",
-                )
-                continue
-            active_tts_task = _active_tts_task_for_chunk(workflow_task_id, index, chunk)
-            if active_tts_task:
-                tts_task_ids.append(active_tts_task.id)
-                _record_child(workflow_task_id, f"doubao_browser_{index}", active_tts_task)
-                _emit(
-                    workflow_task_id,
-                    f"doubao_browser_{index}_wait_existing",
-                    start,
-                    f"继续等待已提交的豆包浏览器朗读子任务 {index}/{len(chunks)}",
-                )
-                tts_task = _wait_child(workflow_task_id, active_tts_task.id, f"doubao_browser_{index}", start_progress=start, end_progress=end)
-                if tts_task.status == "completed":
-                    wav_path = _task_audio_wav_path(tts_task)
-                    if wav_path:
-                        wav_paths.append(wav_path)
-                        continue
-                    raise RuntimeError("豆包浏览器朗读子任务完成但没有返回 WAV 路径")
-                if _is_doubao_captcha_blocked(tts_task):
-                    raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {_child_error_message(tts_task)}")
-                raise RuntimeError(f"豆包浏览器朗读子任务失败: {_child_error_message(tts_task)}")
-            failed_tts_tasks = _failed_tts_tasks_for_chunk(
+        if _script_material_only(payload):
+            _emit(workflow_task_id, "script_material_done", 100, "研报基础口播文案物料已生成，跳过豆包朗读和视频合成")
+            _complete_script_material_task(
                 workflow_task_id,
-                index,
-                chunk,
-                since=retry_requested_at,
+                workflow_created_at,
+                structured=structured,
+                pdf=pdf,
+                gemini_task_id=gemini_task_id,
+                gemini_result=gemini_result,
+                chunks=chunks,
+                tts_chars=tts_chars,
+                script_material_reuse=script_material_result,
             )
-            max_attempts = doubao_retry_limit + 1
-            next_attempt = 1
-            if failed_tts_tasks:
-                _clear_waiting_child(workflow_task_id, f"doubao_browser_{index}")
-                for failed_task in failed_tts_tasks:
-                    failed_attempt = _task_chunk_attempt(failed_task) or 1
-                    _record_child_attempt(
-                        workflow_task_id,
-                        f"doubao_browser_{index}",
-                        failed_task,
-                        failed_attempt,
-                        max_attempts,
-                        "failed",
-                        error=_child_error_message(failed_task),
-                    )
-                latest_failed = failed_tts_tasks[-1]
-                if _is_doubao_captcha_blocked(latest_failed):
-                    raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {_child_error_message(latest_failed)}")
-                next_attempt = max(_task_chunk_attempt(task) or 1 for task in failed_tts_tasks) + 1
-                if next_attempt > max_attempts:
-                    raise RuntimeError(f"豆包浏览器朗读子任务失败: {_child_error_message(latest_failed)}")
-            last_error = None
-            for attempt in range(next_attempt, max_attempts + 1):
-                retry_suffix = "" if attempt == 1 else f"（重试 {attempt - 1}/{doubao_retry_limit}）"
-                _emit(
-                    workflow_task_id,
-                    f"submit_doubao_browser_{index}",
-                    start,
-                    f"创建豆包浏览器朗读子任务 {index}/{len(chunks)}{retry_suffix}",
-                )
-                tts_task = _create_doubao_tts_task(parent_ref, chunk, index, len(chunks), payload, attempt=attempt)
-                tts_task_ids.append(tts_task.id)
-                _record_child(workflow_task_id, f"doubao_browser_{index}", tts_task)
-                if not doubao_submitted_notified:
-                    doubao_submitted_notified = True
-                    _queue_notification(workflow_task_id, "report_audio_doubao_submitted", f"豆包浏览器朗读已开始，共 {len(chunks)} 段")
-                tts_task = _wait_child(workflow_task_id, tts_task.id, f"doubao_browser_{index}", start_progress=start, end_progress=end)
-                if tts_task.status == "completed":
-                    wav_path = ((tts_task.result or {}).get("audio") or {}).get("wav_path")
-                    if wav_path:
-                        wav_paths.append(wav_path)
-                        break
-                    last_error = "豆包浏览器朗读子任务完成但没有返回 WAV 路径"
-                else:
-                    last_error = tts_task.error_message or (tts_task.result or {}).get("error") or "未知错误"
-                    if _is_doubao_captcha_blocked(tts_task):
-                        raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {last_error}")
-                if attempt <= doubao_retry_limit:
-                    _emit(
-                        workflow_task_id,
-                        f"doubao_browser_{index}_retry",
-                        end,
-                        f"豆包浏览器朗读子任务 {index}/{len(chunks)} 失败，准备重试：{last_error}",
-                    )
-                    continue
-                raise RuntimeError(f"豆包浏览器朗读子任务失败: {last_error}")
-        _update_result(workflow_task_id, {"doubao_browser_tts": _task_public_summaries_by_ids(tts_task_ids)})
-        _queue_notification(workflow_task_id, "report_audio_doubao_completed", f"豆包浏览器朗读完成，共生成 {len(wav_paths)} 段 WAV")
+            _queue_notification(workflow_task_id, "report_audio_script_material_completed", "研报基础口播文案物料已生成")
+            logger.info("Report audio script material completed: %s", task_id)
+            return True
 
-        _emit(workflow_task_id, "combine_audio", 92, "合并豆包浏览器朗读音频")
-        audio = combine_wav_files(wav_paths, audio_path_for_job(workflow_task_id, workflow_created_at))
-        audio = doubao_service.validate_audio_duration_for_text(
-            audio,
-            structured.get("final_script_for_tts") or "",
-        )
-        _update_result(workflow_task_id, {"audio": audio})
+        reusable_audio = _reusable_audio_for_pdf(pdf, structured, exclude_task_id=workflow_task_id)
+        if reusable_audio:
+            tts_task_ids = []
+            audio = reusable_audio["audio"]
+            audio_reuse_result = {
+                "status": "completed",
+                "mode": "reused_audio_material",
+                "source_task_id": reusable_audio.get("source_task_id"),
+                "source_feature": reusable_audio.get("source_feature"),
+                "wav_path": audio.get("wav_path"),
+                "seconds": audio.get("seconds"),
+                "bytes": audio.get("bytes"),
+                "completed_at": datetime.utcnow().isoformat() + "Z",
+            }
+            _emit(workflow_task_id, "reuse_audio_material", 92, "复用同 PDF 已完成音频，跳过豆包朗读与音频合并")
+            _update_result(workflow_task_id, {
+                "audio": audio,
+                "audio_reuse": audio_reuse_result,
+                "doubao_browser_tts": [],
+            })
+            _queue_notification(workflow_task_id, "report_audio_audio_reused", "已复用同 PDF 历史音频，直接进入视频合成")
+        else:
+            doubao_retry_limit = max(0, min(_int_env("REPORT_AUDIO_DOUBAO_RETRY_LIMIT", 2), 5))
+            tts_task_ids, wav_paths = _run_doubao_tts_chunks(
+                parent_ref,
+                workflow_task_id,
+                chunks,
+                payload,
+                retry_requested_at=retry_requested_at,
+                retry_limit=doubao_retry_limit,
+            )
+            _update_result(workflow_task_id, {"doubao_browser_tts": _task_public_summaries_by_ids(tts_task_ids)})
+            _queue_notification(workflow_task_id, "report_audio_doubao_completed", f"豆包浏览器朗读完成，共生成 {len(wav_paths)} 段 WAV")
+
+            _emit(workflow_task_id, "combine_audio", 92, "合并豆包浏览器朗读音频")
+            audio = combine_wav_files(wav_paths, audio_path_for_job(workflow_task_id, workflow_created_at))
+            audio = doubao_service.validate_audio_duration_for_text(
+                audio,
+                structured.get("final_script_for_tts") or "",
+            )
+            _update_result(workflow_task_id, {"audio": audio})
         publisher_task = None
         publisher_task_id = None
         video_result = None
@@ -555,7 +529,9 @@ def _process_job(task_id):
             "doubao_browser_task_ids": tts_task_ids,
             "publisher_task_id": publisher_task_id,
             "structured_result": structured,
+            "script_material": script_material_result,
             "audio": audio,
+            "audio_reuse": audio_reuse_result,
             "video": video_result,
             "gemini": gemini_result,
             "completed_at": datetime.utcnow().isoformat() + "Z",
@@ -572,7 +548,9 @@ def _process_job(task_id):
             "doubao_browser_tts": _task_public_summaries_by_ids(tts_task_ids),
             "publisher_video": _task_public_summary_by_id(publisher_task_id) if publisher_task_id else None,
             "structured_result": structured,
+            "script_material": script_material_result,
             "audio": audio,
+            "audio_reuse": audio_reuse_result,
             "video": video_result,
             "output_path": output_path,
             "completed_at": datetime.utcnow().isoformat() + "Z",
@@ -743,6 +721,142 @@ def _valid_structured_result(result):
     return structured
 
 
+def _reusable_material_for_pdf(pdf, *, exclude_task_id=None):
+    asset_id = str((pdf or {}).get("attachment_id") or "").strip()
+    if not asset_id:
+        return None
+    candidates_by_id = {}
+    columns = (
+        PublicationTask.report_audio_pdf_attachment_id,
+        PublicationTask.source_task_id,
+    )
+    for column in columns:
+        query = (
+            PublicationTask.query.options(load_only(
+                PublicationTask.id,
+                PublicationTask.feature,
+                PublicationTask.status,
+                PublicationTask.result,
+                PublicationTask.source_task_id,
+                PublicationTask.report_audio_pdf_attachment_id,
+                PublicationTask.created_at,
+                PublicationTask.completed_at,
+            ))
+            .filter(PublicationTask.feature.in_(MATERIAL_REUSE_FEATURES))
+            .filter(PublicationTask.status == "completed")
+            .filter(column == asset_id)
+        )
+        if exclude_task_id:
+            query = query.filter(PublicationTask.id != exclude_task_id)
+        for candidate in query.order_by(
+            PublicationTask.completed_at.desc(),
+            PublicationTask.created_at.desc(),
+        ).limit(20).all():
+            candidates_by_id[candidate.id] = candidate
+    candidates = sorted(
+        candidates_by_id.values(),
+        key=lambda item: (item.completed_at or item.created_at or datetime.min, item.created_at or datetime.min),
+        reverse=True,
+    )
+    for candidate in candidates:
+        structured = _valid_structured_result(candidate.result)
+        if structured:
+            return {
+                "source": "reused_script_material",
+                "source_task_id": candidate.id,
+                "source_feature": candidate.feature,
+                "structured_result": structured,
+            }
+    return None
+
+
+def _script_material_reuse_payload(reusable, pdf, structured):
+    script = (structured or {}).get("final_script_for_tts") or ""
+    chunks = split_tts_text(script)
+    return {
+        "status": "completed",
+        "mode": "reused_script_material",
+        "source": reusable.get("source") or "reused_script_material",
+        "source_task_id": reusable.get("source_task_id"),
+        "source_feature": reusable.get("source_feature"),
+        "pdf_attachment_id": (pdf or {}).get("attachment_id"),
+        "pdf_filename": (pdf or {}).get("filename"),
+        "chars": len(_plain_text(script)),
+        "chunks": len(chunks),
+        "completed_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def _reusable_audio_for_pdf(pdf, structured, *, exclude_task_id=None):
+    asset_id = str((pdf or {}).get("attachment_id") or "").strip()
+    expected_script = _plain_text((structured or {}).get("final_script_for_tts") or "")
+    if not asset_id or not expected_script:
+        return None
+    candidates_by_id = {}
+    columns = (
+        PublicationTask.report_audio_pdf_attachment_id,
+        PublicationTask.source_task_id,
+    )
+    for column in columns:
+        query = (
+            PublicationTask.query.options(load_only(
+                PublicationTask.id,
+                PublicationTask.feature,
+                PublicationTask.status,
+                PublicationTask.result,
+                PublicationTask.source_task_id,
+                PublicationTask.report_audio_pdf_attachment_id,
+                PublicationTask.created_at,
+                PublicationTask.completed_at,
+            ))
+            .filter(PublicationTask.feature.in_(MATERIAL_REUSE_FEATURES))
+            .filter(PublicationTask.status == "completed")
+            .filter(column == asset_id)
+        )
+        if exclude_task_id:
+            query = query.filter(PublicationTask.id != exclude_task_id)
+        for candidate in query.order_by(
+            PublicationTask.completed_at.desc(),
+            PublicationTask.created_at.desc(),
+        ).limit(20).all():
+            candidates_by_id[candidate.id] = candidate
+    candidates = sorted(
+        candidates_by_id.values(),
+        key=lambda item: (item.completed_at or item.created_at or datetime.min, item.created_at or datetime.min),
+        reverse=True,
+    )
+    for candidate in candidates:
+        audio = _valid_reusable_audio(candidate, expected_script)
+        if audio:
+            return {
+                "source_task_id": candidate.id,
+                "source_feature": candidate.feature,
+                "audio": audio,
+            }
+    return None
+
+
+def _valid_reusable_audio(candidate, expected_script):
+    result = candidate.result if isinstance(candidate.result, dict) else {}
+    structured = _valid_structured_result(result)
+    if not structured:
+        return None
+    script = structured.get("final_script_for_tts") or ""
+    if _plain_text(script) != expected_script:
+        return None
+    audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
+    wav_path = str(audio.get("wav_path") or "").strip()
+    if not wav_path or not os.path.exists(wav_path):
+        return None
+    try:
+        reusable_audio = doubao_service.validate_audio_duration_for_text(dict(audio), script)
+    except Exception as exc:
+        logger.warning("Skip reusable audio with invalid duration: task=%s error=%s", candidate.id, exc)
+        return None
+    reusable_audio["wav_path"] = wav_path
+    return reusable_audio
+
+
 def _completed_gemini_task(parent_id, result):
     candidate_ids = []
     gemini = result.get("gemini") if isinstance(result, dict) else None
@@ -793,6 +907,95 @@ def _valid_gemini_task_result(result):
     return len(_plain_text(raw_text)) >= _min_gemini_final_chars()
 
 
+def _script_material_only(payload):
+    if not isinstance(payload, dict):
+        return False
+    for key in ("script_material_only", "material_only", "script_only"):
+        if key in payload:
+            return _truthy(payload.get(key), False)
+    return False
+
+
+def _complete_script_material_task(
+    workflow_task_id,
+    workflow_created_at,
+    *,
+    structured,
+    pdf,
+    gemini_task_id,
+    gemini_result,
+    chunks,
+    tts_chars,
+    script_material_reuse=None,
+):
+    completed_at = datetime.utcnow()
+    completed_at_text = completed_at.isoformat() + "Z"
+    video_result = {
+        "enabled": False,
+        "status": "skipped",
+        "message": "script_material_only",
+    }
+    script_material = {
+        "status": "completed",
+        "mode": "script_material_only",
+        "source": FEATURE_NAME,
+        "pdf_attachment_id": pdf.get("attachment_id"),
+        "pdf_filename": pdf.get("filename"),
+        "chars": tts_chars,
+        "chunks": len(chunks or []),
+        "completed_at": completed_at_text,
+    }
+    if isinstance(script_material_reuse, dict):
+        script_material.update({
+            "mode": script_material_reuse.get("mode") or script_material["mode"],
+            "source": script_material_reuse.get("source") or script_material["source"],
+            "source_task_id": script_material_reuse.get("source_task_id"),
+            "source_feature": script_material_reuse.get("source_feature"),
+        })
+    output_path = storage_path_for_job(workflow_task_id, workflow_created_at)
+    final_payload = {
+        "workflow_task_id": workflow_task_id,
+        "gemini_task_id": gemini_task_id,
+        "structured_result": structured,
+        "script_material": script_material,
+        "pdf": pdf,
+        "audio": None,
+        "video": video_result,
+        "gemini": gemini_result,
+        "completed_at": completed_at_text,
+    }
+    with open(output_path, "w", encoding="utf-8") as file:
+        json.dump(final_payload, file, ensure_ascii=False, indent=2)
+
+    fresh = _load_task(workflow_task_id, *TASK_STATE_COLUMNS)
+    if not fresh:
+        raise RuntimeError("编排任务不存在")
+    final_result = dict(fresh.result or {})
+    final_result.update({
+        "gemini": _task_public_summary_by_id(gemini_task_id) if gemini_task_id else final_result.get("gemini"),
+        "doubao_browser_tts": [],
+        "publisher_video": None,
+        "structured_result": structured,
+        "tts_text": {
+            "chars": len(structured.get("final_script_for_tts") or ""),
+            "chunks": len(chunks or []),
+        },
+        "script_material": script_material,
+        "audio": None,
+        "video": video_result,
+        "output_path": output_path,
+        "completed_at": completed_at_text,
+    })
+    fresh.status = "completed"
+    fresh.current_step = "done"
+    fresh.progress = 100
+    fresh.completed_at = completed_at
+    fresh.error_message = None
+    fresh.result = final_result
+    flag_modified(fresh, "result")
+    db.session.commit()
+
+
 def _fresh_result(parent_id):
     fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
     return dict(fresh.result or {}) if fresh and isinstance(fresh.result, dict) else {}
@@ -813,6 +1016,176 @@ def _child_id_from_result(result, label):
     return str(child_id).strip() if child_id else None
 
 
+def _run_doubao_tts_chunks(parent, parent_id, chunks, payload, *, retry_requested_at=None, retry_limit=2):
+    total = len(chunks)
+    parallelism = min(total or 1, _doubao_parallelism())
+    max_attempts = int(retry_limit or 0) + 1
+
+    while True:
+        completed = {}
+        active = {}
+        pending = []
+        summaries = []
+
+        for index, chunk in enumerate(chunks, start=1):
+            label = f"doubao_browser_{index}"
+            start = _doubao_progress_start(index, total)
+            end = _doubao_progress_end(index, total)
+
+            reusable_tts_task = _completed_tts_task_for_chunk(parent_id, index, chunk)
+            if reusable_tts_task:
+                _clear_waiting_child(parent_id, label)
+                completed[index] = reusable_tts_task
+                summaries.append(reusable_tts_task.id)
+                _record_child(parent_id, label, reusable_tts_task)
+                _emit(parent_id, f"{label}_reuse", end, f"复用豆包浏览器朗读音频 {index}/{total}")
+                continue
+
+            active_tts_task = _active_tts_task_for_chunk(parent_id, index, chunk)
+            if active_tts_task:
+                active[index] = active_tts_task
+                summaries.append(active_tts_task.id)
+                _record_child(parent_id, label, active_tts_task)
+                continue
+
+            failed_tts_tasks = _failed_tts_tasks_for_chunk(parent_id, index, chunk, since=retry_requested_at)
+            next_attempt = 1
+            if failed_tts_tasks:
+                _clear_waiting_child(parent_id, label)
+                for failed_task in failed_tts_tasks:
+                    failed_attempt = _task_chunk_attempt(failed_task) or 1
+                    _record_child_attempt(
+                        parent_id,
+                        label,
+                        failed_task,
+                        failed_attempt,
+                        max_attempts,
+                        "failed",
+                        error=_child_error_message(failed_task),
+                    )
+                latest_failed = failed_tts_tasks[-1]
+                if _is_doubao_captcha_blocked(latest_failed):
+                    raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {_child_error_message(latest_failed)}")
+                next_attempt = max(_task_chunk_attempt(task) or 1 for task in failed_tts_tasks) + 1
+                if next_attempt > max_attempts:
+                    raise RuntimeError(f"豆包浏览器朗读子任务失败: {_child_error_message(latest_failed)}")
+
+            pending.append({
+                "index": index,
+                "chunk": chunk,
+                "attempt": next_attempt,
+                "start": start,
+                "end": end,
+            })
+
+        if len(completed) == total:
+            return _ordered_doubao_tts_outputs(parent_id, chunks, completed)
+
+        open_slots = max(0, parallelism - len(active))
+        for item in pending[:open_slots]:
+            index = item["index"]
+            label = f"doubao_browser_{index}"
+            attempt = item["attempt"]
+            retry_suffix = "" if attempt == 1 else f"（重试 {attempt - 1}/{retry_limit}）"
+            _emit(
+                parent_id,
+                f"submit_{label}",
+                item["start"],
+                f"创建豆包浏览器朗读子任务 {index}/{total}{retry_suffix} · 并发 {parallelism}",
+            )
+            tts_task = _create_doubao_tts_task(parent, item["chunk"], index, total, payload, attempt=attempt)
+            active[index] = tts_task
+            summaries.append(tts_task.id)
+            _record_child(parent_id, label, tts_task)
+            _record_child_attempt(parent_id, label, tts_task, attempt, max_attempts, "running")
+
+        if summaries:
+            _update_result(parent_id, {"doubao_browser_tts": _task_public_summaries_by_ids(summaries)})
+        if active:
+            _queue_notification(parent_id, "report_audio_doubao_submitted", f"豆包浏览器朗读已开始，共 {total} 段，并发 {parallelism}")
+
+        if not active:
+            raise RuntimeError("豆包浏览器朗读没有可等待或可投递的分段")
+
+        index, active_task = sorted(active.items(), key=lambda item: item[0])[0]
+        label = f"doubao_browser_{index}"
+        _emit(parent_id, f"{label}_wait_existing", _doubao_progress_start(index, total), f"等待豆包浏览器朗读子任务 {index}/{total}")
+        try:
+            tts_task = _wait_child(
+                parent_id,
+                active_task.id,
+                label,
+                start_progress=_doubao_progress_start(index, total),
+                end_progress=_doubao_progress_end(index, total),
+            )
+        except ChildTaskStillRunning:
+            _record_child(parent_id, label, _load_task(active_task.id, *TASK_CHILD_COLUMNS) or active_task)
+            raise
+
+        _record_child(parent_id, label, tts_task)
+        if tts_task.status == "completed":
+            wav_path = _task_audio_wav_path(tts_task)
+            if wav_path and os.path.exists(wav_path):
+                _record_child_attempt(parent_id, label, tts_task, _task_chunk_attempt(tts_task) or 1, max_attempts, "completed")
+                continue
+            message = "豆包浏览器朗读子任务完成但没有返回可用 WAV 路径"
+            _mark_child_failed(tts_task, message)
+            _record_child_attempt(parent_id, label, tts_task, _task_chunk_attempt(tts_task) or 1, max_attempts, "failed", error=message)
+            continue
+
+        last_error = _child_error_message(tts_task)
+        if _is_doubao_captcha_blocked(tts_task):
+            raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {last_error}")
+        _record_child_attempt(parent_id, label, tts_task, _task_chunk_attempt(tts_task) or 1, max_attempts, "failed", error=last_error)
+        if (_task_chunk_attempt(tts_task) or 1) < max_attempts:
+            _emit(parent_id, f"{label}_retry", _doubao_progress_end(index, total), f"豆包浏览器朗读子任务 {index}/{total} 失败，准备重试：{last_error}")
+            continue
+        raise RuntimeError(f"豆包浏览器朗读子任务失败: {last_error}")
+
+
+def _doubao_parallelism():
+    return max(1, min(_int_env("REPORT_AUDIO_DOUBAO_PARALLELISM", 2), _int_env("REPORT_AUDIO_DOUBAO_MAX_PARALLELISM", 8)))
+
+
+def _doubao_progress_start(index, total):
+    return 60 + int((index - 1) / max(1, total) * 28)
+
+
+def _doubao_progress_end(index, total):
+    return 60 + int(index / max(1, total) * 28)
+
+
+def _ordered_doubao_tts_outputs(parent_id, chunks, completed_by_index):
+    task_ids = []
+    wav_paths = []
+    for index, chunk in enumerate(chunks, start=1):
+        task = completed_by_index.get(index)
+        if not task:
+            raise RuntimeError(f"豆包浏览器朗读缺少第 {index}/{len(chunks)} 段")
+        if _plain_text(_task_tts_text(task)) != _plain_text(chunk):
+            raise RuntimeError(f"豆包浏览器朗读第 {index}/{len(chunks)} 段文本校验失败")
+        wav_path = _task_audio_wav_path(task)
+        if not wav_path or not os.path.exists(wav_path):
+            raise RuntimeError(f"豆包浏览器朗读第 {index}/{len(chunks)} 段 WAV 文件不存在")
+        task_ids.append(task.id)
+        wav_paths.append(wav_path)
+
+    if len(task_ids) != len(chunks) or len(wav_paths) != len(chunks):
+        raise RuntimeError("豆包浏览器朗读分段数量校验失败")
+    _update_result(parent_id, {
+        "doubao_browser_order": [
+            {
+                "chunk_index": index,
+                "task_id": task_ids[index - 1],
+                "wav_path": wav_paths[index - 1],
+                "text_hash": _tts_text_hash(chunks[index - 1]),
+            }
+            for index in range(1, len(chunks) + 1)
+        ]
+    })
+    return task_ids, wav_paths
+
+
 def _completed_tts_task_for_chunk(parent_id, chunk_index, expected_text):
     candidates = PublicationTask.query.filter(
         PublicationTask.feature == doubao_service.FEATURE_NAME,
@@ -821,6 +1194,30 @@ def _completed_tts_task_for_chunk(parent_id, chunk_index, expected_text):
     ).options(load_only(*TASK_CHILD_COLUMNS)).order_by(PublicationTask.created_at.asc()).all()
     for candidate in candidates:
         if _task_chunk_index(candidate) != chunk_index:
+            continue
+        if _plain_text(_task_tts_text(candidate)) != _plain_text(expected_text):
+            continue
+        wav_path = _task_audio_wav_path(candidate)
+        if wav_path and os.path.exists(wav_path):
+            return candidate
+    return _completed_tts_task_for_text(expected_text)
+
+
+def _completed_tts_task_for_text(expected_text):
+    expected_hash = _tts_text_hash(expected_text)
+    scan_limit = max(20, min(_int_env("REPORT_AUDIO_DOUBAO_CACHE_SCAN_LIMIT", 500), 2000))
+    candidates = (
+        PublicationTask.query.filter(
+            PublicationTask.feature == doubao_service.FEATURE_NAME,
+            PublicationTask.status == "completed",
+        )
+        .options(load_only(*TASK_CHILD_COLUMNS))
+        .order_by(PublicationTask.created_at.desc())
+        .limit(scan_limit)
+        .all()
+    )
+    for candidate in candidates:
+        if _task_tts_text_hash(candidate) and _task_tts_text_hash(candidate) != expected_hash:
             continue
         if _plain_text(_task_tts_text(candidate)) != _plain_text(expected_text):
             continue
@@ -841,8 +1238,42 @@ def _active_tts_task_for_chunk(parent_id, chunk_index, expected_text):
             continue
         if _plain_text(_task_tts_text(candidate)) != _plain_text(expected_text):
             continue
+        if _mark_stale_doubao_child_if_needed(candidate):
+            continue
         return candidate
     return None
+
+
+def _mark_stale_doubao_child_if_needed(child):
+    if not _is_stale_doubao_child(child):
+        return False
+    _mark_child_failed(child, _doubao_stale_child_message(child))
+    return True
+
+
+def _is_stale_doubao_child(child):
+    if not child or child.status in TERMINAL_STATUSES:
+        return False
+    if getattr(child, "feature", None) != doubao_service.FEATURE_NAME:
+        return False
+    updated_at = getattr(child, "updated_at", None)
+    if not updated_at:
+        return False
+    if updated_at.tzinfo:
+        updated_at = updated_at.astimezone(timezone.utc).replace(tzinfo=None)
+    return (datetime.utcnow() - updated_at).total_seconds() >= _doubao_child_stale_seconds()
+
+
+def _doubao_stale_child_message(child):
+    stale_seconds = _doubao_child_stale_seconds()
+    updated_at = getattr(child, "updated_at", None)
+    updated_text = updated_at.isoformat() if updated_at else "-"
+    return f"豆包浏览器朗读子任务超过 {stale_seconds}s 未更新，判定为 stale 并释放重试；last_updated={updated_text}"
+
+
+def _doubao_child_stale_seconds():
+    default_seconds = _int_env("DOUBAO_BROWSER_TTS_TOTAL_TIMEOUT", 300) + 180
+    return max(60, _int_env("REPORT_AUDIO_DOUBAO_STALE_SECONDS", default_seconds))
 
 
 def _failed_tts_tasks_for_chunk(parent_id, chunk_index, expected_text, *, since=None):
@@ -903,6 +1334,16 @@ def _task_chunk_attempt(task):
         return 0
 
 
+def _task_tts_text_hash(task):
+    result = task.result or {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if not metadata:
+        params = task.params or {}
+        doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
+        metadata = doubao_payload.get("metadata") if isinstance(doubao_payload.get("metadata"), dict) else {}
+    return str(metadata.get("text_hash") or "").strip()
+
+
 def _task_audio_wav_path(task):
     result = task.result or {}
     audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
@@ -913,6 +1354,10 @@ def _task_tts_text(task):
     params = task.params or {}
     doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
     return str(doubao_payload.get("text") or "")
+
+
+def _tts_text_hash(text):
+    return hashlib.sha256(_plain_text(text).encode("utf-8")).hexdigest()
 
 
 def _is_doubao_captcha_blocked(task):
@@ -928,6 +1373,20 @@ def _is_doubao_captcha_blocked(task):
 
 def _create_doubao_tts_task(parent, text, index, total, payload, *, attempt=1):
     retry_index = max(0, int(attempt or 1) - 1)
+    text_hash = _tts_text_hash(text)
+    payload_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    child_metadata = dict(payload_metadata)
+    if child_metadata.get("source") and child_metadata.get("source") != FEATURE_NAME:
+        child_metadata.setdefault("origin_source", child_metadata.get("source"))
+    child_metadata.update({
+        "source": FEATURE_NAME,
+        "parent_task_id": parent.id,
+        "chunk_index": index,
+        "chunk_total": total,
+        "chunk_attempt": int(attempt or 1),
+        "retry_index": retry_index,
+        "text_hash": text_hash,
+    })
     child = PublicationTask(
         status="pending",
         current_step="queued",
@@ -939,26 +1398,11 @@ def _create_doubao_tts_task(parent, text, index, total, payload, *, attempt=1):
             "parent_task_id": parent.id,
             "doubao_browser_tts": {
                 "text": text,
-                "metadata": {
-                    "source": FEATURE_NAME,
-                    "parent_task_id": parent.id,
-                    "chunk_index": index,
-                    "chunk_total": total,
-                    "chunk_attempt": int(attempt or 1),
-                    "retry_index": retry_index,
-                    **(payload.get("metadata") or {}),
-                },
+                "metadata": child_metadata,
             },
         },
         result={
-            "metadata": {
-                "source": FEATURE_NAME,
-                "parent_task_id": parent.id,
-                "chunk_index": index,
-                "chunk_total": total,
-                "chunk_attempt": int(attempt or 1),
-                "retry_index": retry_index,
-            },
+            "metadata": child_metadata,
             "audio": None,
             "logs": [],
         },
@@ -967,11 +1411,15 @@ def _create_doubao_tts_task(parent, text, index, total, payload, *, attempt=1):
     db.session.flush()
     child_id = child.id
     db.session.commit()
-    async_result = process_doubao_browser_tts_job.apply_async(args=[child_id], queue=doubao_service.QUEUE_NAME, retry=False)
+    async_result = process_doubao_browser_tts_job.apply_async(args=[child_id], queue=_doubao_queue_name(), retry=False)
     child = _load_task(child_id, *TASK_CHILD_COLUMNS)
     child.celery_task_id = async_result.id
     db.session.commit()
     return _load_task(child_id, *TASK_CHILD_COLUMNS)
+
+
+def _doubao_queue_name():
+    return os.getenv("DOUBAO_BROWSER_TTS_QUEUE", doubao_service.QUEUE_NAME)
 
 
 def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screenshot, payload):
@@ -1143,6 +1591,8 @@ def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
     deadline = time.monotonic() + timeout
     last_step = None
     while True:
+        # Child tasks are updated by other workers; avoid reusing stale ORM snapshots.
+        db.session.expire_all()
         parent = _load_task(parent_id, PublicationTask.status)
         if not parent or parent.status == "canceled":
             raise RuntimeError("父编排任务已取消")
@@ -1161,6 +1611,10 @@ def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
         celery_failure = _celery_child_failure_message(child)
         if celery_failure:
             _mark_child_failed(child, celery_failure)
+            db.session.expire_all()
+            _clear_waiting_child(parent_id, label)
+            return _load_task(child_id, *TASK_CHILD_COLUMNS)
+        if _is_doubao_child_label(label) and _mark_stale_doubao_child_if_needed(child):
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_CHILD_COLUMNS)

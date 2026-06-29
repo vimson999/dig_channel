@@ -23,3 +23,6 @@ if [ ! -z "$LEFTOVER" ]; then
 fi
 
 echo "✨ doubao_browser_tts Worker 已停止。"
+
+RUNTIME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/runtime"
+rm -f "$RUNTIME_DIR"/doubao_browser_tts.pid "$RUNTIME_DIR"/doubao_browser_tts_*_worker_*.pid 2>/dev/null || true

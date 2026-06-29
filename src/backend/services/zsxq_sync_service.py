@@ -7,7 +7,9 @@ import re
 import time
 from copy import deepcopy
 from datetime import datetime, timedelta
+from html import unescape
 from pathlib import Path
+from urllib.parse import unquote
 
 import requests
 from flask import current_app, has_app_context
@@ -81,10 +83,14 @@ ATTACHMENT_AUDIT_COUNTERS = (
     "attachments_limited_skipped",
 )
 AUTO_VIDEO_DISPATCH_SOURCE = "zsxq_auto_video_dispatch"
+AUTO_SCRIPT_MATERIAL_DISPATCH_SOURCE = "zsxq_auto_script_material_dispatch"
 DEFAULT_AUTO_VIDEO_PDF_THRESHOLD = 35
 DEFAULT_AUTO_VIDEO_MP3_THRESHOLD = 25
+DEFAULT_AUTO_SCRIPT_MATERIAL_PDF_THRESHOLD = 40
 AUTO_VIDEO_AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
 AUTO_VIDEO_REPORT_AUDIO_FEATURES = ("report_pdf_audio_workflow", "report_audio_workflow")
+SCRIPT_MATERIAL_WORKFLOW_FEATURE = "report_script_material_workflow"
+AUTO_SCRIPT_MATERIAL_FEATURES = (*AUTO_VIDEO_REPORT_AUDIO_FEATURES, SCRIPT_MATERIAL_WORKFLOW_FEATURE)
 GENERIC_AUTO_VIDEO_TOPIC_TITLE_NORMALIZED = {
     "pdf",
     "外资",
@@ -207,6 +213,7 @@ class ZsxqSyncService:
         manual_attachment_plan=None,
         attachment_download_rules=None,
         auto_video_dispatch=None,
+        auto_script_material_dispatch=None,
         workflow_run_id=None,
     ):
         self.ensure_schema()
@@ -226,11 +233,23 @@ class ZsxqSyncService:
             group_id=group_id,
             tabs=tabs,
         )
+        sync_meta = sync_meta if isinstance(sync_meta, dict) else {}
         download_rules = self._normalize_attachment_download_rules(
             attachment_download_rules,
             tabs=tabs,
         )
+        auto_video_dispatch = self._dispatch_config_from_sync_meta(
+            auto_video_dispatch,
+            sync_meta,
+            "auto_video_dispatch",
+        )
+        auto_script_material_dispatch = self._dispatch_config_from_sync_meta(
+            auto_script_material_dispatch,
+            sync_meta,
+            "auto_script_material_dispatch",
+        )
         auto_video_dispatch = self._normalize_auto_video_dispatch(auto_video_dispatch)
+        auto_script_material_dispatch = self._normalize_auto_script_material_dispatch(auto_script_material_dispatch)
         if manual_plan["items"] and max_download_files in (None, "", 0, "0"):
             max_download_files = len(manual_plan["items"])
         download_policy = self._attachment_download_policy(
@@ -242,7 +261,6 @@ class ZsxqSyncService:
         )
         download_attachments = download_policy["enabled"]
         max_download_files = download_policy["max_download_files"]
-        sync_meta = sync_meta if isinstance(sync_meta, dict) else {}
         running_result = {"running": True}
         if sync_meta:
             running_result["system_sync"] = sync_meta
@@ -254,6 +272,11 @@ class ZsxqSyncService:
             running_result["auto_video_dispatch"] = {
                 "status": "pending",
                 "config": auto_video_dispatch,
+            }
+        if auto_script_material_dispatch.get("enabled"):
+            running_result["auto_script_material_dispatch"] = {
+                "status": "pending",
+                "config": auto_script_material_dispatch,
             }
         running_result["attachment_download_policy"] = download_policy
 
@@ -325,6 +348,11 @@ class ZsxqSyncService:
             result["auto_video_dispatch"] = {
                 "status": "pending",
                 "config": auto_video_dispatch,
+            }
+        if auto_script_material_dispatch.get("enabled"):
+            result["auto_script_material_dispatch"] = {
+                "status": "pending",
+                "config": auto_script_material_dispatch,
             }
 
         try:
@@ -408,6 +436,13 @@ class ZsxqSyncService:
                     run=run,
                     sync_result=result,
                     config=auto_video_dispatch,
+                    workflow_run_id=workflow_run_id,
+                )
+            if auto_script_material_dispatch.get("enabled"):
+                result["auto_script_material_dispatch"] = self._submit_auto_script_material_dispatch_for_run(
+                    run=run,
+                    sync_result=result,
+                    config=auto_script_material_dispatch,
                     workflow_run_id=workflow_run_id,
                 )
 
@@ -843,6 +878,7 @@ class ZsxqSyncService:
                 ZsxqTopic.content,
                 ZsxqTopic.create_time,
                 ZsxqTopic.raw_json_path,
+                ZsxqTopic.raw_payload,
                 ZsxqTopic.first_sync_run_id,
                 ZsxqTopic.last_sync_run_id,
                 ZsxqTopic.last_synced_at,
@@ -1257,6 +1293,28 @@ class ZsxqSyncService:
             "wait_for_completion": False,
         }
 
+    def _normalize_auto_script_material_dispatch(self, value):
+        value = value if isinstance(value, dict) else {}
+        return {
+            "enabled": self._truthy_text(value.get("enabled", False)),
+            "pdf_min_download_count": self._bounded_int(
+                value.get("pdf_min_download_count"),
+                default=DEFAULT_AUTO_SCRIPT_MATERIAL_PDF_THRESHOLD,
+                lower=0,
+                upper=1_000_000,
+            ),
+            "wait_for_completion": False,
+        }
+
+    def _dispatch_config_from_sync_meta(self, value, sync_meta, key):
+        if value is not None:
+            return value
+        sync_meta = sync_meta if isinstance(sync_meta, dict) else {}
+        fallback = sync_meta.get(key)
+        if isinstance(fallback, dict):
+            return fallback
+        return value
+
     def _submit_auto_video_dispatch_for_run(self, run, sync_result, config, workflow_run_id=None):
         summary = self._new_auto_video_dispatch_summary(config, run, workflow_run_id)
         try:
@@ -1368,6 +1426,13 @@ class ZsxqSyncService:
                         "status": "queued",
                         "task": task_result,
                     })
+                elif task_result.get("deferred"):
+                    bucket["deferred"] += 1
+                    summary["queued_task_ids"].append(task_result.get("task_id"))
+                    item.update({
+                        "status": "deferred",
+                        "task": task_result,
+                    })
                 else:
                     bucket["failed"] += 1
                     item.update({
@@ -1393,6 +1458,133 @@ class ZsxqSyncService:
         self._send_auto_video_dispatch_email(run, summary)
         return summary
 
+    def _submit_auto_script_material_dispatch_for_run(self, run, sync_result, config, workflow_run_id=None):
+        summary = self._new_auto_script_material_dispatch_summary(config, run, workflow_run_id)
+        try:
+            attachment_ids = self._downloaded_attachment_ids_from_sync_result(sync_result)
+            summary["attachments_checked"] = len(attachment_ids)
+            if not attachment_ids:
+                summary["status"] = "skipped"
+                summary["reason"] = "no_downloaded_attachments"
+                self._finalize_auto_script_material_dispatch_summary(summary)
+                return summary
+
+            attachments = (
+                ZsxqAttachment.query
+                .filter(ZsxqAttachment.id.in_(attachment_ids))
+                .all()
+            )
+            attachment_by_id = {item.id: item for item in attachments}
+            summary["attachments_loaded"] = len(attachment_by_id)
+            summary["missing_attachment_rows"] = max(0, len(attachment_ids) - len(attachment_by_id))
+            threshold = config["pdf_min_download_count"]
+            bucket = summary["pdf"]
+
+            for attachment_id in attachment_ids:
+                attachment = attachment_by_id.get(attachment_id)
+                if not attachment:
+                    continue
+                kind = self._auto_video_attachment_kind(attachment)
+                if kind != "pdf":
+                    summary["skipped_non_target"] += 1
+                    continue
+                bucket["checked"] += 1
+                item = self._auto_video_attachment_summary(attachment, kind, threshold)
+                download_count = self._int_or_none(attachment.download_count)
+                if download_count is None:
+                    bucket["skipped_missing_download_count"] += 1
+                    item.update({"status": "skipped", "reason": "missing_download_count"})
+                    bucket["items"].append(item)
+                    continue
+                if download_count < threshold:
+                    bucket["skipped_below_threshold"] += 1
+                    item.update({"status": "skipped", "reason": "below_threshold"})
+                    bucket["items"].append(item)
+                    continue
+                if attachment.download_status != "downloaded":
+                    bucket["skipped_not_downloaded"] += 1
+                    item.update({"status": "skipped", "reason": "not_downloaded"})
+                    bucket["items"].append(item)
+                    continue
+                local_path = self._absolute_local_path(attachment.local_path)
+                if not local_path or not local_path.exists() or not local_path.is_file():
+                    bucket["skipped_missing_file"] += 1
+                    item.update({"status": "skipped", "reason": "missing_local_file"})
+                    bucket["items"].append(item)
+                    continue
+                existing_task = self._find_existing_auto_script_material_task(attachment)
+                if existing_task:
+                    bucket["skipped_existing"] += 1
+                    item.update({
+                        "status": "skipped",
+                        "reason": "existing_material_task",
+                        "existing_task": self._auto_video_task_summary(existing_task),
+                    })
+                    bucket["items"].append(item)
+                    continue
+
+                bucket["eligible"] += 1
+                try:
+                    task_result = self._create_auto_report_script_material_task(
+                        run=run,
+                        attachment=attachment,
+                        threshold=threshold,
+                        workflow_run_id=workflow_run_id,
+                    )
+                except Exception as exc:
+                    db.session.rollback()
+                    logger.exception(
+                        "[ZSXQ_SYNC] auto script material dispatch item failed | run_id=%s attachment=%s",
+                        run.id,
+                        attachment.id,
+                    )
+                    bucket["failed"] += 1
+                    item.update({"status": "failed", "error": str(exc)})
+                    summary["errors"].append({
+                        "kind": kind,
+                        "attachment_id": attachment.id,
+                        "message": str(exc),
+                    })
+                    bucket["items"].append(item)
+                    continue
+
+                if task_result.get("queued"):
+                    bucket["queued"] += 1
+                    summary["queued_task_ids"].append(task_result.get("task_id"))
+                    item.update({
+                        "status": "queued",
+                        "task": task_result,
+                    })
+                elif task_result.get("deferred"):
+                    bucket["deferred"] += 1
+                    summary["queued_task_ids"].append(task_result.get("task_id"))
+                    item.update({
+                        "status": "deferred",
+                        "task": task_result,
+                    })
+                else:
+                    bucket["failed"] += 1
+                    item.update({
+                        "status": "failed",
+                        "task": task_result,
+                        "error": task_result.get("error") or "任务入队失败",
+                    })
+                    summary["errors"].append({
+                        "kind": kind,
+                        "attachment_id": attachment.id,
+                        "task_id": task_result.get("task_id"),
+                        "message": task_result.get("error") or "任务入队失败",
+                    })
+                bucket["items"].append(item)
+
+            self._finalize_auto_script_material_dispatch_summary(summary)
+        except Exception as exc:
+            db.session.rollback()
+            summary["status"] = "failed"
+            summary["errors"].append({"message": str(exc)})
+            logger.exception("[ZSXQ_SYNC] auto script material dispatch failed | run_id=%s", run.id)
+        return summary
+
     def _new_auto_video_dispatch_summary(self, config, run, workflow_run_id=None):
         return {
             "enabled": bool(config.get("enabled")),
@@ -1413,12 +1605,32 @@ class ZsxqSyncService:
             "mp3": self._auto_video_dispatch_bucket(config.get("mp3_min_download_count")),
         }
 
+    def _new_auto_script_material_dispatch_summary(self, config, run, workflow_run_id=None):
+        return {
+            "enabled": bool(config.get("enabled")),
+            "status": "pending",
+            "source": AUTO_SCRIPT_MATERIAL_DISPATCH_SOURCE,
+            "config": dict(config),
+            "run_id": run.id,
+            "workflow_run_id": workflow_run_id,
+            "group_id": run.group_id,
+            "group_name": run.group_name,
+            "attachments_checked": 0,
+            "attachments_loaded": 0,
+            "missing_attachment_rows": 0,
+            "skipped_non_target": 0,
+            "queued_task_ids": [],
+            "errors": [],
+            "pdf": self._auto_video_dispatch_bucket(config.get("pdf_min_download_count")),
+        }
+
     def _auto_video_dispatch_bucket(self, threshold):
         return {
             "threshold": threshold,
             "checked": 0,
             "eligible": 0,
             "queued": 0,
+            "deferred": 0,
             "failed": 0,
             "skipped_existing": 0,
             "skipped_below_threshold": 0,
@@ -1474,7 +1686,7 @@ class ZsxqSyncService:
 
     def _find_existing_auto_video_task(self, attachment, kind):
         if kind == "pdf":
-            task = (
+            tasks = (
                 PublicationTask.query
                 .filter(PublicationTask.feature.in_(AUTO_VIDEO_REPORT_AUDIO_FEATURES))
                 .filter(PublicationTask.status != "canceled")
@@ -1483,9 +1695,14 @@ class ZsxqSyncService:
                     PublicationTask.report_audio_pdf_attachment_id == attachment.id,
                 ))
                 .order_by(PublicationTask.created_at.desc())
-                .first()
+                .limit(20)
+                .all()
             )
-            return task
+            for task in tasks:
+                if self._is_script_material_only_report_audio_task(task):
+                    continue
+                return task
+            return None
 
         task = (
             PublicationTask.query
@@ -1523,6 +1740,29 @@ class ZsxqSyncService:
             if str(audio.get("attachment_id") or "") == attachment.id:
                 return row
         return None
+
+    def _find_existing_auto_script_material_task(self, attachment):
+        tasks = (
+            PublicationTask.query
+            .filter(PublicationTask.feature.in_(AUTO_SCRIPT_MATERIAL_FEATURES))
+            .filter(PublicationTask.status != "canceled")
+            .filter(or_(
+                PublicationTask.source_task_id == attachment.id,
+                PublicationTask.report_audio_pdf_attachment_id == attachment.id,
+            ))
+            .order_by(PublicationTask.created_at.desc())
+            .limit(30)
+            .all()
+        )
+        for task in tasks:
+            if task.status in {"pending", "processing", "completed"}:
+                return task
+        return None
+
+    def _is_script_material_only_report_audio_task(self, task):
+        params = task.params if isinstance(task.params, dict) else {}
+        workflow = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
+        return self._truthy_text(workflow.get("script_material_only", False))
 
     def _auto_video_task_summary(self, task):
         return {
@@ -1652,6 +1892,130 @@ class ZsxqSyncService:
             "admission": submit_result.get("admission"),
         }
 
+    def _create_auto_report_script_material_task(self, *, run, attachment, threshold, workflow_run_id=None):
+        from services.report_script_material_workflow import (
+            DEFAULT_INITIAL_PROMPT,
+            DEFAULT_REVIEW_PROMPT,
+            FEATURE_NAME,
+            QUEUE_NAME,
+        )
+        from tasks.report_script_material_workflow import process_report_script_material_workflow_job
+
+        pdf_meta = self._report_audio_pdf_meta_from_attachment(attachment, job_id=None)
+        topic_title = str(pdf_meta.get("topic_title") or "").strip()
+        filename_title = str(pdf_meta.get("filename") or "").strip()
+        title = (
+            topic_title
+            if topic_title and not _is_generic_auto_video_topic_title(topic_title)
+            else filename_title or "研报基础口播文案物料"
+        )
+        metadata = self._auto_script_material_dispatch_metadata(
+            run=run,
+            attachment=attachment,
+            threshold=threshold,
+            workflow_run_id=workflow_run_id,
+            title=title,
+        )
+        video_options = {
+            "enabled": False,
+            "vertical_enabled": False,
+            "bilibili_enabled": False,
+            "sub_burn_enabled": False,
+            "title": "",
+            "subtitle": "",
+            "tag_text": "研报播客",
+            "source": AUTO_SCRIPT_MATERIAL_DISPATCH_SOURCE,
+        }
+        task = PublicationTask(
+            status="pending",
+            current_step="queued",
+            progress=0,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "system",
+                "parent_feature": "zsxq_sync_run",
+                "parent_task_id": run.id,
+                "source_feature": "zsxq_attachment",
+                "source_task_id": attachment.id,
+                FEATURE_NAME: {
+                    "prompt": DEFAULT_INITIAL_PROMPT,
+                    "review_prompt": DEFAULT_REVIEW_PROMPT,
+                    "followups": [],
+                    "gemini_url": "",
+                    "metadata": metadata,
+                    "video": video_options,
+                    "pdf": None,
+                    "pdf_path": None,
+                },
+            },
+            result={
+                "metadata": metadata,
+                "pdf": None,
+                "children": {},
+                "structured_result": None,
+                "script_material": {"status": "pending"},
+                "audio": None,
+                "video": {
+                    "enabled": False,
+                    "status": "skipped",
+                    "message": FEATURE_NAME,
+                },
+                "logs": [],
+                "auto_script_material_dispatch": metadata["auto_script_material_dispatch"],
+            },
+        )
+        db.session.add(task)
+        db.session.flush()
+
+        pdf_meta = dict(pdf_meta)
+        pdf_meta["download_url"] = None
+        params = dict(task.params or {})
+        workflow = dict(params.get(FEATURE_NAME) or {})
+        workflow["pdf"] = pdf_meta
+        workflow["pdf_path"] = pdf_meta["path"]
+        params[FEATURE_NAME] = workflow
+        task.params = params
+        result = dict(task.result or {})
+        result["pdf"] = pdf_meta
+        task.result = result
+        db.session.commit()
+
+        try:
+            submit_result = maybe_guarded_apply_async(
+                process_report_script_material_workflow_job,
+                args=[task.id],
+                queue=QUEUE_NAME,
+                feature=FEATURE_NAME,
+                task=task,
+                retry=False,
+            )
+            celery_task = submit_result["async_result"]
+        except Exception as exc:
+            task.status = "failed"
+            task.current_step = "failed"
+            task.error_message = f"基础文案物料任务入队失败: {exc}"
+            task.completed_at = datetime.utcnow()
+            db.session.commit()
+            return {
+                "queued": False,
+                "task_id": task.id,
+                "feature": FEATURE_NAME,
+                "error": task.error_message,
+            }
+
+        task.celery_task_id = celery_task.id
+        db.session.commit()
+        deferred = bool(submit_result.get("deferred"))
+        return {
+            "queued": not deferred,
+            "deferred": deferred,
+            "task_id": task.id,
+            "celery_task_id": celery_task.id,
+            "feature": FEATURE_NAME,
+            "queue": QUEUE_NAME,
+            "admission": submit_result.get("admission"),
+        }
+
     def _create_auto_mp3_video_task(self, *, run, attachment, threshold, workflow_run_id=None):
         from services.mp3_video_workflow import (
             DEFAULT_GEMINI_URL,
@@ -1755,6 +2119,24 @@ class ZsxqSyncService:
             },
         }
 
+    def _auto_script_material_dispatch_metadata(self, *, run, attachment, threshold, workflow_run_id=None, title=None):
+        return {
+            "title": title or attachment.name,
+            "source": AUTO_SCRIPT_MATERIAL_DISPATCH_SOURCE,
+            "auto_script_material_dispatch": {
+                "sync_run_id": run.id,
+                "workflow_run_id": workflow_run_id,
+                "group_id": run.group_id,
+                "group_name": run.group_name,
+                "attachment_id": attachment.id,
+                "topic_id": attachment.topic_id,
+                "tab_id": attachment.tab_id,
+                "download_count": attachment.download_count,
+                "threshold": threshold,
+                "queued_at": datetime.utcnow().isoformat() + "Z",
+            },
+        }
+
     def _report_audio_pdf_meta_from_attachment(self, attachment, job_id=None):
         if attachment.download_status != "downloaded":
             raise ValueError("选择的同步 PDF 还没有下载完成")
@@ -1798,17 +2180,47 @@ class ZsxqSyncService:
         pdf = summary.get("pdf") or {}
         mp3 = summary.get("mp3") or {}
         queued = self._safe_int(pdf.get("queued")) + self._safe_int(mp3.get("queued"))
+        deferred = self._safe_int(pdf.get("deferred")) + self._safe_int(mp3.get("deferred"))
+        dispatched = queued + deferred
         failed = self._safe_int(pdf.get("failed")) + self._safe_int(mp3.get("failed"))
         eligible = self._safe_int(pdf.get("eligible")) + self._safe_int(mp3.get("eligible"))
         checked = self._safe_int(pdf.get("checked")) + self._safe_int(mp3.get("checked"))
         summary["queued_count"] = queued
+        summary["deferred_count"] = deferred
+        summary["dispatched_count"] = dispatched
         summary["failed_count"] = failed
         summary["eligible_count"] = eligible
-        if failed and queued:
+        if failed and dispatched:
             summary["status"] = "partial"
         elif failed:
             summary["status"] = "failed"
-        elif queued:
+        elif dispatched:
+            summary["status"] = "completed"
+        elif checked:
+            summary["status"] = "skipped"
+            summary.setdefault("reason", "no_eligible_attachment")
+        else:
+            summary["status"] = "skipped"
+            summary.setdefault("reason", "no_target_attachment")
+
+    def _finalize_auto_script_material_dispatch_summary(self, summary):
+        pdf = summary.get("pdf") or {}
+        queued = self._safe_int(pdf.get("queued"))
+        failed = self._safe_int(pdf.get("failed"))
+        eligible = self._safe_int(pdf.get("eligible"))
+        checked = self._safe_int(pdf.get("checked"))
+        summary["queued_count"] = queued
+        deferred = self._safe_int(pdf.get("deferred"))
+        dispatched = queued + deferred
+        summary["deferred_count"] = deferred
+        summary["dispatched_count"] = dispatched
+        summary["failed_count"] = failed
+        summary["eligible_count"] = eligible
+        if failed and dispatched:
+            summary["status"] = "partial"
+        elif failed:
+            summary["status"] = "failed"
+        elif dispatched:
             summary["status"] = "completed"
         elif checked:
             summary["status"] = "skipped"
@@ -1871,6 +2283,7 @@ class ZsxqSyncService:
         return (
             f"{label}：阈值 {bucket.get('threshold')}，检查 {bucket.get('checked', 0)}，"
             f"达阈值 {bucket.get('eligible', 0)}，投递 {bucket.get('queued', 0)}，"
+            f"延后排队 {bucket.get('deferred', 0)}，"
             f"已有任务 {bucket.get('skipped_existing', 0)}，低于阈值 {bucket.get('skipped_below_threshold', 0)}，"
             f"缺少下载数 {bucket.get('skipped_missing_download_count', 0)}，"
             f"文件缺失 {bucket.get('skipped_missing_file', 0)}，失败 {bucket.get('failed', 0)}。"
@@ -2037,6 +2450,7 @@ class ZsxqSyncService:
                 ZsxqTopic.content,
                 ZsxqTopic.create_time,
                 ZsxqTopic.raw_json_path,
+                ZsxqTopic.raw_payload,
                 ZsxqTopic.first_sync_run_id,
                 ZsxqTopic.last_sync_run_id,
                 ZsxqTopic.last_synced_at,
@@ -2048,10 +2462,14 @@ class ZsxqSyncService:
         has_more = len(rows) > limit
         topics = rows[:limit]
         attachments = self._attachments_by_topic(group_id, topics)
-        payloads = [
-            self._public_cached_topic(topic, attachments.get((topic.tab_id, topic.topic_id), []))
-            for topic in topics
-        ]
+        external_links = self._external_links_for_cached_topics(group_id, topics)
+        payloads = []
+        for topic in topics:
+            payload = self._public_cached_topic(topic, attachments.get((topic.tab_id, topic.topic_id), []))
+            links = external_links.get((str(topic.tab_id), str(topic.topic_id))) or []
+            if links:
+                payload["external_documents"] = links
+            payloads.append(payload)
         next_end_time = self._oldest_cached_topic_time(topics) if has_more else None
         message = ""
         if not payloads and not end_time and not self._has_cached_topics(group_id, tab_id):
@@ -2102,6 +2520,9 @@ class ZsxqSyncService:
         return times[0] if times else None
 
     def _public_cached_topic(self, topic, attachments):
+        raw_payload = topic.raw_payload if isinstance(topic.raw_payload, dict) else {}
+        raw_talk = raw_payload.get("talk") if isinstance(raw_payload.get("talk"), dict) else {}
+        article = self._public_topic_article(raw_talk.get("article") or raw_payload.get("article"))
         payload = {}
         payload.setdefault("topic_id", topic.topic_id)
         payload.setdefault("topic_uid", topic.topic_uid)
@@ -2110,6 +2531,8 @@ class ZsxqSyncService:
         payload.setdefault("raw_json_path", topic.raw_json_path)
         payload.setdefault("tab_id", topic.tab_id)
         payload.setdefault("tab_label", topic.tab_label)
+        if raw_payload.get("annotation"):
+            payload.setdefault("annotation", raw_payload.get("annotation"))
         if topic.author_name:
             payload.setdefault("owner", {"name": topic.author_name})
 
@@ -2119,6 +2542,9 @@ class ZsxqSyncService:
                 "create_time": topic.create_time,
                 "owner": {"name": topic.author_name or "未知作者"},
             }
+        if article:
+            payload.setdefault("talk", {})
+            payload["talk"]["article"] = article
 
         files = []
         images = []
@@ -2139,6 +2565,52 @@ class ZsxqSyncService:
             payload["files"] = files
         if images:
             payload["images"] = images
+        return payload
+
+    def _external_links_for_cached_topics(self, group_id, topics):
+        try:
+            from services.external_document_service import external_document_service
+
+            return external_document_service.links_for_topics(group_id, topics)
+        except Exception as exc:
+            logger.warning("[ZSXQ_SYNC] external document links skipped | group_id=%s | error=%s", group_id, exc)
+            return {}
+
+    def _scan_external_document_links(self, topic_record):
+        if str(os.environ.get("ZSXQ_EXTERNAL_LINK_SCAN_ENABLED", "1")).strip().lower() in {"0", "false", "no", "off"}:
+            return
+        try:
+            from services.external_document_service import external_document_service
+
+            external_document_service.scan_topic_record(topic_record, commit=False)
+        except Exception as exc:
+            logger.warning(
+                "[ZSXQ_SYNC] external document scan skipped | group_id=%s | tab=%s | topic_id=%s | error=%s",
+                getattr(topic_record, "group_id", None),
+                getattr(topic_record, "tab_id", None),
+                getattr(topic_record, "topic_id", None),
+                exc,
+            )
+
+    def _public_topic_article(self, article):
+        if not isinstance(article, dict):
+            return None
+        url = (
+            article.get("article_url")
+            or article.get("url")
+            or article.get("link")
+            or article.get("inline_article_url")
+        )
+        if not url:
+            return None
+        payload = {
+            "title": article.get("title") or "查看原文",
+            "article_url": str(url),
+        }
+        if article.get("article_id"):
+            payload["article_id"] = article.get("article_id")
+        if article.get("inline_article_url"):
+            payload["inline_article_url"] = article.get("inline_article_url")
         return payload
 
     def get_attachment_statuses(self, group_id, tab_id, topic_ids, attachment_refs=None):
@@ -3260,6 +3732,8 @@ class ZsxqSyncService:
 
     def _download_manual_attachment_record(self, cookie, group_id, tab, topic_id, record, download_file_types, remaining_downloads=None):
         payload = record.raw_payload or {}
+        record_id = record.id
+        record_name = record.name
         stats = {
             "attachments_seen": 0,
             "attachments_downloaded": 0,
@@ -3284,7 +3758,7 @@ class ZsxqSyncService:
                 record.error_message = f"非目标类型附件，跳过人工计划下载: {self._attachment_file_type(record)}"
                 stats["attachments_skipped"] += 1
                 stats["attachments_non_target_skipped"] += 1
-                db.session.flush()
+            db.session.commit()
             return stats
         if self._download_record_is_reusable(record):
             record.download_status = "downloaded"
@@ -3293,7 +3767,7 @@ class ZsxqSyncService:
             stats["attachments_already_downloaded_skipped"] += 1
             stats["attachments_reused_local"] += 1
             self._append_downloaded_record_entry(stats, record, record.local_path)
-            db.session.flush()
+            db.session.commit()
             return stats
 
         existing_download = self._find_existing_downloaded_attachment(record)
@@ -3305,38 +3779,47 @@ class ZsxqSyncService:
             stats["attachments_already_downloaded_skipped"] += 1
             stats["attachments_reused_existing"] += 1
             self._append_downloaded_record_entry(stats, record, record.local_path)
-            db.session.flush()
+            db.session.commit()
             return stats
 
         if remaining_downloads is not None and remaining_downloads <= 0:
             stats["stopped_by_download_limit"] = True
             stats["download_limit_reached"] = True
             stats["attachments_limited_skipped"] += 1
+            db.session.commit()
             return stats
 
+        db.session.commit()
         self._attachment_download_pause()
+        record_for_update = None
         try:
             stats["_download_attempted"] = True
-            local_path = self._download_attachment_file(cookie, group_id, tab, topic_id, payload, record.name)
-            record.local_path = local_path
-            record.download_status = "downloaded"
-            record.error_message = None
+            local_path = self._download_attachment_file(cookie, group_id, tab, topic_id, payload, record_name)
+            record_for_update = db.session.get(ZsxqAttachment, record_id)
+            if not record_for_update:
+                raise ValueError("附件记录不存在，无法写入下载结果")
+            record_for_update.local_path = local_path
+            record_for_update.download_status = "downloaded"
+            record_for_update.error_message = None
             stats["attachments_downloaded"] += 1
-            self._append_downloaded_record_entry(stats, record, local_path)
+            self._append_downloaded_record_entry(stats, record_for_update, local_path)
         except Exception as exc:
-            record.download_status = "failed"
-            record.error_message = str(exc)[:1000]
+            if record_for_update is None and record_id:
+                record_for_update = db.session.get(ZsxqAttachment, record_id)
+            if record_for_update:
+                record_for_update.download_status = "failed"
+                record_for_update.error_message = str(exc)[:1000]
             stats["attachments_failed"] += 1
             logger.warning(
                 "[ZSXQ_SYNC] manual attachment download failed | group_id=%s | tab=%s | topic_id=%s | name=%s | error=%s",
                 group_id,
                 tab["id"],
                 topic_id,
-                record.name,
+                record_name,
                 exc,
             )
         finally:
-            db.session.flush()
+            db.session.commit()
         return stats
 
     def _append_downloaded_record_entry(self, stats, record, local_path):
@@ -3514,12 +3997,14 @@ class ZsxqSyncService:
                         break
                     changed = self._update_existing_topic(existing, topic, tab, run)
                     tab_result["topics_updated"] += 1 if changed else 0
+                    self._scan_external_document_links(existing)
                     self._commit_running_progress(run, tab, topic_id, tab_result)
                     continue
 
                 topic_record = self._create_topic_record(group_id, group_name, tab, topic, run)
                 db.session.add(topic_record)
                 db.session.flush()
+                self._scan_external_document_links(topic_record)
                 attachment_stats = self._upsert_attachments(group_id, tab, topic)
                 self._merge_attachment_stats(tab_result, attachment_stats)
                 if download_attachments:
@@ -3810,12 +4295,15 @@ class ZsxqSyncService:
 
         for record in records:
             payload = record.raw_payload or {}
+            record_id = record.id
+            record_name = record.name
             if not self._should_download_attachment(record, download_file_types):
                 if record.download_status == "pending":
                     record.download_status = "skipped"
                     record.error_message = f"非目标类型附件，跳过自动下载: {self._attachment_file_type(record)}"
                     stats["attachments_skipped"] += 1
                     stats["attachments_non_target_skipped"] += 1
+                db.session.commit()
                 continue
             threshold_result = self._attachment_download_rule_result(record, attachment_download_rules)
             if not threshold_result["allowed"]:
@@ -3827,6 +4315,7 @@ class ZsxqSyncService:
                     stats["attachments_missing_download_count"] += 1
                 else:
                     stats["attachments_below_threshold"] += 1
+                db.session.commit()
                 continue
             if self._download_record_is_reusable(record):
                 record.download_status = "downloaded"
@@ -3835,6 +4324,7 @@ class ZsxqSyncService:
                 stats["attachments_already_downloaded_skipped"] += 1
                 stats["attachments_reused_local"] += 1
                 self._append_auto_video_dispatch_file_entry(stats, record, record.local_path)
+                db.session.commit()
                 continue
             existing_download = self._find_existing_downloaded_attachment(record)
             if existing_download:
@@ -3845,36 +4335,46 @@ class ZsxqSyncService:
                 stats["attachments_already_downloaded_skipped"] += 1
                 stats["attachments_reused_existing"] += 1
                 self._append_auto_video_dispatch_file_entry(stats, record, record.local_path)
+                db.session.commit()
                 continue
             if remaining_downloads is not None and remaining_downloads <= 0:
                 stats["stopped_by_download_limit"] = True
                 stats["download_limit_reached"] = True
                 stats["attachments_limited_skipped"] += 1
+                db.session.commit()
                 break
+            db.session.commit()
             self._attachment_download_pause()
             attempted_download = False
+            record_for_update = None
             try:
                 attempted_download = True
-                local_path = self._download_attachment_file(cookie, group_id, tab, topic_id, payload, record.name)
-                record.local_path = local_path
-                record.download_status = "downloaded"
-                record.error_message = None
+                local_path = self._download_attachment_file(cookie, group_id, tab, topic_id, payload, record_name)
+                record_for_update = db.session.get(ZsxqAttachment, record_id)
+                if not record_for_update:
+                    raise ValueError("附件记录不存在，无法写入下载结果")
+                record_for_update.local_path = local_path
+                record_for_update.download_status = "downloaded"
+                record_for_update.error_message = None
                 stats["attachments_downloaded"] += 1
-                entry = self._downloaded_file_entry(record, local_path)
+                entry = self._downloaded_file_entry(record_for_update, local_path)
                 if entry:
                     self._append_unique_file_entry(stats["downloaded_files"], entry)
                     if entry["path"].lower().endswith(".pdf"):
                         self._append_unique_file_entry(stats["downloaded_pdf_files"], entry)
             except Exception as exc:
-                record.download_status = "failed"
-                record.error_message = str(exc)[:1000]
+                if record_for_update is None and record_id:
+                    record_for_update = db.session.get(ZsxqAttachment, record_id)
+                if record_for_update:
+                    record_for_update.download_status = "failed"
+                    record_for_update.error_message = str(exc)[:1000]
                 stats["attachments_failed"] += 1
                 logger.warning(
                     "[ZSXQ_SYNC] attachment download failed | group_id=%s | tab=%s | topic_id=%s | name=%s | error=%s",
                     group_id,
                     tab["id"],
                     topic_id,
-                    record.name,
+                    record_name,
                     exc,
                 )
             finally:
@@ -3883,7 +4383,7 @@ class ZsxqSyncService:
                     if remaining_downloads <= 0:
                         stats["stopped_by_download_limit"] = True
                         stats["download_limit_reached"] = True
-                db.session.flush()
+                db.session.commit()
         stats["remaining_downloads"] = remaining_downloads
         if stats["attachments_downloaded"] or stats["attachments_failed"] or stats["attachments_skipped"]:
             self._clear_attachment_status_cache()
@@ -4278,17 +4778,19 @@ class ZsxqSyncService:
         return str(topic.get("topic_id") or topic.get("id") or topic.get("topic_uid") or "").strip()
 
     def _topic_meta(self, topic):
+        content = self._content(topic)
         title = (
             topic.get("title")
             or (topic.get("article") or {}).get("title")
-            or self._content(topic)[:48]
+            or content[:48]
             or "无标题主题"
         )
+        title = self._normalize_topic_text(title, include_web_url=False).replace("\n", " ").strip() or "无标题主题"
         owner = topic.get("owner") or (topic.get("talk") or {}).get("owner") or {}
         return {
             "title": str(title)[:500],
             "author_name": owner.get("name") or "未知作者",
-            "content": self._content(topic),
+            "content": content,
             "create_time": topic.get("create_time") or (topic.get("talk") or {}).get("create_time") or "",
         }
 
@@ -4302,15 +4804,40 @@ class ZsxqSyncService:
         )
         return self._normalize_topic_text(text)
 
-    def _normalize_topic_text(self, text):
-        def replace_hashtag(match):
-            title = re.search(r'title=["\']([^"\']+)["\']', match.group(0))
-            if not title:
-                return ""
-            from urllib.parse import unquote
-            return unquote(title.group(1))
+    def _normalize_topic_text(self, text, include_web_url=True):
+        def decode_attr(value):
+            try:
+                return unquote(str(value or ""))
+            except Exception:
+                return str(value or "")
 
-        return re.sub(r"<e\s+[^>]*type=[\"']hashtag[\"'][^>]*\/?>", replace_hashtag, str(text or "")).strip()
+        def replace_entity(match):
+            tag = match.group(0)
+            attrs = {
+                key: decode_attr(value)
+                for key, value in re.findall(r"([a-zA-Z0-9_-]+)=[\"']([^\"']*)[\"']", tag)
+            }
+            entity_type = str(attrs.get("type") or "").lower()
+            title = str(attrs.get("title") or "").strip()
+            href = str(attrs.get("href") or attrs.get("url") or "").strip()
+            if entity_type == "web":
+                if not include_web_url:
+                    return title or ""
+                if title and href and title != href:
+                    return f"{title}\n{href}"
+                return title or href or ""
+            if title:
+                return title
+            if include_web_url and href:
+                return href
+            return ""
+
+        value = unescape(str(text or ""))
+        value = re.sub(r"<e\b[^>]*\/?>", replace_entity, value)
+        value = re.sub(r"</e>", "", value)
+        value = value.replace("\r\n", "\n").replace("\r", "\n")
+        value = re.sub(r"\n{3,}", "\n\n", value)
+        return value.strip()
 
     def _topic_files(self, topic):
         return topic.get("files") or (topic.get("talk") or {}).get("files") or (topic.get("article") or {}).get("files") or []

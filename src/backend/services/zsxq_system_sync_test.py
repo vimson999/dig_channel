@@ -31,6 +31,7 @@ DEFAULT_FOREIGN_REPORT_PDF_DOWNLOAD_THRESHOLD = 30
 DEFAULT_RESEARCH_MEMO_MP3_DOWNLOAD_THRESHOLD = 15
 DEFAULT_AUTO_VIDEO_PDF_THRESHOLD = 35
 DEFAULT_AUTO_VIDEO_MP3_THRESHOLD = 25
+DEFAULT_AUTO_SCRIPT_MATERIAL_PDF_THRESHOLD = 40
 TOPIC_PAGE_SIZE_HINT = 20
 COOKIE_ENV_NAME = "ZSXQ_SYNC_TEST_COOKIE"
 COOKIE_OVERRIDE_ENV_NAME = "ZSXQ_SYNC_TEST_COOKIE_OVERRIDE"
@@ -40,6 +41,8 @@ DEFAULT_TRANSIENT_VALIDATE_RETRIES = 5
 DEFAULT_TRANSIENT_VALIDATE_RETRY_DELAY_SECONDS = 60
 ENV_INTERVAL_MINUTES = 25
 GROUP_ID_PLACEHOLDER_RE = re.compile(r"^group[-_]?test", re.IGNORECASE)
+SYSTEM_SYNC_GROUP_ID = "28888112822211"
+SYSTEM_SYNC_GROUP_NAME = "前沿信息收录"
 
 
 def config_exists():
@@ -66,8 +69,12 @@ def _snapshot_config(config):
     rounds_completed = _bounded_int(config.get("rounds_completed"), default=0, lower=0, upper=1_000_000)
     group_id = str(config.get("group_id") or "").strip()
     group_validation_error = _validate_group_id_local(group_id)
+    if not group_validation_error and group_id and not _is_supported_system_sync_group(group_id):
+        group_validation_error = _unsupported_system_sync_group_message(group_id)
     enabled = bool(config.get("enabled", True))
-    if group_validation_error and _is_placeholder_group_id(group_id):
+    if group_validation_error and (
+        _is_placeholder_group_id(group_id) or not _is_supported_system_sync_group(group_id)
+    ):
         enabled = False
     return {
         "exists": True,
@@ -94,6 +101,9 @@ def _snapshot_config(config):
             config.get("jobs") or [],
         ),
         "auto_video_dispatch": _normalize_auto_video_dispatch(config.get("auto_video_dispatch")),
+        "auto_script_material_dispatch": _normalize_auto_script_material_dispatch(
+            config.get("auto_script_material_dispatch")
+        ),
         "auto_pdf_clean": bool(config.get("auto_pdf_clean", False)),
         "auto_audio_clean": bool(config.get("auto_audio_clean", False)),
         "auto_publish_after_clean": _normalize_auto_publish_after_clean(
@@ -128,6 +138,7 @@ def save_config(payload, cookie):
     group_id = str(payload.get("group_id") or "").strip()
     if not group_id:
         raise ValueError("group_id 不能为空")
+    _validate_supported_system_sync_group(group_id)
 
     previous = load_config(required=False) or {}
     credential_id = (
@@ -206,6 +217,12 @@ def save_config(payload, cookie):
             else previous.get("auto_video_dispatch"),
             previous=previous.get("auto_video_dispatch"),
         ),
+        "auto_script_material_dispatch": _normalize_auto_script_material_dispatch(
+            payload.get("auto_script_material_dispatch")
+            if "auto_script_material_dispatch" in payload
+            else previous.get("auto_script_material_dispatch"),
+            previous=previous.get("auto_script_material_dispatch"),
+        ),
         "auto_pdf_clean": bool(payload.get("auto_pdf_clean", previous.get("auto_pdf_clean", False))),
         "pdf_cleaner": payload.get("pdf_cleaner") if isinstance(payload.get("pdf_cleaner"), dict) else previous.get("pdf_cleaner", {}),
         "auto_audio_clean": bool(payload.get("auto_audio_clean", previous.get("auto_audio_clean", False))),
@@ -266,6 +283,29 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
     group_id = str(config.get("group_id") or "").strip()
     if not group_id:
         raise ValueError("系统计划测试配置缺少 group_id")
+    if not _is_supported_system_sync_group(group_id):
+        skipped_at = datetime.utcnow().isoformat() + "Z"
+        error = _unsupported_system_sync_group_message(group_id)
+        config["enabled"] = False
+        config["last_trigger_at"] = skipped_at
+        config["last_skip_at"] = skipped_at
+        config["last_skip_reason"] = "unsupported_group"
+        config["last_skip_error"] = error
+        config["last_failed_batch_id"] = attempt_id
+        config["updated_at"] = skipped_at
+        _write_config(config)
+        logger.warning(
+            "[ZSXQ_SYSTEM_SYNC_TEST] skipped unsupported group | attempt_id=%s group_id=%s",
+            attempt_id or "-",
+            group_id,
+        )
+        return {
+            "queued": [],
+            "skipped": True,
+            "reason": "unsupported_group",
+            "error": error,
+            "config": _snapshot_config(config),
+        }
 
     jobs = _normalize_jobs(config.get("jobs"))
     if not jobs:
@@ -882,6 +922,23 @@ def _is_placeholder_group_id(group_id):
     return bool(GROUP_ID_PLACEHOLDER_RE.match(str(group_id or "").strip()))
 
 
+def _is_supported_system_sync_group(group_id):
+    return str(group_id or "").strip() == SYSTEM_SYNC_GROUP_ID
+
+
+def _unsupported_system_sync_group_message(group_id):
+    return (
+        f"系统计划同步仅支持{SYSTEM_SYNC_GROUP_NAME}（group_id={SYSTEM_SYNC_GROUP_ID}），"
+        f"当前 group_id={str(group_id or '').strip() or '-'}。"
+        "生财有术、洪灝的宏观策略请使用普通 Tab 同步或人工计划。"
+    )
+
+
+def _validate_supported_system_sync_group(group_id):
+    if not _is_supported_system_sync_group(group_id):
+        raise ValueError(_unsupported_system_sync_group_message(group_id))
+
+
 def _is_auth_validation_error(error):
     message = str(error or "").lower()
     return (
@@ -1013,6 +1070,23 @@ def _normalize_auto_video_dispatch(value, previous=None):
         "enabled": enabled,
         "pdf_min_download_count": pdf_threshold,
         "mp3_min_download_count": mp3_threshold,
+        "wait_for_completion": False,
+    }
+
+
+def _normalize_auto_script_material_dispatch(value, previous=None):
+    previous = previous if isinstance(previous, dict) else {}
+    value = value if isinstance(value, dict) else {}
+    enabled = bool(value.get("enabled", previous.get("enabled", False)))
+    pdf_threshold = _bounded_int(
+        value.get("pdf_min_download_count", previous.get("pdf_min_download_count")),
+        default=DEFAULT_AUTO_SCRIPT_MATERIAL_PDF_THRESHOLD,
+        lower=0,
+        upper=1_000_000,
+    )
+    return {
+        "enabled": enabled,
+        "pdf_min_download_count": pdf_threshold,
         "wait_for_completion": False,
     }
 

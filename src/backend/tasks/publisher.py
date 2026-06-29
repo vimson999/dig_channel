@@ -218,8 +218,22 @@ def run_publication_pipeline(self, task_id):
         if not task:
             logger.error(f"Task {task_id} not found in DB")
             return
-        if task.status == "canceled":
-            logger.info("Task %s is canceled before publisher start; skipping.", task_id)
+        request_id = str(getattr(getattr(self, "request", None), "id", "") or "")
+        current_celery_id = str(task.celery_task_id or "")
+        if request_id and current_celery_id and request_id != current_celery_id:
+            logger.info(
+                "Task %s received stale celery message %s, current celery id is %s; skipping.",
+                task_id,
+                request_id,
+                current_celery_id,
+            )
+            return
+        if task.status in {"completed", "failed", "canceled"}:
+            logger.info(
+                "Task %s is terminal (%s) before publisher start; skipping duplicate message.",
+                task_id,
+                task.status,
+            )
             return
         guard_publication_task_start(
             self,

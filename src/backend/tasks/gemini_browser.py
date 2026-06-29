@@ -105,6 +105,7 @@ def _process_job(task_id):
     task.result = result
     flag_modified(task, "result")
     db.session.commit()
+    db.session.expunge_all()
 
     def update_progress(event):
         fresh = _load_task(job_id, *TASK_UPDATE_COLUMNS)
@@ -126,6 +127,7 @@ def _process_job(task_id):
         fresh.result = current_result
         flag_modified(fresh, "result")
         db.session.commit()
+        db.session.expunge(fresh)
 
     try:
         output_path = storage_path_for_job(job_id, job_created_at)

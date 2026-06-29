@@ -113,6 +113,13 @@ youtube-analytics/
 └── 📄 requirements.txt       # Python依赖
 ```
 
+## 近期工程文档
+
+- [项目上下文地图](PROJECT_CONTEXT_MAP.md)
+- [生产级演进路线图](PRODUCTION_EVOLUTION_ROADMAP.md)
+- [今日研报 Top10 编排 MVP 设计](planning/report_top10_workflow_plan_20260624.md)
+- [研报基础文案物料独立队列](planning/report_script_material_workflow_queue_20260625.md)
+
 ---
 
 ## 🔧 配置说明
@@ -145,9 +152,13 @@ youtube-analytics/
 
 ### 运行与排障纪律
 
+- [项目上下文地图](PROJECT_CONTEXT_MAP.md)：新接手项目时的当前系统地图、文档可信顺序、核心业务线和容易踩坑的位置。
+- [生产级演进路线图](PRODUCTION_EVOLUTION_ROADMAP.md)：按 P0/P1/P2 整理的生产健壮性优化方向和验收标准。
 - [工作流运行经验与事故处理纪律](WORKFLOW_RUNTIME_OPERATIONS_PLAYBOOK.md)：数据库连接池、PgBouncer、worker/watchdog、scheduler、封皮标题、发布确认与排队任务处理经验。
 - [生产级运行加固](production-hardening.md)：生产/本地 PgBouncer、SQLAlchemy 连接策略、任务准入保护与观测项。
 - [编排任务开发标准](WORKFLOW_ORCHESTRATION_STANDARD.md)：编排任务状态、续跑、子任务、通知与前端标准。
+- [数据库 Session 生命周期纪律](rules/database-session-lifecycle-discipline.md)：Web、Celery、scheduler、watchdog、CLI 和诊断脚本必须遵守的 DB session 释放规则。
+- [成功经验复用纪律](rules/reuse-proven-patterns-discipline.md)：新增功能和修 bug 前必须先查找并复用已有成熟实现，避免重复踩同类坑。
 - [Bug 修复记录纪律](rules/bugfix-record-discipline.md)：每次修复真实 bug 后，必须记录现象、影响、根因、解决方案、验证和复发预防。
 - [Bug 修复记录索引](bugs/README.md)：项目已处理 bug 的沉淀目录。
 - [故障排除指南](TROUBLESHOOTING.md)：通用依赖、数据库、认证和 API 连接问题。

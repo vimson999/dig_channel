@@ -166,6 +166,9 @@ class DoubaoBrowserTTSTestPage {
         if (action === 'refresh') {
             this.refreshJob(jobId);
         }
+        if (action === 'retry') {
+            this.retryJob(jobId);
+        }
         if (action === 'remove') {
             this.jobs = this.jobs.filter((job) => (job.job_id || job.local_id) !== jobId);
             this.render();
@@ -282,7 +285,9 @@ class DoubaoBrowserTTSTestPage {
             const services = result.data?.services || result.services || [];
             const service = services.find((item) => item.id === 'doubao_browser_tts');
             if (service?.running) {
-                this.setBadge(this.els.workerStatus, `Worker 运行中 · 队列 ${service.queue_length || 0}`, 'success');
+                const processCount = Number(service.processes?.length || service.pids?.length || service.process_count || 0);
+                const suffix = processCount > 1 ? ` · ${processCount} 路` : '';
+                this.setBadge(this.els.workerStatus, `Worker 运行中${suffix} · 队列 ${service.queue_length || 0}`, 'success');
             } else {
                 this.setBadge(this.els.workerStatus, 'Worker 未运行', 'warning');
             }
@@ -350,6 +355,27 @@ class DoubaoBrowserTTSTestPage {
         this.render();
     }
 
+    async retryJob(jobId) {
+        if (!jobId) return;
+        const job = this.jobs.find((item) => item.job_id === jobId);
+        try {
+            const result = await this.request(`/api/doubao-tts/jobs/${encodeURIComponent(jobId)}/retry`, {
+                method: 'POST',
+                body: JSON.stringify({}),
+            });
+            const payload = result.data || result;
+            if (job) {
+                Object.assign(job, payload);
+            } else {
+                this.upsertJob(payload);
+            }
+            this.setNotice('豆包朗读任务已重新投递。', 'success');
+        } catch (error) {
+            this.setNotice(error.message || '重试失败', 'error');
+        }
+        this.render();
+    }
+
     resetPollTimer() {
         if (this.pollTimer) window.clearInterval(this.pollTimer);
         const delay = Math.max(1000, Number(this.els.pollDelay.value) || 2500);
@@ -394,6 +420,11 @@ class DoubaoBrowserTTSTestPage {
         const progress = Number(job.progress || 0);
         const blocked = job.status === 'blocked';
         const captcha = job.captcha_blocked || null;
+        const metadata = job.metadata || job.request?.metadata || {};
+        const workerId = metadata.worker_id || '-';
+        const chunkIndex = metadata.chunk_index || '';
+        const chunkTotal = metadata.chunk_total || '';
+        const textHash = metadata.text_hash || '';
         return `
             <article class="job-card rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="flex items-start justify-between gap-3">
@@ -411,6 +442,11 @@ class DoubaoBrowserTTSTestPage {
                                 <i class="fas fa-rotate"></i>
                             </button>
                         ` : ''}
+                        ${job.job_id && ['failed', 'blocked', 'canceled'].includes(job.status) ? `
+                            <button data-job-action="retry" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-blue-200 bg-blue-50 px-2 py-1.5 text-xs text-blue-700 hover:bg-blue-100" title="重试">
+                                <i class="fas fa-arrow-rotate-right"></i>
+                            </button>
+                        ` : ''}
                         <button data-job-action="remove" data-job-id="${this.escape(job.job_id || job.local_id || '')}" class="rounded-md border border-slate-300 px-2 py-1.5 text-xs text-slate-500 hover:bg-slate-50" title="移除">
                             <i class="fas fa-xmark"></i>
                         </button>
@@ -423,6 +459,11 @@ class DoubaoBrowserTTSTestPage {
                 <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
                     <span>${this.escape(job.step || '-')}</span>
                     <span>${progress}%</span>
+                </div>
+                <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] font-bold text-slate-500">
+                    <span class="rounded bg-slate-100 px-2 py-1">worker ${this.escape(workerId)}</span>
+                    ${chunkIndex ? `<span class="rounded bg-slate-100 px-2 py-1">chunk ${this.escape(chunkIndex)}/${this.escape(chunkTotal || '-')}</span>` : ''}
+                    ${textHash ? `<span class="rounded bg-slate-100 px-2 py-1" title="${this.escape(textHash)}">hash ${this.escape(String(textHash).slice(0, 8))}</span>` : ''}
                 </div>
 
                 <p class="mt-3 line-clamp-3 rounded-md bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700">${this.escape(text)}</p>

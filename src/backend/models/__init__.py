@@ -13,6 +13,7 @@ from .task import PublicationTask
 from .download_task import DownloadTask
 from .system_config import SystemConfig
 from .platform_credential import PlatformCredentialAccount, PlatformCredentialBinding
+from .external_document import ExternalDocument, ZsxqTopicExternalDocument
 from .tts import TTSArticle, TTSSegment
 from .zsxq_sync import ZsxqSyncRun, ZsxqTopic, ZsxqAttachment, ZsxqSyncCursor
 from .zsxq_workflow import ZsxqWorkflowRun
@@ -40,6 +41,8 @@ __all__ = [
     'SystemConfig',
     'PlatformCredentialAccount',
     'PlatformCredentialBinding',
+    'ExternalDocument',
+    'ZsxqTopicExternalDocument',
     'TTSArticle',
     'TTSSegment',
     'ZsxqSyncRun',

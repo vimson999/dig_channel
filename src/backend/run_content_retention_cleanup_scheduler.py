@@ -30,6 +30,7 @@ from services.content_pipeline.retention_scheduler_service import (
     update_runtime_status,
     utc_now_iso,
 )
+from services.workflow_notification_service import workflow_notification_service
 
 
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -42,6 +43,7 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("content_retention_cleanup_scheduler")
+NOTIFY_ENV_NAME = "CONTENT_RETENTION_EMAIL_NOTIFY"
 
 
 class ContentRetentionCleanupScheduler:
@@ -73,6 +75,13 @@ class ContentRetentionCleanupScheduler:
             dry_run,
             config.get("interval_hours"),
             policy.to_dict(),
+        )
+        self._send_notification(
+            "started",
+            trigger=trigger,
+            dry_run=dry_run,
+            policy=policy.to_dict(),
+            config=config,
         )
         try:
             with self.app.app_context():
@@ -110,6 +119,15 @@ class ContentRetentionCleanupScheduler:
                 summary["error_count"],
                 summary["elapsed_seconds"],
             )
+            self._send_notification(
+                "completed" if summary["error_count"] == 0 else "completed_with_errors",
+                trigger=trigger,
+                dry_run=dry_run,
+                policy=policy.to_dict(),
+                summary=summary,
+                cleanup_result=cleanup_result,
+                config=load_config(),
+            )
             return {
                 "queued": False,
                 "skipped": False,
@@ -130,6 +148,15 @@ class ContentRetentionCleanupScheduler:
             }
             update_runtime_status({"last_run_at": summary["completed_at"], "last_result": summary})
             logger.exception("[RETENTION_CLEANUP] trigger_failed | trigger=%s error=%s", trigger, exc)
+            self._send_notification(
+                "failed",
+                trigger=trigger,
+                dry_run=dry_run,
+                policy=policy.to_dict(),
+                summary=summary,
+                error=exc,
+                config=load_config(),
+            )
             return {
                 "queued": False,
                 "skipped": True,
@@ -180,12 +207,91 @@ class ContentRetentionCleanupScheduler:
         config = load_config()
         return int(config.get("interval_hours") or 24)
 
+    def _send_notification(self, event, **context):
+        if not _email_notify_enabled():
+            return {"sent": False, "reason": "disabled"}
+        try:
+            subject, body = _build_retention_email(event, **context)
+            workflow_notification_service.send_email_message(subject, body)
+            logger.info("[RETENTION_CLEANUP] email sent | event=%s", event)
+            return {"sent": True}
+        except Exception as exc:
+            logger.exception("[RETENTION_CLEANUP] email failed | event=%s error=%s", event, exc)
+            return {"sent": False, "error": str(exc)}
+
 
 def _dry_run_override_from_env():
     value = os.getenv(DRY_RUN_OVERRIDE_ENV)
     if value is None:
         return None
     return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _email_notify_enabled():
+    value = os.getenv(NOTIFY_ENV_NAME)
+    if value is None:
+        return True
+    return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _build_retention_email(event, *, trigger, dry_run, policy=None, summary=None, cleanup_result=None, error=None, config=None):
+    status_text = {
+        "started": "开始",
+        "completed": "完成",
+        "completed_with_errors": "完成但有错误",
+        "failed": "异常",
+    }.get(event, event)
+    mode_text = "预览" if dry_run else "真实清理"
+    subject = f"[历史文件清理] {status_text} · {mode_text}"
+    lines = [
+        f"事件：历史文件清理{status_text}",
+        f"模式：{mode_text}",
+        f"触发：{trigger}",
+    ]
+
+    if summary:
+        lines.extend(
+            [
+                f"候选：{summary.get('candidate_count', 0)}",
+                f"候选体积：{summary.get('total_human', '0 B')}",
+                f"已删除：{summary.get('deleted_count', 0)}",
+                f"已释放：{summary.get('deleted_human', '0 B')}",
+                f"错误数：{summary.get('error_count', 0)}",
+                f"耗时：{summary.get('elapsed_seconds', 0)} 秒",
+                f"完成时间：{summary.get('completed_at') or '-'}",
+            ]
+        )
+    else:
+        lines.append("状态：任务已开始，正在扫描候选文件。")
+
+    if error:
+        lines.append(f"错误：{error}")
+
+    cleanup_errors = (cleanup_result or {}).get("errors") if isinstance(cleanup_result, dict) else None
+    if cleanup_errors:
+        lines.append("")
+        lines.append("错误明细（最多 5 条）：")
+        for item in cleanup_errors[:5]:
+            lines.append(f"- {item.get('path') or '-'} | {item.get('error') or '-'}")
+
+    policy = policy if isinstance(policy, dict) else {}
+    if policy:
+        lines.append("")
+        lines.append("保留策略：")
+        lines.append(f"- 同步原始附件：{policy.get('sync_raw_days')} 天")
+        lines.append(f"- 清洗批次：{policy.get('content_pipeline_batch_days')} 天")
+        lines.append(f"- 手动发布临时目录：{policy.get('manual_publish_days')} 天")
+        lines.append(f"- pytest 中转批次：{policy.get('pytest_batch_days')} 天")
+        lines.append(f"- 未收尾任务保护：{policy.get('unfinished_reference_protect_days')} 天")
+        lines.append(f"- 最大候选：{policy.get('max_candidates')}")
+
+    config = config if isinstance(config, dict) else {}
+    if config:
+        lines.append("")
+        lines.append(f"下次计划：{config.get('next_run_at') or '-'}")
+        lines.append(f"日志：{config.get('log_path') or LOG_PATH}")
+
+    return subject, "\n".join(lines)
 
 
 def main():

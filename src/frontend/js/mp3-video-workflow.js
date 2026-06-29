@@ -392,9 +392,10 @@ class Mp3VideoWorkflowPage {
         this.els.selectedAudioTitle.textContent = asset.topic_title || asset.filename || '未命名音频';
         this.els.selectedAudioMeta.textContent = [
             asset.filename || '',
+            asset.tab_label || '',
             this.formatBytes(asset.bytes),
             this.audioAssetDownloadText(asset),
-            asset.topic_create_time || asset.updated_at || '',
+            this.formatDateTime(asset.topic_create_time) || asset.topic_create_time || '',
         ].filter(Boolean).join(' · ');
         this.els.selectedAudioPlayer.src = this.absoluteUrl(`/api/mp3-video-workflows/audio-assets/${encodeURIComponent(asset.attachment_id)}/preview`);
     }
@@ -604,27 +605,34 @@ class Mp3VideoWorkflowPage {
 
     renderAudioAssetCard(asset) {
         const selected = this.selectedAudioAsset?.attachment_id === asset.attachment_id;
-        const title = this.escape(asset.topic_title || asset.filename || '未命名音频');
-        const file = this.escape(asset.filename || '');
-        const excerpt = this.escape(asset.topic_content_excerpt || '');
+        const itemTitle = [asset.filename, asset.topic_title, asset.tab_label].filter(Boolean).join('\n');
         const downloadText = this.audioAssetDownloadText(asset);
         const workflowMeta = this.audioAssetWorkflowMeta(asset);
-        const selectedClass = selected ? 'border-emerald-400 bg-emerald-50 ring-1 ring-emerald-200' : 'border-slate-200 bg-white hover:border-slate-300';
+        const syncTime = this.formatDateTime(asset.topic_last_synced_at || asset.updated_at);
+        const topicTime = this.formatDateTime(asset.topic_create_time) || asset.topic_create_time || '';
+        const metaLine = [
+            asset.tab_label || '',
+            syncTime ? `同步 ${syncTime}` : '',
+            topicTime ? `发布 ${topicTime}` : '',
+        ].filter(Boolean).join(' · ');
+        const selectedClass = selected
+            ? 'border-indigo-300 bg-indigo-50 text-indigo-900'
+            : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50';
         return `
-            <button type="button" data-audio-id="${this.escapeAttr(asset.attachment_id)}" class="block w-full rounded-md border ${selectedClass} p-3 text-left transition" tabindex="0">
-                <div class="flex items-start justify-between gap-3">
+            <button type="button" data-audio-id="${this.escapeAttr(asset.attachment_id)}" title="${this.escapeAttr(itemTitle)}" class="block w-full rounded-md border ${selectedClass} px-3 py-2 text-left text-xs transition" tabindex="0">
+                <div class="flex items-start justify-between gap-2">
                     <div class="min-w-0">
-                        <div class="line-clamp-2 text-sm font-black text-slate-900">${title}</div>
-                        <div class="mt-1 truncate text-xs text-slate-500">${file}</div>
+                        <div class="truncate font-bold">${this.escape(asset.filename || 'MP3')}</div>
+                        <div class="mt-1 truncate text-slate-500">${this.escape(asset.topic_title || asset.tab_label || asset.topic_id || '-')}</div>
                     </div>
-                    <span class="shrink-0 rounded bg-slate-900 px-2 py-1 text-[10px] font-black uppercase text-white">${this.escape(asset.file_ext || 'mp3')}</span>
+                    <div class="flex shrink-0 items-center gap-1.5">
+                        <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500">${this.formatBytes(asset.bytes)}</span>
+                        <span class="rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-bold text-indigo-700">
+                            <i class="fas fa-play mr-1"></i>试听
+                        </span>
+                    </div>
                 </div>
-                ${excerpt ? `<div class="mt-2 line-clamp-2 text-xs leading-5 text-slate-500">${excerpt}</div>` : ''}
-                <div class="mt-2 flex flex-wrap gap-2 text-[11px] font-bold text-slate-400">
-                    <span>${this.formatBytes(asset.bytes)}</span>
-                    <span>${this.escape(asset.topic_create_time || asset.updated_at || '')}</span>
-                    <span>${this.escape(asset.group_id || '')}</span>
-                </div>
+                <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(metaLine)}</div>
                 <div class="mt-2 flex flex-wrap items-center gap-1.5">
                     <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500">
                         <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
@@ -1085,6 +1093,21 @@ class Mp3VideoWorkflowPage {
         if (!path) return '#';
         if (/^https?:\/\//.test(path)) return path;
         return `${this.apiRoot()}${path}`;
+    }
+
+    formatDateTime(value) {
+        if (!value) return '';
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return '';
+        const parts = new Intl.DateTimeFormat('zh-CN', {
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+        }).formatToParts(date);
+        const pick = (type) => parts.find((part) => part.type === type)?.value || '';
+        return `${pick('month')}-${pick('day')} ${pick('hour')}:${pick('minute')}`;
     }
 
     formatBytes(value) {

@@ -296,7 +296,7 @@ class VideoEditorService:
             return alignment, margin_v, font_size
 
         # 默认值
-        alignment, margin_v = (2, int(canvas_h * 0.15)) if is_vertical else (2, int(canvas_h * 0.08))
+        alignment, margin_v = (2, int(canvas_h * 0.12)) if is_vertical else (2, int(canvas_h * 0.08))
         logger.info(f"📐 [SUBTITLE_PARAMS] → branch=default | alignment={alignment} | margin_v={margin_v}")
         return alignment, margin_v, font_size
 

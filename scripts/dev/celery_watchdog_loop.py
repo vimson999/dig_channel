@@ -22,6 +22,7 @@ def _poll_seconds():
 def main():
     from app import create_app
     from apis.v1.celery_monitor import run_watchdog_once
+    from models import db
 
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
     app = create_app()
@@ -31,14 +32,20 @@ def main():
     while True:
         try:
             with app.app_context():
-                result = run_watchdog_once()
-                actions = [
-                    f"{item.get('service_id')}:{item.get('action')}"
-                    for item in result.get("results", [])
-                    if item.get("action") not in {None, "none"}
-                ]
-                if actions:
-                    print(f"watchdog actions: {', '.join(actions)}", flush=True)
+                try:
+                    result = run_watchdog_once()
+                    actions = [
+                        f"{item.get('service_id')}:{item.get('action')}"
+                        for item in result.get("results", [])
+                        if item.get("action") not in {None, "none"}
+                    ]
+                    if actions:
+                        print(f"watchdog actions: {', '.join(actions)}", flush=True)
+                finally:
+                    try:
+                        db.session.rollback()
+                    finally:
+                        db.session.remove()
         except KeyboardInterrupt:
             print("Celery watchdog stopped.", flush=True)
             return 0

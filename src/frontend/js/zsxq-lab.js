@@ -12,6 +12,7 @@ const SYSTEM_SYNC_COUNT = 50;
 const SYSTEM_SYNC_MAX_ROUNDS = 3;
 const SYSTEM_SYNC_STATUS_POLL_MS = 15000;
 const SYSTEM_SYNC_LOG_LINES = 120;
+const SYSTEM_SYNC_GROUP_ID = '28888112822211';
 
 const state = {
     cookie: '',
@@ -162,8 +163,33 @@ function loadSystemSyncSchedulerPanelsAfterBootstrap() {
         });
 }
 
+function isSystemSyncGroupId(groupId) {
+    return String(groupId || '').trim() === SYSTEM_SYNC_GROUP_ID;
+}
+
+function isSelectedSystemSyncGroup() {
+    return Boolean(state.selectedGroup && isSystemSyncGroupId(state.selectedGroup.group_id));
+}
+
 function getSystemSyncTargetGroupId() {
-    return state.selectedGroup?.group_id || state.systemSyncConfig?.group_id || '';
+    if (state.selectedGroup) {
+        return isSelectedSystemSyncGroup() ? String(state.selectedGroup.group_id) : '';
+    }
+    const configGroupId = state.systemSyncConfig?.group_id;
+    return isSystemSyncGroupId(configGroupId) ? String(configGroupId) : '';
+}
+
+function setSystemSyncControlsVisible(visible) {
+    els.autoSyncTestBtn?.classList.toggle('hidden', !visible);
+    els.autoSyncMemoTestBtn?.classList.toggle('hidden', !visible);
+    els.systemSyncTestConfigBtn?.classList.toggle('hidden', !visible);
+    els.systemSyncSchedulerPanel?.classList.toggle('hidden', !visible);
+    if (!visible) {
+        stopSystemSyncSchedulerPolling();
+        state.systemSyncBatches = [];
+        state.systemSyncBatchesError = null;
+        els.syncBatchesPanel?.classList.add('hidden');
+    }
 }
 
 function bindEvents() {
@@ -189,6 +215,7 @@ function bindEvents() {
     els.scopeSelect.addEventListener('change', () => {
         const tab = getTabDefinitions().find(item => !item.hashtagId && item.scope === els.scopeSelect.value);
         state.activeTab = tab?.id || 'preset:all';
+        if (tab) applyAttachmentDefaultsForTab(tab);
         if (state.selectedGroup) loadActiveTabPage({ reset: true });
     });
     els.selectAllTopicsBtn.addEventListener('click', toggleSelectAllTopics);
@@ -495,10 +522,7 @@ function resetZsxqWorkspace() {
     els.copyTopicsJsonBtn?.classList.add('hidden');
     els.syncCurrentTabBtn?.classList.add('hidden');
     els.syncAllTabsBtn?.classList.add('hidden');
-    els.autoSyncTestBtn?.classList.add('hidden');
-    els.autoSyncMemoTestBtn?.classList.add('hidden');
-    els.systemSyncTestConfigBtn?.classList.add('hidden');
-    els.systemSyncSchedulerPanel.classList.add('hidden');
+    setSystemSyncControlsVisible(false);
     els.syncStatus.classList.add('hidden');
     els.syncStatus.innerHTML = '';
     els.syncBatchesPanel.classList.add('hidden');
@@ -654,6 +678,7 @@ async function loadGroups() {
 async function loadTopics(group, options = {}) {
     const requestedActiveTab = state.activeTab;
     state.selectedGroup = group;
+    const systemSyncEnabledForGroup = isSystemSyncGroupId(group.group_id);
     if (options.resetTabs !== false) {
         state.tabStates.clear();
     }
@@ -662,10 +687,7 @@ async function loadTopics(group, options = {}) {
     els.publishPanel.classList.remove('hidden');
     els.syncCurrentTabBtn?.classList.remove('hidden');
     els.syncAllTabsBtn?.classList.remove('hidden');
-    els.autoSyncTestBtn?.classList.remove('hidden');
-    els.autoSyncMemoTestBtn?.classList.remove('hidden');
-    els.systemSyncTestConfigBtn?.classList.remove('hidden');
-    els.systemSyncSchedulerPanel.classList.remove('hidden');
+    setSystemSyncControlsVisible(systemSyncEnabledForGroup);
     els.copyTopicsJsonBtn?.classList.add('hidden');
     els.topicsTitle.textContent = group.name || `星球 ${group.group_id}`;
     els.topicsSubtitle.textContent = `Group ID: ${group.group_id}`;
@@ -683,12 +705,17 @@ async function loadTopics(group, options = {}) {
     applyAttachmentDefaultsForTab(getActiveTabConfig());
     renderTopicTabs();
     renderSyncIntro();
-    startSystemSyncSchedulerPolling();
-    await Promise.all([
-        loadSystemSyncSchedulerStatus(),
-        loadSyncRuns(group.group_id),
-    ]);
-    renderSystemSyncSchedulerPanel();
+    const sideLoads = [loadSyncRuns(group.group_id)];
+    if (systemSyncEnabledForGroup) {
+        startSystemSyncSchedulerPolling();
+        sideLoads.push(loadSystemSyncSchedulerStatus());
+    } else {
+        stopSystemSyncSchedulerPolling();
+    }
+    await Promise.all(sideLoads);
+    if (systemSyncEnabledForGroup) {
+        renderSystemSyncSchedulerPanel();
+    }
 
     await loadActiveTabPage({ reset: true });
 }
@@ -906,6 +933,10 @@ async function startAutoSyncTest(scope = 'full') {
         renderSyncStatus({ type: 'error', message: '请先选择一个星球。' });
         return;
     }
+    if (!isSelectedSystemSyncGroup()) {
+        renderSyncStatus({ type: 'error', message: '自动同步测试仅适用于「前沿信息收录」。生财有术和洪灝请使用普通 Tab 同步。' });
+        return;
+    }
     const jobs = buildAutoSyncTestJobs(scope);
     if (!jobs.length || (scope === 'full' && jobs.length < 2)) {
         const targetText = scope === 'memo' ? '「调研纪要」Tab' : '「外资研报」和「调研纪要」Tab';
@@ -1014,6 +1045,10 @@ async function queueAutoSyncJob(job, round, modePrefix = 'auto') {
 async function saveSystemSyncTestConfig() {
     if (!state.selectedGroup) {
         renderSyncStatus({ type: 'error', message: '请先选择一个星球。' });
+        return;
+    }
+    if (!isSelectedSystemSyncGroup()) {
+        renderSyncStatus({ type: 'error', message: '系统计划配置仅适用于「前沿信息收录」。当前星球请使用普通 Tab 同步或人工计划。' });
         return;
     }
     const jobs = buildAutoSyncTestJobs('full');
@@ -1162,6 +1197,9 @@ function applySystemSyncRuntimeConfig(config = {}) {
 }
 
 function buildAutoSyncTestJobs(scope = 'full') {
+    if (!isSelectedSystemSyncGroup()) {
+        return [];
+    }
     const tabs = getTabDefinitions();
     const foreignReportTab = tabs.find(tab => tab.label.includes('外资研报'));
     const researchMemoTab = tabs.find(tab => tab.label.includes('调研纪要'));
@@ -1307,7 +1345,12 @@ async function loadSyncRuns(groupId, options = {}) {
             limit: 20,
         });
         state.syncRuns = result?.runs || [];
-        await loadSystemSyncBatches(groupId, { render: false });
+        if (isSystemSyncGroupId(groupId)) {
+            await loadSystemSyncBatches(groupId, { render: false });
+        } else {
+            state.systemSyncBatches = [];
+            state.systemSyncBatchesError = null;
+        }
         if (state.syncRuns.some(run => ['queued', 'running'].includes(run.status)) && !state.syncPollTimer) {
             startSyncPolling();
         }
@@ -1332,6 +1375,14 @@ async function loadSyncRuns(groupId, options = {}) {
 
 async function loadSystemSyncBatches(groupId, options = {}) {
     const targetGroupId = groupId || getSystemSyncTargetGroupId();
+    if (!isSystemSyncGroupId(targetGroupId)) {
+        state.systemSyncBatches = [];
+        state.systemSyncBatchesError = null;
+        if (options.render !== false) {
+            renderSystemSyncBatches();
+        }
+        return;
+    }
     try {
         const [batchResult, configResult] = await Promise.all([
             apiPost('/zsxq/system-sync-test/batches', {
@@ -1359,6 +1410,13 @@ async function loadSystemSyncBatches(groupId, options = {}) {
 }
 
 async function loadSystemSyncSchedulerStatus(options = {}) {
+    if (state.selectedGroup && !isSelectedSystemSyncGroup()) {
+        state.systemSyncSchedulerStatus = null;
+        if (options.render !== false) {
+            renderSystemSyncSchedulerPanel();
+        }
+        return;
+    }
     try {
         const result = await apiGet('/zsxq/system-sync-scheduler/status');
         state.systemSyncSchedulerStatus = result?.scheduler || null;
@@ -1382,6 +1440,10 @@ async function loadSystemSyncSchedulerStatus(options = {}) {
 }
 
 async function startSystemSyncScheduler() {
+    if (!isSelectedSystemSyncGroup()) {
+        renderSyncStatus({ type: 'error', message: '系统计划任务仅适用于「前沿信息收录」。' });
+        return;
+    }
     const original = els.systemSyncSchedulerStartBtn.innerHTML;
     setLoading(els.systemSyncSchedulerStartBtn, true, '启动中...');
     try {
@@ -1409,6 +1471,10 @@ async function startSystemSyncScheduler() {
 }
 
 async function stopSystemSyncScheduler() {
+    if (!isSelectedSystemSyncGroup()) {
+        renderSyncStatus({ type: 'error', message: '系统计划任务仅适用于「前沿信息收录」。' });
+        return;
+    }
     const original = els.systemSyncSchedulerStopBtn.innerHTML;
     setLoading(els.systemSyncSchedulerStopBtn, true, '停止中...');
     try {
@@ -1438,6 +1504,10 @@ async function stopSystemSyncScheduler() {
 }
 
 async function runSystemSyncSchedulerOnce() {
+    if (!isSelectedSystemSyncGroup()) {
+        renderSyncStatus({ type: 'error', message: '系统计划任务仅适用于「前沿信息收录」。' });
+        return;
+    }
     const original = els.systemSyncSchedulerRunOnceBtn.innerHTML;
     setLoading(els.systemSyncSchedulerRunOnceBtn, true, '执行中...');
     try {
@@ -1469,6 +1539,9 @@ async function runSystemSyncSchedulerOnce() {
 
 function startSystemSyncSchedulerPolling() {
     stopSystemSyncSchedulerPolling();
+    if (!isSelectedSystemSyncGroup()) {
+        return;
+    }
     state.systemSyncSchedulerPollTimer = setInterval(() => {
         if (!getSystemSyncTargetGroupId() && !state.systemSyncSchedulerStatus?.running) {
             return;
@@ -1532,11 +1605,15 @@ function stopSystemSyncSchedulerPolling() {
 
 function renderSystemSyncSchedulerPanel() {
     if (!els.systemSyncSchedulerPanel) return;
+    if (!isSelectedSystemSyncGroup()) {
+        els.systemSyncSchedulerPanel.classList.add('hidden');
+        return;
+    }
 
     const scheduler = state.systemSyncSchedulerStatus || {};
     const config = scheduler.config || state.systemSyncConfig || {};
     const running = Boolean(scheduler.running);
-    const hasConfig = Boolean(config?.exists || config?.group_id);
+    const hasConfig = Boolean(config?.exists || config?.group_id) && (!config?.group_id || isSystemSyncGroupId(config.group_id));
 
     els.systemSyncSchedulerPanel.classList.remove('hidden');
     els.systemSchedulerStatusBadge.textContent = running ? '运行中' : '未运行';
@@ -1666,6 +1743,11 @@ function renderSyncRunsList(runs) {
 
 function renderSystemSyncBatches() {
     if (!els.syncBatchesPanel) return;
+    if (!isSelectedSystemSyncGroup()) {
+        els.syncBatchesPanel.classList.add('hidden');
+        els.syncBatchesPanel.innerHTML = '';
+        return;
+    }
     const config = state.systemSyncConfig || {};
     const batches = state.systemSyncBatches || [];
     const batchError = state.systemSyncBatchesError;
@@ -2154,6 +2236,9 @@ function getActiveTabConfig() {
 }
 
 function preferredAttachmentTypeForTab(tab) {
+    if (!isSelectedSystemSyncGroup()) {
+        return '';
+    }
     const label = String(tab?.label || '');
     if (label.includes('调研')) return 'mp3';
     if (label.includes('外资')) return 'pdf';
@@ -2162,14 +2247,15 @@ function preferredAttachmentTypeForTab(tab) {
 
 function applyAttachmentDefaultsForTab(tab) {
     const preferredType = preferredAttachmentTypeForTab(tab);
-    if (!preferredType) return;
-    state.attachmentType = preferredType;
-    state.attachmentViewFilter = preferredType;
+    state.attachmentViewFilter = preferredType || 'all';
+    if (preferredType) {
+        state.attachmentType = preferredType;
+    }
     if (els.attachmentTypeSelect) {
-        els.attachmentTypeSelect.value = preferredType;
+        els.attachmentTypeSelect.value = state.attachmentType;
     }
     if (els.attachmentViewFilterSelect) {
-        els.attachmentViewFilterSelect.value = preferredType;
+        els.attachmentViewFilterSelect.value = state.attachmentViewFilter;
     }
 }
 
@@ -2184,16 +2270,53 @@ function updatePublishTabState() {
     els.publishCurrentTabLabel.classList.toggle('text-slate-400', !hasTag);
 }
 
-function normalizeTopicText(text) {
-    return String(text || '').replace(/<e\s+[^>]*type=["']hashtag["'][^>]*\/?>/g, match => {
-        const titleMatch = match.match(/title=["']([^"']+)["']/);
-        if (!titleMatch) return '';
-        try {
-            return decodeURIComponent(titleMatch[1]);
-        } catch {
-            return '';
-        }
-    }).trim();
+function normalizeTopicText(text, options = {}) {
+    const includeWebUrl = options.includeWebUrl !== false;
+    return String(text || '')
+        .replace(/<e\b[^>]*\/?>/g, match => formatZsxqEntity(match, { includeWebUrl }))
+        .replace(/<\/e>/g, '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/\r\n?/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
+function normalizeTopicTitle(text) {
+    return normalizeTopicText(text, { includeWebUrl: false }).replace(/\s+/g, ' ').trim();
+}
+
+function formatZsxqEntity(tag, { includeWebUrl = true } = {}) {
+    const attrs = parseZsxqEntityAttributes(tag);
+    const type = String(attrs.type || '').toLowerCase();
+    const title = safeDecodeZsxqAttr(attrs.title || '').trim();
+    const href = safeDecodeZsxqAttr(attrs.href || attrs.url || '').trim();
+
+    if (type === 'web') {
+        if (!includeWebUrl) return title || '';
+        if (title && href && title !== href) return `${title}\n${href}`;
+        return title || href || '';
+    }
+    if (title) return title;
+    if (includeWebUrl && href) return href;
+    return '';
+}
+
+function parseZsxqEntityAttributes(tag) {
+    const attrs = {};
+    String(tag || '').replace(/([a-zA-Z0-9_-]+)=["']([^"']*)["']/g, (_, key, value) => {
+        attrs[key] = value;
+        return '';
+    });
+    return attrs;
+}
+
+function safeDecodeZsxqAttr(value) {
+    const raw = String(value || '');
+    try {
+        return decodeURIComponent(raw);
+    } catch {
+        return raw;
+    }
 }
 
 function renderGroups(groups) {
@@ -2253,7 +2376,8 @@ function renderTopics(topics, tabState = null) {
         const topicKey = topicKeyForRender(topic);
         state.topicMap.set(topicKey, topic);
         const content = extractContent(topic);
-        const title = topic.title || topic?.talk?.text?.slice(0, 48) || topic?.article?.title || '无标题主题';
+        const rawTitle = topic.title || topic?.talk?.text?.slice(0, 120) || topic?.article?.title || '无标题主题';
+        const title = normalizeTopicTitle(rawTitle) || '无标题主题';
         const author = topic?.owner?.name || topic?.talk?.owner?.name || '未知作者';
         const created = topic.create_time || topic?.talk?.create_time || '';
         const createdText = formatZsxqTime(created);
@@ -2261,6 +2385,9 @@ function renderTopics(topics, tabState = null) {
         const files = filterFilesByAttachmentView(allFiles, viewFilter);
         const topicSelection = topicFileSelectionState(files, topic.topic_id, topicKey);
         const images = topicImages(topic);
+        const articleLink = renderTopicArticleLink(topic, content);
+        const externalDocuments = renderExternalDocuments(topic);
+        const hashtags = extractHashtags(topic);
 
         return `
             <article class="rounded-lg border border-slate-200 p-4 hover:border-blue-200 hover:shadow-sm transition-all min-w-0" data-topic-key="${escapeHtml(topicKey)}">
@@ -2277,7 +2404,10 @@ function renderTopics(topics, tabState = null) {
                         <span class="text-xs text-slate-400">#${escapeHtml(String(topic.topic_id || ''))}</span>
                     </div>
                 </div>
-                <p class="mt-3 text-sm text-slate-600 leading-6 whitespace-pre-wrap break-words">${escapeHtml(truncate(content, 900))}</p>
+                <p class="mt-3 text-sm text-slate-600 leading-6 whitespace-pre-wrap break-words">${renderTopicText(content, 900)}</p>
+                ${articleLink}
+                ${externalDocuments}
+                ${renderTopicHashtags(hashtags)}
                 ${images.length ? renderImages(images) : ''}
                 ${files.length ? renderFiles(files, topic.topic_id, topicKey) : ''}
             </article>
@@ -2295,7 +2425,9 @@ function renderTopics(topics, tabState = null) {
 }
 
 function activeTabState() {
-    return state.tabStates.get(state.activeTab) || null;
+    if (!state.selectedGroup) return null;
+    const tab = getActiveTabConfig();
+    return tab ? getTabState(tab.id) : null;
 }
 
 function renderLoadMoreFooter(tabState) {
@@ -2337,12 +2469,195 @@ function extractContent(topic) {
     return '无正文预览';
 }
 
+function renderTopicText(text, maxLength) {
+    const value = truncate(normalizeTopicText(text), maxLength);
+    const urlRegex = /https?:\/\/[^\s<>"'）)]+/g;
+    let html = '';
+    let cursor = 0;
+    let match;
+
+    while ((match = urlRegex.exec(value)) !== null) {
+        const url = match[0];
+        html += escapeHtml(value.slice(cursor, match.index));
+        html += `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="font-bold text-blue-600 hover:text-blue-700 hover:underline break-all">${escapeHtml(url)}</a>`;
+        cursor = match.index + url.length;
+    }
+
+    html += escapeHtml(value.slice(cursor));
+    return html || escapeHtml(value);
+}
+
+function renderTopicArticleLink(topic, content = '') {
+    const link = topicArticleLink(topic);
+    if (!link?.url) return '';
+    if (String(content || '').includes(link.url)) return '';
+    return `
+        <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer" class="mt-3 inline-flex max-w-full items-center gap-2 rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-sm font-bold text-blue-700 hover:border-blue-200 hover:bg-blue-100">
+            <i class="fas fa-link shrink-0"></i>
+            <span class="min-w-0 truncate">${escapeHtml(link.title || '查看原文')}</span>
+        </a>
+    `;
+}
+
+function renderExternalDocuments(topic) {
+    const links = Array.isArray(topic?.external_documents) ? topic.external_documents : [];
+    if (!links.length) return '';
+    return `
+        <div class="mt-3 space-y-2">
+            ${links.map(renderExternalDocumentItem).join('')}
+        </div>
+    `;
+}
+
+function renderExternalDocumentItem(link) {
+    const document = link?.document || {};
+    const documentId = document.id || link.external_document_id || '';
+    const url = safeExternalUrl(document.canonical_url || link.canonical_url || document.source_url || link.source_url);
+    const title = externalDocumentTitle(link);
+    const fetchMeta = externalDocumentStatusMeta('fetch', document.fetch_status);
+    const summaryMeta = externalDocumentStatusMeta('summary', document.summary_status);
+    const ttsMeta = externalDocumentStatusMeta('tts', document.tts_status);
+    const summary = String(document.summary_text || '').trim();
+    const fetchError = document.fetch_error ? `<div class="mt-2 text-xs text-rose-600 break-words">${escapeHtml(truncate(document.fetch_error, 240))}</div>` : '';
+    const summaryError = document.summary_error ? `<div class="mt-2 text-xs text-amber-700 break-words">${escapeHtml(truncate(document.summary_error, 240))}</div>` : '';
+    const ttsError = document.tts_error ? `<div class="mt-2 text-xs text-rose-600 break-words">${escapeHtml(truncate(document.tts_error, 240))}</div>` : '';
+    const canSummarize = document.fetch_status === 'fetched';
+    const canTts = document.fetch_status === 'fetched' || Boolean(summary);
+    const audioHref = documentId ? `${apiBaseUrl()}/external-documents/${encodeURIComponent(documentId)}/tts/audio` : '';
+
+    return `
+        <div class="rounded-lg border border-sky-100 bg-sky-50/40 p-3 min-w-0" data-external-doc-id="${escapeHtml(documentId)}">
+            <div class="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+                <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="rounded border border-sky-200 bg-white px-2 py-0.5 text-[11px] font-black text-sky-700">${escapeHtml(externalProviderLabel(document.provider || link.provider))}</span>
+                        ${document.content_chars ? `<span class="text-[11px] font-bold text-slate-400">${escapeHtml(String(document.content_chars))} 字</span>` : ''}
+                    </div>
+                    ${url ? `
+                        <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="mt-2 inline-flex max-w-full items-center gap-2 text-sm font-black text-slate-800 hover:text-blue-700">
+                            <i class="fas fa-file-lines shrink-0 text-sky-600"></i>
+                            <span class="min-w-0 truncate">${escapeHtml(title)}</span>
+                        </a>
+                    ` : `<div class="mt-2 text-sm font-black text-slate-800 break-words">${escapeHtml(title)}</div>`}
+                </div>
+                <div class="flex shrink-0 flex-wrap gap-1">
+                    ${renderExternalDocumentButton('external-detail', documentId, '<i class="fas fa-eye mr-1"></i>详情')}
+                    ${renderExternalDocumentButton('external-fetch', documentId, '<i class="fas fa-cloud-arrow-down mr-1"></i>抓取', document.fetch_status === 'fetching')}
+                    ${renderExternalDocumentButton('external-summarize', documentId, '<i class="fas fa-wand-magic-sparkles mr-1"></i>总结', document.summary_status === 'summarizing' || !canSummarize)}
+                    ${renderExternalDocumentButton('external-tts', documentId, '<i class="fas fa-volume-high mr-1"></i>TTS', ['queued', 'running'].includes(document.tts_status) || !canTts)}
+                    ${document.tts_status === 'completed' && audioHref ? `
+                        <a href="${escapeHtml(audioHref)}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-emerald-200 bg-white px-2 py-1 text-xs font-black text-emerald-700 hover:bg-emerald-50">
+                            <i class="fas fa-download mr-1"></i>音频
+                        </a>
+                    ` : ''}
+                </div>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-1.5">
+                ${renderExternalDocumentStatusBadge('抓取', fetchMeta)}
+                ${renderExternalDocumentStatusBadge('总结', summaryMeta)}
+                ${renderExternalDocumentStatusBadge('语音', ttsMeta)}
+            </div>
+            ${summary ? `<div class="mt-2 rounded-md border border-sky-100 bg-white px-3 py-2 text-xs leading-5 text-slate-600 break-words">${renderExternalTextPreview(summary, 500)}</div>` : ''}
+            ${fetchError}${summaryError}${ttsError}
+            <div class="external-document-detail mt-3 hidden rounded-md border border-slate-200 bg-white p-3 text-sm" data-external-detail="${escapeHtml(documentId)}"></div>
+        </div>
+    `;
+}
+
+function renderExternalDocumentButton(action, documentId, html, disabled = false) {
+    const isDisabled = disabled || !documentId;
+    return `
+        <button type="button" data-external-action="${escapeHtml(action)}" data-document-id="${escapeHtml(documentId)}"
+            class="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-black text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50" ${isDisabled ? 'disabled' : ''}>
+            ${html}
+        </button>
+    `;
+}
+
+function renderExternalDocumentStatusBadge(label, meta) {
+    return `<span class="rounded-full border px-2 py-0.5 text-[11px] font-black ${meta.className}">${escapeHtml(label)}: ${escapeHtml(meta.text)}</span>`;
+}
+
+function externalDocumentStatusMeta(kind, status) {
+    const value = status || (kind === 'tts' ? 'not_submitted' : 'pending');
+    const maps = {
+        fetch: {
+            pending: { text: '待抓取', className: 'border-slate-200 bg-white text-slate-500' },
+            fetching: { text: '抓取中', className: 'border-blue-200 bg-blue-50 text-blue-700' },
+            fetched: { text: '已抓取', className: 'border-emerald-200 bg-emerald-50 text-emerald-700' },
+            empty: { text: '空正文', className: 'border-amber-200 bg-amber-50 text-amber-700' },
+            failed: { text: '失败', className: 'border-rose-200 bg-rose-50 text-rose-700' },
+        },
+        summary: {
+            pending: { text: '待总结', className: 'border-slate-200 bg-white text-slate-500' },
+            summarizing: { text: '总结中', className: 'border-blue-200 bg-blue-50 text-blue-700' },
+            completed: { text: '已总结', className: 'border-violet-200 bg-violet-50 text-violet-700' },
+            summarized: { text: '已总结', className: 'border-violet-200 bg-violet-50 text-violet-700' },
+            failed: { text: '失败', className: 'border-amber-200 bg-amber-50 text-amber-700' },
+        },
+        tts: {
+            not_submitted: { text: '未提交', className: 'border-slate-200 bg-white text-slate-500' },
+            submitted: { text: '已提交', className: 'border-blue-200 bg-blue-50 text-blue-700' },
+            queued: { text: '排队中', className: 'border-blue-200 bg-blue-50 text-blue-700' },
+            running: { text: '生成中', className: 'border-blue-200 bg-blue-50 text-blue-700' },
+            processing: { text: '生成中', className: 'border-blue-200 bg-blue-50 text-blue-700' },
+            completed: { text: '已生成', className: 'border-emerald-200 bg-emerald-50 text-emerald-700' },
+            failed: { text: '失败', className: 'border-rose-200 bg-rose-50 text-rose-700' },
+            blocked: { text: '需处理', className: 'border-amber-200 bg-amber-50 text-amber-700' },
+            canceled: { text: '已取消', className: 'border-slate-200 bg-slate-50 text-slate-500' },
+        },
+    };
+    return maps[kind]?.[value] || { text: value, className: 'border-slate-200 bg-white text-slate-500' };
+}
+
+function externalProviderLabel(provider) {
+    const labels = {
+        feishu: '飞书',
+    };
+    return labels[provider] || provider || '外链';
+}
+
+function externalDocumentTitle(link) {
+    const document = link?.document || {};
+    const title = document.title || link.link_text || document.canonical_url || link.canonical_url || link.source_url || '外部文档';
+    return truncate(String(title).replace(/\s+/g, ' ').trim(), 120);
+}
+
+function renderExternalTextPreview(text, limit) {
+    return escapeHtml(truncate(text, limit)).replace(/\n/g, '<br>');
+}
+
+function topicArticleLink(topic) {
+    const article = topic?.talk?.article || topic?.article || topic?.question?.article || null;
+    if (!article || typeof article !== 'object') return null;
+    const url = safeExternalUrl(article.article_url || article.url || article.link || article.inline_article_url);
+    if (!url) return null;
+    return {
+        title: normalizeTopicTitle(article.title || topic.title || '查看原文') || '查看原文',
+        url,
+    };
+}
+
+function safeExternalUrl(value) {
+    const url = String(value || '').trim();
+    return /^https?:\/\//i.test(url) ? url : '';
+}
+
 function topicFiles(topic) {
     return topic.files || topic?.talk?.files || topic?.article?.files || [];
 }
 
 function topicImages(topic) {
     return topic.images || topic?.talk?.images || topic?.article?.images || [];
+}
+
+function renderTopicHashtags(tags) {
+    if (!tags?.length) return '';
+    return `
+        <div class="mt-3 flex flex-wrap gap-2">
+            ${tags.map(tag => `<span class="rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">${escapeHtml(tag)}</span>`).join('')}
+        </div>
+    `;
 }
 
 function attachmentSelectionKey({ topicId, attachmentKey, fileId, name }) {
@@ -2432,6 +2747,7 @@ function renderImages(images) {
 
 function extractHashtags(topic) {
     const chunks = [
+        topic.annotation,
         topic.title,
         topic?.talk?.text,
         topic?.article?.title,
@@ -3011,6 +3327,118 @@ function bindTopicActions() {
             setTimeout(() => { button.textContent = original; }, 1200);
         });
     });
+
+    els.topicsList.querySelectorAll('button[data-external-action]').forEach(button => {
+        button.addEventListener('click', () => handleExternalDocumentAction(button));
+    });
+}
+
+async function handleExternalDocumentAction(button) {
+    const action = button.dataset.externalAction;
+    const documentId = button.dataset.documentId;
+    if (!documentId) return;
+
+    const originalHTML = button.innerHTML;
+    setLoading(button, true, externalDocumentLoadingLabel(action));
+
+    try {
+        let result;
+        if (action === 'external-detail') {
+            result = await apiGet(`/external-documents/${encodeURIComponent(documentId)}`);
+            const document = result?.document || result;
+            updateExternalDocumentInTopics(document);
+            renderExternalDocumentDetailPanel(button, document);
+            setLoading(button, false, originalHTML);
+            return;
+        }
+        if (action === 'external-fetch') {
+            result = await apiPost(`/external-documents/${encodeURIComponent(documentId)}/fetch`, {});
+        } else if (action === 'external-summarize') {
+            result = await apiPost(`/external-documents/${encodeURIComponent(documentId)}/summarize`, {});
+        } else if (action === 'external-tts') {
+            result = await apiPost(`/external-documents/${encodeURIComponent(documentId)}/tts`, {});
+        } else {
+            setLoading(button, false, originalHTML);
+            return;
+        }
+
+        const document = result?.document || result;
+        updateExternalDocumentInTopics(document);
+        renderActiveTab();
+    } catch (error) {
+        setLoading(button, false, originalHTML);
+        renderExternalDocumentInlineError(button, error.message || '操作失败');
+    }
+}
+
+function externalDocumentLoadingLabel(action) {
+    return {
+        'external-detail': '读取...',
+        'external-fetch': '抓取...',
+        'external-summarize': '总结...',
+        'external-tts': '提交...',
+    }[action] || '处理中...';
+}
+
+function renderExternalDocumentDetailPanel(button, document) {
+    const panel = button.closest('[data-external-doc-id]')?.querySelector('.external-document-detail');
+    if (!panel || !document) return;
+    const summary = String(document.summary_text || '').trim();
+    const content = String(document.content_text || '').trim();
+    const rawMeta = document.raw_payload || {};
+    panel.classList.remove('hidden');
+    panel.innerHTML = `
+        <div class="space-y-3">
+            ${summary ? `
+                <section>
+                    <div class="text-xs font-black text-slate-400">AI 总结</div>
+                    <div class="mt-1 rounded-md bg-violet-50 px-3 py-2 text-sm leading-6 text-slate-700 break-words">${renderExternalTextPreview(summary, 1600)}</div>
+                </section>
+            ` : ''}
+            ${content ? `
+                <section>
+                    <div class="text-xs font-black text-slate-400">飞书正文</div>
+                    <div class="mt-1 max-h-80 overflow-auto rounded-md bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-700 whitespace-pre-wrap break-words">${escapeHtml(truncate(content, 4000))}</div>
+                </section>
+            ` : ''}
+            <div class="flex flex-wrap gap-2 text-xs text-slate-400">
+                ${document.fetched_at ? `<span>抓取 ${escapeHtml(formatZsxqTime(document.fetched_at) || document.fetched_at)}</span>` : ''}
+                ${document.summarized_at ? `<span>总结 ${escapeHtml(formatZsxqTime(document.summarized_at) || document.summarized_at)}</span>` : ''}
+                ${rawMeta.final_url ? `<a class="font-bold text-blue-600 hover:underline break-all" href="${escapeHtml(rawMeta.final_url)}" target="_blank" rel="noopener noreferrer">最终链接</a>` : ''}
+            </div>
+            ${!summary && !content ? '<div class="text-sm text-slate-400">暂无正文。</div>' : ''}
+        </div>
+    `;
+}
+
+function renderExternalDocumentInlineError(button, message) {
+    const panel = button.closest('[data-external-doc-id]')?.querySelector('.external-document-detail');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+    panel.innerHTML = `<div class="text-sm font-bold text-rose-600 break-words">${escapeHtml(message)}</div>`;
+}
+
+function updateExternalDocumentInTopics(document) {
+    if (!document?.id) return;
+    const documentId = String(document.id);
+    state.tabStates.forEach(tabState => {
+        (tabState.topics || []).forEach(topic => {
+            (topic.external_documents || []).forEach(link => {
+                const linkDocumentId = String(link.external_document_id || link.document?.id || '');
+                if (linkDocumentId !== documentId) return;
+                link.external_document_id = documentId;
+                link.document = { ...(link.document || {}), ...document };
+            });
+        });
+    });
+    state.currentTopics.forEach(topic => {
+        (topic.external_documents || []).forEach(link => {
+            const linkDocumentId = String(link.external_document_id || link.document?.id || '');
+            if (linkDocumentId !== documentId) return;
+            link.external_document_id = documentId;
+            link.document = { ...(link.document || {}), ...document };
+        });
+    });
 }
 
 async function downloadFile(button) {
@@ -3301,6 +3729,7 @@ async function createManualDownloadWorkflow() {
 
     const publishEnabled = els.manualPlanAutoPublishCheckbox?.checked === true;
     const typeLabel = attachmentTypeText(currentAttachmentType());
+    const cleanerConfig = isSelectedSystemSyncGroup() ? (state.systemSyncConfig || {}) : {};
     const originalHTML = els.batchDownloadBtn.innerHTML;
     setLoading(els.batchDownloadBtn, true, '创建中...');
     renderSyncStatus({
@@ -3324,8 +3753,8 @@ async function createManualDownloadWorkflow() {
                 auto_publish_after_clean: {
                     enabled: publishEnabled,
                 },
-                pdf_cleaner: state.systemSyncConfig?.pdf_cleaner || {},
-                audio_cleaner: state.systemSyncConfig?.audio_cleaner || {},
+                pdf_cleaner: cleanerConfig.pdf_cleaner || {},
+                audio_cleaner: cleanerConfig.audio_cleaner || {},
             },
             trigger: 'zsxq-lab-manual-download-plan',
         };

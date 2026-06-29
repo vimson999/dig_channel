@@ -8,10 +8,15 @@ if backend_dir not in sys.path:
 
 from celery_config import celery_app
 from models import db
-from services.runtime_guard import retry_exception_types
+from services.runtime_guard import is_retryable_db_error, retry_exception_types
 
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_DB_RETRIES = 5
+DEFAULT_DB_RETRY_DELAY_SECONDS = 60
+DB_RETRIES_ENV_NAME = "ZSXQ_SYNC_DB_RETRIES"
+DB_RETRY_DELAY_ENV_NAME = "ZSXQ_SYNC_DB_RETRY_DELAY_SECONDS"
 
 
 @celery_app.task(bind=True, name="tasks.zsxq_sync.run_zsxq_sync")
@@ -57,6 +62,7 @@ def run_zsxq_sync(self, run_id, payload):
                 manual_attachment_plan=payload.get("manual_attachment_plan"),
                 attachment_download_rules=payload.get("attachment_download_rules"),
                 auto_video_dispatch=payload.get("auto_video_dispatch"),
+                auto_script_material_dispatch=payload.get("auto_script_material_dispatch"),
                 workflow_run_id=workflow_run_id,
             )
             if not workflow_run_id and _auto_pdf_clean_enabled(payload):
@@ -143,6 +149,20 @@ def run_zsxq_sync(self, run_id, payload):
         except retry_exception_types():
             raise
         except Exception as exc:
+            db.session.rollback()
+            retryable_db_error = _is_retryable_db_error(exc)
+            if retryable_db_error and self.request.retries < _db_retry_count():
+                countdown = _db_retry_delay_seconds(self.request.retries)
+                logger.warning(
+                    "[ZSXQ_SYNC_TASK] retry transient db error | run_id=%s retry=%s/%s countdown=%ss error=%s",
+                    run_id,
+                    self.request.retries + 1,
+                    _db_retry_count(),
+                    countdown,
+                    exc,
+                )
+                raise self.retry(exc=exc, countdown=countdown, max_retries=_db_retry_count())
+
             if credential_id:
                 try:
                     from services.platform_credential_service import is_auth_error, mark_credential_error
@@ -162,6 +182,26 @@ def run_zsxq_sync(self, run_id, payload):
             raise
         finally:
             db.session.remove()
+
+
+def _is_retryable_db_error(exc):
+    return is_retryable_db_error(exc)
+
+
+def _db_retry_count():
+    return max(0, _int_env(DB_RETRIES_ENV_NAME, DEFAULT_DB_RETRIES))
+
+
+def _db_retry_delay_seconds(retry_index):
+    base = max(1, _int_env(DB_RETRY_DELAY_ENV_NAME, DEFAULT_DB_RETRY_DELAY_SECONDS))
+    return min(base * max(int(retry_index or 0) + 1, 1), 600)
+
+
+def _int_env(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def _auto_pdf_clean_enabled(payload):

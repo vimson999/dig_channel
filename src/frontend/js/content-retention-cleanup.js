@@ -12,6 +12,11 @@
             tone: 'emerald',
             icon: 'fa-diagram-project',
         },
+        content_pipeline_batch_file: {
+            label: '内容流水线大文件',
+            tone: 'emerald',
+            icon: 'fa-file-circle-xmark',
+        },
         manual_publish: {
             label: '手动发布临时目录',
             tone: 'amber',

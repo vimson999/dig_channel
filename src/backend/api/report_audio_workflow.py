@@ -291,6 +291,13 @@ def create_job(current_user):
     review_prompt = (data.get("review_prompt") or DEFAULT_REVIEW_PROMPT).strip()
     followups = _parse_followups(data)
     video_options = _parse_video_options(data)
+    script_material_only = _parse_script_material_only(data)
+    if script_material_only:
+        video_options.update({
+            "enabled": False,
+            "vertical_enabled": False,
+            "bilibili_enabled": False,
+        })
     gemini_url = (data.get("gemini_url") or data.get("url") or "").strip()
     if gemini_url and not gemini_url.startswith(("http://", "https://")):
         return jsonify({"success": False, "message": "gemini_url 必须是 http(s) 地址"}), 400
@@ -299,8 +306,20 @@ def create_job(current_user):
     doubao_status = doubao_browser_tts.status_payload()
     if not gemini_status.get("configured"):
         return jsonify({"success": False, "message": "研报 PDF Gem 解析未配置", "data": {"report_pdf_gemini": gemini_status}}), 400
-    if not doubao_status.get("configured"):
+    if not script_material_only and not doubao_status.get("configured"):
         return jsonify({"success": False, "message": "豆包浏览器朗读未配置", "data": {"doubao_browser_tts": doubao_status}}), 400
+
+    initial_result = {
+        "metadata": metadata,
+        "pdf": None,
+        "children": {},
+        "structured_result": None,
+        "audio": None,
+        "video": None,
+        "logs": [],
+    }
+    if script_material_only:
+        initial_result["script_material"] = {"status": "pending"}
 
     task = PublicationTask(
         status="pending",
@@ -315,20 +334,13 @@ def create_job(current_user):
                 "followups": followups,
                 "gemini_url": gemini_url,
                 "metadata": metadata,
+                "script_material_only": script_material_only,
                 "video": video_options,
                 "pdf": None,
                 "pdf_path": None,
             },
         },
-        result={
-            "metadata": metadata,
-            "pdf": None,
-            "children": {},
-            "structured_result": None,
-            "audio": None,
-            "video": None,
-            "logs": [],
-        },
+        result=initial_result,
     )
     db.session.add(task)
     db.session.flush()
@@ -1056,16 +1068,10 @@ def _latest_vertical_video_child(parent_id):
         .limit(30)
         .all()
     )
-    vertical_children = [task for task in candidates if _is_vertical_backfill_child(task)]
+    vertical_children = [task for task in candidates if _is_vertical_video_candidate_child(task)]
     if not vertical_children:
         return None
-    for task in vertical_children:
-        if task.status not in TERMINAL_STATUSES:
-            return task
-    for task in vertical_children:
-        if task.status == "completed" and _path_exists(_vertical_video_path_from_child(task)):
-            return task
-    return vertical_children[0]
+    return max(vertical_children, key=_vertical_child_priority)
 
 
 def _is_vertical_backfill_child(task):
@@ -1083,7 +1089,22 @@ def _is_vertical_backfill_child(task):
 
 def _vertical_video_path_from_child(child):
     result = child.result if isinstance(child.result, dict) else {}
-    return result.get("vertical_video_path") or result.get("video_path")
+    vertical_path = result.get("vertical_video_path")
+    if vertical_path:
+        return vertical_path
+    if _is_vertical_backfill_child(child):
+        return result.get("video_path")
+    return None
+
+
+def _is_vertical_video_candidate_child(task):
+    if _is_vertical_backfill_child(task):
+        return True
+    if _path_exists(_vertical_video_path_from_child(task)):
+        return True
+    params = task.params if isinstance(task.params, dict) else {}
+    vertical = params.get("vertical_video") if isinstance(params.get("vertical_video"), dict) else {}
+    return _truthy(vertical.get("enabled"), False)
 
 
 def _vertical_video_path_for_task(task):
@@ -1153,6 +1174,16 @@ def _job_payload(task, include_raw=False):
     if vertical_child:
         children["publisher_vertical_video"] = _vertical_child_summary(vertical_child, task.id)
     cover_subtitle = (structured_result or {}).get("cover_subtitle") or video_result.get("cover_subtitle") or ""
+    public_pdf = _public_pdf(task.id, request_payload.get("pdf") or result.get("pdf"))
+    request_metadata = request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
+    request_video = request_payload.get("video") if isinstance(request_payload.get("video"), dict) else {}
+    detail_title = _first_compact_title(
+        _display_title_from_structured(structured_result),
+        request_video.get("title"),
+        request_metadata.get("title"),
+        (public_pdf or {}).get("filename"),
+        (public_pdf or {}).get("topic_title"),
+    )
     payload = {
         "job_id": task.id,
         "status": status,
@@ -1168,17 +1199,18 @@ def _job_payload(task, include_raw=False):
             "followups": request_payload.get("followups") or [],
             "gemini_url": request_payload.get("gemini_url"),
             "video": request_payload.get("video") or {},
-            "pdf": _public_pdf(task.id, request_payload.get("pdf") or result.get("pdf")),
-            "metadata": request_payload.get("metadata") or {},
+            "pdf": public_pdf,
+            "metadata": request_metadata,
         },
-        "pdf": _public_pdf(task.id, request_payload.get("pdf") or result.get("pdf")),
+        "pdf": public_pdf,
         "children": children,
         "child_attempts": result.get("child_attempts") or {},
         "retry_state": result.get("retry_state") or {},
         "gemini": result.get("gemini"),
         "doubao_browser_tts": live_doubao_items or result.get("doubao_browser_tts") or [],
         "structured_result": structured_result,
-        "title": _display_title_from_structured(structured_result),
+        "script_material": result.get("script_material") if isinstance(result.get("script_material"), dict) else None,
+        "title": detail_title,
         "cover_title": (structured_result or {}).get("cover_title") or "",
         "cover_subtitle": cover_subtitle,
         "tts_text": result.get("tts_text"),
@@ -1220,11 +1252,20 @@ def _bool_or_none(value):
 
 
 def _first_compact_title(*values):
+    generic_fallback = ""
     for value in values:
         title = _compact_title(value)
         if title:
+            if _is_generic_report_title(title):
+                generic_fallback = generic_fallback or title
+                continue
             return title
-    return ""
+    return generic_fallback
+
+
+def _is_generic_report_title(value):
+    normalized = "".join(str(value or "").strip().split()).lstrip("#")
+    return normalized in {"外资研报", "研报", "PDF", "pdf"}
 
 
 def _job_summary_payload(row, child_bundle=None):
@@ -1283,14 +1324,27 @@ def _job_summary_payload(row, child_bundle=None):
         row.structured_title,
         row.video_title,
         row.metadata_title,
-        row.request_pdf_topic_title,
-        row.result_pdf_topic_title,
         row.request_pdf_filename,
         row.result_pdf_filename,
+        row.request_pdf_topic_title,
+        row.result_pdf_topic_title,
     )
     status = STATUS_MAP.get(row.status, row.status or "queued")
     result_error = row.result_error
     vertical_child = child_bundle.get("publisher_vertical_video") or {}
+    vertical_video = vertical_child.get("vertical_video") if isinstance(vertical_child, dict) else None
+    if vertical_video:
+        video_payload = video_payload or {
+            "enabled": _bool_or_none(row.video_enabled),
+            "status": row.video_status,
+            "publisher_task_id": row.video_publisher_task_id,
+            "message": row.video_message,
+            "cover_title": row.cover_title,
+            "cover_subtitle": cover_subtitle,
+        }
+        video_payload["vertical_enabled"] = True
+        video_payload["vertical_video"] = vertical_video
+        video_payload = {key: value for key, value in video_payload.items() if value is not None}
     return {
         "job_id": row.id,
         "status": status,
@@ -1315,7 +1369,7 @@ def _job_summary_payload(row, child_bundle=None):
         "download_audio_url": f"/api/report-audio-workflows/jobs/{row.id}/download-audio" if row.audio_wav_path else None,
         "download_result_url": f"/api/report-audio-workflows/jobs/{row.id}/download-result" if row.output_path else None,
         "download_video_url": f"/api/report-audio-workflows/jobs/{row.id}/download-video" if row.video_path and _path_exists(row.video_path) else None,
-        "download_vertical_video_url": f"/api/report-audio-workflows/jobs/{row.id}/download-vertical-video" if vertical_child.get("vertical_video") else None,
+        "download_vertical_video_url": f"/api/report-audio-workflows/jobs/{row.id}/download-vertical-video" if vertical_video else None,
         "download_cover_url": f"/api/report-audio-workflows/jobs/{row.id}/download-cover" if row.cover_path else None,
         "metadata": {"title": row.metadata_title} if row.metadata_title else {},
         "logs": [],
@@ -1452,7 +1506,7 @@ def _vertical_child_summaries_for_parent_ids(parent_ids):
     selected = {}
     for task in candidates:
         parent_id = str(task.source_task_id or "").strip()
-        if parent_id not in ids or not _is_vertical_backfill_child(task):
+        if parent_id not in ids or not _is_vertical_video_candidate_child(task):
             continue
         current = selected.get(parent_id)
         if not current or _vertical_child_priority(task) > _vertical_child_priority(current):
@@ -1465,9 +1519,11 @@ def _vertical_child_summaries_for_parent_ids(parent_ids):
 
 
 def _vertical_child_priority(task):
+    if task.status == "completed" and _path_exists(_vertical_video_path_from_child(task)):
+        return 4
     if task.status not in TERMINAL_STATUSES:
         return 3
-    if task.status == "completed" and _path_exists(_vertical_video_path_from_child(task)):
+    if _is_vertical_backfill_child(task):
         return 2
     return 1
 
@@ -1662,6 +1718,13 @@ def _parse_video_options(data):
         "bilibili_enabled": _truthy(pick("bilibili_enabled", "publish_bilibili_enabled", default=False)),
         "sub_burn_enabled": _truthy(pick("sub_burn_enabled", default=True), default=True),
     }
+
+
+def _parse_script_material_only(data):
+    for key in ("script_material_only", "material_only", "script_only"):
+        if key in data:
+            return _truthy(data.get(key), False)
+    return False
 
 
 def _validate_pdf_upload(file_storage):

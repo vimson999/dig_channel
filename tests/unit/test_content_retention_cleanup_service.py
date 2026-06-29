@@ -3,6 +3,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -13,21 +14,23 @@ if str(BACKEND_DIR) not in sys.path:
 from services.content_pipeline.retention_cleanup_service import (  # noqa: E402
     ContentPipelineRetentionCleanupService,
     ContentRetentionPolicy,
+    _record_is_within_protection_window,
 )
 
 
 class ContentRetentionCleanupServiceTest(unittest.TestCase):
-    def test_preview_does_not_delete_old_content_pipeline_batch(self):
+    def test_preview_collects_old_content_pipeline_large_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             batch = root / "runtime" / "content_pipeline" / "batches" / "old-batch"
             file_path = batch / "pdf_cleaned" / "report.pdf"
             file_path.parent.mkdir(parents=True)
             file_path.write_bytes(b"x" * 128)
+            (batch / "manifest.json").write_text("{}", encoding="utf-8")
             _touch_tree(batch, days_old=5)
 
             service = _service(root)
-            service._protected_paths = lambda: set()
+            service._protected_paths = lambda *_, **__: set()
             result = service.run(
                 policy=ContentRetentionPolicy(
                     content_pipeline_batch_days=2,
@@ -40,9 +43,11 @@ class ContentRetentionCleanupServiceTest(unittest.TestCase):
 
             self.assertEqual(result["candidate_count"], 1)
             self.assertTrue(batch.exists())
-            self.assertEqual(result["candidates"][0]["category"], "content_pipeline_batch")
+            self.assertEqual(result["candidates"][0]["category"], "content_pipeline_batch_file")
+            self.assertEqual(result["candidates"][0]["kind"], "file")
+            self.assertEqual(result["candidates"][0]["path"], str(file_path.resolve()))
 
-    def test_cleanup_deletes_only_expired_batch_directory(self):
+    def test_cleanup_deletes_only_expired_content_pipeline_large_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             batches_root = root / "runtime" / "content_pipeline" / "batches"
@@ -50,12 +55,16 @@ class ContentRetentionCleanupServiceTest(unittest.TestCase):
             new_batch = batches_root / "new-batch"
             (old_batch / "out").mkdir(parents=True)
             (new_batch / "out").mkdir(parents=True)
-            (old_batch / "out" / "old.pdf").write_bytes(b"old")
-            (new_batch / "out" / "new.pdf").write_bytes(b"new")
+            old_pdf = old_batch / "out" / "old.pdf"
+            old_manifest = old_batch / "manifest.json"
+            new_pdf = new_batch / "out" / "new.pdf"
+            old_pdf.write_bytes(b"old")
+            old_manifest.write_text("keep", encoding="utf-8")
+            new_pdf.write_bytes(b"new")
             _touch_tree(old_batch, days_old=5)
 
             service = _service(root)
-            service._protected_paths = lambda: set()
+            service._protected_paths = lambda *_, **__: set()
             result = service.run(
                 policy=ContentRetentionPolicy(
                     content_pipeline_batch_days=2,
@@ -67,8 +76,39 @@ class ContentRetentionCleanupServiceTest(unittest.TestCase):
             )
 
             self.assertEqual(result["deleted_count"], 1)
-            self.assertFalse(old_batch.exists())
+            self.assertFalse(old_pdf.exists())
+            self.assertTrue(old_manifest.exists())
+            self.assertTrue(old_batch.exists())
             self.assertTrue(new_batch.exists())
+            self.assertTrue(new_pdf.exists())
+
+    def test_content_pipeline_large_file_expiry_uses_file_mtime_not_parent_directory_mtime(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            batch = root / "runtime" / "content_pipeline" / "batches" / "touched-batch"
+            file_path = batch / "audio_cleaned" / "files" / "old.mp3"
+            file_path.parent.mkdir(parents=True)
+            file_path.write_bytes(b"old-audio")
+            old_timestamp = time.time() - 8 * 86400
+            os.utime(file_path, (old_timestamp, old_timestamp))
+            now = time.time()
+            os.utime(file_path.parent, (now, now))
+            os.utime(batch, (now, now))
+
+            service = _service(root)
+            service._protected_paths = lambda *_, **__: set()
+            result = service.run(
+                policy=ContentRetentionPolicy(
+                    content_pipeline_batch_days=3,
+                    include_sync_raw=False,
+                    include_manual_publish=False,
+                    include_pytest_batches=False,
+                ),
+                dry_run=True,
+            )
+
+            self.assertEqual(result["candidate_count"], 1)
+            self.assertEqual(result["candidates"][0]["path"], str(file_path.resolve()))
 
     def test_sync_raw_cleanup_deletes_only_large_attachment_suffixes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -82,7 +122,7 @@ class ContentRetentionCleanupServiceTest(unittest.TestCase):
             _touch_tree(files_dir, days_old=5)
 
             service = _service(root)
-            service._protected_paths = lambda: set()
+            service._protected_paths = lambda *_, **__: set()
             result = service.run(
                 policy=ContentRetentionPolicy(
                     sync_raw_days=2,
@@ -108,7 +148,7 @@ class ContentRetentionCleanupServiceTest(unittest.TestCase):
             _touch_tree(batch, days_old=5)
 
             service = _service(root)
-            service._protected_paths = lambda: {output.resolve()}
+            service._protected_paths = lambda *_, **__: {output.resolve()}
             result = service.run(
                 policy=ContentRetentionPolicy(
                     content_pipeline_batch_days=2,
@@ -121,6 +161,20 @@ class ContentRetentionCleanupServiceTest(unittest.TestCase):
 
             self.assertEqual(result["candidate_count"], 0)
             self.assertTrue(batch.exists())
+
+    def test_stale_unfinished_reference_is_not_protected_forever(self):
+        recent = type("Record", (), {"updated_at": datetime.utcnow() - timedelta(days=1)})()
+        stale = type("Record", (), {"updated_at": datetime.utcnow() - timedelta(days=5)})()
+        now = time.time()
+
+        self.assertTrue(_record_is_within_protection_window(recent, now, 3))
+        self.assertFalse(_record_is_within_protection_window(stale, now, 3))
+
+    def test_policy_defaults_include_unfinished_reference_protection_window(self):
+        policy = ContentRetentionPolicy.from_payload({})
+
+        self.assertEqual(policy.unfinished_reference_protect_days, 3)
+        self.assertEqual(policy.to_dict()["unfinished_reference_protect_days"], 3)
 
 
 def _service(root: Path) -> ContentPipelineRetentionCleanupService:

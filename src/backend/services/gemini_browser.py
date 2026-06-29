@@ -965,6 +965,9 @@ class GeminiBrowserWorker:
         last_text = ""
         stable_since = time.monotonic()
         incomplete_since = None
+        normalized_prompt = _clean_text(prompt)
+        resubmit_attempts = 0
+        last_resubmit_at = 0.0
 
         while time.monotonic() < deadline:
             self._guard_total_timeout(started_at)
@@ -986,11 +989,28 @@ class GeminiBrowserWorker:
                             time.sleep(1)
                             continue
                     return {"text": candidate}
+            elif normalized_prompt and resubmit_attempts < 3:
+                now = time.monotonic()
+                if now - last_resubmit_at >= 8:
+                    generating = self._is_generating(page)
+                    state = self._composer_submit_state(page, "")
+                    composer_text = _clean_text(self._composer_text(page))
+                    prompt_still_in_composer = normalized_prompt in composer_text
+                    if prompt_still_in_composer and state.get("enabledSend") and not state.get("busy") and not generating:
+                        button = self._wait_for_send_button(page)
+                        if button is not None:
+                            self._click_send_button(page, button, force=resubmit_attempts > 0)
+                            resubmit_attempts += 1
+                            last_resubmit_at = now
+                            time.sleep(2)
+                            continue
             time.sleep(1)
 
         if last_text:
             return {"text": last_text}
         debug = _submit_state_summary(self._composer_submit_state(page, ""), self._composer_text(page))
+        if resubmit_attempts:
+            debug = f"{debug}; resubmit_attempts={resubmit_attempts}" if debug else f"resubmit_attempts={resubmit_attempts}"
         suffix = f"; {debug}" if debug else ""
         raise GeminiBrowserAutomationError(f"等待 Gemini 回复超时{suffix}")
 

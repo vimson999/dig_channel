@@ -95,6 +95,78 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertNotIn("thumbnail", child.params)
         self.assertEqual(child.result["metadata"]["source"], report_audio_api.VERTICAL_BACKFILL_SOURCE)
 
+    def test_main_publisher_vertical_output_is_reused_as_downloadable_video(self):
+        root = Path(self.tmpdir.name)
+        landscape_path = root / "landscape.mp4"
+        vertical_path = root / "vertical.mp4"
+        screenshot_path = root / "page.jpg"
+        landscape_path.write_bytes(b"landscape")
+        vertical_path.write_bytes(b"vertical")
+        screenshot_path.write_bytes(b"jpeg")
+
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"filename": "sample.pdf", "path": str(root / "sample.pdf")},
+                    "video": {"enabled": True, "vertical_enabled": True},
+                },
+            },
+            result={
+                "video": {
+                    "enabled": True,
+                    "status": "completed",
+                    "video_path": str(landscape_path),
+                    "vertical_enabled": True,
+                },
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        child = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "publisher",
+                "source_feature": FEATURE_NAME,
+                "source_task_id": parent.id,
+                "video": {"enabled": True},
+                "vertical_video": {"enabled": True},
+            },
+            result={
+                "source_task_id": parent.id,
+                "video_path": str(landscape_path),
+                "vertical_video_path": str(vertical_path),
+                "pdf_first_page_image": {"path": str(screenshot_path), "bytes": 4},
+            },
+        )
+        db.session.add(child)
+        db.session.commit()
+
+        video = report_audio_api._video_result_with_vertical_backfill(parent)
+        self.assertEqual(video["vertical_video_path"], str(vertical_path))
+        self.assertEqual(video["vertical_publisher_task_id"], child.id)
+        self.assertEqual(report_audio_api._vertical_video_path_for_task(parent), str(vertical_path))
+
+        public = report_audio_api._public_video(parent.id, video)
+        self.assertEqual(
+            public["vertical_video"]["download_url"],
+            f"/api/report-audio-workflows/jobs/{parent.id}/download-vertical-video",
+        )
+
+        summaries = report_audio_api._vertical_child_summaries_for_parent_ids([parent.id])
+        self.assertEqual(summaries[parent.id]["job_id"], child.id)
+        self.assertEqual(
+            summaries[parent.id]["vertical_video"]["download_url"],
+            f"/api/report-audio-workflows/jobs/{parent.id}/download-vertical-video",
+        )
+
     def test_regenerate_cover_updates_parent_result_and_keeps_history(self):
         root = Path(self.tmpdir.name)
         screenshot_path = root / "page.jpg"
@@ -210,6 +282,102 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(payload["structured_result"]["cover_subtitle"], "第一行 副标题\n第二行 副标题")
         self.assertEqual(payload["video"]["cover_subtitle"], "第一行 副标题\n第二行 副标题")
         self.assertNotIn("children", payload)
+
+    def test_job_summary_payload_prefers_pdf_filename_over_generic_topic_title(self):
+        row = SimpleNamespace(
+            id="job-1",
+            request_pdf_filename="野村-亚洲洞察：中国AI行业如何获得融资？-260624.pdf",
+            result_pdf_filename=None,
+            request_pdf_bytes="123",
+            result_pdf_bytes=None,
+            request_pdf_topic_title="#外资研报",
+            result_pdf_topic_title=None,
+            cover_title=None,
+            cover_subtitle=None,
+            structured_title=None,
+            audio_wav_path=None,
+            audio_seconds=None,
+            audio_bytes=None,
+            video_enabled=None,
+            video_status=None,
+            video_publisher_task_id=None,
+            video_message=None,
+            video_path=None,
+            cover_path=None,
+            video_title=None,
+            metadata_title=None,
+            status="pending",
+            current_step="queued",
+            progress=0,
+            created_at=None,
+            started_at=None,
+            completed_at=None,
+            result_completed_at=None,
+            error_message=None,
+            result_error=None,
+            output_path=None,
+        )
+
+        payload = report_audio_api._job_summary_payload(row)
+
+        self.assertEqual(payload["title"], "野村-亚洲洞察：中国AI行业如何获得融资？-260624.pdf")
+        self.assertEqual(payload["pdf"]["topic_title"], "#外资研报")
+
+    def test_job_summary_payload_exposes_download_for_main_publisher_vertical_video(self):
+        row = SimpleNamespace(
+            id="job-1",
+            request_pdf_filename="sample.pdf",
+            result_pdf_filename=None,
+            request_pdf_bytes="123",
+            result_pdf_bytes=None,
+            request_pdf_topic_title="PDF 标题",
+            result_pdf_topic_title=None,
+            cover_title="封面主标题",
+            cover_subtitle=None,
+            structured_title=None,
+            audio_wav_path=None,
+            audio_seconds=None,
+            audio_bytes=None,
+            video_enabled=True,
+            video_status="completed",
+            video_publisher_task_id="publisher-1",
+            video_message=None,
+            video_path=None,
+            cover_path=None,
+            video_title=None,
+            metadata_title=None,
+            status="completed",
+            current_step="done",
+            progress=100,
+            created_at=None,
+            started_at=None,
+            completed_at=None,
+            result_completed_at=None,
+            error_message=None,
+            result_error=None,
+            output_path=None,
+        )
+
+        payload = report_audio_api._job_summary_payload(
+            row,
+            {
+                "publisher_vertical_video": {
+                    "job_id": "publisher-1",
+                    "status": "completed",
+                    "vertical_video": {
+                        "bytes": 8,
+                        "download_url": "/api/report-audio-workflows/jobs/job-1/download-vertical-video",
+                    },
+                }
+            },
+        )
+
+        self.assertEqual(
+            payload["download_vertical_video_url"],
+            "/api/report-audio-workflows/jobs/job-1/download-vertical-video",
+        )
+        self.assertEqual(payload["video"]["vertical_video"]["bytes"], 8)
+        self.assertTrue(payload["video"]["vertical_enabled"])
 
 
 if __name__ == "__main__":

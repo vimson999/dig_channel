@@ -1,33 +1,60 @@
 import os
 import sys
 import unittest
+import wave
+from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+
+from flask import Flask
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from models import db  # noqa: E402
+from models.task import PublicationTask  # noqa: E402
+from tasks import report_audio_workflow  # noqa: E402
 from tasks.report_audio_workflow import (  # noqa: E402
     CURRENT_STEP_MAX_LENGTH,
     _child_id_from_result,
     _child_inline_wait_seconds,
+    _active_tts_task_for_chunk,
     _current_step_code,
+    _create_doubao_tts_task,
     _format_cover_subtitle,
     _format_cover_title,
     _is_retryable_child_error,
     _parent_max_defers,
     _parent_retry_delay_seconds,
     _parse_utc_datetime,
+    _completed_tts_task_for_chunk,
+    _ordered_doubao_tts_outputs,
+    _process_job,
     _publisher_script_subtitles,
     _publisher_sub_burn_enabled,
     _publisher_result_summary,
     _publisher_video_transform,
     _task_chunk_attempt,
+    _tts_text_hash,
     _valid_structured_result,
     _video_stage_enabled,
+    _wait_child,
 )
+
+
+def _write_test_wav(path, seconds=1.0, sample_rate=16000):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frames = int(sample_rate * seconds)
+    with wave.open(str(path), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(sample_rate)
+        writer.writeframes(b"\x00\x00" * frames)
+    return path
 
 
 class ReportAudioWorkflowTaskTest(unittest.TestCase):
@@ -207,6 +234,694 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertEqual(_parse_utc_datetime("2026-06-23T01:02:03Z").isoformat(), "2026-06-23T01:02:03")
         self.assertEqual(_parse_utc_datetime("2026-06-23T09:02:03+08:00").isoformat(), "2026-06-23T01:02:03")
         self.assertIsNone(_parse_utc_datetime(""))
+
+    def test_tts_text_hash_ignores_whitespace_only_differences(self):
+        self.assertEqual(_tts_text_hash("第一段\n第二段"), _tts_text_hash("第一段 第二段"))
+
+
+class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config.update(
+            SQLALCHEMY_DATABASE_URI="sqlite:///:memory:",
+            SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        )
+        db.init_app(self.app)
+        self.ctx = self.app.app_context()
+        self.ctx.push()
+        db.create_all()
+
+    def tearDown(self):
+        db.session.remove()
+        db.drop_all()
+        self.ctx.pop()
+
+    def test_reusable_material_for_pdf_reads_script_material_workflow(self):
+        structured = {
+            "title": "缓存文案",
+            "final_script_for_tts": "这是一段可以复用的基础文案。" * 10,
+        }
+        existing = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "report_script_material_workflow",
+                "source_feature": "zsxq_attachment",
+                "source_task_id": "asset-1",
+                "report_script_material_workflow": {
+                    "pdf": {"attachment_id": "asset-1", "filename": "report.pdf"},
+                },
+            },
+            result={"structured_result": structured},
+        )
+        db.session.add(existing)
+        db.session.commit()
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "1"}, clear=False):
+            reusable = report_audio_workflow._reusable_material_for_pdf(
+                {"attachment_id": "asset-1", "filename": "report.pdf"},
+                exclude_task_id="new-task",
+            )
+
+        self.assertIsNotNone(reusable)
+        self.assertEqual(reusable["source_task_id"], existing.id)
+        self.assertEqual(reusable["source_feature"], "report_script_material_workflow")
+        self.assertEqual(reusable["structured_result"], structured)
+
+    def test_script_material_only_preserves_reused_material_source(self):
+        root = Path(self.app.instance_path)
+        root.mkdir(parents=True, exist_ok=True)
+        asset_id = "asset-script-only"
+        pdf_path = root / "script-only-source.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% test pdf\n")
+        structured = {
+            "title": "基础文案来源测试",
+            "final_script_for_tts": "这是一段已经存在的基础文案，新的基础文案任务应该直接复用它。" * 8,
+        }
+        existing = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "report_script_material_workflow",
+                "source_task_id": asset_id,
+                "report_script_material_workflow": {
+                    "pdf": {"attachment_id": asset_id, "filename": "script-only-source.pdf", "path": str(pdf_path)},
+                },
+            },
+            result={"structured_result": structured},
+            completed_at=datetime.utcnow(),
+        )
+        workflow = PublicationTask(
+            status="pending",
+            current_step="queued",
+            progress=0,
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "user_id": "1",
+                "report_audio_workflow": {
+                    "prompt": "unused",
+                    "review_prompt": "",
+                    "followups": [],
+                    "metadata": {"title": "基础文案来源测试"},
+                    "script_material_only": True,
+                    "pdf_path": str(pdf_path),
+                    "pdf": {"attachment_id": asset_id, "filename": "script-only-source.pdf", "path": str(pdf_path)},
+                    "video": {"enabled": False},
+                },
+            },
+            result={"metadata": {"title": "基础文案来源测试"}, "logs": []},
+        )
+        db.session.add_all([existing, workflow])
+        db.session.commit()
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "10"}, clear=False), \
+            patch.object(report_audio_workflow, "_run_gemini_task_with_retries") as run_gemini, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        run_gemini.assert_not_called()
+        db.session.refresh(workflow)
+        self.assertEqual(workflow.status, "completed")
+        self.assertEqual(workflow.result["script_material"]["mode"], "reused_script_material")
+        self.assertEqual(workflow.result["script_material"]["source_task_id"], existing.id)
+        self.assertEqual(workflow.result["gemini"], None)
+
+    def test_completed_tts_task_for_chunk_reuses_global_exact_text_audio(self):
+        root = Path(self.app.instance_path)
+        root.mkdir(parents=True, exist_ok=True)
+        wav_path = root / "cached.wav"
+        wav_path.write_bytes(b"RIFF----WAVE")
+        text = "这是一段可以复用的豆包朗读文本。"
+        cached = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "doubao_browser_tts",
+                "parent_task_id": "other-parent",
+                "doubao_browser_tts": {
+                    "text": text,
+                    "metadata": {"chunk_index": 7, "text_hash": _tts_text_hash(text)},
+                },
+            },
+            result={
+                "metadata": {"chunk_index": 7, "text_hash": _tts_text_hash(text)},
+                "audio": {"wav_path": str(wav_path), "seconds": 2.0},
+            },
+        )
+        db.session.add(cached)
+        db.session.commit()
+
+        reusable = _completed_tts_task_for_chunk("new-parent", 1, text)
+
+        self.assertIsNotNone(reusable)
+        self.assertEqual(reusable.id, cached.id)
+
+    def test_active_tts_task_for_chunk_releases_stale_processing_child(self):
+        text = "这是一段卡住后应该释放重试的文本。"
+        stale = PublicationTask(
+            status="processing",
+            current_step="download_wav",
+            progress=88,
+            params={
+                "feature": "doubao_browser_tts",
+                "parent_task_id": "parent-1",
+                "doubao_browser_tts": {
+                    "text": text,
+                    "metadata": {"chunk_index": 1, "text_hash": _tts_text_hash(text)},
+                },
+            },
+            result={
+                "metadata": {"chunk_index": 1, "text_hash": _tts_text_hash(text)},
+                "logs": [],
+            },
+            updated_at=datetime.utcnow() - timedelta(minutes=10),
+        )
+        db.session.add(stale)
+        db.session.commit()
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_DOUBAO_STALE_SECONDS": "60"}, clear=False):
+            active = _active_tts_task_for_chunk("parent-1", 1, text)
+
+        self.assertIsNone(active)
+        db.session.refresh(stale)
+        self.assertEqual(stale.status, "failed")
+        self.assertIn("stale", stale.error_message)
+
+    def test_ordered_doubao_tts_outputs_uses_chunk_index_not_completion_order(self):
+        root = Path(self.app.instance_path)
+        root.mkdir(parents=True, exist_ok=True)
+        first_wav = root / "1.wav"
+        second_wav = root / "2.wav"
+        first_wav.write_bytes(b"RIFF-1")
+        second_wav.write_bytes(b"RIFF-2")
+        chunks = ["第一段文本", "第二段文本"]
+        first = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "doubao_browser_tts",
+                "doubao_browser_tts": {"text": chunks[0], "metadata": {"chunk_index": 1}},
+            },
+            result={"audio": {"wav_path": str(first_wav)}},
+        )
+        second = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "doubao_browser_tts",
+                "doubao_browser_tts": {"text": chunks[1], "metadata": {"chunk_index": 2}},
+            },
+            result={"audio": {"wav_path": str(second_wav)}},
+        )
+        parent = PublicationTask(
+            status="processing",
+            current_step="combine_audio",
+            progress=92,
+            params={"feature": "report_pdf_audio_workflow"},
+            result={},
+        )
+        db.session.add_all([parent, second, first])
+        db.session.commit()
+
+        task_ids, wav_paths = _ordered_doubao_tts_outputs(parent.id, chunks, {2: second, 1: first})
+
+        self.assertEqual(task_ids, [first.id, second.id])
+        self.assertEqual(wav_paths, [str(first_wav), str(second_wav)])
+        db.session.refresh(parent)
+        self.assertEqual([item["chunk_index"] for item in parent.result["doubao_browser_order"]], [1, 2])
+
+    def test_create_doubao_tts_task_protects_system_chunk_metadata(self):
+        parent = PublicationTask(
+            status="processing",
+            current_step="doubao",
+            progress=60,
+            params={"feature": "report_pdf_audio_workflow", "user_id": "1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        class AsyncResult:
+            id = "celery-doubao-1"
+
+        payload = {
+            "metadata": {
+                "source": "report-audio-workflow-test-page",
+                "parent_task_id": "wrong-parent",
+                "chunk_index": 99,
+                "chunk_total": 99,
+                "chunk_attempt": 99,
+                "retry_index": 99,
+                "local_id": "local-1",
+            }
+        }
+        with patch.object(report_audio_workflow.process_doubao_browser_tts_job, "apply_async", return_value=AsyncResult()):
+            child = _create_doubao_tts_task(parent, "第一段文本", 2, 5, payload, attempt=3)
+
+        metadata = child.params["doubao_browser_tts"]["metadata"]
+        self.assertEqual(metadata["source"], report_audio_workflow.FEATURE_NAME)
+        self.assertEqual(metadata["origin_source"], "report-audio-workflow-test-page")
+        self.assertEqual(metadata["parent_task_id"], parent.id)
+        self.assertEqual(metadata["chunk_index"], 2)
+        self.assertEqual(metadata["chunk_total"], 5)
+        self.assertEqual(metadata["chunk_attempt"], 3)
+        self.assertEqual(metadata["retry_index"], 2)
+        self.assertEqual(metadata["local_id"], "local-1")
+        self.assertEqual(child.result["metadata"], metadata)
+        self.assertEqual(child.celery_task_id, "celery-doubao-1")
+
+    def test_wait_child_refreshes_stale_session_snapshot(self):
+        parent_id = "parent-stale"
+        child_id = "child-stale"
+        parent = SimpleNamespace(id=parent_id, status="processing")
+        stale_child = SimpleNamespace(
+            id=child_id,
+            status="processing",
+            current_step="synthesis",
+            progress=10,
+            celery_task_id="celery-child",
+            result={},
+            error_message=None,
+        )
+        completed_child = SimpleNamespace(
+            id=child_id,
+            status="completed",
+            current_step="done",
+            progress=100,
+            celery_task_id="celery-child",
+            result={"video_path": "/tmp/done.mp4"},
+            error_message=None,
+        )
+        refreshed = {"value": False}
+
+        def fake_load_task(task_id, *columns):
+            if task_id == parent_id:
+                return parent
+            if task_id == child_id:
+                return completed_child if refreshed["value"] else stale_child
+            return None
+
+        def fake_expire_all():
+            refreshed["value"] = True
+
+        with patch.object(report_audio_workflow.db.session, "expire_all", side_effect=fake_expire_all), \
+            patch.object(report_audio_workflow, "_load_task", side_effect=fake_load_task), \
+            patch.object(report_audio_workflow, "_emit"), \
+            patch.object(report_audio_workflow, "_record_child"), \
+            patch.object(report_audio_workflow, "_clear_waiting_child") as clear_waiting, \
+            patch.object(report_audio_workflow, "_celery_child_failure_message", return_value=None), \
+            patch.object(report_audio_workflow, "maybe_requeue_stale_publisher_child", side_effect=lambda child, log=None: (child, False)), \
+            patch.dict(os.environ, {"REPORT_AUDIO_PUBLISHER_INLINE_WAIT_SECONDS": "0"}, clear=False):
+            child = _wait_child(parent_id, child_id, "publisher_video", start_progress=95, end_progress=99)
+
+        self.assertEqual(child.status, "completed")
+        clear_waiting.assert_called_once_with(parent_id, "publisher_video")
+
+    def test_pdf_video_workflow_reuses_script_material_and_cached_audio_before_video(self):
+        root = Path(self.app.instance_path)
+        root.mkdir(parents=True, exist_ok=True)
+        asset_id = "asset-with-script-and-audio"
+        pdf_path = root / "source.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% test pdf\n")
+        script = "".join(
+            f"第{index}部分：这是一段可以复用的基础文案，用来模拟已经由 Gemini Gem 清洗后的口播稿，"
+            f"并且保留唯一编号 {index}，避免不同分段文本完全相同。"
+            for index in range(1, 13)
+        )
+        structured = {
+            "title": "缓存复用测试",
+            "cover_title": "缓存复用测试",
+            "final_script_for_tts": script,
+        }
+        material = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "report_script_material_workflow",
+                "source_task_id": asset_id,
+                "report_script_material_workflow": {
+                    "pdf": {"attachment_id": asset_id, "filename": "source.pdf"},
+                },
+            },
+            result={"structured_result": structured},
+            completed_at=datetime.utcnow(),
+        )
+        db.session.add(material)
+        db.session.commit()
+
+        with patch.dict(
+            os.environ,
+            {
+                "REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "10",
+                "REPORT_AUDIO_TTS_CHUNK_CHARS": "220",
+            },
+            clear=False,
+        ):
+            chunks = report_audio_workflow.split_tts_text(script)
+
+        cached_audio_tasks = []
+        for index, chunk in enumerate(chunks, start=1):
+            wav_path = _write_test_wav(root / f"cached-{index}.wav", seconds=20)
+            task = PublicationTask(
+                status="completed",
+                current_step="done",
+                progress=100,
+                params={
+                    "feature": "doubao_browser_tts",
+                    "parent_task_id": "older-parent",
+                    "doubao_browser_tts": {
+                        "text": chunk,
+                        "metadata": {
+                            "chunk_index": index,
+                            "chunk_total": len(chunks),
+                            "text_hash": _tts_text_hash(chunk),
+                        },
+                    },
+                },
+                result={
+                    "metadata": {
+                        "chunk_index": index,
+                        "chunk_total": len(chunks),
+                        "text_hash": _tts_text_hash(chunk),
+                        "worker_id": f"worker_{index}",
+                    },
+                    "audio": {"wav_path": str(wav_path), "seconds": 20, "bytes": wav_path.stat().st_size},
+                },
+                completed_at=datetime.utcnow(),
+            )
+            cached_audio_tasks.append(task)
+        db.session.add_all(cached_audio_tasks)
+        db.session.commit()
+
+        workflow = PublicationTask(
+            status="pending",
+            current_step="queued",
+            progress=0,
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "user_id": "1",
+                "report_audio_workflow": {
+                    "prompt": "unused",
+                    "review_prompt": "",
+                    "followups": [],
+                    "metadata": {"title": "缓存复用测试"},
+                    "script_material_only": False,
+                    "pdf_path": str(pdf_path),
+                    "pdf": {"attachment_id": asset_id, "filename": "source.pdf", "path": str(pdf_path)},
+                    "video": {"enabled": True, "vertical_enabled": True, "bilibili_enabled": False},
+                },
+            },
+            result={
+                "metadata": {"title": "缓存复用测试"},
+                "pdf": {"attachment_id": asset_id, "filename": "source.pdf", "path": str(pdf_path)},
+                "children": {},
+                "structured_result": None,
+                "audio": None,
+                "video": None,
+                "logs": [],
+            },
+        )
+        publisher = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "publisher",
+                "source_feature": "report_pdf_audio_workflow",
+                "source_task_id": "filled-after-flush",
+                "video": {"enabled": True},
+                "vertical_video": {"enabled": True},
+            },
+            result={
+                "video_path": str(root / "video.mp4"),
+                "vertical_video_path": str(root / "vertical.mp4"),
+                "cover_path": str(root / "cover.jpg"),
+            },
+            completed_at=datetime.utcnow(),
+        )
+        db.session.add_all([workflow, publisher])
+        db.session.flush()
+        publisher.source_task_id = workflow.id
+        publisher.params["source_task_id"] = workflow.id
+        db.session.commit()
+
+        screenshot = {"path": str(root / "first-page.jpg"), "bytes": 10, "width": 100, "height": 100}
+        with patch.dict(
+            os.environ,
+            {
+                "REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "10",
+                "REPORT_AUDIO_TTS_CHUNK_CHARS": "220",
+            },
+            clear=False,
+        ), patch.object(report_audio_workflow, "_run_gemini_task_with_retries") as run_gemini, \
+            patch.object(report_audio_workflow, "_create_doubao_tts_task") as create_doubao, \
+            patch.object(report_audio_workflow, "render_pdf_first_page_image", return_value=screenshot), \
+            patch.object(report_audio_workflow, "_create_publisher_video_task", return_value=publisher) as create_video, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        run_gemini.assert_not_called()
+        create_doubao.assert_not_called()
+        create_video.assert_called_once()
+        db.session.refresh(workflow)
+        self.assertEqual(workflow.status, "completed")
+        self.assertEqual(workflow.current_step, "done")
+        self.assertEqual(workflow.result["script_material"]["source_task_id"], material.id)
+        self.assertEqual(
+            [item["task_id"] for item in workflow.result["doubao_browser_order"]],
+            [task.id for task in cached_audio_tasks],
+        )
+        self.assertTrue(workflow.result["audio"]["wav_path"].endswith(f"{workflow.id}.wav"))
+        self.assertEqual(workflow.result["video"]["publisher_task_id"], publisher.id)
+
+    def test_pdf_video_workflow_reuses_existing_final_audio_before_video(self):
+        root = Path(self.app.instance_path)
+        root.mkdir(parents=True, exist_ok=True)
+        asset_id = "asset-with-final-audio"
+        pdf_path = root / "source-final-audio.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% test pdf\n")
+        final_wav = _write_test_wav(root / "existing-final.wav", seconds=20)
+        script = "这是一段历史编排已经生成过最终音频的口播稿。它应该被新的视频编排直接复用。" * 8
+        structured = {
+            "title": "最终音频复用测试",
+            "cover_title": "最终音频复用测试",
+            "final_script_for_tts": script,
+        }
+        historical = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "source_task_id": asset_id,
+                "report_audio_workflow": {
+                    "pdf": {"attachment_id": asset_id, "filename": "source-final-audio.pdf"},
+                },
+            },
+            result={
+                "structured_result": structured,
+                "audio": {"wav_path": str(final_wav), "seconds": 20, "bytes": final_wav.stat().st_size},
+            },
+            completed_at=datetime.utcnow(),
+        )
+        workflow = PublicationTask(
+            status="pending",
+            current_step="queued",
+            progress=0,
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "user_id": "1",
+                "report_audio_workflow": {
+                    "prompt": "unused",
+                    "review_prompt": "",
+                    "followups": [],
+                    "metadata": {"title": "最终音频复用测试"},
+                    "script_material_only": False,
+                    "pdf_path": str(pdf_path),
+                    "pdf": {"attachment_id": asset_id, "filename": "source-final-audio.pdf", "path": str(pdf_path)},
+                    "video": {"enabled": True, "vertical_enabled": False, "bilibili_enabled": False},
+                },
+            },
+            result={
+                "metadata": {"title": "最终音频复用测试"},
+                "pdf": {"attachment_id": asset_id, "filename": "source-final-audio.pdf", "path": str(pdf_path)},
+                "children": {},
+                "structured_result": None,
+                "audio": None,
+                "video": None,
+                "logs": [],
+            },
+        )
+        publisher = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "publisher",
+                "source_feature": "report_pdf_audio_workflow",
+                "source_task_id": "filled-after-flush",
+                "video": {"enabled": True},
+                "vertical_video": {"enabled": False},
+            },
+            result={"video_path": str(root / "video-final-audio.mp4")},
+            completed_at=datetime.utcnow(),
+        )
+        db.session.add_all([historical, workflow, publisher])
+        db.session.flush()
+        publisher.source_task_id = workflow.id
+        publisher.params["source_task_id"] = workflow.id
+        db.session.commit()
+
+        screenshot = {"path": str(root / "first-page-final.jpg"), "bytes": 10, "width": 100, "height": 100}
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "10"}, clear=False), \
+            patch.object(report_audio_workflow, "_run_gemini_task_with_retries") as run_gemini, \
+            patch.object(report_audio_workflow, "_run_doubao_tts_chunks") as run_doubao, \
+            patch.object(report_audio_workflow, "combine_wav_files") as combine_audio, \
+            patch.object(report_audio_workflow, "render_pdf_first_page_image", return_value=screenshot), \
+            patch.object(report_audio_workflow, "_create_publisher_video_task", return_value=publisher) as create_video, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        run_gemini.assert_not_called()
+        run_doubao.assert_not_called()
+        combine_audio.assert_not_called()
+        create_video.assert_called_once()
+        db.session.refresh(workflow)
+        self.assertEqual(workflow.status, "completed")
+        self.assertEqual(workflow.result["script_material"]["source_task_id"], historical.id)
+        self.assertEqual(workflow.result["audio"]["wav_path"], str(final_wav))
+        self.assertEqual(workflow.result["audio_reuse"]["source_task_id"], historical.id)
+        self.assertEqual(workflow.result["video"]["publisher_task_id"], publisher.id)
+
+    def test_pdf_video_workflow_finishes_existing_completed_publisher_child(self):
+        root = Path(self.app.instance_path)
+        root.mkdir(parents=True, exist_ok=True)
+        asset_id = "asset-final-video-child"
+        pdf_path = root / "source-existing-video-child.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% test pdf\n")
+        final_wav = _write_test_wav(root / "existing-child-final.wav", seconds=20)
+        video_path = root / "existing-child-video.mp4"
+        video_path.write_bytes(b"video")
+        script = "这是一段用于恢复已完成视频子任务的口播稿，父任务应该复用文案和最终音频后直接收口。" * 8
+        structured = {
+            "title": "已完成视频子任务恢复测试",
+            "cover_title": "已完成视频子任务恢复测试",
+            "final_script_for_tts": script,
+        }
+        historical = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "source_task_id": asset_id,
+                "report_audio_workflow": {
+                    "pdf": {"attachment_id": asset_id, "filename": "source-existing-video-child.pdf"},
+                },
+            },
+            result={
+                "structured_result": structured,
+                "audio": {"wav_path": str(final_wav), "seconds": 20, "bytes": final_wav.stat().st_size},
+            },
+            completed_at=datetime.utcnow(),
+        )
+        workflow = PublicationTask(
+            status="processing",
+            current_step="pub_wait_exist",
+            progress=95,
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "user_id": "1",
+                "report_audio_workflow": {
+                    "prompt": "unused",
+                    "review_prompt": "",
+                    "followups": [],
+                    "metadata": {"title": "已完成视频子任务恢复测试"},
+                    "script_material_only": False,
+                    "pdf_path": str(pdf_path),
+                    "pdf": {"attachment_id": asset_id, "filename": "source-existing-video-child.pdf", "path": str(pdf_path)},
+                    "video": {"enabled": True, "vertical_enabled": False, "bilibili_enabled": False},
+                },
+            },
+            result={
+                "metadata": {"title": "已完成视频子任务恢复测试"},
+                "pdf": {"attachment_id": asset_id, "filename": "source-existing-video-child.pdf", "path": str(pdf_path)},
+                "children": {},
+                "waiting_child": {"label": "publisher_video", "child_id": "filled-after-flush"},
+                "logs": [],
+            },
+        )
+        publisher = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "publisher",
+                "source_feature": "report_pdf_audio_workflow",
+                "source_task_id": "filled-after-flush",
+                "video": {"enabled": True},
+                "vertical_video": {"enabled": False},
+            },
+            result={"video_path": str(video_path), "cover_path": str(root / "existing-child-cover.jpg")},
+            completed_at=datetime.utcnow(),
+        )
+        db.session.add_all([historical, workflow, publisher])
+        db.session.flush()
+        publisher.source_task_id = workflow.id
+        publisher.params["source_task_id"] = workflow.id
+        workflow_result = dict(workflow.result or {})
+        workflow_result["structured_result"] = structured
+        workflow_result["script_material"] = {
+            "status": "completed",
+            "mode": "reused_script_material",
+            "source_task_id": historical.id,
+            "source_feature": historical.feature,
+            "chars": len(script),
+            "chunks": 1,
+        }
+        workflow_result["children"] = {
+            "publisher_video": {
+                "job_id": publisher.id,
+                "status": "processing",
+                "step": "synthesis",
+            }
+        }
+        workflow_result["waiting_child"] = dict(workflow_result["waiting_child"])
+        workflow_result["waiting_child"]["child_id"] = publisher.id
+        workflow.result = workflow_result
+        db.session.commit()
+
+        screenshot = {"path": str(root / "first-page-existing-child.jpg"), "bytes": 10, "width": 100, "height": 100}
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "10"}, clear=False), \
+            patch.object(report_audio_workflow, "_run_gemini_task_with_retries") as run_gemini, \
+            patch.object(report_audio_workflow, "_run_doubao_tts_chunks") as run_doubao, \
+            patch.object(report_audio_workflow, "combine_wav_files") as combine_audio, \
+            patch.object(report_audio_workflow, "render_pdf_first_page_image", return_value=screenshot), \
+            patch.object(report_audio_workflow, "_create_publisher_video_task") as create_video, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        run_gemini.assert_not_called()
+        run_doubao.assert_not_called()
+        combine_audio.assert_not_called()
+        create_video.assert_not_called()
+        db.session.refresh(workflow)
+        self.assertEqual(workflow.status, "completed")
+        self.assertNotIn("waiting_child", workflow.result)
+        self.assertEqual(workflow.result["script_material"]["source_task_id"], historical.id)
+        self.assertEqual(workflow.result["audio_reuse"]["source_task_id"], historical.id)
+        self.assertEqual(workflow.result["video"]["publisher_task_id"], publisher.id)
+        self.assertEqual(workflow.result["video"]["video_path"], str(video_path))
 
 
 if __name__ == "__main__":

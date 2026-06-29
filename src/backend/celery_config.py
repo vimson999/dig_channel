@@ -13,14 +13,38 @@ backend_dir = os.path.dirname(os.path.abspath(__file__))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
+
+def _int_env(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _broker_pool_limit(default):
+    raw = os.environ.get('CELERY_BROKER_POOL_LIMIT')
+    if raw is None:
+        return default
+    text = str(raw).strip().lower()
+    if text in {'none', 'null'}:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return default
+
+
 def make_celery(app_name=__name__):
     redis_url = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
     broker_url = os.environ.get('CELERY_BROKER_URL', redis_url)
     backend_url = os.environ.get('CELERY_RESULT_BACKEND', redis_url)
-    broker_socket_timeout = int(os.environ.get('CELERY_BROKER_SOCKET_TIMEOUT', '30'))
-    broker_connect_timeout = int(os.environ.get('CELERY_BROKER_CONNECT_TIMEOUT', '5'))
-    broker_health_check_interval = int(os.environ.get('CELERY_BROKER_HEALTH_CHECK_INTERVAL', '30'))
-    broker_visibility_timeout = int(os.environ.get('CELERY_BROKER_VISIBILITY_TIMEOUT', '3600'))
+    process_role = str(os.environ.get('DB_PROCESS_ROLE') or '').strip().lower()
+    api_like_process = process_role in {'web', 'scheduler'}
+    broker_socket_timeout = _int_env('CELERY_BROKER_SOCKET_TIMEOUT', 5 if api_like_process else 30)
+    broker_connect_timeout = _int_env('CELERY_BROKER_CONNECT_TIMEOUT', 5)
+    broker_health_check_interval = _int_env('CELERY_BROKER_HEALTH_CHECK_INTERVAL', 30)
+    broker_visibility_timeout = _int_env('CELERY_BROKER_VISIBILITY_TIMEOUT', 3600)
+    broker_pool_limit = _broker_pool_limit(0 if api_like_process else 10)
     
     celery = Celery(
         app_name,
@@ -34,6 +58,8 @@ def make_celery(app_name=__name__):
             'tasks.doubao_browser_tts',
             'tasks.gemini_browser',
             'tasks.report_audio_workflow',
+            'tasks.report_script_material_workflow',
+            'tasks.report_top10_workflow',
             'tasks.mp3_video_workflow',
             'tasks.zsxq_sync',
             'tasks.zsxq_workflow',
@@ -71,6 +97,7 @@ def make_celery(app_name=__name__):
         broker_connection_timeout=broker_connect_timeout,
         broker_connection_retry=True,
         broker_connection_retry_on_startup=True,
+        broker_pool_limit=broker_pool_limit,
         broker_transport_options={
             'socket_connect_timeout': broker_connect_timeout,
             'socket_timeout': broker_socket_timeout,
@@ -86,6 +113,8 @@ def make_celery(app_name=__name__):
             Queue('doubao_browser_tts', Exchange('doubao_browser_tts'), routing_key='doubao_browser_tts'),
             Queue('report_pdf_gemini', Exchange('report_pdf_gemini'), routing_key='report_pdf_gemini'),
             Queue('report_audio_workflow', Exchange('report_audio_workflow'), routing_key='report_audio_workflow'),
+            Queue('report_script_material_workflow', Exchange('report_script_material_workflow'), routing_key='report_script_material_workflow'),
+            Queue('report_top10_workflow', Exchange('report_top10_workflow'), routing_key='report_top10_workflow'),
             Queue('mp3_video_workflow', Exchange('mp3_video_workflow'), routing_key='mp3_video_workflow'),
             Queue('zsxq_workflow', Exchange('zsxq_workflow'), routing_key='zsxq_workflow'),
             Queue('zsxq_sync', Exchange('zsxq_sync'), routing_key='zsxq_sync'),
@@ -101,6 +130,8 @@ def make_celery(app_name=__name__):
             'tasks.report_pdf_gemini.process_job': {'queue': 'report_pdf_gemini'},
             'tasks.gemini_browser.process_job': {'queue': 'report_pdf_gemini'},
             'tasks.report_audio_workflow.process_job': {'queue': 'report_audio_workflow'},
+            'tasks.report_script_material_workflow.process_job': {'queue': 'report_script_material_workflow'},
+            'tasks.report_top10_workflow.process_job': {'queue': 'report_top10_workflow'},
             'tasks.mp3_video_workflow.process_job': {'queue': 'mp3_video_workflow'},
             'tasks.zsxq_workflow.run_zsxq_workflow': {'queue': 'zsxq_workflow'},
             'tasks.zsxq_workflow.advance_zsxq_workflow': {'queue': 'zsxq_workflow'},

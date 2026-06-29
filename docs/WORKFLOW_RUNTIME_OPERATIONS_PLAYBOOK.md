@@ -41,6 +41,12 @@ QueuePool limit of size 1 overflow 0 reached, connection timed out
 - 父编排释放 session 后，不能继续持有并读取旧 ORM 对象；跨等待、跨轮询只保存 `task_id`，需要展示或落库摘要时重新加载。
 - Celery `task_postrun`、`task_failure`、`task_retry` 必须清理 SQLAlchemy session。
 - 所有任务入口和自动入队入口接入 `services.runtime_guard`，数据库压力大时延迟任务，而不是硬冲。
+- 常驻脚本、watchdog、scheduler、CLI 和监控快照函数没有 Flask 请求 teardown，必须在每个工作单元或每段 DB 查询后显式 `rollback/remove`。
+- 只读查询也会开启事务；Celery 看板、任务快照、自动收口、统计 API 查询后同样必须释放 session。
+- 受控 `idle` 连接不是事故；长期 `idle in transaction` 是事故，超过 60 秒必须排查和收口。
+- 若 PgBouncer 忽略 startup `options`，应用连接串中的 `statement_timeout` 不会生效，必须使用数据库角色或数据库级 `ALTER ROLE` / `ALTER DATABASE` 设置硬超时。
+
+专项规则见 [数据库 Session 生命周期纪律](rules/database-session-lifecycle-discipline.md)。
 
 ### 验证命令
 
@@ -70,6 +76,24 @@ SHOW SERVERS;
 - 禁止在 DB 压力告警时继续重启 scheduler 放量。
 - 禁止把 QueuePool timeout 当普通业务失败吞掉，应识别为可重试/可延迟。
 
+### PostgreSQL 服务端断开正在使用的连接
+
+另一类现象是：
+
+```text
+server closed the connection unexpectedly
+```
+
+这不是“连接池借不到连接”，而是 PostgreSQL 或中间连接层把当前正在执行 SQL 的连接切掉了。同步任务里最危险的场景是附件文件已经下载到本地，但更新 `zsxq_attachments.local_path/download_status` 时连接断开，事务回滚，导致文件存在但数据库状态没有落稳。
+
+处理纪律：
+
+- 该批次不能被标为成功；数据库事务没有提交，就不能宣称附件状态已确认。
+- `zsxq_sync` 必须把该异常识别为可重试数据库异常，先 `rollback`，再按退避重试。
+- 重试期间不发送最终失败邮件；重试耗尽后才进入失败通知。
+- 排查时同时确认三个事实：workflow run 状态、sync run 状态、附件文件是否已经落盘。
+- 文件已落盘但 DB 记录回滚时，下次同步必须允许重新落库或复用本地文件，不能靠人工假改成功。
+
 ## 重启与调度纪律
 
 ### 本地重启
@@ -86,16 +110,19 @@ SHOW SERVERS;
 - 停所有 Celery worker、watchdog、scheduler。
 - 启动 Flask 后端。
 - 后端自举补齐 worker 和 watchdog。
-- 默认不启动 scheduler。
+- 默认补齐知识星球系统同步计划 `zsxq_auto`。
 
-这是故意的。重启代码和恢复计划任务是两件事。代码修复验证前，不应让 scheduler 自动产生新批次。
+这是系统核心链路的默认行为：本地重启后应自动恢复“知识星球同步 → 清洗 → 发布”计划任务。代码修复验证前如果不希望 scheduler 产生新批次，启动前显式设置：
+
+```bash
+BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS=none ./scripts/dev/restart-dev-stack.sh
+```
 
 ### 恢复 scheduler
 
-确认 worker、数据库、页面和关键任务都正常后，再按需启动：
+独立的自动发帖、本地文件清理、研报资产补漏等非核心 scheduler 仍按需启动：
 
 ```bash
-./scripts/dev/run-zsxq-auto-scheduler.sh
 ./scripts/dev/run-zsxq-auto-publish-scheduler.sh
 ```
 
@@ -243,6 +270,117 @@ Watchdog 的目标是守护所有被声明为托管的关键 worker，而不是�
 8. 验证通过后再恢复 scheduler。
 
 不要在未定位根因时“重投全部”。
+
+## 编排卡住排查纪律
+
+当用户反馈“同步整个编排半天没动静”时，不要先猜数据库挂了，也不要直接重启全部服务。按以下顺序排查，目标是区分四类状态：真实执行中、平台上传慢、业务任务孤儿、worker 消费卡住。
+
+### 1. 先定位工作流和阶段
+
+检查最新 `zsxq_workflow_runs`：
+
+- `status`
+- `current_stage`
+- `batch_id`
+- `sync_run_id`
+- `clean_task_ids`
+- `publish_task_ids`
+- `stage_results`
+- `updated_at`
+
+判断口径：
+
+- `sync` 已完成但 `clean` 未推进：优先查清洗子任务。
+- `clean` 已完成但 `publish` 未推进：优先查发布子任务。
+- `publish` 中 PDF 已完成、音频 pending：优先查准入保护和 `zsxq_publish` 队列。
+- `updated_at` 长时间不变不等于数据库挂死，要继续查子任务和 Celery 可见性。
+
+### 2. 排除数据库连接池问题
+
+先看 PostgreSQL 当前连接，而不是凭页面超时判断：
+
+```sql
+SELECT
+  count(*) AS total_connections,
+  count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_transaction_connections
+FROM pg_stat_activity;
+```
+
+如果连接数远低于 `max_connections`，并且没有大量 `idle in transaction`，本次问题优先按队列/worker 排查。
+
+### 3. 查子任务是否是 stale pending
+
+对 `PublicationTask` 子任务检查：
+
+- `id`
+- `feature`
+- `status`
+- `current_step`
+- `progress`
+- `celery_task_id`
+- `updated_at`
+- `error_message`
+- `result.runtime_guard`
+
+危险状态：
+
+- 业务任务是 `pending` 或 `processing`。
+- `updated_at` 超过预期阈值不变。
+- 对应 `celery_task_id` 不在 Celery `active/reserved/scheduled`。
+- Redis 队列里也找不到该消息。
+
+这就是业务任务孤儿，不应新建任务，应重投同一个业务任务 ID。
+
+### 4. 查 worker 是否在线但不消费
+
+监控接口：
+
+```bash
+curl http://localhost:5001/api/v1/celery/status
+```
+
+重点看目标队列：
+
+- `pids`
+- `queue_length`
+- `active_count`
+- `business_active_count`
+- `consumer_warning`
+
+如果 `queue_length > 0`、worker 在线、`active_count=0`，并出现“worker 在线但未领取积压任务，消费连接可能卡住”，可以重启该队列 worker。重启前必须确认没有正在执行的 active 任务。
+
+```bash
+curl -X POST http://localhost:5001/api/v1/celery/restart/content_pipeline
+curl -X POST http://localhost:5001/api/v1/celery/restart/zsxq_publish
+```
+
+### 5. 安全补投递原则
+
+补投递只能使用原业务任务 ID：
+
+- `content_audio_clean` -> `tasks.content_pipeline.run_audio_clean_task(task_id)`
+- `content_pdf_clean` -> `tasks.content_pipeline.run_pdf_clean_task(task_id)`
+- `zsxq_clean_output_publish` -> `tasks.zsxq_publish.run_publish_clean_output_task(task_id)`
+
+补投递前必须满足：
+
+- 业务任务未取消。
+- 旧 Celery 消息不可见。
+- 当前准入检查允许或明确会 deferred。
+- 该任务的业务动作幂等，或任务结果中能识别已处理文件。
+
+补投递后必须更新 `celery_task_id`，并在 `result.manual_requeue_history` 记录旧 ID、新 ID、原因和准入结果。
+
+### 6. 收尾确认
+
+恢复后必须确认：
+
+- 子任务 `status=completed` 或明确失败。
+- 父工作流进入下一阶段或 `completed/done`。
+- 发布结果区分 `verified_count` 和 `pending_verify_count`。
+- UI 过期错误文案被清理，避免任务已恢复但页面仍显示旧的 `deferred_capacity`。
+
+本纪律对应事故记录：[知识星球编排业务任务卡住但 Celery 消息不可见](bugs/2026-06-23-zsxq-workflow-stale-celery-message.md)。
 
 ## 编排任务 ORM 对象纪律
 

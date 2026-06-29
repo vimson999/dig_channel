@@ -30,6 +30,7 @@ def default_config():
         include_manual_publish=True,
         include_pytest_batches=True,
         max_candidates=5000,
+        unfinished_reference_protect_days=3,
     ).to_dict()
     return {
         "enabled": True,

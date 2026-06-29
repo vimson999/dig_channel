@@ -16,6 +16,14 @@ def _compact_text(value, max_length=None):
     return text
 
 
+def _is_generic_report_title(value):
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = "".join(text.split()).lstrip("#")
+    return normalized in {"外资研报", "研报", "PDF", "pdf"}
+
+
 def _nested(mapping, *keys):
     value = mapping if isinstance(mapping, dict) else {}
     for key in keys:
@@ -145,6 +153,10 @@ class PublicationTask(db.Model):
             _nested(params, 'zsxq_publish', 'title'),
             _nested(params, 'report_audio_workflow', 'metadata', 'title'),
             _nested(params, 'report_audio_workflow', 'video', 'title'),
+            _nested(params, 'report_script_material_workflow', 'metadata', 'title'),
+            _nested(result, 'editor_result', 'program_title'),
+            _nested(result, 'editor_result', 'cover_title'),
+            _nested(params, 'report_top10_workflow', 'program_name'),
             _nested(result, 'plan', 'title'),
             _nested(params, 'mp3_video_workflow', 'metadata', 'title'),
             _nested(params, 'mp3_video_workflow', 'audio', 'topic_title'),
@@ -152,17 +164,29 @@ class PublicationTask(db.Model):
             _nested(result, 'structured_result', 'cover_title'),
             _nested(result, 'structured_result', 'title'),
             _nested(result, 'pdf', 'topic_title'),
-            _nested(params, 'report_audio_workflow', 'pdf', 'topic_title'),
             _nested(params, 'report_audio_workflow', 'pdf', 'filename'),
+            _nested(params, 'report_audio_workflow', 'pdf', 'topic_title'),
+            _nested(params, 'report_script_material_workflow', 'pdf', 'filename'),
+            _nested(params, 'report_script_material_workflow', 'pdf', 'topic_title'),
         ]
+        generic_fallback = None
         for value in candidates:
             text = _compact_text(value, 500)
             if text:
+                if _is_generic_report_title(text):
+                    generic_fallback = generic_fallback or text
+                    continue
                 return text
-        return None
+        return generic_fallback
 
     def _sync_report_audio_projection(self, params, result):
         workflow = params.get('report_audio_workflow') if isinstance(params.get('report_audio_workflow'), dict) else {}
+        if not workflow:
+            workflow = (
+                params.get('report_script_material_workflow')
+                if isinstance(params.get('report_script_material_workflow'), dict)
+                else {}
+            )
         request_pdf = workflow.get('pdf') if isinstance(workflow.get('pdf'), dict) else {}
         result_pdf = result.get('pdf') if isinstance(result.get('pdf'), dict) else {}
         structured = result.get('structured_result') if isinstance(result.get('structured_result'), dict) else {}
@@ -223,6 +247,17 @@ class PublicationTask(db.Model):
                     workflow = self.params.get('mp3_video_workflow', {})
                     audio = workflow.get('audio', {}) if isinstance(workflow, dict) else {}
                     title = audio.get('topic_title') or audio.get('filename') or "MP3 视频编排任务"
+                if title == "未命名任务" and self.params.get('feature') == 'report_top10_workflow':
+                    workflow = self.params.get('report_top10_workflow', {})
+                    title = workflow.get('program_name') or "今日研报 Top10 编排"
+                if title == "未命名任务" and self.params.get('feature') == 'report_script_material_workflow':
+                    workflow = self.params.get('report_script_material_workflow', {})
+                    pdf = workflow.get('pdf', {}) if isinstance(workflow, dict) else {}
+                    title = (
+                        workflow.get('metadata', {}).get('title')
+                        if isinstance(workflow.get('metadata'), dict)
+                        else None
+                    ) or pdf.get('topic_title') or pdf.get('filename') or "研报基础文案物料"
         
         return {
             'id': self.id,

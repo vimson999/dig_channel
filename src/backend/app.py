@@ -157,18 +157,21 @@ if __name__ == '__main__':
     os.environ.setdefault("TASK_ADMISSION_RETRY_DELAY_SECONDS", "180")
     os.environ.setdefault(
         "TASK_ADMISSION_FEATURE_BACKLOG_LIMITS",
-        "publisher=12,report_audio_workflow=10,report_pdf_audio_workflow=10,mp3_video_workflow=5,"
+        "publisher=12,report_audio_workflow=10,report_pdf_audio_workflow=10,report_top10_workflow=5,mp3_video_workflow=5,"
         "content_pdf_clean=10,content_audio_clean=5,zsxq_clean_output_publish=5",
     )
+    os.environ.setdefault("ZSXQ_SYNC_DB_RETRIES", "5")
+    os.environ.setdefault("ZSXQ_SYNC_DB_RETRY_DELAY_SECONDS", "60")
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_ENABLED", "1")
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_MODE", "ensure")
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES", "all")
-    os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS", "none")
+    os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS", "zsxq_auto")
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_WATCHDOG", "1")
     os.environ.setdefault(
         "CELERY_AUTO_HEAL_SERVICES",
         os.environ.get("BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES", "all"),
     )
+    os.environ.setdefault("CELERY_AUTO_HEAL_REQUEUE_STALE_TASKS", "1")
     
     app = create_app()
     

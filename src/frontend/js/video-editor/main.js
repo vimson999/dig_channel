@@ -653,6 +653,7 @@ function renderTaskList() {
     elements.taskList.innerHTML = state.tasks.map(task => {
         const isCompleted = task.status === 'completed';
         const errorMessage = task.error_message || '';
+        const visibleErrorMessage = getVisibleTaskError(task);
         const invalidAssetError = /No valid audio clips|音频文件不存在|缺少音频配置/.test(errorMessage);
         const canRequeue = !isCompleted && !invalidAssetError;
         const hasReusableConfig = Boolean(task.has_reusable_config || task.params?.video || Array.isArray(task.params?.audio_segments));
@@ -660,7 +661,7 @@ function renderTaskList() {
         const pendingMinutes = getTaskPendingMinutes(task);
         const pendingNotice = getPendingNotice(task, pendingMinutes, worker);
         return `
-            <div class="task-card bg-zinc-900 border border-zinc-800 p-3 rounded-lg ${task.status === 'failed' ? 'border-l-red-500' : (isCompleted ? 'border-l-emerald-500' : 'border-l-blue-500')}">
+            <div class="task-card bg-zinc-900 border border-zinc-800 p-3 rounded-lg ${getTaskAccentClass(task, isCompleted)}">
                 <div class="flex justify-between items-start">
                     <div class="truncate pr-2">
                         <p class="text-[10px] font-black text-zinc-200 truncate uppercase">${task.title || 'Untitled'}</p>
@@ -668,7 +669,7 @@ function renderTaskList() {
                     </div>
                 </div>
                 ${pendingNotice ? `<div class="mt-2 rounded border ${pendingNotice.className} px-2 py-1 text-[8px] font-bold">${pendingNotice.text}</div>` : ''}
-                ${errorMessage ? `<div class="mt-2 rounded border border-red-500/25 bg-red-500/10 px-2 py-1 text-[8px] font-bold text-red-300">失败：${escapeHtml(errorMessage)}</div>` : ''}
+                ${visibleErrorMessage ? `<div class="mt-2 rounded border border-red-500/25 bg-red-500/10 px-2 py-1 text-[8px] font-bold text-red-300">失败：${escapeHtml(visibleErrorMessage)}</div>` : ''}
                 <div class="h-1 bg-zinc-800 rounded-full mt-2 overflow-hidden">
                     <div class="h-full bg-emerald-500 transition-all" style="width: ${task.progress}%"></div>
                 </div>
@@ -678,6 +679,39 @@ function renderTaskList() {
             </div>
         `;
     }).join('');
+}
+
+function getTaskAccentClass(task, isCompleted) {
+    if (task.status === 'failed') return 'border-l-red-500';
+    if (isCompleted) return 'border-l-emerald-500';
+    if (isRuntimeGuardDeferred(task)) return 'border-l-amber-500';
+    return 'border-l-blue-500';
+}
+
+function getVisibleTaskError(task) {
+    const message = task.error_message || '';
+    if (!message) return '';
+    return isRuntimeGuardMessage(message) ? '' : message;
+}
+
+function isRuntimeGuardDeferred(task) {
+    const step = String(task.current_step || '').toLowerCase();
+    return task.status === 'pending' && [
+        'deferred_capacity',
+        'deferred_backlog',
+        'deferred_db_pressure'
+    ].includes(step);
+}
+
+function isRuntimeGuardMessage(message) {
+    return /系统保护：?.*(稍后自动重试|当前运行上限|排队\/运行积压上限|数据库连接压力|数据库探测失败)/.test(String(message || ''));
+}
+
+function getRuntimeGuardMessage(task) {
+    const guard = task.result?.runtime_guard;
+    if (guard?.message) return String(guard.message);
+    const message = task.error_message || '';
+    return isRuntimeGuardMessage(message) ? message : '';
 }
 
 function escapeHtml(value) {
@@ -717,6 +751,16 @@ function getRenderWorkerSnapshot() {
 }
 
 function getPendingNotice(task, pendingMinutes, worker) {
+    if (isRuntimeGuardDeferred(task)) {
+        const guardMessage = getRuntimeGuardMessage(task)
+            .replace(/^系统保护：?/, '')
+            .replace(/。$/, '');
+        return {
+            text: guardMessage ? `等待容量：${guardMessage}` : '等待容量：系统正在保护并发，稍后自动重试',
+            className: 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+        };
+    }
+
     if (task.status !== 'pending' || pendingMinutes < 2) return null;
 
     const minutes = Math.round(pendingMinutes);

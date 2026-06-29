@@ -52,9 +52,9 @@ def upgrade():
         sa.Column("report_audio_video_path", sa.String(length=600), nullable=True),
         sa.Column("report_audio_cover_path", sa.String(length=600), nullable=True),
     ]:
-        op.add_column("publication_tasks", column, schema="public")
+        _add_column_if_not_exists("publication_tasks", column)
 
-    op.add_column("zsxq_attachments", sa.Column("file_ext", sa.String(length=20), nullable=True), schema="public")
+    _add_column_if_not_exists("zsxq_attachments", sa.Column("file_ext", sa.String(length=20), nullable=True))
 
     for column in [
         sa.Column("system_batch_id", sa.String(length=80), nullable=True),
@@ -74,74 +74,102 @@ def upgrade():
         sa.Column("attachments_skipped", sa.Integer(), nullable=True),
         sa.Column("download_limit_reached", sa.Boolean(), nullable=True),
     ]:
-        op.add_column("zsxq_sync_runs", column, schema="public")
+        _add_column_if_not_exists("zsxq_sync_runs", column)
 
     _backfill_projection_columns()
 
-    op.execute(
+    _create_index_if_allowed(
+        "ix_publication_tasks_feature_user_created_desc",
+        "publication_tasks",
         "CREATE INDEX ix_publication_tasks_feature_user_created_desc "
-        "ON public.publication_tasks (feature, user_id, created_at DESC)"
+        "ON public.publication_tasks (feature, user_id, created_at DESC)",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_publication_tasks_feature_created_desc_v2",
+        "publication_tasks",
         "CREATE INDEX ix_publication_tasks_feature_created_desc_v2 "
-        "ON public.publication_tasks (feature, created_at DESC)"
+        "ON public.publication_tasks (feature, created_at DESC)",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_publication_tasks_feature_status_updated",
+        "publication_tasks",
         "CREATE INDEX ix_publication_tasks_feature_status_updated "
-        "ON public.publication_tasks (feature, status, updated_at)"
+        "ON public.publication_tasks (feature, status, updated_at)",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_publication_tasks_parent_created",
+        "publication_tasks",
         "CREATE INDEX ix_publication_tasks_parent_created "
         "ON public.publication_tasks (parent_task_id, created_at) "
-        "WHERE parent_task_id IS NOT NULL"
+        "WHERE parent_task_id IS NOT NULL",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_publication_tasks_source_created",
+        "publication_tasks",
         "CREATE INDEX ix_publication_tasks_source_created "
         "ON public.publication_tasks (source_task_id, created_at) "
-        "WHERE source_task_id IS NOT NULL"
+        "WHERE source_task_id IS NOT NULL",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_publication_tasks_report_audio_asset_created",
+        "publication_tasks",
         "CREATE INDEX ix_publication_tasks_report_audio_asset_created "
         "ON public.publication_tasks (report_audio_pdf_attachment_id, created_at DESC) "
-        "WHERE feature = 'report_pdf_audio_workflow' AND report_audio_pdf_attachment_id IS NOT NULL"
+        "WHERE feature = 'report_pdf_audio_workflow' AND report_audio_pdf_attachment_id IS NOT NULL",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_zsxq_attachments_pdf_assets_order",
+        "zsxq_attachments",
         "CREATE INDEX ix_zsxq_attachments_pdf_assets_order "
         "ON public.zsxq_attachments (download_status, file_ext, updated_at DESC, created_at DESC) "
-        "WHERE local_path IS NOT NULL"
+        "WHERE local_path IS NOT NULL",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_zsxq_attachments_pdf_assets_group_tab",
+        "zsxq_attachments",
         "CREATE INDEX ix_zsxq_attachments_pdf_assets_group_tab "
         "ON public.zsxq_attachments (group_id, tab_id, download_status, file_ext, updated_at DESC, created_at DESC) "
-        "WHERE local_path IS NOT NULL"
+        "WHERE local_path IS NOT NULL",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_zsxq_sync_runs_sys_group_created_desc",
+        "zsxq_sync_runs",
         "CREATE INDEX ix_zsxq_sync_runs_sys_group_created_desc "
         "ON public.zsxq_sync_runs (group_id, created_at DESC) "
-        "WHERE mode LIKE 'sys%'"
+        "WHERE mode LIKE 'sys%'",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_zsxq_sync_runs_sys_created_desc",
+        "zsxq_sync_runs",
         "CREATE INDEX ix_zsxq_sync_runs_sys_created_desc "
         "ON public.zsxq_sync_runs (created_at DESC) "
-        "WHERE mode LIKE 'sys%'"
+        "WHERE mode LIKE 'sys%'",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_zsxq_sync_runs_system_batch_created_desc",
+        "zsxq_sync_runs",
         "CREATE INDEX ix_zsxq_sync_runs_system_batch_created_desc "
         "ON public.zsxq_sync_runs (system_batch_id, created_at DESC) "
-        "WHERE mode LIKE 'sys%' AND system_batch_id IS NOT NULL"
+        "WHERE mode LIKE 'sys%' AND system_batch_id IS NOT NULL",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_zsxq_sync_runs_system_attempt_created_desc",
+        "zsxq_sync_runs",
         "CREATE INDEX ix_zsxq_sync_runs_system_attempt_created_desc "
         "ON public.zsxq_sync_runs (system_attempt_id, created_at DESC) "
-        "WHERE mode LIKE 'sys%' AND system_attempt_id IS NOT NULL"
+        "WHERE mode LIKE 'sys%' AND system_attempt_id IS NOT NULL",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_zsxq_topics_group_tab_create_time_desc",
+        "zsxq_topics",
         "CREATE INDEX ix_zsxq_topics_group_tab_create_time_desc "
-        "ON public.zsxq_topics (group_id, tab_id, create_time DESC, last_synced_at DESC)"
+        "ON public.zsxq_topics (group_id, tab_id, create_time DESC, last_synced_at DESC)",
     )
-    op.execute(
+    _create_index_if_allowed(
+        "ix_zsxq_attachments_group_tab_topic_created",
+        "zsxq_attachments",
         "CREATE INDEX ix_zsxq_attachments_group_tab_topic_created "
-        "ON public.zsxq_attachments (group_id, tab_id, topic_id, created_at)"
+        "ON public.zsxq_attachments (group_id, tab_id, topic_id, created_at)",
     )
 
 
@@ -286,6 +314,7 @@ def _backfill_projection_columns():
             report_audio_cover_path = LEFT(NULLIF(result #>> '{video,cover_path}', ''), 600)
         """
     )
+
     op.execute(
         """
         UPDATE public.zsxq_attachments
@@ -350,3 +379,54 @@ def _backfill_projection_columns():
         WHERE run.id = source.id
         """
     )
+
+
+def _add_column_if_not_exists(table_name, column):
+    exists = op.get_bind().execute(
+        sa.text(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :table_name
+              AND column_name = :column_name
+            LIMIT 1
+            """
+        ),
+        {"table_name": table_name, "column_name": column.name},
+    ).scalar()
+    if exists:
+        return
+    dialect = op.get_bind().dialect
+    column_type = column.type.compile(dialect=dialect)
+    nullable = "" if column.nullable else " NOT NULL"
+    op.execute(
+        f"ALTER TABLE public.{table_name} "
+        f"ADD COLUMN IF NOT EXISTS {column.name} {column_type}{nullable}"
+    )
+
+
+def _create_index_if_allowed(index_name, table_name, sql):
+    bind = op.get_bind()
+    exists = bind.execute(
+        sa.text("SELECT to_regclass(:index_name)"),
+        {"index_name": f"public.{index_name}"},
+    ).scalar()
+    if exists:
+        return
+    can_create = bind.execute(
+        sa.text(
+            """
+            SELECT pg_has_role(c.relowner, 'MEMBER')
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relname = :table_name
+            LIMIT 1
+            """
+        ),
+        {"table_name": table_name},
+    ).scalar()
+    if not can_create:
+        return
+    op.execute(sql)

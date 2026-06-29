@@ -4,6 +4,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ENV_FILE="$PROJECT_ROOT/.env"
+WORKER_ID="${REPORT_PDF_GEMINI_WORKER_ID:-${1:-}}"
+PROFILE_POOL_ROOT="${REPORT_PDF_GEMINI_PROFILE_POOL_ROOT:-$PROJECT_ROOT/runtime/browser_profiles/report_pdf_gemini_pool}"
 
 env_value() {
     local key="$1"
@@ -22,6 +24,9 @@ env_value() {
 USER_DATA_DIR="${REPORT_PDF_GEMINI_USER_DATA_DIR:-$(env_value REPORT_PDF_GEMINI_USER_DATA_DIR)}"
 if [ -z "$USER_DATA_DIR" ]; then
     USER_DATA_DIR="${GEMINI_BROWSER_USER_DATA_DIR:-$(env_value GEMINI_BROWSER_USER_DATA_DIR)}"
+fi
+if [ -n "$WORKER_ID" ] && [ -z "${REPORT_PDF_GEMINI_USER_DATA_DIR:-}" ]; then
+    USER_DATA_DIR="$PROFILE_POOL_ROOT/$WORKER_ID"
 fi
 
 PROFILE_DIRECTORY="${REPORT_PDF_GEMINI_PROFILE_DIRECTORY:-$(env_value REPORT_PDF_GEMINI_PROFILE_DIRECTORY)}"
@@ -78,6 +83,9 @@ fi
 
 echo "打开研报 PDF Gem 专用 Chrome profile:"
 echo "  user-data-dir: $USER_DATA_DIR"
+if [ -n "$WORKER_ID" ]; then
+    echo "  worker-id: $WORKER_ID"
+fi
 if [ -n "$PROFILE_DIRECTORY" ]; then
     echo "  profile-directory: $PROFILE_DIRECTORY"
 fi

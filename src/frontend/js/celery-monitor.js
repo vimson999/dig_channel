@@ -9,9 +9,9 @@ const state = {
     refreshTimer: null,
 };
 
-const WORKFLOW_SERVICE_ORDER = ['zsxq_workflow', 'report_audio_workflow', 'mp3_video_workflow'];
+const WORKFLOW_SERVICE_ORDER = ['report_audio_workflow', 'report_script_material_workflow', 'report_top10_workflow', 'mp3_video_workflow'];
 const WORKFLOW_SERVICE_IDS = new Set(WORKFLOW_SERVICE_ORDER);
-const ZSXQ_SUPPORT_SERVICE_ORDER = ['zsxq_sync', 'content_pipeline', 'zsxq_publish'];
+const ZSXQ_SUPPORT_SERVICE_ORDER = ['zsxq_sync', 'zsxq_workflow', 'content_pipeline', 'zsxq_publish'];
 const ZSXQ_SUPPORT_SERVICE_IDS = new Set(ZSXQ_SUPPORT_SERVICE_ORDER);
 
 const els = {
@@ -477,6 +477,7 @@ function businessFeatureLabel(feature) {
     return {
         publisher: '视频合成任务',
         report_audio_workflow: '研报转语音编排',
+        report_script_material_workflow: '研报基础文案物料',
         mp3_video_workflow: 'MP3 视频编排',
         content_pdf_clean: 'PDF 清洗任务',
         content_audio_clean: '音频清洗任务',
@@ -542,7 +543,7 @@ function renderCards() {
         workflowServices.length
             ? renderServiceGroup({
                 title: '编排任务',
-                subtitle: '三条业务编排横向集中查看，便于对比积压、状态和日志。',
+                subtitle: '业务编排横向集中查看，便于对比积压、状态和日志。',
                 services: workflowServices,
                 layout: 'workflow-row',
             })

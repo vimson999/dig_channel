@@ -16,6 +16,7 @@ from models.platform_credential import PlatformCredentialAccount
 
 PLATFORM_DEFINITIONS = [
     {"id": "zsxq", "name": "知识星球", "credential_types": ["cookie_header", "cookie_json"]},
+    {"id": "feishu", "name": "飞书", "credential_types": ["cookie_header", "cookie_json"]},
     {"id": "bilibili", "name": "B站", "credential_types": ["bilibili_auth", "cookie_header", "cookie_json"]},
     {"id": "douyin", "name": "抖音", "credential_types": ["cookie_header", "token_json"]},
     {"id": "wechat", "name": "微信", "credential_types": ["cookie_header", "token_json"]},
@@ -26,6 +27,8 @@ PURPOSE_DEFINITIONS = [
     {"id": "zsxq.sync", "name": "知识星球同步", "platform": "zsxq"},
     {"id": "zsxq.publish", "name": "知识星球发帖", "platform": "zsxq"},
     {"id": "zsxq.browser", "name": "知识星球浏览器自动化", "platform": "zsxq"},
+    {"id": "feishu.fetch", "name": "飞书文档抓取", "platform": "feishu"},
+    {"id": "feishu.browser", "name": "飞书浏览器自动化", "platform": "feishu"},
     {"id": "bilibili.upload", "name": "B站视频上传", "platform": "bilibili"},
     {"id": "bilibili.browser", "name": "B站浏览器自动化", "platform": "bilibili"},
     {"id": "douyin.publish", "name": "抖音发布", "platform": "douyin"},
@@ -112,12 +115,20 @@ def _cookie_pairs_from_json(value: Any) -> Dict[str, str]:
 
 def _cookie_pairs_from_header(value: str) -> Dict[str, str]:
     pairs: Dict[str, str] = {}
-    text = re.sub(r"^\s*cookie\s*:\s*", "", value or "", flags=re.I).strip()
+    lines = []
+    for line in str(value or "").replace("\r", "\n").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//") or stripped.startswith("#"):
+            continue
+        lines.append(stripped)
+    text = re.sub(r"^\s*cookie\s*:\s*", "", "; ".join(lines), flags=re.I).strip()
     for part in text.split(";"):
         if "=" not in part:
             continue
         key, item_value = part.split("=", 1)
         key = key.strip()
+        if re.search(r"[\s\r\n]", key):
+            continue
         if key:
             pairs[key] = item_value.strip()
     return pairs
@@ -163,6 +174,14 @@ def masked_summary(platform: str, payload: str) -> str:
             if value:
                 parts.append(f"{key}: {_mask_token(value)}")
         return " · ".join(parts) if parts else "B站凭据"
+
+    if platform == "feishu":
+        parts = []
+        for key in ["session", "passport_web_did", "MONITOR_WEB_ID", "tenant_key", "locale"]:
+            value = pairs.get(key) or pairs.get(key.upper()) or pairs.get(key.lower())
+            if value:
+                parts.append(f"{key}: {_mask_token(value)}")
+        return " · ".join(parts[:3]) if parts else "飞书 Cookie"
 
     if pairs:
         names = list(pairs.keys())[:3]
@@ -344,6 +363,15 @@ def validate_payload_structure(platform: str, credential_type: str, payload: str
         if missing:
             return False, "缺少 B站必要字段: " + ", ".join(missing)
         return True, "结构校验通过：检测到 SESSDATA 和 bili_jct"
+
+    if platform == "feishu":
+        common_keys = {"session", "passport_web_did", "MONITOR_WEB_ID", "tenant_key", "locale"}
+        detected = [key for key in pairs if key in common_keys or key.lower() in {item.lower() for item in common_keys}]
+        if detected:
+            return True, "结构校验通过：检测到飞书 Cookie 字段 " + ", ".join(detected[:4])
+        if pairs:
+            return True, "结构校验通过：检测到 Cookie 字段，可尝试访问飞书文档"
+        return False, "未检测到 Cookie 字段"
 
     if normalize_payload(payload):
         return True, "结构校验通过：凭据内容非空"
@@ -586,6 +614,42 @@ def resolve_bilibili_auth(
     if required and (not auth["sessdata"] or not auth["bili_jct"]):
         raise CredentialError("B站凭据缺少 SESSDATA 或 bili_jct")
     return auth
+
+
+def resolve_feishu_cookie(
+    *,
+    account_id: Optional[str] = None,
+    purpose: str = "feishu.fetch",
+    required: bool = True,
+) -> Dict[str, Any]:
+    try:
+        account, payload = resolve_credential_record(
+            account_id=account_id,
+            platform="feishu",
+            purpose=purpose,
+        )
+    except CredentialError:
+        if required:
+            raise
+        return {}
+
+    cookie = _cookie_header_from_payload(payload)
+    if required and not cookie:
+        raise CredentialError("飞书凭据里没有可用 Cookie")
+    return {
+        "cookie": cookie,
+        "credential_id": account.id,
+        "credential_name": account.name,
+        "credential_source": "db",
+        "account": account,
+    }
+
+
+def _cookie_header_from_payload(payload: str) -> str:
+    pairs = _extract_cookie_pairs(payload)
+    if pairs:
+        return "; ".join(f"{key}={value}" for key, value in pairs.items() if key and value is not None)
+    return re.sub(r"^\s*cookie\s*:\s*", "", normalize_payload(payload), flags=re.I).strip()
 
 
 def _bilibili_payload_from_system_config() -> Dict[str, str]:

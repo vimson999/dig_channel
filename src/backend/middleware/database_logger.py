@@ -49,7 +49,13 @@ class DatabaseLoggerMiddleware:
     
     def _after_cursor_execute(self, conn, cursor, statement, parameters, context, executemany):
         """SQL执行后记录"""
-        total_time = time.time() - conn.info['query_start_time'].pop(-1)
+        query_start_times = conn.info.setdefault('query_start_time', [])
+        if query_start_times:
+            started_at = query_start_times.pop(-1)
+        else:
+            started_at = time.time()
+            logger.debug("SQL query_start_time stack is empty; skipping accurate duration.")
+        total_time = time.time() - started_at
         duration_ms = round(total_time * 1000, 2)
         
         request_id = getattr(g, 'request_id', 'unknown')

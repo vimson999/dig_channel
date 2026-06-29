@@ -1,3 +1,4 @@
+import hashlib
 import os
 from datetime import datetime
 
@@ -70,10 +71,26 @@ def create_job(current_user):
         return jsonify({"success": False, "message": "text 不能为空"}), 400
     if not isinstance(metadata, dict):
         return jsonify({"success": False, "message": "metadata 必须是对象"}), 400
+    metadata = dict(metadata)
+    metadata.setdefault("text_hash", _text_hash(text))
 
     max_length = _max_text_length()
     if len(text) > max_length:
         return jsonify({"success": False, "message": f"text 超过 {max_length} 字限制"}), 400
+
+    if _truthy(data.get("reuse_completed"), False):
+        cached_task = _completed_task_for_text(text, current_user=current_user)
+        if cached_task:
+            payload = _job_payload(cached_task)
+            payload["reused"] = True
+            return jsonify({
+                "success": True,
+                "message": "已复用同文本的豆包音频任务",
+                "job_id": cached_task.id,
+                "status": payload.get("status"),
+                "reused": True,
+                "data": payload,
+            })
 
     browser_status = browser_status_payload()
     if not browser_status.get("configured"):
@@ -105,7 +122,7 @@ def create_job(current_user):
     db.session.commit()
 
     try:
-        celery_task = process_doubao_browser_tts_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+        celery_task = process_doubao_browser_tts_job.apply_async(args=[task.id], queue=_queue_name(), retry=False)
     except Exception as exc:
         task.status = "failed"
         task.current_step = "failed"
@@ -215,6 +232,61 @@ def cancel_job(current_user, job_id):
     return jsonify({"success": True, "message": "任务已取消", **payload, "data": payload})
 
 
+@doubao_browser_tts_bp.route("/jobs/<job_id>/retry", methods=["POST"])
+@require_login
+def retry_job(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    if task.status not in {"failed", "blocked_by_captcha", "canceled"}:
+        payload = _job_payload(task)
+        return jsonify({"success": True, "message": "任务仍在队列或已完成，无需重试", **payload, "data": payload})
+
+    result = dict(task.result or {})
+    logs = list(result.get("logs") or [])
+    now = datetime.utcnow().isoformat() + "Z"
+    logs.append({
+        "step": "manual_retry",
+        "message": "手动重新投递豆包浏览器朗读任务",
+        "progress": 0,
+        "updated_at": now,
+    })
+    result.update({
+        "audio": None,
+        "logs": logs[-80:],
+        "manual_retry_requested_at": now,
+    })
+    result.pop("error", None)
+    result.pop("error_type", None)
+    result.pop("blocked_reason", None)
+    result.pop("captcha_blocked", None)
+
+    task.status = "pending"
+    task.current_step = "queued"
+    task.progress = 0
+    task.error_message = None
+    task.completed_at = None
+    task.result = result
+    flag_modified(task, "result")
+    db.session.commit()
+
+    try:
+        celery_task = process_doubao_browser_tts_job.apply_async(args=[task.id], queue=_queue_name(), retry=False)
+    except Exception as exc:
+        task.status = "failed"
+        task.current_step = "failed"
+        task.error_message = f"任务重新入队失败: {exc}"
+        task.completed_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({"success": False, "message": task.error_message}), 502
+
+    task.celery_task_id = celery_task.id
+    db.session.commit()
+
+    payload = _job_payload(task)
+    return jsonify({"success": True, "message": "任务已重新投递", **payload, "data": payload})
+
+
 def _get_owned_task(current_user, job_id):
     task = PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).get(job_id)
     if not task or (task.feature or (task.params or {}).get("feature")) != FEATURE_NAME:
@@ -276,6 +348,76 @@ def _max_text_length():
         return int(os.getenv("DOUBAO_BROWSER_TTS_MAX_TEXT_LENGTH", "5000"))
     except (TypeError, ValueError):
         return 5000
+
+
+def _queue_name():
+    return os.getenv("DOUBAO_BROWSER_TTS_QUEUE", QUEUE_NAME)
+
+
+def _text_hash(text):
+    compact = "".join(str(text or "").split())
+    return hashlib.sha256(compact.encode("utf-8")).hexdigest()
+
+
+def _completed_task_for_text(text, *, current_user):
+    expected_hash = _text_hash(text)
+    expected_text = _plain_text(text)
+    user_id = str(getattr(current_user, "id", None))
+    scan_limit = _bounded_int(os.getenv("DOUBAO_BROWSER_TTS_CACHE_SCAN_LIMIT"), 500, 20, 2000)
+    candidates = (
+        PublicationTask.query.filter(
+            PublicationTask.feature == FEATURE_NAME,
+            PublicationTask.user_id == user_id,
+            PublicationTask.status == "completed",
+        )
+        .options(load_only(*TASK_PAYLOAD_COLUMNS))
+        .order_by(PublicationTask.created_at.desc())
+        .limit(scan_limit)
+        .all()
+    )
+    for candidate in candidates:
+        if _task_text_hash(candidate) and _task_text_hash(candidate) != expected_hash:
+            continue
+        if _plain_text(_task_text(candidate)) != expected_text:
+            continue
+        audio = (candidate.result or {}).get("audio") if isinstance(candidate.result, dict) else {}
+        wav_path = audio.get("wav_path") if isinstance(audio, dict) else ""
+        if wav_path and os.path.exists(wav_path):
+            return candidate
+    return None
+
+
+def _task_text_hash(task):
+    result = task.result if isinstance(task.result, dict) else {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if not metadata:
+        payload = _task_request_payload(task)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return str(metadata.get("text_hash") or "").strip()
+
+
+def _task_text(task):
+    return str(_task_request_payload(task).get("text") or "")
+
+
+def _task_request_payload(task):
+    params = task.params if isinstance(task.params, dict) else {}
+    payload = params.get("doubao_browser_tts")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _plain_text(text):
+    return "".join(str(text or "").split())
+
+
+def _truthy(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
 def _bounded_int(value, default, minimum, maximum):

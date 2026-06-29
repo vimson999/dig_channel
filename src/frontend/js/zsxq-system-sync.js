@@ -10,6 +10,8 @@ const SYSTEM_SYNC_MP3_DOWNLOAD_THRESHOLD = 15;
 const SYSTEM_SYNC_AUTO_VIDEO_DISPATCH = false;
 const SYSTEM_SYNC_PDF_VIDEO_THRESHOLD = 35;
 const SYSTEM_SYNC_MP3_VIDEO_THRESHOLD = 25;
+const SYSTEM_SYNC_AUTO_SCRIPT_MATERIAL_DISPATCH = false;
+const SYSTEM_SYNC_PDF_SCRIPT_MATERIAL_THRESHOLD = 40;
 const SYSTEM_SYNC_AUTO_PDF_CLEAN = false;
 const SYSTEM_SYNC_AUTO_AUDIO_CLEAN = false;
 const SYSTEM_SYNC_AUTO_PUBLISH_AFTER_CLEAN = false;
@@ -96,6 +98,8 @@ const els = {
     configAutoVideoDispatchCheckbox: document.getElementById('system-sync-auto-video-dispatch-checkbox'),
     configPdfVideoThresholdInput: document.getElementById('system-sync-pdf-video-threshold-input'),
     configMp3VideoThresholdInput: document.getElementById('system-sync-mp3-video-threshold-input'),
+    configAutoScriptMaterialDispatchCheckbox: document.getElementById('system-sync-auto-script-material-dispatch-checkbox'),
+    configPdfScriptMaterialThresholdInput: document.getElementById('system-sync-pdf-script-material-threshold-input'),
     configAutoPdfCleanCheckbox: document.getElementById('system-sync-auto-pdf-clean-checkbox'),
     configAutoAudioCleanCheckbox: document.getElementById('system-sync-auto-audio-clean-checkbox'),
     configAutoPublishAfterCleanCheckbox: document.getElementById('system-sync-auto-publish-after-clean-checkbox'),
@@ -228,6 +232,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (els.configMp3VideoThresholdInput) {
         els.configMp3VideoThresholdInput.value = String(SYSTEM_SYNC_MP3_VIDEO_THRESHOLD);
+    }
+    if (els.configAutoScriptMaterialDispatchCheckbox) {
+        els.configAutoScriptMaterialDispatchCheckbox.checked = SYSTEM_SYNC_AUTO_SCRIPT_MATERIAL_DISPATCH;
+    }
+    if (els.configPdfScriptMaterialThresholdInput) {
+        els.configPdfScriptMaterialThresholdInput.value = String(SYSTEM_SYNC_PDF_SCRIPT_MATERIAL_THRESHOLD);
     }
     if (els.configAutoPdfCleanCheckbox) {
         els.configAutoPdfCleanCheckbox.checked = SYSTEM_SYNC_AUTO_PDF_CLEAN;
@@ -1334,6 +1344,36 @@ function formatAutoVideoDispatchText(config = {}) {
     return `视频编排旁路：PDF≥${value.pdf_min_download_count}，MP3≥${value.mp3_min_download_count}`;
 }
 
+function buildAutoScriptMaterialDispatchConfig(enabled, pdfThreshold) {
+    return {
+        enabled: Boolean(enabled),
+        pdf_min_download_count: Number(pdfThreshold),
+        wait_for_completion: false,
+    };
+}
+
+function autoScriptMaterialDispatchConfig(config = {}) {
+    const value = config.auto_script_material_dispatch;
+    if (!value || typeof value !== 'object') {
+        return buildAutoScriptMaterialDispatchConfig(
+            SYSTEM_SYNC_AUTO_SCRIPT_MATERIAL_DISPATCH,
+            SYSTEM_SYNC_PDF_SCRIPT_MATERIAL_THRESHOLD,
+        );
+    }
+    return buildAutoScriptMaterialDispatchConfig(
+        value.enabled === true,
+        parseBoundedInt(value.pdf_min_download_count, SYSTEM_SYNC_PDF_SCRIPT_MATERIAL_THRESHOLD, 0, 100000),
+    );
+}
+
+function formatAutoScriptMaterialDispatchText(config = {}) {
+    const value = autoScriptMaterialDispatchConfig(config);
+    if (!value.enabled) {
+        return '基础文案物料未开启';
+    }
+    return `基础文案物料：PDF≥${value.pdf_min_download_count}`;
+}
+
 async function saveSystemSyncConfig() {
     const context = syncContext();
     if (!context.selectedGroupId) {
@@ -1385,10 +1425,20 @@ async function saveSystemSyncConfig() {
         0,
         100000,
     );
+    const pdfScriptMaterialThreshold = parseBoundedInt(
+        els.configPdfScriptMaterialThresholdInput?.value,
+        SYSTEM_SYNC_PDF_SCRIPT_MATERIAL_THRESHOLD,
+        0,
+        100000,
+    );
     const autoVideoDispatch = buildAutoVideoDispatchConfig(
         Boolean(els.configAutoVideoDispatchCheckbox?.checked),
         pdfVideoThreshold,
         mp3VideoThreshold,
+    );
+    const autoScriptMaterialDispatch = buildAutoScriptMaterialDispatchConfig(
+        Boolean(els.configAutoScriptMaterialDispatchCheckbox?.checked),
+        pdfScriptMaterialThreshold,
     );
     const attachmentDownloadRules = buildAttachmentDownloadRules(
         jobs,
@@ -1415,6 +1465,7 @@ async function saveSystemSyncConfig() {
             skip_existing_downloads: true,
             attachment_download_rules: attachmentDownloadRules,
             auto_video_dispatch: autoVideoDispatch,
+            auto_script_material_dispatch: autoScriptMaterialDispatch,
             auto_pdf_clean: Boolean(els.configAutoPdfCleanCheckbox?.checked),
             auto_audio_clean: Boolean(els.configAutoAudioCleanCheckbox?.checked),
             auto_publish_after_clean: {
@@ -1668,6 +1719,7 @@ function renderSyncSchedulerPanel() {
     const maxFiles = Number(config.max_download_files ?? SYSTEM_SYNC_MAX_DOWNLOAD_FILES);
     const downloadText = formatThresholdDownloadText(config, maxFiles);
     const videoDispatchText = formatAutoVideoDispatchText(config);
+    const scriptMaterialDispatchText = formatAutoScriptMaterialDispatchText(config);
     const autoPdfClean = config.auto_pdf_clean === true;
     const autoAudioClean = config.auto_audio_clean === true;
     const autoPublishAfterClean = config.auto_publish_after_clean?.enabled === true;
@@ -1687,7 +1739,7 @@ function renderSyncSchedulerPanel() {
         <div class="space-y-1">
             <div>进程状态：${escapeHtml(running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
             <div>计划配置：${escapeHtml(String(interval))} 分钟一次 · 每目标 Tab ${escapeHtml(String(count))} 条 · ${escapeHtml(downloadText)}</div>
-            <div>旁路任务：${escapeHtml(videoDispatchText)}</div>
+            <div>旁路任务：${escapeHtml(videoDispatchText)} · ${escapeHtml(scriptMaterialDispatchText)}</div>
             <div>工作流：同步 → ${escapeHtml(cleanText)}${escapeHtml(publishEnabled ? ' → 发布' : '')}</div>
             <div>轮次：${escapeHtml(rounds)}</div>
             <div>Cookie：${escapeHtml(cookieMode)}</div>
@@ -1855,6 +1907,14 @@ function hydrateSystemSyncRuntimeConfigInputs(config = {}) {
     }
     if (els.configMp3VideoThresholdInput) {
         els.configMp3VideoThresholdInput.value = String(autoVideoDispatch.mp3_min_download_count);
+    }
+
+    const autoScriptMaterialDispatch = autoScriptMaterialDispatchConfig(config);
+    if (els.configAutoScriptMaterialDispatchCheckbox) {
+        els.configAutoScriptMaterialDispatchCheckbox.checked = autoScriptMaterialDispatch.enabled === true;
+    }
+    if (els.configPdfScriptMaterialThresholdInput) {
+        els.configPdfScriptMaterialThresholdInput.value = String(autoScriptMaterialDispatch.pdf_min_download_count);
     }
 
     if (els.configMaxRoundsInput) {

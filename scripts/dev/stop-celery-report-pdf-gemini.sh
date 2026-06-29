@@ -23,3 +23,6 @@ if [ ! -z "$LEFTOVER" ]; then
 fi
 
 echo "✨ report_pdf_gemini Worker 已停止。"
+
+RUNTIME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/runtime"
+rm -f "$RUNTIME_DIR"/report_pdf_gemini.pid "$RUNTIME_DIR"/report_pdf_gemini_worker_*.pid 2>/dev/null || true

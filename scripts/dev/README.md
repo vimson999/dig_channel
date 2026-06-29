@@ -27,6 +27,16 @@ MP3 video workflow worker:
 - `./scripts/dev/run-celery-mp3-video-workflow.sh` 启动 `mp3_video_workflow` 队列，负责已同步 MP3 到 Gemini 信息图与横竖屏视频编排
 - `./scripts/dev/stop-celery-mp3-video-workflow.sh` 停止 `mp3_video_workflow` 队列
 
+Report Top10 workflow worker:
+
+- `./scripts/dev/run-celery-report-top10-workflow.sh` 启动 `report_top10_workflow` 队列，负责 10 篇研报单篇文案缓存/解析与总编辑 Gem 编排
+- `./scripts/dev/stop-celery-report-top10-workflow.sh` 停止 `report_top10_workflow` 队列
+
+Report script material workflow worker:
+
+- `./scripts/dev/run-celery-report-script-material-workflow.sh` 启动 `report_script_material_workflow` 队列，负责 PDF 到可复用单篇口播文案物料
+- `./scripts/dev/stop-celery-report-script-material-workflow.sh` 停止 `report_script_material_workflow` 队列
+
 Runtime configuration should come from `.env` or shell environment variables. Do not hardcode service credentials in these scripts.
 
 Backend startup bootstrap:
@@ -39,4 +49,4 @@ Backend startup bootstrap:
 - 默认 `LOCAL_PGBOUNCER_ENABLED=1`，`run-backend.sh` 会确保本地 PgBouncer 启动；真实直连库地址保存到 `.env` 的 `DIRECT_DATABASE_URL`，应用侧 `DATABASE_URL` 指向 `127.0.0.1:6432`
 - 临时强制重启托管进程：`BACKEND_PROCESS_BOOTSTRAP_MODE=restart ./scripts/dev/run-backend.sh`
 - 临时关闭自动恢复：`BACKEND_PROCESS_BOOTSTRAP_ENABLED=0 ./scripts/dev/run-backend.sh`
-- 默认托管队列是 `all`，watchdog 默认跟随 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`；默认不启动 scheduler。可用 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`、`CELERY_AUTO_HEAL_SERVICES` 和 `BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS` 指定逗号分隔的服务列表
+- 默认托管队列是 `all`，watchdog 默认跟随 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`；默认启动知识星球系统同步计划 `zsxq_auto`。可用 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`、`CELERY_AUTO_HEAL_SERVICES` 和 `BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS` 指定逗号分隔的服务列表，设为 `none` 可临时禁用 scheduler 自启动

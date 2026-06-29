@@ -10,7 +10,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services import zsxq_system_sync_test as system_sync_test  # noqa: E402
-from services.zsxq_sync_service import ZsxqTransientUpstreamError  # noqa: E402
+from services.zsxq_sync_service import ZsxqSyncService, ZsxqTransientUpstreamError  # noqa: E402
 from services.zsxq_workflow_service import ZsxqWorkflowService  # noqa: E402
 
 
@@ -33,6 +33,42 @@ class ZsxqSystemSyncTest(unittest.TestCase):
         self.assertEqual(normalized["mp3_min_download_count"], 25)
         self.assertFalse(normalized["wait_for_completion"])
 
+    def test_auto_script_material_dispatch_config_is_normalized(self):
+        normalized = system_sync_test._normalize_auto_script_material_dispatch({
+            "enabled": True,
+            "pdf_min_download_count": "40",
+            "wait_for_completion": True,
+        })
+
+        self.assertTrue(normalized["enabled"])
+        self.assertEqual(normalized["pdf_min_download_count"], 40)
+        self.assertFalse(normalized["wait_for_completion"])
+
+    def test_sync_service_recovers_auto_dispatch_config_from_sync_meta(self):
+        service = ZsxqSyncService()
+        sync_meta = {
+            "auto_script_material_dispatch": {
+                "enabled": True,
+                "pdf_min_download_count": 40,
+            },
+        }
+
+        recovered = service._dispatch_config_from_sync_meta(
+            None,
+            sync_meta,
+            "auto_script_material_dispatch",
+        )
+        explicit = service._dispatch_config_from_sync_meta(
+            {"enabled": False, "pdf_min_download_count": 99},
+            sync_meta,
+            "auto_script_material_dispatch",
+        )
+
+        self.assertEqual(recovered["pdf_min_download_count"], 40)
+        self.assertTrue(recovered["enabled"])
+        self.assertEqual(explicit["pdf_min_download_count"], 99)
+        self.assertFalse(explicit["enabled"])
+
     def test_workflow_snapshot_carries_auto_video_dispatch(self):
         service = ZsxqWorkflowService()
         snapshot = service._build_system_snapshot(
@@ -47,6 +83,10 @@ class ZsxqSystemSyncTest(unittest.TestCase):
                     "enabled": True,
                     "pdf_min_download_count": 35,
                     "mp3_min_download_count": 25,
+                },
+                "auto_script_material_dispatch": {
+                    "enabled": True,
+                    "pdf_min_download_count": 40,
                 },
             },
             trigger="scheduler_start",
@@ -71,6 +111,8 @@ class ZsxqSystemSyncTest(unittest.TestCase):
         self.assertEqual(snapshot["system_sync"]["auto_video_dispatch"]["pdf_min_download_count"], 35)
         self.assertEqual(snapshot["system_sync"]["auto_video_dispatch"]["mp3_min_download_count"], 25)
         self.assertTrue(snapshot["sync"]["auto_video_dispatch"]["enabled"])
+        self.assertEqual(snapshot["system_sync"]["auto_script_material_dispatch"]["pdf_min_download_count"], 40)
+        self.assertTrue(snapshot["sync"]["auto_script_material_dispatch"]["enabled"])
 
     def test_runtime_cookie_override_counts_as_configured(self):
         with patch.dict(
@@ -136,6 +178,58 @@ class ZsxqSystemSyncTest(unittest.TestCase):
 
         self.assertEqual(get_menus.call_count, 3)
         self.assertEqual(sleep.call_count, 0)
+
+    def test_save_config_rejects_unsupported_group_before_runtime_lookup(self):
+        with patch.object(system_sync_test, "load_config") as load_config:
+            with patch.object(system_sync_test, "runtime_cookie_info") as runtime_cookie_info:
+                with self.assertRaisesRegex(ValueError, "仅支持前沿信息收录"):
+                    system_sync_test.save_config(
+                        {
+                            "group_id": "1824528822",
+                            "jobs": [
+                                {
+                                    "key": "latest",
+                                    "file_type": "pdf",
+                                    "tab": {"id": "latest", "label": "最新", "scope": "all"},
+                                }
+                            ],
+                        },
+                        cookie="",
+                    )
+
+        load_config.assert_not_called()
+        runtime_cookie_info.assert_not_called()
+
+    def test_queue_configured_jobs_disables_unsupported_group(self):
+        config = {
+            "enabled": True,
+            "group_id": "1824528822",
+            "group_name": "生财有术",
+            "jobs": [
+                {
+                    "key": "latest",
+                    "file_type": "pdf",
+                    "mode_code": "lt",
+                    "tab": {"id": "latest", "label": "最新", "scope": "all"},
+                }
+            ],
+        }
+
+        with patch.object(system_sync_test, "load_config", return_value=config):
+            with patch.object(system_sync_test, "runtime_cookie_info") as runtime_cookie_info:
+                with patch.object(system_sync_test, "_write_config") as write_config:
+                    result = system_sync_test.queue_configured_jobs(
+                        trigger="scheduler",
+                        attempt_id="20260628-150000",
+                    )
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "unsupported_group")
+        self.assertFalse(config["enabled"])
+        self.assertEqual(config["last_skip_reason"], "unsupported_group")
+        self.assertIn("生财有术", result["error"])
+        write_config.assert_called_once()
+        runtime_cookie_info.assert_not_called()
 
     def test_invalid_group_skip_records_and_notifies(self):
         config = {

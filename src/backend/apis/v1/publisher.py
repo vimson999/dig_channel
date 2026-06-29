@@ -66,6 +66,11 @@ def _publication_task_summary(row):
     )
     is_video_task = feature in (None, '', 'publisher')
     video_path = getattr(row, 'video_path', None)
+    result = getattr(row, 'result', None) if isinstance(getattr(row, 'result', None), dict) else {}
+    result_summary = {'video_path': video_path} if video_path else {}
+    for key in ('runtime_guard', 'queue_repair', 'processing_orphan_repair'):
+        if result.get(key):
+            result_summary[key] = result.get(key)
     return {
         'id': row.id,
         'title': title,
@@ -77,7 +82,7 @@ def _publication_task_summary(row):
         'is_video_editor_task': is_video_task,
         'has_reusable_config': is_video_task,
         'params': {'feature': feature or 'publisher', '_summary': True},
-        'result': {'video_path': video_path} if video_path else {},
+        'result': result_summary,
         'error_message': row.error_message,
         'created_at': (row.created_at.isoformat() + "Z") if row.created_at else None,
         'updated_at': (row.updated_at.isoformat() + "Z") if row.updated_at else None,
@@ -359,9 +364,11 @@ def requeue_task(task_id):
 @bp.route('/recover-pending', methods=['POST'])
 def recover_pending_tasks():
     """
-    Recover stale pending publisher tasks without duplicating jobs already in Redis.
+    Recover stale publisher tasks without duplicating jobs already in Redis.
     """
     try:
+        from services.publisher_queue_repair import repair_stale_publisher_processing_tasks_once
+
         data = request.get_json(silent=True) or {}
         max_age_minutes = float(data.get('max_age_minutes', 2))
         limit = min(max(int(data.get('limit', 10)), 1), 50)
@@ -412,6 +419,10 @@ def recover_pending_tasks():
                     'error': str(exc),
                 })
 
+        processing_repair = repair_stale_publisher_processing_tasks_once(limit=limit)
+        if recovered or processing_repair.get('requeued') or processing_repair.get('closed'):
+            _clear_publisher_task_list_cache()
+
         return jsonify({
             'success': True,
             'data': {
@@ -421,6 +432,7 @@ def recover_pending_tasks():
                 'recovered': recovered,
                 'skipped': skipped,
                 'failed': failed,
+                'processing_repair': processing_repair,
             }
         })
 
@@ -506,6 +518,7 @@ def list_tasks():
                 PublicationTask.feature.label('feature'),
                 PublicationTask.task_title.label('task_title'),
                 PublicationTask.task_video_path.label('video_path'),
+                PublicationTask.result.label('result'),
             )
             .order_by(PublicationTask.created_at.desc())
             .limit(20)

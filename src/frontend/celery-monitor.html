@@ -16,7 +16,7 @@
 
         .celery-workflow-row {
             display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 16px;
             align-items: stretch;
         }
@@ -31,6 +31,12 @@
             overflow: hidden;
             -webkit-box-orient: vertical;
             -webkit-line-clamp: 2;
+        }
+
+        @media (max-width: 1180px) {
+            .celery-workflow-row {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
         }
 
         @media (max-width: 720px) {
@@ -91,6 +97,6 @@
 
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260602-celery"></script>
-    <script src="js/celery-monitor.js?v=20260618-stale-business-cleanup"></script>
+    <script src="js/celery-monitor.js?v=20260625-zsxq-workflow-support-row"></script>
 </body>
 </html>

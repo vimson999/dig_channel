@@ -28,6 +28,8 @@ DEFAULT_WATCHDOG_SERVICES = (
     "doubao_browser_tts",
     "report_pdf_gemini",
     "report_audio_workflow",
+    "report_script_material_workflow",
+    "report_top10_workflow",
     "mp3_video_workflow",
     "zsxq_sync",
     "zsxq_workflow",
@@ -40,6 +42,8 @@ DEFAULT_WATCHDOG_SERVICES = (
 BUSINESS_TASK_FEATURES = {
     "render": ("publisher",),
     "report_audio_workflow": ("report_audio_workflow", "report_pdf_audio_workflow"),
+    "report_script_material_workflow": ("report_script_material_workflow",),
+    "report_top10_workflow": ("report_top10_workflow",),
     "mp3_video_workflow": ("mp3_video_workflow",),
     "content_pipeline": ("content_pdf_clean", "content_audio_clean"),
     "zsxq_publish": ("zsxq_clean_output_publish",),
@@ -71,20 +75,20 @@ SERVICES = {
         "description": "豆包语音合成队列",
     },
     "doubao_browser_tts": {
-        "label": "豆包浏览器朗读捕获",
+        "label": "豆包浏览器朗读捕获池",
         "queue": "doubao_browser_tts",
-        "hostname_prefix": "doubao_browser_tts@",
-        "run_script": "scripts/dev/run-celery-doubao-browser-tts.sh",
+        "hostname_prefix": "doubao_browser_tts",
+        "run_script": "scripts/dev/run-celery-doubao-browser-tts-pool.sh",
         "log_file": "doubao_browser_tts.log",
-        "description": "真实浏览器控制豆包网页并通过插件捕获 WAV 的串行队列",
+        "description": "多个独立 Chrome profile 共同消费豆包网页朗读捕获队列，单个 profile 内仍保持串行",
     },
     "report_pdf_gemini": {
-        "label": "研报 PDF Gem 解析",
+        "label": "研报 PDF Gem 解析池",
         "queue": "report_pdf_gemini",
         "hostname_prefix": "report_pdf_gemini@",
-        "run_script": "scripts/dev/run-celery-report-pdf-gemini.sh",
+        "run_script": "scripts/dev/run-celery-report-pdf-gemini-pool.sh",
         "log_file": "report_pdf_gemini.log",
-        "description": "真实浏览器控制研报解析 Gem，上传 PDF、追问自审并提取回复的串行队列",
+        "description": "多个独立 Chrome profile 共同消费研报解析 Gem 队列，单个 profile 内仍保持串行",
     },
     "report_audio_workflow": {
         "label": "研报转语音编排",
@@ -93,6 +97,22 @@ SERVICES = {
         "run_script": "scripts/dev/run-celery-report-audio-workflow.sh",
         "log_file": "report_audio_workflow.log",
         "description": "调度研报 PDF Gem 解析、自审结构化、豆包浏览器朗读并汇总音频",
+    },
+    "report_script_material_workflow": {
+        "label": "研报基础文案物料",
+        "queue": "report_script_material_workflow",
+        "hostname_prefix": "report_script_material_workflow@",
+        "run_script": "scripts/dev/run-celery-report-script-material-workflow.sh",
+        "log_file": "report_script_material_workflow.log",
+        "description": "调度研报 PDF Gem 解析并生成可复用口播文案物料，不占用完整研报转语音编排容量",
+    },
+    "report_top10_workflow": {
+        "label": "今日研报 Top10 编排",
+        "queue": "report_top10_workflow",
+        "hostname_prefix": "report_top10_workflow@",
+        "run_script": "scripts/dev/run-celery-report-top10-workflow.sh",
+        "log_file": "report_top10_workflow.log",
+        "description": "调度 10 篇研报单篇文案缓存/解析，并提交总编辑 Gem 生成 Top10 栏目稿",
     },
     "mp3_video_workflow": {
         "label": "MP3 视频编排",
@@ -293,6 +313,21 @@ def _clear_status_cache():
             "tasks": None,
             "errors": None,
         })
+
+
+def _release_db_session_quietly():
+    try:
+        from models import db
+    except Exception:
+        return
+    try:
+        db.session.rollback()
+    except Exception:
+        pass
+    try:
+        db.session.remove()
+    except Exception:
+        pass
 
 
 def _ensure_dirs():
@@ -745,6 +780,7 @@ def _watchdog_config():
     return {
         "enabled": _truthy_env("CELERY_AUTO_HEAL_ENABLED", False),
         "notify_enabled": _truthy_env("CELERY_AUTO_HEAL_NOTIFY_ENABLED", True),
+        "requeue_stale_tasks": _truthy_env("CELERY_AUTO_HEAL_REQUEUE_STALE_TASKS", True),
         "services": _watchdog_services(),
         "paused_services": sorted(paused.keys()),
         "confirmations": max(1, _int_env("CELERY_AUTO_HEAL_CONFIRMATIONS", 3)),
@@ -838,6 +874,64 @@ def _business_tasks_recently_active(tasks, now=None):
     return False
 
 
+def _paused_business_features():
+    paused = _load_paused_services()
+    features = set()
+    for service_id in paused.keys():
+        features.update(BUSINESS_TASK_FEATURES.get(service_id, ()))
+    return features
+
+
+def _watchdog_repair_stale_business_tasks(config):
+    if not config.get("enabled"):
+        return {"enabled": False, "skipped": "auto_heal_disabled"}
+    if not config.get("requeue_stale_tasks"):
+        return {"enabled": False, "skipped": "requeue_disabled"}
+
+    try:
+        from services.publisher_queue_repair import (
+            cleanup_publisher_children_of_terminal_parents_once,
+            repair_stale_publication_tasks_once,
+            repair_stale_publisher_pending_tasks_once,
+            repair_stale_publisher_processing_tasks_once,
+        )
+
+        excluded_features = _paused_business_features()
+        publisher_repair_paused = "publisher" in excluded_features
+        if publisher_repair_paused:
+            cleanup_result = {"enabled": False, "skipped": "publisher_paused", "cleaned": 0}
+            publisher_pending_repair_result = {"enabled": False, "skipped": "publisher_paused", "requeued": 0}
+            processing_repair_result = {
+                "enabled": False,
+                "skipped": "publisher_paused",
+                "requeued": 0,
+                "demoted": 0,
+                "closed": 0,
+            }
+        else:
+            cleanup_result = cleanup_publisher_children_of_terminal_parents_once()
+            publisher_pending_repair_result = repair_stale_publisher_pending_tasks_once()
+            processing_repair_result = repair_stale_publisher_processing_tasks_once()
+        repair_result = repair_stale_publication_tasks_once(
+            excluded_features=excluded_features,
+        )
+        repair_result["publisher_pending_repair"] = publisher_pending_repair_result
+        repair_result["processing_repair"] = processing_repair_result
+        repair_result["requeued"] = (
+            (repair_result.get("requeued") or 0)
+            + (publisher_pending_repair_result.get("requeued") or 0)
+            + (processing_repair_result.get("requeued") or 0)
+        )
+        repair_result["demoted"] = processing_repair_result.get("demoted") or 0
+        repair_result["closed"] = processing_repair_result.get("closed") or 0
+        repair_result["child_cleanup"] = cleanup_result
+        return repair_result
+    except Exception as exc:
+        return {"enabled": True, "error": str(exc), "requeued": 0, "items": []}
+    finally:
+        _release_db_session_quietly()
+
+
 def run_watchdog_once():
     """Detect stuck Celery consumers and optionally restart the affected worker."""
     _ensure_dirs()
@@ -845,8 +939,28 @@ def run_watchdog_once():
     state = _load_watchdog_state()
     services_state = state.setdefault("services", {})
     now = time.time()
+    repair_result = _watchdog_repair_stale_business_tasks(config)
+    cleanup_count = ((repair_result.get("child_cleanup") or {}).get("cleaned") or 0)
+    closed_count = repair_result.get("closed") or 0
+    demoted_count = repair_result.get("demoted") or 0
+    if repair_result.get("requeued") or cleanup_count or closed_count or demoted_count:
+        _watchdog_event(
+            state,
+            "business_task_repair",
+            "requeued",
+            (
+                f"已自动重投 {repair_result.get('requeued') or 0} 个业务孤儿任务，"
+                f"降回排队 {demoted_count} 个 processing 孤儿任务，"
+                f"收口 {cleanup_count} 个父任务已终止的子任务，"
+                f"关闭 {closed_count} 个消失的 processing 任务。"
+            ),
+            {"repair": repair_result},
+        )
+        _clear_status_cache()
     inspect_data, inspect_error = _inspect_tasks_by_queue()
     results = []
+    business_tasks, business_task_errors = _business_tasks_snapshot(force_refresh=True)
+    _release_db_session_quietly()
 
     for service_id in config["services"]:
         service = SERVICES[service_id]
@@ -871,6 +985,9 @@ def run_watchdog_once():
             include_logs=False,
             inspect_data=inspect_data,
             inspect_error=inspect_error,
+            business_tasks=business_tasks.get(service_id),
+            business_task_error=business_task_errors.get(service_id),
+            force_refresh=True,
         )
         item_state = services_state.setdefault(service_id, {})
         stuck = _consumer_stuck(status)
@@ -954,6 +1071,7 @@ def run_watchdog_once():
     _save_watchdog_state(state)
     return {
         "config": config,
+        "task_repair": repair_result,
         "inspect_error": inspect_error,
         "results": results,
         "state": state,
@@ -1161,6 +1279,8 @@ def _auto_clean_stale_business_tasks(PublicationTask, stale_rows):
     except Exception as exc:
         db.session.rollback()
         return str(exc)
+    finally:
+        _release_db_session_quietly()
 
 
 def _report_video_stage_stats(force_refresh=False):
@@ -1196,6 +1316,8 @@ def _report_video_stage_stats(force_refresh=False):
         )
     except Exception as exc:
         return None, str(exc)
+    finally:
+        _release_db_session_quietly()
 
     task_counter = {status: int(count or 0) for status, count in task_rows if status}
     parse_counter = {status: int(count or 0) for status, count in parse_rows if status}
@@ -1273,6 +1395,8 @@ def _business_tasks_snapshot(force_refresh=False):
         )
     except Exception as exc:
         return empty, {service_id: f"业务任务读取失败: {exc}" for service_id in service_ids}
+    finally:
+        _release_db_session_quietly()
 
     errors = {service_id: None for service_id in service_ids}
     if BUSINESS_TASKS_AUTO_CLEAN_STALE and rows:
@@ -1321,6 +1445,7 @@ def _business_tasks_snapshot(force_refresh=False):
                 "tasks": deepcopy(buckets),
                 "errors": deepcopy(errors),
             })
+    _release_db_session_quietly()
     return buckets, errors
 
 
@@ -1371,6 +1496,8 @@ def _zsxq_business_tasks_snapshot():
         buckets["zsxq_sync"] = [_zsxq_sync_task_payload(row) for row in sync_rows]
     except Exception as exc:
         errors["zsxq_sync"] = f"星球同步运行记录读取失败: {exc}"
+    finally:
+        _release_db_session_quietly()
 
     try:
         workflow_rows = (
@@ -1399,6 +1526,8 @@ def _zsxq_business_tasks_snapshot():
         buckets["zsxq_workflow"] = [_zsxq_workflow_task_payload(row) for row in workflow_rows]
     except Exception as exc:
         errors["zsxq_workflow"] = f"星球编排运行记录读取失败: {exc}"
+    finally:
+        _release_db_session_quietly()
 
     return buckets, errors
 
@@ -1505,6 +1634,7 @@ def _business_task_fallback_title(row):
         "publisher": "视频合成任务",
         "report_audio_workflow": "研报转语音编排",
         "report_pdf_audio_workflow": "研报转语音编排",
+        "report_top10_workflow": "今日研报 Top10 编排",
         "mp3_video_workflow": "MP3 视频编排",
         "content_pdf_clean": "PDF 清洗任务",
         "content_audio_clean": "音频清洗任务",
@@ -1541,6 +1671,7 @@ def _service_status(
     scheduled_count = len(tasks.get("scheduled") or [])
     consumer_warning = None
     consumer_note = None
+    inspect_blocked = bool(inspect_error and inspect_error != "skipped")
     business_recently_active = _business_tasks_recently_active(business_tasks)
     if paused and not processes:
         consumer_note = "服务已暂停；看门狗不会自动拉起该队列 worker。"
@@ -1555,7 +1686,7 @@ def _service_status(
         and active_count == 0
         and reserved_count == 0
         and scheduled_count == 0
-        and not inspect_error
+        and not inspect_blocked
     ):
         if business_recently_active:
             consumer_note = "队列有积压，但业务任务近期仍在推进，暂不判定为消费异常。"
@@ -1584,7 +1715,7 @@ def _service_status(
         "business_tasks": business_tasks or [],
         "business_active_count": len(business_tasks or []),
         "business_tasks_error": business_task_error,
-        "inspect_error": None,
+        "inspect_error": inspect_error,
         "consumer_warning": consumer_warning,
         "consumer_note": consumer_note,
         "updated_at": datetime.utcnow().isoformat() + "Z",

@@ -11,6 +11,8 @@
 
 ## 后端基础结构
 
+新增或改造编排前，必须先执行 [成功经验复用纪律](rules/reuse-proven-patterns-discipline.md)：查找相似成熟编排，列出可复用的 worker、service、状态字段、重试策略、恢复策略、监控和通知。只复用底层函数或 worker 不算完成复用，父编排的幂等、重试、续跑、子任务记录和运行态对账也必须一起对齐。
+
 每个编排必须有一个稳定的 `feature`，例如 `report_audio_workflow`、`mp3_video_workflow`。父任务统一使用 `PublicationTask`：
 
 - `params.feature`: 编排 feature。
@@ -176,15 +178,17 @@
 
 ## 新增编排检查清单
 
-1. 定义 `FEATURE_NAME`、队列名、页面路径。
-2. 新增 API blueprint，并注册到后端。
-3. 新增 Celery task，并注册到 celery 配置和开发 worker 脚本。
-4. 父任务 `PublicationTask` 的 `params/result` 按本标准落库。
-5. 每个阶段都实现可复用检查点。
-6. `/retry` 实现从失败处续跑，不能清空已有产物。
-7. 子任务写入 parent/source metadata，并记录到 `result.children`。
-8. 邮件通知事件注册到 `workflow_notification_service`。
-9. Celery Monitor 增加业务运行映射。
-10. 前端历史列表支持状态、复制标题、下载、取消、失败续跑。
-11. 单元测试覆盖规划/产物判断/续跑复用的核心逻辑。
-12. 验证项至少包括后端语法检查、前端语法检查、相关单元测试。
+1. 执行成功经验复用检查：找到相似成熟实现，列出复用项和不复用原因。
+2. 定义 `FEATURE_NAME`、队列名、页面路径。
+3. 新增 API blueprint，并注册到后端。
+4. 新增 Celery task，并注册到 celery 配置和开发 worker 脚本。
+5. 父任务 `PublicationTask` 的 `params/result` 按本标准落库。
+6. 每个阶段都实现可复用检查点。
+7. `/retry` 实现从失败处续跑，不能清空已有产物。
+8. 子任务写入 parent/source metadata，并记录到 `result.children`。
+9. 子任务可恢复失败必须有重试或延迟恢复，并写入 `result.child_attempts/retry_state`。
+10. 邮件通知事件注册到 `workflow_notification_service`。
+11. Celery Monitor 增加业务运行映射。
+12. 前端历史列表支持状态、复制标题、下载、取消、失败续跑。
+13. 单元测试覆盖规划/产物判断/续跑复用的核心逻辑。
+14. 验证项至少包括后端语法检查、前端语法检查、相关单元测试。

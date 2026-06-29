@@ -31,6 +31,18 @@ def register_all_apis(app):
     from api.report_audio_workflow import report_audio_workflow_bp
     app.register_blueprint(report_audio_workflow_bp)
 
+    # 注册今日研报 Top10 总编辑编排模块
+    from api.report_top10_workflow import report_top10_workflow_bp
+    app.register_blueprint(report_top10_workflow_bp)
+
+    # 注册研报基础文案物料独立编排模块
+    from api.report_script_material_workflow import report_script_material_workflow_bp
+    app.register_blueprint(report_script_material_workflow_bp)
+
+    # 注册研报视觉编排预览模块
+    from api.report_visual_plan import report_visual_plan_bp
+    app.register_blueprint(report_visual_plan_bp)
+
     # 注册已同步 MP3 -> Gemini 图片 -> 横竖屏视频编排模块
     from api.mp3_video_workflow import mp3_video_workflow_bp
     app.register_blueprint(mp3_video_workflow_bp)
@@ -57,6 +69,9 @@ def register_all_apis(app):
         endpoints['report_pdf_gemini'] = '/api/report-pdf-gemini'
         endpoints['gemini_browser_legacy'] = '/api/gemini-browser'
         endpoints['report_audio_workflows'] = '/api/report-audio-workflows'
+        endpoints['report_top10_workflows'] = '/api/report-top10-workflows'
+        endpoints['report_script_material_workflows'] = '/api/report-script-material-workflows'
+        endpoints['report_visual_plans'] = '/api/report-visual-plans'
         endpoints['mp3_video_workflows'] = '/api/mp3-video-workflows'
         if app.config.get('ENABLE_MHTML_API', False):
             endpoints['v1']['mhtml_pdf'] = '/api/v1/mhtml-pdf'

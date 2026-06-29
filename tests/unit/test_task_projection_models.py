@@ -61,6 +61,59 @@ class TaskProjectionModelTest(unittest.TestCase):
         self.assertEqual(task.report_audio_video_path, "/tmp/video.mp4")
         self.assertEqual(task.task_title, "元数据标题")
 
+    def test_publication_task_projection_prefers_filename_over_generic_topic_title(self):
+        task = PublicationTask(
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "report_audio_workflow": {
+                    "pdf": {
+                        "attachment_id": "asset-1",
+                        "filename": "野村-亚洲洞察：中国AI行业如何获得融资？-260624.pdf",
+                        "topic_title": "#外资研报",
+                    },
+                },
+            },
+            result={},
+        )
+
+        self.assertEqual(task.task_title, "野村-亚洲洞察：中国AI行业如何获得融资？-260624.pdf")
+
+    def test_publication_task_projection_from_script_material_payload(self):
+        task = PublicationTask(
+            params={
+                "feature": "report_script_material_workflow",
+                "user_id": "system",
+                "source_feature": "zsxq_attachment",
+                "source_task_id": "asset-2",
+                "report_script_material_workflow": {
+                    "pdf": {
+                        "attachment_id": "asset-2",
+                        "filename": "material.pdf",
+                        "bytes": 321,
+                        "topic_title": "基础物料标题",
+                    },
+                    "metadata": {"title": "物料元数据标题"},
+                    "video": {"enabled": False},
+                },
+            },
+            result={
+                "structured_result": {
+                    "title": "结构化物料标题",
+                    "cover_title": "封面",
+                    "final_script_for_tts": "这是一段基础文案。",
+                },
+                "video": {"enabled": False, "status": "skipped"},
+            },
+        )
+
+        self.assertEqual(task.feature, "report_script_material_workflow")
+        self.assertEqual(task.source_task_id, "asset-2")
+        self.assertEqual(task.report_audio_pdf_attachment_id, "asset-2")
+        self.assertEqual(task.report_audio_pdf_filename, "material.pdf")
+        self.assertEqual(task.report_audio_pdf_topic_title, "基础物料标题")
+        self.assertFalse(task.report_audio_video_enabled)
+        self.assertEqual(task.task_title, "物料元数据标题")
+
     def test_publication_task_projection_defaults_legacy_publisher_feature(self):
         task = PublicationTask(params={"bilibili": {"title": "发布标题"}}, result={"video_path": "/tmp/a.mp4"})
 

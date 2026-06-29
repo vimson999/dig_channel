@@ -8,6 +8,10 @@ Worker 在线但未领取积压任务，消费连接可能卡住；建议重启�
 
 自愈守护会连续多次确认该状态，确认后可发送邮件，并在启用时自动重启对应队列 worker。
 
+守护进程还会修复一种更隐蔽的业务卡死：数据库里的业务任务仍是 `pending`，但原 `celery_task_id` 在 worker `active/reserved/scheduled` 和 Redis 队列中都不可见。此时它会重投同一个业务任务 ID，并在 `result.queue_repair` 记录旧/新 Celery ID。
+
+守护进程还会收口另一类历史脏状态：`publisher` 视频子任务仍是 `pending/processing`，但父编排任务已经 `completed/failed/canceled/blocked_by_captcha`。这种子任务不会被重投，而是自动标记为 `canceled`，并在 `result.orphan_child_cleanup` 记录父任务状态和旧 Celery ID。
+
 ## 配置
 
 ```env
@@ -28,6 +32,9 @@ CELERY_AUTO_HEAL_COOLDOWN_SECONDS=900
 
 # 守护进程轮询间隔
 CELERY_AUTO_HEAL_POLL_SECONDS=60
+
+# 自动修复业务表 pending 但 Celery 消息不可见的孤儿任务
+CELERY_AUTO_HEAL_REQUEUE_STALE_TASKS=1
 ```
 
 邮件发送复用工作流通知配置，见 `docs/WORKFLOW_EMAIL_NOTIFICATIONS.md`。
@@ -65,3 +72,22 @@ curl http://localhost:5001/api/v1/celery/watchdog/status
 ```text
 runtime/celery/watchdog_state.json
 ```
+
+## 自动 repair 边界
+
+自动 repair 只处理以下 pending 任务：
+
+- `content_pdf_clean`
+- `content_audio_clean`
+- `zsxq_clean_output_publish`
+
+它必须同时满足：
+
+- 任务超过 `BUSINESS_TASK_QUEUE_REPAIR_GRACE_SECONDS` 仍未推进。
+- 原 `celery_task_id` 在 worker 和 Redis 队列中都不可见。
+- 重投次数未超过 `BUSINESS_TASK_QUEUE_REPAIR_LIMIT`。
+- 目标 worker 未被人工 pause。
+
+默认不会新建业务任务，只会重投同一个 `PublicationTask.id`。
+
+`publisher` 视频任务的边界不同：watchdog 不会全局重投历史 `publisher` 任务，避免意外拉起旧视频；只会自动收口父编排已经终止的 publisher 子任务。

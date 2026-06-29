@@ -4,6 +4,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ENV_FILE="$PROJECT_ROOT/.env"
+WORKER_ID="${DOUBAO_BROWSER_TTS_WORKER_ID:-${1:-}}"
+PROFILE_POOL_ROOT="${DOUBAO_BROWSER_TTS_PROFILE_POOL_ROOT:-$PROJECT_ROOT/runtime/browser_profiles/doubao_pool}"
 
 env_value() {
     local key="$1"
@@ -25,6 +27,10 @@ CHROME_PATH="${DOUBAO_BROWSER_TTS_CHROME_PATH:-$(env_value DOUBAO_BROWSER_TTS_CH
 DOUBAO_URL="${DOUBAO_BROWSER_TTS_URL:-$(env_value DOUBAO_BROWSER_TTS_URL)}"
 EXTENSION_PATH="${DOUBAO_BROWSER_TTS_EXTENSION_PATH:-$(env_value DOUBAO_BROWSER_TTS_EXTENSION_PATH)}"
 LEGACY_USER_DATA_DIR="$PROJECT_ROOT/runtime/doubao-browser-profile"
+
+if [ -n "$WORKER_ID" ] && [ -z "${DOUBAO_BROWSER_TTS_USER_DATA_DIR:-}" ]; then
+    USER_DATA_DIR="$PROFILE_POOL_ROOT/$WORKER_ID"
+fi
 
 if [ -z "$USER_DATA_DIR" ]; then
     USER_DATA_DIR="$PROJECT_ROOT/runtime/browser_profiles/doubao"
@@ -73,6 +79,9 @@ if [ -d "$EXTENSION_PATH" ]; then
 fi
 
 echo "打开豆包专用 Chrome profile:"
+if [ -n "$WORKER_ID" ]; then
+    echo "  worker-id: $WORKER_ID"
+fi
 echo "  user-data-dir: $USER_DATA_DIR"
 if [ -n "$PROFILE_DIRECTORY" ]; then
     echo "  profile-directory: $PROFILE_DIRECTORY"

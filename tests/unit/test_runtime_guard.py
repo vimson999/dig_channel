@@ -89,10 +89,39 @@ class RuntimeGuardTest(unittest.TestCase):
             self.assertEqual(runtime_guard._feature_limit("report_pdf_audio_workflow"), 2)
             self.assertEqual(runtime_guard._feature_backlog_limit("report_pdf_audio_workflow"), 6)
 
+    def test_script_material_workflow_has_independent_default_capacity(self):
+        self.assertEqual(runtime_guard._feature_limit("report_script_material_workflow"), 2)
+        self.assertEqual(runtime_guard._feature_backlog_limit("report_script_material_workflow"), 50)
+
     def test_admission_retry_budget_does_not_fall_back_to_celery_default_three(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TASK_ADMISSION_MAX_RETRIES", None)
             self.assertEqual(runtime_guard._admission_retry_max_retries(), 100000)
+
+    def test_deferred_task_keeps_guard_message_out_of_error_message(self):
+        task = self._add_task("pending", feature="publisher")
+        admission = {
+            "allowed": False,
+            "reason": "feature_capacity",
+            "message": "系统保护：publisher 同类任务达到当前运行上限 4，稍后自动重试。",
+            "feature": "publisher",
+            "active_count": 4,
+            "limit": 4,
+        }
+
+        saved = runtime_guard._mark_publication_task_deferred(
+            task.id,
+            admission=admission,
+            queue="render",
+            countdown=300,
+        )
+
+        self.assertTrue(saved)
+        db.session.refresh(task)
+        self.assertEqual(task.status, "pending")
+        self.assertEqual(task.current_step, "deferred_capacity")
+        self.assertIsNone(task.error_message)
+        self.assertEqual(task.result["runtime_guard"]["message"], admission["message"])
 
 
 if __name__ == "__main__":

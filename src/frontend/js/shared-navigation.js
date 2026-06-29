@@ -64,6 +64,12 @@ class SharedNavigation {
             return 'gemini-browser-test';
         } else if (filename === 'report-audio-workflow-test.html') {
             return 'report-audio-workflow-test';
+        } else if (filename === 'report-script-material-workflow-test.html') {
+            return 'report-script-material-workflow-test';
+        } else if (filename === 'report-visual-plan-test.html') {
+            return 'report-visual-plan-test';
+        } else if (filename === 'report-top10-workflow-test.html') {
+            return 'report-top10-workflow-test';
         } else if (filename === 'mp3-video-workflow.html') {
             return 'mp3-video-workflow';
         } else if (filename === 'thumbnail-generator.html') {
@@ -123,6 +129,9 @@ class SharedNavigation {
             'gemini-test': 'Gemini AI 测试台',
             'gemini-browser-test': '研报 PDF Gem 测试台',
             'report-audio-workflow-test': '研报转语音编排台',
+            'report-script-material-workflow-test': '研报基础文案物料台',
+            'report-visual-plan-test': '研报视觉编排测试台',
+            'report-top10-workflow-test': '今日研报 Top10 编排台',
             'mp3-video-workflow': 'MP3 视频编排台',
             'thumbnail-workbench': '听见资本封面工作台',
             'thumbnail-generator': '研报封面生成器',
@@ -404,6 +413,24 @@ class SharedNavigation {
                         name: '研报转语音',
                         icon: 'fas fa-file-audio',
                         href: 'report-audio-workflow-test.html'
+                    },
+                    {
+                        id: 'report-script-material-workflow-test',
+                        name: '研报基础文案',
+                        icon: 'fas fa-file-lines',
+                        href: 'report-script-material-workflow-test.html'
+                    },
+                    {
+                        id: 'report-visual-plan-test',
+                        name: '研报视觉编排',
+                        icon: 'fas fa-wand-magic-sparkles',
+                        href: 'report-visual-plan-test.html'
+                    },
+                    {
+                        id: 'report-top10-workflow-test',
+                        name: '研报 Top10',
+                        icon: 'fas fa-ranking-star',
+                        href: 'report-top10-workflow-test.html'
                     },
                     {
                         id: 'mp3-video-workflow',

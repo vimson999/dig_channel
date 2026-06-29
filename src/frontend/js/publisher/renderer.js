@@ -386,84 +386,179 @@ const CanvasRenderer = {
         const w = canvas.width, h = canvas.height;
         ctx.clearRect(0, 0, w, h);
 
-        // 1. 区域划分
-        const splitY = 700;
+        // 1. 区域划分：顶部资料区约 27%，下方留给标题组和字幕安全区
+        const splitY = 520;
         
         // 2. 背景绘制
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, w, splitY);
-        
-        // --- 新增：阴影过渡 (纸张悬浮感) ---
-        const shadowH = 60;
-        const gradShadow = ctx.createLinearGradient(0, splitY - shadowH, 0, splitY);
-        gradShadow.addColorStop(0, 'rgba(0,0,0,0)');
-        gradShadow.addColorStop(1, 'rgba(0,0,0,0.08)');
-        ctx.fillStyle = gradShadow;
-        ctx.fillRect(0, splitY - shadowH, w, shadowH);
-
-        ctx.fillStyle = '#051C33';
-        ctx.fillRect(0, splitY, w, h - splitY);
+        const bgGrad = ctx.createLinearGradient(0, splitY, 0, h);
+        bgGrad.addColorStop(0, '#071727');
+        bgGrad.addColorStop(1, '#030A16');
+        ctx.fillStyle = bgGrad;
+        ctx.fillRect(0, 0, w, h);
 
         // 3. 截图区域渲染 (Object-fit: contain 逻辑)
         if (images.v_screenshot && images.v_screenshot.complete && images.v_screenshot.naturalWidth) {
             const img = images.v_screenshot;
-            const scale = Math.min(w / img.naturalWidth, splitY / img.naturalHeight);
+            const scale = Math.max(w / img.naturalWidth, splitY / img.naturalHeight);
             const nw = img.naturalWidth * scale;
             const nh = img.naturalHeight * scale;
             const nx = (w - nw) / 2;
-            const ny = (splitY - nh) / 2;
+            const ny = 0;
+            ctx.save();
+            ctx.beginPath(); ctx.rect(0, 0, w, splitY); ctx.clip();
             ctx.drawImage(img, nx, ny, nw, nh);
-            
-            // 细微分割线
-            ctx.strokeStyle = 'rgba(0,0,0,0.05)';
-            ctx.lineWidth = 1;
-            ctx.beginPath(); ctx.moveTo(0, splitY); ctx.lineTo(w, splitY); ctx.stroke();
+            ctx.restore();
         } else {
             ctx.fillStyle = '#F8F9FA';
-            ctx.fillRect(40, 40, w - 80, splitY - 80);
+            ctx.fillRect(0, 0, w, splitY);
             ctx.fillStyle = '#DEE2E6';
-            ctx.textAlign = 'center'; ctx.font = 'bold 30px ${FONT_STACK}';
+            ctx.textAlign = 'center'; ctx.font = `bold 30px ${FONT_STACK}`;
             ctx.fillText('等待上传研报截图...', w / 2, splitY / 2);
         }
+        const fade = ctx.createLinearGradient(0, splitY - 180, 0, splitY + 112);
+        fade.addColorStop(0, 'rgba(7,23,39,0)');
+        fade.addColorStop(1, 'rgba(7,23,39,0.94)');
+        ctx.fillStyle = fade;
+        ctx.fillRect(0, splitY - 180, w, 292);
+        ctx.fillStyle = 'rgba(226,198,82,0.16)';
+        ctx.fillRect(0, splitY, w, 2);
 
         // 4. 文字排版规则
-        const leftPadding = 80;
-        const maxTextW = w * 0.82 - leftPadding; // 安全区控制
-        let currentY = splitY + 120;
+        const leftPadding = 86;
+        const maxTextW = w - leftPadding * 2;
+        let currentY = splitY + 132;
 
-        // 主标题绘制 (亮黄色 #FFD700)
-        let mainFs = 95;
-        if (config.mainTitle.length > 25) mainFs = 82;
+        const focusGlow = ctx.createRadialGradient(leftPadding + 130, currentY + 120, 0, leftPadding + 130, currentY + 120, 560);
+        focusGlow.addColorStop(0, 'rgba(226,198,82,0.07)');
+        focusGlow.addColorStop(1, 'rgba(226,198,82,0)');
+        ctx.fillStyle = focusGlow;
+        ctx.fillRect(0, splitY, w, h - splitY);
+
+        const bottomGlow = ctx.createRadialGradient(w - 160, h - 260, 0, w - 160, h - 260, 520);
+        bottomGlow.addColorStop(0, 'rgba(20,74,112,0.09)');
+        bottomGlow.addColorStop(1, 'rgba(20,74,112,0)');
+        ctx.fillStyle = bottomGlow;
+        ctx.fillRect(0, splitY, w, h - splitY);
+
+        ctx.fillStyle = '#E2C652';
+        ctx.fillRect(leftPadding, currentY - 52, 136, 5);
+
+        // 主标题绘制：机构前缀用金色，其余正文用白色，降低整段高亮的突兀感
+        let mainFs = 66;
+        if (config.mainTitle.length > 25) mainFs = 56;
         ctx.font = `900 ${mainFs}px ${FONT_STACK}`;
-        ctx.fillStyle = '#FFD700';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
 
-        const mainLines = this._wrapText(ctx, config.mainTitle, maxTextW).slice(0, 3);
-        mainLines.forEach(line => {
-            ctx.fillText(line, leftPadding, currentY);
-            currentY += mainFs * 1.35;
+        const mainLines = this._wrapText(ctx, config.mainTitle, maxTextW).slice(0, 4);
+        mainLines.forEach((line, index) => {
+            const separatorIndex = String(line || '').search(/[:：]/);
+            if (index === 0 && separatorIndex > 0 && separatorIndex < 8) {
+                const prefix = line.slice(0, separatorIndex + 1);
+                const rest = line.slice(separatorIndex + 1).trimStart();
+                ctx.fillStyle = '#E2C652';
+                ctx.fillText(prefix, leftPadding, currentY);
+                ctx.fillStyle = '#F6F8FC';
+                ctx.fillText(rest, leftPadding + ctx.measureText(prefix).width + 14, currentY);
+            } else {
+                ctx.fillStyle = '#F6F8FC';
+                ctx.fillText(line, leftPadding, currentY);
+            }
+            currentY += mainFs * 1.18;
         });
 
-        // 副标题绘制 (纯白 #FFFFFF)
-        currentY += 40;
-        const subFs = 55;
+        // 副标题绘制
+        currentY += 24;
+        const subFs = 34;
         ctx.font = `500 ${subFs}px ${FONT_STACK}`;
-        ctx.fillStyle = '#FFFFFF';
-        const subLines = this._wrapText(ctx, config.subTitle, maxTextW).slice(0, 1);
+        ctx.fillStyle = 'rgba(214,222,232,0.86)';
+        const subLines = this._wrapText(ctx, config.subTitle, maxTextW).slice(0, 2);
         subLines.forEach(line => {
             ctx.fillText(line, leftPadding, currentY);
-            currentY += subFs * 1.5;
+            currentY += subFs * 1.28;
         });
 
-        // 5. 底部品牌标识 (上移至离底部 400px，避开 UI 遮挡)
-        const brandY = h - 400; 
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-        // 精致短横线 (位于文字上方 15px)
-        ctx.fillRect(leftPadding, brandY - 45, 100, 2);
-        // 品牌文字
-        ctx.font = '500 38px ${FONT_STACK}';
-        ctx.fillText(config.dateText, leftPadding, brandY - 30);
+        // 5. 来源/日期跟随标题组，不再漂到中下部
+        const brandY = Math.min(currentY + 46, 1120);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.58)';
+        ctx.fillRect(leftPadding, brandY - 25, 92, 3);
+        ctx.font = `500 28px ${FONT_STACK}`;
+        ctx.fillText(config.dateText, leftPadding, brandY - 6);
+
+        const lowerTop = Math.min(Math.max(brandY + 84, 1090), 1240);
+        const captionTop = h - 430;
+        const captionBottom = h - 156;
+        const stageFade = ctx.createLinearGradient(0, lowerTop, 0, h);
+        stageFade.addColorStop(0, 'rgba(1,6,14,0.04)');
+        stageFade.addColorStop(1, 'rgba(1,6,14,0.27)');
+        ctx.fillStyle = stageFade;
+        ctx.fillRect(0, lowerTop, w, h - lowerTop);
+
+        const railTop = lowerTop + 18;
+        const railBottom = captionTop - 94;
+        if (railBottom > railTop) {
+            ctx.strokeStyle = 'rgba(226,198,82,0.13)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(leftPadding, railTop);
+            ctx.lineTo(leftPadding, railBottom);
+            ctx.stroke();
+
+            ctx.fillStyle = 'rgba(226,198,82,0.34)';
+            ctx.beginPath();
+            ctx.arc(leftPadding, railTop, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            [railTop, railTop + 96, railTop + 192].forEach((y, index) => {
+                if (y >= railBottom - 20) return;
+                ctx.strokeStyle = `rgba(148,163,184,${0.09 - index * 0.02})`;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(leftPadding + 26, y);
+                ctx.lineTo(leftPadding + 150, y);
+                ctx.stroke();
+            });
+        }
+
+        ctx.strokeStyle = 'rgba(226,198,82,0.17)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(leftPadding, captionTop);
+        ctx.lineTo(w - leftPadding, captionTop);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(148,163,184,0.09)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(leftPadding, captionBottom);
+        ctx.lineTo(w - leftPadding, captionBottom);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(226,198,82,0.13)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(leftPadding, captionTop);
+        ctx.lineTo(leftPadding, captionTop + 74);
+        ctx.moveTo(w - leftPadding, captionTop);
+        ctx.lineTo(w - leftPadding, captionTop + 74);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(148,163,184,0.07)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(leftPadding, captionBottom - 64);
+        ctx.lineTo(leftPadding, captionBottom);
+        ctx.moveTo(w - leftPadding, captionBottom - 64);
+        ctx.lineTo(w - leftPadding, captionBottom);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(148,163,184,0.04)';
+        [captionTop + 92, captionTop + 174].forEach((y) => {
+            ctx.beginPath();
+            ctx.moveTo(leftPadding + 34, y);
+            ctx.lineTo(w - leftPadding - 34, y);
+            ctx.stroke();
+        });
     },
 
     /**

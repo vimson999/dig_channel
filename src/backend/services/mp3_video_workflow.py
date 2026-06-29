@@ -269,7 +269,11 @@ def list_audio_assets(
             ZsxqAttachment.topic_id.label("topic_id"),
             ZsxqTopic.title.label("topic_title"),
             ZsxqTopic.content.label("topic_content"),
+            ZsxqTopic.tab_label.label("tab_label"),
+            ZsxqTopic.author_name.label("topic_author"),
             ZsxqTopic.create_time.label("topic_create_time"),
+            ZsxqTopic.first_synced_at.label("topic_first_synced_at"),
+            ZsxqTopic.last_synced_at.label("topic_last_synced_at"),
         )
         .outerjoin(ZsxqTopic, topic_join)
         .filter(ZsxqAttachment.download_status == "downloaded")
@@ -357,7 +361,11 @@ def audio_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
             ZsxqAttachment.topic_id.label("topic_id"),
             ZsxqTopic.title.label("topic_title"),
             ZsxqTopic.content.label("topic_content"),
+            ZsxqTopic.tab_label.label("tab_label"),
+            ZsxqTopic.author_name.label("topic_author"),
             ZsxqTopic.create_time.label("topic_create_time"),
+            ZsxqTopic.first_synced_at.label("topic_first_synced_at"),
+            ZsxqTopic.last_synced_at.label("topic_last_synced_at"),
         )
         .outerjoin(
             ZsxqTopic,
@@ -2535,9 +2543,22 @@ def _audio_asset_row_payload(row) -> Optional[Dict[str, Any]]:
         "tab_id": row.tab_id,
         "topic_id": row.topic_id,
         "topic_title": row.topic_title,
+        "topic_author": getattr(row, "topic_author", None),
         "topic_content_excerpt": _clip_text(_clean_line(row.topic_content), 180),
         "topic_create_time": row.topic_create_time,
+        "topic_first_synced_at": _isoformat_z(getattr(row, "topic_first_synced_at", None)),
+        "topic_last_synced_at": _isoformat_z(getattr(row, "topic_last_synced_at", None)),
+        "tab_label": getattr(row, "tab_label", None),
+        "preview_url": f"/api/mp3-video-workflows/audio-assets/{row.attachment_id}/preview",
     }
+
+
+def _isoformat_z(value):
+    if not value:
+        return None
+    if isinstance(value, str):
+        return value
+    return value.isoformat() + "Z"
 
 
 def _resolve_project_path(path_value: Any) -> Optional[Path]:

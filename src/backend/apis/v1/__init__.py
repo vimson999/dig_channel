@@ -87,6 +87,10 @@ def register_blueprints(app):
     from .zsxq import bp as zsxq_bp
     app.register_blueprint(zsxq_bp)
 
+    # 注册外链文档富化 API
+    from .external_documents import bp as external_documents_bp
+    app.register_blueprint(external_documents_bp)
+
     # 注册 Celery Worker 控制台 API
     from .celery_monitor import bp as celery_monitor_bp
     app.register_blueprint(celery_monitor_bp)

@@ -22,6 +22,8 @@ DEFAULT_FEATURE_LIMITS = {
     "publisher": 4,
     "report_audio_workflow": 2,
     "report_pdf_audio_workflow": 2,
+    "report_script_material_workflow": 2,
+    "report_top10_workflow": 1,
     "mp3_video_workflow": 1,
     "content_pdf_clean": 2,
     "content_audio_clean": 1,
@@ -32,6 +34,8 @@ DEFAULT_FEATURE_BACKLOG_LIMITS = {
     "publisher": 12,
     "report_audio_workflow": 10,
     "report_pdf_audio_workflow": 10,
+    "report_script_material_workflow": 50,
+    "report_top10_workflow": 5,
     "mp3_video_workflow": 5,
     "content_pdf_clean": 10,
     "content_audio_clean": 5,
@@ -332,7 +336,7 @@ def _mark_publication_task_deferred(task_id, *, admission, queue, countdown):
             if str(admission.get("reason") or "").startswith("db_")
             else ("deferred_backlog" if admission.get("reason") == "feature_backlog" else "deferred_capacity")
         )
-        task.error_message = admission.get("message")
+        task.error_message = None
         task.completed_at = None
         task.result = result
         flag_modified(task, "result")

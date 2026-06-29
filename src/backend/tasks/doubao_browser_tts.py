@@ -1,5 +1,6 @@
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
@@ -19,6 +20,35 @@ from services.workflow_notification_service import workflow_notification_service
 
 
 logger = logging.getLogger("DOUBAO_BROWSER_TTS_TASK")
+
+DEFAULT_RETRY_LIMIT = 2
+DEFAULT_RETRY_DELAY_SECONDS = 20
+MAX_RETRY_LIMIT = 5
+
+RETRYABLE_ERROR_FRAGMENTS = (
+    "豆包音频时长异常",
+    "疑似朗读未完成",
+    "空音频",
+    "等待音频捕获",
+    "导出 WAV",
+    "WAV 已保存",
+    "音频捕获",
+    "页面自动化超时",
+    "Timeout",
+    "timed out",
+    "Target closed",
+    "Browser closed",
+    "Protocol error",
+    "net::ERR",
+)
+
+NON_RETRYABLE_ERROR_FRAGMENTS = (
+    "文本不能为空",
+    "任务已取消",
+    "任务不存在",
+    "人机验证",
+    "captcha",
+)
 
 
 TASK_UPDATE_COLUMNS = (
@@ -58,10 +88,10 @@ def _load_task(task_id, *columns):
 def process_doubao_browser_tts_job(self, task_id):
     app = create_app()
     with app.app_context():
-        return _process_job(task_id)
+        return _process_job(task_id, celery_task=self)
 
 
-def _process_job(task_id):
+def _process_job(task_id, celery_task=None):
     task = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
     if not task:
         logger.error("Doubao browser TTS task not found: %s", task_id)
@@ -126,7 +156,14 @@ def _process_job(task_id):
         if not fresh:
             raise RuntimeError("任务不存在")
         final_result = dict(fresh.result or {})
+        metadata = dict(final_result.get("metadata") or {})
+        metadata.update({
+            "worker_id": os.getenv("DOUBAO_BROWSER_TTS_WORKER_ID", "default"),
+            "user_data_dir": audio.get("user_data_dir"),
+            "profile_directory": audio.get("profile_directory"),
+        })
         final_result.update({
+            "metadata": {key: value for key, value in metadata.items() if value not in (None, "")},
             "audio": {
                 "wav_path": audio.get("wav_path"),
                 "chunks": audio.get("chunks"),
@@ -158,9 +195,103 @@ def _process_job(task_id):
         db.session.rollback()
         task = _load_task(task_id, *TASK_UPDATE_COLUMNS)
         if task:
+            if _should_auto_retry(task, exc, celery_task):
+                _mark_retrying(task, exc, celery_task)
+                raise celery_task.retry(
+                    exc=exc,
+                    countdown=_retry_delay_seconds(task),
+                    max_retries=_retry_limit(task),
+                )
             _mark_failed(task, str(exc))
         logger.error("Doubao browser TTS task failed: %s", exc, exc_info=True)
         return False
+
+
+def _should_auto_retry(task, exc, celery_task):
+    if not celery_task or not hasattr(celery_task, "retry"):
+        return False
+    limit = _retry_limit(task)
+    if limit <= 0:
+        return False
+    retries = int(getattr(getattr(celery_task, "request", None), "retries", 0) or 0)
+    if retries >= limit:
+        return False
+    return _is_retryable_error(exc)
+
+
+def _is_retryable_error(exc):
+    message = str(exc or "")
+    if not message:
+        return False
+    lowered = message.lower()
+    for fragment in NON_RETRYABLE_ERROR_FRAGMENTS:
+        if fragment.lower() in lowered:
+            return False
+    return any(fragment.lower() in lowered for fragment in RETRYABLE_ERROR_FRAGMENTS)
+
+
+def _retry_limit(task):
+    payload = ((task.params or {}).get("doubao_browser_tts") or {}) if task else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    raw = payload.get("retry_limit")
+    if raw is None:
+        raw = metadata.get("retry_limit")
+    if raw is None:
+        raw = os.getenv("DOUBAO_BROWSER_TTS_RETRY_LIMIT", DEFAULT_RETRY_LIMIT)
+    try:
+        return max(0, min(int(raw), MAX_RETRY_LIMIT))
+    except (TypeError, ValueError):
+        return DEFAULT_RETRY_LIMIT
+
+
+def _retry_delay_seconds(task):
+    payload = ((task.params or {}).get("doubao_browser_tts") or {}) if task else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    raw = payload.get("retry_delay_seconds")
+    if raw is None:
+        raw = metadata.get("retry_delay_seconds")
+    if raw is None:
+        raw = os.getenv("DOUBAO_BROWSER_TTS_RETRY_DELAY_SECONDS", DEFAULT_RETRY_DELAY_SECONDS)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_RETRY_DELAY_SECONDS
+
+
+def _mark_retrying(task, exc, celery_task):
+    now_dt = datetime.utcnow()
+    now = now_dt.isoformat() + "Z"
+    retries = int(getattr(getattr(celery_task, "request", None), "retries", 0) or 0)
+    retry_number = retries + 1
+    limit = _retry_limit(task)
+    delay = _retry_delay_seconds(task)
+    message = str(exc)
+    result = dict(task.result or {})
+    logs = list(result.get("logs") or [])
+    logs.append({
+        "step": "auto_retry",
+        "message": f"自动重试 {retry_number}/{limit}: {message}",
+        "progress": task.progress or 0,
+        "updated_at": now,
+    })
+    result.update({
+        "last_error": message,
+        "retry_state": {
+            "retry_number": retry_number,
+            "retry_limit": limit,
+            "retry_delay_seconds": delay,
+            "next_retry_at": (now_dt + timedelta(seconds=delay)).isoformat() + "Z",
+            "updated_at": now,
+        },
+        "logs": logs[-80:],
+    })
+    task.status = "pending"
+    task.current_step = "auto_retry"
+    task.error_message = None
+    task.completed_at = None
+    task.result = result
+    flag_modified(task, "result")
+    db.session.commit()
 
 
 def _mark_failed(task, message):

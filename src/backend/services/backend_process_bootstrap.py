@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_DIR = PROJECT_ROOT / "runtime"
 LOG_PATH = PROJECT_ROOT / "logs" / "backend_process_bootstrap.log"
 
-DEFAULT_SCHEDULERS = ()
+DEFAULT_SCHEDULERS = ("zsxq_auto", "content_retention")
 
 SCHEDULERS = {
     "zsxq_auto": {

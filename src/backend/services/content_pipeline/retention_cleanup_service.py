@@ -2,10 +2,12 @@ import os
 import shutil
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
 from flask import current_app, has_app_context
+from sqlalchemy import or_
 
 from models.task import PublicationTask
 
@@ -33,6 +35,11 @@ LARGE_ATTACHMENT_SUFFIXES = {
     ".pptx",
     ".zip",
 }
+RETENTION_PROTECTED_TASK_FEATURES = (
+    "content_pdf_clean",
+    "content_audio_clean",
+    "zsxq_clean_output_publish",
+)
 
 
 class RetentionCleanupError(RuntimeError):
@@ -50,6 +57,7 @@ class ContentRetentionPolicy:
     include_manual_publish: bool = True
     include_pytest_batches: bool = True
     max_candidates: int = 2000
+    unfinished_reference_protect_days: int = 3
 
     @classmethod
     def from_payload(cls, payload: Optional[dict] = None):
@@ -64,6 +72,7 @@ class ContentRetentionPolicy:
             include_manual_publish=_truthy(payload.get("include_manual_publish", True)),
             include_pytest_batches=_truthy(payload.get("include_pytest_batches", True)),
             max_candidates=_positive_int(payload.get("max_candidates"), 2000),
+            unfinished_reference_protect_days=_positive_int(payload.get("unfinished_reference_protect_days"), 3),
         )
 
     def to_dict(self):
@@ -77,6 +86,7 @@ class ContentRetentionPolicy:
             "include_manual_publish": self.include_manual_publish,
             "include_pytest_batches": self.include_pytest_batches,
             "max_candidates": self.max_candidates,
+            "unfinished_reference_protect_days": self.unfinished_reference_protect_days,
         }
 
 
@@ -121,7 +131,7 @@ class ContentPipelineRetentionCleanupService:
     def run(self, *, policy: Optional[ContentRetentionPolicy] = None, dry_run: bool = True) -> dict:
         policy = policy or ContentRetentionPolicy()
         now = time.time()
-        protected_paths = self._protected_paths()
+        protected_paths = self._protected_paths(policy=policy, now=now)
         candidates = self._collect_candidates(policy, now, protected_paths)
         candidates = candidates[: max(policy.max_candidates, 1)]
 
@@ -160,13 +170,11 @@ class ContentPipelineRetentionCleanupService:
         candidates = []
         if policy.include_content_pipeline_batches:
             candidates.extend(
-                self._collect_old_directories(
+                self._collect_old_content_pipeline_files(
                     root=self.content_pipeline_root / "batches",
-                    category="content_pipeline_batch",
                     days=policy.content_pipeline_batch_days,
                     now=now,
                     protected_paths=protected_paths,
-                    reason="content pipeline 清洗批次超过保留期",
                 )
             )
         if policy.include_manual_publish:
@@ -193,10 +201,28 @@ class ContentPipelineRetentionCleanupService:
                 )
             )
         if policy.include_sync_raw:
-            candidates.extend(self._collect_old_sync_attachments(policy.sync_raw_days, now))
+            candidates.extend(self._collect_old_sync_attachments(policy.sync_raw_days, now, protected_paths))
 
         candidates.sort(key=lambda item: (item["category"], item["path"]))
         return candidates
+
+    def _collect_old_content_pipeline_files(
+        self,
+        *,
+        root: Path,
+        days: int,
+        now: float,
+        protected_paths: set[Path],
+    ) -> list[dict]:
+        return self._collect_old_large_files(
+            root=root,
+            category="content_pipeline_batch_file",
+            days=days,
+            now=now,
+            protected_paths=protected_paths,
+            reason="content pipeline 批次内大文件超过保留期，保留 JSON/manifest 元数据",
+            allowed_root=self.content_pipeline_root,
+        )
 
     def _collect_old_directories(
         self,
@@ -239,46 +265,109 @@ class ContentPipelineRetentionCleanupService:
             )
         return candidates
 
-    def _collect_old_sync_attachments(self, days: int, now: float) -> list[dict]:
-        if not self.zsxq_data_dir.exists() or not self.zsxq_data_dir.is_dir():
+    def _collect_old_sync_attachments(self, days: int, now: float, protected_paths: set[Path]) -> list[dict]:
+        return self._collect_old_large_files(
+            root=self.zsxq_data_dir,
+            category="sync_raw_attachment",
+            days=days,
+            now=now,
+            protected_paths=protected_paths,
+            reason="知识星球同步附件超过保留期，仅删除大文件附件，保留数据库和 JSON 元数据",
+            allowed_root=self.zsxq_data_dir,
+            files_glob="*/*/files",
+        )
+
+    def _collect_old_large_files(
+        self,
+        *,
+        root: Path,
+        category: str,
+        days: int,
+        now: float,
+        protected_paths: set[Path],
+        reason: str,
+        allowed_root: Path,
+        files_glob: Optional[str] = None,
+    ) -> list[dict]:
+        if not root.exists() or not root.is_dir():
             return []
         cutoff_seconds = days * 86400
         candidates = []
-        for files_dir in self.zsxq_data_dir.glob("*/*/files"):
-            if not files_dir.is_dir() or files_dir.is_symlink():
-                continue
-            for path in files_dir.rglob("*"):
+        search_roots: Iterable[Path]
+        if files_glob:
+            search_roots = (path for path in root.glob(files_glob) if path.is_dir() and not path.is_symlink())
+        else:
+            search_roots = (root,)
+
+        for search_root in search_roots:
+            for path in search_root.rglob("*"):
                 if not path.is_file() or path.is_symlink():
                     continue
                 if path.suffix.lower() not in LARGE_ATTACHMENT_SUFFIXES:
                     continue
                 resolved = path.resolve()
-                _assert_inside(resolved, self.zsxq_data_dir)
+                _assert_inside(resolved, allowed_root)
+                if self._is_protected(resolved, protected_paths):
+                    continue
                 age_seconds = now - resolved.stat().st_mtime
                 if age_seconds < cutoff_seconds:
                     continue
                 size = resolved.stat().st_size
                 candidates.append(
                     {
-                        "category": "sync_raw_attachment",
+                        "category": category,
                         "kind": "file",
                         "path": str(resolved),
                         "bytes": size,
                         "human_size": _format_bytes(size),
                         "age_days": round(age_seconds / 86400, 2),
-                        "reason": "知识星球同步附件超过保留期，仅删除大文件附件，保留数据库和 JSON 元数据",
+                        "reason": reason,
                     }
                 )
         return candidates
 
-    def _protected_paths(self) -> set[Path]:
+    def _protected_paths(self, *, policy: ContentRetentionPolicy, now: float) -> set[Path]:
         protected = set()
-        for task in PublicationTask.query.filter(PublicationTask.status.in_(["pending", "processing", "failed"])).all():
-            protected.update(_paths_from_nested(task.result))
-            protected.update(_paths_from_nested(task.params))
+        if policy.unfinished_reference_protect_days <= 0:
+            return protected
+
+        cutoff = datetime.utcfromtimestamp(now - policy.unfinished_reference_protect_days * 86400)
+        task_rows = (
+            PublicationTask.query.with_entities(PublicationTask.params, PublicationTask.result)
+            .filter(PublicationTask.status.in_(["pending", "processing", "failed"]))
+            .filter(
+                or_(
+                    PublicationTask.feature.in_(RETENTION_PROTECTED_TASK_FEATURES),
+                    PublicationTask.params["feature"].as_string().in_(RETENTION_PROTECTED_TASK_FEATURES),
+                )
+            )
+            .filter(
+                or_(
+                    PublicationTask.updated_at.is_(None),
+                    PublicationTask.updated_at >= cutoff,
+                    PublicationTask.created_at >= cutoff,
+                )
+            )
+            .all()
+        )
+        for params, result in task_rows:
+            protected.update(_paths_from_nested(result))
+            protected.update(_paths_from_nested(params))
         if ZsxqSyncRun is not None:
-            for run in ZsxqSyncRun.query.filter(ZsxqSyncRun.status.in_(["running", "pending", "processing"])).all():
-                protected.update(_paths_from_nested(run.result))
+            sync_rows = (
+                ZsxqSyncRun.query.with_entities(ZsxqSyncRun.result)
+                .filter(ZsxqSyncRun.status.in_(["running", "pending", "processing"]))
+                .filter(
+                    or_(
+                        ZsxqSyncRun.updated_at.is_(None),
+                        ZsxqSyncRun.updated_at >= cutoff,
+                        ZsxqSyncRun.created_at >= cutoff,
+                    )
+                )
+                .all()
+            )
+            for (result,) in sync_rows:
+                protected.update(_paths_from_nested(result))
         return {item.resolve() for item in protected if item.exists()}
 
     def _is_protected(self, path: Path, protected_paths: set[Path]) -> bool:
@@ -298,7 +387,7 @@ class ContentPipelineRetentionCleanupService:
     def _delete_candidate(self, item: dict):
         path = Path(item["path"]).expanduser().resolve()
         category = item.get("category")
-        if category in {"content_pipeline_batch", "manual_publish"}:
+        if category in {"content_pipeline_batch_file", "manual_publish"}:
             _assert_inside(path, self.content_pipeline_root)
         elif category == "pytest_batch":
             _assert_inside(path, self.pytest_project_dir)
@@ -311,7 +400,10 @@ class ContentPipelineRetentionCleanupService:
             shutil.rmtree(path)
         elif item.get("kind") == "file":
             path.unlink()
-            _prune_empty_parents(path.parent, stop_at=self.zsxq_data_dir)
+            if category == "content_pipeline_batch_file":
+                _prune_empty_parents(path.parent, stop_at=self.content_pipeline_root / "batches")
+            elif category == "sync_raw_attachment":
+                _prune_empty_parents(path.parent, stop_at=self.zsxq_data_dir)
         else:
             raise RetentionCleanupError(f"未知清理对象类型: {item.get('kind')}")
 
@@ -331,6 +423,23 @@ def _paths_from_nested(value) -> set[Path]:
     elif isinstance(value, str) and value.startswith("/"):
         paths.add(Path(value).expanduser())
     return paths
+
+
+def _record_is_within_protection_window(record, now: float, days: int) -> bool:
+    if days <= 0:
+        return False
+    timestamp = _record_timestamp(record)
+    if timestamp is None:
+        return True
+    return now - timestamp < days * 86400
+
+
+def _record_timestamp(record) -> Optional[float]:
+    for attr in ("updated_at", "completed_at", "started_at", "created_at"):
+        value = getattr(record, attr, None)
+        if isinstance(value, datetime):
+            return value.timestamp()
+    return None
 
 
 def _latest_mtime(path: Path) -> float:

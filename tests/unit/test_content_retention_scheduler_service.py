@@ -10,6 +10,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services.content_pipeline import retention_scheduler_service as scheduler_service  # noqa: E402
+from run_content_retention_cleanup_scheduler import _build_retention_email  # noqa: E402
 
 
 class ContentRetentionSchedulerServiceTest(unittest.TestCase):
@@ -56,6 +57,36 @@ class ContentRetentionSchedulerServiceTest(unittest.TestCase):
             self.assertEqual(config["policy"]["max_candidates"], 42)
             self.assertEqual(config["last_run_at"], "2026-06-13T12:00:00Z")
             self.assertEqual(config["last_result"]["candidate_count"], 3)
+
+    def test_retention_cleanup_email_contains_summary_and_policy(self):
+        subject, body = _build_retention_email(
+            "completed",
+            trigger="scheduler",
+            dry_run=False,
+            policy={
+                "sync_raw_days": 3,
+                "content_pipeline_batch_days": 3,
+                "manual_publish_days": 3,
+                "pytest_batch_days": 3,
+                "unfinished_reference_protect_days": 3,
+                "max_candidates": 5000,
+            },
+            summary={
+                "candidate_count": 10,
+                "total_human": "1.2 GB",
+                "deleted_count": 10,
+                "deleted_human": "1.2 GB",
+                "error_count": 0,
+                "elapsed_seconds": 2.5,
+                "completed_at": "2026-06-24T00:00:00Z",
+            },
+            config={"next_run_at": "2026-06-25T00:00:00Z", "log_path": "/tmp/retention.log"},
+        )
+
+        self.assertIn("完成", subject)
+        self.assertIn("已删除：10", body)
+        self.assertIn("未收尾任务保护：3 天", body)
+        self.assertIn("下次计划：2026-06-25T00:00:00Z", body)
 
 
 def _patched_paths(root: Path):

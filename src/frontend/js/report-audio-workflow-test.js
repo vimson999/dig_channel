@@ -772,6 +772,7 @@ class ReportAudioWorkflowPage {
             'doubao_browser_tts',
             'publisher_video',
             'structured_result',
+            'script_material',
             'tts_text',
             'request',
             'pdf',
@@ -1332,7 +1333,11 @@ class ReportAudioWorkflowPage {
         const coverRegenerating = this.coverRegeneratingIds.has(job.job_id);
         const pdf = job.pdf || job.request?.pdf || null;
         const parentStatus = job.status || '';
-        const geminiChild = job.gemini || job.children?.gemini;
+        const materialChild = this.scriptMaterialChild(job);
+        const geminiChild = materialChild || job.gemini || job.children?.gemini;
+        const firstStageLabel = materialChild ? '基础文案' : 'Gemini';
+        const firstStage = materialChild ? 'script_material' : 'gemini';
+        const firstStageDetailRef = materialChild ? null : this.childDetailRef(job, 'gemini', geminiChild);
         const doubaoItems = job.doubao_browser_tts || [];
         const doubaoDisplayItems = this.doubaoDisplayItems(doubaoItems);
         const publisherChild = job.publisher_video || job.children?.publisher_video;
@@ -1340,7 +1345,8 @@ class ReportAudioWorkflowPage {
         const verticalPublisherStatus = this.normalizeStatus(verticalPublisherChild?.status || '');
         const verticalPublisherActive = this.verticalVideoRequestIds.has(job.job_id) || ['queued', 'running'].includes(verticalPublisherStatus);
         const verticalPublisherFailed = verticalPublisherStatus === 'failed';
-        const canGenerateVerticalVideo = Boolean(job.job_id && showLandscapeVideoUrl && !verticalVideoUrl && !verticalPublisherActive);
+        const canRequestVerticalVideo = Boolean(showLandscapeVideoUrl || audioUrl);
+        const canGenerateVerticalVideo = Boolean(job.job_id && canRequestVerticalVideo && !verticalVideoUrl && !verticalPublisherActive);
         const retryState = job.retry_state || {};
         const childAttempts = job.child_attempts || {};
         return `
@@ -1375,7 +1381,7 @@ class ReportAudioWorkflowPage {
                 ${pdf ? this.renderJobPdfRow(job, pdf) : ''}
 
                 <div class="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
-                    ${this.renderChild('Gemini', geminiChild, parentStatus, this.stageDisplayStatus('gemini', job, geminiChild), this.childDetailRef(job, 'gemini', geminiChild), this.retryInfo(retryState.gemini, childAttempts.gemini))}
+                    ${this.renderChild(firstStageLabel, geminiChild, parentStatus, this.stageDisplayStatus(firstStage, job, geminiChild), firstStageDetailRef, materialChild ? null : this.retryInfo(retryState.gemini, childAttempts.gemini))}
                     ${doubaoDisplayItems.length ? doubaoDisplayItems.map((item, idx) => this.renderChild(this.doubaoChildLabel(item, idx, doubaoDisplayItems), item, parentStatus, this.stageDisplayStatus('doubao', job, item), this.childDetailRef(job, 'doubao', item, idx))).join('') : this.renderChild('豆包浏览器朗读', null, parentStatus, this.stageDisplayStatus('doubao', job, null))}
                     ${this.renderChild('视频合成', publisherChild, parentStatus, this.stageDisplayStatus('publisher', job, publisherChild), this.childDetailRef(job, 'publisher', publisherChild))}
                 </div>
@@ -1412,7 +1418,7 @@ class ReportAudioWorkflowPage {
                                 ${showLandscapeVideoUrl ? `<a href="${videoUrl}" download class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800"><i class="fas fa-film mr-1"></i>横屏 MP4</a>` : ''}
                                 ${verticalVideoUrl ? `<a href="${verticalVideoUrl}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : ''}
                                 ${verticalPublisherActive ? `<button type="button" disabled class="cursor-wait rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700"><i class="fas fa-spinner fa-spin mr-1"></i>竖屏生成中</button>` : ''}
-                                ${canGenerateVerticalVideo ? `<button type="button" data-job-action="generate-vertical" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-mobile-screen-button mr-1"></i>${verticalPublisherFailed ? '重试竖屏' : '生成竖屏'}</button>` : ''}
+                                ${canGenerateVerticalVideo ? `<button type="button" data-job-action="generate-vertical" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-mobile-screen-button mr-1"></i>${verticalPublisherFailed ? '重试竖屏' : '补生成竖屏'}</button>` : ''}
                             </div>
                         </div>
                         ${verticalPublisherFailed && !verticalVideoUrl ? `<div class="mt-2 rounded border border-red-100 bg-white/80 px-2 py-1 text-xs text-red-700">竖屏生成失败：${this.escape(verticalPublisherChild?.error || '请重试')}</div>` : ''}
@@ -1481,14 +1487,22 @@ class ReportAudioWorkflowPage {
             Array.isArray(structured.titles?.standard) ? structured.titles.standard[0] : '',
             job?.video?.title,
             job?.request?.metadata?.title,
+            job?.pdf?.filename,
+            job?.request?.pdf?.filename,
             job?.pdf?.topic_title,
             job?.request?.pdf?.topic_title,
         ];
+        let genericFallback = '';
         for (const candidate of candidates) {
             const title = this.compactTitle(candidate);
-            if (title) return title;
+            if (!title) continue;
+            if (this.isGenericReportTitle(title)) {
+                genericFallback ||= title;
+                continue;
+            }
+            return title;
         }
-        return fallback;
+        return genericFallback || fallback;
     }
 
     jobMetaLine(job, sequenceLabel, hasDisplayTitle) {
@@ -1715,6 +1729,11 @@ class ReportAudioWorkflowPage {
             .trim();
     }
 
+    isGenericReportTitle(value) {
+        const normalized = String(value || '').replace(/\s+/g, '').replace(/^#/, '');
+        return ['外资研报', '研报', 'PDF', 'pdf'].includes(normalized);
+    }
+
     compactMultilineCoverText(value) {
         return String(value ?? '')
             .replace(/\r/g, '\n')
@@ -1758,6 +1777,37 @@ class ReportAudioWorkflowPage {
                 ${preview ? `<div class="mt-1 text-slate-500" title="${this.escape(preview)}" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${this.escape(preview)}</div>` : ''}
             </div>
         `;
+    }
+
+    scriptMaterialChild(job) {
+        const material = job?.script_material || null;
+        const hasMaterial = Boolean(material && typeof material === 'object' && material.status);
+        const inferredFromSummary = !hasMaterial
+            && !job?.gemini
+            && !job?.children?.gemini
+            && Boolean(job?.structured_result)
+            && Number(job?.progress || 0) >= 58;
+        if (!hasMaterial && !inferredFromSummary) return null;
+
+        const structured = job?.structured_result || {};
+        const chars = Number(material?.chars || structured.final_script_for_tts?.length || 0);
+        const chunks = Number(material?.chunks || job?.tts_text?.chunks || 0);
+        const detail = [
+            material?.source_feature || material?.source || (inferredFromSummary ? 'local_material' : ''),
+            chars ? `${chars} 字` : '',
+            chunks ? `${chunks} 段` : '',
+        ].filter(Boolean).join(' · ');
+        return {
+            job_id: material?.source_task_id || '',
+            status: material?.status || 'completed',
+            step: material?.source || 'reused',
+            progress: 100,
+            metadata: {
+                source: material?.source || (inferredFromSummary ? 'inferred_local_material' : ''),
+                source_feature: material?.source_feature || '',
+            },
+            text_preview: detail,
+        };
     }
 
     retryInfo(state = null, attempts = []) {
@@ -1913,6 +1963,15 @@ class ReportAudioWorkflowPage {
             if (parentStatus === 'running' && (child || progress > 0) && (progress < 58 || step.startsWith('gemini') || step.startsWith('gem_'))) {
                 return 'running';
             }
+            return childStatus;
+        }
+
+        if (stage === 'script_material') {
+            if (job.script_material || job.structured_result || progress >= 58) return 'succeeded';
+            if (this.isTerminal(parentStatus)) {
+                return this.childDisplayStatus(childStatus, parentStatus, Boolean(child));
+            }
+            if (parentStatus === 'running' && progress > 0) return 'running';
             return childStatus;
         }
 

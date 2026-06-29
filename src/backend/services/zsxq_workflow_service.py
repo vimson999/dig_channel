@@ -1,11 +1,11 @@
 import logging
 import os
+import time
 import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
 
 from sqlalchemy import inspect, or_, text
-from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm.attributes import flag_modified
 
 from models import db
@@ -17,7 +17,7 @@ from services.content_pipeline.auto_publish_handoff import (
     summarize_publish_runs_for_request,
 )
 from services.workflow_notification_service import workflow_notification_service
-from services.runtime_guard import is_retryable_db_error
+from services.runtime_guard import is_retryable_db_error, release_db_session_quietly
 from services.zsxq_sync_service import zsxq_sync_service
 
 
@@ -31,8 +31,13 @@ CLEAN_STALE_MINUTES_ENV_NAME = "ZSXQ_WORKFLOW_CLEAN_STALE_MINUTES"
 DEFAULT_CLEAN_STALE_MINUTES = 360
 SCHEMA_CHECK_TTL_SECONDS_ENV_NAME = "ZSXQ_WORKFLOW_SCHEMA_CHECK_TTL_SECONDS"
 DEFAULT_SCHEMA_CHECK_TTL_SECONDS = 300
+QUEUE_DB_RETRIES_ENV_NAME = "ZSXQ_WORKFLOW_QUEUE_DB_RETRIES"
+QUEUE_DB_RETRY_DELAY_SECONDS_ENV_NAME = "ZSXQ_WORKFLOW_QUEUE_DB_RETRY_DELAY_SECONDS"
+DEFAULT_QUEUE_DB_RETRIES = 3
+DEFAULT_QUEUE_DB_RETRY_DELAY_SECONDS = 10
 DEFAULT_AUTO_VIDEO_PDF_THRESHOLD = 35
 DEFAULT_AUTO_VIDEO_MP3_THRESHOLD = 25
+DEFAULT_AUTO_SCRIPT_MATERIAL_PDF_THRESHOLD = 40
 TOPIC_PAGE_SIZE_HINT = 20
 
 
@@ -90,7 +95,6 @@ class ZsxqWorkflowService:
         max_download_files,
         jobs,
     ):
-        self.ensure_schema()
         snapshot = self._build_system_snapshot(
             config=config,
             trigger=trigger,
@@ -100,50 +104,65 @@ class ZsxqWorkflowService:
             max_download_files=max_download_files,
             jobs=jobs,
         )
-        workflow = ZsxqWorkflowRun(
-            batch_id=batch_id,
-            group_id=str(config.get("group_id") or ""),
-            group_name=config.get("group_name"),
-            trigger=trigger,
-            status="queued",
-            current_stage="init",
-            round=batch_round,
-            max_rounds=max_rounds,
-            config_snapshot=snapshot,
-            stage_results={
-                "workflow": {
-                    "status": "created",
-                    "created_at": self._now_iso(),
-                }
-            },
+        group_id = str(config.get("group_id") or "")
+        return self._create_workflow_with_db_retry(
+            label=f"system batch={batch_id} round={batch_round}",
+            existing_lookup=lambda: self._find_existing_system_workflow(
+                batch_id=batch_id,
+                group_id=group_id,
+                batch_round=batch_round,
+            ),
+            workflow_factory=lambda: ZsxqWorkflowRun(
+                batch_id=batch_id,
+                group_id=group_id,
+                group_name=config.get("group_name"),
+                trigger=trigger,
+                status="queued",
+                current_stage="init",
+                round=batch_round,
+                max_rounds=max_rounds,
+                config_snapshot=snapshot,
+                stage_results={
+                    "workflow": {
+                        "status": "created",
+                        "created_at": self._now_iso(),
+                    }
+                },
+            ),
         )
-        db.session.add(workflow)
-        return self._commit_and_payload(workflow)
 
     def create_manual_download_workflow(self, *, config, trigger):
-        self.ensure_schema()
         snapshot = self._build_manual_download_snapshot(config=config, trigger=trigger)
         system_sync = snapshot.get("system_sync") or {}
-        workflow = ZsxqWorkflowRun(
-            batch_id=system_sync.get("batch_id"),
-            group_id=str((snapshot.get("sync") or {}).get("group_id") or ""),
-            group_name=(snapshot.get("sync") or {}).get("group_name"),
-            trigger=trigger,
-            status="queued",
-            current_stage="init",
-            round=None,
-            max_rounds=None,
-            config_snapshot=snapshot,
-            stage_results={
-                "workflow": {
-                    "status": "created",
-                    "created_at": self._now_iso(),
+        sync_snapshot = snapshot.get("sync") or {}
+        batch_id = system_sync.get("batch_id")
+        group_id = str(sync_snapshot.get("group_id") or "")
+        return self._create_workflow_with_db_retry(
+            label=f"manual batch={batch_id}",
+            existing_lookup=lambda: self._find_existing_manual_workflow(
+                batch_id=batch_id,
+                group_id=group_id,
+                trigger=trigger,
+            ),
+            workflow_factory=lambda: ZsxqWorkflowRun(
+                batch_id=batch_id,
+                group_id=group_id,
+                group_name=sync_snapshot.get("group_name"),
+                trigger=trigger,
+                status="queued",
+                current_stage="init",
+                round=None,
+                max_rounds=None,
+                config_snapshot=snapshot,
+                stage_results={
+                    "workflow": {
+                        "status": "created",
+                        "created_at": self._now_iso(),
+                    },
+                    "manual_download_plan": system_sync.get("manual_attachment_plan") or {},
                 },
-                "manual_download_plan": system_sync.get("manual_attachment_plan") or {},
-            },
+            ),
         )
-        db.session.add(workflow)
-        return self._commit_and_payload(workflow)
 
     def enqueue_workflow_task(self, workflow_run_id, *, cookie=None, credential_id=None):
         self.ensure_schema()
@@ -249,6 +268,7 @@ class ZsxqWorkflowService:
                 "manual_attachment_plan": sync_config.get("manual_attachment_plan"),
                 "attachment_download_rules": sync_config.get("attachment_download_rules"),
                 "auto_video_dispatch": sync_config.get("auto_video_dispatch"),
+                "auto_script_material_dispatch": sync_config.get("auto_script_material_dispatch"),
                 "credential_id": credential_id,
                 # Workflow owns downstream orchestration. Keep legacy direct
                 # sync->clean handoff off for workflow-triggered sync tasks.
@@ -949,6 +969,9 @@ class ZsxqWorkflowService:
         download_attachments = requested_download_attachments and allow_attachment_downloads
         attachment_download_rules = self._normalize_attachment_download_rules(config.get("attachment_download_rules"))
         auto_video_dispatch = self._normalize_auto_video_dispatch(config.get("auto_video_dispatch"))
+        auto_script_material_dispatch = self._normalize_auto_script_material_dispatch(
+            config.get("auto_script_material_dispatch")
+        )
         skip_existing_downloads = bool(config.get("skip_existing_downloads", True))
         count = _topic_count(config.get("count", 12))
         max_pages = _effective_topic_max_pages(count, config.get("max_pages", 1))
@@ -969,6 +992,7 @@ class ZsxqWorkflowService:
             "allow_attachment_downloads": allow_attachment_downloads,
             "attachment_download_rules": attachment_download_rules,
             "auto_video_dispatch": auto_video_dispatch,
+            "auto_script_material_dispatch": auto_script_material_dispatch,
             "skip_existing_downloads": skip_existing_downloads,
             "auto_pdf_clean": auto_pdf_clean,
             "auto_audio_clean": auto_audio_clean,
@@ -1006,6 +1030,7 @@ class ZsxqWorkflowService:
                 "max_download_files": max_download_files,
                 "attachment_download_rules": attachment_download_rules,
                 "auto_video_dispatch": auto_video_dispatch,
+                "auto_script_material_dispatch": auto_script_material_dispatch,
                 "skip_existing_downloads": skip_existing_downloads,
                 "mode": mode,
             },
@@ -1243,6 +1268,7 @@ class ZsxqWorkflowService:
             "max_download_files": summary.get("max_download_files"),
             "download_limit_reached": summary.get("download_limit_reached"),
             "auto_video_dispatch": summary.get("auto_video_dispatch"),
+            "auto_script_material_dispatch": summary.get("auto_script_material_dispatch"),
         }
         tabs = summary.get("tabs") if isinstance(summary.get("tabs"), list) else []
         compact["tabs"] = [self._sync_tab_summary(tab) for tab in tabs[:20] if isinstance(tab, dict)]
@@ -1330,6 +1356,67 @@ class ZsxqWorkflowService:
     def _stage_results(self, workflow):
         return dict(workflow.stage_results) if isinstance(workflow.stage_results, dict) else {}
 
+    def _create_workflow_with_db_retry(self, *, workflow_factory, existing_lookup, label):
+        attempts = _queue_db_retries() + 1
+        last_exc = None
+        for attempt in range(1, attempts + 1):
+            try:
+                self.ensure_schema()
+                existing = existing_lookup()
+                if existing:
+                    return existing.to_dict()
+                workflow = workflow_factory()
+                db.session.add(workflow)
+                return self._commit_and_payload(workflow)
+            except Exception as exc:
+                db.session.rollback()
+                last_exc = exc
+                if not _is_retryable_database_error(exc) or attempt >= attempts:
+                    raise
+
+                self._schema_checked_at = None
+                release_db_session_quietly()
+                delay = _queue_db_retry_delay_seconds(attempt)
+                logger.warning(
+                    "[ZSXQ_WORKFLOW] create workflow transient db failure, retrying | label=%s attempt=%s/%s delay=%ss error=%s",
+                    label,
+                    attempt,
+                    attempts - 1,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
+
+        raise last_exc
+
+    def _find_existing_system_workflow(self, *, batch_id, group_id, batch_round):
+        if not batch_id or not group_id:
+            return None
+        return (
+            ZsxqWorkflowRun.query
+            .filter(
+                ZsxqWorkflowRun.batch_id == str(batch_id),
+                ZsxqWorkflowRun.group_id == str(group_id),
+                ZsxqWorkflowRun.round == batch_round,
+            )
+            .order_by(ZsxqWorkflowRun.created_at.desc())
+            .first()
+        )
+
+    def _find_existing_manual_workflow(self, *, batch_id, group_id, trigger):
+        if not batch_id or not group_id:
+            return None
+        return (
+            ZsxqWorkflowRun.query
+            .filter(
+                ZsxqWorkflowRun.batch_id == str(batch_id),
+                ZsxqWorkflowRun.group_id == str(group_id),
+                ZsxqWorkflowRun.trigger == trigger,
+            )
+            .order_by(ZsxqWorkflowRun.created_at.desc())
+            .first()
+        )
+
     def _commit_and_payload(self, workflow):
         db.session.flush()
         payload = workflow.to_dict()
@@ -1393,6 +1480,19 @@ class ZsxqWorkflowService:
             "wait_for_completion": False,
         }
 
+    def _normalize_auto_script_material_dispatch(self, value):
+        value = value if isinstance(value, dict) else {}
+        return {
+            "enabled": bool(value.get("enabled", False)),
+            "pdf_min_download_count": _bounded_int(
+                value.get("pdf_min_download_count"),
+                default=DEFAULT_AUTO_SCRIPT_MATERIAL_PDF_THRESHOLD,
+                lower=0,
+                upper=1_000_000,
+            ),
+            "wait_for_completion": False,
+        }
+
     def _now_iso(self):
         return datetime.utcnow().isoformat() + "Z"
 
@@ -1423,6 +1523,22 @@ def _schema_check_ttl_seconds():
     except (TypeError, ValueError):
         seconds = DEFAULT_SCHEMA_CHECK_TTL_SECONDS
     return max(0, min(3600, seconds))
+
+
+def _queue_db_retries():
+    try:
+        retries = int(os.environ.get(QUEUE_DB_RETRIES_ENV_NAME, DEFAULT_QUEUE_DB_RETRIES))
+    except (TypeError, ValueError):
+        retries = DEFAULT_QUEUE_DB_RETRIES
+    return max(0, min(10, retries))
+
+
+def _queue_db_retry_delay_seconds(attempt):
+    try:
+        delay = int(os.environ.get(QUEUE_DB_RETRY_DELAY_SECONDS_ENV_NAME, DEFAULT_QUEUE_DB_RETRY_DELAY_SECONDS))
+    except (TypeError, ValueError):
+        delay = DEFAULT_QUEUE_DB_RETRY_DELAY_SECONDS
+    return min(max(delay, 1) * max(int(attempt or 1), 1), 300)
 
 
 def _topic_count(value):

@@ -49,7 +49,8 @@ docs/bugs/2026-06-23-report-audio-detached-session.md
 3. 修复时补上能防复发的测试或可观测性。
 4. 修复完成后补充或更新 `docs/bugs/*.md`。
 5. 如果 bug 暴露出通用工程纪律，要同步更新 `docs/rules/`、运行手册或编排标准。
-6. 最终提交说明里必须提到对应 bug 记录文件。
+6. 如果 bug 暴露出“已有成熟实现未复用”，必须同步执行 [成功经验复用纪律](reuse-proven-patterns-discipline.md)，检查同类功能是否也漏掉了同一类重试、幂等、续跑、监控或通知机制。
+7. 最终提交说明里必须提到对应 bug 记录文件。
 
 ## 不合格记录
 
@@ -90,4 +91,3 @@ docs/bugs/2026-06-23-report-audio-detached-session.md
 
 ## 后续事项
 ```
-

@@ -1,13 +1,21 @@
 import base64
+import hashlib
 import json
 import os
 import re
+import threading
 import time
 import wave
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 
 FEATURE_NAME = "doubao_browser_tts"
@@ -19,6 +27,7 @@ MIN_DURATION_CHECK_CHARS = 80
 SHORT_DURATION_CHECK_CHARS = 20
 SHORT_TEXT_MIN_AUDIO_SECONDS = 1.0
 MAX_REASONABLE_TTS_CHARS_PER_SECOND = 25.0
+_ACTIVE_PROFILE_LOCKS: Dict[str, Dict[str, Any]] = {}
 
 
 class DoubaoBrowserTTSError(RuntimeError):
@@ -106,6 +115,9 @@ def status_payload(options: Optional[DoubaoBrowserTTSOptions] = None) -> Dict[st
         "chrome_path_configured": bool(options.chrome_executable_path),
         "chrome_path_exists": bool(chrome_path and chrome_path.exists()),
         "mode": "real_browser_with_extension",
+        "worker_id": os.getenv("DOUBAO_BROWSER_TTS_WORKER_ID", "default"),
+        "profile_pool_root": os.getenv("DOUBAO_BROWSER_TTS_PROFILE_POOL_ROOT", ""),
+        "profile_count": _int_env("DOUBAO_BROWSER_TTS_PROFILE_COUNT", 1),
     }
 
 
@@ -136,73 +148,78 @@ class DoubaoBrowserTTSWorker:
         except ImportError as exc:
             raise DoubaoBrowserTTSConfigError("缺少 playwright 依赖，请安装 requirements 后执行 playwright install") from exc
 
-        self._emit(progress_callback, "prepare_browser", 5, "启动真实浏览器")
         with sync_playwright() as playwright:
-            context = self._launch_context(playwright)
-            self._install_capture_init_script(context)
-            page = context.pages[0] if context.pages else context.new_page()
-            page.set_default_timeout(10_000)
+            self._emit(progress_callback, "wait_browser_profile", 4, "等待豆包浏览器 profile 空闲")
+            with _doubao_profile_lock(self.options):
+                self._emit(progress_callback, "prepare_browser", 5, "启动真实浏览器")
+                context = self._launch_context(playwright)
+                self._install_capture_init_script(context)
+                page = context.pages[0] if context.pages else context.new_page()
+                page.set_default_timeout(10_000)
 
-            try:
-                page.goto(self.options.doubao_url, wait_until="domcontentloaded", timeout=45_000)
-                self._raise_if_login_or_captcha(page, job_id)
-                self._guard_total_timeout(started)
+                try:
+                    page.goto(self.options.doubao_url, wait_until="domcontentloaded", timeout=45_000)
+                    self._raise_if_login_or_captcha(page, job_id)
+                    self._guard_total_timeout(started)
 
-                self._emit(progress_callback, "clear_audio_cache", 12, "清空插件音频缓存")
-                self._clear_audio(page)
-                self._raise_if_login_or_captcha(page, job_id)
+                    self._emit(progress_callback, "clear_audio_cache", 12, "清空插件音频缓存")
+                    self._clear_audio(page)
+                    self._raise_if_login_or_captcha(page, job_id)
 
-                self._emit(progress_callback, "submit_text", 25, "提交文本到豆包")
-                self._submit_text(page, text, job_id)
-                self._raise_if_login_or_captcha(page, job_id)
-                self._guard_total_timeout(started)
+                    self._emit(progress_callback, "submit_text", 25, "提交文本到豆包")
+                    self._submit_text(page, text, job_id)
+                    self._raise_if_login_or_captcha(page, job_id)
+                    self._guard_total_timeout(started)
 
-                self._emit(progress_callback, "wait_response", 45, "等待豆包回复完成")
-                read_button = self._wait_for_read_button(page, job_id)
-                self._guard_total_timeout(started)
+                    self._emit(progress_callback, "wait_response", 45, "等待豆包回复完成")
+                    read_button = self._wait_for_read_button(page, job_id)
+                    self._guard_total_timeout(started)
 
-                self._emit(progress_callback, "start_reading", 62, "触发朗读")
-                self._raise_if_login_or_captcha(page, job_id)
-                read_button.click(timeout=10_000)
+                    self._emit(progress_callback, "start_reading", 62, "触发朗读")
+                    self._raise_if_login_or_captcha(page, job_id)
+                    read_button.click(timeout=10_000)
 
-                self._emit(progress_callback, "capture_audio", 72, "等待音频捕获")
-                audio = self._wait_for_audio(page, started, job_id, text=text)
+                    self._emit(progress_callback, "capture_audio", 72, "等待音频捕获")
+                    audio = self._wait_for_audio(page, started, job_id, text=text)
 
-                self._emit(progress_callback, "download_wav", 88, "导出 WAV")
-                wav_bytes = self._export_wav_bytes(page, output, job_id)
-                if wav_bytes:
-                    output.write_bytes(wav_bytes)
+                    self._emit(progress_callback, "download_wav", 88, "导出 WAV")
+                    wav_bytes = self._export_wav_bytes(page, output, job_id)
+                    if wav_bytes:
+                        output.write_bytes(wav_bytes)
 
-                if not output.exists() or output.stat().st_size == 0:
-                    raise DoubaoBrowserTTSAutomationError("WAV 导出完成但文件为空")
+                    if not output.exists() or output.stat().st_size == 0:
+                        raise DoubaoBrowserTTSAutomationError("WAV 导出完成但文件为空")
 
-                file_seconds = _wav_duration_seconds(output)
-                result = {
-                    "wav_path": str(output),
-                    "bytes": output.stat().st_size,
-                    "sample_rate": audio.get("sample_rate") or self.options.sample_rate,
-                    "chunks": audio.get("chunks") or 0,
-                    "seconds": file_seconds or audio.get("seconds") or 0,
-                    "page_url": page.url,
-                }
-                self._emit(progress_callback, "save_file", 96, "WAV 已保存", result=result)
-                return result
-            except PlaywrightTimeoutError as exc:
-                captcha_error = self._captcha_error(page, job_id)
-                if captcha_error:
-                    raise captcha_error from exc
-                screenshot = self._save_failure_screenshot(page, job_id)
-                raise DoubaoBrowserTTSAutomationError(f"页面自动化超时: {exc}; screenshot={screenshot}") from exc
-            except DoubaoBrowserTTSCaptchaError:
-                raise
-            except Exception:
-                captcha_error = self._captcha_error(page, job_id)
-                if captcha_error:
-                    raise captcha_error
-                self._save_failure_screenshot(page, job_id)
-                raise
-            finally:
-                context.close()
+                    file_seconds = _wav_duration_seconds(output)
+                    result = {
+                        "wav_path": str(output),
+                        "bytes": output.stat().st_size,
+                        "sample_rate": audio.get("sample_rate") or self.options.sample_rate,
+                        "chunks": audio.get("chunks") or 0,
+                        "seconds": file_seconds or audio.get("seconds") or 0,
+                        "page_url": page.url,
+                        "worker_id": os.getenv("DOUBAO_BROWSER_TTS_WORKER_ID", "default"),
+                        "user_data_dir": self.options.user_data_dir,
+                        "profile_directory": self.options.profile_directory,
+                    }
+                    self._emit(progress_callback, "save_file", 96, "WAV 已保存", result=result)
+                    return result
+                except PlaywrightTimeoutError as exc:
+                    captcha_error = self._captcha_error(page, job_id)
+                    if captcha_error:
+                        raise captcha_error from exc
+                    screenshot = self._save_failure_screenshot(page, job_id)
+                    raise DoubaoBrowserTTSAutomationError(f"页面自动化超时: {exc}; screenshot={screenshot}") from exc
+                except DoubaoBrowserTTSCaptchaError:
+                    raise
+                except Exception:
+                    captcha_error = self._captcha_error(page, job_id)
+                    if captcha_error:
+                        raise captcha_error
+                    self._save_failure_screenshot(page, job_id)
+                    raise
+                finally:
+                    context.close()
 
     def _validate_options(self) -> None:
         if not self.options.user_data_dir:
@@ -561,6 +578,81 @@ def _default_user_data_dir() -> str:
 
 def _legacy_user_data_dir() -> str:
     return str(Path(_project_root()) / "runtime" / "doubao-browser-profile")
+
+
+@contextmanager
+def _doubao_profile_lock(options: DoubaoBrowserTTSOptions):
+    if fcntl is None:
+        yield
+        return
+
+    timeout_seconds = max(1, _int_env("DOUBAO_BROWSER_TTS_PROFILE_LOCK_TIMEOUT_SECONDS", 1800))
+    user_data_dir = str(Path(options.user_data_dir or "").expanduser())
+    profile = options.profile_directory or "Default"
+    key = hashlib.sha1(f"{user_data_dir}|{profile}".encode("utf-8")).hexdigest()[:16]
+    owner = (os.getpid(), threading.get_ident())
+    lock_dir = Path(_project_root()) / "runtime" / "locks" / "doubao_browser_tts"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{key}.lock"
+    deadline = time.monotonic() + timeout_seconds
+
+    while True:
+        state = _ACTIVE_PROFILE_LOCKS.get(str(lock_path))
+        if state:
+            if state.get("owner") == owner:
+                state["depth"] = int(state.get("depth") or 0) + 1
+                try:
+                    yield
+                finally:
+                    state["depth"] = max(0, int(state.get("depth") or 1) - 1)
+                return
+            if time.monotonic() >= deadline:
+                raise DoubaoBrowserTTSAutomationError(
+                    f"等待豆包浏览器 profile 空闲超时: {user_data_dir} ({timeout_seconds}s)"
+                )
+            time.sleep(0.5)
+            continue
+
+        handle = open(lock_path, "a+", encoding="utf-8")
+        try:
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise DoubaoBrowserTTSAutomationError(
+                            f"等待豆包浏览器 profile 空闲超时: {user_data_dir} ({timeout_seconds}s)"
+                        ) from exc
+                    time.sleep(1)
+
+            handle.seek(0)
+            handle.truncate()
+            handle.write(
+                "pid={pid} thread={thread} acquired_at={at} user_data_dir={dir} profile={profile}\n".format(
+                    pid=os.getpid(),
+                    thread=threading.get_ident(),
+                    at=datetime.utcnow().isoformat() + "Z",
+                    dir=user_data_dir,
+                    profile=profile,
+                )
+            )
+            handle.flush()
+            _ACTIVE_PROFILE_LOCKS[str(lock_path)] = {"owner": owner, "depth": 1, "handle": handle}
+            try:
+                yield
+            finally:
+                state = _ACTIVE_PROFILE_LOCKS.get(str(lock_path))
+                if state and state.get("owner") == owner:
+                    depth = max(0, int(state.get("depth") or 1) - 1)
+                    if depth > 0:
+                        state["depth"] = depth
+                    else:
+                        _ACTIVE_PROFILE_LOCKS.pop(str(lock_path), None)
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+        return
 
 
 def _effective_user_data_dir(configured: Optional[str], default: str, legacy: str) -> str:
