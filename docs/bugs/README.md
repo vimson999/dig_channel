@@ -8,6 +8,7 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-06-29 | [研报音频豆包分段失败记录后访问 detached 子任务](2026-06-29-report-audio-doubao-child-detached-after-failure-record.md) | report audio workflow / doubao browser tts / SQLAlchemy session | 已修复 |
 | 2026-06-29 | [飞书 Cookie 函数已存在但旧 Celery worker 仍导入失败](2026-06-29-feishu-cookie-import-stale-celery-workers.md) | Celery worker / external documents / platform credentials | 已处置 |
 | 2026-06-26 | [独立豆包朗读短音频失败后没有自动重试](2026-06-26-doubao-standalone-short-audio-no-auto-retry.md) | doubao browser tts / 测试页 / Celery worker | 已修复 |
 | 2026-06-26 | [研报音频 publisher 子任务已完成但父任务仍等待](2026-06-26-report-audio-publisher-child-completed-parent-waiting.md) | report audio workflow / publisher child wait / SQLAlchemy session | 已修复 |

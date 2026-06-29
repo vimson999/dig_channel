@@ -238,6 +238,82 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
     def test_tts_text_hash_ignores_whitespace_only_differences(self):
         self.assertEqual(_tts_text_hash("第一段\n第二段"), _tts_text_hash("第一段 第二段"))
 
+    def test_doubao_failed_child_uses_snapshot_after_attempt_record(self):
+        text = "豆包失败后仍然要保留原始错误。"
+        metadata = {"chunk_index": 1, "chunk_attempt": 1, "text_hash": _tts_text_hash(text)}
+
+        class DetachableTask:
+            id = "failed-child-1"
+            celery_task_id = "celery-failed-child-1"
+            feature = "doubao_browser_tts"
+            parent_task_id = "parent-1"
+            source_task_id = None
+            created_at = datetime.utcnow()
+            completed_at = datetime.utcnow()
+
+            def __init__(self):
+                self.detached = False
+                self._fields = {
+                    "status": "failed",
+                    "current_step": "failed",
+                    "progress": 45,
+                    "error_message": "失败尝试 1",
+                    "params": {
+                        "feature": "doubao_browser_tts",
+                        "parent_task_id": "parent-1",
+                        "doubao_browser_tts": {"text": text, "metadata": metadata},
+                    },
+                    "result": {"metadata": metadata, "error": "失败尝试 1"},
+                }
+
+            def _value(self, name):
+                if self.detached:
+                    raise RuntimeError("detached task attribute refresh")
+                return self._fields[name]
+
+            @property
+            def status(self):
+                return self._value("status")
+
+            @property
+            def current_step(self):
+                return self._value("current_step")
+
+            @property
+            def progress(self):
+                return self._value("progress")
+
+            @property
+            def error_message(self):
+                return self._value("error_message")
+
+            @property
+            def params(self):
+                return self._value("params")
+
+            @property
+            def result(self):
+                return self._value("result")
+
+        failed_task = DetachableTask()
+
+        def detach_after_record(*args, **kwargs):
+            failed_task.detached = True
+
+        with patch.object(report_audio_workflow, "_completed_tts_task_for_chunk", return_value=None), \
+            patch.object(report_audio_workflow, "_active_tts_task_for_chunk", return_value=None), \
+            patch.object(report_audio_workflow, "_failed_tts_tasks_for_chunk", return_value=[failed_task]), \
+            patch.object(report_audio_workflow, "_clear_waiting_child"), \
+            patch.object(report_audio_workflow, "_record_child_attempt", side_effect=detach_after_record):
+            with self.assertRaisesRegex(RuntimeError, "豆包浏览器朗读子任务失败: 失败尝试 1"):
+                report_audio_workflow._run_doubao_tts_chunks(
+                    SimpleNamespace(id="parent-1"),
+                    "parent-1",
+                    [text],
+                    {},
+                    retry_limit=0,
+                )
+
 
 class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
     def setUp(self):

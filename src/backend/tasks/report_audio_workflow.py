@@ -1034,39 +1034,42 @@ def _run_doubao_tts_chunks(parent, parent_id, chunks, payload, *, retry_requeste
 
             reusable_tts_task = _completed_tts_task_for_chunk(parent_id, index, chunk)
             if reusable_tts_task:
+                reusable_summary = _task_state_snapshot(reusable_tts_task)
                 _clear_waiting_child(parent_id, label)
-                completed[index] = reusable_tts_task
-                summaries.append(reusable_tts_task.id)
-                _record_child(parent_id, label, reusable_tts_task)
+                completed[index] = reusable_summary
+                summaries.append(_task_id(reusable_summary))
+                _record_child(parent_id, label, reusable_summary)
                 _emit(parent_id, f"{label}_reuse", end, f"复用豆包浏览器朗读音频 {index}/{total}")
                 continue
 
             active_tts_task = _active_tts_task_for_chunk(parent_id, index, chunk)
             if active_tts_task:
-                active[index] = active_tts_task
-                summaries.append(active_tts_task.id)
-                _record_child(parent_id, label, active_tts_task)
+                active_summary = _task_state_snapshot(active_tts_task)
+                active[index] = active_summary
+                summaries.append(_task_id(active_summary))
+                _record_child(parent_id, label, active_summary)
                 continue
 
             failed_tts_tasks = _failed_tts_tasks_for_chunk(parent_id, index, chunk, since=retry_requested_at)
             next_attempt = 1
             if failed_tts_tasks:
                 _clear_waiting_child(parent_id, label)
-                for failed_task in failed_tts_tasks:
-                    failed_attempt = _task_chunk_attempt(failed_task) or 1
+                failed_summaries = [_task_state_snapshot(failed_task) for failed_task in failed_tts_tasks]
+                for failed_summary in failed_summaries:
+                    failed_attempt = _task_chunk_attempt(failed_summary) or 1
                     _record_child_attempt(
                         parent_id,
                         label,
-                        failed_task,
+                        failed_summary,
                         failed_attempt,
                         max_attempts,
                         "failed",
-                        error=_child_error_message(failed_task),
+                        error=_child_error_message(failed_summary),
                     )
-                latest_failed = failed_tts_tasks[-1]
+                latest_failed = failed_summaries[-1]
                 if _is_doubao_captcha_blocked(latest_failed):
                     raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {_child_error_message(latest_failed)}")
-                next_attempt = max(_task_chunk_attempt(task) or 1 for task in failed_tts_tasks) + 1
+                next_attempt = max(_task_chunk_attempt(task) or 1 for task in failed_summaries) + 1
                 if next_attempt > max_attempts:
                     raise RuntimeError(f"豆包浏览器朗读子任务失败: {_child_error_message(latest_failed)}")
 
@@ -1094,10 +1097,11 @@ def _run_doubao_tts_chunks(parent, parent_id, chunks, payload, *, retry_requeste
                 f"创建豆包浏览器朗读子任务 {index}/{total}{retry_suffix} · 并发 {parallelism}",
             )
             tts_task = _create_doubao_tts_task(parent, item["chunk"], index, total, payload, attempt=attempt)
-            active[index] = tts_task
-            summaries.append(tts_task.id)
-            _record_child(parent_id, label, tts_task)
-            _record_child_attempt(parent_id, label, tts_task, attempt, max_attempts, "running")
+            tts_summary = _task_state_snapshot(tts_task)
+            active[index] = tts_summary
+            summaries.append(_task_id(tts_summary))
+            _record_child(parent_id, label, tts_summary)
+            _record_child_attempt(parent_id, label, tts_summary, attempt, max_attempts, "running")
 
         if summaries:
             _update_result(parent_id, {"doubao_browser_tts": _task_public_summaries_by_ids(summaries)})
@@ -1109,35 +1113,40 @@ def _run_doubao_tts_chunks(parent, parent_id, chunks, payload, *, retry_requeste
 
         index, active_task = sorted(active.items(), key=lambda item: item[0])[0]
         label = f"doubao_browser_{index}"
+        active_task_id = _task_id(active_task)
         _emit(parent_id, f"{label}_wait_existing", _doubao_progress_start(index, total), f"等待豆包浏览器朗读子任务 {index}/{total}")
         try:
             tts_task = _wait_child(
                 parent_id,
-                active_task.id,
+                active_task_id,
                 label,
                 start_progress=_doubao_progress_start(index, total),
                 end_progress=_doubao_progress_end(index, total),
             )
         except ChildTaskStillRunning:
-            _record_child(parent_id, label, _load_task(active_task.id, *TASK_CHILD_COLUMNS) or active_task)
+            _record_child(parent_id, label, _task_state_snapshot(_load_task(active_task_id, *TASK_CHILD_COLUMNS)) or active_task)
             raise
 
-        _record_child(parent_id, label, tts_task)
-        if tts_task.status == "completed":
-            wav_path = _task_audio_wav_path(tts_task)
+        tts_summary = _task_state_snapshot(tts_task)
+        tts_task_id = _task_id(tts_summary)
+        _record_child(parent_id, label, tts_summary)
+        if tts_summary.get("status") == "completed":
+            wav_path = _task_audio_wav_path(tts_summary)
             if wav_path and os.path.exists(wav_path):
-                _record_child_attempt(parent_id, label, tts_task, _task_chunk_attempt(tts_task) or 1, max_attempts, "completed")
+                _record_child_attempt(parent_id, label, tts_summary, _task_chunk_attempt(tts_summary) or 1, max_attempts, "completed")
                 continue
             message = "豆包浏览器朗读子任务完成但没有返回可用 WAV 路径"
             _mark_child_failed(tts_task, message)
-            _record_child_attempt(parent_id, label, tts_task, _task_chunk_attempt(tts_task) or 1, max_attempts, "failed", error=message)
+            failed_summary = _task_state_snapshot(_load_task(tts_task_id, *TASK_CHILD_COLUMNS)) or dict(tts_summary, error=message)
+            _record_child_attempt(parent_id, label, failed_summary, _task_chunk_attempt(failed_summary) or 1, max_attempts, "failed", error=message)
             continue
 
-        last_error = _child_error_message(tts_task)
-        if _is_doubao_captcha_blocked(tts_task):
+        last_error = _child_error_message(tts_summary)
+        if _is_doubao_captcha_blocked(tts_summary):
             raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {last_error}")
-        _record_child_attempt(parent_id, label, tts_task, _task_chunk_attempt(tts_task) or 1, max_attempts, "failed", error=last_error)
-        if (_task_chunk_attempt(tts_task) or 1) < max_attempts:
+        attempt = _task_chunk_attempt(tts_summary) or 1
+        _record_child_attempt(parent_id, label, tts_summary, attempt, max_attempts, "failed", error=last_error)
+        if attempt < max_attempts:
             _emit(parent_id, f"{label}_retry", _doubao_progress_end(index, total), f"豆包浏览器朗读子任务 {index}/{total} 失败，准备重试：{last_error}")
             continue
         raise RuntimeError(f"豆包浏览器朗读子任务失败: {last_error}")
@@ -1167,7 +1176,7 @@ def _ordered_doubao_tts_outputs(parent_id, chunks, completed_by_index):
         wav_path = _task_audio_wav_path(task)
         if not wav_path or not os.path.exists(wav_path):
             raise RuntimeError(f"豆包浏览器朗读第 {index}/{len(chunks)} 段 WAV 文件不存在")
-        task_ids.append(task.id)
+        task_ids.append(_task_id(task))
         wav_paths.append(wav_path)
 
     if len(task_ids) != len(chunks) or len(wav_paths) != len(chunks):
@@ -1309,12 +1318,7 @@ def _parse_utc_datetime(value):
 
 
 def _task_chunk_index(task):
-    result = task.result or {}
-    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    if not metadata:
-        params = task.params or {}
-        doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
-        metadata = doubao_payload.get("metadata") if isinstance(doubao_payload.get("metadata"), dict) else {}
+    metadata = _task_doubao_metadata(task)
     try:
         return int(metadata.get("chunk_index") or 0)
     except (TypeError, ValueError):
@@ -1322,12 +1326,7 @@ def _task_chunk_index(task):
 
 
 def _task_chunk_attempt(task):
-    result = task.result or {}
-    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    if not metadata:
-        params = task.params or {}
-        doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
-        metadata = doubao_payload.get("metadata") if isinstance(doubao_payload.get("metadata"), dict) else {}
+    metadata = _task_doubao_metadata(task)
     try:
         return int(metadata.get("chunk_attempt") or 0)
     except (TypeError, ValueError):
@@ -1335,23 +1334,18 @@ def _task_chunk_attempt(task):
 
 
 def _task_tts_text_hash(task):
-    result = task.result or {}
-    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    if not metadata:
-        params = task.params or {}
-        doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
-        metadata = doubao_payload.get("metadata") if isinstance(doubao_payload.get("metadata"), dict) else {}
+    metadata = _task_doubao_metadata(task)
     return str(metadata.get("text_hash") or "").strip()
 
 
 def _task_audio_wav_path(task):
-    result = task.result or {}
+    result = _task_result_payload(task)
     audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
     return audio.get("wav_path") or result.get("wav_path")
 
 
 def _task_tts_text(task):
-    params = task.params or {}
+    params = _task_params_payload(task)
     doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
     return str(doubao_payload.get("text") or "")
 
@@ -1361,11 +1355,12 @@ def _tts_text_hash(text):
 
 
 def _is_doubao_captcha_blocked(task):
-    if not task:
+    snapshot = _task_state_snapshot(task)
+    if not snapshot:
         return False
-    result = task.result if isinstance(task.result, dict) else {}
+    result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
     return (
-        task.status == "blocked_by_captcha"
+        snapshot.get("status") == "blocked_by_captcha"
         or result.get("error_type") == "blocked_by_captcha"
         or result.get("blocked_reason") == "captcha"
     )
@@ -1812,10 +1807,16 @@ def _update_result(parent_id, values):
 
 
 def _child_error_message(child):
-    if not child:
+    snapshot = _task_state_snapshot(child)
+    if not snapshot:
         return "子任务不存在"
-    result = child.result if isinstance(child.result, dict) else {}
-    return child.error_message or result.get("error") or f"子任务状态异常: {child.status or '-'} / {child.current_step or '-'}"
+    result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
+    return (
+        snapshot.get("error_message")
+        or snapshot.get("error")
+        or result.get("error")
+        or f"子任务状态异常: {snapshot.get('status') or '-'} / {snapshot.get('current_step') or snapshot.get('step') or '-'}"
+    )
 
 
 def _is_retryable_child_error(label, message):
@@ -2554,24 +2555,138 @@ def _format_bytes(value):
     return f"{bytes_value / 1024 / 1024:.1f} MB"
 
 
-def _task_public_summary(task):
+def _safe_task_attr(task, name, default=None):
+    try:
+        return getattr(task, name, default)
+    except Exception:
+        return default
+
+
+def _copy_dict(value):
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _isoformat_z(value):
+    if not value:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        text = value.isoformat()
+    except AttributeError:
+        return str(value)
+    return text if text.endswith("Z") else f"{text}Z"
+
+
+def _task_id(task):
+    if isinstance(task, dict):
+        value = task.get("id") or task.get("job_id")
+    else:
+        value = _safe_task_attr(task, "id")
+    text = str(value or "").strip()
+    return text or None
+
+
+def _task_state_snapshot(task):
     if not task:
         return None
-    result = task.result if isinstance(task.result, dict) else {}
+    if isinstance(task, dict):
+        snapshot = dict(task)
+        result = _copy_dict(snapshot.get("result"))
+        params = _copy_dict(snapshot.get("params"))
+        metadata = _copy_dict(snapshot.get("metadata"))
+        audio = _copy_dict(snapshot.get("audio"))
+        if metadata and not isinstance(result.get("metadata"), dict):
+            result["metadata"] = metadata
+        if audio and not isinstance(result.get("audio"), dict):
+            result["audio"] = audio
+        for key in ("error_type", "blocked_reason", "captcha_blocked"):
+            if key in snapshot and key not in result:
+                result[key] = snapshot.get(key)
+        snapshot["id"] = snapshot.get("id") or snapshot.get("job_id")
+        snapshot["job_id"] = snapshot.get("job_id") or snapshot.get("id")
+        snapshot["celery_task_id"] = snapshot.get("celery_task_id") or snapshot.get("celery_id")
+        snapshot["celery_id"] = snapshot.get("celery_id") or snapshot.get("celery_task_id")
+        snapshot["current_step"] = snapshot.get("current_step") or snapshot.get("step")
+        snapshot["step"] = snapshot.get("step") or snapshot.get("current_step")
+        snapshot["progress"] = snapshot.get("progress") or 0
+        snapshot["error_message"] = snapshot.get("error_message") or snapshot.get("error") or result.get("error")
+        snapshot["error"] = snapshot.get("error") or snapshot.get("error_message") or result.get("error")
+        snapshot["result"] = result
+        snapshot["params"] = params
+        return snapshot
+
+    result = _copy_dict(_safe_task_attr(task, "result"))
+    params = _copy_dict(_safe_task_attr(task, "params"))
+    task_id = _safe_task_attr(task, "id")
+    celery_task_id = _safe_task_attr(task, "celery_task_id")
+    current_step = _safe_task_attr(task, "current_step")
+    error_message = _safe_task_attr(task, "error_message")
     return {
-        "job_id": task.id,
-        "celery_id": task.celery_task_id,
-        "status": task.status,
-        "step": task.current_step,
-        "progress": task.progress or 0,
-        "error": task.error_message,
+        "id": task_id,
+        "job_id": task_id,
+        "celery_task_id": celery_task_id,
+        "celery_id": celery_task_id,
+        "status": _safe_task_attr(task, "status"),
+        "current_step": current_step,
+        "step": current_step,
+        "progress": _safe_task_attr(task, "progress") or 0,
+        "error_message": error_message,
+        "error": error_message or result.get("error"),
+        "feature": _safe_task_attr(task, "feature"),
+        "parent_task_id": _safe_task_attr(task, "parent_task_id"),
+        "source_task_id": _safe_task_attr(task, "source_task_id"),
+        "params": params,
+        "result": result,
+        "created_at": _safe_task_attr(task, "created_at"),
+        "completed_at": _safe_task_attr(task, "completed_at"),
+    }
+
+
+def _task_result_payload(task):
+    snapshot = _task_state_snapshot(task) or {}
+    return snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
+
+
+def _task_params_payload(task):
+    snapshot = _task_state_snapshot(task) or {}
+    return snapshot.get("params") if isinstance(snapshot.get("params"), dict) else {}
+
+
+def _task_doubao_metadata(task):
+    snapshot = _task_state_snapshot(task) or {}
+    result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if metadata:
+        return metadata
+    metadata = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
+    if metadata:
+        return metadata
+    params = snapshot.get("params") if isinstance(snapshot.get("params"), dict) else {}
+    doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
+    metadata = doubao_payload.get("metadata") if isinstance(doubao_payload.get("metadata"), dict) else {}
+    return metadata
+
+
+def _task_public_summary(task):
+    snapshot = _task_state_snapshot(task)
+    if not snapshot:
+        return None
+    result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
+    return {
+        "job_id": snapshot.get("job_id") or snapshot.get("id"),
+        "celery_id": snapshot.get("celery_id") or snapshot.get("celery_task_id"),
+        "status": snapshot.get("status"),
+        "step": snapshot.get("step") or snapshot.get("current_step"),
+        "progress": snapshot.get("progress") or 0,
+        "error": snapshot.get("error") or snapshot.get("error_message") or result.get("error"),
         "error_type": result.get("error_type"),
         "blocked_reason": result.get("blocked_reason"),
         "captcha_blocked": result.get("captcha_blocked"),
-        "metadata": result.get("metadata") or {},
+        "metadata": _task_doubao_metadata(snapshot),
         "audio": result.get("audio"),
-        "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
-        "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else None,
+        "created_at": _isoformat_z(snapshot.get("created_at")),
+        "completed_at": _isoformat_z(snapshot.get("completed_at")),
     }
 
 
