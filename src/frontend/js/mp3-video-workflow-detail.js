@@ -8,6 +8,10 @@ class Mp3VideoWorkflowDetailPage {
         this.biliChargingOptionsErrorByCredential = {};
         this.biliChargingOptionsPromises = {};
         this.biliChargingOptionsLoading = '';
+        this.biliSeasonsByCredential = {};
+        this.biliSeasonsErrorByCredential = {};
+        this.biliSeasonsPromises = {};
+        this.biliSeasonsLoading = '';
         this.lastBiliUpload = null;
         this.refreshTimer = null;
         this.autoRefreshMs = 5000;
@@ -57,7 +61,17 @@ class Mp3VideoWorkflowDetailPage {
                 this.onBiliCredentialChange(event.target.value);
             } else if (event.target?.id === 'bili-charging-enabled') {
                 this.toggleBiliChargingFields(event.target.checked);
+            } else if (event.target?.id === 'bili-schedule-enabled') {
+                this.refreshBiliScheduleInput();
             }
+            if (event.target?.id === 'bili-schedule-time') this.refreshBiliScheduleInput();
+        });
+        this.els.root?.addEventListener('click', (event) => {
+            const clearSeasonButton = event.target.closest('[data-bili-clear-season]');
+            if (!clearSeasonButton) return;
+            event.preventDefault();
+            const select = document.getElementById('bili-season-id');
+            if (select) select.value = '';
         });
         this.els.root?.addEventListener('submit', (event) => {
             const form = event.target.closest('#bili-upload-form');
@@ -196,6 +210,35 @@ class Mp3VideoWorkflowDetailPage {
         return this.biliChargingOptionsPromises[id];
     }
 
+    async loadBiliSeasons(credentialId) {
+        const id = String(credentialId || '').trim();
+        if (!id) return;
+        if (
+            Object.prototype.hasOwnProperty.call(this.biliSeasonsByCredential, id) &&
+            !this.biliSeasonsErrorByCredential[id]
+        ) return;
+        if (this.biliSeasonsPromises[id]) return this.biliSeasonsPromises[id];
+        this.biliSeasonsLoading = id;
+        this.applyBiliSeasonOptions(id);
+        this.biliSeasonsPromises[id] = (async () => {
+            try {
+                const result = await this.request(`/api/mp3-video-workflows/bilibili-seasons?credential_id=${encodeURIComponent(id)}`, { timeoutMs: 20000 });
+                this.biliSeasonsByCredential[id] = Array.isArray(result.data?.items)
+                    ? result.data.items
+                    : (Array.isArray(result.data) ? result.data : (result.items || []));
+                delete this.biliSeasonsErrorByCredential[id];
+            } catch (error) {
+                delete this.biliSeasonsByCredential[id];
+                this.biliSeasonsErrorByCredential[id] = error.message || String(error);
+            } finally {
+                delete this.biliSeasonsPromises[id];
+                if (this.biliSeasonsLoading === id) this.biliSeasonsLoading = '';
+                this.applyBiliSeasonOptions(id);
+            }
+        })();
+        return this.biliSeasonsPromises[id];
+    }
+
     renderMissingJob() {
         this.els.title.textContent = '缺少任务 ID';
         this.els.subtitle.textContent = '请从编排台点击“详情新页”打开。';
@@ -221,6 +264,12 @@ class Mp3VideoWorkflowDetailPage {
             this.renderLogs(job),
             this.renderRaw(job),
         ].join('');
+        this.refreshBiliScheduleInput();
+        const credentialId = document.getElementById('bili-credential-id')?.value || '';
+        if (credentialId) {
+            this.applyBiliSeasonOptions(credentialId);
+            this.loadBiliSeasons(credentialId);
+        }
     }
 
     sourceLabel(job) {
@@ -457,6 +506,7 @@ class Mp3VideoWorkflowDetailPage {
         const defaultTitle = this.defaultBiliTitle(job, selectedVideo.key);
         const uploadItems = Array.isArray(job.bilibili_uploads) ? job.bilibili_uploads : [];
         const disabled = !hasVideos || !this.biliCredentials.length;
+        const selectedCredentialId = this.biliCredentials[0]?.id || '';
         const unavailableMessages = [
             hasVideos ? '' : '当前任务还没有完整视频文件。请先用“完整横竖屏视频”模式生成横屏或竖屏视频，关键帧预览不能直接投递 B站。',
             !this.biliCredentials.length ? '暂无可用 B站上传账号。请先在账号管理里导入或新增用途为「B站视频上传」的账号。' : '',
@@ -520,6 +570,32 @@ class Mp3VideoWorkflowDetailPage {
                             <input name="tid" type="number" value="207" min="1" class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-bold text-slate-800" ${disabled ? 'disabled' : ''}>
                         </label>
                     </div>
+                    <div class="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_1.2fr]">
+                        <div class="rounded-md border border-slate-200 bg-white p-3">
+                            <div class="grid grid-cols-[86px_1fr_auto] items-center gap-3">
+                                <div class="text-xs text-slate-600">加入合集</div>
+                                <select id="bili-season-id" name="season_id" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-800 disabled:bg-slate-100 disabled:text-slate-400" ${disabled ? 'disabled' : ''}>
+                                    ${this.renderBiliSeasonOptions(selectedCredentialId)}
+                                </select>
+                                <button type="button" data-bili-clear-season="1" class="rounded-md px-2 py-1 text-xs font-bold text-slate-500 hover:bg-slate-100" ${disabled ? 'disabled' : ''}>清除</button>
+                            </div>
+                            <div id="bili-season-options-note" class="ml-[98px] mt-1 text-xs text-slate-400">${this.escape(this.biliSeasonOptionNote(selectedCredentialId))}</div>
+                        </div>
+                        <div class="rounded-md border border-slate-200 bg-white p-3">
+                            <div class="grid grid-cols-[86px_1fr] items-center gap-3">
+                                <div class="text-xs text-slate-600">定时发布</div>
+                                <div class="flex flex-wrap items-center gap-3">
+                                    <label class="inline-flex cursor-pointer items-center gap-3 font-bold text-sm text-slate-700">
+                                        <input id="bili-schedule-enabled" name="schedule_enabled" type="checkbox" value="1" class="peer sr-only" ${disabled ? 'disabled' : ''}>
+                                        <span class="relative h-5 w-10 rounded-full bg-slate-300 transition peer-checked:bg-sky-500 peer-disabled:opacity-50 after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow-sm after:transition peer-checked:after:translate-x-5"></span>
+                                        <span>启用定时</span>
+                                    </label>
+                                    <input id="bili-schedule-time" name="schedule_time" type="datetime-local" class="min-w-[210px] rounded-md border border-slate-300 px-3 py-2 text-sm font-bold text-slate-800 disabled:bg-slate-100 disabled:text-slate-400" disabled>
+                                </div>
+                            </div>
+                            <div class="ml-[98px] mt-1 text-xs text-slate-400">可选择距当前最早 5 分钟、最晚 15 天的时间。</div>
+                        </div>
+                    </div>
                     <div class="rounded-md border border-slate-200 bg-white p-3">
                         <div class="grid gap-3 text-sm text-slate-700">
                             <div class="grid grid-cols-[86px_1fr] items-center gap-3">
@@ -554,7 +630,7 @@ class Mp3VideoWorkflowDetailPage {
                                     <span class="font-bold">包月付费</span>
                                     <span class="text-slate-500">仅有加入</span>
                                     <select id="bili-upower-level-id" name="upower_level_id" data-bili-charging-field class="min-w-[180px] rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-800 disabled:bg-slate-100 disabled:text-slate-400" disabled>
-                                        ${this.renderBiliChargingLevelOptions(this.biliCredentials[0]?.id || '')}
+                                        ${this.renderBiliChargingLevelOptions(selectedCredentialId)}
                                     </select>
                                     <span class="text-slate-500">及以上成员可观看</span>
                                 </div>
@@ -566,7 +642,7 @@ class Mp3VideoWorkflowDetailPage {
                                     <label class="inline-flex items-center gap-2"><input type="checkbox" disabled> 限时免费</label>
                                 </div>
                             </div>
-                            <div id="bili-charging-options-note" class="ml-[98px] text-xs text-slate-400">${this.escape(this.biliChargingOptionNote(this.biliCredentials[0]?.id || ''))}</div>
+                            <div id="bili-charging-options-note" class="ml-[98px] text-xs text-slate-400">${this.escape(this.biliChargingOptionNote(selectedCredentialId))}</div>
                         </div>
                     </div>
                     <div class="flex flex-wrap items-center justify-between gap-3">
@@ -613,6 +689,8 @@ class Mp3VideoWorkflowDetailPage {
                                 <div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-500">
                                     <span>${this.escape(item.video_key === 'vertical' ? '此刻此声竖屏' : '小君君横屏')}</span>
                                     ${item.credential_name ? `<span>账号 ${this.escape(item.credential_name)}</span>` : ''}
+                                    ${item.delay_time ? `<span>定时 ${this.escape(this.formatBiliDelayTime(item.delay_time))}</span>` : ''}
+                                    ${item.season_id ? `<span>合集 ${this.escape(item.season_id)}</span>` : ''}
                                     ${item.charging_pay?.enabled ? `<span>充电 ${this.escape(item.charging_pay.upower_level_id || '默认档')}</span>` : ''}
                                     <a href="${this.absoluteUrl(`/api/v1/publisher/task/${encodeURIComponent(item.task_id)}`)}" target="_blank" rel="noopener noreferrer" class="font-bold text-indigo-700 hover:text-indigo-900">任务 JSON</a>
                                 </div>
@@ -764,11 +842,96 @@ class Mp3VideoWorkflowDetailPage {
     onBiliCredentialChange(credentialId) {
         const form = document.getElementById('bili-upload-form');
         const enabled = Boolean(form?.querySelector('#bili-charging-enabled')?.checked);
+        this.applyBiliSeasonOptions(credentialId);
+        this.loadBiliSeasons(credentialId);
         if (enabled) {
             this.loadBiliChargingOptions(credentialId);
         } else {
             this.applyBiliChargingOptions(credentialId);
         }
+    }
+
+    renderBiliSeasonOptions(credentialId) {
+        const id = String(credentialId || '').trim();
+        const seasons = Array.isArray(this.biliSeasonsByCredential[id]) ? this.biliSeasonsByCredential[id] : [];
+        const loading = this.biliSeasonsLoading === id;
+        const error = this.biliSeasonsErrorByCredential[id];
+        const placeholder = loading
+            ? '<option value="">读取合集中...</option>'
+            : (error ? '<option value="">合集读取失败</option>' : '<option value="">不加入合集</option>');
+        return [
+            placeholder,
+            ...seasons.map((item) => `<option value="${this.escapeAttr(item.id || '')}">${this.escape(item.title || item.name || item.id || '未命名合集')}</option>`),
+        ].join('');
+    }
+
+    biliSeasonOptionNote(credentialId) {
+        const id = String(credentialId || '').trim();
+        if (!id) return '';
+        if (this.biliSeasonsLoading === id) return '正在读取该账号的合集...';
+        const error = this.biliSeasonsErrorByCredential[id];
+        if (error) return `合集读取失败：${error}`;
+        const seasons = this.biliSeasonsByCredential[id] || [];
+        return seasons.length ? `已读取 ${seasons.length} 个合集` : '该账号暂无可选合集，或 B站未返回合集列表';
+    }
+
+    applyBiliSeasonOptions(credentialId) {
+        const form = document.getElementById('bili-upload-form');
+        if (!form) return;
+        const select = form.querySelector('#bili-season-id');
+        const previous = select?.value || '';
+        if (select) {
+            select.innerHTML = this.renderBiliSeasonOptions(credentialId);
+            if (previous && Array.from(select.options).some((option) => option.value === previous)) {
+                select.value = previous;
+            }
+        }
+        const note = form.querySelector('#bili-season-options-note');
+        if (note) note.textContent = this.biliSeasonOptionNote(credentialId);
+    }
+
+    formatDateTimeLocal(date) {
+        const pad = (value) => String(value).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    refreshBiliScheduleInput() {
+        const checkbox = document.getElementById('bili-schedule-enabled');
+        const input = document.getElementById('bili-schedule-time');
+        if (!checkbox || !input) return;
+        const minDate = new Date(Date.now() + 6 * 60 * 1000);
+        const maxDate = new Date(Date.now() + 15 * 24 * 60 * 60 * 1000);
+        minDate.setSeconds(0, 0);
+        maxDate.setSeconds(0, 0);
+        input.min = this.formatDateTimeLocal(minDate);
+        input.max = this.formatDateTimeLocal(maxDate);
+        input.disabled = !checkbox.checked;
+        if (checkbox.checked && !input.value) {
+            input.value = input.min;
+        }
+        if (!checkbox.checked) {
+            input.value = '';
+        }
+    }
+
+    getBiliScheduleTimestamp(formData) {
+        const enabled = document.getElementById('bili-schedule-enabled')?.checked ?? false;
+        if (!enabled) return null;
+        const value = formData.get('schedule_time');
+        if (!value) throw new Error('请选择 B站定时发布时间');
+        const timestamp = Math.floor(new Date(value).getTime() / 1000);
+        const minTimestamp = Math.floor((Date.now() + 5 * 60 * 1000) / 1000);
+        const maxTimestamp = Math.floor((Date.now() + 15 * 24 * 60 * 60 * 1000) / 1000);
+        if (!Number.isFinite(timestamp) || timestamp < minTimestamp || timestamp > maxTimestamp) {
+            throw new Error('B站定时发布时间需在 5 分钟后、15 天内');
+        }
+        return timestamp;
+    }
+
+    formatBiliDelayTime(value) {
+        const seconds = Number(value);
+        if (!Number.isFinite(seconds)) return String(value || '');
+        return this.formatDateTime(new Date(seconds * 1000).toISOString());
     }
 
     renderBiliChargingLevelOptions(credentialId) {
@@ -807,6 +970,13 @@ class Mp3VideoWorkflowDetailPage {
         const originalHtml = button?.innerHTML || '';
         const data = new FormData(form);
         const chargingEnabled = Boolean(data.get('charging_enabled'));
+        let delayTime = null;
+        try {
+            delayTime = this.getBiliScheduleTimestamp(data);
+        } catch (error) {
+            this.setNotice(error.message || 'B站定时发布时间无效', 'warning');
+            return;
+        }
         const payload = {
             credential_id: data.get('credential_id') || '',
             video_key: data.get('video_key') || 'landscape',
@@ -816,7 +986,12 @@ class Mp3VideoWorkflowDetailPage {
             tags: data.get('tags') || '',
             tid: data.get('tid') || 207,
             is_only_self: data.get('is_only_self') ? 1 : 0,
+            season_id: data.get('season_id') || '',
         };
+        if (delayTime) {
+            payload.schedule_enabled = 1;
+            payload.delay_time = delayTime;
+        }
         if (chargingEnabled) {
             if (!payload.credential_id) {
                 this.setNotice('启用充电专属前，请先选择一个 B站账号。', 'warning');

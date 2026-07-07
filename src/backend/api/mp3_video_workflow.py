@@ -1,3 +1,4 @@
+import asyncio
 import mimetypes
 import os
 import re
@@ -149,6 +150,53 @@ def bilibili_charging_options(_current_user):
         )
         options = uploader.charging_pay_options()
         return jsonify({"success": True, "data": options, **options})
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 502
+
+
+@mp3_video_workflow_bp.route("/bilibili-seasons", methods=["GET"])
+@require_login
+def bilibili_seasons(_current_user):
+    credential_id = _clean_upload_text(request.args.get("credential_id"), max_length=80)
+    if not credential_id:
+        return jsonify({"success": False, "message": "请选择 B站账号"}), 400
+    try:
+        from bilibili_api import user
+        from services.platform_credential_service import resolve_bilibili_auth
+        from services.bilibili.uploader import BiliUploader
+
+        auth = resolve_bilibili_auth(account_id=credential_id, required=True)
+        uploader = BiliUploader(
+            sessdata=auth.get("sessdata"),
+            bili_jct=auth.get("bili_jct"),
+            buvid3=auth.get("buvid3"),
+            dedeuserid=auth.get("dedeuserid"),
+        )
+
+        async def _fetch():
+            uid = int(auth.get("dedeuserid") or 0)
+            if not uid:
+                info = await user.get_self_info(uploader.credential)
+                uid = int((info or {}).get("mid") or 0)
+            if not uid:
+                raise ValueError("B站账号缺少 DedeUserID，无法读取合集")
+            channels = await user.User(credential=uploader.credential, uid=uid).get_channels()
+            seasons = []
+            for channel in channels or []:
+                meta = getattr(channel, "meta", None) or {}
+                season_id = meta.get("season_id") or meta.get("id")
+                title = meta.get("title") or meta.get("name")
+                if not season_id or not title:
+                    continue
+                seasons.append({
+                    "id": str(season_id),
+                    "title": str(title),
+                    "name": str(meta.get("name") or title),
+                })
+            return seasons
+
+        seasons = asyncio.run(_fetch())
+        return jsonify({"success": True, "data": {"items": seasons}, "items": seasons})
     except Exception as exc:
         return jsonify({"success": False, "message": str(exc)}), 502
 
@@ -419,6 +467,8 @@ def submit_bilibili_upload(current_user, job_id):
     desc = _clean_upload_text(data.get("desc") or data.get("description"), max_length=2000)
     try:
         charging_pay = _charging_pay_from_upload_payload(data)
+        delay_time = _bilibili_upload_delay_time(data)
+        season_id = _bilibili_upload_season_id(data)
     except ValueError as exc:
         return jsonify({"success": False, "message": str(exc)}), 400
 
@@ -453,6 +503,8 @@ def submit_bilibili_upload(current_user, job_id):
             "is_only_self": _bounded_int(data.get("is_only_self") or data.get("only_self"), 0, 0, 1),
             "dynamic": _clean_upload_text(data.get("dynamic"), max_length=233),
             "charging_pay": charging_pay,
+            "delay_time": delay_time,
+            "season_id": season_id,
         },
         "youtube": {"enabled": False},
         "metadata": {
@@ -476,6 +528,8 @@ def submit_bilibili_upload(current_user, job_id):
             "bilibili_credential_id": credential_id or None,
             "bilibili_credential_name": credential_name,
             "bilibili_charging_pay": charging_pay,
+            "bilibili_delay_time": delay_time,
+            "bilibili_season_id": season_id,
         },
     )
     db.session.add(child)
@@ -1374,6 +1428,46 @@ def _charging_pay_from_upload_payload(data):
     return payload
 
 
+def _bilibili_upload_delay_time(data):
+    enabled = (
+        data.get("schedule_enabled")
+        if data.get("schedule_enabled") is not None
+        else data.get("delay_enabled")
+    )
+    raw = data.get("delay_time") or data.get("dtime") or data.get("schedule_time")
+    if not _truthy(enabled, default=False) and raw in (None, "", 0, "0", False):
+        return None
+    if raw in (None, "", 0, "0", False):
+        raise ValueError("请选择 B站定时发布时间")
+    if isinstance(raw, str) and re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", raw):
+        try:
+            timestamp = int(datetime.fromisoformat(raw).timestamp())
+        except ValueError as exc:
+            raise ValueError("B站定时发布时间格式无效") from exc
+    else:
+        try:
+            timestamp = int(float(raw))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("B站定时发布时间必须是秒级时间戳") from exc
+
+    now_ts = int(time.time())
+    min_ts = now_ts + 5 * 60
+    max_ts = now_ts + 15 * 24 * 60 * 60
+    if timestamp < min_ts or timestamp > max_ts:
+        raise ValueError("B站定时发布时间需在 5 分钟后、15 天内")
+    return timestamp
+
+
+def _bilibili_upload_season_id(data):
+    raw = data.get("season_id") or data.get("bili_season_id")
+    if raw in (None, "", 0, "0", False):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("B站合集 ID 必须是整数") from exc
+
+
 def _bilibili_upload_children(parent_id):
     rows = (
         PublicationTask.query.options(load_only(
@@ -1429,6 +1523,8 @@ def _bilibili_upload_child_payload(task):
             or _platform_credential_display_name(bili.get("credential_id") or result.get("bilibili_credential_id"))
         ),
         "charging_pay": bili.get("charging_pay") or result.get("bilibili_charging_pay"),
+        "delay_time": bili.get("delay_time") or result.get("bilibili_delay_time"),
+        "season_id": bili.get("season_id") or result.get("bilibili_season_id"),
         "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
         "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else None,
         "result": upload_result,

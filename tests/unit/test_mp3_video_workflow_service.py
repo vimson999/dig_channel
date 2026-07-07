@@ -9,6 +9,8 @@ from PIL import Image, ImageDraw
 from sqlalchemy.exc import OperationalError
 
 from api.mp3_video_workflow import (
+    _bilibili_upload_delay_time as _api_bilibili_upload_delay_time,
+    _bilibili_upload_season_id as _api_bilibili_upload_season_id,
     _charging_pay_from_upload_payload as _api_charging_pay_from_upload_payload,
     _clean_bilibili_upload_title as _api_clean_bilibili_upload_title,
     _clean_ds_title as _api_clean_ds_title,
@@ -82,6 +84,21 @@ from services.mp3_video_workflow import (
 
 
 class Mp3VideoWorkflowServiceTest(unittest.TestCase):
+    def test_api_bilibili_upload_parses_schedule_and_season(self):
+        with patch("api.mp3_video_workflow.time.time", return_value=1000):
+            self.assertEqual(
+                _api_bilibili_upload_delay_time({"schedule_enabled": 1, "delay_time": "1600"}),
+                1600,
+            )
+            self.assertIsNone(_api_bilibili_upload_delay_time({"schedule_enabled": 0}))
+            with self.assertRaises(ValueError):
+                _api_bilibili_upload_delay_time({"schedule_enabled": 1, "delay_time": "1200"})
+
+        self.assertEqual(_api_bilibili_upload_season_id({"season_id": "12345"}), 12345)
+        self.assertIsNone(_api_bilibili_upload_season_id({"season_id": ""}))
+        with self.assertRaises(ValueError):
+            _api_bilibili_upload_season_id({"season_id": "not-a-number"})
+
     def test_api_closed_door_title_ignores_prompt_placeholder(self):
         actual = "内资闭门会 / Micro-TEC光模块核心器件 / 国产突破内挤压工艺 / 出口管制误解消除 / 2026-07-07"
         dirty = (
