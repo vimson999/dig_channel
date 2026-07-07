@@ -14,6 +14,7 @@ from api.mp3_video_workflow import (
     _clean_ds_title as _api_clean_ds_title,
     _default_bilibili_title as _api_default_bilibili_title,
     _ds_extract_payload as _api_ds_extract_payload,
+    _prepare_keyframe_job_for_full_video as _api_prepare_keyframe_job_for_full_video,
 )
 from models.task import PublicationTask
 from services.gemini_browser import (
@@ -1043,6 +1044,44 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
 
         self.assertEqual(cleaned, {"plan": {"title": "demo"}})
         self.assertIn("waiting_child", result)
+
+    def test_prepare_keyframe_job_for_full_video_preserves_assets(self):
+        task = PublicationTask(
+            id="job-keyframes",
+            status="completed",
+            current_step="keyframes_ready",
+            progress=100,
+            params={
+                "feature": "mp3_video_workflow",
+                "mp3_video_workflow": {
+                    "render_mode": "keyframes",
+                    "generate_subtitles": False,
+                },
+            },
+            result={
+                "render_mode": "keyframes",
+                "artifacts": {"finance_cover": {"path": "/tmp/cover.jpg"}},
+                "keyframes": {"keyframe_vertical_01": {"path": "/tmp/keyframe.jpg"}},
+                "landscape_video": {"status": "skipped", "reason": "keyframes_preview"},
+                "vertical_video": {"status": "skipped", "reason": "keyframes_preview"},
+                "output_path": "/tmp/keyframes-result.json",
+                "completed_at": "2026-07-07T00:00:00Z",
+            },
+        )
+
+        ok, message = _api_prepare_keyframe_job_for_full_video(task)
+
+        self.assertTrue(ok, message)
+        self.assertEqual(task.status, "pending")
+        self.assertEqual(task.current_step, "queued_full_video")
+        self.assertEqual(task.params["mp3_video_workflow"]["render_mode"], "full_video")
+        self.assertEqual(task.result["render_mode"], "full_video")
+        self.assertEqual(task.result["artifacts"]["finance_cover"]["path"], "/tmp/cover.jpg")
+        self.assertEqual(task.result["keyframes"]["keyframe_vertical_01"]["path"], "/tmp/keyframe.jpg")
+        self.assertEqual(task.result["landscape_video"], {})
+        self.assertEqual(task.result["vertical_video"], {})
+        self.assertNotIn("output_path", task.result)
+        self.assertNotIn("completed_at", task.result)
 
     def test_publisher_video_children_use_short_inline_wait_and_deferred_resume(self):
         with patch.dict(os.environ, {

@@ -28,6 +28,12 @@ class Mp3VideoWorkflowDetailPage {
         this.els.refreshBtn?.addEventListener('click', () => this.load({ manual: true }));
         window.addEventListener('beforeunload', () => this.clearAutoRefresh());
         this.els.root?.addEventListener('click', (event) => {
+            const continueFullVideoButton = event.target.closest('[data-continue-full-video]');
+            if (continueFullVideoButton) {
+                event.preventDefault();
+                this.continueFullVideo(continueFullVideoButton);
+                return;
+            }
             const cancelBiliUploadButton = event.target.closest('[data-bili-upload-cancel]');
             if (cancelBiliUploadButton) {
                 event.preventDefault();
@@ -226,6 +232,7 @@ class Mp3VideoWorkflowDetailPage {
         const audio = job.request?.audio || job.audio || {};
         const planAudio = job.plan?.audio || {};
         const generateSubtitles = job.generate_subtitles ?? job.request?.generate_subtitles ?? true;
+        const canContinueFullVideo = this.canContinueFullVideo(job);
         const range = [
             planAudio.start_seconds !== undefined ? `起点 ${this.formatDuration(planAudio.start_seconds)}` : '',
             planAudio.end_seconds !== undefined && planAudio.end_seconds !== null ? `终点 ${this.formatDuration(planAudio.end_seconds)}` : '终点自动',
@@ -248,13 +255,33 @@ class Mp3VideoWorkflowDetailPage {
                             range,
                         ].filter(Boolean).join(' · '))}</div>
                     </div>
-                    ${job.error ? `<div class="rounded-md border border-rose-100 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">${this.escape(job.error)}</div>` : ''}
+                    <div class="flex flex-col items-start gap-2 lg:items-end">
+                        ${canContinueFullVideo ? `
+                            <button type="button" data-continue-full-video="1" class="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-black text-white hover:bg-emerald-700">
+                                <i class="fas fa-film mr-1.5"></i>继续生成完整视频
+                            </button>
+                        ` : ''}
+                        ${job.error ? `<div class="rounded-md border border-rose-100 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">${this.escape(job.error)}</div>` : ''}
+                    </div>
                 </div>
                 <div class="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
                     <div class="h-full rounded-full ${status.bar}" style="width:${Math.max(0, Math.min(100, Number(job.progress || 0)))}%"></div>
                 </div>
             </section>
         `;
+    }
+
+    canContinueFullVideo(job) {
+        const status = String(job?.status || '').toLowerCase();
+        const mode = String(job?.render_mode || job?.request?.render_mode || '').toLowerCase();
+        const hasKeyframes = Object.keys(job?.keyframes || {}).length > 0
+            || Object.keys(job?.artifacts || {}).some((key) => key.startsWith('keyframe_'));
+        const hasLandscape = Boolean(job?.download_landscape_video_url);
+        const hasVertical = Boolean(job?.download_vertical_video_url);
+        return ['succeeded', 'completed'].includes(status)
+            && mode === 'keyframes'
+            && hasKeyframes
+            && !(hasLandscape && hasVertical);
     }
 
     renderDsExtract(job) {
@@ -817,6 +844,32 @@ class Mp3VideoWorkflowDetailPage {
             this.setNotice(`已投递 B站上传任务：${this.lastBiliUpload?.task_id || ''}`, 'success');
         } catch (error) {
             this.setNotice(`B站上传投递失败：${error.message}`, 'error');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.innerHTML = originalHtml;
+            }
+        }
+    }
+
+    async continueFullVideo(button) {
+        if (!window.confirm('确认关键帧效果可以，继续生成完整横屏和竖屏视频？已有 DS、封皮、背景和关键帧会复用。')) return;
+        const originalHtml = button?.innerHTML || '';
+        try {
+            if (button) {
+                button.disabled = true;
+                button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>投递中...';
+            }
+            const result = await this.request(`/api/mp3-video-workflows/jobs/${encodeURIComponent(this.jobId)}/continue-full-video`, {
+                method: 'POST',
+                timeoutMs: 30000,
+            });
+            this.job = result.data || result;
+            this.render();
+            this.scheduleAutoRefresh();
+            this.setNotice(result.message || '已开始继续生成完整视频。', 'success');
+        } catch (error) {
+            this.setNotice(`继续生成完整视频失败：${error.message}`, 'error');
         } finally {
             if (button) {
                 button.disabled = false;

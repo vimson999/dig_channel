@@ -612,6 +612,37 @@ def retry_job(current_user, job_id):
     return jsonify({"success": True, "message": "任务已从失败处续跑", **payload, "data": payload})
 
 
+@mp3_video_workflow_bp.route("/jobs/<job_id>/continue-full-video", methods=["POST"])
+@require_login
+def continue_full_video(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    if task.status in {"pending", "processing"}:
+        payload = _job_payload(task)
+        return jsonify({"success": True, "message": "任务仍在运行中", **payload, "data": payload})
+
+    ok, message = _prepare_keyframe_job_for_full_video(task)
+    if not ok:
+        payload = _job_payload(task)
+        return jsonify({"success": False, "message": message, **payload, "data": payload}), 400
+
+    db.session.commit()
+    try:
+        celery_task = process_mp3_video_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+    except Exception as exc:
+        task.status = "failed"
+        task.current_step = "failed"
+        task.error_message = f"完整视频续跑任务入队失败: {exc}"
+        task.completed_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({"success": False, "message": task.error_message}), 502
+    task.celery_task_id = celery_task.id
+    db.session.commit()
+    payload = _job_payload(task)
+    return jsonify({"success": True, "message": "已从关键帧继续生成完整视频", **payload, "data": payload})
+
+
 @mp3_video_workflow_bp.route("/jobs/<job_id>/download-result", methods=["GET"])
 @require_login
 def download_result(current_user, job_id):
@@ -962,6 +993,68 @@ def _job_payload(task, include_raw=False):
         payload["raw_params"] = params
         payload["raw_result"] = result
     return payload
+
+
+def _prepare_keyframe_job_for_full_video(task):
+    params = dict(task.params or {})
+    workflow = dict(params.get(FEATURE_NAME) or {})
+    result = dict(task.result or {})
+    render_mode = str(
+        result.get("render_mode")
+        or workflow.get("render_mode")
+        or ""
+    ).strip().lower()
+    artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+    has_keyframes = bool(result.get("keyframes") or any(
+        str(key).startswith("keyframe_")
+        for key in artifacts.keys()
+    ))
+    if render_mode != "keyframes" and not has_keyframes:
+        return False, "当前任务不是关键帧预览任务，不能用这个入口续跑完整视频"
+    if _path_exists(_video_output_path(result.get("landscape_video"))) and _path_exists(_video_output_path(result.get("vertical_video"))):
+        return False, "当前任务已经有完整横屏和竖屏视频，无需续跑"
+
+    requested_at = datetime.utcnow().isoformat() + "Z"
+    workflow["render_mode"] = "full_video"
+    params[FEATURE_NAME] = workflow
+    result["render_mode"] = "full_video"
+    result["continue_full_video_requested_at"] = requested_at
+    result["error"] = None
+    result.pop("completed_at", None)
+    result.pop("output_path", None)
+    result.pop("waiting_child", None)
+    result.pop("deferred_waits", None)
+    result["landscape_video"] = _drop_keyframe_skip_video(result.get("landscape_video"))
+    result["vertical_video"] = _drop_keyframe_skip_video(result.get("vertical_video"))
+    logs = list(result.get("logs") or [])
+    logs.append({
+        "step": "continue_full_video_requested",
+        "message": "用户确认关键帧效果，继续生成完整横屏和竖屏视频",
+        "progress": max(int(task.progress or 0), 68),
+        "updated_at": requested_at,
+    })
+    result["logs"] = logs[-160:]
+
+    task.status = "pending"
+    task.current_step = "queued_full_video"
+    task.progress = max(int(task.progress or 0), 68)
+    task.error_message = None
+    task.completed_at = None
+    task.params = params
+    task.result = result
+    flag_modified(task, "params")
+    flag_modified(task, "result")
+    return True, "ok"
+
+
+def _drop_keyframe_skip_video(video):
+    if not isinstance(video, dict):
+        return video
+    if str(video.get("status") or "").strip().lower() == "skipped" and video.get("reason") == "keyframes_preview":
+        return {}
+    if not _video_output_path(video) and video.get("reason") == "keyframes_preview":
+        return {}
+    return video
 
 
 def _artifact_by_key(task, key):
