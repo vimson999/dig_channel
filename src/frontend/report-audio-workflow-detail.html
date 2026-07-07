@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>研报转语音详情 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <div id="nav-container"></div>
+
+    <main class="mx-auto max-w-[1280px] px-6 py-6">
+        <div class="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+                <div class="mb-2 flex flex-wrap items-center gap-2 text-xs font-bold text-slate-500">
+                    <a href="report-audio-workflow-test.html" class="text-indigo-700 hover:text-indigo-900">
+                        <i class="fas fa-arrow-left mr-1"></i>返回编排台
+                    </a>
+                    <span id="job-id-label"></span>
+                </div>
+                <h1 id="detail-title" class="text-2xl font-black tracking-tight">研报转语音详情</h1>
+                <p id="detail-subtitle" class="mt-1 text-sm text-slate-500">加载任务详情中。</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <button id="refresh-detail-btn" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                    <i class="fas fa-rotate mr-1.5"></i>刷新详情
+                </button>
+                <a id="open-api-json" href="#" target="_blank" rel="noopener noreferrer" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                    <i class="fas fa-code mr-1.5"></i>API JSON
+                </a>
+            </div>
+        </div>
+
+        <div id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm"></div>
+        <div id="detail-root" class="space-y-4"></div>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20260614-report-audio-workflow-detail"></script>
+    <script src="js/bilibili-publish-panel.js?v=20260707-common-bili"></script>
+    <script src="js/report-audio-workflow-detail.js?v=20260707-bili-detail"></script>
+</body>
+</html>

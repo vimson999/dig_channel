@@ -12,6 +12,7 @@ class Mp3VideoWorkflowDetailPage {
         this.biliSeasonsErrorByCredential = {};
         this.biliSeasonsPromises = {};
         this.biliSeasonsLoading = '';
+        this.biliPanel = null;
         this.lastBiliUpload = null;
         this.refreshTimer = null;
         this.autoRefreshMs = 5000;
@@ -264,12 +265,38 @@ class Mp3VideoWorkflowDetailPage {
             this.renderLogs(job),
             this.renderRaw(job),
         ].join('');
+        this.mountBilibiliPanel(job);
         this.refreshBiliScheduleInput();
         const credentialId = document.getElementById('bili-credential-id')?.value || '';
         if (credentialId) {
             this.applyBiliSeasonOptions(credentialId);
             this.loadBiliSeasons(credentialId);
         }
+    }
+
+    mountBilibiliPanel(job) {
+        const container = document.getElementById('mp3-bilibili-publish-panel');
+        if (!container || !window.BilibiliPublishPanel) return;
+        if (!this.biliPanel || this.biliPanel.container !== container) {
+            this.biliPanel = new window.BilibiliPublishPanel({
+                container,
+                apiRoot: () => this.apiRoot(),
+                request: (path, options) => this.request(path, options),
+                onNotice: (message, type) => this.setNotice(message, type),
+                uploadPath: (jobId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload`,
+                cancelPath: (jobId, uploadTaskId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload/${encodeURIComponent(uploadTaskId)}/cancel`,
+                uploads: (payload) => payload.bilibili_uploads || [],
+                videoOptions: (payload) => this.biliVideoOptions(payload),
+                coverOptions: (payload, videoKey) => this.biliCoverOptions(payload, videoKey),
+                defaultCoverKey: (payload, videoKey) => this.defaultBiliCoverKey(payload, videoKey),
+                defaultTitle: (payload, videoKey) => this.defaultBiliTitle(payload, videoKey),
+                defaultTags: '财经,音频,内资闭门会',
+                emptyDescription: '当前任务还没有完整视频文件。请先用“完整横竖屏视频”模式生成横屏或竖屏视频，关键帧预览不能直接投递 B站。',
+                onAfterSubmit: async () => this.load(),
+                onAfterCancel: async () => this.load(),
+            });
+        }
+        this.biliPanel.setJob(job);
     }
 
     sourceLabel(job) {
@@ -498,6 +525,7 @@ class Mp3VideoWorkflowDetailPage {
     }
 
     renderBilibiliPublisher(job) {
+        return '<div id="mp3-bilibili-publish-panel"></div>';
         const videos = this.biliVideoOptions(job);
         const hasVideos = videos.length > 0;
         const selectedVideo = videos[0] || { key: 'landscape', label: '暂无可投递视频', defaultTitle: job.plan?.title || job.request?.audio?.topic_title || '内资闭门会' };

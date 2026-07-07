@@ -1542,6 +1542,7 @@ class ReportAudioWorkflowPage {
                     </div>
                     <div class="flex items-center gap-1.5">
                         <span class="rounded-full px-2.5 py-1 text-xs font-bold ${status.className}">${status.label}</span>
+                        ${job.job_id ? `<a href="report-audio-workflow-detail.html?job_id=${encodeURIComponent(job.job_id)}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-indigo-200 bg-white px-2 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50" title="打开详情页"><i class="fas fa-up-right-from-square mr-1"></i>详情新页</a>` : ''}
                         ${job.job_id && job.status === 'failed' ? `<button data-job-action="retry" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-emerald-300 bg-emerald-50 px-2 py-1.5 text-xs text-emerald-700 hover:bg-emerald-100" title="从失败处续跑"><i class="fas fa-play"></i></button>` : ''}
                         ${job.job_id ? `<button data-job-action="refresh" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-slate-300 px-2 py-1.5 text-xs text-slate-600 hover:bg-slate-50" title="刷新"><i class="fas fa-rotate"></i></button>` : ''}
                         <button data-job-action="remove" data-job-id="${this.escape(job.job_id || job.local_id || '')}" class="rounded-md border border-slate-300 px-2 py-1.5 text-xs text-slate-500 hover:bg-slate-50" title="移除"><i class="fas fa-xmark"></i></button>

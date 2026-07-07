@@ -27,6 +27,14 @@ from services.report_audio_workflow import (
     render_pdf_first_page_image,
     status_payload as workflow_status_payload,
 )
+from services.bilibili_publish import (
+    bilibili_upload_child_payload,
+    bilibili_upload_children,
+    cancel_bilibili_upload_child,
+    clean_upload_text as clean_bilibili_upload_text,
+    create_bilibili_upload_task,
+    enqueue_bilibili_upload_task,
+)
 from services.thumbnail_service import thumbnail_service
 from tasks.publisher import run_publication_pipeline
 from tasks.report_audio_workflow import (
@@ -81,6 +89,7 @@ STATUS_MAP = {
 SYSTEM_USER_ID = "system"
 TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 VERTICAL_BACKFILL_SOURCE = "report_audio_workflow_vertical_backfill"
+BILIBILI_UPLOAD_SOURCE = f"{FEATURE_NAME}:bilibili_upload"
 VERTICAL_VIDEO_SCHEME_DEFAULT = "scheme1"
 VERTICAL_VIDEO_SCHEMES = {"scheme1", "scheme2"}
 VERTICAL_PREVIEW_SECONDS_DEFAULT = 10
@@ -651,6 +660,90 @@ def download_cover(current_user, job_id):
     if not cover_path or not os.path.exists(cover_path):
         return jsonify({"success": False, "message": "封面文件不存在"}), 404
     return send_file(cover_path, mimetype="image/jpeg", as_attachment=True, download_name=f"{task.id}.jpg")
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/bilibili-upload", methods=["POST"])
+@require_login
+def submit_bilibili_upload(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    data = _request_payload()
+    video_key = str(data.get("video_key") or data.get("video") or "landscape").strip().lower()
+    if video_key not in {"landscape", "vertical"}:
+        return jsonify({"success": False, "message": "video_key 只能是 landscape 或 vertical"}), 400
+
+    video_path = _report_bilibili_video_path(task, video_key)
+    if not _path_exists(video_path):
+        return jsonify({"success": False, "message": "当前任务还没有可上传的视频文件"}), 400
+
+    cover_key = str(data.get("cover_key") or "").strip()
+    cover_path, resolved_cover_key = _report_bilibili_cover_path(task, video_key, cover_key)
+    if cover_key and not cover_path:
+        return jsonify({"success": False, "message": f"封面产物不存在：{cover_key}"}), 400
+
+    manual_title = clean_bilibili_upload_text(data.get("title"), max_length=120)
+    title = manual_title or _report_bilibili_default_title(task, video_key)
+    try:
+        child = create_bilibili_upload_task(
+            task,
+            current_user=current_user,
+            parent_feature=FEATURE_NAME,
+            source_label=BILIBILI_UPLOAD_SOURCE,
+            video_path=video_path,
+            video_key=video_key,
+            title=title,
+            data=data,
+            cover_path=cover_path,
+            cover_key=resolved_cover_key,
+            default_tags=["财经", "音频", "研报解读"],
+            metadata_extra={"title_source": "manual" if manual_title else "report_audio_default"},
+        )
+        enqueue_bilibili_upload_task(child)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"success": False, "message": f"B站上传投递失败: {exc}"}), 502
+
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
+    item = bilibili_upload_child_payload(child, source_label=BILIBILI_UPLOAD_SOURCE)
+    return jsonify({
+        "success": True,
+        "message": "已投递 B站上传任务",
+        "data": {"upload_task": item},
+        "upload_task": item,
+    })
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/bilibili-upload/<upload_task_id>/cancel", methods=["POST"])
+@require_login
+def cancel_bilibili_upload(current_user, job_id, upload_task_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    child = (
+        PublicationTask.query
+        .filter(PublicationTask.id == upload_task_id)
+        .filter(PublicationTask.feature == "publisher")
+        .filter(PublicationTask.parent_task_id == task.id)
+        .filter(PublicationTask.parent_feature == FEATURE_NAME)
+        .first()
+    )
+    if not child or not bilibili_upload_child_payload(child, source_label=BILIBILI_UPLOAD_SOURCE):
+        return jsonify({"success": False, "message": "B站上传任务不存在"}), 404
+
+    ok, message = cancel_bilibili_upload_child(child)
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
+    item = bilibili_upload_child_payload(child, source_label=BILIBILI_UPLOAD_SOURCE)
+    return jsonify({
+        "success": ok,
+        "message": message,
+        "data": {"upload_task": item},
+        "upload_task": item,
+    }), (200 if ok else 409)
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/regenerate-cover", methods=["POST"])
@@ -1591,6 +1684,66 @@ def _podcast_cover_path_for_task(task):
     return None
 
 
+def _report_bilibili_video_path(task, video_key):
+    result = task.result if isinstance(task.result, dict) else {}
+    video = result.get("video") if isinstance(result.get("video"), dict) else {}
+    if video_key == "vertical":
+        return _vertical_video_path_for_task(task)
+    return video.get("video_path")
+
+
+def _report_bilibili_cover_path(task, video_key, requested_key=""):
+    result = task.result if isinstance(task.result, dict) else {}
+    video = _video_result_with_vertical_backfill(task)
+    cover_map = {
+        "cover": (result.get("video") or {}).get("cover_path") if isinstance(result.get("video"), dict) else None,
+        "landscape_cover": (result.get("video") or {}).get("cover_path") if isinstance(result.get("video"), dict) else None,
+        "vertical_cover": _vertical_cover_path_for_task(task),
+        "podcast_cover": _podcast_cover_path_for_task(task),
+        "pdf_first_page": (video.get("pdf_first_page_image") or {}).get("path") if isinstance(video.get("pdf_first_page_image"), dict) else None,
+    }
+    requested_key = str(requested_key or "").strip()
+    if requested_key:
+        path = cover_map.get(requested_key)
+        return (path, requested_key) if _path_exists(path) else (None, requested_key)
+
+    candidates = (
+        ["vertical_cover", "podcast_cover", "cover"]
+        if video_key == "vertical"
+        else ["cover", "vertical_cover", "podcast_cover"]
+    )
+    for key in candidates:
+        path = cover_map.get(key)
+        if _path_exists(path):
+            return path, key
+    return None, ""
+
+
+def _report_bilibili_default_title(task, video_key):
+    result = task.result if isinstance(task.result, dict) else {}
+    params = task.params if isinstance(task.params, dict) else {}
+    request_payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
+    request_metadata = request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
+    request_video = request_payload.get("video") if isinstance(request_payload.get("video"), dict) else {}
+    public_pdf = request_payload.get("pdf") if isinstance(request_payload.get("pdf"), dict) else {}
+    if not public_pdf and isinstance(result.get("pdf"), dict):
+        public_pdf = result.get("pdf")
+    structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
+    video = result.get("video") if isinstance(result.get("video"), dict) else {}
+    title = _first_compact_title(
+        request_video.get("bilibili_title_7") if video_key == "vertical" else request_video.get("bilibili_title_6"),
+        request_video.get("title"),
+        video.get("cover_title"),
+        _display_title_from_structured(structured),
+        request_metadata.get("title"),
+        public_pdf.get("topic_title"),
+        public_pdf.get("filename"),
+        task.task_title,
+        "研报解读",
+    )
+    return clean_bilibili_upload_text(title, max_length=120)
+
+
 def _video_result_with_vertical_backfill(task):
     result = task.result if isinstance(task.result, dict) else {}
     video = dict(result.get("video") or {}) if isinstance(result.get("video"), dict) else {}
@@ -1731,6 +1884,11 @@ def _job_payload(task, include_raw=False):
         "publisher_video": result.get("publisher_video"),
         "publisher_vertical_video": children.get("publisher_vertical_video"),
         "publisher_vertical_preview_video": children.get("publisher_vertical_preview_video"),
+        "bilibili_uploads": bilibili_upload_children(
+            task.id,
+            parent_feature=FEATURE_NAME,
+            source_label=BILIBILI_UPLOAD_SOURCE,
+        ),
         "pdf_first_page_image": _public_image(task.id, result.get("pdf_first_page_image")),
         "download_audio_url": f"/api/report-audio-workflows/jobs/{task.id}/download-audio" if audio and audio.get("wav_path") else None,
         "download_result_url": f"/api/report-audio-workflows/jobs/{task.id}/download-result" if result.get("output_path") else None,

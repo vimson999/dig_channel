@@ -46,6 +46,10 @@ def register_all_apis(app):
     # 注册已同步 MP3 -> Gemini 图片 -> 横竖屏视频编排模块
     from api.mp3_video_workflow import mp3_video_workflow_bp
     app.register_blueprint(mp3_video_workflow_bp)
+
+    # 注册通用 B站发布辅助接口，供多个详情页复用
+    from api.bilibili_publish import bilibili_publish_bp
+    app.register_blueprint(bilibili_publish_bp)
     
     # 创建API信息端点
     @app.route('/api', methods=['GET'])
@@ -73,6 +77,7 @@ def register_all_apis(app):
         endpoints['report_script_material_workflows'] = '/api/report-script-material-workflows'
         endpoints['report_visual_plans'] = '/api/report-visual-plans'
         endpoints['mp3_video_workflows'] = '/api/mp3-video-workflows'
+        endpoints['bilibili_publish'] = '/api/bilibili-publish'
         if app.config.get('ENABLE_MHTML_API', False):
             endpoints['v1']['mhtml_pdf'] = '/api/v1/mhtml-pdf'
 
