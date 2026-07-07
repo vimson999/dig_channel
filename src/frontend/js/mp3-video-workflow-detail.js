@@ -34,6 +34,12 @@ class Mp3VideoWorkflowDetailPage {
                 this.continueFullVideo(continueFullVideoButton);
                 return;
             }
+            const regenerateVideosButton = event.target.closest('[data-regenerate-videos]');
+            if (regenerateVideosButton) {
+                event.preventDefault();
+                this.regenerateVideos(regenerateVideosButton);
+                return;
+            }
             const cancelBiliUploadButton = event.target.closest('[data-bili-upload-cancel]');
             if (cancelBiliUploadButton) {
                 event.preventDefault();
@@ -233,6 +239,7 @@ class Mp3VideoWorkflowDetailPage {
         const planAudio = job.plan?.audio || {};
         const generateSubtitles = job.generate_subtitles ?? job.request?.generate_subtitles ?? true;
         const canContinueFullVideo = this.canContinueFullVideo(job);
+        const canRegenerateVideos = this.canRegenerateVideos(job);
         const range = [
             planAudio.start_seconds !== undefined ? `起点 ${this.formatDuration(planAudio.start_seconds)}` : '',
             planAudio.end_seconds !== undefined && planAudio.end_seconds !== null ? `终点 ${this.formatDuration(planAudio.end_seconds)}` : '终点自动',
@@ -261,6 +268,11 @@ class Mp3VideoWorkflowDetailPage {
                                 <i class="fas fa-film mr-1.5"></i>继续生成完整视频
                             </button>
                         ` : ''}
+                        ${canRegenerateVideos ? `
+                            <button type="button" data-regenerate-videos="1" class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-800 hover:bg-amber-100">
+                                <i class="fas fa-arrows-rotate mr-1.5"></i>重新生成完整视频
+                            </button>
+                        ` : ''}
                         ${job.error ? `<div class="rounded-md border border-rose-100 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">${this.escape(job.error)}</div>` : ''}
                     </div>
                 </div>
@@ -282,6 +294,16 @@ class Mp3VideoWorkflowDetailPage {
             && mode === 'keyframes'
             && hasKeyframes
             && !(hasLandscape && hasVertical);
+    }
+
+    canRegenerateVideos(job) {
+        const status = String(job?.status || '').toLowerCase();
+        const mode = String(job?.render_mode || job?.request?.render_mode || '').toLowerCase();
+        const hasLandscape = Boolean(job?.download_landscape_video_url || job?.landscape_video?.video_path);
+        const hasVertical = Boolean(job?.download_vertical_video_url || job?.vertical_video?.video_path);
+        return ['succeeded', 'completed'].includes(status)
+            && mode === 'full_video'
+            && (hasLandscape || hasVertical);
     }
 
     renderDsExtract(job) {
@@ -870,6 +892,32 @@ class Mp3VideoWorkflowDetailPage {
             this.setNotice(result.message || '已开始继续生成完整视频。', 'success');
         } catch (error) {
             this.setNotice(`继续生成完整视频失败：${error.message}`, 'error');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.innerHTML = originalHtml;
+            }
+        }
+    }
+
+    async regenerateVideos(button) {
+        if (!window.confirm('确认重新生成完整横屏和竖屏视频？旧视频不会删除，但本次会强制提交新的合成子任务。')) return;
+        const originalHtml = button?.innerHTML || '';
+        try {
+            if (button) {
+                button.disabled = true;
+                button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>投递中...';
+            }
+            const result = await this.request(`/api/mp3-video-workflows/jobs/${encodeURIComponent(this.jobId)}/regenerate-videos`, {
+                method: 'POST',
+                timeoutMs: 30000,
+            });
+            this.job = result.data || result;
+            this.render();
+            this.scheduleAutoRefresh();
+            this.setNotice(result.message || '已重新投递完整视频生成任务。', 'success');
+        } catch (error) {
+            this.setNotice(`重新生成完整视频失败：${error.message}`, 'error');
         } finally {
             if (button) {
                 button.disabled = false;

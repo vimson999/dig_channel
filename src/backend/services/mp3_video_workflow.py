@@ -692,25 +692,32 @@ def process_job(task_id: str) -> bool:
         existing = _fresh_result(task.id)
         audio_segment = audio_segment_from_plan(audio, plan)
         audio_signature = _audio_segment_signature(audio_segment)
-        landscape_summary, landscape_task = _reusable_video_summary(
-            existing,
-            "landscape_video",
-            parent_id=task.id,
-            generate_subtitles=generate_subtitles,
-            audio_signature=audio_signature,
-        )
+        force_video_regenerate = _workflow_force_video_regenerate(workflow, existing)
+        if force_video_regenerate:
+            landscape_summary, landscape_task = None, None
+        else:
+            landscape_summary, landscape_task = _reusable_video_summary(
+                existing,
+                "landscape_video",
+                parent_id=task.id,
+                generate_subtitles=generate_subtitles,
+                audio_signature=audio_signature,
+            )
         if landscape_summary:
             _emit(task.id, "landscape_video_reused", 90, "复用已完成的小君君横屏视频")
             if landscape_task:
                 _record_child(task.id, "landscape_video", landscape_task)
             _update_result(task.id, {"landscape_video": landscape_summary})
         else:
-            landscape_task = _active_child_from_result(
-                existing,
-                "landscape_video",
-                generate_subtitles=generate_subtitles,
-                audio_signature=audio_signature,
-            )
+            if force_video_regenerate:
+                landscape_task = None
+            else:
+                landscape_task = _active_child_from_result(
+                    existing,
+                    "landscape_video",
+                    generate_subtitles=generate_subtitles,
+                    audio_signature=audio_signature,
+                )
             if landscape_task:
                 _emit(task.id, "landscape_video_wait_existing", 80, "继续等待已提交的小君君横屏视频")
                 _sync_publisher_video_task_title(landscape_task, _publisher_video_title(plan, role="xiaojunjun_landscape"))
@@ -727,6 +734,7 @@ def process_job(task_id: str) -> bool:
                     role="xiaojunjun_landscape",
                     aspect_ratio="16:9",
                     generate_subtitles=generate_subtitles,
+                    force_new=force_video_regenerate,
                 )
                 _record_child(task.id, "landscape_video", landscape_task)
                 _queue_notification(task.id, "mp3_video_landscape_submitted", "小君君横屏视频合成任务已提交")
@@ -739,25 +747,31 @@ def process_job(task_id: str) -> bool:
 
         _raise_if_parent_canceled(task.id)
         existing = _fresh_result(task.id)
-        vertical_summary, vertical_task = _reusable_video_summary(
-            existing,
-            "vertical_video",
-            parent_id=task.id,
-            generate_subtitles=generate_subtitles,
-            audio_signature=audio_signature,
-        )
+        if force_video_regenerate:
+            vertical_summary, vertical_task = None, None
+        else:
+            vertical_summary, vertical_task = _reusable_video_summary(
+                existing,
+                "vertical_video",
+                parent_id=task.id,
+                generate_subtitles=generate_subtitles,
+                audio_signature=audio_signature,
+            )
         if vertical_summary:
             _emit(task.id, "vertical_video_reused", 99, "复用已完成的此刻此声竖屏视频")
             if vertical_task:
                 _record_child(task.id, "vertical_video", vertical_task)
             _update_result(task.id, {"vertical_video": vertical_summary})
         else:
-            vertical_task = _active_child_from_result(
-                existing,
-                "vertical_video",
-                generate_subtitles=generate_subtitles,
-                audio_signature=audio_signature,
-            )
+            if force_video_regenerate:
+                vertical_task = None
+            else:
+                vertical_task = _active_child_from_result(
+                    existing,
+                    "vertical_video",
+                    generate_subtitles=generate_subtitles,
+                    audio_signature=audio_signature,
+                )
             if vertical_task:
                 _emit(task.id, "vertical_video_wait_existing", 92, "继续等待已提交的此刻此声竖屏视频")
                 _sync_publisher_video_task_title(vertical_task, _publisher_video_title(plan, role="ciketc_vertical"))
@@ -774,6 +788,7 @@ def process_job(task_id: str) -> bool:
                     role="ciketc_vertical",
                     aspect_ratio="9:16",
                     generate_subtitles=generate_subtitles,
+                    force_new=force_video_regenerate,
                 )
                 _record_child(task.id, "vertical_video", vertical_task)
                 _queue_notification(task.id, "mp3_video_vertical_submitted", "此刻此声竖屏视频合成任务已提交")
@@ -912,6 +927,12 @@ def _workflow_render_mode(workflow: Dict[str, Any]) -> str:
     if workflow.get("keyframes_only") is True or workflow.get("preview_only") is True:
         return "keyframes"
     return "full_video"
+
+
+def _workflow_force_video_regenerate(workflow: Dict[str, Any], result: Optional[Dict[str, Any]] = None) -> bool:
+    workflow = workflow if isinstance(workflow, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    return bool(workflow.get("force_video_regenerate_at") or result.get("force_video_regenerate_at"))
 
 
 def _truthy(value: Any, default: bool = True) -> bool:
@@ -2619,18 +2640,21 @@ def create_publisher_video_task(
     role: str,
     aspect_ratio: str,
     generate_subtitles: bool = True,
+    force_new: bool = False,
 ) -> PublicationTask:
     title = _publisher_video_title(plan, role=role)
     generate_subtitles = bool(generate_subtitles)
     audio_segment = audio_segment_from_plan(audio, plan)
     audio_signature = _audio_segment_signature(audio_segment)
-    existing = _find_existing_publisher_video_task(
-        parent_id,
-        role=role,
-        aspect_ratio=aspect_ratio,
-        generate_subtitles=generate_subtitles,
-        audio_signature=audio_signature,
-    )
+    existing = None
+    if not force_new:
+        existing = _find_existing_publisher_video_task(
+            parent_id,
+            role=role,
+            aspect_ratio=aspect_ratio,
+            generate_subtitles=generate_subtitles,
+            audio_signature=audio_signature,
+        )
     if existing:
         _sync_publisher_video_task_title(existing, title)
         return existing
@@ -2673,6 +2697,7 @@ def create_publisher_video_task(
             "role": role,
             "title": title,
             "generate_subtitles": generate_subtitles,
+            "force_new": bool(force_new),
             "audio": audio,
             "audio_signature": audio_signature,
         },

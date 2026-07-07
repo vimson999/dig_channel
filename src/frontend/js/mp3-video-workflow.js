@@ -865,8 +865,9 @@ class Mp3VideoWorkflowPage {
     }
 
     renderJobCard(job) {
-        const title = job.plan?.title || job.request?.audio?.topic_title || job.request?.audio?.filename || job.job_id;
+        const title = job.plan?.title || job.request?.metadata?.title || job.request?.audio?.topic_title || job.request?.audio?.filename || job.job_id;
         const audio = job.request?.audio || job.audio || {};
+        const audioLine = this.jobAudioLine(audio);
         const status = this.jobStatusMeta(job.status);
         const canCancel = ['queued', 'running'].includes(job.status);
         const canRetry = ['failed', 'canceled'].includes(job.status);
@@ -881,7 +882,10 @@ class Mp3VideoWorkflowPage {
                                 <i class="fas fa-copy"></i>
                             </button>
                         </div>
-                        <div class="mt-1 text-xs text-slate-500">${this.escape(audio.filename || '')} · ${this.escape(job.created_at || '')}</div>
+                        <div class="mt-1 line-clamp-1 text-xs font-bold text-slate-600" title="${this.escapeAttr(audioLine)}">
+                            <i class="fas fa-music mr-1 text-slate-400"></i>${this.escape(audioLine || '原始 MP3：未记录')}
+                        </div>
+                        <div class="mt-1 text-xs text-slate-400">${this.escape(job.created_at || '')}</div>
                     </div>
                     <div class="flex flex-wrap items-center gap-2">
                         <span class="rounded-full px-2.5 py-1 text-xs font-bold ${status.className}">${status.label}</span>
@@ -909,6 +913,18 @@ class Mp3VideoWorkflowPage {
                 ${this.renderLogs(job.logs || [])}
             </article>
         `;
+    }
+
+    jobAudioLine(audio) {
+        if (!audio) return '';
+        const filename = String(audio.filename || audio.name || '').trim();
+        const tab = String(audio.tab_label || audio.topic_title || '').trim();
+        const downloadCount = Number(audio.download_count || 0);
+        return [
+            filename ? `原始 MP3：${filename}` : '',
+            tab ? `来源 ${tab}` : '',
+            downloadCount ? `下载 ${downloadCount} 次` : '',
+        ].filter(Boolean).join(' · ');
     }
 
     renderGeminiRetry(job) {

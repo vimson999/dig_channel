@@ -67,6 +67,7 @@ JOB_LIST_COLUMNS = (
     PublicationTask.source_task_id,
     PublicationTask.source_feature,
     PublicationTask.task_title,
+    PublicationTask.params,
     PublicationTask.created_at,
     PublicationTask.updated_at,
     PublicationTask.completed_at,
@@ -643,6 +644,37 @@ def continue_full_video(current_user, job_id):
     return jsonify({"success": True, "message": "已从关键帧继续生成完整视频", **payload, "data": payload})
 
 
+@mp3_video_workflow_bp.route("/jobs/<job_id>/regenerate-videos", methods=["POST"])
+@require_login
+def regenerate_videos(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    if task.status in {"pending", "processing"}:
+        payload = _job_payload(task)
+        return jsonify({"success": False, "message": "任务仍在运行中，请先等待或取消后再重生成", **payload, "data": payload}), 409
+
+    ok, message = _prepare_job_for_video_regeneration(task)
+    if not ok:
+        payload = _job_payload(task)
+        return jsonify({"success": False, "message": message, **payload, "data": payload}), 400
+
+    db.session.commit()
+    try:
+        celery_task = process_mp3_video_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+    except Exception as exc:
+        task.status = "failed"
+        task.current_step = "failed"
+        task.error_message = f"视频重生成任务入队失败: {exc}"
+        task.completed_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({"success": False, "message": task.error_message}), 502
+    task.celery_task_id = celery_task.id
+    db.session.commit()
+    payload = _job_payload(task)
+    return jsonify({"success": True, "message": "已重新投递横屏和竖屏视频生成任务", **payload, "data": payload})
+
+
 @mp3_video_workflow_bp.route("/jobs/<job_id>/download-result", methods=["GET"])
 @require_login
 def download_result(current_user, job_id):
@@ -896,11 +928,7 @@ def _append_workflow_stat(stats, asset_id, row):
 def _job_list_payload(task):
     status = STATUS_MAP.get(task.status, task.status or "queued")
     title = task.task_title or "MP3 视频编排"
-    audio = {
-        "attachment_id": task.source_task_id,
-        "topic_title": title,
-        "filename": title,
-    } if task.source_task_id or title else None
+    audio = _audio_summary_from_task(task)
     return {
         "job_id": task.id,
         "status": status,
@@ -927,6 +955,39 @@ def _job_list_payload(task):
         "download_infographic_url": None,
         "download_landscape_video_url": None,
         "download_vertical_video_url": None,
+    }
+
+
+def _audio_summary_from_task(task):
+    params = task.params if isinstance(task.params, dict) else {}
+    workflow = params.get(FEATURE_NAME) if isinstance(params.get(FEATURE_NAME), dict) else {}
+    audio = dict(workflow.get("audio") if isinstance(workflow.get("audio"), dict) else {})
+    attachment_id = (
+        task.source_task_id
+        or audio.get("attachment_id")
+        or audio.get("audio_asset_id")
+        or workflow.get("audio_asset_id")
+    )
+    if audio.get("path") and not audio.get("filename"):
+        audio["filename"] = Path(str(audio.get("path"))).name
+    if attachment_id and not audio.get("attachment_id"):
+        audio["attachment_id"] = attachment_id
+    if not audio and attachment_id:
+        audio = {
+            "attachment_id": attachment_id,
+            "topic_title": "",
+            "filename": f"音频 {attachment_id}",
+        }
+    if not audio:
+        return None
+    return {
+        "attachment_id": audio.get("attachment_id"),
+        "topic_title": audio.get("topic_title") or audio.get("title") or "",
+        "tab_label": audio.get("tab_label") or audio.get("tab") or "",
+        "filename": audio.get("filename") or audio.get("name") or "",
+        "download_count": audio.get("download_count"),
+        "duration_seconds": audio.get("duration_seconds"),
+        "path": audio.get("path"),
     }
 
 
@@ -1037,6 +1098,73 @@ def _prepare_keyframe_job_for_full_video(task):
 
     task.status = "pending"
     task.current_step = "queued_full_video"
+    task.progress = max(int(task.progress or 0), 68)
+    task.error_message = None
+    task.completed_at = None
+    task.params = params
+    task.result = result
+    flag_modified(task, "params")
+    flag_modified(task, "result")
+    return True, "ok"
+
+
+def _prepare_job_for_video_regeneration(task):
+    params = dict(task.params or {})
+    workflow = dict(params.get(FEATURE_NAME) or {})
+    result = dict(task.result or {})
+    plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
+    artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+    if not plan:
+        return False, "当前任务缺少 DS/规划结果，不能重生成视频"
+    if not _path_exists((artifacts.get("xiaojunjun_background") or {}).get("path")):
+        return False, "当前任务缺少小君君横屏背景图，不能重生成视频"
+    if not _path_exists((artifacts.get("audio_background") or {}).get("path")):
+        return False, "当前任务缺少此刻此声竖屏背景图，不能重生成视频"
+
+    requested_at = datetime.utcnow().isoformat() + "Z"
+    workflow["render_mode"] = "full_video"
+    workflow["force_video_regenerate_at"] = requested_at
+    params[FEATURE_NAME] = workflow
+
+    history = list(result.get("regenerated_video_history") or [])
+    old_videos = {
+        "archived_at": requested_at,
+        "landscape_video": result.get("landscape_video"),
+        "vertical_video": result.get("vertical_video"),
+        "children": {
+            "landscape_video": (result.get("children") or {}).get("landscape_video") if isinstance(result.get("children"), dict) else None,
+            "vertical_video": (result.get("children") or {}).get("vertical_video") if isinstance(result.get("children"), dict) else None,
+        },
+    }
+    if old_videos["landscape_video"] or old_videos["vertical_video"]:
+        history.append(old_videos)
+        result["regenerated_video_history"] = history[-8:]
+
+    children = dict(result.get("children") or {})
+    children.pop("landscape_video", None)
+    children.pop("vertical_video", None)
+
+    result["render_mode"] = "full_video"
+    result["force_video_regenerate_at"] = requested_at
+    result["error"] = None
+    result["children"] = children
+    result.pop("completed_at", None)
+    result.pop("output_path", None)
+    result.pop("waiting_child", None)
+    result.pop("deferred_waits", None)
+    result.pop("landscape_video", None)
+    result.pop("vertical_video", None)
+    logs = list(result.get("logs") or [])
+    logs.append({
+        "step": "regenerate_videos_requested",
+        "message": "用户要求重新生成横屏和竖屏视频，强制跳过旧视频复用",
+        "progress": max(int(task.progress or 0), 68),
+        "updated_at": requested_at,
+    })
+    result["logs"] = logs[-160:]
+
+    task.status = "pending"
+    task.current_step = "queued_regenerate_videos"
     task.progress = max(int(task.progress or 0), 68)
     task.error_message = None
     task.completed_at = None
@@ -1359,6 +1487,8 @@ def _ds_extract_payload(result):
     raw_text = _source_response_text(result)
     sections = _numbered_sections(raw_text)
     clip = _extract_clip(sections.get("4") or raw_text)
+    plan = result.get("plan") if isinstance(result, dict) and isinstance(result.get("plan"), dict) else {}
+    plan_clip = _clip_from_plan(plan)
     payload = {
         "title_1": _clean_ds_title(sections.get("1", "")),
         "title_2": _clean_ds_title(sections.get("2", "")),
@@ -1368,6 +1498,16 @@ def _ds_extract_payload(result):
         "raw_text": raw_text,
         "raw_sections": sections,
     }
+    if not payload["title_1"]:
+        payload["title_1"] = _clean_ds_title(_plan_title_option(plan, 0) or plan.get("title") or "")
+    if not payload["title_2"]:
+        payload["title_2"] = _clean_ds_title(_plan_title_option(plan, 1) or plan.get("title") or "")
+    if not payload["title_6"]:
+        payload["title_6"] = _clean_ds_title(plan.get("xiaojunjun_video_title") or "", prefer_closed_door=True)
+    if not payload["title_7"]:
+        payload["title_7"] = _clean_ds_title(plan.get("ciketc_video_title") or "", prefer_closed_door=True)
+    if not (clip.get("start_text") and clip.get("end_text")) and plan_clip.get("start_text"):
+        payload["clip"] = plan_clip
     payload["has_content"] = any([
         payload["title_1"],
         payload["title_2"],
@@ -1377,6 +1517,37 @@ def _ds_extract_payload(result):
         clip.get("end_text"),
     ])
     return payload
+
+
+def _plan_title_option(plan, index):
+    options = plan.get("title_options") if isinstance(plan, dict) and isinstance(plan.get("title_options"), list) else []
+    if index < len(options):
+        return options[index]
+    return ""
+
+
+def _clip_from_plan(plan):
+    plan_audio = plan.get("audio") if isinstance(plan, dict) and isinstance(plan.get("audio"), dict) else {}
+    start_seconds = _coerce_seconds(plan_audio.get("start_seconds"))
+    end_seconds = _coerce_seconds(plan_audio.get("end_seconds"))
+    if start_seconds is None and end_seconds is None:
+        return {}
+    return {
+        "start_text": _format_timestamp(start_seconds) if start_seconds is not None else "",
+        "end_text": _format_timestamp(end_seconds) if end_seconds is not None else "",
+        "start_seconds": start_seconds,
+        "end_seconds": end_seconds,
+        "summary": "来自 DS 规划结果",
+    }
+
+
+def _coerce_seconds(value):
+    if value in (None, ""):
+        return None
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return _timestamp_to_seconds(value)
 
 
 def _numbered_sections(text):
@@ -1492,17 +1663,20 @@ def _trim_title(value):
 def _extract_clip(text):
     value = _clean_ds_text(text)
     time_token = r"(?:\d{1,2}:)?\d{1,2}:\d{2}|\d+(?:\.\d+)?\s*(?:秒|s)?"
-    pair = re.search(rf"({time_token})\s*(?:-|—|–|~|～|至|到)\s*({time_token})", value)
     start = end = None
-    if pair:
-        start, end = pair.group(1), pair.group(2)
-    else:
-        start_match = re.search(rf"(?:开始|起点|起始)(?:时间戳|时间)?\s*[:：]?\s*[\[【(（]?\s*({time_token})", value)
-        end_match = re.search(rf"(?:结束|终点|截止|终止)(?:时间戳|时间)?\s*[:：]?\s*[\[【(（]?\s*({time_token})", value)
-        start = start_match.group(1) if start_match else None
-        end = end_match.group(1) if end_match else None
+    start_match = re.search(rf"(?:开始|起点|起始)(?:时间戳|时间)?\s*[:：]?\s*[\[【(（]?\s*({time_token})", value)
+    end_match = re.search(rf"(?:结束|终点|截止|终止)(?:时间戳|时间)?\s*[:：]?\s*[\[【(（]?\s*({time_token})", value)
+    start = start_match.group(1) if start_match else None
+    end = end_match.group(1) if end_match else None
+    if not (start and end):
+        pair = re.search(rf"({time_token})\s*(?:-|—|–|~|～|至|到)\s*({time_token})", value)
+        if pair:
+            start, end = pair.group(1), pair.group(2)
     start_seconds = _timestamp_to_seconds(start)
     end_seconds = _timestamp_to_seconds(end)
+    if start_seconds is not None and end_seconds is not None and end_seconds <= start_seconds:
+        start_seconds = None
+        end_seconds = None
     return {
         "start_text": _format_timestamp(start_seconds) if start_seconds is not None else "",
         "end_text": _format_timestamp(end_seconds) if end_seconds is not None else "",

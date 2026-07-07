@@ -14,6 +14,7 @@ from api.mp3_video_workflow import (
     _clean_ds_title as _api_clean_ds_title,
     _default_bilibili_title as _api_default_bilibili_title,
     _ds_extract_payload as _api_ds_extract_payload,
+    _prepare_job_for_video_regeneration as _api_prepare_job_for_video_regeneration,
     _prepare_keyframe_job_for_full_video as _api_prepare_keyframe_job_for_full_video,
 )
 from models.task import PublicationTask
@@ -125,6 +126,39 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertNotEqual(payload["title_2"], "宁德时代时刻")
         self.assertEqual(payload["clip"]["start_text"], "02:36")
         self.assertEqual(payload["clip"]["end_text"], "36:41")
+
+    def test_api_ds_extract_falls_back_to_ds_plan(self):
+        payload = _api_ds_extract_payload({
+            "source": {"response_text": "非标准输出，前端不应该靠这段硬猜。"},
+            "plan": {
+                "title": "特斯拉机器人供应链信息差",
+                "title_options": [
+                    "中信内部闭门会深度爆料：Optimus V3量产时间线铁定不延",
+                    "内资忽视的港股低估标的空间测算曝光",
+                ],
+                "audio": {"start_seconds": 32, "end_seconds": 1532, "speed": 1.2},
+                "xiaojunjun_video_title": "内资闭门会 / 特斯拉Optimus量产 / 恒帅电子皮肤新定点 / 港股低估标的 / 2026-07-07",
+                "ciketc_video_title": "内资闭门会 | Optimus V3量产不延 | 核心供应链定点解析 | 港股低估空间测算 | 2026-07-07",
+            },
+        })
+
+        self.assertEqual(payload["title_1"], "中信内部闭门会深度爆料：Optimus V3量产时间线铁定不延")
+        self.assertEqual(payload["title_2"], "内资忽视的港股低估标的空间测算曝光")
+        self.assertEqual(payload["clip"]["start_text"], "00:32")
+        self.assertEqual(payload["clip"]["end_text"], "25:32")
+        self.assertIn("内资闭门会 / 特斯拉Optimus量产", payload["title_6"])
+        self.assertIn("内资闭门会 | Optimus V3量产不延", payload["title_7"])
+
+    def test_api_ds_extract_ignores_date_as_clip_pair(self):
+        payload = _api_ds_extract_payload({
+            "source": {"response_text": "6. 内资闭门会 / 特斯拉V3量产确认 / 2026-07-07"},
+            "plan": {
+                "audio": {"start_seconds": 32, "end_seconds": 1532, "speed": 1.2},
+            },
+        })
+
+        self.assertEqual(payload["clip"]["start_text"], "00:32")
+        self.assertEqual(payload["clip"]["end_text"], "25:32")
 
     def test_api_bilibili_charging_payload_uses_preview_and_level(self):
         payload = _api_charging_pay_from_upload_payload({
@@ -1080,6 +1114,57 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertEqual(task.result["keyframes"]["keyframe_vertical_01"]["path"], "/tmp/keyframe.jpg")
         self.assertEqual(task.result["landscape_video"], {})
         self.assertEqual(task.result["vertical_video"], {})
+        self.assertNotIn("output_path", task.result)
+        self.assertNotIn("completed_at", task.result)
+
+    def test_prepare_job_for_video_regeneration_archives_old_videos(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            landscape_bg = Path(tmpdir) / "landscape.jpg"
+            vertical_bg = Path(tmpdir) / "vertical.jpg"
+            landscape_bg.write_bytes(b"landscape")
+            vertical_bg.write_bytes(b"vertical")
+            task = PublicationTask(
+                id="job-full",
+                status="completed",
+                current_step="done",
+                progress=100,
+                params={
+                    "feature": "mp3_video_workflow",
+                    "mp3_video_workflow": {
+                        "render_mode": "full_video",
+                        "generate_subtitles": False,
+                    },
+                },
+                result={
+                    "render_mode": "full_video",
+                    "plan": {"title": "demo", "audio": {"start_seconds": 0, "end_seconds": 60, "speed": 1.2}},
+                    "artifacts": {
+                        "xiaojunjun_background": {"path": str(landscape_bg)},
+                        "audio_background": {"path": str(vertical_bg)},
+                    },
+                    "children": {
+                        "landscape_video": {"job_id": "old-landscape"},
+                        "vertical_video": {"job_id": "old-vertical"},
+                    },
+                    "landscape_video": {"video_path": "/tmp/old-landscape.mp4"},
+                    "vertical_video": {"video_path": "/tmp/old-vertical.mp4"},
+                    "output_path": "/tmp/full-result.json",
+                    "completed_at": "2026-07-07T00:00:00Z",
+                },
+            )
+
+            ok, message = _api_prepare_job_for_video_regeneration(task)
+
+        self.assertTrue(ok, message)
+        self.assertEqual(task.status, "pending")
+        self.assertEqual(task.current_step, "queued_regenerate_videos")
+        self.assertEqual(task.params["mp3_video_workflow"]["render_mode"], "full_video")
+        self.assertIn("force_video_regenerate_at", task.params["mp3_video_workflow"])
+        self.assertIn("force_video_regenerate_at", task.result)
+        self.assertEqual(task.result["children"], {})
+        self.assertNotIn("landscape_video", task.result)
+        self.assertNotIn("vertical_video", task.result)
+        self.assertEqual(task.result["regenerated_video_history"][0]["children"]["landscape_video"]["job_id"], "old-landscape")
         self.assertNotIn("output_path", task.result)
         self.assertNotIn("completed_at", task.result)
 
