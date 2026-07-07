@@ -219,6 +219,10 @@ class ReportVisualPlanTestPage {
         const badge = hasMaterial
             ? `<span class="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-black text-emerald-700"><i class="fas fa-circle-check mr-1"></i>基础文案 ${asset.material_script_chars || 0} 字</span>`
             : `<span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500">暂无基础文案</span>`;
+        const downloadText = window.DownloadCountHighlight?.badgeText(asset.download_count)
+            || `下载 ${Number(asset.download_count || 0)} 次`;
+        const downloadBadgeClass = window.DownloadCountHighlight?.badgeClass(asset.download_count)
+            || 'border-slate-200 bg-slate-100 text-slate-500';
         const previewUrl = asset.preview_url ? `${this.apiRoot()}${asset.preview_url}` : '';
         return `
             <article class="rounded-lg border ${hasMaterial ? 'border-slate-200 hover:border-blue-300' : 'border-slate-200 opacity-75'} bg-white p-3 transition">
@@ -227,7 +231,7 @@ class ReportVisualPlanTestPage {
                         <div class="truncate text-sm font-black text-slate-900" title="${this.escape(asset.topic_title || asset.filename || '')}">${this.escape(title)}</div>
                         <div class="mt-1 truncate text-xs text-slate-500" title="${this.escape(asset.filename || '')}">${this.escape(filename)}</div>
                         <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-                            <span><i class="fas fa-download mr-1"></i>下载 ${Number(asset.download_count || 0)} 次</span>
+                            <span class="rounded-full border px-2 py-0.5 font-bold ${downloadBadgeClass}"><i class="fas fa-download mr-1"></i>${this.escape(downloadText)}</span>
                             ${badge}
                         </div>
                     </div>

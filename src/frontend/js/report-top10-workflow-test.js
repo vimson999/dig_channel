@@ -13,6 +13,10 @@ class ReportTop10WorkflowPage {
         this.jobStatus = this.initialJobStatus();
         this.jobSearch = this.initialJobSearch();
         this.jobPagination = { page: 1, pages: 0, total: 0 };
+        this.defaultReportCount = 10;
+        this.minReportCount = 1;
+        this.maxReportCount = 20;
+        this.reportCountDirty = false;
         this.selectedJobId = '';
         this.selectedJobDetail = null;
         this.selectedJobLoading = false;
@@ -26,6 +30,7 @@ class ReportTop10WorkflowPage {
             refreshStatusBtn: document.getElementById('refresh-status-btn'),
             notice: document.getElementById('notice'),
             selectedCount: document.getElementById('selected-count'),
+            selectedCountInput: document.getElementById('selected-count-input'),
             assetTabs: document.getElementById('asset-tabs'),
             assetSearch: document.getElementById('asset-search'),
             assetRefreshBtn: document.getElementById('asset-refresh-btn'),
@@ -48,6 +53,9 @@ class ReportTop10WorkflowPage {
             jobDetail: document.getElementById('job-detail'),
         };
         this.els.dateLabel.value = new Date().toISOString().slice(0, 10);
+        if (this.els.selectedCountInput) {
+            this.els.selectedCountInput.value = String(this.initialReportCount());
+        }
         this.bind();
         this.refreshStatus();
         this.loadAssets({ silent: true });
@@ -87,6 +95,40 @@ class ReportTop10WorkflowPage {
     initialJobSearch() {
         const params = new URLSearchParams(window.location.search);
         return this.normalizeJobSearch(params.get('q') || params.get('job_search') || '');
+    }
+
+    initialReportCount() {
+        const params = new URLSearchParams(window.location.search);
+        return this.normalizeReportCount(params.get('selected_count') || params.get('report_count') || params.get('n') || this.defaultReportCount);
+    }
+
+    normalizeReportCount(value) {
+        const parsed = Number(value);
+        const fallback = Number(this.defaultReportCount || 10);
+        const raw = Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+        const min = Number.isFinite(Number(this.minReportCount)) ? Number(this.minReportCount) : 1;
+        const max = Number.isFinite(Number(this.maxReportCount)) ? Number(this.maxReportCount) : 20;
+        return Math.min(max, Math.max(min, Math.floor(raw)));
+    }
+
+    targetReportCount() {
+        return this.normalizeReportCount(this.els.selectedCountInput?.value || this.defaultReportCount);
+    }
+
+    jobTargetReportCount(job) {
+        return this.normalizeReportCount(job?.target_report_count || job?.pdfs?.length || this.defaultReportCount);
+    }
+
+    handleReportCountChange() {
+        this.reportCountDirty = true;
+        const target = this.targetReportCount();
+        if (this.els.selectedCountInput) this.els.selectedCountInput.value = String(target);
+        if (this.selected.length > target) {
+            this.selected = this.selected.slice(0, target);
+            this.setNotice(`本期最多篇数已调整为 ${target}，超出的 PDF 已从已选列表移除。`, 'info');
+        }
+        this.renderSelected();
+        this.renderAssets();
     }
 
     async request(path, options = {}) {
@@ -136,6 +178,8 @@ class ReportTop10WorkflowPage {
         this.els.assetPagination.addEventListener('click', (event) => this.handleAssetPageClick(event));
         this.els.assetPagination.addEventListener('submit', (event) => this.handleAssetPageJump(event));
         this.els.selectedList.addEventListener('click', (event) => this.handleSelectedClick(event));
+        this.els.selectedCountInput?.addEventListener('change', () => this.handleReportCountChange());
+        this.els.selectedCountInput?.addEventListener('input', () => this.handleReportCountChange());
         this.els.submitBtn.addEventListener('click', () => this.submit());
         this.els.loadHistoryBtn.addEventListener('click', () => this.loadHistory({ page: 1, force: true }));
         this.els.refreshJobsBtn?.addEventListener('click', () => this.loadHistory({ page: this.jobPage, force: true }));
@@ -157,9 +201,21 @@ class ReportTop10WorkflowPage {
             const result = await this.request('/api/report-top10-workflows/status', { timeoutMs: 10000 });
             const provider = result.data?.provider || {};
             const gemini = result.data?.report_pdf_gemini || {};
+            this.defaultReportCount = this.normalizeReportCount(provider.default_report_count || this.defaultReportCount);
+            this.minReportCount = Number(provider.min_report_count || this.minReportCount || 1);
+            this.maxReportCount = Number(provider.max_report_count || this.maxReportCount || 20);
+            if (this.els.selectedCountInput) {
+                this.els.selectedCountInput.min = String(this.minReportCount);
+                this.els.selectedCountInput.max = String(this.maxReportCount);
+                if (!this.reportCountDirty) {
+                    this.els.selectedCountInput.value = String(this.defaultReportCount);
+                    this.renderSelected();
+                    this.renderAssets();
+                }
+            }
             const ok = provider.configured && gemini.configured;
             this.els.providerStatus.className = `rounded-lg border px-3 py-2 text-xs font-bold ${ok ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`;
-            this.els.providerStatus.textContent = ok ? 'Top10 / Gemini 已配置' : 'Gemini 浏览器未配置';
+            this.els.providerStatus.textContent = ok ? '严选 / Gemini 已配置' : 'Gemini 浏览器未配置';
         } catch (error) {
             this.els.providerStatus.className = 'rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-700';
             this.els.providerStatus.textContent = `状态失败：${error.message}`;
@@ -223,8 +279,9 @@ class ReportTop10WorkflowPage {
             this.setNotice('这份 PDF 已经选过。', 'error');
             return;
         }
-        if (this.selected.length >= 10) {
-            this.setNotice('本期最多选择 10 份 PDF。', 'error');
+        const target = this.targetReportCount();
+        if (this.selected.length >= target) {
+            this.setNotice(`本期最多选择 ${target} 份 PDF。`, 'error');
             return;
         }
         this.selected.push(asset);
@@ -287,8 +344,14 @@ class ReportTop10WorkflowPage {
     }
 
     async submit() {
-        if (this.selected.length !== 10) {
-            this.setNotice(`需要选择 10 份 PDF，当前 ${this.selected.length} 份。`, 'error');
+        const selectedCount = this.selected.length;
+        const maxCount = this.targetReportCount();
+        if (!selectedCount) {
+            this.setNotice('请至少选择 1 份 PDF。', 'error');
+            return;
+        }
+        if (selectedCount > maxCount) {
+            this.setNotice(`本期最多 ${maxCount} 份 PDF，当前 ${selectedCount} 份。`, 'error');
             return;
         }
         this.els.submitBtn.disabled = true;
@@ -299,14 +362,15 @@ class ReportTop10WorkflowPage {
                 timeoutMs: 60000,
                 body: JSON.stringify({
                     pdf_asset_ids: this.selected.map((item) => item.id),
-                    program_name: this.els.programName.value.trim() || '今日研报 Top10',
+                    selected_count: selectedCount,
+                    program_name: this.els.programName.value.trim() || '今日研报严选',
                     date_label: this.els.dateLabel.value.trim(),
                     editor_gemini_url: this.els.editorGeminiUrl.value.trim(),
                     reuse_existing_single_reports: this.els.reuseCache.checked,
                     metadata: { source: 'report-top10-workflow-test-page' },
                 }),
             });
-            this.setNotice('Top10 编排任务已投递。', 'success');
+            this.setNotice('严选节目包编排任务已投递。', 'success');
             this.selected = [];
             this.renderSelected();
             await this.loadHistory({ page: 1, force: true });
@@ -392,6 +456,8 @@ class ReportTop10WorkflowPage {
             const id = actionButton.dataset.jobId;
             if (actionButton.dataset.jobAction === 'retry') this.retryJob(id);
             if (actionButton.dataset.jobAction === 'cancel') this.cancelJob(id);
+            if (actionButton.dataset.jobAction === 'create-video-task') this.createVideoTask(id, actionButton);
+            if (actionButton.dataset.jobAction === 'open-video-task') this.openVideoFactory(actionButton.dataset.videoTaskId);
             return;
         }
         const sourceReportButton = event.target.closest('[data-source-report-index]');
@@ -523,7 +589,7 @@ class ReportTop10WorkflowPage {
     }
 
     async cancelJob(jobId) {
-        if (!window.confirm('确认取消这个 Top10 编排任务？')) return;
+        if (!window.confirm('确认取消这个严选编排任务？')) return;
         try {
             await this.request(`/api/report-top10-workflows/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', timeoutMs: 20000 });
             this.setNotice('任务已取消。', 'success');
@@ -531,6 +597,36 @@ class ReportTop10WorkflowPage {
         } catch (error) {
             this.setNotice(`取消失败：${error.message}`, 'error');
         }
+    }
+
+    async createVideoTask(jobId, button) {
+        const originalHtml = button?.innerHTML || '';
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>创建中';
+        }
+        try {
+            const result = await this.request(`/api/report-top10-workflows/jobs/${encodeURIComponent(jobId)}/create-video-task`, {
+                method: 'POST',
+                timeoutMs: 60000,
+                body: JSON.stringify({ output_ratios: ['16:9', '9:16'] }),
+            });
+            const taskId = result.data?.report_video_task_id;
+            if (!taskId) throw new Error('接口没有返回视频工厂任务 ID');
+            this.setNotice('节目包已送入视频工厂，正在打开制作台。', 'success');
+            this.openVideoFactory(taskId);
+        } catch (error) {
+            if (button) {
+                button.disabled = false;
+                button.innerHTML = originalHtml;
+            }
+            this.setNotice(`创建视频工厂任务失败：${error.message}`, 'error');
+        }
+    }
+
+    openVideoFactory(taskId) {
+        if (!taskId) return;
+        window.location.href = `report-video-factory.html?task_id=${encodeURIComponent(taskId)}`;
     }
 
     handleDetailClick(event) {
@@ -580,8 +676,9 @@ class ReportTop10WorkflowPage {
         const page = this.assetPagination.page || this.assetPage;
         const scanned = this.assetPagination.scanned || 0;
         const skipped = this.assetPagination.skipped_missing || 0;
+        const target = this.targetReportCount();
         this.els.assetSummary.textContent = this.assets.length
-            ? `${this.assetScopeLabel()}· 第 ${page} 页 · 本页 ${this.assets.length} 个 PDF · 已选 ${this.selected.length}/10 · 扫描 ${scanned} 条 · 跳过缺失 ${skipped} 条`
+            ? `${this.assetScopeLabel()}· 第 ${page} 页 · 本页 ${this.assets.length} 个 PDF · 本期 N=${this.selected.length} / 上限 ${target} · 扫描 ${scanned} 条 · 跳过缺失 ${skipped} 条`
             : (this.assetScope === 'hot' ? '没有找到下载次数达到 30 次的热门 PDF。' : '没有找到已下载的同步 PDF。');
         if (!this.assets.length) {
             const emptyText = this.assetScope === 'hot'
@@ -595,9 +692,10 @@ class ReportTop10WorkflowPage {
                 const previewPath = item.preview_url || `/api/report-top10-workflows/pdf-assets/${encodeURIComponent(item.id)}/preview`;
                 const previewUrl = `${this.apiRoot()}${previewPath}`;
                 const itemTitle = [item.filename, item.topic_title, item.tab_label].filter(Boolean).join('\n');
-                const downloadText = Number.isFinite(Number(item.download_count))
-                    ? `下载 ${Number(item.download_count)} 次`
-                    : '下载 -';
+                const downloadText = window.DownloadCountHighlight?.badgeText(item.download_count)
+                    || (Number.isFinite(Number(item.download_count)) ? `下载 ${Number(item.download_count)} 次` : '下载 -');
+                const downloadBadgeClass = window.DownloadCountHighlight?.badgeClass(item.download_count)
+                    || 'border-slate-200 bg-slate-100 text-slate-500';
                 const syncTime = this.formatDateTime(item.topic_last_synced_at || item.updated_at);
                 const topicTime = this.formatDateTime(item.topic_create_time) || item.topic_create_time || '';
                 const metaLine = [
@@ -619,7 +717,7 @@ class ReportTop10WorkflowPage {
                         </div>
                         <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(metaLine)}</div>
                         <div class="mt-2 flex flex-wrap items-center gap-1.5">
-                            <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500">
+                            <span class="rounded-full border px-2 py-0.5 text-[11px] font-bold ${downloadBadgeClass}">
                                 <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
                             </span>
                             <span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${item.single_script_cached ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}">
@@ -658,8 +756,9 @@ class ReportTop10WorkflowPage {
     }
 
     renderSelected() {
-        this.els.selectedCount.textContent = `${this.selected.length} / 10`;
-        this.els.selectedCount.className = `rounded-md px-2.5 py-1 text-xs font-black ${this.selected.length === 10 ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`;
+        const target = this.targetReportCount();
+        this.els.selectedCount.textContent = `N=${this.selected.length} / 上限${target}`;
+        this.els.selectedCount.className = `rounded-md px-2.5 py-1 text-xs font-black ${this.selected.length > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`;
         if (!this.selected.length) {
             this.els.selectedList.innerHTML = '<div class="rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-6 text-center text-xs text-slate-500">还没有选择 PDF。</div>';
             return;
@@ -681,7 +780,7 @@ class ReportTop10WorkflowPage {
     renderJobs() {
         if (!this.jobs.length) {
             const scopeLabel = this.jobScopeLabel();
-            const emptyText = scopeLabel ? `暂无${scopeLabel}的 Top10 编排任务。` : '暂无 Top10 编排任务。';
+            const emptyText = scopeLabel ? `暂无${scopeLabel}的严选编排任务。` : '暂无严选编排任务。';
             this.els.jobList.innerHTML = `<div class="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-12 text-center text-sm text-slate-500">${this.escape(emptyText)}</div>`;
         } else {
             this.els.jobList.innerHTML = this.jobs.map((job) => this.renderJobCard(job)).join('');
@@ -693,15 +792,16 @@ class ReportTop10WorkflowPage {
         const status = this.statusMeta(job.status);
         const active = job.job_id === this.selectedJobId;
         const detailHtml = active ? this.renderInlineJobDetail(job) : '';
+        const target = this.jobTargetReportCount(job);
         return `
             <div data-job-id="${this.escapeAttr(job.job_id)}" class="cursor-pointer rounded-lg border ${active ? 'border-indigo-300 bg-indigo-50/70' : 'border-slate-200 bg-white hover:bg-slate-50'} p-4 shadow-sm">
                 <div class="flex items-start justify-between gap-3">
                     <div class="min-w-0">
                         <div class="flex flex-wrap items-center gap-2">
                             <span class="status-dot ${status.dot}"></span>
-                            <h3 class="line-clamp-2 text-base font-black text-slate-900">${this.escape(job.title || '今日研报 Top10')}</h3>
+                            <h3 class="line-clamp-2 text-base font-black text-slate-900">${this.escape(job.title || '今日研报严选')}</h3>
                         </div>
-                        <div class="mt-1 text-xs text-slate-500">编排 ${this.escape(job.source_report_count || 0)} / 10 · 创建 ${this.formatDateTime(job.created_at) || '-'} · ${this.escape(job.job_id || '')}</div>
+                        <div class="mt-1 text-xs text-slate-500">编排 ${this.escape(job.source_report_count || 0)} / ${target} · 创建 ${this.formatDateTime(job.created_at) || '-'} · ${this.escape(job.job_id || '')}</div>
                     </div>
                     <div class="flex shrink-0 items-center gap-2">
                         <span class="rounded-full px-2.5 py-1 text-xs font-bold ${status.className}">${status.label}</span>
@@ -738,6 +838,8 @@ class ReportTop10WorkflowPage {
         const finalScript = job.final_script_for_tts || job.editor_result?.final_script_for_tts || '';
         const editorInput = job.editor_input || '';
         const detailKey = this.safeDomId(job.job_id || 'current');
+        const target = this.jobTargetReportCount(job);
+        const videoTaskId = job.video_factory?.task_id || '';
         const selectedReportIndex = sourceReports.length
             ? Math.max(0, Math.min(this.selectedSourceReportIndex, sourceReports.length - 1))
             : 0;
@@ -746,10 +848,12 @@ class ReportTop10WorkflowPage {
             <div class="space-y-4">
                 <div class="flex flex-wrap items-start justify-between gap-3">
                     <div>
-                        <h3 class="text-lg font-black text-slate-900">${this.escape(job.title || '今日研报 Top10')}</h3>
+                        <h3 class="text-lg font-black text-slate-900">${this.escape(job.title || '今日研报严选')}</h3>
                         <p class="mt-1 text-xs text-slate-500">${this.escape(job.job_id || '')}</p>
                     </div>
                     <div class="flex flex-wrap gap-2">
+                        ${videoTaskId ? `<button type="button" data-job-action="open-video-task" data-video-task-id="${this.escapeAttr(videoTaskId)}" data-job-id="${this.escapeAttr(job.job_id)}" class="rounded-md border border-indigo-300 bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-100"><i class="fas fa-film mr-1"></i>打开视频工厂</button>` : ''}
+                        ${!videoTaskId && job.status === 'succeeded' ? `<button type="button" data-job-action="create-video-task" data-job-id="${this.escapeAttr(job.job_id)}" class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100"><i class="fas fa-film mr-1"></i>制作成视频</button>` : ''}
                         ${job.download_result_url ? `<a href="${this.apiRoot()}${job.download_result_url}" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-download mr-1"></i>下载结果</a>` : ''}
                     </div>
                 </div>
@@ -757,7 +861,7 @@ class ReportTop10WorkflowPage {
                 <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
                     <div class="rounded-md border border-slate-200 bg-slate-50 p-3">
                         <div class="text-xs font-bold text-slate-500">单篇文案</div>
-                        <div class="mt-1 text-xl font-black text-slate-900">${this.escape(sourceReports.length)} / 10</div>
+                        <div class="mt-1 text-xl font-black text-slate-900">${this.escape(sourceReports.length)} / ${target}</div>
                     </div>
                     <div class="rounded-md border border-slate-200 bg-slate-50 p-3">
                         <div class="text-xs font-bold text-slate-500">总编辑输入</div>
@@ -891,7 +995,7 @@ class ReportTop10WorkflowPage {
         const scopeLabel = this.jobScopeLabel();
         this.els.summaryText.textContent = this.jobs.length
             ? `${scopeLabel || '全部'} ${historyTotal || this.jobs.length} 条 · 第 ${this.jobPage}/${Math.max(1, pageCount || 1)} 页，本页 ${this.jobs.length} 条，运行中 ${running}，成功 ${succeeded}，失败 ${failed}。`
-            : (scopeLabel ? `暂无${scopeLabel}的 Top10 编排任务。` : '等待投递。');
+            : (scopeLabel ? `暂无${scopeLabel}的严选编排任务。` : '等待投递。');
     }
 
     renderJobPagination() {

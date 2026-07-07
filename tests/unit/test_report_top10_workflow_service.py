@@ -8,10 +8,21 @@ BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from services.report_top10_workflow import assemble_final_script_for_tts, build_editor_input, extract_editor_json  # noqa: E402
+from services.report_top10_workflow import (  # noqa: E402
+    assemble_final_script_for_tts,
+    build_editor_input,
+    extract_editor_json,
+    selected_report_count,
+)
 
 
 class ReportTop10WorkflowServiceTest(unittest.TestCase):
+    def test_selected_report_count_clamps_to_supported_range(self):
+        self.assertEqual(selected_report_count(None), 10)
+        self.assertEqual(selected_report_count("3"), 3)
+        self.assertEqual(selected_report_count(0), 1)
+        self.assertEqual(selected_report_count(99), 20)
+
     def test_build_editor_input_uses_material_boundary(self):
         text = build_editor_input([
             {

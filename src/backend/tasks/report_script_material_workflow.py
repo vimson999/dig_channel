@@ -6,6 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
+from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy import or_
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import load_only
@@ -38,6 +39,7 @@ DEFAULT_GEMINI_RETRY_LIMIT = 2
 DEFAULT_CHILD_TIMEOUT_SECONDS = 1800
 DEFAULT_PARENT_RETRY_DELAY_SECONDS = 300
 DEFAULT_PARENT_MAX_DEFERS = 144
+DEFAULT_NORMALIZER_TIMEOUT_SECONDS = 20
 MATERIAL_REUSE_FEATURES = (
     FEATURE_NAME,
     "report_pdf_audio_workflow",
@@ -96,6 +98,20 @@ TASK_PAYLOAD_COLUMNS = (
 TASK_CHILD_COLUMNS = (
     *TASK_STATE_COLUMNS,
     PublicationTask.params,
+    PublicationTask.feature,
+    PublicationTask.parent_task_id,
+    PublicationTask.source_task_id,
+)
+TASK_CHILD_POLL_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.error_message,
+    PublicationTask.created_at,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
     PublicationTask.feature,
     PublicationTask.parent_task_id,
     PublicationTask.source_task_id,
@@ -205,15 +221,16 @@ def _process_job(task_id: str) -> bool:
             source_task_id = reusable["source_task_id"]
             _emit(workflow_task_id, "reuse_completed_material", 45, "复用同 PDF 已完成基础文案物料")
         else:
-            gemini_task = _completed_gemini_task(workflow_task_id, result)
-            active_gemini_task = None if gemini_task else _active_gemini_task(workflow_task_id, result)
+            gemini_task = _task_snapshot(_completed_gemini_task(workflow_task_id, result))
+            active_gemini_task = None if gemini_task else _task_snapshot(_active_gemini_task(workflow_task_id, result))
             if gemini_task:
                 _record_child(workflow_task_id, "gemini", gemini_task)
                 _emit(workflow_task_id, "reuse_gemini_result", 52, "复用已完成 Gemini 子任务")
             elif active_gemini_task:
                 _record_child(workflow_task_id, "gemini", active_gemini_task)
                 _emit(workflow_task_id, "gemini_wait_existing", 10, "继续等待已提交的 Gemini 子任务")
-                gemini_task = _wait_child(workflow_task_id, active_gemini_task.id, "gemini", start_progress=10, end_progress=52)
+                active_gemini_task_id = active_gemini_task.id
+                gemini_task = _wait_child(workflow_task_id, active_gemini_task_id, "gemini", start_progress=10, end_progress=52)
                 if gemini_task.status != "completed":
                     error = _child_error_message(gemini_task)
                     if not _is_retryable_child_error(error):
@@ -256,6 +273,13 @@ def _process_job(task_id: str) -> bool:
                         f"Gemini 子任务返回内容过短: {final_chars} 字，低于 {min_final_chars} 字"
                     )
                 _emit(workflow_task_id, "normalize_result", 58, "使用结构化解析器整理 Gemini 结果")
+                normalizer_timeout = _normalizer_timeout_seconds()
+                logger.info(
+                    "Normalizing report script material: task=%s gemini_task=%s timeout=%ss",
+                    workflow_task_id,
+                    gemini_task.id,
+                    normalizer_timeout,
+                )
                 structured = normalize_for_tts(
                     raw_final,
                     initial_text=initial_text,
@@ -264,6 +288,13 @@ def _process_job(task_id: str) -> bool:
                         "gemini_task_id": gemini_task.id,
                         "pdf_filename": pdf.get("filename"),
                     },
+                    normalizer_timeout=normalizer_timeout,
+                )
+                logger.info(
+                    "Report script material normalized: task=%s provider=%s chars=%s",
+                    workflow_task_id,
+                    structured.get("provider"),
+                    len(_plain_text(structured.get("final_script_for_tts") or "")),
                 )
                 source = "gemini"
                 source_task_id = gemini_task.id
@@ -313,22 +344,27 @@ def _run_gemini_task_with_retries(parent, *, pdf, pdf_path, prompt, followups, p
             attempt=attempt,
             max_attempts=max_attempts,
         )
+        gemini_task = _task_snapshot(gemini_task)
+        gemini_task_id = gemini_task.id if gemini_task else None
         last_task = gemini_task
         _record_child(parent.id, "gemini", gemini_task)
         _record_child_attempt(parent.id, "gemini", gemini_task, attempt, max_attempts, "running")
 
         try:
-            gemini_task = _wait_child(parent.id, gemini_task.id, "gemini", start_progress=start_progress, end_progress=end_progress)
+            if not gemini_task_id:
+                raise RuntimeError("Gemini 子任务创建失败")
+            gemini_task = _wait_child(parent.id, gemini_task_id, "gemini", start_progress=start_progress, end_progress=end_progress)
         except ChildTaskStillRunning:
-            _record_child(parent.id, "gemini", _load_task(gemini_task.id, *TASK_CHILD_COLUMNS) or gemini_task)
+            if gemini_task_id:
+                _record_child(parent.id, "gemini", _load_task_snapshot(gemini_task_id) or gemini_task)
             raise
         except Exception as exc:
             last_error = str(exc)
-            latest = _load_task(gemini_task.id, *TASK_CHILD_COLUMNS) or gemini_task
+            latest = _load_task_snapshot(gemini_task_id) if gemini_task_id else gemini_task
             if latest and latest.status not in TERMINAL_STATUSES:
                 _revoke_child_task(latest)
                 _mark_child_failed(latest, last_error)
-                latest = _load_task(latest.id, *TASK_CHILD_COLUMNS) or latest
+                latest = _load_task_snapshot(latest.id) or latest
             last_task = latest
             _record_child_attempt(parent.id, "gemini", latest, attempt, max_attempts, "failed", error=last_error)
         else:
@@ -410,7 +446,7 @@ def _reusable_material_for_pdf(pdf: Dict[str, Any], *, exclude_task_id: Optional
             PublicationTask.id,
             PublicationTask.feature,
             PublicationTask.status,
-            PublicationTask.result,
+            PublicationTask.final_script_chars,
             PublicationTask.source_task_id,
             PublicationTask.report_audio_pdf_attachment_id,
             PublicationTask.created_at,
@@ -418,6 +454,7 @@ def _reusable_material_for_pdf(pdf: Dict[str, Any], *, exclude_task_id: Optional
         ))
         .filter(PublicationTask.feature.in_(MATERIAL_REUSE_FEATURES))
         .filter(PublicationTask.status == "completed")
+        .filter(PublicationTask.final_script_chars > 0)
         .filter(or_(
             PublicationTask.source_task_id == asset_id,
             PublicationTask.report_audio_pdf_attachment_id == asset_id,
@@ -427,7 +464,8 @@ def _reusable_material_for_pdf(pdf: Dict[str, Any], *, exclude_task_id: Optional
         query = query.filter(PublicationTask.id != exclude_task_id)
     candidates = query.order_by(PublicationTask.completed_at.desc(), PublicationTask.created_at.desc()).limit(20).all()
     for candidate in candidates:
-        structured = _valid_structured_result(candidate.result)
+        detail = _load_task(candidate.id, PublicationTask.result)
+        structured = _valid_structured_result(detail.result if detail else None)
         if structured:
             return {
                 "source_task_id": candidate.id,
@@ -488,7 +526,7 @@ def _active_gemini_task(parent_id: str, result: Dict[str, Any]) -> Optional[Publ
     return candidates[0] if candidates else None
 
 
-def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: int, end_progress: int) -> PublicationTask:
+def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: int, end_progress: int):
     timeout = _child_inline_wait_seconds()
     poll_seconds = max(1, _int_env("REPORT_SCRIPT_MATERIAL_CHILD_POLL_SECONDS", 3))
     deadline = time.monotonic() + timeout
@@ -497,7 +535,7 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
         parent = _load_task(parent_id, PublicationTask.status)
         if not parent or parent.status == "canceled":
             raise RuntimeError("父编排任务已取消")
-        child = _load_task(child_id, *TASK_CHILD_COLUMNS)
+        child = _task_snapshot(_load_task(child_id, *TASK_CHILD_POLL_COLUMNS), include_payload=False)
         if not child:
             raise RuntimeError(f"子任务不存在: {child_id}")
         if child.current_step != last_step:
@@ -507,17 +545,22 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
             _emit(parent_id, f"{label}_{child.current_step}", mapped, f"{label}: {child.current_step}")
             _record_child(parent_id, label, child)
         if child.status in TERMINAL_STATUSES:
+            completed_child = _load_task_snapshot(child_id) or child
+            _record_child(parent_id, label, completed_child)
             _clear_waiting_child(parent_id, label)
-            return child
+            return completed_child
         celery_failure = _celery_child_failure_message(child)
         if celery_failure:
             _mark_child_failed(child, celery_failure)
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
-            return _load_task(child_id, *TASK_CHILD_COLUMNS)
+            failed_child = _load_task_snapshot(child_id) or child
+            _record_child(parent_id, label, failed_child)
+            return failed_child
         if time.monotonic() >= deadline:
-            _record_child(parent_id, label, child)
-            raise ChildTaskStillRunning(label, child.id, child.status or "", child.current_step or "")
+            waiting_child = _load_task_snapshot(child_id) or child
+            _record_child(parent_id, label, waiting_child)
+            raise ChildTaskStillRunning(label, waiting_child.id, waiting_child.status or "", waiting_child.current_step or "")
         release_db_session_quietly()
         sleep_seconds = min(poll_seconds, max(0.2, deadline - time.monotonic()))
         time.sleep(sleep_seconds)
@@ -617,29 +660,37 @@ def _valid_gemini_task_result(result: Dict[str, Any]) -> bool:
     return len(_plain_text(raw_text)) >= _min_final_chars()
 
 
-def _record_child(parent_id: str, label: str, child: Optional[PublicationTask]) -> None:
+def _record_child(parent_id: str, label: str, child) -> None:
     if not child:
+        return
+    summary = _task_public_summary(child)
+    _record_child_summary(parent_id, label, summary)
+
+
+def _record_child_summary(parent_id: str, label: str, summary: Optional[Dict[str, Any]]) -> None:
+    if not summary:
         return
     parent = _load_task(parent_id, *TASK_STATE_COLUMNS)
     if not parent:
         return
     result = dict(parent.result or {})
     children = dict(result.get("children") or {})
-    children[label] = _task_public_summary(child)
+    previous = children.get(label) if isinstance(children.get(label), dict) else {}
+    children[label] = _merge_child_summary(previous, summary)
     result["children"] = children
     parent.result = result
     flag_modified(parent, "result")
     db.session.commit()
 
 
-def _record_child_attempt(parent_id: str, label: str, child: Optional[PublicationTask], attempt: int, max_attempts: int, status: str, *, error: Optional[str] = None) -> None:
+def _record_child_attempt(parent_id: str, label: str, child, attempt: int, max_attempts: int, status: str, *, error: Optional[str] = None) -> None:
+    summary = _task_public_summary(child) if child else {}
     parent = _load_task(parent_id, *TASK_STATE_COLUMNS)
     if not parent:
         return
     result = dict(parent.result or {})
     attempts = dict(result.get("child_attempts") or {})
     items = list(attempts.get(label) or [])
-    summary = _task_public_summary(child) if child else {}
     updated_at = datetime.utcnow().isoformat() + "Z"
     summary.update({
         "attempt": int(attempt or 1),
@@ -657,9 +708,10 @@ def _record_child_attempt(parent_id: str, label: str, child: Optional[Publicatio
     db.session.commit()
 
 
-def _task_public_summary(task: Optional[PublicationTask]) -> Optional[Dict[str, Any]]:
+def _task_public_summary(task) -> Optional[Dict[str, Any]]:
     if not task:
         return None
+    task = _task_snapshot(task)
     return {
         "job_id": task.id,
         "celery_id": task.celery_task_id,
@@ -674,7 +726,15 @@ def _task_public_summary(task: Optional[PublicationTask]) -> Optional[Dict[str, 
     }
 
 
-def _child_metadata(child: PublicationTask) -> Dict[str, Any]:
+def _merge_child_summary(previous: Dict[str, Any], summary: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(previous or {})
+    merged.update(summary or {})
+    if previous.get("metadata") and not merged.get("metadata"):
+        merged["metadata"] = previous.get("metadata")
+    return merged
+
+
+def _child_metadata(child) -> Dict[str, Any]:
     result = child.result if isinstance(child.result, dict) else {}
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else None
     if metadata is not None:
@@ -859,7 +919,54 @@ def _load_task(task_id: str, *columns) -> Optional[PublicationTask]:
             continue
         seen.add(key)
         attrs.append(column)
-    return PublicationTask.query.options(load_only(*attrs)).get(task_id)
+    return (
+        PublicationTask.query.options(load_only(*attrs))
+        .filter(PublicationTask.id == task_id)
+        .one_or_none()
+    )
+
+
+def _load_task_snapshot(task_id: str, *, include_payload: bool = True):
+    columns = TASK_CHILD_COLUMNS if include_payload else TASK_CHILD_POLL_COLUMNS
+    return _task_snapshot(_load_task(task_id, *columns), include_payload=include_payload)
+
+
+def _task_snapshot(task, *, include_payload: bool = True):
+    if not task:
+        return None
+    if isinstance(task, SimpleNamespace):
+        return task
+    result = _loaded_task_attr(task, "result", {}) if include_payload else {}
+    params = _loaded_task_attr(task, "params", {}) if include_payload else {}
+    return SimpleNamespace(
+        id=_loaded_task_attr(task, "id"),
+        celery_task_id=_loaded_task_attr(task, "celery_task_id"),
+        status=_loaded_task_attr(task, "status"),
+        current_step=_loaded_task_attr(task, "current_step"),
+        progress=_loaded_task_attr(task, "progress"),
+        result=result if isinstance(result, dict) else {},
+        params=params if isinstance(params, dict) else {},
+        feature=_loaded_task_attr(task, "feature"),
+        parent_task_id=_loaded_task_attr(task, "parent_task_id"),
+        source_task_id=_loaded_task_attr(task, "source_task_id"),
+        error_message=_loaded_task_attr(task, "error_message"),
+        created_at=_loaded_task_attr(task, "created_at"),
+        updated_at=_loaded_task_attr(task, "updated_at"),
+        completed_at=_loaded_task_attr(task, "completed_at"),
+    )
+
+
+def _loaded_task_attr(task, name: str, default=None):
+    try:
+        state = sqlalchemy_inspect(task)
+        if name in state.unloaded:
+            return default
+    except Exception:
+        pass
+    try:
+        return getattr(task, name, default)
+    except Exception:
+        return default
 
 
 def _child_error_message(child: Optional[PublicationTask]) -> str:
@@ -900,6 +1007,13 @@ def _parent_retry_delay_seconds() -> int:
 
 def _parent_max_defers() -> int:
     return max(1, _int_env("REPORT_SCRIPT_MATERIAL_PARENT_MAX_DEFERS", DEFAULT_PARENT_MAX_DEFERS))
+
+
+def _normalizer_timeout_seconds() -> int:
+    return max(1, min(_int_env(
+        "REPORT_SCRIPT_MATERIAL_NORMALIZER_TIMEOUT_SECONDS",
+        DEFAULT_NORMALIZER_TIMEOUT_SECONDS,
+    ), 120))
 
 
 def _plain_text(value: Any) -> str:

@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import schedule
@@ -25,9 +26,14 @@ from services.content_pipeline.retention_cleanup_service import (
 from services.content_pipeline.retention_scheduler_service import (
     DRY_RUN_OVERRIDE_ENV,
     LOG_PATH,
+    acquire_scheduler_process_lock,
+    local_naive_datetime,
     load_config,
     next_run_iso,
+    release_file_lock,
+    scheduled_next_run_datetime,
     update_runtime_status,
+    utc_datetime_iso,
     utc_now_iso,
 )
 from services.workflow_notification_service import workflow_notification_service
@@ -169,10 +175,13 @@ class ContentRetentionCleanupScheduler:
 
     def refresh_schedule(self):
         schedule.clear("content-retention-cleanup")
+        config = load_config()
         self.interval_hours = self._interval_hours()
         job = schedule.every(self.interval_hours).hours.do(self.cleanup_once).tag("content-retention-cleanup")
+        target_next_run = scheduled_next_run_datetime(config, interval_hours=self.interval_hours)
+        job.next_run = local_naive_datetime(target_next_run)
         self._scheduled_interval = self.interval_hours
-        update_runtime_status({"next_run_at": next_run_iso(self.interval_hours)})
+        update_runtime_status({"next_run_at": utc_datetime_iso(target_next_run)})
         logger.info(
             "历史文件清理计划已设置：每 %s 小时执行一次 | next_run=%s",
             self.interval_hours,
@@ -186,6 +195,7 @@ class ContentRetentionCleanupScheduler:
         logger.info("历史文件清理调度器启动")
         if config.get("run_on_start"):
             self.cleanup_once(trigger="scheduler_start")
+            self.refresh_schedule()
 
         while self.running:
             current_interval = self._interval_hours()
@@ -194,13 +204,12 @@ class ContentRetentionCleanupScheduler:
             due_count = sum(1 for job in schedule.get_jobs("content-retention-cleanup") if job.should_run)
             schedule.run_pending()
             if due_count:
-                update_runtime_status({"next_run_at": next_run_iso(self.interval_hours)})
+                update_runtime_status({"next_run_at": _scheduled_job_next_run_iso() or next_run_iso(self.interval_hours)})
             time.sleep(30)
 
     def stop(self):
         self.running = False
         schedule.clear("content-retention-cleanup")
-        update_runtime_status({"next_run_at": None})
         logger.info("历史文件清理调度器停止")
 
     def _interval_hours(self):
@@ -218,6 +227,19 @@ class ContentRetentionCleanupScheduler:
         except Exception as exc:
             logger.exception("[RETENTION_CLEANUP] email failed | event=%s error=%s", event, exc)
             return {"sent": False, "error": str(exc)}
+
+
+def _scheduled_job_next_run_iso():
+    jobs = schedule.get_jobs("content-retention-cleanup")
+    if not jobs:
+        return None
+    next_run = getattr(jobs[0], "next_run", None)
+    if not isinstance(next_run, datetime):
+        return None
+    if next_run.tzinfo is None:
+        local_tz = datetime.now().astimezone().tzinfo
+        next_run = next_run.replace(tzinfo=local_tz)
+    return utc_datetime_iso(next_run.astimezone(timezone.utc))
 
 
 def _dry_run_override_from_env():
@@ -299,6 +321,13 @@ def main():
     parser.add_argument("command", choices=["start", "once", "status"])
     args = parser.parse_args()
 
+    process_lock = None
+    if args.command == "start":
+        process_lock = acquire_scheduler_process_lock()
+        if not process_lock:
+            logger.warning("已有历史文件清理调度器进程运行，退出本次启动")
+            return
+
     service = ContentRetentionCleanupScheduler()
 
     def signal_handler(signum, frame):
@@ -308,13 +337,16 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    if args.command == "start":
-        service.start()
-    elif args.command == "once":
-        result = service.cleanup_once(trigger="manual_cli", dry_run_override=_dry_run_override_from_env())
-        print(json.dumps(result, ensure_ascii=False))
-    elif args.command == "status":
-        print(json.dumps(load_config(), ensure_ascii=False))
+    try:
+        if args.command == "start":
+            service.start()
+        elif args.command == "once":
+            result = service.cleanup_once(trigger="manual_cli", dry_run_override=_dry_run_override_from_env())
+            print(json.dumps(result, ensure_ascii=False))
+        elif args.command == "status":
+            print(json.dumps(load_config(), ensure_ascii=False))
+    finally:
+        release_file_lock(process_lock)
 
 
 if __name__ == "__main__":

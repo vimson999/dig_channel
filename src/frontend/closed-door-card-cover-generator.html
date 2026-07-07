@@ -67,8 +67,16 @@ PB从0.4到0.8，年底前看到修复</textarea>
 
                     <div>
                         <label class="block text-sm font-bold text-gray-700 mb-1">日期</label>
-                        <input type="text" id="dateText" value="2026.5.1" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-700">
+                        <input type="text" id="dateText" value="" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-slate-700">
                     </div>
+
+                    <label class="flex items-start gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 cursor-pointer hover:bg-gray-100 transition-colors">
+                        <input id="showDate" type="checkbox" checked class="mt-1 h-4 w-4 rounded border-gray-300 text-slate-900 focus:ring-slate-700">
+                        <span class="min-w-0">
+                            <span class="block text-sm font-bold text-gray-700">在封面上展示日期</span>
+                            <span class="block text-xs text-gray-500 mt-0.5">取消勾选后日期输入仍保留，但不会绘制到封面。</span>
+                        </span>
+                    </label>
 
                     <div>
                         <label class="block text-sm font-bold text-gray-700 mb-1">底部免责声明</label>
@@ -125,12 +133,14 @@ PB从0.4到0.8，年底前看到修复</textarea>
             mainTitle: document.getElementById('mainTitle'),
             subTitle: document.getElementById('subTitle'),
             dateText: document.getElementById('dateText'),
+            showDate: document.getElementById('showDate'),
             disclaimer: document.getElementById('disclaimer'),
             subtitleSafeSpace: document.getElementById('subtitleSafeSpace'),
             mainColor: document.getElementById('mainColor'),
             subColor: document.getElementById('subColor'),
         };
 
+        inputs.dateText.value = formatDateText(new Date());
         Object.values(inputs).forEach(input => input.addEventListener('input', draw));
 
         const bgUpload = document.getElementById('bgUpload');
@@ -485,6 +495,7 @@ PB从0.4到0.8，年底前看到修复</textarea>
         }
 
         function drawDatePill(ctx, centerX, y) {
+            if (!inputs.showDate.checked) return;
             const text = inputs.dateText.value.trim();
             if (!text) return;
             ctx.font = '900 34px "Noto Sans SC", "Microsoft YaHei", sans-serif';
@@ -495,6 +506,13 @@ PB从0.4到0.8，年底前看到修复</textarea>
             roundRect(ctx, x, y, w, 62, 31, true, false);
             ctx.fillStyle = '#0b1f36';
             ctx.fillText(text, centerX, y + 14);
+        }
+
+        function formatDateText(date) {
+            const value = date instanceof Date ? date : new Date();
+            const month = String(value.getMonth() + 1).padStart(2, '0');
+            const day = String(value.getDate()).padStart(2, '0');
+            return `${value.getFullYear()}-${month}-${day}`;
         }
 
         function drawCoverImage(ctx, img, x, y, w, h) {
@@ -597,9 +615,13 @@ PB从0.4到0.8，年底前看到修复</textarea>
         }
 
         window.renderWorkflowClosedDoorCover = async function(payload = {}) {
+            const hasDateText = Object.prototype.hasOwnProperty.call(payload, 'dateText');
             inputs.mainTitle.value = payload.mainTitle || '内资闭门会议';
             inputs.subTitle.value = payload.subTitle || '';
-            inputs.dateText.value = payload.dateText || '';
+            inputs.dateText.value = hasDateText ? (payload.dateText || '') : formatDateText(new Date());
+            inputs.showDate.checked = Object.prototype.hasOwnProperty.call(payload, 'showDate')
+                ? Boolean(payload.showDate)
+                : inputs.dateText.value.trim() !== '';
             inputs.disclaimer.value = payload.disclaimer || '本内容只供交流学习，不作为任何投资建议。理财有风险，投资需谨慎。';
             inputs.subtitleSafeSpace.checked = Boolean(payload.subtitleSafeSpace);
             inputs.mainColor.value = payload.mainColor || '#FFFFFF';

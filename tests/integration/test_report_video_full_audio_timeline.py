@@ -184,7 +184,7 @@ class ReportVideoFullAudioTimelineTest(unittest.TestCase):
             self.assertEqual((task.result or {}).get("audio_mode"), "full_audio_srt")
             task_id = task.id
 
-        result = generate_videos_task(task_id, ["16:9"], None)
+        result = generate_videos_task(task_id, ["16:9"], None, True)
         self.assertIn(result["status"], {"completed", "video_partial"})
         self.assertTrue(result["generated"], result)
         output_path = PROJECT_ROOT / result["generated"][0]["file_path"]

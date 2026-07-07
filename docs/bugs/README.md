@@ -8,6 +8,20 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-07-07 | [MP3 封面后台渲染被外部 CDN 阻塞超时](2026-07-07-mp3-cover-render-cdn-timeout.md) | MP3 视频编排 / 四张封皮背景图生成 / Playwright 后台渲染 | 已修复 |
+| 2026-07-07 | [MP3 视频合成 1.2 倍速未真正生效](2026-07-07-mp3-video-audio-speed-not-applied.md) | MP3 视频编排 / publisher 音频预处理 / 横竖屏视频合成 | 已修复 |
+| 2026-07-07 | [平台上传 worker 重启导致 B站上传任务假运行](2026-07-07-platform-upload-worker-restart-orphan.md) | MP3 详情页 B站上传 / platform_upload / publisher queue repair | 已修复 |
+| 2026-07-07 | [平台上传误用 render 合成队列](2026-07-07-platform-upload-used-render-queue.md) | B站/YouTube 上传 / publisher / Celery 队列 | 已修复 |
+| 2026-07-07 | [MP3 详情页 DS 清洗误报未识别时间戳](2026-07-07-mp3-detail-ds-cleaning-false-missing-timestamp.md) | mp3-video-workflow-detail / DS 返回值展示 | 已修复 |
+| 2026-07-07 | [MP3 手动 DS 返回值不完整仍生成垃圾封面和视频](2026-07-07-mp3-invalid-ds-response-generated-garbage-assets.md) | mp3_video_workflow / 手动 DS 返回值 / IMA 全文 DS / 视觉资产 | 已修复 |
+| 2026-07-07 | [MP3 B站后投上传被误取消且标题混入占位模板](2026-07-07-mp3-bilibili-upload-canceled-and-dirty-title.md) | mp3 detail / B站上传 / publisher cleanup / DS 标题清洗 | 已修复 |
+| 2026-07-07 | [MP3 详情页 B站上传记录停留在排队中](2026-07-07-mp3-detail-bilibili-upload-status-stale.md) | mp3-video-workflow-detail / B站上传子任务 / publisher | 已修复 |
+| 2026-07-07 | [MP3 视频文件已生成但父编排仍显示运行中](2026-07-07-mp3-video-publisher-file-done-parent-waiting.md) | mp3_video_workflow / publisher / render worker | 已修复，当前任务已完成收口 |
+| 2026-07-03 | [知识星球工作流入队失败与同步 orphan running](2026-07-03-zsxq-workflow-queue-failure-and-sync-orphan.md) | zsxq workflow / zsxq sync / scheduler / SQLAlchemy session | 已修复，当前阻塞已释放 |
+| 2026-07-02 | [研报视频关键帧渲染误用占位段落名](2026-07-02-report-video-keyframe-placeholder-labels.md) | report video / keyframe preview / preview clip renderer | 已修复 |
+| 2026-07-02 | [Report Script Material 任务达到修复上限后仍 pending](2026-07-02-report-script-material-orphan-pending-after-repair-limit.md) | report_script_material_workflow / celery watchdog / queue repair | 已修复，5 个历史任务已完成 |
+| 2026-07-02 | [历史文件清理重复调度器覆盖执行结果](2026-07-02-content-retention-duplicate-scheduler-overwrote-result.md) | content retention cleanup scheduler / runtime status / email notification | 已修复 |
+| 2026-06-29 | [Celery worker 假活但不消费队列](2026-06-29-celery-worker-fake-alive-backlog-not-consuming.md) | celery watchdog / report audio workflow / Redis broker | 已修复 |
 | 2026-06-29 | [研报音频豆包分段失败记录后访问 detached 子任务](2026-06-29-report-audio-doubao-child-detached-after-failure-record.md) | report audio workflow / doubao browser tts / SQLAlchemy session | 已修复 |
 | 2026-06-29 | [飞书 Cookie 函数已存在但旧 Celery worker 仍导入失败](2026-06-29-feishu-cookie-import-stale-celery-workers.md) | Celery worker / external documents / platform credentials | 已处置 |
 | 2026-06-26 | [独立豆包朗读短音频失败后没有自动重试](2026-06-26-doubao-standalone-short-audio-no-auto-retry.md) | doubao browser tts / 测试页 / Celery worker | 已修复 |

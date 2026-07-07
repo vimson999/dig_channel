@@ -140,6 +140,16 @@ def groups():
         return handle_api_error(502, _safe_error(e))
 
 
+@bp.route("/groups/local", methods=["GET"])
+def local_groups():
+    """Read cached ZSXQ groups from local sync tables without touching upstream."""
+    try:
+        result = zsxq_sync_service.list_cached_groups()
+        return jsonify({"success": True, "data": result})
+    except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
 @bp.route("/topics", methods=["POST"])
 def topics():
     """Fetch latest topics from one ZSXQ group."""
@@ -189,6 +199,7 @@ def local_topics():
             count=data.get("count", 20),
             end_time=data.get("end_time"),
             publish_filter=data.get("publish_filter"),
+            include_raw_payload=bool(data.get("include_raw_payload")),
         )
         return jsonify({"success": True, "data": result})
     except Exception as e:

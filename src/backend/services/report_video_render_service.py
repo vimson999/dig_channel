@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import re
 import shlex
 import subprocess
@@ -8,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import fitz  # type: ignore
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 from services.report_video_service import PROJECT_ROOT, rel_path, task_dir
 
@@ -21,6 +22,10 @@ FONT_CANDIDATES = [
 
 DEFAULT_SOURCE_CARD_DURATION_SEC = 5.0
 IMPORTANT_SOURCE_CARD_DURATION_SEC = 6.0
+MAX_XFADE_FRAME_ITEMS = int(os.environ.get("REPORT_VIDEO_MAX_XFADE_FRAME_ITEMS", "40"))
+MAX_XFADE_DURATION_SEC = float(os.environ.get("REPORT_VIDEO_MAX_XFADE_DURATION_SEC", "900"))
+REPORT_VIDEO_RENDER_PREVIEW_VERSION = "pillow_ffmpeg_preview_v2_stitch_portrait"
+_PDF_FILENAME_CACHE = {}
 
 CANVAS_BG = "#07111f"
 CANVAS_TOP_BG = "#0a1627"
@@ -33,6 +38,11 @@ FINANCE_GOLD = "#facc15"
 FINANCE_GOLD_SOFT = "#fef3c7"
 FINANCE_GOLD_DARK = "#78350f"
 FINANCE_BLUE = "#60a5fa"
+PORTRAIT_PRIMARY = "#ffb4aa"
+PORTRAIT_PRIMARY_SOFT = "#ffdad5"
+PORTRAIT_SURFACE = "#121414"
+PORTRAIT_GLASS = (18, 24, 32, 214)
+PORTRAIT_GLASS_BORDER = (255, 255, 255, 44)
 
 SUBTITLE_HIGHLIGHT_TERMS = [
     "AI算力",
@@ -409,18 +419,18 @@ def _segment_points(segment, analysis=None, max_points=3, fallback_labels=None):
 
     for item in (payload.get("bullet_points") or []):
         text = _trim_text(item, 20)
-        if text:
+        if text and not _is_generic_label(text):
             candidates.append(text)
 
     for item in (payload.get("key_points") or []):
         text = _trim_text(item, 20)
-        if text:
+        if text and not _is_generic_label(text):
             candidates.append(text)
 
     if not candidates and fallback_labels:
         for item in fallback_labels:
             text = _trim_text(item, 18)
-            if text:
+            if text and not _is_generic_label(text):
                 candidates.append(text)
 
     if not candidates:
@@ -429,7 +439,7 @@ def _segment_points(segment, analysis=None, max_points=3, fallback_labels=None):
             parts = re.split(r"[，,:：]", sentence)
             for part in parts:
                 text = _trim_text(part, 18)
-                if len(_normalize_label(text)) >= 4:
+                if len(_normalize_label(text)) >= 4 and not _is_generic_label(text):
                     candidates.append(text)
             if len(candidates) >= max_points * 2:
                 break
@@ -437,7 +447,7 @@ def _segment_points(segment, analysis=None, max_points=3, fallback_labels=None):
     if not candidates and analysis is not None:
         for item in (getattr(analysis, "key_points", None) or []):
             text = _trim_text(item, 18)
-            if text:
+            if text and not _is_generic_label(text):
                 candidates.append(text)
 
     unique = []
@@ -450,11 +460,144 @@ def _segment_points(segment, analysis=None, max_points=3, fallback_labels=None):
         seen.add(key)
         if len(unique) >= max_points:
             break
-    return unique or [_trim_text(getattr(segment, "segment_title", "") or "核心观点", 18)]
+    fallback = _meaningful_label(getattr(segment, "segment_title", ""), 18)
+    return unique or [fallback or "核心观点"]
 
 
 def _normalize_label(text):
     return re.sub(r"[\s，。、“”‘’：:；;,.!?！？（）()\[\]【】《》|·\-—_]+", "", str(text or "")).lower()
+
+
+_GENERIC_LABEL_WORDS = {
+    "主题",
+    "中心主题",
+    "当前主题",
+    "当前节点",
+    "当前段落",
+    "当前章节",
+    "本段",
+    "本段落",
+    "节点",
+    "段落",
+    "章节",
+    "节目段落",
+}
+
+
+def _is_generic_label(value):
+    text = _display_text(value)
+    normalized = _normalize_label(text)
+    if not normalized:
+        return True
+    if normalized in {_normalize_label(item) for item in _GENERIC_LABEL_WORDS}:
+        return True
+    number = r"[0-9一二三四五六七八九十百千万零〇]+"
+    generic_patterns = [
+        rf"^(节目)?段落{number}$",
+        rf"^(节目)?章节{number}$",
+        rf"^节目{number}$",
+        rf"^section{number}$",
+        rf"^program{number}$",
+        rf"^node{number}$",
+        rf"^s{number}$",
+    ]
+    return any(re.match(pattern, normalized, flags=re.IGNORECASE) for pattern in generic_patterns)
+
+
+def _meaningful_label(value, limit, min_chars=4):
+    text = _trim_text(value, limit)
+    if not text or _is_generic_label(text):
+        return ""
+    if len(_normalize_label(text)) < min_chars:
+        return ""
+    return text
+
+
+def _first_meaningful_clause(text, limit=24, min_chars=6):
+    for sentence in _split_sentences(text):
+        for clause in re.split(r"[，,；;：:。！？!?]", sentence):
+            label = _meaningful_label(clause.strip(" \n\r\t-—:："), limit, min_chars=min_chars)
+            if label:
+                return label
+    return ""
+
+
+def _segment_display_title(segment, analysis=None, max_chars=24):
+    payload = getattr(segment, "raw_payload", None) or {}
+    candidates = [
+        getattr(segment, "segment_title", None),
+        payload.get("display_title"),
+        payload.get("visual_title"),
+        payload.get("headline"),
+        payload.get("title"),
+        payload.get("section_title"),
+        payload.get("summary"),
+        payload.get("segment_summary"),
+    ]
+    for value in candidates:
+        label = _meaningful_label(value, max_chars)
+        if label:
+            return label
+
+    clause = _first_meaningful_clause(getattr(segment, "voice_text", "") or "", limit=max_chars)
+    if clause:
+        return clause
+
+    if analysis is not None:
+        clause = _first_meaningful_clause(getattr(analysis, "core_view", "") or "", limit=max_chars)
+        if clause:
+            return clause
+
+    detail = _segment_detail_text(segment, analysis=analysis, min_chars=12, max_chars=max_chars)
+    label = _meaningful_label(detail, max_chars)
+    if label:
+        return label
+    return _trim_text(getattr(segment, "segment_id", None) or "当前段落", max_chars)
+
+
+def _node_display_label(node, fallback="", max_chars=24):
+    label = _meaningful_label((node or {}).get("label"), max_chars)
+    if label:
+        return label
+    return _trim_text(fallback, max_chars)
+
+
+def _root_display_label(report, root, segment=None, max_chars=28):
+    analysis = getattr(report, "analysis", None)
+    for value in [
+        (root or {}).get("label"),
+        getattr(analysis, "theme", None),
+        getattr(analysis, "report_title", None),
+        getattr(report, "file_name", None),
+    ]:
+        label = _meaningful_label(value, max_chars)
+        if label:
+            return label
+    if segment is not None:
+        return _segment_display_title(segment, analysis=analysis, max_chars=max_chars)
+    return "中心主题"
+
+
+def _meaningful_child_labels(children, limit=18):
+    labels = []
+    for child in children or []:
+        label = _meaningful_label((child or {}).get("label") or (child or {}).get("id"), limit)
+        if label:
+            labels.append(label)
+    return labels
+
+
+def _segment_visual_points(segment, analysis=None, max_points=3, fallback_labels=None):
+    points = _segment_points(
+        segment,
+        analysis=analysis,
+        max_points=max_points,
+        fallback_labels=[label for label in (fallback_labels or []) if not _is_generic_label(label)],
+    )
+    points = [point for point in points if not _is_generic_label(point)]
+    if points:
+        return points[:max_points]
+    return [_segment_display_title(segment, analysis=analysis, max_chars=18)]
 
 
 def _subheading_text(analysis, segment):
@@ -663,12 +806,40 @@ def _report_pdf_preview_path(report, page_number=1):
     return pdf_path.parent / "preview_cache" / f"page_{max(int(page_number), 1):03d}.jpg"
 
 
-def _ensure_report_pdf_preview(report, page_number=1):
-    pdf_path = PROJECT_ROOT / getattr(report, "file_path", "")
-    if not pdf_path.exists() or not pdf_path.is_file():
+def _resolve_local_path(value):
+    if not value:
+        return None
+    path = Path(str(value))
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _find_pdf_by_filename(filename):
+    filename = str(filename or "").strip()
+    if not filename:
+        return None
+    if filename in _PDF_FILENAME_CACHE:
+        return _PDF_FILENAME_CACHE[filename]
+
+    for root in [PROJECT_ROOT / "data/tasks", PROJECT_ROOT / "data/zsxq"]:
+        if not root.exists():
+            continue
+        try:
+            for path in root.rglob("*.pdf"):
+                if path.name == filename:
+                    _PDF_FILENAME_CACHE[filename] = path
+                    return path
+        except OSError:
+            continue
+    _PDF_FILENAME_CACHE[filename] = None
+    return None
+
+
+def _ensure_pdf_path_preview(pdf_path, page_number=1):
+    pdf_path = _resolve_local_path(pdf_path)
+    if not pdf_path or not pdf_path.exists() or not pdf_path.is_file() or pdf_path.suffix.lower() != ".pdf":
         return None
 
-    preview_path = _report_pdf_preview_path(report, page_number=page_number)
+    preview_path = pdf_path.parent / "preview_cache" / f"page_{max(int(page_number), 1):03d}.jpg"
     if preview_path.exists():
         return preview_path
 
@@ -686,6 +857,10 @@ def _ensure_report_pdf_preview(report, page_number=1):
     return preview_path if preview_path.exists() else None
 
 
+def _ensure_report_pdf_preview(report, page_number=1):
+    return _ensure_pdf_path_preview(getattr(report, "file_path", ""), page_number=page_number)
+
+
 def _load_report_pdf_preview(report, page_number=1, target_size=None):
     preview_path = _ensure_report_pdf_preview(report, page_number=page_number)
     if not preview_path:
@@ -698,6 +873,80 @@ def _load_report_pdf_preview(report, page_number=1, target_size=None):
     if target_size:
         image.thumbnail(target_size, Image.Resampling.LANCZOS)
     return image
+
+
+def _load_pdf_path_preview(pdf_path, page_number=1, target_size=None):
+    preview_path = _ensure_pdf_path_preview(pdf_path, page_number=page_number)
+    if not preview_path:
+        return None
+    try:
+        image = Image.open(preview_path).convert("RGB")
+    except Exception:
+        return None
+    if target_size:
+        image.thumbnail(target_size, Image.Resampling.LANCZOS)
+    return image
+
+
+def _program_package_source_index(segment, source_count):
+    payload = getattr(segment, "raw_payload", None) or {}
+    for key in ("source_report_index", "item_index", "report_index"):
+        index = _safe_int(payload.get(key), None)
+        if index is not None:
+            return max(0, min(index - 1 if index >= 1 else index, source_count - 1))
+
+    for value in [
+        payload.get("voice_text_ref"),
+        payload.get("section_id"),
+        payload.get("section_type"),
+        getattr(segment, "segment_id", None),
+    ]:
+        match = re.search(r"item[_-](\d+)", str(value or ""), flags=re.IGNORECASE)
+        if match:
+            return max(0, min(int(match.group(1)) - 1, source_count - 1))
+
+    segment_index = _safe_int(getattr(segment, "segment_index", None), None)
+    if segment_index is not None and segment_index >= 3:
+        return max(0, min((segment_index - 3) // 3, source_count - 1))
+    return 0
+
+
+def _program_package_source_pdf_path(report, segment=None):
+    package_path = _resolve_local_path(getattr(report, "file_path", ""))
+    if not package_path or package_path.suffix.lower() != ".json" or not package_path.exists():
+        return None
+    try:
+        data = json.loads(package_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    source_reports = data.get("source_reports") if isinstance(data.get("source_reports"), list) else []
+    if not source_reports:
+        return None
+
+    start_index = _program_package_source_index(segment, len(source_reports)) if segment is not None else 0
+    ordered_indexes = [start_index] + [idx for idx in range(len(source_reports)) if idx != start_index]
+    for index in ordered_indexes:
+        item = source_reports[index] if 0 <= index < len(source_reports) else {}
+        pdf = item.get("pdf") if isinstance(item, dict) else {}
+        pdf_path = (pdf or {}).get("path") or item.get("pdf_path") or item.get("file_path")
+        resolved = _resolve_local_path(pdf_path)
+        if resolved and resolved.exists() and resolved.suffix.lower() == ".pdf":
+            return resolved
+        filename = (pdf or {}).get("filename") or item.get("filename") or (Path(str(pdf_path)).name if pdf_path else "")
+        resolved = _find_pdf_by_filename(filename)
+        if resolved and resolved.exists() and resolved.suffix.lower() == ".pdf":
+            return resolved
+    return None
+
+
+def _load_portrait_source_preview(report, segment, page_number=1):
+    preview = _load_report_pdf_preview(report, page_number=page_number)
+    if preview is not None:
+        return preview
+    program_pdf_path = _program_package_source_pdf_path(report, segment=segment)
+    if program_pdf_path:
+        return _load_pdf_path_preview(program_pdf_path, page_number=1)
+    return None
 
 
 def _paste_rounded_image(base_img, image, box, radius=18, background="#0f172a"):
@@ -925,7 +1174,7 @@ def _theme_flow_items(task, report=None):
         flow = [
             {
                 "id": segment.focus_node_id or segment.segment_id,
-                "label": segment.segment_title or f"章节 {segment.segment_index}",
+                "label": _segment_display_title(segment, analysis=getattr(report, "analysis", None), max_chars=18),
                 "section_id": segment.segment_id,
                 "section_type": segment.segment_type or "topic_section",
             }
@@ -1441,6 +1690,124 @@ def _draw_bullet_list(draw, x, y, points, font, line_gap, text_fill="#e5edf8", b
         draw.text((bullet_x + 28, top), point, fill=text_fill, font=font)
 
 
+def _cover_image(image, target_size):
+    target_w, target_h = target_size
+    source = image.convert("RGB")
+    if source.width <= 0 or source.height <= 0:
+        return Image.new("RGB", target_size, "#070b14")
+    scale = max(target_w / source.width, target_h / source.height)
+    resized = source.resize(
+        (max(int(source.width * scale + 0.5), target_w), max(int(source.height * scale + 0.5), target_h)),
+        Image.Resampling.LANCZOS,
+    )
+    left = max((resized.width - target_w) // 2, 0)
+    top = max((resized.height - target_h) // 2, 0)
+    return resized.crop((left, top, left + target_w, top + target_h))
+
+
+def _draw_text_with_shadow(draw, xy, text, font, fill, shadow=(0, 0, 0, 150), offset=(3, 4)):
+    x, y = xy
+    draw.text((x + offset[0], y + offset[1]), text, fill=shadow, font=font)
+    draw.text((x, y), text, fill=fill, font=font)
+
+
+def _portrait_brand_label(report):
+    task = getattr(report, "task", None)
+    result = getattr(task, "result", None) or {}
+    candidates = [
+        result.get("brand_text"),
+        result.get("channel_name"),
+        result.get("publisher_name"),
+        result.get("creator_name"),
+        (result.get("bilibili") or {}).get("account_name") if isinstance(result.get("bilibili"), dict) else None,
+    ]
+    for value in candidates:
+        label = _display_text(value)
+        if label:
+            return _trim_text(label, 16)
+    return "君君播客"
+
+
+def _portrait_title_parts(report, source_meta):
+    analysis = getattr(report, "analysis", None)
+    raw_title = _display_text(
+        source_meta.get("title")
+        or getattr(analysis, "report_title", "")
+        or getattr(report, "file_name", "")
+        or "研报解读"
+    )
+    raw_title = Path(raw_title).stem
+    raw_title = re.sub(r"\s+", " ", raw_title).strip(" -_|｜")
+    for separator in ["：", ":", "｜", "|", " - ", "-", "—"]:
+        if separator not in raw_title:
+            continue
+        left, right = [part.strip(" -_|｜") for part in raw_title.split(separator, 1)]
+        if len(_normalize_label(left)) >= 3 and len(_normalize_label(right)) >= 3:
+            return _trim_text(left, 22), _trim_text(right, 24)
+    return _trim_text(raw_title, 32), ""
+
+
+def _draw_portrait_editorial_backdrop(img, draw, width, height, subtitle_top, source_image=None):
+    if source_image is not None:
+        background = _cover_image(source_image, (width, height))
+        soft = background.filter(ImageFilter.GaussianBlur(radius=5))
+        background = Image.blend(background, soft, 0.38)
+        background = ImageEnhance.Color(background).enhance(0.42)
+        background = ImageEnhance.Contrast(background).enhance(0.88)
+        background = ImageEnhance.Brightness(background).enhance(0.58)
+        img.alpha_composite(background.convert("RGBA"))
+
+    else:
+        for y in range(0, height, 3):
+            blend = y / max(height - 1, 1)
+            r = int(5 + 4 * blend)
+            g = int(8 + 8 * blend)
+            b = int(17 + 15 * blend)
+            draw.rectangle((0, y, width, y + 3), fill=(r, g, b, 255))
+
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    for y in range(0, height, 4):
+        t = y / max(height - 1, 1)
+        alpha = int(28 + 220 * (t ** 1.42))
+        overlay_draw.rectangle((0, y, width, y + 4), fill=(6, 11, 20, alpha))
+    overlay_draw.rectangle((0, 0, width, 360), fill=(3, 7, 14, 72))
+    overlay_draw.rectangle((0, subtitle_top - 64, width, height), fill=(3, 6, 14, 226))
+    img.alpha_composite(overlay)
+
+    draw.line((72, subtitle_top + 20, width - 72, subtitle_top + 20), fill=(148, 163, 184, 70), width=1)
+    draw.line((0, subtitle_top, width, subtitle_top), fill=(255, 180, 170, 88), width=2)
+
+
+def _draw_portrait_insight_rows(draw, left, top, right, points, font, small_font):
+    row_h = 104
+    gap = 10
+    for idx, point in enumerate((points or [])[:3], start=1):
+        y = top + (idx - 1) * (row_h + gap)
+        icon = (left, y + 24, left + 58, y + 82)
+        draw.ellipse(icon, fill=(255, 180, 170, 36), outline=(255, 180, 170, 94), width=2)
+        number = f"{idx:02d}"
+        bbox = draw.textbbox((0, 0), number, font=small_font)
+        draw.text(
+            (icon[0] + (icon[2] - icon[0] - (bbox[2] - bbox[0])) / 2, icon[1] + 16),
+            str(idx),
+            fill="#101827",
+            font=small_font,
+        )
+        draw.text((left + 80, y + 14), f"指标 {number}", fill=PORTRAIT_PRIMARY, font=small_font)
+        lines, render_font, _ = _adaptive_text_layout(draw, point, 34, 28, right - left - 100, 2)
+        _layout_text_block(
+            draw,
+            left + 80,
+            y + 50,
+            right - left - 100,
+            lines,
+            render_font,
+            "#f4f7fb",
+            max(37, int(getattr(render_font, "size", 34) * 1.1)),
+        )
+
+
 def _fit_points_count(start_y, bottom_y, preferred_count=3, line_gap=64, min_count=1):
     usable = max(0, float(bottom_y) - float(start_y))
     count = int(usable // max(float(line_gap), 1.0)) + 1
@@ -1736,7 +2103,8 @@ def render_landscape_theme_frame(report, segment, frame_path):
     draw.text((right_panel[0] + 32, right_panel[1] + 30), "本段解读", fill="#0f172a", font=load_font(28))
     draw_tag(draw, right_panel[0] + 32, right_panel[1] + 74, "主题级主线", load_font(22), FINANCE_GOLD_SOFT, FINANCE_GOLD_DARK, padding_x=16, padding_y=7, radius=14)
     title_width = preview_box[0] - right_panel[0] - 58
-    title_lines = wrap_text(draw, segment.segment_title or "当前章节", load_font(46), title_width, 2)
+    segment_title = _segment_display_title(segment, analysis=analysis, max_chars=28)
+    title_lines = wrap_text(draw, segment_title, load_font(46), title_width, 2)
     _layout_text_block(draw, right_panel[0] + 32, right_panel[1] + 126, title_width, title_lines, load_font(46), "#0f172a", 54)
 
     detail_y = right_panel[1] + 142 + len(title_lines) * 54
@@ -1844,6 +2212,16 @@ def render_landscape_frame(report, segment, frame_path):
     focus_id = _segment_focus_node_id(segment)
     focus = nodes.get(str(focus_id or "")) or {}
     focus_children = _focus_children_for_render(nodes, root, focus)
+    segment_title = _segment_display_title(segment, analysis=analysis, max_chars=28)
+    root_label = _root_display_label(report, root, segment=segment, max_chars=28)
+    focus_label = _node_display_label(focus, fallback=segment_title, max_chars=24)
+    child_fallback_labels = _meaningful_child_labels(focus_children)
+    segment_points = _segment_visual_points(
+        segment,
+        analysis=analysis,
+        max_points=3,
+        fallback_labels=child_fallback_labels,
+    )
     visual_child_focus_id = getattr(segment, "visual_child_focus_id", None)
     transition_progress = _ease_in_out(getattr(segment, "transition_progress", 1.0))
     previous_focus_node_id = getattr(segment, "previous_focus_node_id", None)
@@ -1918,7 +2296,7 @@ def render_landscape_frame(report, segment, frame_path):
     root_center_x = (left_panel[0] + left_panel[2]) / 2
     root_box = (root_center_x - 164, left_panel[1] + 84, root_center_x + 164, left_panel[1] + 154)
     draw_rounded_rect(draw, root_box, 22, "#111c2f", "#334155", 2)
-    root_lines, root_font, _ = _adaptive_text_layout(draw, root.get("label") or mindmap.center or "中心主题", 34, 26, 290, 2)
+    root_lines, root_font, _ = _adaptive_text_layout(draw, root_label, 34, 26, 290, 2)
     draw_centered_text(draw, root_center_x, left_panel[1] + 105, root_lines, root_font, "#f8fafc", 34)
 
     focus_base_center_x = root_center_x
@@ -1949,7 +2327,7 @@ def render_landscape_frame(report, segment, frame_path):
     draw_rounded_rect(draw, (focus_box[0] - 12, focus_box[1] - 12, focus_box[2] + 12, focus_box[3] + 12), 30, (37, 99, 235, glow_alpha_outer))
     draw_rounded_rect(draw, (focus_box[0] - 5, focus_box[1] - 5, focus_box[2] + 5, focus_box[3] + 5), 28, (96, 165, 250, glow_alpha_inner))
     draw_rounded_rect(draw, focus_box, 26, "#2563eb", "#bfdbfe", 3)
-    focus_lines, focus_render_font, _ = _adaptive_text_layout(draw, focus.get("label") or segment.segment_title or "当前节点", 46, 32, focus_w - 70, 2)
+    focus_lines, focus_render_font, _ = _adaptive_text_layout(draw, focus_label, 46, 32, focus_w - 70, 2)
     focus_top = focus_box[1] + (18 if len(focus_lines) <= 1 else 10)
     focus_gap = max(34, int(getattr(focus_render_font, "size", 46) * 0.92))
     draw_centered_text(draw, focus_center_x, focus_top, focus_lines, focus_render_font, "#ffffff", focus_gap)
@@ -1957,8 +2335,13 @@ def render_landscape_frame(report, segment, frame_path):
     child_count = max(len(focus_children), 1)
     max_child_width = 232
     child_cards = []
-    for child in focus_children:
-        child_lines, child_font, measured_width = _adaptive_text_layout(draw, child.get("label") or child.get("id"), 24, 20, max_child_width, 2)
+    for idx, child in enumerate(focus_children):
+        child_label = _meaningful_label(child.get("label") or child.get("id"), 24)
+        if not child_label and idx < len(segment_points):
+            child_label = segment_points[idx]
+        if not child_label:
+            continue
+        child_lines, child_font, measured_width = _adaptive_text_layout(draw, child_label, 24, 20, max_child_width, 2)
         card_width = min(max(int(measured_width + 66), 218), 250)
         child_cards.append({
             "node": child,
@@ -2014,22 +2397,18 @@ def render_landscape_frame(report, segment, frame_path):
         child_top = child_y - (14 if len(item["lines"]) <= 1 else 26)
         draw_centered_text(draw, child_x, child_top, item["lines"], item["font"], child_text, child_gap)
 
-    points = _segment_points(
-        segment,
-        analysis=analysis,
-        max_points=3,
-        fallback_labels=[child.get("label") or child.get("id") for child in focus_children],
-    )
+    points = segment_points
     detail_text = _segment_detail_text(segment, analysis=analysis, min_chars=60, max_chars=96)
 
     current_chip_text = "当前节点"
     if visual_child_focus_id:
         active_child = nodes.get(str(visual_child_focus_id))
         if active_child:
-            current_chip_text = f"子节点：{_trim_text(active_child.get('label') or active_child.get('id'), 12)}"
+            active_label = _node_display_label(active_child, fallback=segment_title, max_chars=12)
+            current_chip_text = f"子节点：{active_label}"
     draw_tag(draw, right_panel[0] + 32, right_panel[1] + 70, current_chip_text, small_font, "#eff6ff", "#1d4ed8", padding_x=16, padding_y=7, radius=14)
     title_width = preview_box[0] - right_panel[0] - 56
-    title_lines = wrap_text(draw, segment.segment_title or focus.get("label") or "当前段落", focus_font, title_width, 2)
+    title_lines = wrap_text(draw, segment_title, focus_font, title_width, 2)
     _layout_text_block(draw, right_panel[0] + 32, right_panel[1] + 126, title_width, title_lines, focus_font, "#0f172a", 52)
     detail_title_y = right_panel[1] + 150 + len(title_lines) * 52
     draw.text((right_panel[0] + 32, detail_title_y), "详细说明", fill="#475569", font=panel_title_font)
@@ -2117,14 +2496,12 @@ def render_landscape_source_card(report, segment, frame_path, reveal_progress=1.
 
 def render_portrait_frame(report, segment, frame_path):
     width, height = 1080, 1920
-    img = Image.new("RGBA", (width, height), "#0f172a")
+    img = Image.new("RGBA", (width, height), "#070b14")
     draw = ImageDraw.Draw(img)
-    title_font = load_font(58)
-    focus_font = load_font(66)
-    body_font = load_font(34)
-    panel_title_font = load_font(28)
-    small_font = load_font(24)
-    chip_font = load_font(26)
+    body_font = load_font(32)
+    insight_title_font = load_font(42)
+    small_font = load_font(23)
+    tiny_font = load_font(20)
 
     analysis = report.analysis
     mindmap = report.mindmap
@@ -2133,66 +2510,107 @@ def render_portrait_frame(report, segment, frame_path):
     focus_id = _segment_focus_node_id(segment)
     focus = nodes.get(str(focus_id or "")) or {"label": segment.segment_title}
     focus_children = _focus_children_for_render(nodes, root, focus)
-    visual_child_focus_id = getattr(segment, "visual_child_focus_id", None)
-    subtitle_top = 1588
-
-    draw.rectangle((0, 0, width, height), fill="#0b1220")
-    draw.rectangle((0, subtitle_top, width, height), fill="#060d18")
-    draw.line((0, subtitle_top, width, subtitle_top), fill=(96, 165, 250, 64), width=2)
-
-    draw_tag(draw, 60, 64, (analysis.theme if analysis else "研报解读") or "研报解读", small_font, "#0f172a", "#dbeafe", padding_x=16, padding_y=7, radius=14)
-    title_lines = wrap_text(draw, analysis.report_title if analysis else report.file_name, title_font, width - 120, 2)
-    _layout_text_block(draw, 60, 126, width - 120, title_lines, title_font, "#f8fafc", 64)
-    draw.text((60, 272), _subheading_text(analysis, segment), fill="#9fb1c9", font=panel_title_font)
-
-    root_card = (60, 332, width - 60, 520)
-    focus_card = (60, 578, width - 60, 948)
-    points_card = (60, 1002, width - 60, 1494)
-    draw_rounded_rect(draw, root_card, 28, "#111c2f", "#334155", 2)
-    draw_rounded_rect(draw, focus_card, 34, "#facc15")
-    draw_rounded_rect(draw, points_card, 28, "#f8fbff", "#d9e4f2", 1)
-
-    draw.text((96, 372), "中心主题", fill="#94a3b8", font=panel_title_font)
-    _layout_text_block(draw, 96, 422, width - 192, wrap_text(draw, root.get("label") or "中心主题", body_font, width - 192, 2), body_font, "#f8fafc", 50)
-
-    draw.text((96, 626), "当前聚焦", fill="#713f12", font=panel_title_font)
-    _layout_text_block(draw, 96, 724, width - 192, wrap_text(draw, focus.get("label") or segment.segment_title or "节点", focus_font, width - 192, 3), focus_font, "#111827", 76)
-
-    draw.text((96, 1042), "核心要点", fill="#475569", font=panel_title_font)
-    points = _segment_points(
+    segment_title = _segment_display_title(segment, analysis=analysis, max_chars=28)
+    root_label = _root_display_label(report, root, segment=segment, max_chars=26)
+    focus_label = _node_display_label(focus, fallback=segment_title, max_chars=24)
+    child_fallback_labels = _meaningful_child_labels(focus_children)
+    points = _segment_visual_points(
         segment,
         analysis=analysis,
         max_points=3,
-        fallback_labels=[child.get("label") or child.get("id") for child in focus_children],
+        fallback_labels=child_fallback_labels,
     )
-    _draw_bullet_list(draw, 96, 1102, points, body_font, 118, text_fill="#1e293b", bullet_fill="#2563eb")
+    source_meta = _report_source_meta(report, segment=segment)
+    source_preview = _load_portrait_source_preview(report, segment, page_number=source_meta["source_page"])
+    subtitle_top = 1588
 
-    relation = f"{_trim_text(root.get('label') or '中心主题', 10)} → {_trim_text(focus.get('label') or segment.segment_title or '当前节点', 14)}"
-    relation_top = 1102 + len(points) * 118 + 10
-    draw.text((96, relation_top), relation, fill="#0f172a", font=chip_font)
+    _draw_portrait_editorial_backdrop(img, draw, width, height, subtitle_top, source_image=source_preview)
+    theme_label = _trim_text((analysis.theme if analysis else source_meta["theme"]) or "研报解读", 22)
+    segment_no = _safe_int(getattr(segment, "segment_index", None), 0) or 0
 
-    chip_x = 96
-    chip_y = relation_top + 54
-    for child in focus_children[:3]:
-        next_x, _ = draw_tag(
-            draw,
-            chip_x,
-            chip_y,
-            _trim_text(child.get("label") or child.get("id"), 12),
-            chip_font,
-            "#dbeafe" if str(child.get("id")) == str(visual_child_focus_id) else "#ffffff",
-            "#1d4ed8" if str(child.get("id")) == str(visual_child_focus_id) else "#475569",
-            padding_x=14,
-            padding_y=8,
-            radius=14,
-            outline="#93c5fd" if str(child.get("id")) == str(visual_child_focus_id) else "#dbe3ef",
-        )
-        chip_x = next_x + 12
-        if chip_x > width - 200:
-            chip_x = 96
-            chip_y += 52
+    content_left = 60
+    content_right = width - 60
+    content_w = content_right - content_left
+    brand_y = 600
+    badge_size = 56
+    draw.ellipse(
+        (content_left, brand_y, content_left + badge_size, brand_y + badge_size),
+        fill="#d11b1b",
+        outline=(255, 218, 213, 92),
+        width=2,
+    )
+    draw.rectangle((content_left + 18, brand_y + 18, content_left + 38, brand_y + 38), fill=PORTRAIT_PRIMARY_SOFT)
+    institution = source_meta["institution"]
+    draw.text((content_left + 72, brand_y + 6), _trim_text(institution, 18), fill=PORTRAIT_PRIMARY_SOFT, font=small_font)
+    context_text = " · ".join(item for item in [theme_label, source_meta["date"], source_meta["page_label"]] if item)
+    if context_text:
+        draw.text((content_left + 72, brand_y + 36), _trim_text(context_text, 30), fill="#aeb8c8", font=tiny_font)
+    if segment_no:
+        frame_label = f"FRAME {segment_no:02d}"
+        frame_bbox = draw.textbbox((0, 0), frame_label, font=tiny_font)
+        draw.text((content_right - (frame_bbox[2] - frame_bbox[0]), brand_y + 12), frame_label, fill="#b6c2d4", font=tiny_font)
 
-    draw.line((72, subtitle_top + 18, width - 72, subtitle_top + 18), fill=(148, 163, 184, 90), width=1)
+    main_title, accent_title = _portrait_title_parts(report, source_meta)
+    title_y = brand_y + 104
+    if accent_title:
+        main_lines, main_font, _ = _adaptive_text_layout(draw, main_title, 62, 48, content_w, 1)
+        main_gap = max(62, int(getattr(main_font, "size", 62) * 1.08))
+        for idx, line in enumerate(main_lines):
+            _draw_text_with_shadow(draw, (content_left, title_y + idx * main_gap), line, main_font, "#f8fafc")
+        accent_y = title_y + len(main_lines) * main_gap + 2
+        accent_lines, accent_font, _ = _adaptive_text_layout(draw, accent_title, 64, 46, content_w, 2)
+        accent_gap = max(62, int(getattr(accent_font, "size", 64) * 1.08))
+        for idx, line in enumerate(accent_lines):
+            _draw_text_with_shadow(draw, (content_left, accent_y + idx * accent_gap), line, accent_font, PORTRAIT_PRIMARY)
+        title_bottom = accent_y + len(accent_lines) * accent_gap
+    else:
+        title_lines, title_font, _ = _adaptive_text_layout(draw, main_title, 64, 44, content_w, 2)
+        title_gap = max(62, int(getattr(title_font, "size", 64) * 1.08))
+        for idx, line in enumerate(title_lines):
+            _draw_text_with_shadow(draw, (content_left, title_y + idx * title_gap), line, title_font, "#f8fafc")
+        title_bottom = title_y + len(title_lines) * title_gap
+
+    subheading = _subheading_text(analysis, segment) or source_meta["core_view"]
+    sub_lines, sub_font, _ = _adaptive_text_layout(draw, subheading, 27, 22, content_w, 2)
+    subtitle_y = title_bottom + 26
+    _layout_text_block(draw, content_left, subtitle_y, content_w, sub_lines, sub_font, "#b7c3d5", 34)
+
+    insight_top = min(max(940, subtitle_y + len(sub_lines) * 34 + 48), subtitle_top - 590)
+    insight_bottom = subtitle_top - 76
+    insight_box = (content_left, insight_top, content_right, insight_bottom)
+    draw_panel_shadow(draw, insight_box, radius=34, offset=8, fill=(0, 0, 0, 46))
+    draw_rounded_rect(draw, insight_box, 34, PORTRAIT_GLASS, PORTRAIT_GLASS_BORDER, 1)
+    draw.text((content_left + 38, insight_top + 34), "核心洞察", fill=PORTRAIT_PRIMARY, font=insight_title_font)
+    focus_lines, focus_font, _ = _adaptive_text_layout(draw, focus_label, 34, 27, content_w - 76, 1)
+    _layout_text_block(
+        draw,
+        content_left + 38,
+        insight_top + 90,
+        content_w - 76,
+        focus_lines,
+        focus_font,
+        "#f8fafc",
+        38,
+    )
+    row_top = insight_top + 148
+    point_count = 3 if (insight_bottom - row_top) >= 350 else 2
+    _draw_portrait_insight_rows(
+        draw,
+        content_left + 38,
+        row_top,
+        content_right - 38,
+        points[:point_count],
+        body_font,
+        small_font,
+    )
+
+    footer_y = insight_bottom - 54
+    draw.line((content_left + 38, footer_y, content_right - 38, footer_y), fill=(255, 255, 255, 24), width=1)
+    brand_label = _portrait_brand_label(report)
+    draw.text((content_left + 38, footer_y + 18), brand_label, fill="#bdf4ff", font=small_font)
+    source_tail = _trim_text(f"{root_label} -> {segment_title}", 32)
+    tail_bbox = draw.textbbox((0, 0), source_tail, font=tiny_font)
+    draw.text((content_right - 38 - (tail_bbox[2] - tail_bbox[0]), footer_y + 21), source_tail, fill="#8fa4c2", font=tiny_font)
 
     img.convert("RGB").save(frame_path, quality=95)
 
@@ -2205,7 +2623,13 @@ def make_concat_video(frame_items, output_path, width, height, audio_path=None, 
     output_path = Path(output_path)
     cmd = ["ffmpeg", "-y"]
     transition_duration = max(0.0, min(float(transition_duration or 0.0), 1.2))
-    use_xfade = len(frame_items) > 1 and transition_duration > 0.0
+    visible_duration = sum(max(float(duration), 1.0) for _, duration in frame_items)
+    use_xfade = (
+        len(frame_items) > 1
+        and transition_duration > 0.0
+        and len(frame_items) <= MAX_XFADE_FRAME_ITEMS
+        and visible_duration <= MAX_XFADE_DURATION_SEC
+    )
     post_trim_duration = 0.0
     encode_path = output_path
 
@@ -2319,7 +2743,11 @@ def make_concat_video(frame_items, output_path, width, height, audio_path=None, 
         cmd.extend(["-an"])
     cmd.append(str(encode_path))
 
-    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=240)
+    render_timeout = max(
+        240,
+        int((post_trim_duration or visible_duration or 0) * (1.2 if use_xfade else 0.35)) + 180,
+    )
+    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=render_timeout)
     if post_trim_duration > 0 and encode_path != output_path:
         trim_cmd = [
             "ffmpeg",
@@ -2454,6 +2882,386 @@ def _task_segments(task):
     for report in task.reports:
         segments.extend(list(report.segments))
     return sorted(segments, key=lambda item: (item.report.report_code if item.report else "", item.segment_index))
+
+
+def _ratio_dimensions(ratio):
+    return (1080, 1920) if ratio == "9:16" else (1920, 1080)
+
+
+def _render_segment_preview_frame(report, segment, frame_path, ratio="16:9", previous_focus_node_id=None, duration=None):
+    segment_duration = duration or segment.actual_duration_sec or segment.estimated_duration_sec or 12
+    segment_context = SimpleNamespace(
+        **getattr(segment, "__dict__", {}),
+        previous_focus_node_id=previous_focus_node_id,
+    )
+    visual_states = _build_segment_visual_states(report, segment_context, segment_duration)
+    state = visual_states[min(1, len(visual_states) - 1)] if visual_states else {"child_focus_id": None, "transition_progress": 1.0}
+    frame_segment = SimpleNamespace(
+        **getattr(segment, "__dict__", {}),
+        visual_child_focus_id=state.get("child_focus_id"),
+        transition_progress=state.get("transition_progress", 1.0),
+        previous_focus_node_id=previous_focus_node_id,
+    )
+    if ratio == "9:16":
+        render_portrait_frame(report, frame_segment, frame_path)
+    else:
+        render_landscape_frame(report, frame_segment, frame_path)
+    return state
+
+
+def _preview_segments_from_timeline(task, segments, limit=8):
+    segment_map = {segment.id: segment for segment in segments}
+    timeline_spans = sorted((task.result or {}).get("timeline_spans") or [], key=lambda item: item.get("start_sec") or 0)
+    selected = []
+    seen = set()
+    for span in timeline_spans:
+        if span.get("type") != "segment":
+            continue
+        segment = segment_map.get(span.get("segment_id"))
+        if not segment or segment.id in seen:
+            continue
+        selected.append(segment)
+        seen.add(segment.id)
+        if len(selected) >= limit:
+            break
+    if selected:
+        return selected
+    return segments[:limit]
+
+
+def _selected_preview_milestones(selected_milestones):
+    items = []
+    for item in selected_milestones or []:
+        if not isinstance(item, dict):
+            continue
+        milestone_type = str(item.get("type") or "").strip()
+        segment_id = item.get("segment_id")
+        items.append({
+            "type": milestone_type,
+            "segment_id": str(segment_id) if segment_id else None,
+            "label": str(item.get("label") or "").strip(),
+        })
+    return items
+
+
+def _previous_focus_node_id_for_segment(segments, target_segment):
+    previous_focus_node_id = None
+    for segment in segments:
+        if segment.id == target_segment.id:
+            return previous_focus_node_id
+        current_focus_node_id = _segment_focus_node_id(segment)
+        if current_focus_node_id:
+            previous_focus_node_id = current_focus_node_id
+    return previous_focus_node_id
+
+
+def _timeline_span_for_segment(task, segment):
+    for span in (task.result or {}).get("timeline_spans") or []:
+        if span.get("type") == "segment" and span.get("segment_id") == segment.id:
+            return span
+    return None
+
+
+def _append_clipped_frame_item(frame_items, frame_path, duration, remaining):
+    clipped = min(max(float(duration or 0.0), 0.05), max(float(remaining or 0.0), 0.0))
+    if clipped <= 0:
+        return 0.0
+    frame_items.append((frame_path, clipped))
+    return clipped
+
+
+def _trim_audio_clip(audio_path, output_path, duration_sec=10.0, start_sec=0.0):
+    if not audio_path:
+        return None
+    audio_path = Path(audio_path)
+    if not audio_path.exists():
+        return None
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-ss",
+            f"{float(start_sec or 0):.3f}",
+            "-t",
+            f"{float(duration_sec or 10):.3f}",
+            "-i",
+            str(audio_path),
+            "-c:a",
+            "aac",
+            str(output_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return output_path if output_path.exists() else None
+
+
+def render_task_keyframes(task, ratio="16:9", limit=8):
+    segments = _task_segments(task)
+    if not segments:
+        raise ValueError("没有可渲染的口播段落，请先生成 AI 文案")
+
+    output_root = task_dir(task.id) / "previews" / "keyframes" / ratio.replace(":", "x") / uuid.uuid4().hex[:8]
+    frame_dir = output_root / "frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    selected_segments = _preview_segments_from_timeline(task, segments, limit=max(1, int(limit or 8)))
+    file_paths = []
+    segment_ids = []
+    milestones = []
+
+    if ratio == "16:9" and _is_theme_task(task):
+        opening_path = frame_dir / "keyframe_000_theme_opening.jpg"
+        render_landscape_theme_opening(task, opening_path, stage="network", progress=1.0)
+        opening_rel = rel_path(opening_path)
+        file_paths.append(opening_rel)
+        milestones.append({
+            "type": "theme_opening",
+            "label": "主题开场",
+            "file_path": opening_rel,
+            "segment_id": None,
+        })
+
+    previous_focus_node_id = None
+    for index, segment in enumerate(selected_segments, start=1):
+        report = segment.report
+        if not report:
+            continue
+        frame_path = frame_dir / f"keyframe_{index:03d}_{safe_filename(segment.segment_id or segment.id)}.jpg"
+        _render_segment_preview_frame(report, segment, frame_path, ratio=ratio, previous_focus_node_id=previous_focus_node_id)
+        frame_rel = rel_path(frame_path)
+        segment_label = _segment_display_title(segment, analysis=report.analysis, max_chars=28)
+        file_paths.append(frame_rel)
+        segment_ids.append(segment.id)
+        milestones.append({
+            "type": "segment",
+            "label": segment_label or segment.segment_id or f"段落 {index}",
+            "file_path": frame_rel,
+            "segment_id": segment.id,
+            "segment_index": segment.segment_index,
+            "report_code": report.report_code,
+        })
+        current_focus_node_id = _segment_focus_node_id(segment)
+        if current_focus_node_id:
+            previous_focus_node_id = current_focus_node_id
+
+    if not file_paths:
+        raise ValueError("没有生成有效关键帧")
+    return {
+        "preview_type": "keyframes",
+        "ratio": ratio,
+        "file_paths": file_paths,
+        "file_path": file_paths[0],
+        "segment_ids": segment_ids,
+        "duration_sec": None,
+        "renderer_version": REPORT_VIDEO_RENDER_PREVIEW_VERSION,
+        "meta": {
+            "frame_count": len(file_paths),
+            "milestone_count": len(milestones),
+            "milestones": milestones,
+            "source": "timeline" if (task.result or {}).get("timeline_spans") else "segments",
+        },
+    }
+
+
+def _preview_audio_for_milestone(task, segment, output_path, duration_sec):
+    full_audio = (task.result or {}).get("full_audio") or {}
+    if full_audio.get("file_path"):
+        span = _timeline_span_for_segment(task, segment) if segment is not None else None
+        start_sec = float((span or {}).get("start_sec") or 0.0)
+        return _trim_audio_clip(
+            PROJECT_ROOT / full_audio["file_path"],
+            output_path,
+            duration_sec=duration_sec,
+            start_sec=start_sec,
+        )
+    if segment is not None and segment.audio_path:
+        return _trim_audio_clip(PROJECT_ROOT / segment.audio_path, output_path, duration_sec=duration_sec)
+    return None
+
+
+def _render_task_opening_preview_clip(task, ratio, output_root, duration_sec):
+    width, height = _ratio_dimensions(ratio)
+    clip_dir = output_root / "opening"
+    frame_dir = clip_dir / "frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    frame_items = []
+    remaining = duration_sec
+    opening_states = _theme_opening_visual_states(task, duration_sec)
+    for state_index, state in enumerate(opening_states, start=1):
+        if remaining <= 0:
+            break
+        frame_path = frame_dir / f"opening_{state_index:02d}.jpg"
+        render_landscape_theme_opening(
+            task,
+            frame_path,
+            stage=state.get("stage") or "covers",
+            progress=state.get("progress", 1.0),
+        )
+        consumed = _append_clipped_frame_item(frame_items, frame_path, state.get("duration", 1.0), remaining)
+        remaining -= consumed
+    if remaining > 0 and frame_items:
+        last_frame, last_duration = frame_items[-1]
+        frame_items[-1] = (last_frame, float(last_duration or 0.0) + remaining)
+    audio_path = None
+    full_audio = (task.result or {}).get("full_audio") or {}
+    if full_audio.get("file_path"):
+        audio_path = _trim_audio_clip(
+            PROJECT_ROOT / full_audio["file_path"],
+            clip_dir / "opening_audio.m4a",
+            duration_sec=duration_sec,
+        )
+    output_path = clip_dir / f"milestone_000_opening_{ratio.replace(':', 'x')}_{uuid.uuid4().hex[:8]}.mp4"
+    make_concat_video(frame_items, output_path, width, height, audio_path=audio_path, transition_duration=0.0)
+    return {
+        "type": "theme_opening",
+        "label": "主题开场",
+        "file_path": rel_path(output_path),
+        "segment_id": None,
+        "duration_sec": media_duration(output_path),
+    }
+
+
+def _render_segment_preview_clip(task, segment, ratio, output_root, index, duration_sec, previous_focus_node_id=None):
+    report = segment.report
+    if not report:
+        return None
+    width, height = _ratio_dimensions(ratio)
+    clip_dir = output_root / f"segment_{index:03d}_{safe_filename(segment.segment_id or segment.id)}"
+    frame_dir = clip_dir / "frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    frame_items = []
+    remaining = duration_sec
+    segment_duration = min(float(segment.actual_duration_sec or segment.estimated_duration_sec or duration_sec), duration_sec)
+    segment_context = SimpleNamespace(
+        **getattr(segment, "__dict__", {}),
+        previous_focus_node_id=previous_focus_node_id,
+    )
+    visual_states = _build_segment_visual_states(report, segment_context, segment_duration)
+    if not visual_states:
+        visual_states = [{"child_focus_id": None, "duration": segment_duration, "transition_progress": 1.0}]
+    for state_index, state in enumerate(visual_states, start=1):
+        if remaining <= 0:
+            break
+        frame_path = frame_dir / f"clip_{index:03d}_{state_index:02d}.jpg"
+        state_segment = SimpleNamespace(
+            **getattr(segment, "__dict__", {}),
+            visual_child_focus_id=state.get("child_focus_id"),
+            transition_progress=state.get("transition_progress", 1.0),
+            previous_focus_node_id=previous_focus_node_id,
+        )
+        if ratio == "9:16":
+            render_portrait_frame(report, state_segment, frame_path)
+        else:
+            render_landscape_frame(report, state_segment, frame_path)
+        consumed = _append_clipped_frame_item(frame_items, frame_path, state.get("duration", segment_duration), remaining)
+        remaining -= consumed
+    if not frame_items:
+        return None
+    if remaining > 0:
+        last_frame, last_duration = frame_items[-1]
+        frame_items[-1] = (last_frame, float(last_duration or 0.0) + remaining)
+    audio_path = _preview_audio_for_milestone(task, segment, clip_dir / "clip_audio.m4a", duration_sec)
+    output_path = clip_dir / f"milestone_{index:03d}_{safe_filename(segment.segment_id or segment.id)}_{ratio.replace(':', 'x')}_{uuid.uuid4().hex[:8]}.mp4"
+    make_concat_video(
+        frame_items,
+        output_path,
+        width,
+        height,
+        audio_path=audio_path,
+        transition_duration=0.0,
+    )
+    segment_label = _segment_display_title(segment, analysis=report.analysis, max_chars=28)
+    return {
+        "type": "segment",
+        "label": segment_label or segment.segment_id or f"段落 {index}",
+        "file_path": rel_path(output_path),
+        "segment_id": segment.id,
+        "segment_index": segment.segment_index,
+        "report_code": report.report_code,
+        "duration_sec": media_duration(output_path),
+    }
+
+
+def render_task_preview_clip(task, ratio="16:9", duration_sec=10.0, limit=6, selected_milestones=None):
+    segments = _task_segments(task)
+    if not segments:
+        raise ValueError("没有可渲染的口播段落，请先生成 AI 文案")
+
+    preview_duration = max(3.0, min(float(duration_sec or 10.0), 30.0))
+    output_root = task_dir(task.id) / "previews" / "clips" / ratio.replace(":", "x") / uuid.uuid4().hex[:8]
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    file_paths = []
+    segment_ids = []
+    milestones = []
+    previous_focus_node_id = None
+    selected_items = _selected_preview_milestones(selected_milestones)
+    selected_segment_ids = [item["segment_id"] for item in selected_items if item.get("segment_id")]
+    selected_mode = bool(selected_items)
+    include_opening = any(item.get("type") == "theme_opening" for item in selected_items)
+
+    if ratio == "16:9" and _is_theme_task(task) and (include_opening or not selected_mode):
+        opening = _render_task_opening_preview_clip(task, ratio, output_root, min(preview_duration, 10.0))
+        file_paths.append(opening["file_path"])
+        milestones.append(opening)
+
+    if selected_mode:
+        segment_map = {segment.id: segment for segment in segments}
+        selected_segments = []
+        seen = set()
+        for segment_id in selected_segment_ids:
+            segment = segment_map.get(segment_id)
+            if segment and segment.id not in seen:
+                selected_segments.append(segment)
+                seen.add(segment.id)
+    else:
+        selected_segments = _preview_segments_from_timeline(task, segments, limit=max(1, int(limit or 6)))
+    for index, segment in enumerate(selected_segments, start=1):
+        if selected_mode:
+            previous_focus_node_id = _previous_focus_node_id_for_segment(segments, segment)
+        milestone = _render_segment_preview_clip(
+            task,
+            segment,
+            ratio,
+            output_root,
+            index,
+            preview_duration,
+            previous_focus_node_id=previous_focus_node_id,
+        )
+        if milestone:
+            file_paths.append(milestone["file_path"])
+            milestones.append(milestone)
+            segment_ids.append(segment.id)
+        current_focus_node_id = _segment_focus_node_id(segment)
+        if current_focus_node_id:
+            previous_focus_node_id = current_focus_node_id
+
+    if not file_paths:
+        raise ValueError("没有生成有效预览片段画面")
+    return {
+        "preview_type": "preview_clip",
+        "ratio": ratio,
+        "file_path": file_paths[0],
+        "file_paths": file_paths,
+        "segment_ids": segment_ids,
+        "duration_sec": sum(float(item.get("duration_sec") or 0.0) for item in milestones),
+        "renderer_version": REPORT_VIDEO_RENDER_PREVIEW_VERSION,
+        "meta": {
+            "clip_count": len(file_paths),
+            "milestone_count": len(milestones),
+            "milestones": milestones,
+            "mode": "selected" if selected_mode else "group",
+            "requested_milestones": selected_items,
+            "per_clip_duration_sec": preview_duration,
+            "source": "timeline" if (task.result or {}).get("timeline_spans") else "segments",
+        },
+    }
 
 
 def _report_for_context_span(task, span, segments):

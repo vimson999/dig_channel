@@ -24,7 +24,6 @@ from services.report_audio_workflow import (
 from services.report_top10_workflow import (
     FEATURE_NAME,
     QUEUE_NAME,
-    REQUIRED_REPORT_COUNT,
     ReportTop10WorkflowError,
     assemble_final_script_for_tts,
     build_editor_input,
@@ -32,6 +31,7 @@ from services.report_top10_workflow import (
     cached_single_report_for_pdf,
     default_editor_gemini_url,
     extract_editor_json,
+    selected_report_count,
     valid_single_report_script,
     write_result_file,
 )
@@ -165,8 +165,9 @@ def _process_job(task_id: str) -> bool:
 
     payload = task.params.get("report_top10_workflow") or {}
     pdfs = payload.get("pdfs") if isinstance(payload.get("pdfs"), list) else []
-    if len(pdfs) != REQUIRED_REPORT_COUNT:
-        _mark_failed(task, f"需要选择 {REQUIRED_REPORT_COUNT} 份 PDF，当前 {len(pdfs)} 份")
+    report_count = selected_report_count(payload.get("selected_count") or len(pdfs))
+    if len(pdfs) != report_count:
+        _mark_failed(task, f"需要选择 {report_count} 份 PDF，当前 {len(pdfs)} 份")
         return False
 
     result = dict(task.result or {})
@@ -193,13 +194,13 @@ def _process_job(task_id: str) -> bool:
         params={"user_id": task.user_id or task.params.get("user_id")},
     )
 
-    _emit(task.id, "prepare_single_reports", 3, "开始准备 10 篇单篇研报文案")
+    _emit(task.id, "prepare_single_reports", 3, f"开始准备 {report_count} 篇单篇研报文案")
     source_reports = _existing_source_reports(task.id)
     for index, pdf in enumerate(pdfs, start=1):
         _raise_if_canceled(task.id)
         existing = _source_report_for_pdf(source_reports, pdf)
         if existing:
-            _emit(task.id, f"single_report_{index:02d}_reused", _single_progress(index), f"复用第 {index} 篇单篇文案")
+            _emit(task.id, f"single_report_{index:02d}_reused", _single_progress(index, report_count), f"复用第 {index} 篇单篇文案")
             continue
 
         reusable = None
@@ -208,7 +209,7 @@ def _process_job(task_id: str) -> bool:
         if reusable:
             source_reports.append(reusable)
             _update_result(task.id, {"source_reports": source_reports})
-            _emit(task.id, f"single_report_{index:02d}_reused_history", _single_progress(index), f"复用历史单篇解析：{_pdf_title(pdf)}")
+            _emit(task.id, f"single_report_{index:02d}_reused_history", _single_progress(index, report_count), f"复用历史单篇解析：{_pdf_title(pdf)}")
             continue
 
         report = _run_single_report_gemini(
@@ -216,12 +217,12 @@ def _process_job(task_id: str) -> bool:
             pdf=pdf,
             index=index,
             payload=payload,
-            start_progress=_single_progress(index - 1),
-            end_progress=_single_progress(index),
+            start_progress=_single_progress(index - 1, report_count),
+            end_progress=_single_progress(index, report_count),
         )
         source_reports.append(report)
         _update_result(task.id, {"source_reports": source_reports})
-        _emit(task.id, f"single_report_{index:02d}_completed", _single_progress(index), f"第 {index} 篇单篇文案已完成")
+        _emit(task.id, f"single_report_{index:02d}_completed", _single_progress(index, report_count), f"第 {index} 篇单篇文案已完成")
 
     source_reports = _order_source_reports(source_reports, pdfs)
     editor_input = build_editor_input(source_reports, payload)
@@ -570,7 +571,7 @@ def _create_editor_gemini_task(parent, editor_input: str, payload: Dict[str, Any
         "source": FEATURE_NAME,
         "role": "top10_editor",
         "parent_task_id": parent.id,
-        "title": str(payload.get("program_name") or "今日研报 Top10"),
+        "title": str(payload.get("program_name") or "今日研报严选"),
         "attempt": int(attempt or 1),
         "max_attempts": int(max_attempts or 1),
         "retry_index": retry_index,
@@ -650,7 +651,7 @@ def _reusable_single_report_for_pdf(pdf: Dict[str, Any]) -> Optional[Dict[str, A
             PublicationTask.id,
             PublicationTask.feature,
             PublicationTask.status,
-            PublicationTask.result,
+            PublicationTask.final_script_chars,
             PublicationTask.source_task_id,
             PublicationTask.report_audio_pdf_attachment_id,
             PublicationTask.report_audio_cover_title,
@@ -661,6 +662,7 @@ def _reusable_single_report_for_pdf(pdf: Dict[str, Any]) -> Optional[Dict[str, A
         .filter(
             PublicationTask.feature.in_(SINGLE_REPORT_FEATURES),
             PublicationTask.status == "completed",
+            PublicationTask.final_script_chars > 0,
             or_(
                 PublicationTask.source_task_id == asset_id,
                 PublicationTask.report_audio_pdf_attachment_id == asset_id,
@@ -671,7 +673,8 @@ def _reusable_single_report_for_pdf(pdf: Dict[str, Any]) -> Optional[Dict[str, A
     )
     if not task:
         return None
-    result = task.result if isinstance(task.result, dict) else {}
+    detail = _load_task(task.id, PublicationTask.result)
+    result = detail.result if detail and isinstance(detail.result, dict) else {}
     structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
     script = valid_single_report_script(structured)
     if not script:
@@ -975,9 +978,10 @@ def _load_task_status(task_id: str):
     )
 
 
-def _single_progress(index: int) -> int:
-    index = max(0, min(REQUIRED_REPORT_COUNT, int(index or 0)))
-    return 5 + int(index / REQUIRED_REPORT_COUNT * 65)
+def _single_progress(index: int, total: int = 10) -> int:
+    total = max(1, int(total or 1))
+    index = max(0, min(total, int(index or 0)))
+    return 5 + int(index / total * 65)
 
 
 def _pdf_title(pdf: Dict[str, Any]) -> str:

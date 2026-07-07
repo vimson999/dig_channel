@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+from datetime import datetime, timedelta
 
 backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if backend_dir not in sys.path:
@@ -17,6 +18,10 @@ DEFAULT_DB_RETRIES = 5
 DEFAULT_DB_RETRY_DELAY_SECONDS = 60
 DB_RETRIES_ENV_NAME = "ZSXQ_SYNC_DB_RETRIES"
 DB_RETRY_DELAY_ENV_NAME = "ZSXQ_SYNC_DB_RETRY_DELAY_SECONDS"
+DEFAULT_UPSTREAM_RETRIES = 5
+DEFAULT_UPSTREAM_RETRY_DELAY_SECONDS = 300
+UPSTREAM_RETRIES_ENV_NAME = "ZSXQ_SYNC_UPSTREAM_RETRIES"
+UPSTREAM_RETRY_DELAY_ENV_NAME = "ZSXQ_SYNC_UPSTREAM_RETRY_DELAY_SECONDS"
 
 
 @celery_app.task(bind=True, name="tasks.zsxq_sync.run_zsxq_sync")
@@ -163,6 +168,8 @@ def run_zsxq_sync(self, run_id, payload):
                 )
                 raise self.retry(exc=exc, countdown=countdown, max_retries=_db_retry_count())
 
+            _maybe_retry_transient_upstream_error(self, run_id, exc)
+
             if credential_id:
                 try:
                     from services.platform_credential_service import is_auth_error, mark_credential_error
@@ -188,6 +195,100 @@ def _is_retryable_db_error(exc):
     return is_retryable_db_error(exc)
 
 
+def _is_retryable_upstream_error(exc):
+    try:
+        from services.zsxq_sync_service import ZsxqTransientUpstreamError
+
+        if isinstance(exc, ZsxqTransientUpstreamError):
+            return True
+    except Exception:
+        pass
+
+    try:
+        from requests import RequestException
+
+        if isinstance(exc, RequestException):
+            return True
+    except Exception:
+        pass
+
+    message = str(exc or "").lower()
+    return "code=1059" in message or "code 1059" in message
+
+
+def _maybe_retry_transient_upstream_error(celery_task, run_id, exc):
+    if not _is_retryable_upstream_error(exc):
+        return False
+    retry_count = _upstream_retry_count()
+    retries = _request_retries(celery_task)
+    if retry_count <= 0 or retries >= retry_count:
+        return False
+
+    countdown = _upstream_retry_delay_seconds(retries)
+    logger.warning(
+        "[ZSXQ_SYNC_TASK] retry transient upstream error | run_id=%s retry=%s/%s countdown=%ss error=%s",
+        run_id,
+        retries + 1,
+        retry_count,
+        countdown,
+        exc,
+    )
+    _mark_sync_run_upstream_retrying(
+        run_id,
+        exc,
+        celery_task,
+        countdown=countdown,
+        retry_count=retry_count,
+    )
+    raise celery_task.retry(exc=exc, countdown=countdown, max_retries=retry_count)
+
+
+def _mark_sync_run_upstream_retrying(run_id, exc, celery_task, *, countdown, retry_count):
+    if not run_id:
+        return
+    try:
+        from models.zsxq_sync import ZsxqSyncRun
+
+        run = ZsxqSyncRun.query.filter(ZsxqSyncRun.id == str(run_id)).one_or_none()
+        if not run:
+            return
+        now = datetime.utcnow()
+        now_text = now.isoformat() + "Z"
+        next_retry_at = (now + timedelta(seconds=countdown)).isoformat() + "Z"
+        retries = _request_retries(celery_task)
+        retry_number = retries + 1
+        result = dict(run.result or {})
+        retry_state = dict(result.get("retry_state") or {})
+        retry_state["upstream"] = {
+            "status": "scheduled",
+            "retry_number": retry_number,
+            "retry_limit": retry_count,
+            "retry_delay_seconds": countdown,
+            "next_retry_at": next_retry_at,
+            "last_error": str(exc),
+            "updated_at": now_text,
+        }
+        result.update({
+            "queued": True,
+            "running": False,
+            "last_error": str(exc),
+            "retry_state": retry_state,
+        })
+        run.status = "queued"
+        run.completed_at = None
+        run.error_message = None
+        run.result = result
+        db.session.add(run)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        logger.exception("[ZSXQ_SYNC_TASK] failed to mark upstream retry | run_id=%s", run_id)
+
+
+def _request_retries(celery_task):
+    return int(getattr(getattr(celery_task, "request", None), "retries", 0) or 0)
+
+
 def _db_retry_count():
     return max(0, _int_env(DB_RETRIES_ENV_NAME, DEFAULT_DB_RETRIES))
 
@@ -195,6 +296,15 @@ def _db_retry_count():
 def _db_retry_delay_seconds(retry_index):
     base = max(1, _int_env(DB_RETRY_DELAY_ENV_NAME, DEFAULT_DB_RETRY_DELAY_SECONDS))
     return min(base * max(int(retry_index or 0) + 1, 1), 600)
+
+
+def _upstream_retry_count():
+    return max(0, min(_int_env(UPSTREAM_RETRIES_ENV_NAME, DEFAULT_UPSTREAM_RETRIES), 20))
+
+
+def _upstream_retry_delay_seconds(retry_index):
+    base = max(1, _int_env(UPSTREAM_RETRY_DELAY_ENV_NAME, DEFAULT_UPSTREAM_RETRY_DELAY_SECONDS))
+    return min(base * max(int(retry_index or 0) + 1, 1), 1800)
 
 
 def _int_env(name, default):

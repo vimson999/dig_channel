@@ -11,6 +11,7 @@ from flask import has_app_context
 from sqlalchemy import text
 
 from celery_config import celery_app
+from models import db
 from models.zsxq_sync import ZsxqSyncRun
 from services.zsxq_service import zsxq_service
 from services.zsxq_sync_service import (
@@ -459,6 +460,7 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
         }]
     except Exception as exc:
         queue_error = str(exc)
+        _reset_db_session("workflow_queue_failed")
         if isinstance(workflow, dict) and workflow.get("id"):
             try:
                 from services.zsxq_workflow_service import zsxq_workflow_service
@@ -714,20 +716,32 @@ def _pending_system_sync_work(group_id):
     try:
         from services.zsxq_workflow_service import zsxq_workflow_service
         stale_workflows = zsxq_workflow_service.recover_stale_initial_workflows(group_id=group_id)
+        stale_workflows.extend(zsxq_workflow_service.recover_stale_running_sync_workflows(group_id=group_id))
+        stale_workflows.extend(zsxq_workflow_service.recover_stale_running_clean_workflows(group_id=group_id))
         pending_workflow = zsxq_workflow_service.pending_workflow(group_id=group_id, recover_stale=False)
-    except Exception:
+    except Exception as exc:
+        _reset_db_session("pending_workflow_check")
+        logger.warning(
+            "[ZSXQ_SYSTEM_SYNC_TEST] pending workflow check failed, session reset | group_id=%s error=%s",
+            group_id,
+            exc,
+        )
         pending_workflow = None
 
-    pending_run = (
-        ZsxqSyncRun.query
-        .filter(
-            ZsxqSyncRun.group_id == str(group_id),
-            text("zsxq_sync_runs.mode LIKE 'sys%'"),
-            ZsxqSyncRun.status.in_(("queued", "running")),
+    try:
+        pending_run = (
+            ZsxqSyncRun.query
+            .filter(
+                ZsxqSyncRun.group_id == str(group_id),
+                text("zsxq_sync_runs.mode LIKE 'sys%'"),
+                ZsxqSyncRun.status.in_(("queued", "running")),
+            )
+            .order_by(ZsxqSyncRun.created_at.desc())
+            .first()
         )
-        .order_by(ZsxqSyncRun.created_at.desc())
-        .first()
-    )
+    except Exception:
+        _reset_db_session("pending_run_check")
+        raise
 
     return {
         "pending": bool(pending_workflow) or bool(pending_run) or bool(queue_length and queue_length > 0),
@@ -756,6 +770,7 @@ def runtime_cookie_info(account_id=None, required=True):
         if info.get("cookie"):
             return info
     except Exception:
+        _reset_db_session("runtime_cookie_info")
         if required:
             raise
 
@@ -798,7 +813,27 @@ def _runtime_db_cookie_configured():
 
         return bool(has_active_credential(platform="zsxq", purpose="zsxq.sync"))
     except Exception:
+        _reset_db_session("runtime_db_cookie_check")
         return False
+
+
+def _reset_db_session(reason=None):
+    if not has_app_context():
+        return
+    try:
+        db.session.rollback()
+    except Exception:
+        logger.exception(
+            "[ZSXQ_SYSTEM_SYNC_TEST] db session rollback failed | reason=%s",
+            reason or "-",
+        )
+    try:
+        db.session.remove()
+    except Exception:
+        logger.exception(
+            "[ZSXQ_SYSTEM_SYNC_TEST] db session remove failed | reason=%s",
+            reason or "-",
+        )
 
 
 def _runtime_cookie_source():

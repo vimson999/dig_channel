@@ -91,7 +91,9 @@
 
                     <label class="mt-4 block">
                         <span class="mb-1 block text-xs font-bold text-slate-500">可选 Gem URL</span>
-                        <input id="gemini-url-input" type="url" class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" placeholder="留空使用 .env 中的 REPORT_PDF_GEMINI_URL/GEMINI_BROWSER_URL">
+                        <select id="gemini-url-select" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 focus:border-slate-500 focus:outline-none"></select>
+                        <input id="gemini-url-input" type="url" class="mt-2 hidden w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" placeholder="粘贴 https://gemini.google.com/gem/...">
+                        <div id="gemini-url-current" class="mt-1 truncate text-[11px] font-bold text-slate-400"></div>
                     </label>
 
                     <div class="mt-4 rounded-md border border-indigo-100 bg-indigo-50/50 p-3">
@@ -109,6 +111,13 @@
                             <label class="flex items-center gap-2 rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
                                 <input id="vertical-video-enabled" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-indigo-600">
                                 生成竖屏视频
+                            </label>
+                            <label class="block rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
+                                <span class="mb-1 block text-slate-500">竖屏视频方案</span>
+                                <select id="vertical-video-scheme" class="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 focus:border-slate-400 focus:outline-none">
+                                    <option value="scheme1">方案一：当前竖屏背景</option>
+                                    <option value="scheme2">方案二：封面工具台竖版背景</option>
+                                </select>
                             </label>
                             <label class="flex items-center gap-2 rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-400">
                                 <input id="bilibili-enabled" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-indigo-600" disabled>
@@ -180,6 +189,7 @@
 
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260614-report-audio-workflow"></script>
-    <script src="js/report-audio-workflow-test.js?v=20260626-vertical-video-download"></script>
+    <script src="js/download-count-highlight.js?v=20260702"></script>
+    <script src="js/report-audio-workflow-test.js?v=20260702-download-count-highlight"></script>
 </body>
 </html>

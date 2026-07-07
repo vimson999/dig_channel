@@ -273,8 +273,11 @@ class ExternalDocumentService:
             .options(load_only(
                 ZsxqTopicExternalDocument.id,
                 ZsxqTopicExternalDocument.group_id,
+                ZsxqTopicExternalDocument.group_name,
                 ZsxqTopicExternalDocument.tab_id,
+                ZsxqTopicExternalDocument.tab_label,
                 ZsxqTopicExternalDocument.topic_id,
+                ZsxqTopicExternalDocument.topic_title,
                 ZsxqTopicExternalDocument.provider,
                 ZsxqTopicExternalDocument.external_document_id,
                 ZsxqTopicExternalDocument.source_url,
@@ -282,6 +285,8 @@ class ExternalDocumentService:
                 ZsxqTopicExternalDocument.url_hash,
                 ZsxqTopicExternalDocument.link_text,
                 ZsxqTopicExternalDocument.link_source,
+                ZsxqTopicExternalDocument.created_at,
+                ZsxqTopicExternalDocument.updated_at,
             ))
             .all()
         )
@@ -560,6 +565,7 @@ class ExternalDocumentService:
             ExternalDocument.tts_error,
             ExternalDocument.tts_submitted_at,
             ExternalDocument.tts_completed_at,
+            ExternalDocument.created_at,
             ExternalDocument.updated_at,
         )).all()
         return {row.id: row for row in rows}

@@ -76,7 +76,9 @@
                     <div id="selected-list" class="mt-3 max-h-56 space-y-2 overflow-auto"></div>
                     <label class="mt-4 block">
                         <span class="mb-1 block text-xs font-bold text-slate-500">单篇 Gem URL</span>
-                        <input id="gemini-url" type="url" class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" placeholder="留空则使用 worker 默认 Gem">
+                        <select id="gemini-url-select" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 focus:border-slate-500 focus:outline-none"></select>
+                        <input id="gemini-url" type="url" class="mt-2 hidden w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" placeholder="粘贴 https://gemini.google.com/gem/...">
+                        <div id="gemini-url-current" class="mt-1 truncate text-[11px] font-bold text-slate-400"></div>
                     </label>
                     <details class="mt-3 rounded-md border border-slate-200 bg-slate-50">
                         <summary class="cursor-pointer px-3 py-2 text-xs font-black text-slate-700">提示词</summary>
@@ -134,6 +136,7 @@
 
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260625-script-material"></script>
-    <script src="js/report-script-material-workflow-test.js?v=20260627-script-material-doubao-submit"></script>
+    <script src="js/download-count-highlight.js?v=20260702"></script>
+    <script src="js/report-script-material-workflow-test.js?v=20260703-material-detail-stable"></script>
 </body>
 </html>

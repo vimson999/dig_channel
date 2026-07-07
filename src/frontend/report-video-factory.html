@@ -6,7 +6,8 @@
     <title>研报导图视频工厂 - Shioa</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link href="css/report-video-factory.css?v=20260609-topic-flow" rel="stylesheet">
+    <link href="css/report-video-factory.css?v=20260702-selective-milestone-clips" rel="stylesheet">
+    <link href="css/three-workspaces.css?v=20260702-report-flow" rel="stylesheet">
 </head>
 <body>
     <main class="rv-shell">
@@ -16,6 +17,28 @@
                 <p>上传研报 PDF，可走单篇解读或批量主题策划；主题脚本应用后可直接进入音频匹配和视频生成。</p>
             </div>
             <div class="rv-phase-badge">PDF → AI → Video</div>
+        </section>
+
+        <section id="report-video-flow-map" class="three-workspace-panel three-workspace-panel--compact">
+            <div class="three-workspace-scene" data-three-scene></div>
+            <aside class="three-workspace-side" data-three-side></aside>
+        </section>
+
+        <section id="report-video-storyboard" class="rv-storyboard-panel">
+            <div class="rv-storyboard-head">
+                <div>
+                    <p class="rv-storyboard-kicker">VIDEO FRAMES</p>
+                    <h2>视频内容帧</h2>
+                    <span id="storyboard-summary">0 帧</span>
+                </div>
+                <div class="rv-storyboard-ratio" aria-label="视频比例">
+                    <button class="active" type="button" data-storyboard-ratio="16:9">16:9</button>
+                    <button type="button" data-storyboard-ratio="9:16">9:16</button>
+                </div>
+            </div>
+            <div id="storyboard-frame-list" class="rv-storyboard-list">
+                <div class="rv-empty">选择任务并生成文案后会显示视频内容帧。</div>
+            </div>
         </section>
 
         <section class="rv-layout">
@@ -219,6 +242,8 @@
                             </div>
                             <div class="rv-toolbar-actions">
                                 <span id="tts-script-summary">0 段</span>
+                                <button id="submit-doubao-tts-btn" class="rv-primary small" type="button">投递豆包 TTS</button>
+                                <button id="sync-doubao-tts-btn" class="rv-ghost" type="button">同步 TTS 音频</button>
                                 <button id="copy-all-tts-btn" class="rv-primary small" type="button">复制视频口播稿</button>
                                 <button id="copy-tts-manifest-btn" class="rv-ghost" type="button">复制制作清单</button>
                             </div>
@@ -226,6 +251,7 @@
                         <div id="tts-script-list" class="rv-tts-list">
                             <div class="rv-empty">生成 AI 文案后会显示可用于 TTS 的口播稿。</div>
                         </div>
+                        <div id="doubao-tts-status" class="rv-doubao-tts-status"></div>
 
                         <div class="rv-upload-panel">
                             <div>
@@ -291,12 +317,36 @@
                     </section>
 
                     <section id="tab-video" class="rv-tab-panel hidden">
+                        <section class="rv-render-gate">
+                            <div class="rv-render-gate-head">
+                                <div>
+                                    <h3>正式生成前确认</h3>
+                                    <p>先生成一组里程碑关键帧确认画面方向，再生成一组 10 秒里程碑样片确认字幕、音频、转场和节奏。</p>
+                                </div>
+                                <span id="render-preview-summary">等待预览</span>
+                            </div>
+                            <div class="rv-render-gate-actions">
+                                <button id="generate-keyframes-btn" class="rv-primary small" type="button">生成关键帧</button>
+                                <button id="approve-keyframes-btn" class="rv-ghost small" type="button">确认关键帧</button>
+                                <button id="reject-keyframes-btn" class="rv-ghost small danger" type="button">退回关键帧</button>
+                                <button id="generate-preview-clip-btn" class="rv-primary small" type="button">生成样片组</button>
+                                <button id="approve-preview-clip-btn" class="rv-ghost small" type="button">确认样片组</button>
+                                <button id="reject-preview-clip-btn" class="rv-ghost small danger" type="button">退回样片组</button>
+                            </div>
+                            <div id="render-preview-list" class="rv-render-preview-list">
+                                <div class="rv-empty">音频匹配完成后，先生成里程碑关键帧和样片组。</div>
+                            </div>
+                        </section>
+
                         <div class="rv-ai-panel">
                             <div>
                                 <h3>视频生成</h3>
-                                <p>横屏生成导图聚焦画面，竖屏生成节点卡片。没有音频时按 segment 预估时长生成静音测试视频。</p>
+                                <p>关键帧组和里程碑样片组确认通过后，才会进入完整 MP4 生成。</p>
                             </div>
-                            <button id="generate-video-btn" class="rv-primary" type="button">生成视频</button>
+                            <div class="rv-video-generate-actions">
+                                <button id="generate-video-btn" class="rv-primary" type="button">生成视频</button>
+                                <button id="generate-remotion-video-btn" class="rv-ghost" type="button">生成 Remotion 试验版</button>
+                            </div>
                         </div>
                         <div class="rv-report-toolbar">
                             <h3>输出列表</h3>
@@ -499,6 +549,8 @@
     <script src="js/env.js"></script>
     <script src="js/api.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/report-video-factory.js?v=20260609-topic-flow"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="js/three-workspace-graph.js?v=20260702-report-flow"></script>
+    <script src="js/report-video-factory.js?v=20260702-selective-milestone-clips"></script>
 </body>
 </html>

@@ -22,7 +22,7 @@
         <div class="mb-5 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
             <div>
                 <h1 class="text-2xl font-black tracking-tight">MP3 视频编排台</h1>
-                <p class="mt-1 text-sm text-slate-500">已同步 MP3 -> Gemini Gem 摘要与信息图 -> DS v4 pro 标题/时间戳 -> 四张封皮/背景 -> 横竖屏视频。</p>
+                <p class="mt-1 text-sm text-slate-500">已同步 MP3 -> Gemini / IMA+DS / 手动 DS 返回值 -> 四张封皮/背景 -> 横竖屏视频。</p>
             </div>
             <div class="flex flex-wrap items-center gap-2">
                 <span id="provider-status" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-500">配置检查中</span>
@@ -76,6 +76,29 @@
                 <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                     <h2 class="text-base font-black">投递配置</h2>
                     <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">内容来源</span>
+                        <select id="input-source-select" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 focus:border-slate-500 focus:outline-none">
+                            <option value="gemini_audio">Gemini 上传 MP3（旧流程）</option>
+                            <option value="ima_transcript">IMA 转录全文 + DS Prompt</option>
+                            <option value="ds_response">直接粘贴 DS 返回值</option>
+                        </select>
+                    </label>
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">输出模式</span>
+                        <select id="render-mode-select" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 focus:border-slate-500 focus:outline-none">
+                            <option value="keyframes" selected>关键帧预览（不合成完整视频）</option>
+                            <option value="full_video">完整横竖屏视频</option>
+                        </select>
+                    </label>
+                    <label class="mt-4 flex items-start gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5">
+                        <input id="generate-subtitles-checkbox" type="checkbox" checked class="mt-0.5 h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-500">
+                        <span>
+                            <span class="block text-sm font-black text-slate-800">生成字幕</span>
+                            <span class="mt-0.5 block text-xs leading-5 text-slate-500">完整视频时执行 ASR 并烧录字幕；关闭后合成无字幕视频。</span>
+                        </span>
+                    </label>
+                    <div id="gemini-config-panel">
+                    <label class="mt-4 block">
                         <span class="mb-1 block text-xs font-bold text-slate-500">Gemini Gem URL</span>
                         <input id="gemini-url-input" type="url" class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" value="https://gemini.google.com/gem/f9e84d5e215c">
                     </label>
@@ -83,6 +106,23 @@
                         <span class="mb-1 block text-xs font-bold text-slate-500">Gemini 生成图片 Prompt</span>
                         <textarea id="image-prompt-input" rows="6" class="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm leading-6 focus:border-slate-500 focus:outline-none"></textarea>
                     </label>
+                    </div>
+                    <div id="transcript-config-panel" class="hidden">
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">IMA 复制全文</span>
+                        <textarea id="transcript-text-input" rows="8" class="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm leading-6 focus:border-slate-500 focus:outline-none" placeholder="从 ima.copilot 点击“复制全文”后粘贴到这里"></textarea>
+                    </label>
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">DS Prompt</span>
+                        <textarea id="transcript-prompt-input" rows="7" class="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm leading-6 focus:border-slate-500 focus:outline-none"></textarea>
+                    </label>
+                    </div>
+                    <div id="ds-response-config-panel" class="hidden">
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">DS 返回值</span>
+                        <textarea id="ds-response-input" rows="12" class="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm leading-6 focus:border-slate-500 focus:outline-none" placeholder="直接粘贴 DS v4 pro 已返回的 1-7 条结果"></textarea>
+                    </label>
+                    </div>
                     <div class="mt-4 grid grid-cols-2 gap-2">
                         <button id="submit-btn" class="rounded-md bg-slate-900 px-3 py-2.5 text-sm font-bold text-white hover:bg-slate-800">
                             <i class="fas fa-paper-plane mr-1.5"></i>投递编排
@@ -136,6 +176,7 @@
 
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260618-mp3-video-workflow"></script>
-    <script src="js/mp3-video-workflow.js?v=20260624-audio-asset-card"></script>
+    <script src="js/download-count-highlight.js?v=20260702"></script>
+    <script src="js/mp3-video-workflow.js?v=20260707-subtitle-toggle"></script>
 </body>
 </html>

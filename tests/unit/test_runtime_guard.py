@@ -26,19 +26,19 @@ class RuntimeGuardTest(unittest.TestCase):
         db.init_app(self.app)
         self.ctx = self.app.app_context()
         self.ctx.push()
-        db.create_all()
+        PublicationTask.__table__.create(bind=db.engine)
         runtime_guard._DB_PRESSURE_CACHE["expires_at"] = 0.0
         runtime_guard._DB_PRESSURE_CACHE["snapshot"] = None
 
     def tearDown(self):
         db.session.remove()
-        db.drop_all()
+        PublicationTask.__table__.drop(bind=db.engine)
         self.ctx.pop()
 
-    def _add_task(self, status, feature="report_pdf_audio_workflow"):
+    def _add_task(self, status, feature="report_pdf_audio_workflow", step="init"):
         task = PublicationTask(
             status=status,
-            current_step="init",
+            current_step=step,
             progress=0,
             params={"feature": feature},
             result={},
@@ -92,6 +92,28 @@ class RuntimeGuardTest(unittest.TestCase):
     def test_script_material_workflow_has_independent_default_capacity(self):
         self.assertEqual(runtime_guard._feature_limit("report_script_material_workflow"), 2)
         self.assertEqual(runtime_guard._feature_backlog_limit("report_script_material_workflow"), 50)
+
+    def test_mp3_video_waiting_children_do_not_consume_start_capacity(self):
+        self._add_task("processing", feature="mp3_video_workflow", step="landscape_video_waiting")
+
+        start = runtime_guard.check_publication_task_admission(
+            "mp3_video_workflow",
+            mode="start",
+        )
+
+        self.assertTrue(start["allowed"])
+        self.assertEqual(start["active_count"], 0)
+        self.assertEqual(start["limit"], 1)
+
+        self._add_task("processing", feature="mp3_video_workflow", step="generate_visual_assets")
+        blocked = runtime_guard.check_publication_task_admission(
+            "mp3_video_workflow",
+            mode="start",
+        )
+
+        self.assertFalse(blocked["allowed"])
+        self.assertEqual(blocked["reason"], "feature_capacity")
+        self.assertEqual(blocked["active_count"], 1)
 
     def test_admission_retry_budget_does_not_fall_back_to_celery_default_three(self):
         with patch.dict(os.environ, {}, clear=False):

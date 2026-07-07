@@ -34,6 +34,10 @@ from sqlalchemy.orm import load_only
 
 logger = logging.getLogger(__name__)
 
+RENDER_QUEUE = "render"
+PLATFORM_UPLOAD_QUEUE = "platform_upload"
+AUDIO_PREPROCESS_VERSION = "v2"
+AUDIO_DURATION_TOLERANCE_SECONDS = 2.0
 DEFAULT_DB_RETRIES = 5
 DEFAULT_DB_RETRY_DELAY_SECONDS = 3
 DB_RETRIES_ENV_NAME = "PUBLISHER_DB_RETRIES"
@@ -197,6 +201,120 @@ def _enabled(value, default=False):
         return False
     return default
 
+
+def _normalize_tag_list(value, default=None):
+    if isinstance(value, list):
+        tags = [str(item).strip(" #") for item in value if str(item or "").strip(" #")]
+    elif isinstance(value, str):
+        import re
+        tags = [item.strip(" #") for item in re.split(r"[,，、\n]+", value) if item.strip(" #")]
+    else:
+        tags = []
+    tags = [tag[:20] for tag in tags if tag]
+    return tags[:10] or list(default or [])
+
+
+def _audio_needs_preprocess(start_offset, end_offset, speed):
+    return (
+        abs(float(start_offset or 0)) >= 0.001
+        or abs(float(end_offset or 0)) >= 0.001
+        or abs(float(speed or 1.0) - 1.0) >= 0.001
+    )
+
+
+def _atempo_filter(speed):
+    speed = float(speed or 1.0)
+    if speed <= 0:
+        raise ValueError("音频倍速必须大于 0")
+    if abs(speed - 1.0) < 0.001:
+        return None
+    remaining = speed
+    factors = []
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+    if abs(remaining - 1.0) >= 0.001:
+        factors.append(remaining)
+    return ",".join(f"atempo={factor:.8g}" for factor in factors)
+
+
+def _probe_audio_duration(media_path):
+    try:
+        from services.asr_cache_service import probe_media_duration
+
+        return float(probe_media_duration(media_path) or 0)
+    except Exception as exc:
+        logger.warning("⚠️ [TASK] 无法读取音频时长: %s | %s", media_path, exc)
+        return 0.0
+
+
+def _expected_prepared_audio_duration(source_duration, start_offset, end_seconds, speed):
+    source_duration = float(source_duration or 0)
+    start_offset = max(0.0, float(start_offset or 0))
+    speed = float(speed or 1.0)
+    if speed <= 0:
+        raise ValueError("音频倍速必须大于 0")
+    if end_seconds is not None:
+        resolved_end = float(end_seconds)
+    elif source_duration > 0:
+        resolved_end = source_duration
+    else:
+        return None
+    source_length = max(0.1, resolved_end - start_offset)
+    return source_length / speed
+
+
+def _duration_matches_expected(actual, expected):
+    if expected is None or expected <= 0:
+        return True
+    actual = float(actual or 0)
+    if actual <= 0:
+        return False
+    tolerance = max(AUDIO_DURATION_TOLERANCE_SECONDS, expected * 0.01)
+    return abs(actual - expected) <= tolerance
+
+
+def _prepared_audio_needs_rebuild(edit_path, raw_path, expected_duration):
+    if not os.path.exists(edit_path) or os.path.getsize(edit_path) <= 0:
+        return True
+    if os.path.getmtime(raw_path) > os.path.getmtime(edit_path):
+        logger.info("  - 🔄 原始文件已更新，准备重新生成剪辑片段")
+        return True
+    if expected_duration is not None:
+        actual_duration = _probe_audio_duration(edit_path)
+        if not _duration_matches_expected(actual_duration, expected_duration):
+            logger.warning(
+                "  - 🔄 剪辑音频时长不匹配，准备重建: path=%s expected=%.3fs actual=%.3fs",
+                edit_path,
+                expected_duration,
+                actual_duration,
+            )
+            return True
+    return False
+
+
+def _build_audio_preprocess_command(raw_path, edit_path, start_offset, end_seconds, speed):
+    cmd = ["ffmpeg", "-y", "-ss", str(start_offset)]
+    if end_seconds is not None:
+        cmd.extend(["-t", str(max(0.1, float(end_seconds) - float(start_offset or 0)))])
+    cmd.extend(["-i", raw_path])
+    atempo = _atempo_filter(speed)
+    if atempo:
+        cmd.extend(["-filter:a", atempo])
+    cmd.extend(["-vn", edit_path])
+    return cmd
+
+
+def _first_existing_path(*candidates):
+    for candidate in candidates:
+        path = to_abs_path(candidate)
+        if path and os.path.exists(path):
+            return path
+    return None
+
 @celery_app.task(bind=True)
 def run_publication_pipeline(self, task_id):
     """
@@ -239,7 +357,7 @@ def run_publication_pipeline(self, task_id):
             self,
             task_id,
             feature=task.feature or "publisher",
-            queue="render",
+            queue=RENDER_QUEUE,
         )
     
         try:
@@ -304,39 +422,45 @@ def run_publication_pipeline(self, task_id):
                     end_offset = float(seg.get('end_offset', 0))
                     source_duration = 0
                     end_seconds = None
-                    if end_offset > 0:
-                        try:
-                            from services.asr_cache_service import probe_media_duration
-                            source_duration = probe_media_duration(raw_path)
-                            if source_duration > 0:
-                                end_seconds = max(start_offset + 0.1, source_duration - end_offset)
-                        except Exception as exc:
-                            logger.warning(f"⚠️ [TASK] 无法读取音频片段时长，跳过 end_offset 裁切: {exc}")
+                    strict_preprocess = _audio_needs_preprocess(start_offset, end_offset, speed)
+                    if strict_preprocess:
+                        source_duration = _probe_audio_duration(raw_path)
+                    if end_offset > 0 and source_duration > 0:
+                        end_seconds = max(start_offset + 0.1, source_duration - end_offset)
+                    elif end_offset > 0:
+                        logger.warning("⚠️ [TASK] 无法读取音频片段时长，不能安全执行 end_offset 裁切: %s", raw_path)
+                        raise RuntimeError(f"无法读取音频时长，不能安全裁切结尾: {raw_path}")
                     
                     # 生成物理剪辑后的临时文件
                     file_dir, file_name = os.path.split(raw_path)
                     name_part, ext_part = os.path.splitext(file_name)
-                    edit_path = os.path.join(file_dir, f"{name_part}_edit_s{speed}_st{start_offset}_eo{end_offset}{ext_part}")
-                    
-                    # 检查临时文件是否需要重新生成（不存在，或原始文件更新）
-                    need_rebuild = not os.path.exists(edit_path)
-                    if not need_rebuild:
-                        if os.path.getmtime(raw_path) > os.path.getmtime(edit_path):
-                            logger.info(f"  - 🔄 原始文件已更新，准备重新生成剪辑片段")
-                            need_rebuild = True
+                    edit_path = os.path.join(
+                        file_dir,
+                        f"{name_part}_edit_{AUDIO_PREPROCESS_VERSION}_s{speed}_st{start_offset}_eo{end_offset}{ext_part}",
+                    )
+                    expected_duration = _expected_prepared_audio_duration(
+                        source_duration,
+                        start_offset,
+                        end_seconds,
+                        speed,
+                    )
+                    need_rebuild = _prepared_audio_needs_rebuild(edit_path, raw_path, expected_duration)
 
                     if need_rebuild:
-                        cmd = ["ffmpeg", "-y", "-ss", str(start_offset), "-i", raw_path]
-                        if end_seconds is not None:
-                            cmd.extend(["-t", str(max(0.1, end_seconds - start_offset))])
-                        if abs(speed - 1.0) >= 0.001:
-                            cmd.extend(["-filter:a", f"atempo={speed}"])
-                        cmd.extend(["-vn", edit_path])
+                        cmd = _build_audio_preprocess_command(raw_path, edit_path, start_offset, end_seconds, speed)
                         try:
                             subprocess.run(cmd, check=True, capture_output=True)
+                            actual_duration = _probe_audio_duration(edit_path)
+                            if not _duration_matches_expected(actual_duration, expected_duration):
+                                raise RuntimeError(
+                                    f"音频剪辑/倍速结果时长异常: expected={expected_duration:.3f}s actual={actual_duration:.3f}s"
+                                )
                             audio_path_abs.append(edit_path)
                             prepared_audio_path = edit_path
-                        except:
+                        except Exception as exc:
+                            logger.error("音频剪辑/倍速处理失败: %s", exc, exc_info=True)
+                            if strict_preprocess:
+                                raise RuntimeError(f"音频剪辑/倍速处理失败，已中止合成: {exc}") from exc
                             audio_path_abs.append(raw_path)
                             prepared_audio_path = None
                     else:
@@ -493,22 +617,77 @@ def run_publication_pipeline(self, task_id):
                 # 如果是显式指定竖屏，则参数从 vid_params 取；否则从 v_vid_params 取
                 active_v_params = vid_params if is_explicit_vertical else v_vid_params
                 vertical_thumb_params = params.get('vertical_thumbnail') if isinstance(params.get('vertical_thumbnail'), dict) else {}
+                vertical_cover_params = params.get('vertical_cover') if isinstance(params.get('vertical_cover'), dict) else {}
+                podcast_cover_params = params.get('podcast_cover') if isinstance(params.get('podcast_cover'), dict) else {}
                 
                 v_image_path = to_abs_path(active_v_params.get('image_path'))
                 if vertical_thumb_params and _enabled(vertical_thumb_params.get('enabled'), True):
+                    vertical_scheme = str(
+                        vertical_thumb_params.get('scheme')
+                        or active_v_params.get('scheme')
+                        or active_v_params.get('render_scheme')
+                        or 'scheme1'
+                    ).strip().lower()
                     screenshot_path = to_abs_path(
                         vertical_thumb_params.get('screenshot_path')
                         or active_v_params.get('image_path')
                         or vid_params.get('image_path')
                     )
-                    v_image_path = thumbnail_service.generate_vertical_thumbnail(
-                        main_title=vertical_thumb_params.get('main_title') or thumb_params.get('main_title') or bili_params.get('title') or "",
-                        sub_title=vertical_thumb_params.get('sub_title') or thumb_params.get('sub_title') or "",
-                        date_text=vertical_thumb_params.get('date_text') or thumb_params.get('date_text') or "",
-                        screenshot_path=screenshot_path,
-                        output_filename=f"vbg_{base_name}.jpg",
-                    )
-                    result_state = {**result_state, 'vertical_background_path': v_image_path}
+                    main_title = vertical_thumb_params.get('main_title') or thumb_params.get('main_title') or bili_params.get('title') or ""
+                    sub_title = vertical_thumb_params.get('sub_title') or thumb_params.get('sub_title') or ""
+                    if vertical_scheme in {'scheme2', 'workbench', 'thumbnail_workbench'}:
+                        workbench_institution = vertical_thumb_params.get('institution') or vertical_cover_params.get('institution') or '深度研报'
+                        workbench_emotion = vertical_thumb_params.get('emotion') or vertical_cover_params.get('emotion') or 'bull'
+                        workbench_footer = vertical_thumb_params.get('footer_text') or vertical_cover_params.get('footer_text') or '听见资本'
+                        workbench_transform = vertical_thumb_params.get('image_transform') or vertical_cover_params.get('image_transform') or {}
+                        v_image_path = thumbnail_service.generate_workbench_vertical_thumbnail(
+                            main_title=main_title,
+                            sub_title=sub_title,
+                            screenshot_path=screenshot_path,
+                            output_filename=f"vbg2_{base_name}.jpg",
+                            institution=workbench_institution,
+                            emotion=workbench_emotion,
+                            footer_text=workbench_footer,
+                            image_transform=workbench_transform,
+                        )
+                        vertical_cover_path = thumbnail_service.generate_workbench_vertical_cover(
+                            main_title=vertical_cover_params.get('main_title') or main_title,
+                            sub_title=vertical_cover_params.get('sub_title') or sub_title,
+                            screenshot_path=vertical_cover_params.get('screenshot_path') or screenshot_path,
+                            output_filename=f"vcover2_{base_name}.jpg",
+                            institution=vertical_cover_params.get('institution') or workbench_institution,
+                            emotion=vertical_cover_params.get('emotion') or workbench_emotion,
+                            footer_text=vertical_cover_params.get('footer_text') or workbench_footer,
+                            image_transform=vertical_cover_params.get('image_transform') or workbench_transform,
+                        )
+                        podcast_cover_path = thumbnail_service.generate_workbench_podcast_cover(
+                            main_title=podcast_cover_params.get('main_title') or main_title,
+                            sub_title=podcast_cover_params.get('sub_title') or sub_title,
+                            screenshot_path=podcast_cover_params.get('screenshot_path') or screenshot_path,
+                            output_filename=f"pcover2_{base_name}.jpg",
+                            institution=podcast_cover_params.get('institution') or workbench_institution,
+                            emotion=podcast_cover_params.get('emotion') or workbench_emotion,
+                            footer_text=podcast_cover_params.get('footer_text') or workbench_footer,
+                            image_transform=podcast_cover_params.get('image_transform') or workbench_transform,
+                        )
+                    else:
+                        vertical_scheme = 'scheme1'
+                        vertical_cover_path = None
+                        podcast_cover_path = None
+                        v_image_path = thumbnail_service.generate_vertical_thumbnail(
+                            main_title=main_title,
+                            sub_title=sub_title,
+                            date_text=vertical_thumb_params.get('date_text') or thumb_params.get('date_text') or "",
+                            screenshot_path=screenshot_path,
+                            output_filename=f"vbg_{base_name}.jpg",
+                        )
+                    result_state = {
+                        **result_state,
+                        'vertical_background_path': v_image_path,
+                        'vertical_video_scheme': vertical_scheme,
+                        **({'vertical_cover_path': vertical_cover_path} if vertical_cover_path else {}),
+                        **({'podcast_cover_path': podcast_cover_path} if podcast_cover_path else {}),
+                    }
                     task = update_task_record(task_id, result=result_state)
 
                 if not v_image_path or not os.path.exists(v_image_path):
@@ -521,7 +700,13 @@ def run_publication_pipeline(self, task_id):
 
                 v_subtitle_position = active_v_params.get('subtitle_position')
                 v_subtitle_size = active_v_params.get('subtitle_size', 'normal')
+                v_subtitle_style = active_v_params.get('subtitle_style') if isinstance(active_v_params.get('subtitle_style'), dict) else None
                 v_export_params = params.get('export_params')
+                preview_seconds = active_v_params.get('preview_seconds') or params.get('preview_seconds')
+                try:
+                    preview_seconds = float(preview_seconds or 0)
+                except (TypeError, ValueError):
+                    preview_seconds = 0
 
                 v_video_path = video_editor_service.process_vertical_video(
                     image_file=v_image_path,
@@ -530,12 +715,16 @@ def run_publication_pipeline(self, task_id):
                     output_filename=f"v_{base_name}.mp4",
                     subtitle_position=v_subtitle_position,
                     subtitle_size=v_subtitle_size,
-                    export_params=v_export_params
+                    subtitle_style=v_subtitle_style,
+                    export_params=v_export_params,
+                    duration_limit=preview_seconds if preview_seconds > 0 else None
                 )
                 logger.info(f"  - ✅ Vertical Done: {v_video_path}")
                 
                 # 如果这是唯一的合成任务，把它也放到主 video_path 里方便前端下载
                 res_dict = {**result_state, 'vertical_video_path': v_video_path}
+                if preview_seconds > 0:
+                    res_dict['vertical_preview_seconds'] = preview_seconds
                 if is_explicit_vertical or not final_video_path:
                     res_dict['video_path'] = v_video_path
                     
@@ -747,6 +936,13 @@ def run_youtube_upload_only(self, task_id):
             logger.error(f"Task {task_id} not found")
             return
 
+        guard_publication_task_start(
+            self,
+            task_id,
+            feature="publisher_upload",
+            queue=PLATFORM_UPLOAD_QUEUE,
+        )
+
         params = task.params or {}
         result_state = dict(task.result or {})
 
@@ -797,3 +993,177 @@ def run_youtube_upload_only(self, task_id):
                 status='completed',
                 current_step='done',
             )
+
+
+@celery_app.task(bind=True)
+def run_bilibili_upload_only(self, task_id):
+    """
+    Upload an already-rendered video to Bilibili without running synthesis again.
+    """
+    from app import create_app
+
+    app = create_app()
+
+    with app.app_context():
+        task = _load_task_with_retries(task_id, *TASK_PAYLOAD_COLUMNS)
+        if not task:
+            logger.error("Task %s not found", task_id)
+            return
+
+        request_id = str(getattr(getattr(self, "request", None), "id", "") or "")
+        current_celery_id = str(task.celery_task_id or "")
+        if request_id and current_celery_id and request_id != current_celery_id:
+            logger.info(
+                "Task %s received stale Bilibili upload message %s, current celery id is %s; skipping.",
+                task_id,
+                request_id,
+                current_celery_id,
+            )
+            return
+        if task.status in {"completed", "canceled"}:
+            logger.info("Task %s is terminal (%s) before Bilibili upload; skipping.", task_id, task.status)
+            return
+        guard_publication_task_start(
+            self,
+            task_id,
+            feature="publisher_upload",
+            queue=PLATFORM_UPLOAD_QUEUE,
+        )
+
+        params = task.params or {}
+        result_state = dict(task.result or {})
+        bili_params = params.get("bilibili") if isinstance(params.get("bilibili"), dict) else {}
+        video_params = params.get("video") if isinstance(params.get("video"), dict) else {}
+
+        video_path = _first_existing_path(
+            result_state.get("video_path"),
+            params.get("upload_video_path"),
+            video_params.get("video_path"),
+        )
+        cover_path = _first_existing_path(
+            bili_params.get("cover_path"),
+            result_state.get("cover_path"),
+        )
+        if not video_path:
+            message = "无法补发 B站：找不到已生成的视频文件"
+            update_task_record(
+                task_id,
+                status="failed",
+                current_step="failed",
+                progress=0,
+                error_message=message,
+                completed_at=datetime.utcnow(),
+            )
+            raise FileNotFoundError(message)
+
+        title = str(bili_params.get("title") or "").strip() or os.path.splitext(os.path.basename(video_path))[0]
+        desc = str(bili_params.get("desc") or "").strip()
+        tags = _normalize_tag_list(bili_params.get("tags"), default=["财经", "音频", "视频"])
+
+        try:
+            result_state = {
+                **result_state,
+                "video_path": video_path,
+                **({"cover_path": cover_path} if cover_path else {}),
+            }
+            task = update_task_record(
+                task_id,
+                status="processing",
+                current_step="upload_bilibili",
+                progress=max(int(task.progress or 0), 10),
+                result=result_state,
+                error_message=None,
+            )
+
+            bili_auth = resolve_bilibili_auth(
+                account_id=bili_params.get("credential_id") or bili_params.get("platform_credential_id"),
+                required=True,
+            )
+            uploader = BiliUploader(
+                sessdata=bili_auth.get("sessdata"),
+                bili_jct=bili_auth.get("bili_jct"),
+                buvid3=bili_auth.get("buvid3"),
+                dedeuserid=bili_auth.get("dedeuserid"),
+            )
+
+            async def _do_upload():
+                return await uploader.upload_single(
+                    video_path=video_path,
+                    title=title,
+                    desc=desc,
+                    tid=int(bili_params.get("tid", 207)),
+                    tags=tags,
+                    cover_path=cover_path,
+                    copyright=int(bili_params.get("copyright", 1)),
+                    no_reprint=int(bili_params.get("no_reprint", 1)),
+                    dynamic=bili_params.get("dynamic", ""),
+                    neutral_mark=bili_params.get("neutral_mark") or DEFAULT_NEUTRAL_MARK,
+                    charging_pay=bili_params.get("charging_pay"),
+                    delay_time=bili_params.get("delay_time") or bili_params.get("dtime"),
+                    season_id=bili_params.get("season_id"),
+                    is_only_self=(
+                        bili_params.get("is_only_self")
+                        or bili_params.get("isOnlySelf")
+                        or bili_params.get("only_self")
+                        or 0
+                    ),
+                    space_hidden=bili_params.get("space_hidden"),
+                    creation_statement_id=(
+                        bili_params.get("creation_statement_id")
+                        or bili_params.get("creationStatementId")
+                    ),
+                )
+
+            try:
+                upload_result = asyncio.run(_do_upload())
+                try:
+                    from services.platform_credential_service import mark_credential_success
+
+                    mark_credential_success(bili_auth.get("credential_id"))
+                except Exception:
+                    logger.exception("[PUBLISHER] Bilibili credential success mark failed")
+            except Exception as exc:
+                try:
+                    from services.platform_credential_service import is_auth_error, mark_credential_error
+
+                    mark_credential_error(
+                        bili_auth.get("credential_id"),
+                        exc,
+                        expired=is_auth_error(exc),
+                    )
+                except Exception:
+                    logger.exception("[PUBLISHER] Bilibili credential error mark failed")
+                raise
+
+            result_state = {
+                **result_state,
+                "bilibili_result": upload_result,
+                "bilibili_title": title,
+                "bilibili_credential_id": bili_auth.get("credential_id"),
+                "bilibili_credential_name": bili_auth.get("credential_name"),
+            }
+            update_task_record(
+                task_id,
+                status="completed",
+                current_step="done",
+                progress=100,
+                result=result_state,
+                completed_at=datetime.utcnow(),
+            )
+            logger.info("Task %s: Bilibili upload supplement successful.", task_id)
+
+        except retry_exception_types():
+            raise
+        except Exception as exc:
+            logger.error("Bilibili upload supplement failed for task %s: %s", task_id, exc, exc_info=True)
+            result_state = {**result_state, "bilibili_error": str(exc)}
+            update_task_record(
+                task_id,
+                result=result_state,
+                status="failed",
+                current_step="failed",
+                progress=10,
+                error_message=str(exc),
+                completed_at=datetime.utcnow(),
+            )
+            raise

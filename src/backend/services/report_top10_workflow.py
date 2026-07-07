@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy.orm import load_only
+
 from models.zsxq_sync import ZsxqAttachment, ZsxqTopic
 from models.task import PublicationTask
 from models import db
@@ -15,9 +17,12 @@ FEATURE_NAME = "report_top10_workflow"
 QUEUE_NAME = "report_top10_workflow"
 SINGLE_REPORT_CACHE_FEATURE = "report_single_script_cache"
 DEFAULT_EDITOR_GEMINI_URL = "https://gemini.google.com/gem/3d1eca63c142"
-DEFAULT_PROGRAM_NAME = "今日研报 Top10"
+DEFAULT_PROGRAM_NAME = "今日研报严选"
 DEFAULT_TARGET_DURATION_MINUTES = "6-9"
-REQUIRED_REPORT_COUNT = 10
+DEFAULT_REPORT_COUNT = 10
+MIN_REPORT_COUNT = 1
+MAX_REPORT_COUNT = 20
+REQUIRED_REPORT_COUNT = DEFAULT_REPORT_COUNT
 DEFAULT_EDITOR_SCRIPT_CHAR_LIMIT = 800
 FINAL_SCRIPT_PLACEHOLDERS = {
     "ASSEMBLE_BY_BACKEND_USING_final_script_assembly_plan",
@@ -34,9 +39,20 @@ def status_payload() -> Dict[str, Any]:
         "business_feature": FEATURE_NAME,
         "queue": QUEUE_NAME,
         "editor_gemini_url": default_editor_gemini_url(),
-        "required_report_count": REQUIRED_REPORT_COUNT,
+        "default_report_count": DEFAULT_REPORT_COUNT,
+        "min_report_count": MIN_REPORT_COUNT,
+        "max_report_count": MAX_REPORT_COUNT,
+        "required_report_count": DEFAULT_REPORT_COUNT,
         "single_report_cache_feature": SINGLE_REPORT_CACHE_FEATURE,
     }
+
+
+def selected_report_count(value: Any = None) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        count = DEFAULT_REPORT_COUNT
+    return min(max(count, MIN_REPORT_COUNT), MAX_REPORT_COUNT)
 
 
 def default_editor_gemini_url() -> str:
@@ -55,7 +71,22 @@ def storage_path_for_job(job_id: str, created_at: Optional[datetime] = None) -> 
 
 
 def pdf_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
-    attachment = ZsxqAttachment.query.get(str(asset_id))
+    attachment = (
+        ZsxqAttachment.query.options(
+            load_only(
+                ZsxqAttachment.id,
+                ZsxqAttachment.group_id,
+                ZsxqAttachment.tab_id,
+                ZsxqAttachment.topic_id,
+                ZsxqAttachment.name,
+                ZsxqAttachment.file_id,
+                ZsxqAttachment.local_path,
+                ZsxqAttachment.download_status,
+            )
+        )
+        .filter(ZsxqAttachment.id == str(asset_id))
+        .one_or_none()
+    )
     if not attachment:
         raise ReportTop10WorkflowError("选择的同步 PDF 不存在")
     if attachment.download_status != "downloaded":
@@ -74,6 +105,12 @@ def pdf_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
         group_id=attachment.group_id,
         tab_id=attachment.tab_id,
         topic_id=attachment.topic_id,
+    ).options(
+        load_only(
+            ZsxqTopic.id,
+            ZsxqTopic.title,
+            ZsxqTopic.tab_label,
+        )
     ).first()
     return {
         "filename": attachment.name or path.name,

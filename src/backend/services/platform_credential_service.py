@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from cryptography.fernet import Fernet, InvalidToken
 from flask import current_app
+from sqlalchemy.orm import load_only
 
 from models import db
 from models.platform_credential import PlatformCredentialAccount
@@ -40,6 +41,24 @@ PURPOSE_DEFINITIONS = [
 VALID_STATUSES = {"active", "expired", "disabled", "deleted"}
 VALID_PLATFORM_IDS = {item["id"] for item in PLATFORM_DEFINITIONS}
 VALID_PURPOSE_IDS = {item["id"] for item in PURPOSE_DEFINITIONS}
+CREDENTIAL_LAST_USED_TOUCH_INTERVAL_SECONDS = int(
+    os.environ.get("PLATFORM_CREDENTIAL_LAST_USED_TOUCH_INTERVAL_SECONDS", "300") or 300
+)
+RUNTIME_CREDENTIAL_COLUMNS = (
+    PlatformCredentialAccount.id,
+    PlatformCredentialAccount.platform,
+    PlatformCredentialAccount.name,
+    PlatformCredentialAccount.credential_type,
+    PlatformCredentialAccount.purposes,
+    PlatformCredentialAccount.status,
+    PlatformCredentialAccount.priority,
+    PlatformCredentialAccount.owner_label,
+    PlatformCredentialAccount.encrypted_payload,
+    PlatformCredentialAccount.notes,
+    PlatformCredentialAccount.last_used_at,
+    PlatformCredentialAccount.extra,
+    PlatformCredentialAccount.updated_at,
+)
 
 
 class CredentialError(ValueError):
@@ -73,6 +92,29 @@ def decrypt_payload(encrypted_payload: str) -> str:
         return _fernet().decrypt((encrypted_payload or "").encode("utf-8")).decode("utf-8")
     except InvalidToken as exc:
         raise CredentialError("凭据无法解密，请检查 PLATFORM_CREDENTIAL_ENCRYPTION_KEY 是否变化") from exc
+
+
+def _runtime_credential_query():
+    return PlatformCredentialAccount.query.options(load_only(*RUNTIME_CREDENTIAL_COLUMNS))
+
+
+def _mark_credential_used_if_due(account: PlatformCredentialAccount, now: Optional[datetime] = None) -> bool:
+    now = now or datetime.utcnow()
+    last_used_at = getattr(account, "last_used_at", None)
+    if CREDENTIAL_LAST_USED_TOUCH_INTERVAL_SECONDS <= 0:
+        account.last_used_at = now
+        return True
+    if not last_used_at:
+        account.last_used_at = now
+        return True
+    try:
+        age_seconds = (now - last_used_at).total_seconds()
+    except Exception:
+        age_seconds = CREDENTIAL_LAST_USED_TOUCH_INTERVAL_SECONDS
+    if age_seconds >= CREDENTIAL_LAST_USED_TOUCH_INTERVAL_SECONDS:
+        account.last_used_at = now
+        return True
+    return False
 
 
 def _mask_token(value: str, head: int = 6, tail: int = 6) -> str:
@@ -408,7 +450,7 @@ def resolve_credential_record(
     platform: Optional[str] = None,
     purpose: Optional[str] = None,
 ) -> Tuple[PlatformCredentialAccount, str]:
-    query = PlatformCredentialAccount.query.filter(PlatformCredentialAccount.status == "active")
+    query = _runtime_credential_query().filter(PlatformCredentialAccount.status == "active")
     if account_id:
         query = query.filter(PlatformCredentialAccount.id == account_id)
     if platform:
@@ -421,8 +463,8 @@ def resolve_credential_record(
     ).first()
     if not account:
         raise CredentialError("没有可用的平台凭据")
-    account.last_used_at = datetime.utcnow()
-    db.session.commit()
+    if _mark_credential_used_if_due(account):
+        db.session.commit()
     return account, decrypt_payload(account.encrypted_payload)
 
 
@@ -432,7 +474,7 @@ def resolve_credential_records(
     purpose: Optional[str] = None,
     account_id: Optional[str] = None,
 ) -> List[Tuple[PlatformCredentialAccount, str]]:
-    query = PlatformCredentialAccount.query.filter(
+    query = _runtime_credential_query().filter(
         PlatformCredentialAccount.status == "active",
         PlatformCredentialAccount.platform == platform,
     )
@@ -447,9 +489,11 @@ def resolve_credential_records(
     if not accounts:
         raise CredentialError("没有可用的平台凭据")
     now = datetime.utcnow()
+    touched = False
     for account in accounts:
-        account.last_used_at = now
-    db.session.commit()
+        touched = _mark_credential_used_if_due(account, now) or touched
+    if touched:
+        db.session.commit()
     return [(account, decrypt_payload(account.encrypted_payload)) for account in accounts]
 
 
@@ -545,7 +589,7 @@ def resolve_zsxq_cookie_accounts(
 
     output = []
     target_group_id = str(group_id or "").strip()
-    query = PlatformCredentialAccount.query.filter(
+    query = _runtime_credential_query().filter(
         PlatformCredentialAccount.status == "active",
         PlatformCredentialAccount.platform == "zsxq",
     )
@@ -557,6 +601,8 @@ def resolve_zsxq_cookie_accounts(
         PlatformCredentialAccount.priority.asc(),
         PlatformCredentialAccount.updated_at.desc(),
     ).all()
+    now = datetime.utcnow()
+    touched = False
     for account in accounts:
         extra = account.extra if isinstance(account.extra, dict) else {}
         allowed_group_ids = extra.get("group_ids") or extra.get("allowed_group_ids") or []
@@ -564,7 +610,7 @@ def resolve_zsxq_cookie_accounts(
         if allowed_group_ids and target_group_id and target_group_id not in allowed_group_ids:
             continue
         payload = decrypt_payload(account.encrypted_payload)
-        account.last_used_at = datetime.utcnow()
+        touched = _mark_credential_used_if_due(account, now) or touched
         output.append({
             "id": account.id,
             "name": account.owner_label or account.name,
@@ -578,7 +624,7 @@ def resolve_zsxq_cookie_accounts(
             "runtime_only": True,
             "db_backed": True,
         })
-    if output:
+    if output and touched:
         db.session.commit()
     if required and not output:
         raise CredentialError("没有可用于当前星球的知识星球发帖凭据")

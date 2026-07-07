@@ -14,6 +14,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 RUNTIME_DIR = PROJECT_ROOT / "runtime"
 CONFIG_PATH = RUNTIME_DIR / "content_retention_cleanup_config.json"
 PID_PATH = RUNTIME_DIR / "content_retention_cleanup_scheduler.pid"
+START_LOCK_PATH = RUNTIME_DIR / "content_retention_cleanup_scheduler_start.lock"
+PROCESS_LOCK_PATH = RUNTIME_DIR / "content_retention_cleanup_scheduler_process.lock"
 LOG_PATH = PROJECT_ROOT / "logs" / "content_retention_cleanup_scheduler.log"
 DRY_RUN_OVERRIDE_ENV = "CONTENT_RETENTION_DRY_RUN_OVERRIDE"
 DEFAULT_INTERVAL_HOURS = 24
@@ -122,56 +124,69 @@ def start_scheduler():
             "scheduler": scheduler_status(),
         }
 
-    current = scheduler_status()
-    if current.get("running"):
+    lock_handle = acquire_scheduler_start_lock()
+    if not lock_handle:
+        current = scheduler_status()
         return {
             "started": False,
-            "running": True,
-            "message": "历史文件清理计划已在运行。",
+            "running": bool(current.get("running")),
+            "message": "历史文件清理计划正在启动中，请稍后查看状态。",
             "scheduler": current,
         }
 
-    command = [
-        sys.executable,
-        str(PROJECT_ROOT / "src" / "backend" / "run_content_retention_cleanup_scheduler.py"),
-        "start",
-    ]
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    process = subprocess.Popen(
-        command,
-        cwd=str(PROJECT_ROOT),
-        env=_scheduler_env(),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-    )
+    try:
+        current = scheduler_status()
+        if current.get("running"):
+            return {
+                "started": False,
+                "running": True,
+                "message": "历史文件清理计划已在运行。",
+                "scheduler": current,
+            }
 
-    started_at = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-    _write_pid_file(
-        {
-            "pid": process.pid,
-            "started_at": started_at,
-            "command": " ".join(command),
-            "log_path": str(LOG_PATH),
-        }
-    )
-    time.sleep(0.6)
-    if process.poll() is not None or not _is_pid_running(process.pid):
-        _safe_unlink(PID_PATH)
+        command = [
+            sys.executable,
+            str(PROJECT_ROOT / "src" / "backend" / "run_content_retention_cleanup_scheduler.py"),
+            "start",
+        ]
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        process = subprocess.Popen(
+            command,
+            cwd=str(PROJECT_ROOT),
+            env=_scheduler_env(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+
+        started_at = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        _write_pid_file(
+            {
+                "pid": process.pid,
+                "started_at": started_at,
+                "command": " ".join(command),
+                "log_path": str(LOG_PATH),
+            }
+        )
+        time.sleep(0.6)
+        if process.poll() is not None or not _is_pid_running(process.pid):
+            _safe_unlink(PID_PATH)
+            return {
+                "started": False,
+                "running": False,
+                "message": "历史文件清理计划启动后立即退出，请查看最近日志。",
+                "scheduler": scheduler_status(),
+            }
+
         return {
-            "started": False,
-            "running": False,
-            "message": "历史文件清理计划启动后立即退出，请查看最近日志。",
+            "started": True,
+            "running": True,
+            "message": "历史文件清理计划已启动。",
             "scheduler": scheduler_status(),
         }
-
-    return {
-        "started": True,
-        "running": True,
-        "message": "历史文件清理计划已启动。",
-        "scheduler": scheduler_status(),
-    }
+    finally:
+        release_file_lock(lock_handle)
 
 
 def stop_scheduler():
@@ -207,7 +222,6 @@ def stop_scheduler():
     still_running = _is_pid_running(pid)
     if not still_running:
         _safe_unlink(PID_PATH)
-        update_runtime_status({"next_run_at": None})
     return {
         "stopped": not still_running,
         "running": still_running,
@@ -286,6 +300,54 @@ def scheduler_log_tail(lines=120):
     ]
 
 
+def scheduled_next_run_datetime(config=None, *, interval_hours=None, now=None):
+    config = config if isinstance(config, dict) else {}
+    persisted = parse_utc_datetime(config.get("next_run_at"))
+    if persisted is not None:
+        return persisted
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    interval = _bounded_int(
+        interval_hours if interval_hours is not None else config.get("interval_hours"),
+        DEFAULT_INTERVAL_HOURS,
+        lower=1,
+        upper=24 * 30,
+    )
+    return current + timedelta(hours=interval)
+
+
+def parse_utc_datetime(value):
+    if not value:
+        return None
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def utc_datetime_iso(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def local_naive_datetime(value):
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone().replace(tzinfo=None)
+
+
 def _normalize_config(payload):
     payload = payload if isinstance(payload, dict) else {}
     defaults = default_config()
@@ -357,7 +419,10 @@ def _safe_unlink(path):
 
 def _is_pid_running(pid):
     try:
-        os.kill(int(pid), 0)
+        parsed_pid = int(pid)
+        if _is_zombie_process(parsed_pid):
+            return False
+        os.kill(parsed_pid, 0)
         return True
     except PermissionError:
         return True
@@ -365,6 +430,22 @@ def _is_pid_running(pid):
         return False
     except OSError:
         return False
+
+
+def _is_zombie_process(pid):
+    try:
+        process = subprocess.run(
+            ["ps", "-p", str(int(pid)), "-o", "stat="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return False
+    if process.returncode != 0:
+        return False
+    return (process.stdout or "").strip().upper().startswith("Z")
 
 
 def _terminate_process(pid):
@@ -400,4 +481,46 @@ def utc_now_iso():
 
 
 def next_run_iso(interval_hours):
-    return (datetime.now(timezone.utc) + timedelta(hours=int(interval_hours))).isoformat().replace("+00:00", "Z")
+    return utc_datetime_iso(datetime.now(timezone.utc) + timedelta(hours=int(interval_hours)))
+
+
+def acquire_scheduler_start_lock():
+    return _acquire_file_lock(START_LOCK_PATH, blocking=False)
+
+
+def acquire_scheduler_process_lock():
+    return _acquire_file_lock(PROCESS_LOCK_PATH, blocking=False)
+
+
+def release_file_lock(handle):
+    if not handle:
+        return
+    try:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
+
+
+def _acquire_file_lock(path, *, blocking):
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a", encoding="utf-8")
+    try:
+        import fcntl
+
+        flags = fcntl.LOCK_EX
+        if not blocking:
+            flags |= fcntl.LOCK_NB
+        fcntl.flock(handle.fileno(), flags)
+        return handle
+    except BlockingIOError:
+        handle.close()
+        return None
+    except Exception:
+        handle.close()
+        raise

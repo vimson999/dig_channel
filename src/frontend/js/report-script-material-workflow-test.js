@@ -17,6 +17,8 @@ class ReportScriptMaterialWorkflowPage {
         this.assetSearchTimer = null;
         this.jobSearchTimer = null;
         this.pollTimer = null;
+        this.geminiEnvUrl = '';
+        this.geminiUrlPresets = this.defaultGeminiUrlPresets();
         this.els = {
             providerStatus: document.getElementById('provider-status'),
             workerStatus: document.getElementById('worker-status'),
@@ -32,7 +34,9 @@ class ReportScriptMaterialWorkflowPage {
             assetPagination: document.getElementById('asset-pagination'),
             selectedList: document.getElementById('selected-list'),
             clearSelectedBtn: document.getElementById('clear-selected-btn'),
+            geminiUrlSelect: document.getElementById('gemini-url-select'),
             geminiUrl: document.getElementById('gemini-url'),
+            geminiUrlCurrent: document.getElementById('gemini-url-current'),
             prompt: document.getElementById('prompt'),
             reviewPrompt: document.getElementById('review-prompt'),
             submitBtn: document.getElementById('submit-btn'),
@@ -44,12 +48,64 @@ class ReportScriptMaterialWorkflowPage {
             jobPagination: document.getElementById('job-pagination'),
             jobDetail: document.getElementById('job-detail'),
         };
+        this.renderGeminiUrlOptions();
         this.bind();
         this.refreshStatus();
         this.loadAssets({ silent: true });
         this.loadHistory({ silent: true });
         this.resetPollTimer();
         this.render();
+    }
+
+    defaultGeminiUrlPresets() {
+        return [
+            { value: '', label: '使用 .env 默认' },
+            { value: 'https://gemini.google.com/gem/099a92ae7888', label: '文案编辑v4' },
+            { value: 'https://gemini.google.com/gem/b71a9220571e', label: '文案编辑v5' },
+            { value: 'https://gemini.google.com/gem/3d1eca63c142', label: '今日研报严选总编辑 Gem' },
+            { value: 'https://gemini.google.com/gem/f9e84d5e215c', label: 'MP3 视频解析 Gem' },
+            { value: '__custom__', label: '自定义 URL' },
+        ];
+    }
+
+    renderGeminiUrlOptions() {
+        if (!this.els.geminiUrlSelect) return;
+        const previousValue = this.els.geminiUrlSelect.value || '';
+        this.els.geminiUrlSelect.innerHTML = this.geminiUrlPresets.map((item) => (
+            `<option value="${this.escape(item.value)}">${this.escape(item.label)}</option>`
+        )).join('');
+        if (this.geminiUrlPresets.some((item) => item.value === previousValue)) {
+            this.els.geminiUrlSelect.value = previousValue;
+        }
+        this.updateGeminiUrlUi();
+    }
+
+    updateGeminiUrlUi() {
+        const selected = this.els.geminiUrlSelect?.value || '';
+        const isCustom = selected === '__custom__';
+        if (this.els.geminiUrl) {
+            this.els.geminiUrl.classList.toggle('hidden', !isCustom);
+            this.els.geminiUrl.disabled = !isCustom;
+            if (!isCustom) this.els.geminiUrl.value = '';
+        }
+        if (!this.els.geminiUrlCurrent) return;
+        const envText = this.geminiEnvUrl || 'REPORT_PDF_GEMINI_URL / GEMINI_BROWSER_URL';
+        if (isCustom) {
+            this.els.geminiUrlCurrent.textContent = '自定义 URL 会覆盖 worker 默认 Gem';
+        } else if (selected) {
+            this.els.geminiUrlCurrent.textContent = `覆盖：${selected}`;
+        } else {
+            this.els.geminiUrlCurrent.textContent = `默认：${envText}`;
+        }
+        this.els.geminiUrlCurrent.title = this.els.geminiUrlCurrent.textContent;
+    }
+
+    selectedGeminiUrl() {
+        const select = document.getElementById('gemini-url-select') || this.els.geminiUrlSelect;
+        const input = document.getElementById('gemini-url') || this.els.geminiUrl;
+        const selected = select?.value || '';
+        if (selected === '__custom__') return input?.value.trim() || '';
+        return selected.trim();
     }
 
     apiRoot() {
@@ -112,6 +168,7 @@ class ReportScriptMaterialWorkflowPage {
             this.renderSelected();
             this.renderAssets();
         });
+        this.els.geminiUrlSelect?.addEventListener('change', () => this.updateGeminiUrlUi());
         this.els.submitBtn.addEventListener('click', () => this.submit());
         this.els.loadHistoryBtn.addEventListener('click', () => this.loadHistory({ page: 1, force: true }));
         this.els.jobStatusFilter.addEventListener('change', () => {
@@ -138,9 +195,22 @@ class ReportScriptMaterialWorkflowPage {
             const result = await this.request('/api/report-script-material-workflows/status', { timeoutMs: 10000 });
             const provider = result.data?.provider || {};
             const gemini = result.data?.report_pdf_gemini || {};
-            const ok = Boolean(provider.configured && gemini.configured);
+            this.geminiEnvUrl = (gemini.gemini_url || '').trim();
+            this.updateGeminiUrlUi();
+            const geminiOk = Boolean(gemini.configured);
+            const normalizerOk = Boolean(provider.normalizer_available ?? provider.configured);
+            const fallbackAllowed = Boolean(provider.local_fallback_allowed);
+            const ok = geminiOk && normalizerOk;
             this.els.providerStatus.className = `rounded-lg border px-3 py-2 text-xs font-bold ${ok ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`;
-            this.els.providerStatus.textContent = ok ? 'Gemini 已配置' : 'Gemini 未配置';
+            if (!geminiOk) {
+                this.els.providerStatus.textContent = 'Gemini 未配置';
+            } else if (!normalizerOk) {
+                this.els.providerStatus.textContent = '结构化器不可用';
+            } else if (fallbackAllowed) {
+                this.els.providerStatus.textContent = '结构化器 Fallback 已启用';
+            } else {
+                this.els.providerStatus.textContent = 'Gemini / 结构化器已配置';
+            }
         } catch (error) {
             this.els.providerStatus.className = 'rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-700';
             this.els.providerStatus.textContent = `配置失败：${error.message}`;
@@ -230,13 +300,11 @@ class ReportScriptMaterialWorkflowPage {
             this.jobs = result.data?.items || result.items || [];
             this.jobPagination = result.data?.pagination || { page, pages: 0, total: 0 };
             this.renderJobs();
-            if (this.selectedJobId && !this.jobs.some((job) => job.job_id === this.selectedJobId)) {
-                this.selectedJobId = '';
-                this.selectedJobDetail = null;
-                this.renderDetail();
+            if (this.selectedJobId && this.jobs.some((job) => job.job_id === this.selectedJobId)) {
+                this.loadJobDetail(this.selectedJobId, { silent: true });
             }
-            if (this.selectedJobId) this.loadJobDetail(this.selectedJobId, { silent: true });
         } catch (error) {
+            if (options.silent) return;
             this.els.summaryText.textContent = `加载历史失败：${error.message}`;
             this.els.jobList.innerHTML = '';
             this.els.jobPagination.innerHTML = '';
@@ -253,7 +321,7 @@ class ReportScriptMaterialWorkflowPage {
         try {
             const payload = {
                 pdf_asset_ids: this.selected.map((item) => item.id),
-                gemini_url: this.els.geminiUrl.value.trim(),
+                gemini_url: this.selectedGeminiUrl(),
                 prompt: this.els.prompt.value.trim(),
                 review_prompt: this.els.reviewPrompt.value.trim(),
                 metadata: { source: 'report-script-material-workflow-test-page' },
@@ -608,9 +676,10 @@ class ReportScriptMaterialWorkflowPage {
             const title = asset.filename || 'PDF';
             const subtitle = asset.topic_title || asset.tab_label || asset.topic_id || '-';
             const itemTitle = [asset.filename, asset.topic_title, asset.tab_label].filter(Boolean).join('\n');
-            const downloadText = Number.isFinite(Number(asset.download_count))
-                ? `下载 ${Number(asset.download_count)} 次`
-                : '下载 -';
+            const downloadText = window.DownloadCountHighlight?.badgeText(asset.download_count)
+                || (Number.isFinite(Number(asset.download_count)) ? `下载 ${Number(asset.download_count)} 次` : '下载 -');
+            const downloadBadgeClass = window.DownloadCountHighlight?.badgeClass(asset.download_count)
+                || 'border-slate-200 bg-slate-100 text-slate-500';
             const syncTime = this.formatDateTime(asset.topic_last_synced_at || asset.updated_at);
             const topicTime = this.formatDateTime(asset.topic_create_time) || asset.topic_create_time || '';
             const metaLine = [
@@ -636,7 +705,7 @@ class ReportScriptMaterialWorkflowPage {
                     </div>
                     <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(metaLine)}</div>
                     <div class="mt-2 flex flex-wrap items-center gap-1.5">
-                        <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500">
+                        <span class="rounded-full border px-2 py-0.5 text-[11px] font-bold ${downloadBadgeClass}">
                             <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
                         </span>
                         <span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${materialMeta.className}">
@@ -797,8 +866,14 @@ class ReportScriptMaterialWorkflowPage {
         }
         const script = detail.final_script_for_tts || '';
         const hasScript = Boolean(String(script).trim());
+        const structured = detail.structured_result || {};
         const children = detail.children || {};
         const detailTitle = this.jobDisplayTitle(detail);
+        const materialTitle = structured.title || detailTitle;
+        const coverTitle = structured.cover_title || '';
+        const coverSubtitle = structured.cover_subtitle || '';
+        const summary = structured.summary || '';
+        const provider = structured.provider || detail.script_material?.source || '';
         const detailMeta = [
             this.formatDateTime(detail.created_at) ? `创建 ${this.formatDateTime(detail.created_at)}` : '',
             detail.job_id || '',
@@ -834,7 +909,32 @@ class ReportScriptMaterialWorkflowPage {
                     <div class="rounded-md bg-slate-50 p-2"><span class="font-bold text-slate-500">片段</span><div class="mt-1 font-black">${this.escape(detail.tts_text?.chunks ?? '-')}</div></div>
                 </div>
                 ${childRows ? `<div class="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">${childRows}</div>` : ''}
+                <div class="mt-4 grid grid-cols-1 gap-2 text-xs md:grid-cols-2">
+                    ${this.renderMaterialField('标题', materialTitle)}
+                    ${this.renderMaterialField('封面标题', coverTitle, true)}
+                    ${this.renderMaterialField('封面副标题', coverSubtitle)}
+                    ${provider ? this.renderMaterialField('结构化来源', provider) : ''}
+                    ${summary ? `<div class="rounded-md border border-slate-200 bg-slate-50 p-3 md:col-span-2">
+                        <span class="font-bold text-slate-500">摘要</span>
+                        <div class="mt-1 whitespace-pre-wrap text-slate-800">${this.escape(summary)}</div>
+                    </div>` : ''}
+                </div>
+                <div class="mt-4 flex items-center justify-between gap-3">
+                    <div class="text-xs font-black uppercase tracking-wider text-slate-400">最终口播正文</div>
+                    ${hasScript ? `<div class="text-xs font-bold text-slate-400">${script.length} 字</div>` : ''}
+                </div>
                 <pre class="mt-4 max-h-[34rem] overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-4 text-sm leading-7 text-slate-50">${this.escape(script || '等待生成。')}</pre>
+            </div>
+        `;
+    }
+
+    renderMaterialField(label, value, multiline = false) {
+        const text = String(value || '').trim();
+        if (!text) return '';
+        return `
+            <div class="rounded-md border border-slate-200 bg-slate-50 p-3">
+                <span class="font-bold text-slate-500">${this.escape(label)}</span>
+                <div class="mt-1 ${multiline ? 'whitespace-pre-wrap' : 'truncate'} font-black text-slate-900" title="${this.escape(text)}">${this.escape(text)}</div>
             </div>
         `;
     }

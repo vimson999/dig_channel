@@ -11,6 +11,8 @@ const ReportVideoApp = {
     autoScan: null,
     assetScheduler: null,
     prompts: [],
+    flowGraph: null,
+    storyboardRatio: '16:9',
 
     els: {
         taskForm: document.getElementById('task-form'),
@@ -48,6 +50,9 @@ const ReportVideoApp = {
         mindmapSummary: document.getElementById('mindmap-summary'),
         ttsScriptList: document.getElementById('tts-script-list'),
         ttsScriptSummary: document.getElementById('tts-script-summary'),
+        submitDoubaoTtsBtn: document.getElementById('submit-doubao-tts-btn'),
+        syncDoubaoTtsBtn: document.getElementById('sync-doubao-tts-btn'),
+        doubaoTtsStatus: document.getElementById('doubao-tts-status'),
         copyAllTtsBtn: document.getElementById('copy-all-tts-btn'),
         copyTtsManifestBtn: document.getElementById('copy-tts-manifest-btn'),
         audioInput: document.getElementById('audio-input'),
@@ -61,8 +66,17 @@ const ReportVideoApp = {
         audioList: document.getElementById('audio-list'),
         audioSummary: document.getElementById('audio-summary'),
         generateVideoBtn: document.getElementById('generate-video-btn'),
+        generateRemotionVideoBtn: document.getElementById('generate-remotion-video-btn'),
         videoOutputList: document.getElementById('video-output-list'),
         videoSummary: document.getElementById('video-summary'),
+        generateKeyframesBtn: document.getElementById('generate-keyframes-btn'),
+        approveKeyframesBtn: document.getElementById('approve-keyframes-btn'),
+        rejectKeyframesBtn: document.getElementById('reject-keyframes-btn'),
+        generatePreviewClipBtn: document.getElementById('generate-preview-clip-btn'),
+        approvePreviewClipBtn: document.getElementById('approve-preview-clip-btn'),
+        rejectPreviewClipBtn: document.getElementById('reject-preview-clip-btn'),
+        renderPreviewSummary: document.getElementById('render-preview-summary'),
+        renderPreviewList: document.getElementById('render-preview-list'),
         autoScanEnabled: document.getElementById('auto-scan-enabled'),
         autoScanDir: document.getElementById('auto-scan-dir'),
         autoScanTime: document.getElementById('auto-scan-time'),
@@ -104,17 +118,467 @@ const ReportVideoApp = {
         textModalTitle: document.getElementById('text-modal-title'),
         textModalMeta: document.getElementById('text-modal-meta'),
         textModalBody: document.getElementById('text-modal-body'),
-        closeTextModal: document.getElementById('close-text-modal')
+        closeTextModal: document.getElementById('close-text-modal'),
+        storyboardPanel: document.getElementById('report-video-storyboard'),
+        storyboardSummary: document.getElementById('storyboard-summary'),
+        storyboardFrameList: document.getElementById('storyboard-frame-list'),
+        storyboardRatioButtons: document.querySelectorAll('[data-storyboard-ratio]')
     },
 
     init() {
+        this.activeTaskId = this.initialTaskId();
+        this.initFlowGraph();
         this.bindEvents();
+        this.renderStoryboard(null);
         this.updateAudioModeUi();
         this.loadTasks();
         this.loadAutoScan();
         this.loadAssetScheduler();
         this.loadPrompts();
         this.refreshTimer = window.setInterval(() => this.refreshIfBusy(), 5000);
+    },
+
+    initFlowGraph() {
+        const root = document.getElementById('report-video-flow-map');
+        if (!root || !window.ShioaThreeGraph) return;
+        this.flowGraph = window.ShioaThreeGraph.mount(root, {
+            kicker: 'Video Pipeline',
+            title: '研报视频制作链路',
+            subtitle: 'PDF、主题、脚本、导图、音频和视频输出的当前连接。',
+        });
+        this.updateFlowGraph();
+    },
+
+    updateFlowGraph() {
+        if (!this.flowGraph) return;
+        this.flowGraph.update(this.buildFlowGraphModel());
+    },
+
+    buildFlowGraphModel() {
+        const task = this.getActiveTask();
+        const reports = task?.reports || [];
+        const planning = task?.result?.topic_planning || {};
+        const rankedTopics = planning.ranked_topics || [];
+        const audios = task?.audios || [];
+        const outputs = task?.outputs || [];
+        const scriptReady = reports.filter(report => report.analysis || (report.segments || []).length);
+        const mindmapReady = reports.filter(report => report.mindmap);
+        const ttsRows = this.buildTtsRows(reports);
+        const nodes = [
+            { id: 'task', type: 'stage', label: task?.task_name || '选择任务', value: task ? 7 : 3, status: task ? this.graphStatus(task.status) : 'idle' },
+            { id: 'pdf', type: 'attachment', label: `PDF ${reports.length}`, value: Math.max(2, reports.length), status: reports.length ? 'success' : 'idle' },
+            { id: 'topic', type: 'topic', label: `主题 ${rankedTopics.length}`, value: Math.max(2, rankedTopics.length), status: rankedTopics.length ? 'success' : 'idle' },
+            { id: 'script', type: 'summary', label: `文案 ${scriptReady.length}`, value: Math.max(2, scriptReady.length), status: scriptReady.length ? 'success' : 'idle' },
+            { id: 'mindmap', type: 'tab', label: `导图 ${mindmapReady.length}`, value: Math.max(2, mindmapReady.length), status: mindmapReady.length ? 'success' : 'idle' },
+            { id: 'tts', type: 'audio', label: `TTS ${ttsRows.length}`, value: Math.max(2, ttsRows.length / 2), status: ttsRows.length ? 'success' : 'idle' },
+            { id: 'audio', type: 'audio', label: `音频 ${audios.length}`, value: Math.max(2, audios.length), status: audios.length ? 'success' : 'idle' },
+            { id: 'video', type: 'video', label: `视频 ${outputs.length}`, value: Math.max(2, outputs.length), status: outputs.some(output => output.status === 'completed') ? 'success' : (outputs.length ? 'running' : 'idle') },
+        ];
+        const links = [
+            { source: 'task', target: 'pdf' },
+            { source: 'pdf', target: 'topic' },
+            { source: 'topic', target: 'script' },
+            { source: 'script', target: 'mindmap' },
+            { source: 'script', target: 'tts' },
+            { source: 'tts', target: 'audio' },
+            { source: 'audio', target: 'video' },
+            { source: 'mindmap', target: 'video' },
+        ];
+
+        reports.slice(0, 8).forEach(report => {
+            const id = `report:${report.id}`;
+            nodes.push({
+                id,
+                type: 'attachment',
+                label: report.report_code || report.file_name || 'PDF',
+                value: report.page_count ? Math.min(8, 2 + report.page_count / 20) : 3,
+                status: this.graphStatus(report.parse_status),
+            });
+            links.push({ source: 'pdf', target: id, opacity: 0.3 });
+            if (report.analysis || (report.segments || []).length) {
+                const scriptId = `script:${report.id}`;
+                nodes.push({
+                    id: scriptId,
+                    type: 'summary',
+                    label: report.analysis?.report_title || report.report_code || 'AI 文案',
+                    value: Math.max(3, (report.segments || []).length),
+                    status: 'success',
+                });
+                links.push({ source: id, target: scriptId, opacity: 0.35 });
+            }
+            if (report.mindmap) {
+                const mapId = `mindmap:${report.id}`;
+                nodes.push({
+                    id: mapId,
+                    type: 'tab',
+                    label: report.mindmap.center || report.report_code || '导图',
+                    value: Math.max(3, (report.mindmap.nodes || []).length / 2),
+                    status: 'success',
+                });
+                links.push({ source: id, target: mapId, opacity: 0.35 });
+            }
+        });
+
+        rankedTopics.slice(0, 6).forEach(topic => {
+            const id = `topic:${topic.topic_id || topic.rank}`;
+            nodes.push({
+                id,
+                type: 'topic',
+                label: topic.topic_name || `主题 ${topic.rank || ''}`,
+                value: Math.min(8, 2 + Number(topic.final_score || 0) / 20),
+                status: topic.topic_id === this.selectedTopicId ? 'success' : 'idle',
+            });
+            links.push({ source: 'topic', target: id, opacity: 0.28 });
+        });
+
+        audios.slice(0, 6).forEach(audio => {
+            const id = `audio:${audio.id}`;
+            nodes.push({
+                id,
+                type: 'audio',
+                label: audio.file_name || '音频',
+                value: 3,
+                status: ['matched', 'timeline_matched'].includes(audio.match_status) ? 'success' : 'warning',
+            });
+            links.push({ source: 'audio', target: id, opacity: 0.28 });
+        });
+
+        outputs.slice(0, 6).forEach(output => {
+            const id = `output:${output.id}`;
+            nodes.push({
+                id,
+                type: 'video',
+                label: `${output.ratio || ''} ${output.video_type || '视频'}`.trim(),
+                value: 4,
+                status: this.graphStatus(output.status),
+            });
+            links.push({ source: 'video', target: id, opacity: 0.3 });
+        });
+
+        return {
+            title: task?.task_name || '研报导图视频工厂',
+            subtitle: task
+                ? `${this.formatStatus(task.status)} · ${reports.length} 篇 PDF · ${ttsRows.length} 段 TTS`
+                : '创建或选择任务后生成制作链路',
+            metrics: [
+                { label: '任务', value: this.tasks.length },
+                { label: 'PDF', value: reports.length },
+                { label: '文案', value: scriptReady.length },
+                { label: '视频', value: outputs.length },
+            ],
+            legend: [
+                { label: 'PDF', color: window.ShioaThreeGraph.colors.attachment },
+                { label: '主题', color: window.ShioaThreeGraph.colors.topic },
+                { label: 'AI 文案', color: window.ShioaThreeGraph.colors.summary },
+                { label: '导图', color: window.ShioaThreeGraph.colors.tab },
+                { label: '音频', color: window.ShioaThreeGraph.colors.audio },
+                { label: '视频', color: window.ShioaThreeGraph.colors.video },
+            ],
+            nodes,
+            links,
+        };
+    },
+
+    renderStoryboard(task) {
+        if (!this.els.storyboardFrameList) return;
+        this.els.storyboardRatioButtons?.forEach(button => {
+            button.classList.toggle('active', button.dataset.storyboardRatio === this.storyboardRatio);
+        });
+        this.els.storyboardFrameList.classList.toggle('is-vertical', this.storyboardRatio === '9:16');
+
+        if (!task) {
+            this.els.storyboardSummary.textContent = '0 帧';
+            this.els.storyboardFrameList.innerHTML = '<div class="rv-empty">选择任务并生成文案后会显示视频内容帧。</div>';
+            return;
+        }
+        if (task.summary_only) {
+            this.els.storyboardSummary.textContent = '加载中';
+            this.els.storyboardFrameList.innerHTML = '<div class="rv-empty">正在加载任务详情...</div>';
+            return;
+        }
+        const keyframePreview = this.latestRenderPreview(task, 'keyframes', this.storyboardRatio);
+        if (
+            keyframePreview
+            && ['completed', 'approved'].includes(keyframePreview.status)
+            && (keyframePreview.file_paths || []).length
+        ) {
+            this.renderStoryboardKeyframes(keyframePreview);
+            return;
+        }
+
+        const frames = this.buildStoryboardFrames(task);
+        if (!frames.length) {
+            this.els.storyboardSummary.textContent = '0 帧';
+            this.els.storyboardFrameList.innerHTML = '<div class="rv-empty">还没有可绘制的脚本段落。先生成主题脚本或单篇 AI 文案。</div>';
+            return;
+        }
+
+        const totalDuration = frames.reduce((sum, frame) => sum + Number(frame.duration || 0), 0);
+        this.els.storyboardSummary.textContent = `${frames.length} 帧草图 · ${this.storyboardRatio}${totalDuration ? ` · ${this.formatDuration(totalDuration)}` : ''}`;
+        this.els.storyboardFrameList.innerHTML = frames
+            .slice(0, 12)
+            .map((frame, index) => this.renderStoryboardFrame(frame, index))
+            .join('');
+    },
+
+    renderStoryboardKeyframes(preview) {
+        const files = preview.file_paths || [];
+        const milestones = preview.meta?.milestones || [];
+        this.els.storyboardSummary.textContent = `${files.length} 张真实关键帧 · ${preview.ratio}`;
+        this.els.storyboardFrameList.innerHTML = files.map((_, index) => {
+            const milestone = milestones[index] || {};
+            const caption = milestone.label || `关键帧 ${index + 1}`;
+            const href = `${this.API_BASE}/report-video/previews/${preview.id}/files/${index}`;
+            return `
+                <article class="rv-story-real-frame">
+                    <a href="${href}" target="_blank" rel="noopener" title="打开大图">
+                        <img src="${href}" alt="${this.escape(caption)}">
+                    </a>
+                    <div class="rv-story-frame-meta">
+                        <span>${this.escape(String(index + 1).padStart(3, '0'))}</span>
+                        <span>${this.escape(caption)}</span>
+                    </div>
+                </article>
+            `;
+        }).join('');
+    },
+
+    buildStoryboardFrames(task) {
+        if (!task || task.summary_only) return [];
+        const planning = task.result?.topic_planning || {};
+        const topic = this.resolveStoryboardTopic(planning);
+        const topicScripts = planning.topic_scripts || {};
+        const topicScript = topic ? topicScripts[topic.topic_id] : null;
+        if (topic && topicScript && Array.isArray(topicScript.sections) && topicScript.sections.length) {
+            return this.buildTopicStoryboardFrames(task, planning, topic, topicScript);
+        }
+
+        const reportFrames = this.buildReportStoryboardFrames(task.reports || []);
+        if (reportFrames.length) return reportFrames;
+
+        return this.buildPlanningStoryboardFrames(planning);
+    },
+
+    resolveStoryboardTopic(planning) {
+        const topics = Array.isArray(planning.topics) ? planning.topics : [];
+        const rankedTopics = Array.isArray(planning.ranked_topics) ? planning.ranked_topics : [];
+        const topicMap = new Map(topics.map(topic => [topic.topic_id, topic]));
+        const preferredId = this.selectedTopicId || planning.applied_topic_id || rankedTopics[0]?.topic_id || topics[0]?.topic_id;
+        if (preferredId && topicMap.has(preferredId)) return topicMap.get(preferredId);
+        if (preferredId) return rankedTopics.find(topic => topic.topic_id === preferredId) || null;
+        return rankedTopics[0] || null;
+    },
+
+    buildTopicStoryboardFrames(task, planning, topic, script) {
+        const sections = Array.isArray(script.sections) ? script.sections : [];
+        const cards = Array.isArray(planning.report_cards) ? planning.report_cards : [];
+        const cardMap = new Map(cards.map(card => [card.report_id || card.report_code, card]));
+        const supportingCards = (topic.reports || []).map(id => cardMap.get(id)).filter(Boolean);
+        const themeBullets = [
+            topic.topic_summary,
+            ...(topic.common_views || []),
+            ...(topic.conflicting_views || []).map(item => `风险：${item}`),
+        ].filter(Boolean);
+        const frames = [{
+            kind: 'opening',
+            source: '主题脚本',
+            title: script.video_title || topic.topic_name || '主题视频',
+            subtitle: topic.recommended_video_angle || topic.topic_summary || script.opening_text || '',
+            voiceText: script.opening_text || topic.topic_summary || '',
+            bullets: themeBullets,
+            nodes: supportingCards.map(card => card.institution || card.report_id).filter(Boolean),
+            duration: 8,
+            score: topic.final_score ?? topic.internal_heat_score,
+        }];
+
+        sections.forEach((section, index) => {
+            const sourceCard = supportingCards[index % Math.max(1, supportingCards.length)] || {};
+            frames.push({
+                kind: 'topic-section',
+                source: sourceCard.report_id || sourceCard.report_code || '主题脚本',
+                title: section.section_title || section.segment_title || `${this.formatChineseOrdinal(index + 1)}段`,
+                subtitle: section.key_visual || sourceCard.report_title || topic.topic_name || '',
+                voiceText: section.voice_text || '',
+                bullets: (section.bullet_points || []).concat(themeBullets).filter(Boolean),
+                focusNodeId: section.focus_node_id,
+                nodes: [
+                    sourceCard.institution,
+                    ...(section.bullet_points || []),
+                ].filter(Boolean),
+                duration: section.estimated_duration_sec || section.duration_sec || 18,
+                score: topic.final_score ?? sourceCard.video_value_score,
+            });
+        });
+        return frames;
+    },
+
+    buildReportStoryboardFrames(reports) {
+        const segmentFrames = reports.flatMap(report => {
+            const analysis = report.analysis || {};
+            const segments = Array.isArray(report.segments) ? report.segments : [];
+            if (!segments.length) return [];
+            return segments.map((segment, index) => {
+                const focus = this.findMindmapNode(report, segment.focus_node_id);
+                const nodes = this.collectMindmapLabels(report, segment.focus_node_id);
+                return {
+                    kind: 'segment',
+                    source: report.report_code || report.file_name || '研报',
+                    title: segment.segment_title || analysis.report_title || report.file_name || `第 ${index + 1} 段`,
+                    subtitle: focus?.label || analysis.core_view || analysis.theme || '',
+                    voiceText: segment.voice_text || '',
+                    bullets: [
+                        focus?.label,
+                        ...(analysis.key_points || []),
+                    ].filter(Boolean),
+                    focusNodeId: segment.focus_node_id,
+                    nodes,
+                    duration: segment.estimated_duration_sec || segment.duration_sec,
+                    score: analysis.video_value_score,
+                };
+            });
+        });
+        if (segmentFrames.length) return segmentFrames;
+        return reports
+            .filter(report => report.file_name || report.report_code)
+            .slice(0, 8)
+            .map(report => {
+                const extractionMethod = report.raw_meta?.extraction_method || report.raw_meta?.scan_stats?.extraction_method || report.parse_status;
+                return {
+                    kind: 'pdf-material',
+                    source: report.report_code || 'PDF',
+                    title: String(report.file_name || report.report_code || '研报素材').replace(/\.pdf$/i, ''),
+                    subtitle: `${report.page_count || 0} 页 · 清洗后 ${report.cleaned_text_chars || 0} 字符`,
+                    voiceText: `${report.report_code || 'PDF'} · ${report.page_count || 0} 页 · ${this.formatExtractionMethod(extractionMethod)}`,
+                    bullets: [
+                        this.formatStatus(report.parse_status),
+                        report.is_scanned ? '扫描版' : '文本型',
+                        report.cleaned_text_chars ? `${report.cleaned_text_chars} 字符` : null,
+                    ].filter(Boolean),
+                    nodes: [
+                        report.report_code,
+                        this.formatExtractionMethod(extractionMethod),
+                        report.page_count ? `${report.page_count} 页` : null,
+                    ].filter(Boolean),
+                    duration: 6,
+                };
+            });
+    },
+
+    buildPlanningStoryboardFrames(planning) {
+        const rankedTopics = Array.isArray(planning.ranked_topics) ? planning.ranked_topics : [];
+        const cards = Array.isArray(planning.report_cards) ? planning.report_cards : [];
+        if (rankedTopics.length) {
+            return rankedTopics.slice(0, 8).map(topic => ({
+                kind: 'topic-rank',
+                source: `${topic.report_count || 0} 篇研报`,
+                title: topic.topic_name || '主题',
+                subtitle: (topic.institutions || []).slice(0, 4).join('、') || topic.topic_category || '',
+                voiceText: topic.topic_summary || topic.recommended_video_angle || '',
+                bullets: [topic.reason, topic.topic_category].filter(Boolean),
+                nodes: topic.institutions || [],
+                duration: 12,
+                score: topic.final_score,
+            }));
+        }
+        return cards.slice(0, 8).map(card => ({
+            kind: 'report-card',
+            source: card.report_id || card.report_code || '摘要卡',
+            title: card.report_title || card.file_name || '研报摘要',
+            subtitle: card.institution || card.primary_theme || '',
+            voiceText: card.one_sentence_summary || card.core_view || '',
+            bullets: card.theme_tags || card.key_points || [],
+            nodes: [card.institution, card.primary_theme].filter(Boolean),
+            duration: 10,
+            score: card.video_value_score,
+        }));
+    },
+
+    renderStoryboardFrame(frame, index) {
+        const ratioClass = this.storyboardRatio === '9:16' ? 'is-vertical' : 'is-wide';
+        const toneClass = `tone-${index % 5}`;
+        const frameNo = String(index + 1).padStart(3, '0');
+        const title = this.excerptText(frame.title || '视频帧', this.storyboardRatio === '9:16' ? 24 : 34);
+        const subtitle = this.excerptText(frame.subtitle || frame.voiceText || '', this.storyboardRatio === '9:16' ? 42 : 72);
+        const voiceText = this.excerptText(frame.voiceText || frame.subtitle || '', this.storyboardRatio === '9:16' ? 58 : 88);
+        const bullets = (frame.bullets || []).filter(Boolean).slice(0, 3);
+        return `
+            <article class="rv-story-frame ${ratioClass} ${toneClass}">
+                <div class="rv-video-frame">
+                    <div class="rv-video-frame-top">
+                        <span>FRAME ${frameNo}</span>
+                        <span>${this.escape(frame.source || '-')}</span>
+                    </div>
+                    <div class="rv-video-frame-stage">
+                        <div class="rv-video-frame-copy">
+                            <em>${this.escape(frame.kind === 'opening' ? 'OPENING' : (frame.focusNodeId || frame.kind || 'SEGMENT'))}</em>
+                            <strong>${this.escape(title)}</strong>
+                            <p>${this.escape(subtitle)}</p>
+                        </div>
+                        ${this.renderFrameVisual(frame, index)}
+                    </div>
+                    <div class="rv-video-frame-bottom">
+                        <p>${this.escape(voiceText || '等待口播文本')}</p>
+                        <span>${this.escape(this.formatDuration(frame.duration))}</span>
+                    </div>
+                </div>
+                <div class="rv-story-frame-meta">
+                    <span>${this.escape(frame.score != null ? `价值 ${frame.score}` : (frame.focusNodeId || frame.kind || '-'))}</span>
+                    <span>${bullets.map(item => this.escape(this.excerptText(item, 18))).join(' · ') || '内容帧'}</span>
+                </div>
+            </article>
+        `;
+    },
+
+    renderFrameVisual(frame, index) {
+        const nodes = (frame.nodes || frame.bullets || []).filter(Boolean).slice(0, 5);
+        const bars = [0, 1, 2, 3].map(offset => {
+            const value = 34 + ((index + 2 + offset) * 17) % 52;
+            return `<i style="--bar:${value}%"></i>`;
+        }).join('');
+        const nodeMarkup = nodes.length
+            ? nodes.map((node, nodeIndex) => `<b class="node-${nodeIndex}">${this.escape(this.excerptText(node, 12))}</b>`).join('')
+            : '<b class="node-0">观点</b><b class="node-1">数据</b><b class="node-2">风险</b>';
+        return `
+            <div class="rv-video-frame-visual">
+                <div class="rv-frame-node-map">${nodeMarkup}</div>
+                <div class="rv-frame-bars">${bars}</div>
+            </div>
+        `;
+    },
+
+    findMindmapNode(report, nodeId) {
+        if (!nodeId) return null;
+        const nodes = report.mindmap?.nodes || [];
+        return nodes.find(node => String(node.id) === String(nodeId)) || null;
+    },
+
+    collectMindmapLabels(report, focusNodeId) {
+        const nodes = report.mindmap?.nodes || [];
+        if (!nodes.length) return [];
+        const focus = this.findMindmapNode(report, focusNodeId);
+        const related = nodes.filter(node => {
+            if (!focusNodeId) return node.id !== 'root';
+            return String(node.parent_id || node.parent || '') === String(focusNodeId) || String(node.id) === String(focusNodeId);
+        });
+        return [focus, ...related]
+            .filter(Boolean)
+            .map(node => node.label || node.title || node.id)
+            .filter(Boolean)
+            .slice(0, 5);
+    },
+
+    excerptText(value, maxLength = 80) {
+        const text = String(value || '').replace(/\s+/g, ' ').trim();
+        if (!text) return '';
+        return text.length > maxLength ? `${text.slice(0, Math.max(0, maxLength - 1))}…` : text;
+    },
+
+    graphStatus(status) {
+        const value = String(status || '').toLowerCase();
+        if (['completed', 'succeeded', 'parsed', 'matched', 'timeline_matched'].includes(value)) return 'success';
+        if (['failed', 'error', 'parse_failed', 'unmatched'].includes(value)) return 'failed';
+        if (['processing', 'running', 'queued', 'pending'].includes(value)) return 'running';
+        return 'idle';
     },
 
     bindEvents() {
@@ -130,6 +594,8 @@ const ReportVideoApp = {
         this.els.generateTopicScriptBtn?.addEventListener('click', () => this.generateTopicScript());
         this.els.applyTopicScriptBtn?.addEventListener('click', () => this.applyTopicScript());
         this.els.generateAiBtn?.addEventListener('click', () => this.generateAiScripts());
+        this.els.submitDoubaoTtsBtn?.addEventListener('click', () => this.submitDoubaoTts());
+        this.els.syncDoubaoTtsBtn?.addEventListener('click', () => this.syncDoubaoTts());
         this.els.copyAllTtsBtn?.addEventListener('click', () => this.copyAllTtsScripts());
         this.els.copyTtsManifestBtn?.addEventListener('click', () => this.copyTtsManifest());
         this.els.audioInput?.addEventListener('change', () => this.updateAudioFileSummary());
@@ -138,7 +604,19 @@ const ReportVideoApp = {
             input.addEventListener('change', () => this.updateAudioModeUi());
         });
         this.els.uploadAudioBtn?.addEventListener('click', () => this.uploadAudios());
+        this.els.generateKeyframesBtn?.addEventListener('click', () => this.generateRenderPreview('keyframes'));
+        this.els.approveKeyframesBtn?.addEventListener('click', () => this.approveRenderPreview('keyframes'));
+        this.els.rejectKeyframesBtn?.addEventListener('click', () => this.rejectRenderPreview('keyframes'));
+        this.els.generatePreviewClipBtn?.addEventListener('click', () => this.generateRenderPreview('clip'));
+        this.els.approvePreviewClipBtn?.addEventListener('click', () => this.approveRenderPreview('clip'));
+        this.els.rejectPreviewClipBtn?.addEventListener('click', () => this.rejectRenderPreview('clip'));
         this.els.generateVideoBtn?.addEventListener('click', () => this.generateVideos());
+        this.els.generateRemotionVideoBtn?.addEventListener('click', () => this.generateRemotionVideos());
+        this.els.renderPreviewList?.addEventListener('click', (event) => {
+            const button = event.target.closest('[data-generate-milestone-clip]');
+            if (!button) return;
+            this.generateMilestoneClip(button.dataset.previewId, Number(button.dataset.milestoneIndex || 0), button);
+        });
         this.els.saveAutoScanBtn?.addEventListener('click', () => this.saveAutoScanConfig());
         this.els.previewAutoScanBtn?.addEventListener('click', () => this.previewAutoScan());
         this.els.runAutoScanBtn?.addEventListener('click', () => this.runAutoScan());
@@ -155,9 +633,23 @@ const ReportVideoApp = {
         this.els.textModal?.addEventListener('click', (event) => {
             if (event.target === this.els.textModal) this.closeTextModal();
         });
+        this.els.storyboardRatioButtons?.forEach(button => {
+            button.addEventListener('click', () => {
+                this.storyboardRatio = button.dataset.storyboardRatio || '16:9';
+                this.els.storyboardRatioButtons.forEach(item => {
+                    item.classList.toggle('active', item === button);
+                });
+                this.renderStoryboard(this.getActiveTask());
+            });
+        });
         document.querySelectorAll('.rv-tabs button').forEach((button) => {
             button.addEventListener('click', () => this.switchTab(button.dataset.tab));
         });
+    },
+
+    initialTaskId() {
+        const params = new URLSearchParams(window.location.search);
+        return (params.get('task_id') || params.get('task') || '').trim() || null;
     },
 
     async api(path, options = {}) {
@@ -188,6 +680,13 @@ const ReportVideoApp = {
         try {
             const data = await this.api('/report-video/tasks');
             this.tasks = this.mergeTaskSummaries(data.data || []);
+            if (this.activeTaskId && !this.tasks.some(task => task.id === this.activeTaskId)) {
+                try {
+                    await this.loadTaskDetail(this.activeTaskId);
+                } catch (_) {
+                    this.activeTaskId = null;
+                }
+            }
             if (!this.activeTaskId && this.tasks.length) {
                 this.activeTaskId = this.tasks[0].id;
             }
@@ -476,18 +975,26 @@ const ReportVideoApp = {
         }
     },
 
-    refreshIfBusy() {
+    async refreshIfBusy() {
+        const activeTask = this.getActiveTask();
+        if (this.hasDoubaoTtsInFlight(activeTask)) {
+            await this.syncDoubaoTts({ silent: true });
+            return;
+        }
         const busyStatuses = new Set([
             'parsing',
             'ai_generating',
             'video_generating',
+            'remotion_generating',
             'topic_cards_generating',
             'topic_clustering',
             'topic_script_generating',
             'audio_processing',
+            'keyframes_generating',
+            'preview_generating',
         ]);
         if (this.tasks.some(task => busyStatuses.has(task.status))) {
-            this.loadTasks();
+            await this.loadTasks();
         }
     },
 
@@ -781,6 +1288,62 @@ const ReportVideoApp = {
         }
     },
 
+    async submitDoubaoTts() {
+        const task = this.getActiveTask();
+        const rows = this.buildTtsRows(task?.reports || []);
+        if (!task || !rows.length) {
+            alert('还没有可投递的 TTS 段落');
+            return;
+        }
+        this.setButtonLoading(this.els.submitDoubaoTtsBtn, true, '投递中...');
+        try {
+            const data = await this.api(`/report-video/tasks/${task.id}/tts/doubao/submit`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reuse_completed: true })
+            });
+            this.upsertTask(data.data.task);
+            this.renderTasks();
+            this.renderActiveTask();
+            const summary = data.data.doubao_tts?.summary || {};
+            this.renderToastHint(`豆包 TTS 已投递：${summary.submitted || 0} 段，已就绪 ${summary.audio_ready || 0}/${summary.total || rows.length}`);
+        } catch (error) {
+            alert(`投递豆包 TTS 失败：${error.message}`);
+        } finally {
+            this.setButtonLoading(this.els.submitDoubaoTtsBtn, false, '投递豆包 TTS');
+        }
+    },
+
+    async syncDoubaoTts(options = {}) {
+        const task = this.getActiveTask();
+        if (!task) return;
+        if (!options.silent) {
+            this.setButtonLoading(this.els.syncDoubaoTtsBtn, true, '同步中...');
+        }
+        try {
+            const data = await this.api(`/report-video/tasks/${task.id}/tts/doubao/sync`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            this.upsertTask(data.data.task);
+            this.renderTasks();
+            this.renderActiveTask();
+            if (!options.silent) {
+                const summary = data.data.doubao_tts?.summary || {};
+                this.renderToastHint(`TTS 同步完成：音频就绪 ${summary.audio_ready || 0}/${summary.total || 0}`);
+            }
+        } catch (error) {
+            if (!options.silent) {
+                alert(`同步 TTS 音频失败：${error.message}`);
+            }
+        } finally {
+            if (!options.silent) {
+                this.setButtonLoading(this.els.syncDoubaoTtsBtn, false, '同步 TTS 音频');
+            }
+        }
+    },
+
     async uploadAudios() {
         const task = this.getActiveTask();
         if (!task) {
@@ -868,6 +1431,11 @@ const ReportVideoApp = {
             alert('请先生成单篇 AI 文案，或在主题策划中生成并应用主题脚本');
             return;
         }
+        const missingPreview = this.previewApprovalMissing(task);
+        if (missingPreview.length) {
+            alert(`请先完成正式生成前确认：\n${missingPreview.join('\n')}`);
+            return;
+        }
         this.setButtonLoading(this.els.generateVideoBtn, true, '生成中...');
         try {
             const data = await this.api(`/report-video/tasks/${task.id}/videos/generate`, {
@@ -886,6 +1454,34 @@ const ReportVideoApp = {
             alert(`视频生成失败：${error.message}`);
         } finally {
             this.setButtonLoading(this.els.generateVideoBtn, false, '生成视频');
+        }
+    },
+
+    async generateRemotionVideos() {
+        const task = this.getActiveTask();
+        if (!task) {
+            alert('请先选择任务');
+            return;
+        }
+        const readyReports = (task.reports || []).filter(report => report.analysis && (report.segments || []).length);
+        if (!readyReports.length) {
+            alert('请先生成单篇 AI 文案，或在主题策划中生成并应用主题脚本');
+            return;
+        }
+        this.setButtonLoading(this.els.generateRemotionVideoBtn, true, 'Remotion 入队中...');
+        try {
+            const data = await this.api(`/report-video/tasks/${task.id}/videos/remotion/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ratios: task.output_ratios || ['16:9'] })
+            });
+            this.upsertTask(data.data.task);
+            this.renderTasks();
+            this.renderActiveTask();
+        } catch (error) {
+            alert(`Remotion 视频生成失败：${error.message}`);
+        } finally {
+            this.setButtonLoading(this.els.generateRemotionVideoBtn, false, '生成 Remotion 试验版');
         }
     },
 
@@ -936,6 +1532,7 @@ const ReportVideoApp = {
     renderTasks() {
         if (!this.tasks.length) {
             this.els.taskList.innerHTML = '<div class="rv-empty">暂无任务</div>';
+            this.updateFlowGraph();
             return;
         }
         this.els.taskList.innerHTML = this.tasks.map(task => `
@@ -959,13 +1556,19 @@ const ReportVideoApp = {
                 }
             });
         });
+        this.updateFlowGraph();
     },
 
     renderActiveTask() {
         const task = this.getActiveTask();
         this.els.emptyState.classList.toggle('hidden', !!task);
         this.els.workbench.classList.toggle('hidden', !task);
-        if (!task) return;
+        if (!task) {
+            this.renderStoryboard(null);
+            this.renderRenderPreviews(null);
+            this.updateFlowGraph();
+            return;
+        }
 
         const reports = task.reports || [];
         this.els.activeTaskName.textContent = task.task_name;
@@ -984,6 +1587,9 @@ const ReportVideoApp = {
             this.els.audioList.innerHTML = '<div class="rv-empty">正在加载任务详情...</div>';
             this.els.videoSummary.textContent = '加载中';
             this.els.videoOutputList.innerHTML = '<div class="rv-empty">正在加载任务详情...</div>';
+            this.renderStoryboard(task);
+            this.renderRenderPreviews(task);
+            this.updateFlowGraph();
             return;
         }
         this.els.reportSummary.textContent = `${reports.length} 篇`;
@@ -992,8 +1598,12 @@ const ReportVideoApp = {
         this.renderScripts(reports);
         this.renderMindmaps(reports);
         this.renderTtsScripts(reports);
+        this.renderDoubaoTtsStatus(task);
         this.renderAudios(task);
+        this.renderRenderPreviews(task);
         this.renderOutputs(task.outputs || []);
+        this.renderStoryboard(task);
+        this.updateFlowGraph();
     },
 
     renderAutoScanConfig(config) {
@@ -1254,6 +1864,7 @@ const ReportVideoApp = {
                     button.addEventListener('click', () => {
                         this.selectedTopicId = button.dataset.topicId;
                         this.renderTopicPlanning(this.getActiveTask());
+                        this.renderStoryboard(this.getActiveTask());
                     });
                 });
             }
@@ -1279,6 +1890,7 @@ const ReportVideoApp = {
         if (!this.els.topicDetailPanel) return;
         if (!topic) {
             this.els.topicDetailPanel.innerHTML = '<div class="rv-empty">请先在主题榜里选择一个主题。</div>';
+            this.updateFlowGraph();
             return;
         }
 
@@ -1328,6 +1940,7 @@ const ReportVideoApp = {
                 </div>
             </article>
         `;
+        this.updateFlowGraph();
     },
 
     renderTopicScriptPreview(script) {
@@ -1488,6 +2101,12 @@ const ReportVideoApp = {
         if (!this.els.ttsScriptList) return;
         const rows = this.buildTtsRows(reports);
         this.els.ttsScriptSummary.textContent = `${rows.length} 段`;
+        if (this.els.submitDoubaoTtsBtn) {
+            this.els.submitDoubaoTtsBtn.disabled = !rows.length;
+        }
+        if (this.els.syncDoubaoTtsBtn) {
+            this.els.syncDoubaoTtsBtn.disabled = !rows.length;
+        }
         if (!rows.length) {
             this.els.ttsScriptList.innerHTML = '<div class="rv-empty">生成单篇 AI 文案，或应用主题脚本后会显示可用于 TTS 的口播稿。</div>';
             return;
@@ -1514,6 +2133,53 @@ const ReportVideoApp = {
                 this.copyText(row.segment.voice_text || '');
             });
         });
+    },
+
+    renderDoubaoTtsStatus(task) {
+        if (!this.els.doubaoTtsStatus) return;
+        const state = task?.result?.doubao_tts || null;
+        const jobs = Array.isArray(state?.jobs) ? state.jobs : [];
+        if (!jobs.length) {
+            this.els.doubaoTtsStatus.innerHTML = `
+                <div class="rv-doubao-tts-empty">
+                    豆包 TTS 尚未投递。可以直接点击“投递豆包 TTS”，系统会按当前段落逐条生成音频并自动回填。
+                </div>
+            `;
+            return;
+        }
+
+        const summary = state.summary || {};
+        const statusClass = this.doubaoTtsStatusClass(state.status);
+        this.els.doubaoTtsStatus.innerHTML = `
+            <section class="rv-doubao-tts-panel">
+                <div class="rv-doubao-tts-head">
+                    <div>
+                        <h4>豆包 TTS 任务</h4>
+                        <p>音频就绪 ${summary.audio_ready || 0}/${summary.total || jobs.length} · 处理中 ${(summary.queued || 0) + (summary.running || 0)} · 失败/阻塞 ${(summary.failed || 0) + (summary.blocked || 0)}</p>
+                    </div>
+                    <span class="rv-pill ${statusClass}">${this.formatDoubaoTtsStatus(state.status)}</span>
+                </div>
+                <div class="rv-doubao-tts-jobs">
+                    ${jobs.map(job => `
+                        <div class="rv-doubao-tts-job">
+                            <div>
+                                <strong>${this.escape(job.recommended_file_name || job.segment_title || job.segment_id || '-')}</strong>
+                                <span>${this.escape(job.segment_title || job.segment_id || '-')}</span>
+                                ${job.error ? `<em>${this.escape(job.error)}</em>` : ''}
+                            </div>
+                            <span class="rv-pill ${this.doubaoJobStatusClass(job.status)}">${this.formatDoubaoJobStatus(job.status)}${job.progress ? ` · ${job.progress}%` : ''}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </section>
+        `;
+    },
+
+    hasDoubaoTtsInFlight(task) {
+        const state = task?.result?.doubao_tts || null;
+        if (!state) return false;
+        if (['queued', 'running'].includes(state.status)) return true;
+        return (state.jobs || []).some(job => ['queued', 'running', 'succeeded'].includes(job.status));
     },
 
     formatTtsManifestRowText({ report, segment, recommendedFileName }) {
@@ -1663,6 +2329,242 @@ const ReportVideoApp = {
         this.els.audioList.innerHTML = [summaryText, activeBlock, primaryBlock, staleBlock].filter(Boolean).join('');
     },
 
+    latestRenderPreview(task, previewType, ratio) {
+        const normalized = previewType === 'clip' ? 'preview_clip' : previewType;
+        return (task?.render_previews || [])
+            .filter(preview => preview.preview_type === normalized && preview.ratio === ratio)
+            .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0] || null;
+    },
+
+    previewApprovalMissing(task) {
+        const ratios = task?.output_ratios || ['16:9'];
+        const missing = [];
+        ratios.forEach(ratio => {
+            const keyframes = this.latestRenderPreview(task, 'keyframes', ratio);
+            const clip = this.latestRenderPreview(task, 'preview_clip', ratio);
+            if (!keyframes || keyframes.status !== 'approved') missing.push(`${ratio} 关键帧`);
+            if (!clip || clip.status !== 'approved') missing.push(`${ratio} 里程碑样片组`);
+        });
+        return missing;
+    },
+
+    renderRenderPreviews(task) {
+        if (!this.els.renderPreviewList) return;
+        const ratios = task?.output_ratios || ['16:9'];
+        if (!task) {
+            this.els.renderPreviewSummary.textContent = '等待任务';
+            this.els.renderPreviewList.innerHTML = '<div class="rv-empty">选择任务后生成里程碑关键帧和样片组。</div>';
+            return;
+        }
+        if (task.summary_only) {
+            this.els.renderPreviewSummary.textContent = '加载中';
+            this.els.renderPreviewList.innerHTML = '<div class="rv-empty">正在加载任务详情...</div>';
+            return;
+        }
+
+        const missing = this.previewApprovalMissing(task);
+        this.els.renderPreviewSummary.textContent = missing.length ? `待确认 ${missing.length} 项` : '预览已确认';
+        this.els.generateVideoBtn.disabled = !!missing.length;
+        this.els.renderPreviewList.innerHTML = ratios.map(ratio => {
+            const keyframes = this.latestRenderPreview(task, 'keyframes', ratio);
+            const clip = this.latestRenderPreview(task, 'preview_clip', ratio);
+            const ratioMissing = missing.filter(item => item.startsWith(ratio));
+            return `
+                <article class="rv-render-preview-item">
+                    <div class="rv-render-preview-head">
+                        <div>
+                            <h4>${this.escape(ratio)} 质量闸门</h4>
+                            <p>${this.escape(ratioMissing.join(' · ') || '可以正式生成')}</p>
+                        </div>
+                        <span class="rv-pill ${ratioMissing.length ? 'warn' : 'ok'}">${ratioMissing.length ? '待确认' : '已确认'}</span>
+                    </div>
+                    <div class="rv-render-preview-grid">
+                        ${this.renderPreviewCard(keyframes, '关键帧', ratio)}
+                        ${this.renderPreviewCard(clip, '里程碑样片组', ratio)}
+                    </div>
+                </article>
+            `;
+        }).join('');
+    },
+
+    renderPreviewCard(preview, label, ratio) {
+        if (!preview) {
+            return `
+                <div class="rv-render-preview-card">
+                    <div class="rv-render-preview-empty">${this.escape(label)}未生成</div>
+                    <p>${this.escape(ratio)} · 等待生成</p>
+                </div>
+            `;
+        }
+        const statusClass = preview.status === 'approved' ? 'ok' : (preview.status === 'failed' || preview.status === 'rejected' ? 'bad' : (preview.status === 'completed' ? 'warn' : ''));
+        const fileCount = (preview.file_paths || []).length;
+        const milestones = preview.meta?.milestones || [];
+        const isClip = preview.preview_type === 'preview_clip';
+        const media = preview.status === 'completed' || preview.status === 'approved'
+            ? (isClip
+                ? `<div class="rv-preview-clip-list">${(preview.file_paths || []).map((_, index) => {
+                    const milestone = milestones[index] || {};
+                    const caption = milestone.label || `${label} ${index + 1}`;
+                    return `
+                        <figure class="rv-preview-clip">
+                            <video controls preload="metadata" src="${this.API_BASE}/report-video/previews/${preview.id}/files/${index}"></video>
+                            <figcaption>${this.escape(caption)}</figcaption>
+                        </figure>
+                    `;
+                }).join('')}</div>`
+                : `<div class="rv-keyframe-strip">${(preview.file_paths || []).map((_, index) => {
+                    const milestone = milestones[index] || {};
+                    const caption = milestone.label || `${label} ${index + 1}`;
+                    const href = `${this.API_BASE}/report-video/previews/${preview.id}/files/${index}`;
+                    return `
+                        <figure class="rv-keyframe">
+                            <a class="rv-keyframe-link" href="${href}" target="_blank" rel="noopener" title="打开大图">
+                                <img src="${href}" alt="${this.escape(caption)}">
+                            </a>
+                            <figcaption>${this.escape(caption)}</figcaption>
+                            <button
+                                class="rv-milestone-clip-btn"
+                                type="button"
+                                data-generate-milestone-clip="1"
+                                data-preview-id="${preview.id}"
+                                data-milestone-index="${index}"
+                            >生成该样片</button>
+                        </figure>
+                    `;
+                }).join('')}</div>`)
+            : `<div class="rv-render-preview-empty">${this.escape(this.formatStatus(preview.status))}</div>`;
+        const fileSummary = isClip
+            ? `${fileCount || preview.meta?.clip_count || 0} 个样片`
+            : `${fileCount || preview.meta?.frame_count || 0} 张关键帧`;
+        return `
+            <div class="rv-render-preview-card">
+                <div class="rv-render-preview-card-head">
+                    <strong>${this.escape(label)}</strong>
+                    <span class="rv-pill ${statusClass}">${this.escape(this.formatStatus(preview.status))}</span>
+                </div>
+                ${media}
+                <p>${this.escape(fileSummary)} · ${this.escape(preview.renderer_version || '-')}</p>
+                ${preview.error_message ? `<p class="rv-error-text">${this.escape(preview.error_message)}</p>` : ''}
+                ${preview.reject_reason ? `<p class="rv-error-text">${this.escape(preview.reject_reason)}</p>` : ''}
+            </div>
+        `;
+    },
+
+    async generateRenderPreview(type) {
+        const task = this.getActiveTask();
+        if (!task) {
+            alert('请先选择任务');
+            return;
+        }
+        const readyReports = (task.reports || []).filter(report => report.analysis && (report.segments || []).length);
+        if (!readyReports.length) {
+            alert('请先生成单篇 AI 文案，或在主题策划中生成并应用主题脚本');
+            return;
+        }
+        const isClip = type === 'clip';
+        const button = isClip ? this.els.generatePreviewClipBtn : this.els.generateKeyframesBtn;
+        const endpoint = isClip ? 'clip' : 'keyframes';
+        this.setButtonLoading(button, true, isClip ? '样片生成中...' : '关键帧生成中...');
+        try {
+            const data = await this.api(`/report-video/tasks/${task.id}/previews/${endpoint}/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ratios: task.output_ratios || ['16:9'], duration_sec: 10 })
+            });
+            this.upsertTask(data.data.task);
+            this.renderTasks();
+            this.renderActiveTask();
+        } catch (error) {
+            alert(`${isClip ? '样片组' : '关键帧'}生成失败：${error.message}`);
+        } finally {
+            this.setButtonLoading(button, false, isClip ? '生成样片组' : '生成关键帧');
+        }
+    },
+
+    async generateMilestoneClip(previewId, milestoneIndex, button) {
+        const task = this.getActiveTask();
+        if (!task) {
+            alert('请先选择任务');
+            return;
+        }
+        const preview = (task.render_previews || []).find(item => item.id === previewId);
+        if (!preview) {
+            alert('没有找到对应的关键帧预览');
+            return;
+        }
+        const milestone = (preview.meta?.milestones || [])[milestoneIndex] || {};
+        const payloadMilestone = {
+            type: milestone.type || (milestone.segment_id ? 'segment' : 'theme_opening'),
+            segment_id: milestone.segment_id || null,
+            label: milestone.label || `关键帧 ${milestoneIndex + 1}`
+        };
+        this.setButtonLoading(button, true, '生成中...');
+        try {
+            const data = await this.api(`/report-video/tasks/${task.id}/previews/clip/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    ratios: [preview.ratio || this.storyboardRatio || '16:9'],
+                    duration_sec: 10,
+                    milestones: [payloadMilestone]
+                })
+            });
+            this.upsertTask(data.data.task);
+            this.renderTasks();
+            this.renderActiveTask();
+        } catch (error) {
+            alert(`该里程碑样片生成失败：${error.message}`);
+        } finally {
+            this.setButtonLoading(button, false, '生成该样片');
+        }
+    },
+
+    async approveRenderPreview(type) {
+        const task = this.getActiveTask();
+        if (!task) return;
+        const isClip = type === 'clip';
+        const button = isClip ? this.els.approvePreviewClipBtn : this.els.approveKeyframesBtn;
+        this.setButtonLoading(button, true, '确认中...');
+        try {
+            const data = await this.api(`/report-video/tasks/${task.id}/previews/${isClip ? 'clip' : 'keyframes'}/approve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ratios: task.output_ratios || ['16:9'] })
+            });
+            this.upsertTask(data.data.task);
+            this.renderTasks();
+            this.renderActiveTask();
+        } catch (error) {
+            alert(`确认失败：${error.message}`);
+        } finally {
+            this.setButtonLoading(button, false, isClip ? '确认样片组' : '确认关键帧');
+        }
+    },
+
+    async rejectRenderPreview(type) {
+        const task = this.getActiveTask();
+        if (!task) return;
+        const reason = prompt('退回原因', '画面需要重新调整');
+        if (reason === null) return;
+        const isClip = type === 'clip';
+        const button = isClip ? this.els.rejectPreviewClipBtn : this.els.rejectKeyframesBtn;
+        this.setButtonLoading(button, true, '退回中...');
+        try {
+            const data = await this.api(`/report-video/tasks/${task.id}/previews/${isClip ? 'clip' : 'keyframes'}/reject`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ratios: task.output_ratios || ['16:9'], reason })
+            });
+            this.upsertTask(data.data.task);
+            this.renderTasks();
+            this.renderActiveTask();
+        } catch (error) {
+            alert(`退回失败：${error.message}`);
+        } finally {
+            this.setButtonLoading(button, false, isClip ? '退回样片组' : '退回关键帧');
+        }
+    },
+
     renderOutputs(outputs) {
         if (!this.els.videoOutputList) return;
         this.els.videoSummary.textContent = `${outputs.length} 个视频`;
@@ -1751,11 +2653,22 @@ const ReportVideoApp = {
             audio_processing: '音频处理中',
             audio_failed: '音频处理失败',
             waiting_video: '待生成视频',
+            keyframes_generating: '关键帧生成中',
+            keyframes_ready: '关键帧就绪',
+            preview_generating: '样片生成中',
+            preview_ready: '样片就绪',
+            preview_partial: '预览部分完成',
+            preview_failed: '预览失败',
             video_generating: '视频生成中',
+            remotion_generating: 'Remotion 生成中',
             video_partial: '部分生成',
             video_failed: '视频失败',
             completed: '已完成',
+            approved: '已确认',
+            rejected: '已退回',
             failed: '失败',
+            queued: '排队中',
+            processing: '处理中',
             pending: '待处理',
             asr_queued: 'ASR 排队中',
             asr_processing: 'ASR 生成字幕中',
@@ -1764,6 +2677,45 @@ const ReportVideoApp = {
             unmatched: '未匹配'
         };
         return map[status] || status || '-';
+    },
+
+    formatDoubaoTtsStatus(status) {
+        const map = {
+            empty: '未投递',
+            queued: '排队中',
+            running: '生成中',
+            completed: '音频就绪',
+            partial_failed: '部分失败',
+            failed: '失败'
+        };
+        return map[status] || status || '-';
+    },
+
+    formatDoubaoJobStatus(status) {
+        const map = {
+            queued: '排队中',
+            running: '生成中',
+            succeeded: '待回填',
+            audio_ready: '已回填',
+            failed: '失败',
+            blocked: '验证阻塞',
+            canceled: '已取消'
+        };
+        return map[status] || status || '-';
+    },
+
+    doubaoTtsStatusClass(status) {
+        if (status === 'completed') return 'ok';
+        if (status === 'partial_failed') return 'warn';
+        if (status === 'failed') return 'bad';
+        return '';
+    },
+
+    doubaoJobStatusClass(status) {
+        if (status === 'audio_ready') return 'ok';
+        if (['failed', 'blocked', 'canceled'].includes(status)) return 'bad';
+        if (status === 'succeeded') return 'warn';
+        return '';
     },
 
     formatAutoScanStatus(status) {

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>知识星球实验台 - Shioa</title>
     <link href="css/zsxq-lab.css?v=20260617-download-heat" rel="stylesheet">
+    <link href="css/three-workspaces.css?v=20260702-zsxq-map-polish" rel="stylesheet">
     <style>
         .line-clamp-2 {
             display: -webkit-box;
@@ -25,6 +26,11 @@
                 <i class="fas fa-triangle-exclamation"></i>
                 <span>仅用于个人授权账号验证，不做批量抓取。</span>
             </div>
+        </section>
+
+        <section id="zsxq-knowledge-map" class="three-workspace-panel three-workspace-panel--knowledge">
+            <div class="three-workspace-scene" data-three-scene></div>
+            <aside class="three-workspace-side" data-three-side></aside>
         </section>
 
         <section class="zsxq-workbench grid grid-cols-1 gap-6 min-w-0">
@@ -79,19 +85,26 @@
                     </div>
                 </div>
 
-                <div class="zsxq-panel-section flex gap-3">
-                    <button id="load-groups-btn" class="flex-1 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-700 transition-colors">
-                        <i class="fas fa-satellite-dish mr-2"></i>获取星球
-                    </button>
-                    <button id="clear-btn" class="rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-bold text-slate-600 hover:bg-slate-50 transition-colors">
-                        清空
-                    </button>
+                <div class="zsxq-panel-section">
+                    <label class="text-xs font-bold text-slate-600">星球来源</label>
+                    <p class="mt-1 text-xs text-slate-400">默认读取本地缓存；需要校验账号或发现新星球时再走远端。</p>
+                    <div class="mt-2 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2">
+                        <button id="load-groups-btn" class="rounded-lg bg-blue-600 px-3 py-2.5 text-xs font-bold text-white hover:bg-blue-700 transition-colors">
+                            <i class="fas fa-database mr-2"></i>本地缓存
+                        </button>
+                        <button id="load-remote-groups-btn" class="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs font-bold text-blue-700 hover:bg-blue-100 transition-colors">
+                            <i class="fas fa-cloud-arrow-down mr-2"></i>远端刷新
+                        </button>
+                        <button id="clear-btn" class="rounded-lg border border-slate-300 px-3 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors">
+                            清空
+                        </button>
+                    </div>
                 </div>
 
                 <div class="zsxq-panel-section">
                     <label class="zsxq-section-label text-xs font-bold text-slate-600 uppercase tracking-wider">星球列表</label>
                     <div id="groups-list" class="mt-2 max-h-[420px] overflow-y-auto rounded-lg border border-slate-200 divide-y divide-slate-100 bg-white">
-                        <div class="p-4 text-sm text-slate-400">等待获取...</div>
+                        <div class="p-4 text-sm text-slate-400">正读取本地缓存...</div>
                     </div>
                 </div>
             </aside>
@@ -232,6 +245,8 @@
     <script src="js/env.js"></script>
     <script src="js/config.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/zsxq-lab.js?v=20260628-system-sync-scope"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="js/three-workspace-graph.js?v=20260702-zsxq-map-polish"></script>
+    <script src="js/zsxq-lab.js?v=20260702-three-knowledge-map-polish"></script>
 </body>
 </html>

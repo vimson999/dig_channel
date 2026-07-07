@@ -37,6 +37,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let imgOffsetX = 0;
     let imgOffsetY = 0;
     let imgScale = 1.0;
+    let workflowRenderOptions = {};
     let isDragging = false;
     let dragStartX = 0;
     let dragStartY = 0;
@@ -208,6 +209,81 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         context.fillText(line, x, currentY);
         return currentY + lineHeight;
+    }
+
+    function compactText(text) {
+        return String(text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function wrapTextLines(context, text, maxWidth) {
+        const value = compactText(text);
+        const lines = [];
+        let line = '';
+        for (let n = 0; n < value.length; n++) {
+            const ch = value[n];
+            const testLine = line + ch;
+            if (line && context.measureText(testLine).width > maxWidth) {
+                lines.push(line);
+                line = ch;
+            } else {
+                line = testLine;
+            }
+        }
+        if (line || lines.length === 0) lines.push(line);
+        return lines;
+    }
+
+    function ellipsizeLine(context, text, maxWidth) {
+        const ellipsis = '...';
+        let value = compactText(text);
+        if (!value || context.measureText(value).width <= maxWidth) return value;
+        while (value.length > 0 && context.measureText(value + ellipsis).width > maxWidth) {
+            value = value.slice(0, -1);
+        }
+        return value ? value + ellipsis : ellipsis;
+    }
+
+    function drawFittedWrappedText(context, text, x, y, maxWidth, options = {}) {
+        const value = compactText(text);
+        const maxLines = Math.max(1, Number(options.maxLines || 1));
+        const startSize = Math.max(1, Number(options.startSize || 64));
+        const minSize = Math.max(1, Math.min(startSize, Number(options.minSize || startSize)));
+        const step = Math.max(1, Number(options.step || 2));
+        const weight = options.weight || 'bold';
+        const family = options.family || '"Microsoft YaHei", "PingFang SC", sans-serif';
+        const lineHeightRatio = Number(options.lineHeightRatio || 1.2);
+
+        let selectedSize = minSize;
+        let selectedLines = [];
+        for (let size = startSize; size >= minSize; size -= step) {
+            context.font = `${weight} ${size}px ${family}`;
+            const lines = wrapTextLines(context, value, maxWidth);
+            selectedSize = size;
+            selectedLines = lines;
+            if (lines.length <= maxLines) break;
+        }
+
+        context.font = `${weight} ${selectedSize}px ${family}`;
+        let lines = selectedLines.length ? selectedLines : wrapTextLines(context, value, maxWidth);
+        if (lines.length > maxLines) {
+            const visible = lines.slice(0, maxLines);
+            visible[maxLines - 1] = ellipsizeLine(context, lines.slice(maxLines - 1).join(''), maxWidth);
+            lines = visible;
+        } else {
+            lines = lines.slice(0, maxLines);
+            if (lines.length) lines[lines.length - 1] = ellipsizeLine(context, lines[lines.length - 1], maxWidth);
+        }
+
+        const lineHeight = Math.round(selectedSize * lineHeightRatio);
+        lines.forEach((line, index) => {
+            context.fillText(line, x, y + index * lineHeight);
+        });
+        return {
+            nextY: y + lines.length * lineHeight,
+            fontSize: selectedSize,
+            lineHeight,
+            lines
+        };
     }
 
     function roundRect(ctx, x, y, width, height, radius) {
@@ -417,17 +493,18 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (format === 'vertical') {
                 targetWidth = w; targetHeight = 1200;
                 const targetRatio = targetWidth / targetHeight;
+                const anchorTopLeft = workflowRenderOptions.imageAnchor === 'top-left';
                 if (imgRatio > targetRatio) {
                     let dw = reportImg.width * (targetHeight / reportImg.height);
                     let sDw = dw * imgScale; let sDh = targetHeight * imgScale;
-                    drawX = -(sDw - targetWidth) / 2 + imgOffsetX; 
-                    drawY = 0 - (sDh - targetHeight) / 2 + imgOffsetY;
+                    drawX = (anchorTopLeft ? 0 : -(sDw - targetWidth) / 2) + imgOffsetX;
+                    drawY = (anchorTopLeft ? 0 : 0 - (sDh - targetHeight) / 2) + imgOffsetY;
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 } else {
                     let dh = reportImg.height * (targetWidth / reportImg.width);
                     let sDw = targetWidth * imgScale; let sDh = dh * imgScale;
-                    drawX = 0 - (sDw - targetWidth) / 2 + imgOffsetX; 
-                    drawY = 0 - (sDh - targetHeight) / 2 + imgOffsetY;
+                    drawX = (anchorTopLeft ? 0 : 0 - (sDw - targetWidth) / 2) + imgOffsetX;
+                    drawY = (anchorTopLeft ? 0 : 0 - (sDh - targetHeight) / 2) + imgOffsetY;
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 }
                 const mask = ctx.createLinearGradient(0, 400, 0, 1200);
@@ -438,17 +515,18 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (format === 'wx_cover') {
                 targetWidth = w; targetHeight = 900;
                 const targetRatio = targetWidth / targetHeight;
+                const anchorTopLeft = workflowRenderOptions.imageAnchor === 'top-left';
                 if (imgRatio > targetRatio) {
                     let dw = reportImg.width * (targetHeight / reportImg.height);
                     let sDw = dw * imgScale; let sDh = targetHeight * imgScale;
-                    drawX = -(sDw - targetWidth) / 2 + imgOffsetX; 
-                    drawY = 0 - (sDh - targetHeight) / 2 + imgOffsetY;
+                    drawX = (anchorTopLeft ? 0 : -(sDw - targetWidth) / 2) + imgOffsetX;
+                    drawY = (anchorTopLeft ? 0 : 0 - (sDh - targetHeight) / 2) + imgOffsetY;
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 } else {
                     let dh = reportImg.height * (targetWidth / reportImg.width);
                     let sDw = targetWidth * imgScale; let sDh = dh * imgScale;
-                    drawX = 0 - (sDw - targetWidth) / 2 + imgOffsetX; 
-                    drawY = 0 - (sDh - targetHeight) / 2 + imgOffsetY;
+                    drawX = (anchorTopLeft ? 0 : 0 - (sDw - targetWidth) / 2) + imgOffsetX;
+                    drawY = (anchorTopLeft ? 0 : 0 - (sDh - targetHeight) / 2) + imgOffsetY;
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 }
                 const mask = ctx.createLinearGradient(0, 300, 0, 900);
@@ -459,17 +537,18 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (format === 'podcast') {
                 targetWidth = w; targetHeight = 900;
                 const targetRatio = targetWidth / targetHeight;
+                const anchorTopLeft = workflowRenderOptions.imageAnchor === 'top-left';
                 if (imgRatio > targetRatio) {
                     let dw = reportImg.width * (targetHeight / reportImg.height);
                     let sDw = dw * imgScale; let sDh = targetHeight * imgScale;
-                    drawX = -(sDw - targetWidth) / 2 + imgOffsetX; 
-                    drawY = 0 - (sDh - targetHeight) / 2 + imgOffsetY;
+                    drawX = (anchorTopLeft ? 0 : -(sDw - targetWidth) / 2) + imgOffsetX;
+                    drawY = (anchorTopLeft ? 0 : 0 - (sDh - targetHeight) / 2) + imgOffsetY;
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 } else {
                     let dh = reportImg.height * (targetWidth / reportImg.width);
                     let sDw = targetWidth * imgScale; let sDh = dh * imgScale;
-                    drawX = 0 - (sDw - targetWidth) / 2 + imgOffsetX; 
-                    drawY = 0 - (sDh - targetHeight) / 2 + imgOffsetY;
+                    drawX = (anchorTopLeft ? 0 : 0 - (sDw - targetWidth) / 2) + imgOffsetX;
+                    drawY = (anchorTopLeft ? 0 : 0 - (sDh - targetHeight) / 2) + imgOffsetY;
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 }
                 const mask = ctx.createLinearGradient(0, 200, 0, 900);
@@ -654,14 +733,27 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
             ctx.fillRect(margin, 1000, 10, 40); ctx.fillStyle = '#e2e8f0';
             ctx.fillText(instText + " · 研报解构", margin + 25, 1032);
-            ctx.font = '900 110px "Microsoft YaHei", "PingFang SC", sans-serif'; ctx.fillStyle = colors.main;
+            ctx.fillStyle = colors.main;
             ctx.shadowColor = colors.glow; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
-            let nextY = wrapText(ctx, mainText, margin, 1170, maxW, 130);
+            const titleResult = drawFittedWrappedText(ctx, mainText, margin, 1170, maxW, {
+                maxLines: Number(workflowRenderOptions.titleMaxLines || 2),
+                startSize: Number(workflowRenderOptions.titleStartSize || 110),
+                minSize: Number(workflowRenderOptions.titleMinSize || 74),
+                weight: '900',
+                lineHeightRatio: 1.18
+            });
+            let nextY = titleResult.nextY;
             ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             if (subText) {
-                ctx.font = 'bold 65px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#ffffff';
+                ctx.fillStyle = '#ffffff';
                 ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 5;
-                wrapText(ctx, subText, margin, nextY + 60, maxW, 85);
+                drawFittedWrappedText(ctx, subText, margin, nextY + 50, maxW, {
+                    maxLines: Number(workflowRenderOptions.subtitleMaxLines || 1),
+                    startSize: Number(workflowRenderOptions.subtitleStartSize || 58),
+                    minSize: Number(workflowRenderOptions.subtitleMinSize || 42),
+                    weight: 'bold',
+                    lineHeightRatio: 1.24
+                });
                 ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             }
             const by = 1750; ctx.fillStyle = colors.main;
@@ -672,14 +764,27 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
             ctx.fillRect(margin, 700, 10, 40); ctx.fillStyle = '#e2e8f0';
             ctx.fillText(instText + " · 研报解构", margin + 25, 732);
-            ctx.font = '900 110px "Microsoft YaHei", "PingFang SC", sans-serif'; ctx.fillStyle = colors.main;
+            ctx.fillStyle = colors.main;
             ctx.shadowColor = colors.glow; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
-            let nextY = wrapText(ctx, mainText, margin, 870, maxW, 130);
+            const titleResult = drawFittedWrappedText(ctx, mainText, margin, 870, maxW, {
+                maxLines: Number(workflowRenderOptions.titleMaxLines || 2),
+                startSize: Number(workflowRenderOptions.titleStartSize || 110),
+                minSize: Number(workflowRenderOptions.titleMinSize || 72),
+                weight: '900',
+                lineHeightRatio: 1.18
+            });
+            let nextY = titleResult.nextY;
             ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             if (subText) {
-                ctx.font = 'bold 65px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#ffffff';
+                ctx.fillStyle = '#ffffff';
                 ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 5;
-                wrapText(ctx, subText, margin, nextY + 60, maxW, 85);
+                drawFittedWrappedText(ctx, subText, margin, nextY + 50, maxW, {
+                    maxLines: Number(workflowRenderOptions.subtitleMaxLines || 1),
+                    startSize: Number(workflowRenderOptions.subtitleStartSize || 56),
+                    minSize: Number(workflowRenderOptions.subtitleMinSize || 40),
+                    weight: 'bold',
+                    lineHeightRatio: 1.24
+                });
                 ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             }
             const by = 1300; ctx.fillStyle = colors.main;
@@ -690,14 +795,27 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.font = 'bold 45px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
             ctx.fillRect(margin, 630, 12, 50); ctx.fillStyle = '#e2e8f0';
             ctx.fillText(instText + " · 研报解构", margin + 35, 672);
-            ctx.font = '900 140px "Microsoft YaHei", "PingFang SC", sans-serif'; ctx.fillStyle = colors.main;
+            ctx.fillStyle = colors.main;
             ctx.shadowColor = colors.glow; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
-            let nextY = wrapText(ctx, mainText, margin, 850, maxW, 160);
+            const titleResult = drawFittedWrappedText(ctx, mainText, margin, 850, maxW, {
+                maxLines: Number(workflowRenderOptions.titleMaxLines || 2),
+                startSize: Number(workflowRenderOptions.titleStartSize || 132),
+                minSize: Number(workflowRenderOptions.titleMinSize || 76),
+                weight: '900',
+                lineHeightRatio: 1.18
+            });
+            let nextY = titleResult.nextY;
             ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             if (subText) {
-                ctx.font = 'bold 80px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#ffffff';
+                ctx.fillStyle = '#ffffff';
                 ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 5;
-                wrapText(ctx, subText, margin, nextY + 60, maxW, 100);
+                drawFittedWrappedText(ctx, subText, margin, nextY + 48, maxW, {
+                    maxLines: Number(workflowRenderOptions.subtitleMaxLines || 1),
+                    startSize: Number(workflowRenderOptions.subtitleStartSize || 66),
+                    minSize: Number(workflowRenderOptions.subtitleMinSize || 42),
+                    weight: 'bold',
+                    lineHeightRatio: 1.22
+                });
                 ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             }
             const by = 1340; ctx.fillStyle = colors.main; ctx.fillRect(margin, by-20, 8, 20); ctx.fillRect(margin+16, by-40, 8, 40); ctx.fillRect(margin+32, by-25, 8, 25); ctx.fillRect(margin+48, by-45, 8, 45); ctx.fillRect(margin+64, by-15, 8, 15);
@@ -796,6 +914,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     window.renderWorkflowThumbnail = async function(payload = {}) {
+        workflowRenderOptions = {
+            imageAnchor: payload.imageAnchor || payload.image_anchor || '',
+            titleMaxLines: payload.titleMaxLines,
+            titleStartSize: payload.titleStartSize,
+            titleMinSize: payload.titleMinSize,
+            subtitleMaxLines: payload.subtitleMaxLines,
+            subtitleStartSize: payload.subtitleStartSize,
+            subtitleMinSize: payload.subtitleMinSize
+        };
         if (payload.format && layouts[payload.format]) {
             inputs.format.value = payload.format;
             updateLayoutAndDraw();

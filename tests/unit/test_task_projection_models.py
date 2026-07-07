@@ -113,6 +113,7 @@ class TaskProjectionModelTest(unittest.TestCase):
         self.assertEqual(task.report_audio_pdf_topic_title, "基础物料标题")
         self.assertFalse(task.report_audio_video_enabled)
         self.assertEqual(task.task_title, "物料元数据标题")
+        self.assertEqual(task.final_script_chars, len("这是一段基础文案。"))
 
     def test_publication_task_projection_defaults_legacy_publisher_feature(self):
         task = PublicationTask(params={"bilibili": {"title": "发布标题"}}, result={"video_path": "/tmp/a.mp4"})

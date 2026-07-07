@@ -1,4 +1,6 @@
+import hashlib
 import json
+import os
 import shutil
 import subprocess
 import uuid
@@ -10,6 +12,7 @@ import logging
 import math
 
 from flask import Blueprint, jsonify, request
+from sqlalchemy.orm import load_only, selectinload
 
 from models import db
 from models.report_video import (
@@ -17,10 +20,13 @@ from models.report_video import (
     ReportVideoAudio,
     ReportVideoMindmap,
     ReportVideoOutput,
+    ReportVideoRenderPreview,
     ReportVideoReport,
     ReportVideoSegment,
     ReportVideoTask,
 )
+from models.task import PublicationTask
+from services import doubao_browser_tts as doubao_tts_service
 from services.report_video_service import (
     PROJECT_ROOT,
     rel_path,
@@ -45,10 +51,30 @@ from services.report_video_auto_service import (
     save_auto_scan_config,
 )
 from services.report_video_render_service import media_duration, render_report_video, render_task_video, safe_filename
+from tasks.doubao_browser_tts import process_doubao_browser_tts_job
 
 
 bp = Blueprint("report_video", __name__, url_prefix="/api/v1/report-video")
 logger = logging.getLogger(__name__)
+DOUBAO_TTS_PARENT_FEATURE = "report_video_factory"
+DOUBAO_TTS_TERMINAL_STATUSES = {"completed", "failed", "blocked_by_captcha", "canceled"}
+DOUBAO_TTS_ACTIVE_STATUSES = {"pending", "processing"}
+DOUBAO_CHILD_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.feature,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.error_message,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.parent_feature,
+    PublicationTask.parent_task_id,
+    PublicationTask.created_at,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
+)
 
 
 def _audio_speed_value(value):
@@ -137,11 +163,53 @@ def _should_force_asr_for_full_audio(form_value, audio_mode, has_timeline_payloa
     return str(form_value).strip().lower() in {"true", "1", "yes", "on"}
 
 
-def _task_or_404(task_id):
-    task = ReportVideoTask.query.get(task_id)
+def _task_or_404(task_id, *, include_details=False):
+    query = ReportVideoTask.query
+    if include_details:
+        query = query.options(
+            selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.analysis),
+            selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.mindmap),
+            selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.segments),
+            selectinload(ReportVideoTask.audios),
+            selectinload(ReportVideoTask.outputs),
+            selectinload(ReportVideoTask.render_previews),
+        )
+    task = query.filter(ReportVideoTask.id == task_id).one_or_none()
     if not task:
         return None, (jsonify({"success": False, "error": "Task not found"}), 404)
     return task, None
+
+
+def _preview_type(value):
+    return "preview_clip" if value in {"clip", "preview_clip", "key_render"} else "keyframes"
+
+
+def _latest_preview(task, preview_type, ratio):
+    previews = list(getattr(task, "render_previews", None) or [])
+    candidates = [
+        preview for preview in previews
+        if preview.preview_type == preview_type and preview.ratio == ratio
+    ]
+    return sorted(candidates, key=lambda item: item.created_at or datetime.min, reverse=True)[0] if candidates else None
+
+
+def _missing_preview_approvals(task, ratios):
+    missing = []
+    for ratio in ratios or []:
+        keyframes = _latest_preview(task, "keyframes", ratio)
+        preview_clip = _latest_preview(task, "preview_clip", ratio)
+        if not keyframes or keyframes.status != "approved" or not keyframes.approved_at:
+            missing.append({"ratio": ratio, "preview_type": "keyframes", "label": f"{ratio} 关键帧"})
+        if not preview_clip or preview_clip.status != "approved" or not preview_clip.approved_at:
+            missing.append({"ratio": ratio, "preview_type": "preview_clip", "label": f"{ratio} 里程碑样片组"})
+    return missing
+
+
+def _preview_file_path(preview, file_index=0):
+    paths = preview.file_paths or []
+    if paths and 0 <= file_index < len(paths):
+        return paths[file_index]
+    return preview.file_path
 
 
 def _report_or_404(report_id):
@@ -1695,6 +1763,556 @@ def _match_audio_to_segments(task, audio_rows):
         matched.status = "audio_ready"
 
 
+@bp.route("/tasks/<task_id>/tts/doubao/submit", methods=["POST"])
+def submit_doubao_tts(task_id):
+    task, error = _task_or_404(task_id, include_details=True)
+    if error:
+        return error
+
+    data = request.get_json(silent=True) or {}
+    force = _truthy(data.get("force"), False)
+    segments = _doubao_tts_segments(task)
+    if not segments:
+        return jsonify({"success": False, "error": "当前任务还没有可投递的口播段落"}), 400
+
+    browser_status = doubao_tts_service.status_payload()
+    if not browser_status.get("configured"):
+        return jsonify({
+            "success": False,
+            "error": "豆包浏览器 TTS 未配置，请先配置浏览器 profile 和捕获插件",
+            "data": {"provider": browser_status},
+        }), 400
+
+    state = _doubao_tts_state(task)
+    existing_jobs = state.get("jobs") or []
+    job_by_segment = {
+        str(job.get("segment_db_id")): job
+        for job in existing_jobs
+        if job.get("segment_db_id")
+    }
+    submitted = []
+    reused = []
+    skipped = []
+    failed = []
+
+    for index, item in enumerate(segments, start=1):
+        segment = item["segment"]
+        text = item["text"]
+        segment_key = str(segment.id)
+        text_hash = _doubao_text_hash(text)
+        if _segment_has_audio(segment) and not force:
+            skipped.append(_doubao_job_payload_from_segment(item, status="audio_ready"))
+            continue
+
+        existing_job = job_by_segment.get(segment_key)
+        existing_child = _doubao_child_by_id(existing_job.get("job_id")) if existing_job else None
+        if (
+            existing_child
+            and _doubao_child_text_hash(existing_child) == text_hash
+            and _doubao_child_is_reusable(existing_child)
+            and not force
+        ):
+            reused.append(_doubao_job_payload(existing_child, item))
+            continue
+
+        active_child = _active_doubao_child_for_segment(task.id, segment.id, text_hash)
+        if active_child and not force:
+            reused.append(_doubao_job_payload(active_child, item))
+            continue
+
+        completed_child = _completed_doubao_child_for_segment(task.id, segment.id, text_hash)
+        if completed_child and not force:
+            reused.append(_doubao_job_payload(completed_child, item))
+            continue
+
+        try:
+            child = _create_report_video_doubao_tts_task(task, item, index, len(segments), force=force)
+            submitted.append(_doubao_job_payload(child, item))
+        except Exception as exc:
+            db.session.rollback()
+            failed.append({
+                "segment_db_id": segment.id,
+                "segment_id": segment.segment_id,
+                "segment_title": segment.segment_title,
+                "error": str(exc),
+            })
+
+    task = ReportVideoTask.query.options(
+        selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.analysis),
+        selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.mindmap),
+        selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.segments),
+        selectinload(ReportVideoTask.audios),
+        selectinload(ReportVideoTask.outputs),
+        selectinload(ReportVideoTask.render_previews),
+    ).get(task.id)
+    sync_result = _sync_doubao_tts_audio(task)
+    if any(item.get("status") in {"queued", "running"} for item in sync_result["jobs"]):
+        task.status = "audio_processing"
+        task.error_message = None
+    task.updated_at = datetime.utcnow()
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "task": task.to_dict(include_reports=True, include_ai=True),
+            "doubao_tts": sync_result,
+            "submitted": submitted,
+            "reused": reused,
+            "skipped": skipped,
+            "failed": failed,
+        },
+    })
+
+
+@bp.route("/tasks/<task_id>/tts/doubao/sync", methods=["POST"])
+def sync_doubao_tts(task_id):
+    task, error = _task_or_404(task_id, include_details=True)
+    if error:
+        return error
+
+    sync_result = _sync_doubao_tts_audio(task)
+    task.updated_at = datetime.utcnow()
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "task": task.to_dict(include_reports=True, include_ai=True),
+            "doubao_tts": sync_result,
+        },
+    })
+
+
+def _doubao_tts_segments(task):
+    items = []
+    for report in task.reports or []:
+        for segment in report.segments or []:
+            text = str(segment.voice_text or "").strip()
+            if not text:
+                continue
+            items.append({
+                "report": report,
+                "segment": segment,
+                "text": text,
+                "recommended_file_name": _doubao_segment_file_name(report, segment),
+            })
+    return items
+
+
+def _doubao_segment_file_name(report, segment):
+    report_code_value = report.report_code if report and report.report_code else "001"
+    index = int(segment.segment_index or 0)
+    return f"{report_code_value}_seg_{index:03d}.wav"
+
+
+def _segment_has_audio(segment):
+    return bool(segment.audio_path and segment.status == "audio_ready")
+
+
+def _doubao_tts_state(task):
+    result = task.result if isinstance(task.result, dict) else {}
+    state = result.get("doubao_tts") if isinstance(result.get("doubao_tts"), dict) else {}
+    return dict(state)
+
+
+def _set_doubao_tts_state(task, state):
+    result = dict(task.result or {})
+    result["doubao_tts"] = state
+    task.result = result
+
+
+def _load_doubao_publication_task(task_id):
+    if not task_id:
+        return None
+    return (
+        PublicationTask.query.options(load_only(*DOUBAO_CHILD_COLUMNS))
+        .filter(PublicationTask.id == str(task_id))
+        .one_or_none()
+    )
+
+
+def _create_report_video_doubao_tts_task(task, item, index, total, *, force=False):
+    segment = item["segment"]
+    report = item["report"]
+    text = item["text"]
+    text_hash = _doubao_text_hash(text)
+    metadata = {
+        "source": DOUBAO_TTS_PARENT_FEATURE,
+        "parent_task_id": task.id,
+        "report_video_task_id": task.id,
+        "report_id": report.id if report else None,
+        "report_code": report.report_code if report else None,
+        "segment_db_id": segment.id,
+        "segment_id": segment.segment_id,
+        "segment_index": segment.segment_index,
+        "segment_title": segment.segment_title,
+        "chunk_index": index,
+        "chunk_total": total,
+        "recommended_file_name": item["recommended_file_name"],
+        "text_hash": text_hash,
+        "force": bool(force),
+    }
+    child = PublicationTask(
+        status="pending",
+        current_step="queued",
+        progress=0,
+        params={
+            "feature": doubao_tts_service.FEATURE_NAME,
+            "user_id": "report_video_factory",
+            "parent_feature": DOUBAO_TTS_PARENT_FEATURE,
+            "parent_task_id": task.id,
+            "doubao_browser_tts": {
+                "text": text,
+                "metadata": {key: value for key, value in metadata.items() if value is not None},
+            },
+        },
+        result={
+            "metadata": {key: value for key, value in metadata.items() if value is not None},
+            "audio": None,
+            "logs": [],
+        },
+    )
+    db.session.add(child)
+    db.session.flush()
+    child_id = child.id
+    db.session.commit()
+    try:
+        async_result = process_doubao_browser_tts_job.apply_async(
+            args=[child_id],
+            queue=os.getenv("DOUBAO_BROWSER_TTS_QUEUE", doubao_tts_service.QUEUE_NAME),
+            retry=False,
+        )
+    except Exception as exc:
+        child = _load_doubao_publication_task(child_id)
+        if child:
+            child.status = "failed"
+            child.current_step = "enqueue_failed"
+            child.progress = 0
+            child.error_message = f"豆包 TTS 入队失败：{exc}"
+            child.completed_at = datetime.utcnow()
+            db.session.commit()
+        raise
+    child = _load_doubao_publication_task(child_id)
+    if not child:
+        raise RuntimeError(f"豆包 TTS 子任务不存在：{child_id}")
+    child.celery_task_id = async_result.id
+    db.session.commit()
+    return child
+
+
+def _sync_doubao_tts_audio(task):
+    segments = _doubao_tts_segments(task)
+    segment_by_id = {str(item["segment"].id): item for item in segments}
+    child_tasks = _doubao_children_for_task(task.id)
+    child_by_segment = {}
+    item_by_segment = {}
+    jobs = []
+    synced_count = 0
+
+    for child in child_tasks:
+        metadata = _doubao_child_metadata(child)
+        segment_key = str(metadata.get("segment_db_id") or "")
+        item = segment_by_id.get(segment_key)
+        if not item:
+            continue
+        current = child_by_segment.get(segment_key)
+        if not current or _doubao_child_display_rank(child) >= _doubao_child_display_rank(current):
+            child_by_segment[segment_key] = child
+            item_by_segment[segment_key] = item
+
+    for segment_key, child in child_by_segment.items():
+        item = item_by_segment[segment_key]
+        job_payload = _doubao_job_payload(child, item)
+        if child.status == "completed":
+            audio = _ensure_report_video_audio_from_doubao_child(task, item, child)
+            if audio:
+                job_payload["audio_id"] = audio.id
+                job_payload["audio_file_path"] = audio.file_path
+                job_payload["status"] = "audio_ready"
+                synced_count += 1
+            else:
+                job_payload["status"] = "failed"
+                job_payload["error"] = job_payload.get("error") or "豆包 TTS 已完成但没有找到可用 WAV"
+        jobs.append(job_payload)
+
+    known_segment_keys = {str(job.get("segment_db_id")) for job in jobs}
+    for item in segments:
+        if str(item["segment"].id) in known_segment_keys:
+            continue
+        if _segment_has_audio(item["segment"]):
+            jobs.append(_doubao_job_payload_from_segment(item, status="audio_ready"))
+
+    jobs = sorted(jobs, key=lambda item: (int(item.get("segment_index") or 0), item.get("created_at") or ""))
+    status = _doubao_tts_status(jobs, expected_total=len(segments))
+    summary = _doubao_tts_summary(jobs, expected_total=len(segments))
+    state = {
+        "status": status,
+        "summary": summary,
+        "jobs": jobs,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    _set_doubao_tts_state(task, state)
+
+    if summary["audio_ready"] > 0:
+        task.status = "waiting_video" if status in {"completed", "partial_failed"} else "audio_processing"
+        task.error_message = None if status != "failed" else task.error_message
+    elif status in {"queued", "running"}:
+        task.status = "audio_processing"
+        task.error_message = None
+    elif status == "failed":
+        task.status = "audio_failed"
+        task.error_message = "豆包浏览器 TTS 全部分段失败"
+    task.updated_at = datetime.utcnow()
+    return {**state, "synced_count": synced_count}
+
+
+def _doubao_child_display_rank(child):
+    if child.status in DOUBAO_TTS_ACTIVE_STATUSES:
+        status_score = 4
+    elif child.status == "completed":
+        status_score = 3
+    elif child.status in DOUBAO_TTS_TERMINAL_STATUSES:
+        status_score = 2
+    else:
+        status_score = 1
+    timestamp = child.updated_at or child.created_at or datetime.min
+    return status_score, timestamp
+
+
+def _doubao_child_is_reusable(child):
+    return child.status in (DOUBAO_TTS_ACTIVE_STATUSES | {"completed"})
+
+
+def _ensure_report_video_audio_from_doubao_child(task, item, child):
+    audio_payload = ((child.result or {}).get("audio") or {}) if isinstance(child.result, dict) else {}
+    wav_path = str(audio_payload.get("wav_path") or "").strip()
+    if not wav_path:
+        return None
+    wav_abs = Path(wav_path)
+    if not wav_abs.exists():
+        return None
+
+    segment = item["segment"]
+    rel_audio_path = _safe_project_rel_path(wav_abs)
+    audio = ReportVideoAudio.query.filter(
+        ReportVideoAudio.task_id == task.id,
+        ReportVideoAudio.segment_id == segment.segment_id,
+        ReportVideoAudio.file_path == rel_audio_path,
+    ).first()
+    if not audio:
+        audio = ReportVideoAudio(
+            task_id=task.id,
+            report_id=segment.report_id,
+            segment_id=segment.segment_id,
+            file_name=item["recommended_file_name"],
+            file_path=rel_audio_path,
+            duration_sec=audio_payload.get("seconds") or media_duration(wav_abs),
+            format="wav",
+            match_status="matched",
+            error_message=None,
+        )
+        db.session.add(audio)
+        db.session.flush()
+    else:
+        audio.report_id = segment.report_id
+        audio.duration_sec = audio.duration_sec or audio_payload.get("seconds") or media_duration(wav_abs)
+        audio.match_status = "matched"
+        audio.error_message = None
+    segment.audio_filename = audio.file_name
+    segment.audio_path = audio.file_path
+    segment.actual_duration_sec = audio.duration_sec
+    segment.status = "audio_ready"
+    return audio
+
+
+def _safe_project_rel_path(path):
+    resolved = Path(path).resolve()
+    try:
+        return rel_path(resolved)
+    except ValueError:
+        return str(resolved)
+
+
+def _doubao_children_for_task(task_id):
+    return (
+        PublicationTask.query.filter(
+            PublicationTask.feature == doubao_tts_service.FEATURE_NAME,
+            PublicationTask.parent_feature == DOUBAO_TTS_PARENT_FEATURE,
+            PublicationTask.parent_task_id == task_id,
+        )
+        .options(load_only(*DOUBAO_CHILD_COLUMNS))
+        .order_by(PublicationTask.created_at.asc())
+        .all()
+    )
+
+
+def _doubao_child_by_id(job_id):
+    if not job_id:
+        return None
+    task = _load_doubao_publication_task(str(job_id))
+    if not task or task.feature != doubao_tts_service.FEATURE_NAME:
+        return None
+    return task
+
+
+def _active_doubao_child_for_segment(task_id, segment_db_id, text_hash):
+    return _doubao_child_for_segment(task_id, segment_db_id, text_hash, DOUBAO_TTS_ACTIVE_STATUSES)
+
+
+def _completed_doubao_child_for_segment(task_id, segment_db_id, text_hash):
+    return _doubao_child_for_segment(task_id, segment_db_id, text_hash, {"completed"})
+
+
+def _doubao_child_for_segment(task_id, segment_db_id, text_hash, statuses):
+    candidates = (
+        PublicationTask.query.filter(
+            PublicationTask.feature == doubao_tts_service.FEATURE_NAME,
+            PublicationTask.parent_feature == DOUBAO_TTS_PARENT_FEATURE,
+            PublicationTask.parent_task_id == task_id,
+            PublicationTask.status.in_(list(statuses)),
+        )
+        .options(load_only(*DOUBAO_CHILD_COLUMNS))
+        .order_by(PublicationTask.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    segment_id_text = str(segment_db_id)
+    for candidate in candidates:
+        metadata = _doubao_child_metadata(candidate)
+        if str(metadata.get("segment_db_id") or "") != segment_id_text:
+            continue
+        if _doubao_child_text_hash(candidate) != text_hash:
+            continue
+        return candidate
+    return None
+
+
+def _doubao_child_metadata(child):
+    result = child.result if isinstance(child.result, dict) else {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if metadata:
+        return metadata
+    params = child.params if isinstance(child.params, dict) else {}
+    payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
+    return payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+
+
+def _doubao_child_text(child):
+    params = child.params if isinstance(child.params, dict) else {}
+    payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
+    return str(payload.get("text") or "")
+
+
+def _doubao_child_text_hash(child):
+    metadata = _doubao_child_metadata(child)
+    return str(metadata.get("text_hash") or _doubao_text_hash(_doubao_child_text(child)))
+
+
+def _doubao_text_hash(text):
+    compact = "".join(str(text or "").split())
+    return hashlib.sha256(compact.encode("utf-8")).hexdigest()
+
+
+def _doubao_job_payload(child, item):
+    audio = ((child.result or {}).get("audio") or {}) if isinstance(child.result, dict) else {}
+    metadata = _doubao_child_metadata(child)
+    segment = item["segment"]
+    return {
+        "job_id": child.id,
+        "celery_task_id": child.celery_task_id,
+        "status": _doubao_public_status(child.status),
+        "raw_status": child.status,
+        "step": child.current_step,
+        "progress": child.progress or 0,
+        "error": child.error_message or ((child.result or {}).get("error") if isinstance(child.result, dict) else None),
+        "segment_db_id": segment.id,
+        "segment_id": segment.segment_id,
+        "segment_index": segment.segment_index,
+        "segment_title": segment.segment_title,
+        "recommended_file_name": item["recommended_file_name"],
+        "audio": {
+            "seconds": audio.get("seconds"),
+            "bytes": audio.get("bytes"),
+            "sample_rate": audio.get("sample_rate"),
+        } if audio else None,
+        "created_at": child.created_at.isoformat() if child.created_at else None,
+        "updated_at": child.updated_at.isoformat() if child.updated_at else None,
+        "text_hash": metadata.get("text_hash") or _doubao_text_hash(item["text"]),
+    }
+
+
+def _doubao_job_payload_from_segment(item, *, status):
+    segment = item["segment"]
+    return {
+        "job_id": None,
+        "celery_task_id": None,
+        "status": status,
+        "raw_status": status,
+        "step": "audio_ready" if status == "audio_ready" else status,
+        "progress": 100 if status == "audio_ready" else 0,
+        "error": None,
+        "segment_db_id": segment.id,
+        "segment_id": segment.segment_id,
+        "segment_index": segment.segment_index,
+        "segment_title": segment.segment_title,
+        "recommended_file_name": item["recommended_file_name"],
+        "audio_file_path": segment.audio_path,
+        "created_at": None,
+        "updated_at": None,
+        "text_hash": _doubao_text_hash(item["text"]),
+    }
+
+
+def _doubao_public_status(status):
+    return {
+        "pending": "queued",
+        "processing": "running",
+        "completed": "succeeded",
+        "failed": "failed",
+        "blocked_by_captcha": "blocked",
+        "canceled": "canceled",
+    }.get(status, status or "queued")
+
+
+def _doubao_tts_summary(jobs, *, expected_total):
+    return {
+        "total": expected_total,
+        "submitted": len([job for job in jobs if job.get("job_id")]),
+        "audio_ready": len([job for job in jobs if job.get("status") == "audio_ready"]),
+        "succeeded": len([job for job in jobs if job.get("status") == "succeeded"]),
+        "queued": len([job for job in jobs if job.get("status") == "queued"]),
+        "running": len([job for job in jobs if job.get("status") == "running"]),
+        "failed": len([job for job in jobs if job.get("status") == "failed"]),
+        "blocked": len([job for job in jobs if job.get("status") == "blocked"]),
+        "canceled": len([job for job in jobs if job.get("status") == "canceled"]),
+    }
+
+
+def _doubao_tts_status(jobs, *, expected_total):
+    summary = _doubao_tts_summary(jobs, expected_total=expected_total)
+    if expected_total <= 0:
+        return "empty"
+    if summary["audio_ready"] >= expected_total:
+        return "completed"
+    if summary["queued"] or summary["running"]:
+        return "running"
+    terminal = summary["audio_ready"] + summary["failed"] + summary["blocked"] + summary["canceled"]
+    if terminal >= expected_total:
+        return "partial_failed" if summary["audio_ready"] else "failed"
+    return "queued" if jobs else "empty"
+
+
+def _truthy(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
 @bp.route("/tasks", methods=["GET"])
 def list_tasks():
     report_counts = (
@@ -2000,7 +2618,7 @@ def asset_scan_scheduler_logs():
 
 @bp.route("/tasks/<task_id>", methods=["GET"])
 def get_task(task_id):
-    task, error = _task_or_404(task_id)
+    task, error = _task_or_404(task_id, include_details=True)
     if error:
         return error
     return jsonify({"success": True, "data": task.to_dict(include_reports=True, include_ai=True)})
@@ -2020,7 +2638,7 @@ def delete_task(task_id):
 
 @bp.route("/tasks/<task_id>/reports", methods=["POST"])
 def upload_reports(task_id):
-    task, error = _task_or_404(task_id)
+    task, error = _task_or_404(task_id, include_details=True)
     if error:
         return error
 
@@ -2148,7 +2766,7 @@ def delete_report(report_id):
 
 @bp.route("/tasks/<task_id>/reports/reorder", methods=["POST"])
 def reorder_reports(task_id):
-    task, error = _task_or_404(task_id)
+    task, error = _task_or_404(task_id, include_details=True)
     if error:
         return error
 
@@ -2180,7 +2798,7 @@ def reorder_reports(task_id):
 
 @bp.route("/tasks/<task_id>/ai-scripts", methods=["POST"])
 def generate_task_ai_scripts(task_id):
-    task, error = _task_or_404(task_id)
+    task, error = _task_or_404(task_id, include_details=True)
     if error:
         return error
 
@@ -2224,7 +2842,7 @@ def get_topic_planning(task_id):
 
 @bp.route("/tasks/<task_id>/topic-planning/cards", methods=["POST"])
 def generate_topic_cards(task_id):
-    task, error = _task_or_404(task_id)
+    task, error = _task_or_404(task_id, include_details=True)
     if error:
         return error
     if not task.reports:
@@ -2249,7 +2867,7 @@ def generate_topic_cards(task_id):
 
 @bp.route("/tasks/<task_id>/topic-planning/clusters", methods=["POST"])
 def generate_topic_clusters_route(task_id):
-    task, error = _task_or_404(task_id)
+    task, error = _task_or_404(task_id, include_details=True)
     if error:
         return error
     planning = _topic_planning_payload(task)
@@ -2275,7 +2893,7 @@ def generate_topic_clusters_route(task_id):
 
 @bp.route("/tasks/<task_id>/topics/<topic_id>/script", methods=["POST"])
 def generate_topic_script_route(task_id, topic_id):
-    task, error = _task_or_404(task_id)
+    task, error = _task_or_404(task_id, include_details=True)
     if error:
         return error
     planning = _topic_planning_payload(task)
@@ -2412,7 +3030,7 @@ def _apply_topic_script_to_task(task, topic_id):
 
 @bp.route("/tasks/<task_id>/topics/<topic_id>/apply-script", methods=["POST"])
 def apply_topic_script_route(task_id, topic_id):
-    task, error = _task_or_404(task_id)
+    task, error = _task_or_404(task_id, include_details=True)
     if error:
         return error
     try:
@@ -2433,7 +3051,7 @@ def apply_topic_script_route(task_id, topic_id):
 
 @bp.route("/tasks/<task_id>/audios", methods=["POST"])
 def upload_audios(task_id):
-    task, error = _task_or_404(task_id)
+    task, error = _task_or_404(task_id, include_details=True)
     if error:
         return error
 
@@ -2721,15 +3339,230 @@ def upload_audios(task_id):
     })
 
 
+def _ready_report_count(task):
+    return len([report for report in task.reports if report.analysis and report.segments])
+
+
+@bp.route("/tasks/<task_id>/previews/keyframes/generate", methods=["POST"])
+def generate_keyframe_previews(task_id):
+    task, error = _task_or_404(task_id, include_details=True)
+    if error:
+        return error
+    if not _ready_report_count(task):
+        return jsonify({"success": False, "error": "请先生成单篇 AI 文案，或在主题策划中生成并应用主题脚本"}), 400
+
+    data = request.get_json(silent=True) or {}
+    ratios = data.get("ratios") or task.output_ratios or ["16:9"]
+    from tasks.report_video import generate_render_preview_task
+
+    now = datetime.utcnow()
+    previews = []
+    for ratio in ratios:
+        preview = ReportVideoRenderPreview(
+            task_id=task.id,
+            preview_type="keyframes",
+            ratio=ratio,
+            status="queued",
+            created_at=now,
+            updated_at=now,
+        )
+        db.session.add(preview)
+        previews.append(preview)
+    task.status = "keyframes_generating"
+    task.error_message = None
+    task.updated_at = now
+    db.session.flush()
+    celery_task = _enqueue_report_video_task(generate_render_preview_task, task.id, "keyframes", ratios, 10)
+    for preview in previews:
+        preview.celery_task_id = celery_task.id
+    db.session.commit()
+    task, _ = _task_or_404(task.id, include_details=True)
+    return jsonify({
+        "success": True,
+        "data": {
+            "task": task.to_dict(include_reports=True, include_ai=True),
+            "queued": True,
+            "celery_id": celery_task.id,
+        },
+    })
+
+
+@bp.route("/tasks/<task_id>/previews/clip/generate", methods=["POST"])
+def generate_clip_preview(task_id):
+    task, error = _task_or_404(task_id, include_details=True)
+    if error:
+        return error
+    if not _ready_report_count(task):
+        return jsonify({"success": False, "error": "请先生成单篇 AI 文案，或在主题策划中生成并应用主题脚本"}), 400
+
+    data = request.get_json(silent=True) or {}
+    ratios = data.get("ratios") or task.output_ratios or ["16:9"]
+    duration_sec = max(3, min(int(data.get("duration_sec") or 10), 30))
+    selected_milestones = data.get("milestones") if isinstance(data.get("milestones"), list) else []
+    if not selected_milestones and isinstance(data.get("segment_ids"), list):
+        selected_milestones = [
+            {"type": "segment", "segment_id": str(segment_id)}
+            for segment_id in data.get("segment_ids")
+            if segment_id
+        ]
+    from tasks.report_video import generate_render_preview_task
+
+    now = datetime.utcnow()
+    previews = []
+    for ratio in ratios:
+        preview = ReportVideoRenderPreview(
+            task_id=task.id,
+            preview_type="preview_clip",
+            ratio=ratio,
+            status="queued",
+            duration_sec=duration_sec,
+            segment_ids=[item.get("segment_id") for item in selected_milestones if isinstance(item, dict) and item.get("segment_id")],
+            meta={
+                "mode": "selected" if selected_milestones else "group",
+                "requested_milestones": selected_milestones,
+                "per_clip_duration_sec": duration_sec,
+            },
+            created_at=now,
+            updated_at=now,
+        )
+        db.session.add(preview)
+        previews.append(preview)
+    task.status = "preview_generating"
+    task.error_message = None
+    task.updated_at = now
+    db.session.flush()
+    celery_task = _enqueue_report_video_task(
+        generate_render_preview_task,
+        task.id,
+        "preview_clip",
+        ratios,
+        duration_sec,
+        selected_milestones,
+    )
+    for preview in previews:
+        preview.celery_task_id = celery_task.id
+    db.session.commit()
+    task, _ = _task_or_404(task.id, include_details=True)
+    return jsonify({
+        "success": True,
+        "data": {
+            "task": task.to_dict(include_reports=True, include_ai=True),
+            "queued": True,
+            "celery_id": celery_task.id,
+        },
+    })
+
+
+@bp.route("/tasks/<task_id>/previews/<preview_type>/approve", methods=["POST"])
+def approve_render_previews(task_id, preview_type):
+    task, error = _task_or_404(task_id, include_details=True)
+    if error:
+        return error
+    data = request.get_json(silent=True) or {}
+    ratios = data.get("ratios") or task.output_ratios or ["16:9"]
+    preview_type = _preview_type(preview_type)
+    approved = []
+    now = datetime.utcnow()
+    for ratio in ratios:
+        preview = _latest_preview(task, preview_type, ratio)
+        if not preview or preview.status not in {"completed", "approved"}:
+            continue
+        preview.status = "approved"
+        preview.approved_at = now
+        preview.rejected_at = None
+        preview.reject_reason = None
+        preview.error_message = None
+        preview.updated_at = now
+        approved.append(preview.to_dict())
+    if not approved:
+        return jsonify({"success": False, "error": "没有可确认的预览，请先生成并等待完成"}), 400
+    task.status = "waiting_video"
+    task.error_message = None
+    task.updated_at = now
+    db.session.commit()
+    task, _ = _task_or_404(task.id, include_details=True)
+    return jsonify({"success": True, "data": {"task": task.to_dict(include_reports=True, include_ai=True), "approved": approved}})
+
+
+@bp.route("/tasks/<task_id>/previews/<preview_type>/reject", methods=["POST"])
+def reject_render_previews(task_id, preview_type):
+    task, error = _task_or_404(task_id, include_details=True)
+    if error:
+        return error
+    data = request.get_json(silent=True) or {}
+    ratios = data.get("ratios") or task.output_ratios or ["16:9"]
+    reason = (data.get("reason") or "").strip() or "需要重新生成"
+    preview_type = _preview_type(preview_type)
+    rejected = []
+    now = datetime.utcnow()
+    for ratio in ratios:
+        preview = _latest_preview(task, preview_type, ratio)
+        if not preview:
+            continue
+        preview.status = "rejected"
+        preview.approved_at = None
+        preview.rejected_at = now
+        preview.reject_reason = reason
+        preview.updated_at = now
+        rejected.append(preview.to_dict())
+    if not rejected:
+        return jsonify({"success": False, "error": "没有可退回的预览"}), 400
+    task.status = "waiting_video"
+    task.error_message = reason
+    task.updated_at = now
+    db.session.commit()
+    task, _ = _task_or_404(task.id, include_details=True)
+    return jsonify({"success": True, "data": {"task": task.to_dict(include_reports=True, include_ai=True), "rejected": rejected}})
+
+
+@bp.route("/previews/<preview_id>/files/<int:file_index>", methods=["GET"])
+def preview_file(preview_id, file_index):
+    from flask import send_file
+
+    preview = ReportVideoRenderPreview.query.get(preview_id)
+    if not preview:
+        return jsonify({"success": False, "error": "Preview not found"}), 404
+    rel = _preview_file_path(preview, file_index)
+    if not rel:
+        return jsonify({"success": False, "error": "预览文件不存在"}), 404
+    path = (PROJECT_ROOT / rel).resolve()
+    if not str(path).startswith(str(PROJECT_ROOT)) or not path.exists():
+        return jsonify({"success": False, "error": "预览文件不存在"}), 404
+    return send_file(path)
+
+
+@bp.route("/previews/<preview_id>/download", methods=["GET"])
+def download_preview(preview_id):
+    from flask import send_file
+
+    preview = ReportVideoRenderPreview.query.get(preview_id)
+    if not preview:
+        return jsonify({"success": False, "error": "Preview not found"}), 404
+    rel = preview.file_path or _preview_file_path(preview, 0)
+    if not rel:
+        return jsonify({"success": False, "error": "预览文件不存在"}), 404
+    path = (PROJECT_ROOT / rel).resolve()
+    if not str(path).startswith(str(PROJECT_ROOT)) or not path.exists():
+        return jsonify({"success": False, "error": "预览文件不存在"}), 404
+    return send_file(path, as_attachment=True, download_name=path.name)
+
+
 @bp.route("/tasks/<task_id>/videos/generate", methods=["POST"])
 def generate_videos(task_id):
-    task, error = _task_or_404(task_id)
+    task, error = _task_or_404(task_id, include_details=True)
     if error:
         return error
 
     data = request.get_json(silent=True) or {}
     ratios = data.get("ratios") or task.output_ratios or ["16:9"]
     report_id = data.get("report_id")
+    missing_gate = _missing_preview_approvals(task, ratios)
+    if missing_gate and not data.get("force"):
+        return jsonify({
+            "success": False,
+            "error": "请先完成并确认关键帧与里程碑样片组",
+            "missing": missing_gate,
+        }), 409
     reports = [report for report in task.reports if report.analysis and report.segments]
     if report_id:
         reports = [report for report in reports if report.id == report_id]
@@ -2741,7 +3574,40 @@ def generate_videos(task_id):
     task.status = "video_generating"
     task.updated_at = datetime.utcnow()
     db.session.commit()
-    celery_task = _enqueue_report_video_task(generate_videos_task, task.id, ratios, report_id)
+    force_preview_gate = bool(data.get("force"))
+    celery_task = _enqueue_report_video_task(generate_videos_task, task.id, ratios, report_id, force_preview_gate)
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "task": task.to_dict(include_reports=True, include_ai=True),
+            "queued": True,
+            "celery_id": celery_task.id,
+            "outputs": [],
+            "failed": [],
+        },
+    })
+
+
+@bp.route("/tasks/<task_id>/videos/remotion/generate", methods=["POST"])
+def generate_remotion_videos(task_id):
+    task, error = _task_or_404(task_id, include_details=True)
+    if error:
+        return error
+
+    data = request.get_json(silent=True) or {}
+    ratios = data.get("ratios") or task.output_ratios or ["16:9"]
+    reports = [report for report in task.reports if report.analysis and report.segments]
+    if not reports:
+        return jsonify({"success": False, "error": "没有可生成 Remotion 视频的研报，请先生成 AI 文案"}), 400
+
+    from tasks.report_video import generate_remotion_videos_task
+
+    task.status = "remotion_generating"
+    task.error_message = None
+    task.updated_at = datetime.utcnow()
+    db.session.commit()
+    celery_task = _enqueue_report_video_task(generate_remotion_videos_task, task.id, ratios)
 
     return jsonify({
         "success": True,

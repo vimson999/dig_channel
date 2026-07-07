@@ -97,20 +97,42 @@ def render_pdf_first_page_image(pdf_path: str, output_path: str, *, dpi: int = 1
     }
 
 
-def normalize_for_tts(raw_text: str, *, initial_text: str = "", metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def normalize_for_tts(
+    raw_text: str,
+    *,
+    initial_text: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+    normalizer_timeout: Optional[int] = None,
+    allow_local_fallback: Optional[bool] = None,
+) -> Dict[str, Any]:
     raw_text = (raw_text or "").strip()
     if not raw_text:
         raise ReportAudioWorkflowError("Gemini 结果为空，无法结构化")
 
+    fallback_allowed = _local_fallback_allowed(allow_local_fallback)
+    normalizer_error = ""
     try:
-        payload = _deepseek_normalize(raw_text, initial_text=initial_text, metadata=metadata or {})
+        payload = _deepseek_normalize(
+            raw_text,
+            initial_text=initial_text,
+            metadata=metadata or {},
+            timeout_seconds=normalizer_timeout,
+        )
     except ReportAudioWorkflowError as exc:
-        LOGGER.warning("DeepSeek normalizer failed, using local fallback: %s", exc)
+        normalizer_error = str(exc)
+        LOGGER.warning("DeepSeek normalizer failed: %s", exc)
         payload = None
     except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as exc:
-        LOGGER.warning("DeepSeek normalizer returned unusable response, using local fallback: %s", exc)
+        normalizer_error = str(exc)
+        LOGGER.warning("DeepSeek normalizer returned unusable response: %s", exc)
         payload = None
     if not payload:
+        if not fallback_allowed:
+            detail = f"：{normalizer_error}" if normalizer_error else ""
+            raise ReportAudioWorkflowError(
+                f"结构化器不可用或返回不可用结果{detail}。已禁止 local_fallback 产出最终文案。"
+            )
+        LOGGER.warning("DeepSeek normalizer unavailable; local fallback explicitly enabled")
         payload = _fallback_normalize(raw_text)
     return _validate_structured_result(payload, raw_text)
 
@@ -120,6 +142,15 @@ def structured_result_quality_issue(structured: Dict[str, Any]) -> str:
         return ""
     script = str(structured.get("final_script_for_tts") or "").strip()
     return _tts_script_quality_issue(script)
+
+
+def clean_final_script_for_tts(value: Any) -> str:
+    text = _clean_tts_script(value)
+    if _looks_like_editor_review_notes(text):
+        extracted = _clean_tts_script(_extract_final_script(text))
+        if extracted and not _looks_like_editor_review_notes(extracted):
+            text = extracted
+    return _strip_trailing_section_stub(text)
 
 
 def split_tts_text(text: str, max_chars: Optional[int] = None) -> List[str]:
@@ -187,23 +218,32 @@ def combine_wav_files(input_paths: List[str], output_path: str) -> Dict[str, Any
 
 def status_payload() -> Dict[str, Any]:
     deepseek_configured = bool(os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("REPORT_AUDIO_NORMALIZER_API_KEY"))
+    fallback_allowed = _local_fallback_allowed()
     return {
-        "configured": True,
+        "configured": bool(deepseek_configured or fallback_allowed),
         "deepseek_configured": deepseek_configured,
-        "normalizer_provider": "deepseek" if deepseek_configured else "local_fallback",
+        "normalizer_available": bool(deepseek_configured or fallback_allowed),
+        "local_fallback_allowed": fallback_allowed,
+        "normalizer_provider": "deepseek" if deepseek_configured else ("local_fallback" if fallback_allowed else "unavailable"),
         "normalizer_model": _normalizer_model() if deepseek_configured else None,
         "mode": "celery_orchestrator",
     }
 
 
-def _deepseek_normalize(raw_text: str, *, initial_text: str, metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _deepseek_normalize(
+    raw_text: str,
+    *,
+    initial_text: str,
+    metadata: Dict[str, Any],
+    timeout_seconds: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
     api_key = os.environ.get("REPORT_AUDIO_NORMALIZER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
         return None
 
     base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     model = _normalizer_model()
-    timeout = _int_env("REPORT_AUDIO_NORMALIZER_TIMEOUT", 120)
+    timeout = _normalizer_timeout(timeout_seconds)
     system_prompt = (
         "你是内容流水线的结构化整理器。只做抽取和规整，不新增事实，不扩写观点。"
         "你必须输出严格 JSON，不要 Markdown，不要解释。"
@@ -285,12 +325,21 @@ def _deepseek_normalize(raw_text: str, *, initial_text: str, metadata: Dict[str,
     return payload
 
 
+def _normalizer_timeout(timeout_seconds: Optional[int] = None) -> int:
+    if timeout_seconds is not None:
+        try:
+            return max(1, int(timeout_seconds))
+        except (TypeError, ValueError):
+            pass
+    return _int_env("REPORT_AUDIO_NORMALIZER_TIMEOUT", 120)
+
+
 def _validate_structured_result(payload: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         payload = {}
-    script = _clean_tts_script(payload.get("final_script_for_tts") or "")
+    script = clean_final_script_for_tts(payload.get("final_script_for_tts") or "")
     if not script:
-        script = _clean_tts_script(_extract_final_script(raw_text))
+        script = clean_final_script_for_tts(_extract_final_script(raw_text))
     if not script:
         raise ReportAudioWorkflowError("结构化结果缺少 final_script_for_tts")
     quality_issue = _tts_script_quality_issue(script)
@@ -316,12 +365,13 @@ def _validate_structured_result(payload: Dict[str, Any], raw_text: str) -> Dict[
 
 def _fallback_normalize(raw_text: str) -> Dict[str, Any]:
     title_pack = _extract_fallback_title_pack(raw_text)
+    script = clean_final_script_for_tts(_extract_final_script(raw_text) or raw_text)
     return {
         "title": title_pack.get("title") or "",
         "summary": "",
         "cover_title": title_pack.get("cover_title") or "",
         "cover_subtitle": title_pack.get("cover_subtitle") or "",
-        "final_script_for_tts": _extract_final_script(raw_text) or raw_text,
+        "final_script_for_tts": script,
         "corrections": [],
         "titles": title_pack.get("titles") or {"standard": [], "short": []},
         "sources": [],
@@ -334,7 +384,15 @@ def _fallback_normalize(raw_text: str) -> Dict[str, Any]:
 def _extract_final_script(raw_text: str) -> str:
     text = _clean_text(raw_text)
     markers = [
+        "最终优化版播客文案",
+        "最终优化后的播客文案",
+        "最终版播客文案",
+        "优化后的最终播客文案",
         "最终优化版口播文案",
+        "最终优化后的口播文案",
+        "最终版口播文案",
+        "最终口播正文",
+        "最终口播文案",
         "最终优化后的信息版本",
         "最终文案",
         "口播文案",
@@ -352,7 +410,7 @@ def _extract_final_script(raw_text: str) -> str:
     end_positions = [text.find(marker) for marker in end_markers if text.find(marker) > 200]
     if end_positions:
         text = text[:min(end_positions)].strip()
-    return _strip_gemini_capture_artifacts(text)
+    return _strip_trailing_section_stub(_strip_leading_style_fragments(_strip_gemini_capture_artifacts(text)))
 
 
 def _extract_fallback_title_pack(raw_text: str) -> Dict[str, Any]:
@@ -428,7 +486,33 @@ def _clean_text(value: Any) -> str:
 def _clean_tts_script(value: Any) -> str:
     text = _strip_gemini_capture_artifacts(value)
     text = re.sub(r"(^|\s)PDF(?:\s*\+\s*\d+)?(?=\s|$)", " ", text, flags=re.I)
+    text = _strip_leading_style_fragments(text)
+    return _strip_trailing_section_stub(_clean_text(text))
+
+
+def _strip_leading_style_fragments(value: Any) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    text = re.sub(
+        r"^(?:[：:、，。；;\s]*(?:[\u4e00-\u9fffA-Za-z0-9]{1,14}型|聚焦式|散点式|悬念式|故事式)){1,8}",
+        " ",
+        text,
+    )
     return _clean_text(text)
+
+
+def _strip_trailing_section_stub(value: Any) -> str:
+    text = _clean_text(value)
+    return re.sub(r"\s*(?:[一二三四五六七八九十]|\d+)[、.．]\s*$", "", text).strip()
+
+
+def _looks_like_editor_review_notes(value: Any) -> bool:
+    text = _clean_text(value)
+    return bool(re.search(
+        r"作为(?:首席)?内容主编|播客文案初稿|核对过程与勘误说明|原稿表述|原文依据|修正说明|勘误点",
+        text,
+    ))
 
 
 def _strip_gemini_capture_artifacts(value: Any) -> str:
@@ -463,6 +547,8 @@ def _tts_script_quality_issue(value: Any) -> str:
             return f"包含页面/提示词残留: {marker}"
     if re.search(r"(?<![A-Za-z0-9])PDF\s*\+\s*\d+(?![A-Za-z0-9])", text, flags=re.I):
         return "包含 PDF 上传控件残留"
+    if _looks_like_editor_review_notes(text):
+        return "包含编辑复核/勘误说明残留"
     return ""
 
 
@@ -485,6 +571,13 @@ def _int_env(name: str, default: int) -> int:
         return int(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+def _local_fallback_allowed(value: Optional[bool] = None) -> bool:
+    if value is not None:
+        return bool(value)
+    raw = str(os.environ.get("REPORT_AUDIO_ALLOW_LOCAL_FALLBACK", "")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _normalizer_model() -> str:

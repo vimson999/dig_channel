@@ -7,6 +7,7 @@
     <link href="css/zsxq-lab.css" rel="stylesheet">
     <link href="css/zsxq-auto-publish.css" rel="stylesheet">
     <link href="css/zsxq-system-sync.css?v=20260612-e2e-handoff" rel="stylesheet">
+    <link href="css/three-workspaces.css?v=20260702-sync-flow" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 </head>
 <body class="min-h-screen bg-slate-50 text-slate-900 overflow-x-hidden">
@@ -54,6 +55,11 @@
             <p class="zsxq-inline-tip">
                 系统同步和自动发帖现在各自维护独立的 DB Cookie 与星球上下文。持续调度会优先使用平台凭据数据库里的知识星球 Cookie，再回退到环境变量。
             </p>
+        </section>
+
+        <section id="system-sync-flow-map" class="three-workspace-panel">
+            <div class="three-workspace-scene" data-three-scene></div>
+            <aside class="three-workspace-side" data-three-side></aside>
         </section>
 
         <section class="zsxq-console-layout">
@@ -657,6 +663,8 @@
     <script src="js/env.js"></script>
     <script src="js/config.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/zsxq-system-sync.js?v=20260623-db-credential-cookie"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="js/three-workspace-graph.js?v=20260702-sync-flow"></script>
+    <script src="js/zsxq-system-sync.js?v=20260702-three-sync-flow"></script>
 </body>
 </html>

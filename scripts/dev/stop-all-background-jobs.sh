@@ -70,6 +70,7 @@ run_if_exists "$SCRIPT_DIR/stop-celery-content-pipeline.sh"
 run_if_exists "$SCRIPT_DIR/stop-celery-report-video.sh"
 run_if_exists "$SCRIPT_DIR/stop-celery-podcast.sh"
 run_if_exists "$SCRIPT_DIR/stop-celery-tts.sh"
+run_if_exists "$SCRIPT_DIR/stop-celery-platform-upload.sh"
 
 echo
 echo "4/4 最后做一次 Celery 残留清理..."

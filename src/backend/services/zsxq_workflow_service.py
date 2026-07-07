@@ -29,6 +29,8 @@ QUEUED_STALE_MINUTES_ENV_NAME = "ZSXQ_WORKFLOW_QUEUED_STALE_MINUTES"
 DEFAULT_QUEUED_STALE_MINUTES = 20
 CLEAN_STALE_MINUTES_ENV_NAME = "ZSXQ_WORKFLOW_CLEAN_STALE_MINUTES"
 DEFAULT_CLEAN_STALE_MINUTES = 360
+SYNC_STALE_MINUTES_ENV_NAME = "ZSXQ_WORKFLOW_SYNC_STALE_MINUTES"
+DEFAULT_SYNC_STALE_MINUTES = 30
 SCHEMA_CHECK_TTL_SECONDS_ENV_NAME = "ZSXQ_WORKFLOW_SCHEMA_CHECK_TTL_SECONDS"
 DEFAULT_SCHEMA_CHECK_TTL_SECONDS = 300
 QUEUE_DB_RETRIES_ENV_NAME = "ZSXQ_WORKFLOW_QUEUE_DB_RETRIES"
@@ -434,6 +436,7 @@ class ZsxqWorkflowService:
         self.ensure_schema()
         if recover_stale:
             self.recover_stale_initial_workflows(group_id=group_id)
+            self.recover_stale_running_sync_workflows(group_id=group_id)
             self.recover_stale_running_clean_workflows(group_id=group_id)
         query = ZsxqWorkflowRun.query.filter(ZsxqWorkflowRun.status.in_(("queued", "running")))
         if group_id:
@@ -474,6 +477,76 @@ class ZsxqWorkflowService:
             group_id or "-",
             len(recovered),
             [item.get("id") for item in recovered],
+        )
+        return recovered
+
+    def recover_stale_running_sync_workflows(self, group_id=None, stale_minutes=None):
+        self.ensure_schema()
+        stale_minutes = _workflow_sync_stale_minutes(stale_minutes)
+        cutoff = datetime.utcnow() - timedelta(minutes=stale_minutes)
+        query = ZsxqWorkflowRun.query.filter(
+            ZsxqWorkflowRun.status == "running",
+            ZsxqWorkflowRun.current_stage == "sync",
+            ZsxqWorkflowRun.sync_run_id.isnot(None),
+            or_(
+                ZsxqWorkflowRun.updated_at < cutoff,
+                ZsxqWorkflowRun.created_at < cutoff,
+            ),
+        )
+        if group_id:
+            query = query.filter(ZsxqWorkflowRun.group_id == str(group_id))
+
+        workflows = query.order_by(ZsxqWorkflowRun.updated_at.asc(), ZsxqWorkflowRun.created_at.asc()).limit(20).all()
+        if not workflows:
+            return []
+
+        now = datetime.utcnow()
+        recovered = []
+        for workflow in workflows:
+            sync_run = ZsxqSyncRun.query.get(str(workflow.sync_run_id))
+            sync_result = sync_run.result if sync_run and isinstance(sync_run.result, dict) else {}
+            partial = sync_result.get("partial") if isinstance(sync_result.get("partial"), dict) else {}
+            heartbeat = _parse_iso_datetime(
+                sync_result.get("heartbeat_at")
+                or sync_result.get("progress_at")
+                or partial.get("heartbeat_at")
+                or partial.get("progress_at")
+            )
+            sync_last_touched = heartbeat or workflow.updated_at or workflow.created_at or now
+            if sync_last_touched >= cutoff:
+                continue
+
+            message = (
+                f"同步任务长时间停留在 running/sync（超过 {stale_minutes} 分钟），"
+                "通常是 worker 重启或进程被杀导致 Celery 任务丢失；已自动标记失败，避免阻塞后续调度。"
+            )
+            if sync_run and sync_run.status not in TERMINAL_TASK_STATUSES:
+                result = dict(sync_run.result or {})
+                result["error"] = message
+                result["stale_recovered"] = True
+                result["stale_recovered_at"] = self._now_iso()
+                sync_run.status = "failed"
+                sync_run.error_message = message
+                sync_run.completed_at = now
+                sync_run.result = result
+                flag_modified(sync_run, "result")
+
+            self._mark_failed(workflow, message, stage="sync")
+            recovered.append({
+                "workflow_id": workflow.id,
+                "sync_run_id": workflow.sync_run_id,
+                "message": message,
+            })
+
+        if not recovered:
+            return []
+
+        db.session.commit()
+        logger.warning(
+            "[ZSXQ_WORKFLOW] stale running sync workflows marked failed | group_id=%s count=%s ids=%s",
+            group_id or "-",
+            len(recovered),
+            [item.get("workflow_id") for item in recovered],
         )
         return recovered
 
@@ -1515,6 +1588,27 @@ def _workflow_clean_stale_minutes(value=None):
     except (TypeError, ValueError):
         minutes = DEFAULT_CLEAN_STALE_MINUTES
     return max(30, min(7 * 24 * 60, minutes))
+
+
+def _workflow_sync_stale_minutes(value=None):
+    try:
+        minutes = int(value if value is not None else os.environ.get(SYNC_STALE_MINUTES_ENV_NAME))
+    except (TypeError, ValueError):
+        minutes = DEFAULT_SYNC_STALE_MINUTES
+    return max(30, min(24 * 60, minutes))
+
+
+def _parse_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        text_value = str(value).strip()
+        if text_value.endswith("Z"):
+            text_value = text_value[:-1]
+        parsed = datetime.fromisoformat(text_value)
+        return parsed.replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None
 
 
 def _schema_check_ttl_seconds():

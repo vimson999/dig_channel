@@ -183,6 +183,8 @@ const els = {
     autoPublishLogsPanel: document.getElementById('ap-logs-panel'),
 };
 
+let systemSyncFlowGraph = null;
+
 function currentModeKey() {
     return state.activeMode === 'publish' ? 'publish' : 'sync';
 }
@@ -200,6 +202,7 @@ function publishContext() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    initSystemSyncFlowGraph();
     renderCookieProfiles(true);
     updateCookieSummary('正在读取平台凭据...', 'muted');
     setCookieEditorOpen(false);
@@ -287,6 +290,106 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     startSchedulerPolling();
 });
+
+function initSystemSyncFlowGraph() {
+    const root = document.getElementById('system-sync-flow-map');
+    if (!root || !window.ShioaThreeGraph) return;
+    systemSyncFlowGraph = window.ShioaThreeGraph.mount(root, {
+        kicker: 'Sync Pipeline',
+        title: '同步流水线',
+        subtitle: '账号、星球、Tab、调度器、清洗和发布的当前运行关系。',
+    });
+    updateSystemSyncFlowGraph();
+}
+
+function updateSystemSyncFlowGraph() {
+    if (!systemSyncFlowGraph) return;
+    systemSyncFlowGraph.update(buildSystemSyncFlowGraphModel());
+}
+
+function buildSystemSyncFlowGraphModel() {
+    const context = state.contexts.sync || {};
+    const group = (context.groups || []).find(item => String(item.group_id) === String(context.selectedGroupId)) || null;
+    const config = state.syncConfig || state.schedulerStatus?.config || {};
+    const scheduler = state.schedulerStatus || {};
+    const batches = Array.isArray(state.batches) ? state.batches : [];
+    const running = Boolean(scheduler.running);
+    const cookieReady = Boolean(context.cookie || context.activeCookieId || config.cookie_env_configured || config.credential_id);
+    const tabs = state.selectedTabDefinitions || [];
+    const autoPdfClean = config.auto_pdf_clean === true;
+    const autoAudioClean = config.auto_audio_clean === true;
+    const publishEnabled = (autoPdfClean || autoAudioClean) && config.auto_publish_after_clean?.enabled === true;
+    const nodes = [
+        { id: 'cookie', type: 'stage', label: 'DB Cookie', value: cookieReady ? 5 : 2, status: cookieReady ? 'success' : 'idle' },
+        { id: 'group', type: 'group', label: group?.name || config.group_name || context.selectedGroupId || '目标星球', value: group || config.group_id ? 7 : 3, status: group || config.group_id ? 'success' : 'idle' },
+        { id: 'tabs', type: 'tab', label: `目标 Tab ${tabs.length || (config.target_tabs || []).length || 0}`, value: Math.max(2, tabs.length || 1), status: tabs.length || (config.target_tabs || []).length ? 'success' : 'idle' },
+        { id: 'config', type: 'stage', label: config.exists ? '配置已保存' : '配置待保存', value: config.exists ? 5 : 2, status: config.exists ? 'success' : 'warning' },
+        { id: 'scheduler', type: 'worker', label: running ? `调度器 ${scheduler.pid || ''}` : '调度器待命', value: running ? 7 : 3, status: running ? 'running' : 'idle' },
+        { id: 'sync', type: 'run', label: '远端同步', value: 5, status: running ? 'running' : 'idle' },
+        { id: 'download', type: 'attachment', label: '附件下载', value: Number(config.max_download_files || 0) ? 5 : 2, status: Number(config.max_download_files || 0) ? 'success' : 'idle' },
+        { id: 'clean', type: 'summary', label: [autoPdfClean ? 'PDF' : null, autoAudioClean ? '音频' : null].filter(Boolean).join(' + ') || '清洗关闭', value: autoPdfClean || autoAudioClean ? 5 : 2, status: autoPdfClean || autoAudioClean ? 'success' : 'idle' },
+        { id: 'publish', type: 'video', label: publishEnabled ? '自动发布' : '发布待命', value: publishEnabled ? 5 : 2, status: publishEnabled ? 'success' : 'idle' },
+    ];
+    const links = [
+        { source: 'cookie', target: 'group' },
+        { source: 'group', target: 'tabs' },
+        { source: 'tabs', target: 'config' },
+        { source: 'config', target: 'scheduler' },
+        { source: 'scheduler', target: 'sync' },
+        { source: 'sync', target: 'download' },
+        { source: 'download', target: 'clean' },
+        { source: 'clean', target: 'publish' },
+    ];
+
+    batches.slice(0, 8).forEach((batch, index) => {
+        const id = `batch:${batch.batch_id || batch.attempt_id || index}`;
+        const summary = batch.summary || {};
+        const failed = Number(summary.attachments_failed || 0) > 0 || /fail|error/i.test(String(batch.status || ''));
+        nodes.push({
+            id,
+            type: 'run',
+            label: batch.batch_id || batch.attempt_id || `批次 ${index + 1}`,
+            value: Math.min(8, 2 + Number(summary.attachments_downloaded || 0)),
+            status: failed ? 'failed' : 'success',
+        });
+        links.push({ source: 'sync', target: id, opacity: 0.28 });
+    });
+
+    tabs.slice(0, 8).forEach((tab, index) => {
+        const id = `target-tab:${tab.id || tab.hashtag_id || index}`;
+        nodes.push({
+            id,
+            type: 'tab',
+            label: tab.label || tab.title || `Tab ${index + 1}`,
+            value: 3,
+            status: 'success',
+        });
+        links.push({ source: 'tabs', target: id, opacity: 0.25 });
+    });
+
+    return {
+        title: group?.name || config.group_name || '知识星球系统同步',
+        subtitle: running
+            ? `运行中 · 下一次 ${formatZsxqTime(scheduler.next_run || config.next_run_at)}`
+            : `当前模式：${state.activeMode === 'publish' ? '自动发帖' : '系统同步'}`,
+        metrics: [
+            { label: 'Cookie', value: cookieReady ? 'Ready' : 'None' },
+            { label: 'Tab', value: tabs.length || (config.target_tabs || []).length || 0 },
+            { label: '批次', value: batches.length },
+            { label: '状态', value: running ? 'Run' : 'Idle' },
+        ],
+        legend: [
+            { label: '账号/配置', color: window.ShioaThreeGraph.colors.stage },
+            { label: '星球', color: window.ShioaThreeGraph.colors.group },
+            { label: 'Tab', color: window.ShioaThreeGraph.colors.tab },
+            { label: '同步批次', color: window.ShioaThreeGraph.colors.run },
+            { label: '清洗', color: window.ShioaThreeGraph.colors.summary },
+            { label: '发布', color: window.ShioaThreeGraph.colors.video },
+        ],
+        nodes,
+        links,
+    };
+}
 
 function bindEvents() {
     els.modeSyncBtn?.addEventListener('click', () => setActiveMode('sync'));
@@ -865,6 +968,7 @@ function renderWorkspaceSnapshot() {
     setWorkspaceStatusText(els.workspaceSidebarGroup, currentGroupMeta.text, currentGroupMeta.id ? 'success' : 'idle');
     setWorkspaceStatusText(els.workspaceSidebarSync, syncMeta.text, syncMeta.tone);
     setWorkspaceStatusText(els.workspaceSidebarPublish, publishMeta.text, publishMeta.tone);
+    updateSystemSyncFlowGraph();
 }
 
 function resetWorkspaceForMode(mode = state.activeMode) {

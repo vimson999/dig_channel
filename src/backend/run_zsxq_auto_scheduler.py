@@ -14,12 +14,15 @@ from pathlib import Path
 import schedule
 from typing import Tuple
 
+from flask import has_app_context
+
 
 BACKEND_DIR = Path(__file__).resolve().parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app import create_app
+from models import db
 from services.zsxq_system_sync_test import (
     COOKIE_ENV_NAME,
     COOKIE_OVERRIDE_ENV_NAME,
@@ -163,6 +166,25 @@ def _notify_scheduler_trigger_failure(*, attempt_id, trigger, reason, message=No
         )
 
 
+def _reset_db_session(reason=None):
+    if not has_app_context():
+        return
+    try:
+        db.session.rollback()
+    except Exception:
+        logger.exception(
+            "[ZSXQ_AUTO_SYNC] db session rollback failed | reason=%s",
+            reason or "-",
+        )
+    try:
+        db.session.remove()
+    except Exception:
+        logger.exception(
+            "[ZSXQ_AUTO_SYNC] db session remove failed | reason=%s",
+            reason or "-",
+        )
+
+
 class ZsxqAutoScheduler:
     def __init__(self):
         self.app = create_app()
@@ -187,6 +209,7 @@ class ZsxqAutoScheduler:
         )
         try:
             with self.app.app_context():
+                _reset_db_session("trigger_start")
                 status = config_status()
                 if not status.get("exists"):
                     logger.info(
@@ -305,6 +328,14 @@ class ZsxqAutoScheduler:
                     "message": f"已提交第 {result.get('round', '-')} 轮，batch={result.get('batch_id', '-')}",
                 }
         except Exception as exc:
+            try:
+                with self.app.app_context():
+                    _reset_db_session("trigger_failed")
+            except Exception:
+                logger.exception(
+                    "[ZSXQ_AUTO_SYNC] db session reset failed after trigger error | attempt_id=%s",
+                    attempt_id,
+                )
             logger.exception(
                 "[ZSXQ_AUTO_SYNC] trigger_failed | attempt_id=%s trigger=%s elapsed=%.2fs error=%s",
                 attempt_id,

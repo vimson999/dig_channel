@@ -24,6 +24,7 @@ WATCHDOG_LOG_FILE = LOG_DIR / "celery_watchdog.log"
 WATCHDOG_SCRIPT = PROJECT_ROOT / "scripts" / "dev" / "run-celery-watchdog.sh"
 DEFAULT_WATCHDOG_SERVICES = (
     "render",
+    "platform_upload",
     "cloud_tts",
     "doubao_browser_tts",
     "report_pdf_gemini",
@@ -41,6 +42,7 @@ DEFAULT_WATCHDOG_SERVICES = (
 
 BUSINESS_TASK_FEATURES = {
     "render": ("publisher",),
+    "platform_upload": ("publisher",),
     "report_audio_workflow": ("report_audio_workflow", "report_pdf_audio_workflow"),
     "report_script_material_workflow": ("report_script_material_workflow",),
     "report_top10_workflow": ("report_top10_workflow",),
@@ -53,6 +55,9 @@ ZSXQ_ACTIVE_STATUSES = ("queued", "running", "pending", "processing")
 BUSINESS_TASK_ACTIVE_STATUSES = ("pending", "processing")
 BUSINESS_TASK_CONSUMER_GRACE_SECONDS_DEFAULT = 1800
 BUSINESS_TASK_LIMIT_PER_SERVICE = 8
+NON_INTERRUPTIBLE_SERVICE_STEPS = {
+    "platform_upload": ("upload_bilibili", "upload_youtube"),
+}
 BUSINESS_TASK_UUID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
@@ -65,6 +70,14 @@ SERVICES = {
         "run_script": "scripts/dev/run-celery.sh",
         "log_file": "render.log",
         "description": "publisher / video-editor 主视频渲染队列",
+    },
+    "platform_upload": {
+        "label": "平台上传",
+        "queue": "platform_upload",
+        "hostname_prefix": "platform_upload@",
+        "run_script": "scripts/dev/run-celery-platform-upload.sh",
+        "log_file": "platform_upload.log",
+        "description": "B站 / YouTube 后投上传队列，不占用视频合成 render 队列",
     },
     "cloud_tts": {
         "label": "豆包 TTS",
@@ -778,7 +791,7 @@ def _watchdog_services():
 def _watchdog_config():
     paused = _load_paused_services()
     return {
-        "enabled": _truthy_env("CELERY_AUTO_HEAL_ENABLED", False),
+        "enabled": _truthy_env("CELERY_AUTO_HEAL_ENABLED", True),
         "notify_enabled": _truthy_env("CELERY_AUTO_HEAL_NOTIFY_ENABLED", True),
         "requeue_stale_tasks": _truthy_env("CELERY_AUTO_HEAL_REQUEUE_STALE_TASKS", True),
         "services": _watchdog_services(),
@@ -891,6 +904,7 @@ def _watchdog_repair_stale_business_tasks(config):
     try:
         from services.publisher_queue_repair import (
             cleanup_publisher_children_of_terminal_parents_once,
+            repair_stale_business_processing_tasks_once,
             repair_stale_publication_tasks_once,
             repair_stale_publisher_pending_tasks_once,
             repair_stale_publisher_processing_tasks_once,
@@ -915,15 +929,23 @@ def _watchdog_repair_stale_business_tasks(config):
         repair_result = repair_stale_publication_tasks_once(
             excluded_features=excluded_features,
         )
+        business_processing_repair_result = repair_stale_business_processing_tasks_once(
+            excluded_features=excluded_features,
+        )
         repair_result["publisher_pending_repair"] = publisher_pending_repair_result
         repair_result["processing_repair"] = processing_repair_result
+        repair_result["business_processing_repair"] = business_processing_repair_result
         repair_result["requeued"] = (
             (repair_result.get("requeued") or 0)
             + (publisher_pending_repair_result.get("requeued") or 0)
             + (processing_repair_result.get("requeued") or 0)
+            + (business_processing_repair_result.get("requeued") or 0)
         )
         repair_result["demoted"] = processing_repair_result.get("demoted") or 0
-        repair_result["closed"] = processing_repair_result.get("closed") or 0
+        repair_result["closed"] = (
+            (processing_repair_result.get("closed") or 0)
+            + (business_processing_repair_result.get("closed") or 0)
+        )
         repair_result["child_cleanup"] = cleanup_result
         return repair_result
     except Exception as exc:
@@ -1378,10 +1400,16 @@ def _business_tasks_snapshot(force_refresh=False):
                 PublicationTask.current_step.label("current_step"),
                 PublicationTask.progress.label("progress"),
                 PublicationTask.task_title.label("task_title"),
+                PublicationTask.params.label("params"),
                 PublicationTask.parent_feature.label("parent_feature"),
                 PublicationTask.parent_task_id.label("parent_task_id"),
                 PublicationTask.source_feature.label("source_feature"),
                 PublicationTask.source_task_id.label("source_task_id"),
+                PublicationTask.waiting_child_label.label("waiting_child_label"),
+                PublicationTask.waiting_child_id.label("waiting_child_id"),
+                PublicationTask.waiting_child_status.label("waiting_child_status"),
+                PublicationTask.waiting_child_step.label("waiting_child_step"),
+                PublicationTask.waiting_child_updated_at.label("waiting_child_updated_at"),
                 PublicationTask.error_message.label("error_message"),
                 PublicationTask.created_at.label("created_at"),
                 PublicationTask.updated_at.label("updated_at"),
@@ -1429,7 +1457,10 @@ def _business_tasks_snapshot(force_refresh=False):
     buckets = {service_id: [] for service_id in service_ids}
     for row in rows:
         for service_id, feature_names in BUSINESS_TASK_FEATURES.items():
-            if row.feature not in feature_names or len(buckets[service_id]) >= BUSINESS_TASK_LIMIT_PER_SERVICE:
+            if (
+                not _business_task_matches_service(row, service_id, feature_names)
+                or len(buckets[service_id]) >= BUSINESS_TASK_LIMIT_PER_SERVICE
+            ):
                 continue
             buckets[service_id].append(_business_task_payload(row))
 
@@ -1447,6 +1478,39 @@ def _business_tasks_snapshot(force_refresh=False):
             })
     _release_db_session_quietly()
     return buckets, errors
+
+
+def _business_task_matches_service(row, service_id, feature_names):
+    if row.feature not in feature_names:
+        return False
+    if row.feature == "publisher":
+        is_upload = _business_task_is_platform_upload(row)
+        if service_id == "platform_upload":
+            return is_upload
+        if service_id == "render":
+            return not is_upload
+    return True
+
+
+def _business_task_is_platform_upload(row):
+    params = row.params if isinstance(getattr(row, "params", None), dict) else {}
+    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    source = str(metadata.get("source") or "").strip()
+    if source in {"mp3_video_workflow:bilibili_upload"}:
+        return True
+
+    video = params.get("video") if isinstance(params.get("video"), dict) else {}
+    bilibili = params.get("bilibili") if isinstance(params.get("bilibili"), dict) else {}
+    youtube = params.get("youtube") if isinstance(params.get("youtube"), dict) else {}
+    if (
+        str(video.get("media_type") or "") == "existing_video"
+        and video.get("enabled") is False
+        and (bool(bilibili.get("enabled")) or bool(youtube.get("enabled")))
+    ):
+        return True
+
+    step = str(getattr(row, "current_step", None) or "").strip().lower()
+    return step in {"upload_bilibili", "upload_youtube"}
 
 
 def _business_task_service_ids():
@@ -1622,10 +1686,23 @@ def _business_task_payload(row):
         "parent_task_id": row.parent_task_id,
         "source_feature": row.source_feature,
         "source_task_id": row.source_task_id,
+        "waiting_child": _business_task_waiting_child_payload(row),
         "error": row.error_message,
         "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
         "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
         "completed_at": row.completed_at.isoformat() + "Z" if row.completed_at else None,
+    }
+
+
+def _business_task_waiting_child_payload(row):
+    if not getattr(row, "waiting_child_id", None):
+        return None
+    return {
+        "label": row.waiting_child_label,
+        "child_id": row.waiting_child_id,
+        "status": row.waiting_child_status,
+        "step": row.waiting_child_step,
+        "updated_at": row.waiting_child_updated_at,
     }
 
 
@@ -1689,9 +1766,8 @@ def _service_status(
         and not inspect_blocked
     ):
         if business_recently_active:
-            consumer_note = "队列有积压，但业务任务近期仍在推进，暂不判定为消费异常。"
-        else:
-            consumer_warning = "Worker 在线但未领取积压任务，消费连接可能卡住；建议重启该队列 worker。"
+            consumer_note = "队列有积压且业务任务近期有更新；若连续确认未领取任务，看门狗仍会按自愈策略重启 worker。"
+        consumer_warning = "Worker 在线但未领取积压任务，消费连接可能卡住；建议重启该队列 worker。"
 
     status = {
         "id": service_id,
@@ -1729,8 +1805,18 @@ def _service_status(
     return status
 
 
-def _stop_service(service_id, service, *, pause=False, reason=None):
+def _stop_service(service_id, service, *, pause=False, reason=None, force=False):
     _ensure_dirs()
+    if not force:
+        guard = _service_stop_guard(service_id)
+        if guard:
+            return {
+                **guard,
+                "terminated_pids": [],
+                "force_killed_pids": [],
+                "paused": None,
+            }
+
     pause_state = None
     if pause:
         pause_state = _set_service_paused(service_id, True, reason=reason or "manual_stop")
@@ -1767,6 +1853,71 @@ def _stop_service(service_id, service, *, pause=False, reason=None):
         pass
 
     return {"terminated_pids": pids, "force_killed_pids": killed, "paused": pause_state.get(service_id) if pause_state else None}
+
+
+def _service_stop_guard(service_id):
+    active_tasks = _active_non_interruptible_service_tasks(service_id)
+    if not active_tasks:
+        return None
+    return {
+        "skipped": True,
+        "reason": "active_non_interruptible_tasks",
+        "message": "该队列有不可中断的平台上传任务正在进行，已跳过停止/重启以避免产生孤儿上传。",
+        "active_tasks": active_tasks,
+    }
+
+
+def _active_non_interruptible_service_tasks(service_id, *, rows=None):
+    steps = NON_INTERRUPTIBLE_SERVICE_STEPS.get(service_id)
+    if not steps:
+        return []
+
+    if rows is None:
+        try:
+            from models.task import PublicationTask
+
+            rows = (
+                PublicationTask.query
+                .with_entities(
+                    PublicationTask.id,
+                    PublicationTask.status,
+                    PublicationTask.current_step,
+                    PublicationTask.progress,
+                    PublicationTask.task_title,
+                    PublicationTask.updated_at,
+                )
+                .filter(PublicationTask.feature == "publisher")
+                .filter(PublicationTask.status == "processing")
+                .filter(PublicationTask.current_step.in_(steps))
+                .order_by(PublicationTask.updated_at.desc(), PublicationTask.created_at.desc())
+                .limit(5)
+                .all()
+            )
+        except Exception:
+            return []
+
+    items = []
+    for row in rows or []:
+        status = str(_row_get(row, "status") or "").lower()
+        step = str(_row_get(row, "current_step") or "").lower()
+        if status != "processing" or step not in steps:
+            continue
+        updated_at = _row_get(row, "updated_at")
+        items.append({
+            "id": _row_get(row, "id"),
+            "status": status,
+            "step": step,
+            "progress": _row_get(row, "progress"),
+            "title": _row_get(row, "task_title"),
+            "updated_at": updated_at.isoformat() + "Z" if hasattr(updated_at, "isoformat") else updated_at,
+        })
+    return items
+
+
+def _row_get(row, key):
+    if isinstance(row, dict):
+        return row.get(key)
+    return getattr(row, key, None)
 
 
 def _start_service(service_id, service, *, clear_pause=True):
@@ -2010,7 +2161,7 @@ def stop(service_id):
         data = request.get_json(silent=True) or {}
         pause = bool(data.get("pause", True))
         reason = data.get("reason") or "manual_stop"
-        result = _stop_service(service_id, service, pause=pause, reason=reason)
+        result = _stop_service(service_id, service, pause=pause, reason=reason, force=bool(data.get("force")))
         result["status"] = _service_status(service_id, service, include_logs=True)
         return jsonify({"success": True, "data": result})
     except Exception as exc:
@@ -2061,7 +2212,8 @@ def restart(service_id):
     if error:
         return error
     try:
-        stop_result = _stop_service(service_id, service)
+        data = request.get_json(silent=True) or {}
+        stop_result = _stop_service(service_id, service, force=bool(data.get("force")))
         time.sleep(0.6)
         start_result = _start_service(service_id, service, clear_pause=True)
         return jsonify({
@@ -2083,6 +2235,7 @@ def restart_all():
         data = request.get_json(silent=True) or {}
         start_all_schedulers = bool(data.get("start_all_schedulers"))
         include_paused = bool(data.get("include_paused"))
+        force = bool(data.get("force"))
         celery_results = {}
         scheduler_results = {}
 
@@ -2100,7 +2253,7 @@ def restart_all():
                 continue
             celery_results[service_id] = {
                 "label": service.get("label") or service_id,
-                "stop": _stop_service(service_id, service),
+                "stop": _stop_service(service_id, service, force=force),
             }
 
         for scheduler_id, scheduler in SCHEDULERS.items():

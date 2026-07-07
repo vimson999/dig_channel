@@ -13,7 +13,7 @@ from urllib.parse import unquote
 
 import requests
 from flask import current_app, has_app_context
-from sqlalchemy import and_, inspect, or_, text
+from sqlalchemy import and_, inspect, or_, text, update
 from sqlalchemy.orm import load_only
 
 from models import db
@@ -281,7 +281,11 @@ class ZsxqSyncService:
         running_result["attachment_download_policy"] = download_policy
 
         if run_id:
-            run = ZsxqSyncRun.query.get(str(run_id))
+            run = (
+                ZsxqSyncRun.query.options(load_only(ZsxqSyncRun.id))
+                .filter(ZsxqSyncRun.id == str(run_id))
+                .one_or_none()
+            )
             if not run:
                 raise ValueError(f"同步任务不存在: {run_id}")
             run.status = "running"
@@ -305,6 +309,9 @@ class ZsxqSyncService:
                 result=running_result,
             )
             db.session.add(run)
+        db.session.flush()
+        run._zsxq_cached_result = deepcopy(running_result)
+        run._zsxq_cached_run_id = run.id
         db.session.commit()
 
         result = {
@@ -782,7 +789,6 @@ class ZsxqSyncService:
                 ZsxqSyncRun.mode,
                 ZsxqSyncRun.status,
                 ZsxqSyncRun.requested_tabs,
-                ZsxqSyncRun.result,
                 ZsxqSyncRun.system_batch_id,
                 ZsxqSyncRun.system_attempt_id,
                 ZsxqSyncRun.system_round,
@@ -815,7 +821,7 @@ class ZsxqSyncService:
                 run = runs_by_id.get(run_id)
                 if not run:
                     continue
-                run_payload = run.to_dict()
+                run_payload = self._system_sync_run_payload_from_model(run)
                 topic_detail = self._topics_for_run(run)
                 run_payload["failed_attachments"] = self._failed_attachments_for_run(run)
                 run_payload["topics"] = topic_detail["topics"]
@@ -827,6 +833,61 @@ class ZsxqSyncService:
             batch["topics"] = topics
             batch["topics_count"] = len(topics)
             batch["topics_truncated"] = topics_truncated
+
+    def _system_sync_run_payload_from_model(self, run):
+        result = {
+            "system_sync": {
+                "batch_id": run.system_batch_id,
+                "attempt_id": run.system_attempt_id,
+                "round": self._int_or_none(run.system_round),
+                "max_rounds": self._int_or_none(run.system_max_rounds),
+                "trigger": run.system_trigger,
+                "queued_at": run.system_queued_at,
+                "max_download_files": self._int_or_none(run.system_max_download_files),
+                "jobs": [],
+            },
+            "topics_fetched": self._int_or_zero(run.topics_fetched),
+            "topics_new": self._int_or_zero(run.topics_new),
+            "topics_updated": self._int_or_zero(run.topics_updated),
+            "topics_existing": self._int_or_zero(run.topics_existing),
+            "attachments_seen": self._int_or_zero(run.attachments_seen),
+            "attachments_downloaded": self._int_or_zero(run.attachments_downloaded),
+            "attachments_failed": self._int_or_zero(run.attachments_failed),
+            "attachments_skipped": self._int_or_zero(run.attachments_skipped),
+            "download_limit_reached": bool(run.download_limit_reached),
+        }
+        return {
+            "id": run.id,
+            "group_id": run.group_id,
+            "group_name": run.group_name,
+            "tab_id": run.tab_id,
+            "tab_label": run.tab_label,
+            "mode": run.mode,
+            "status": run.status,
+            "requested_tabs": run.requested_tabs or [],
+            "result": result,
+            "system_batch_id": run.system_batch_id,
+            "system_attempt_id": run.system_attempt_id,
+            "system_round": run.system_round,
+            "system_max_rounds": run.system_max_rounds,
+            "system_trigger": run.system_trigger,
+            "system_queued_at": run.system_queued_at,
+            "system_max_download_files": run.system_max_download_files,
+            "topics_fetched": self._int_or_zero(run.topics_fetched),
+            "topics_new": self._int_or_zero(run.topics_new),
+            "topics_updated": self._int_or_zero(run.topics_updated),
+            "topics_existing": self._int_or_zero(run.topics_existing),
+            "attachments_seen": self._int_or_zero(run.attachments_seen),
+            "attachments_downloaded": self._int_or_zero(run.attachments_downloaded),
+            "attachments_failed": self._int_or_zero(run.attachments_failed),
+            "attachments_skipped": self._int_or_zero(run.attachments_skipped),
+            "download_limit_reached": bool(run.download_limit_reached),
+            "error_message": run.error_message,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+            "created_at": run.created_at.isoformat() if run.created_at else None,
+            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        }
 
     def _int_or_zero(self, value):
         return self._int_or_none(value) or 0
@@ -876,9 +937,15 @@ class ZsxqSyncService:
                 ZsxqTopic.title,
                 ZsxqTopic.author_name,
                 ZsxqTopic.content,
+                ZsxqTopic.topic_type,
+                ZsxqTopic.question_text,
+                ZsxqTopic.answer_text,
+                ZsxqTopic.article_title,
+                ZsxqTopic.article_excerpt,
+                ZsxqTopic.files_count,
+                ZsxqTopic.images_count,
                 ZsxqTopic.create_time,
                 ZsxqTopic.raw_json_path,
-                ZsxqTopic.raw_payload,
                 ZsxqTopic.first_sync_run_id,
                 ZsxqTopic.last_sync_run_id,
                 ZsxqTopic.last_synced_at,
@@ -904,7 +971,7 @@ class ZsxqSyncService:
                 tab_ids.append(str(tab["id"]))
         return sorted(set(tab_ids))
 
-    def _attachments_by_topic(self, group_id, topics):
+    def _attachments_by_topic(self, group_id, topics, include_raw_payload=False):
         if not topics:
             return {}
         topic_ids = sorted({item.topic_id for item in topics if item.topic_id})
@@ -919,35 +986,39 @@ class ZsxqSyncService:
         if tab_ids:
             query = query.filter(ZsxqAttachment.tab_id.in_(tab_ids))
 
+        columns = [
+            ZsxqAttachment.id,
+            ZsxqAttachment.group_id,
+            ZsxqAttachment.tab_id,
+            ZsxqAttachment.topic_id,
+            ZsxqAttachment.attachment_key,
+            ZsxqAttachment.attachment_type,
+            ZsxqAttachment.name,
+            ZsxqAttachment.file_id,
+            ZsxqAttachment.download_count,
+            ZsxqAttachment.local_path,
+            ZsxqAttachment.file_ext,
+            ZsxqAttachment.download_status,
+            ZsxqAttachment.error_message,
+            ZsxqAttachment.publish_status,
+            ZsxqAttachment.publish_task_id,
+            ZsxqAttachment.publish_source_task_id,
+            ZsxqAttachment.publish_topic_id,
+            ZsxqAttachment.publish_submitted_count,
+            ZsxqAttachment.publish_verified_count,
+            ZsxqAttachment.publish_failed_count,
+            ZsxqAttachment.publish_updated_at,
+            ZsxqAttachment.created_at,
+            ZsxqAttachment.updated_at,
+        ]
+        if include_raw_payload:
+            columns.append(ZsxqAttachment.raw_payload)
+
         grouped = {}
-        for attachment in query.options(
-            load_only(
-                ZsxqAttachment.id,
-                ZsxqAttachment.group_id,
-                ZsxqAttachment.tab_id,
-                ZsxqAttachment.topic_id,
-                ZsxqAttachment.attachment_key,
-                ZsxqAttachment.attachment_type,
-                ZsxqAttachment.name,
-                ZsxqAttachment.file_id,
-                ZsxqAttachment.download_count,
-                ZsxqAttachment.local_path,
-                ZsxqAttachment.raw_payload,
-                ZsxqAttachment.file_ext,
-                ZsxqAttachment.download_status,
-                ZsxqAttachment.error_message,
-                ZsxqAttachment.publish_status,
-                ZsxqAttachment.publish_task_id,
-                ZsxqAttachment.publish_source_task_id,
-                ZsxqAttachment.publish_topic_id,
-                ZsxqAttachment.publish_submitted_count,
-                ZsxqAttachment.publish_verified_count,
-                ZsxqAttachment.publish_failed_count,
-                ZsxqAttachment.publish_updated_at,
-                ZsxqAttachment.created_at,
-                ZsxqAttachment.updated_at,
-            )
-        ).order_by(ZsxqAttachment.topic_id.asc(), ZsxqAttachment.created_at.asc()).all():
+        for attachment in query.options(load_only(*columns)).order_by(
+            ZsxqAttachment.topic_id.asc(),
+            ZsxqAttachment.created_at.asc(),
+        ).all():
             grouped.setdefault((attachment.tab_id, attachment.topic_id), []).append(attachment)
         return grouped
 
@@ -2330,6 +2401,57 @@ class ZsxqSyncService:
         except (TypeError, OSError, ValueError):
             return None
 
+    def list_cached_groups(self):
+        if not self._sync_tables_ready():
+            return {
+                "succeeded": True,
+                "source": "local_db",
+                "tables_ready": False,
+                "resp_data": {
+                    "groups": [],
+                    "message": "本地同步表尚未初始化。",
+                },
+            }
+
+        rows = db.session.query(
+            ZsxqTopic.group_id,
+            db.func.max(ZsxqTopic.group_name),
+            db.func.count(ZsxqTopic.id),
+            db.func.count(db.distinct(ZsxqTopic.tab_id)),
+            db.func.max(ZsxqTopic.last_synced_at),
+            db.func.max(ZsxqTopic.create_time),
+        ).group_by(
+            ZsxqTopic.group_id,
+        ).order_by(
+            db.func.max(ZsxqTopic.last_synced_at).desc(),
+        ).all()
+
+        groups = []
+        for group_id, group_name, topic_count, tab_count, last_synced_at, latest_topic_time in rows:
+            group_id = str(group_id or "").strip()
+            if not group_id:
+                continue
+            groups.append({
+                "group_id": group_id,
+                "name": group_name or f"星球 {group_id}",
+                "type": "local",
+                "local_cached": True,
+                "topic_count": int(topic_count or 0),
+                "tab_count": int(tab_count or 0),
+                "last_synced_at": last_synced_at.isoformat() if last_synced_at else None,
+                "latest_topic_time": latest_topic_time,
+            })
+
+        return {
+            "succeeded": True,
+            "source": "local_db",
+            "tables_ready": True,
+            "resp_data": {
+                "groups": groups,
+                "total": len(groups),
+            },
+        }
+
     def list_cached_tabs(self, group_id):
         if not self._sync_tables_ready():
             return {"tabs": [], "source": "local_db", "tables_ready": False}
@@ -2371,7 +2493,15 @@ class ZsxqSyncService:
             "tables_ready": True,
         }
 
-    def list_cached_topics(self, group_id, tab_id=None, count=20, end_time=None, publish_filter=None):
+    def list_cached_topics(
+        self,
+        group_id,
+        tab_id=None,
+        count=20,
+        end_time=None,
+        publish_filter=None,
+        include_raw_payload=False,
+    ):
         if not self._sync_tables_ready():
             return {
                 "succeeded": True,
@@ -2448,9 +2578,15 @@ class ZsxqSyncService:
                 ZsxqTopic.title,
                 ZsxqTopic.author_name,
                 ZsxqTopic.content,
+                ZsxqTopic.topic_type,
+                ZsxqTopic.question_text,
+                ZsxqTopic.answer_text,
+                ZsxqTopic.article_title,
+                ZsxqTopic.article_excerpt,
+                ZsxqTopic.files_count,
+                ZsxqTopic.images_count,
                 ZsxqTopic.create_time,
                 ZsxqTopic.raw_json_path,
-                ZsxqTopic.raw_payload,
                 ZsxqTopic.first_sync_run_id,
                 ZsxqTopic.last_sync_run_id,
                 ZsxqTopic.last_synced_at,
@@ -2461,7 +2597,13 @@ class ZsxqSyncService:
         ).limit(limit + 1).all()
         has_more = len(rows) > limit
         topics = rows[:limit]
-        attachments = self._attachments_by_topic(group_id, topics)
+        if include_raw_payload:
+            self._hydrate_topic_raw_payloads(topics)
+        else:
+            image_topics = [topic for topic in topics if (topic.images_count or 0) > 0]
+            if image_topics:
+                self._hydrate_topic_raw_payloads(image_topics)
+        attachments = self._attachments_by_topic(group_id, topics, include_raw_payload=include_raw_payload)
         external_links = self._external_links_for_cached_topics(group_id, topics)
         payloads = []
         for topic in topics:
@@ -2520,9 +2662,14 @@ class ZsxqSyncService:
         return times[0] if times else None
 
     def _public_cached_topic(self, topic, attachments):
-        raw_payload = topic.raw_payload if isinstance(topic.raw_payload, dict) else {}
+        raw_payload = getattr(topic, "_cached_raw_payload", None)
+        if raw_payload is None:
+            raw_payload = self._loaded_model_attr(topic, "raw_payload", {})
+        raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
         raw_talk = raw_payload.get("talk") if isinstance(raw_payload.get("talk"), dict) else {}
-        article = self._public_topic_article(raw_talk.get("article") or raw_payload.get("article"))
+        raw_article = raw_payload.get("article") if isinstance(raw_payload.get("article"), dict) else {}
+        raw_talk_article = raw_talk.get("article") if isinstance(raw_talk.get("article"), dict) else {}
+        article = self._public_topic_article(raw_talk_article or raw_article)
         payload = {}
         payload.setdefault("topic_id", topic.topic_id)
         payload.setdefault("topic_uid", topic.topic_uid)
@@ -2531,25 +2678,60 @@ class ZsxqSyncService:
         payload.setdefault("raw_json_path", topic.raw_json_path)
         payload.setdefault("tab_id", topic.tab_id)
         payload.setdefault("tab_label", topic.tab_label)
+        if topic.topic_type:
+            payload.setdefault("topic_type", topic.topic_type)
         if raw_payload.get("annotation"):
             payload.setdefault("annotation", raw_payload.get("annotation"))
         if topic.author_name:
             payload.setdefault("owner", {"name": topic.author_name})
 
-        if topic.content:
+        content = self._content(raw_payload) if raw_payload else (topic.content or "")
+        if content:
             payload["talk"] = {
-                "text": topic.content,
+                "text": content,
                 "create_time": topic.create_time,
                 "owner": {"name": topic.author_name or "未知作者"},
+            }
+        if isinstance(raw_payload.get("question"), dict):
+            payload["question"] = {
+                "text": self._normalize_topic_text(raw_payload["question"].get("text") or ""),
+                "owner": raw_payload["question"].get("owner") or {},
+            }
+        elif topic.question_text:
+            payload["question"] = {
+                "text": topic.question_text,
+                "owner": {"name": topic.author_name or "未知作者"},
+            }
+        if isinstance(raw_payload.get("answer"), dict):
+            payload["answer"] = {
+                "text": self._normalize_topic_text(raw_payload["answer"].get("text") or ""),
+                "owner": raw_payload["answer"].get("owner") or {},
+                "images": raw_payload["answer"].get("images") or [],
+            }
+        elif topic.answer_text:
+            payload["answer"] = {
+                "text": topic.answer_text,
+                "owner": {"name": topic.author_name or "未知作者"},
+                "images": [],
             }
         if article:
             payload.setdefault("talk", {})
             payload["talk"]["article"] = article
+        elif topic.article_title or topic.article_excerpt:
+            payload.setdefault("talk", {})
+            payload["talk"]["article"] = {
+                "title": topic.article_title,
+                "article_content": topic.article_excerpt,
+            }
 
         files = []
-        images = []
+        images = [
+            deepcopy(item) if isinstance(item, dict) else {"url": str(item)}
+            for item in self._topic_feed_images(raw_payload)
+            if item
+        ]
         for attachment in attachments or []:
-            item = dict(attachment.raw_payload or {})
+            item = dict(self._loaded_model_attr(attachment, "raw_payload", {}) or {})
             item.setdefault("name", attachment.name)
             if attachment.file_id:
                 item.setdefault("file_id", attachment.file_id)
@@ -2557,15 +2739,111 @@ class ZsxqSyncService:
                 item.setdefault("download_count", attachment.download_count)
             item.setdefault("attachment_key", attachment.attachment_key)
             if attachment.attachment_type == "image":
-                images.append(item)
+                if self._image_payload_has_url(item):
+                    images.append(item)
             else:
                 files.append(item)
 
         if files:
             payload["files"] = files
         if images:
-            payload["images"] = images
+            payload["images"] = self._dedupe_topic_images(images)
         return payload
+
+    def _dedupe_topic_images(self, images):
+        unique = []
+        seen = set()
+        for image in images or []:
+            item = image if isinstance(image, dict) else {"url": str(image)}
+            original = item.get("original") if isinstance(item.get("original"), dict) else {}
+            large = item.get("large") if isinstance(item.get("large"), dict) else {}
+            thumbnail = item.get("thumbnail") if isinstance(item.get("thumbnail"), dict) else {}
+            key = str(
+                item.get("image_id")
+                or item.get("file_id")
+                or item.get("id")
+                or item.get("hash_id")
+                or item.get("url")
+                or original.get("url")
+                or large.get("url")
+                or thumbnail.get("url")
+                or ""
+            )
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            unique.append(item)
+        return unique
+
+    def _topic_feed_images(self, raw_payload):
+        if not isinstance(raw_payload, dict):
+            return []
+        talk = raw_payload.get("talk") if isinstance(raw_payload.get("talk"), dict) else {}
+        article = raw_payload.get("article") if isinstance(raw_payload.get("article"), dict) else {}
+        talk_article = talk.get("article") if isinstance(talk.get("article"), dict) else {}
+        images = []
+        for value in (
+            raw_payload.get("images"),
+            talk.get("images"),
+            article.get("images"),
+            talk_article.get("images"),
+        ):
+            if isinstance(value, list):
+                images.extend(value)
+        return images
+
+    def _image_payload_has_url(self, item):
+        if not isinstance(item, dict):
+            return bool(item)
+        for value in (
+            item.get("url"),
+            item.get("image_url"),
+            item.get("raw_url"),
+            item.get("source_url"),
+            item.get("download_url"),
+            item.get("src"),
+            item.get("href"),
+            item.get("link"),
+        ):
+            if str(value or "").strip():
+                return True
+        for key in ("thumbnail", "large", "original", "small", "file", "picture", "photo"):
+            nested = item.get(key)
+            if isinstance(nested, str) and nested.strip():
+                return True
+            if isinstance(nested, dict) and any(str(nested.get(field) or "").strip() for field in ("url", "src", "href", "link", "image_url")):
+                return True
+        return False
+
+    def _hydrate_topic_raw_payloads(self, topics):
+        topic_ids = [topic.id for topic in topics or [] if topic and topic.id]
+        if not topic_ids:
+            return
+        rows = (
+            db.session.query(ZsxqTopic.id, ZsxqTopic.raw_payload)
+            .filter(ZsxqTopic.id.in_(topic_ids))
+            .all()
+        )
+        raw_by_id = {
+            row.id: row.raw_payload
+            for row in rows
+            if isinstance(row.raw_payload, dict)
+        }
+        for topic in topics:
+            topic._cached_raw_payload = raw_by_id.get(topic.id) or {}
+
+    def _loaded_model_attr(self, record, name, default=None):
+        try:
+            state = inspect(record)
+            if name in state.unloaded:
+                return default
+        except Exception:
+            pass
+        try:
+            return getattr(record, name, default)
+        except Exception:
+            return default
 
     def _external_links_for_cached_topics(self, group_id, topics):
         try:
@@ -3838,17 +4116,17 @@ class ZsxqSyncService:
         self._append_unique_file_entry(stats["auto_video_dispatch_files"], entry)
 
     def _commit_manual_running_progress(self, run, tab, topic_id, tab_result, manual_plan):
-        run.updated_at = datetime.utcnow()
-        previous_result = run.result if isinstance(run.result, dict) else {}
+        previous_result = self._cached_run_result(run)
         next_result = {
             "running": True,
+            "heartbeat_at": datetime.utcnow().isoformat() + "Z",
             "current_tab": self._public_tab(tab),
             "current_topic_id": topic_id,
             "manual_attachment_plan": self._public_manual_attachment_plan(manual_plan),
             "partial": dict(tab_result),
         }
-        run.result = self._preserve_run_result_context(next_result, previous_result)
-        db.session.commit()
+        next_result = self._preserve_run_result_context(next_result, previous_result)
+        self._update_run_progress_result(run, next_result)
 
     def _sync_one_tab(
         self,
@@ -4088,16 +4366,16 @@ class ZsxqSyncService:
         return None
 
     def _commit_running_progress(self, run, tab, topic_id, tab_result):
-        run.updated_at = datetime.utcnow()
-        previous_result = run.result if isinstance(run.result, dict) else {}
+        previous_result = self._cached_run_result(run)
         next_result = {
             "running": True,
+            "heartbeat_at": datetime.utcnow().isoformat() + "Z",
             "current_tab": self._public_tab(tab),
             "current_topic_id": topic_id,
             "partial": dict(tab_result),
         }
-        run.result = self._preserve_run_result_context(next_result, previous_result)
-        db.session.commit()
+        next_result = self._preserve_run_result_context(next_result, previous_result)
+        self._update_run_progress_result(run, next_result)
 
     def _preserve_run_result_context(self, next_result, previous_result):
         if not isinstance(previous_result, dict):
@@ -4109,6 +4387,59 @@ class ZsxqSyncService:
             if value is not None:
                 next_result[key] = deepcopy(value)
         return next_result
+
+    def _cached_run_result(self, run):
+        cached = getattr(run, "_zsxq_cached_result", None)
+        if isinstance(cached, dict):
+            return deepcopy(cached)
+        return {}
+
+    def _update_run_progress_result(self, run, result):
+        run_id = getattr(run, "_zsxq_cached_run_id", None) or getattr(run, "id", None)
+        if not run_id:
+            raise ValueError("同步任务 ID 不能为空")
+        values = {
+            "updated_at": datetime.utcnow(),
+            "result": result,
+            **self._sync_run_projection_values(result),
+        }
+        db.session.execute(
+            update(ZsxqSyncRun)
+            .where(ZsxqSyncRun.id == str(run_id))
+            .values(**values)
+        )
+        run._zsxq_cached_result = deepcopy(result)
+        run._zsxq_cached_run_id = str(run_id)
+        db.session.commit()
+
+    def _sync_run_projection_values(self, result):
+        result = result if isinstance(result, dict) else {}
+        partial = result.get("partial") if isinstance(result.get("partial"), dict) else {}
+        meta = result.get("system_sync") if isinstance(result.get("system_sync"), dict) else {}
+        return {
+            "system_batch_id": self._text_or_none(meta.get("batch_id"), 80),
+            "system_attempt_id": self._text_or_none(meta.get("attempt_id"), 80),
+            "system_round": self._int_or_none(meta.get("round")),
+            "system_max_rounds": self._int_or_none(meta.get("max_rounds")),
+            "system_trigger": self._text_or_none(meta.get("trigger"), 120),
+            "system_queued_at": self._text_or_none(meta.get("queued_at"), 64),
+            "system_max_download_files": self._int_or_none(meta.get("max_download_files")),
+            "topics_fetched": self._int_or_zero(result.get("topics_fetched", partial.get("topics_fetched"))),
+            "topics_new": self._int_or_zero(result.get("topics_new", partial.get("topics_new"))),
+            "topics_updated": self._int_or_zero(result.get("topics_updated", partial.get("topics_updated"))),
+            "topics_existing": self._int_or_zero(result.get("topics_existing", partial.get("topics_existing"))),
+            "attachments_seen": self._int_or_zero(result.get("attachments_seen", partial.get("attachments_seen"))),
+            "attachments_downloaded": self._int_or_zero(result.get("attachments_downloaded", partial.get("attachments_downloaded"))),
+            "attachments_failed": self._int_or_zero(result.get("attachments_failed", partial.get("attachments_failed"))),
+            "attachments_skipped": self._int_or_zero(result.get("attachments_skipped", partial.get("attachments_skipped"))),
+            "download_limit_reached": self._truthy_text(result.get("download_limit_reached", partial.get("download_limit_reached"))),
+        }
+
+    def _text_or_none(self, value, max_length):
+        text_value = str(value or "").strip()
+        if not text_value:
+            return None
+        return text_value[:max_length]
 
     def _mark_stale_runs_failed(self, group_id=None, stale_minutes=120):
         cutoff = datetime.utcnow() - timedelta(minutes=stale_minutes)
@@ -4795,11 +5126,18 @@ class ZsxqSyncService:
         }
 
     def _content(self, topic):
+        if not isinstance(topic, dict):
+            return ""
+        question_text = self._normalize_topic_text((topic.get("question") or {}).get("text") or "")
+        answer_text = self._normalize_topic_text((topic.get("answer") or {}).get("text") or "")
+        if question_text and answer_text:
+            return f"提问：{question_text}\n\n回答：{answer_text}"
         text = (
             (topic.get("talk") or {}).get("text")
             or (topic.get("article") or {}).get("article_content")
             or (topic.get("article") or {}).get("title")
-            or (topic.get("question") or {}).get("text")
+            or question_text
+            or answer_text
             or ""
         )
         return self._normalize_topic_text(text)
@@ -4843,7 +5181,17 @@ class ZsxqSyncService:
         return topic.get("files") or (topic.get("talk") or {}).get("files") or (topic.get("article") or {}).get("files") or []
 
     def _topic_images(self, topic):
-        return topic.get("images") or (topic.get("talk") or {}).get("images") or (topic.get("article") or {}).get("images") or []
+        images = []
+        for item in (
+            topic.get("images"),
+            (topic.get("talk") or {}).get("images"),
+            (topic.get("article") or {}).get("images"),
+            (topic.get("question") or {}).get("images"),
+            (topic.get("answer") or {}).get("images"),
+        ):
+            if isinstance(item, list):
+                images.extend(item)
+        return images
 
     def _attachment_key(self, payload, index, attachment_type):
         return str(

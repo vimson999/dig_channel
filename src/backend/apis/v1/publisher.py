@@ -66,11 +66,7 @@ def _publication_task_summary(row):
     )
     is_video_task = feature in (None, '', 'publisher')
     video_path = getattr(row, 'video_path', None)
-    result = getattr(row, 'result', None) if isinstance(getattr(row, 'result', None), dict) else {}
     result_summary = {'video_path': video_path} if video_path else {}
-    for key in ('runtime_guard', 'queue_repair', 'processing_orphan_repair'):
-        if result.get(key):
-            result_summary[key] = result.get(key)
     return {
         'id': row.id,
         'title': title,
@@ -445,7 +441,7 @@ def post_to_youtube(task_id):
     """
     Directly upload an existing task's video to YouTube.
     """
-    from tasks.publisher import run_youtube_upload_only
+    from tasks.publisher import PLATFORM_UPLOAD_QUEUE, run_youtube_upload_only
     
     try:
         task = PublicationTask.query.get(task_id)
@@ -456,7 +452,7 @@ def post_to_youtube(task_id):
             return jsonify({'error': 'No video file found for this task. It must be completed first.'}), 400
             
         # Trigger Celery
-        celery_task = run_youtube_upload_only.apply_async(args=[task.id], queue='render')
+        celery_task = run_youtube_upload_only.apply_async(args=[task.id], queue=PLATFORM_UPLOAD_QUEUE)
         
         return jsonify({
             'success': True,
@@ -518,7 +514,6 @@ def list_tasks():
                 PublicationTask.feature.label('feature'),
                 PublicationTask.task_title.label('task_title'),
                 PublicationTask.task_video_path.label('video_path'),
-                PublicationTask.result.label('result'),
             )
             .order_by(PublicationTask.created_at.desc())
             .limit(20)

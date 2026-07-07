@@ -1,17 +1,20 @@
 import base64
+import hashlib
 import json
 import logging
 import mimetypes
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from sqlalchemy import or_
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -36,6 +39,20 @@ FEATURE_NAME = "mp3_video_workflow"
 QUEUE_NAME = "mp3_video_workflow"
 DEFAULT_GEMINI_URL = "https://gemini.google.com/gem/f9e84d5e215c"
 DEFAULT_GEMINI_INITIAL_PROMPT = "请基于我已上传的音频文件开始处理，严格按照当前 Gem 的既定流程输出结果。"
+DEFAULT_TRANSCRIPT_DEEPSEEK_PROMPT = (
+    "1：请你使用投资者的视角，用投资者最关心的信息视角为这个内容起一个标题，告诉投资者信息差和赚钱机会，"
+    "这个标题要包括足够的信息密度同时又能提高点击率\n"
+    "2：再来一个版本的，请你使用投资者的视角，用投资者最关心的信息视角为这个内容起一个标题，告诉投资者信息差和赚钱机会，"
+    "这个标题要包括足够的信息密度同时又能提高点击率\n"
+    "3：再精简一个短标题\n"
+    "4：从这段音频中识别出最精华的一段，要让别人一打开这个音频就立即被吸引住，我们需要提取出来，"
+    "需要标识出来开始、结束的时间戳，\n"
+    "注意：如果音频总时长超过了30分钟，那么你就识别出来的片段应该大约25分钟，"
+    "如果音频总时长不超过30分分钟，那么识别出来片段应该尽量接近15分分钟。\n"
+    "5：找出这段音频里的几段金句\n"
+    "6：尝试优化下标题，使用 内资闭门会 / xxxx / xxxx / xxxx / 当日日期 ，这样的格式来写\n"
+    "7：尝试优化下标题，并给我另外一个版本，使用 内资闭门会 | xxxx | xxxx | xxxx | 当日日期 ，这样的格式来写"
+)
 DEFAULT_SPEED = 1.2
 DEFAULT_CHILD_TIMEOUT_SECONDS = 2400
 DEFAULT_PUBLISHER_INLINE_WAIT_SECONDS = 5
@@ -47,14 +64,16 @@ TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
 HOT_AUDIO_DOWNLOAD_THRESHOLD = 20
-PLANNER_VERSION = "mp3_video_planner_20260622_v4"
+PLANNER_VERSION = "mp3_video_planner_20260706_v10"
 VISUAL_ARTIFACT_KEYS = (
     "finance_cover",
     "audio_background",
     "xiaojunjun_cover",
     "xiaojunjun_background",
 )
-VISUAL_ARTIFACT_VERSION = "mp3_video_visuals_20260618_v4"
+VISUAL_ARTIFACT_VERSION = "mp3_video_visuals_20260706_v9"
+KEYFRAME_ARTIFACT_VERSION = "mp3_video_keyframes_20260706_v6"
+TRANSCRIPT_DEEPSEEK_CACHE_VERSION = "mp3_transcript_deepseek_cache_20260706_v1"
 VISUAL_ARTIFACT_EXPECTED_SIZES = {
     "finance_cover": (1280, 720),
     "audio_background": (1080, 1920),
@@ -126,6 +145,7 @@ TASK_PUBLIC_COLUMNS = (
     PublicationTask.result,
     PublicationTask.error_message,
     PublicationTask.feature,
+    PublicationTask.task_video_path,
     PublicationTask.created_at,
     PublicationTask.updated_at,
     PublicationTask.completed_at,
@@ -172,15 +192,45 @@ class ChildTaskStillRunning(RuntimeError):
         super().__init__(f"子任务仍在执行: {label} {child_id} ({status or '-'} / {step or '-'})")
 
 
+class ParentTaskCanceled(RuntimeError):
+    pass
+
+
 def project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _db_retry(operation, label: str = "db operation", *, attempts: int = 3, delay_seconds: float = 0.25):
+    last_error = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return operation()
+        except OperationalError as exc:
+            last_error = exc
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            try:
+                db.session.remove()
+            except Exception:
+                pass
+            if attempt >= attempts:
+                break
+            logger.warning("MP3 workflow DB retry %s/%s for %s: %s", attempt + 1, attempts, label, exc)
+            time.sleep(delay_seconds * attempt)
+    raise last_error
+
+
 def _load_task(task_id: Any, *columns: Any) -> Optional[PublicationTask]:
-    query = PublicationTask.query
-    if columns:
-        query = query.options(load_only(*columns))
-    return query.get(str(task_id))
+    def operation():
+        query = PublicationTask.query
+        if columns:
+            query = query.options(load_only(*columns))
+        return query.get(str(task_id))
+
+    return _db_retry(operation, f"load task {task_id}")
+
 
 
 def storage_dir_for_job(job_id: str, created_at: Optional[datetime] = None) -> Path:
@@ -200,15 +250,23 @@ def artifact_path_for_job(job_id: str, name: str, ext: str = "jpg", created_at: 
 
 
 def status_payload() -> Dict[str, Any]:
-    deepseek_configured = bool(os.environ.get("MP3_VIDEO_PLANNER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY"))
+    planner_configured = bool(os.environ.get("MP3_VIDEO_PLANNER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY"))
+    transcript_configured = bool(os.environ.get("MP3_VIDEO_TRANSCRIPT_API_KEY") or planner_configured)
+    deepseek_configured = bool(planner_configured or transcript_configured)
     options = gemini_options_from_env()
+    gemini_configured = gemini_is_configured(options)
     return {
-        "configured": gemini_is_configured(options),
+        "configured": bool(gemini_configured or deepseek_configured),
         "mode": "celery_orchestrator",
+        "gemini_configured": gemini_configured,
         "gemini_url": options.gemini_url,
         "deepseek_configured": deepseek_configured,
-        "planner_provider": "deepseek" if deepseek_configured else "local_fallback",
-        "planner_model": planner_model() if deepseek_configured else None,
+        "planner_deepseek_configured": planner_configured,
+        "transcript_deepseek_configured": transcript_configured,
+        "planner_provider": "deepseek" if planner_configured else "local_fallback",
+        "planner_model": planner_model() if planner_configured else None,
+        "transcript_provider": "deepseek" if transcript_configured else "unavailable",
+        "transcript_model": transcript_model() if transcript_configured else None,
         "business_feature": FEATURE_NAME,
     }
 
@@ -232,6 +290,14 @@ def initial_gemini_prompt(workflow: Optional[Dict[str, Any]] = None) -> str:
     if prompt:
         return prompt
     return _env("MP3_VIDEO_GEMINI_INITIAL_PROMPT", "GEMINI_MP3_VIDEO_INITIAL_PROMPT", DEFAULT_GEMINI_INITIAL_PROMPT).strip()
+
+
+def initial_transcript_prompt(workflow: Optional[Dict[str, Any]] = None) -> str:
+    workflow = workflow if isinstance(workflow, dict) else {}
+    prompt = str(workflow.get("transcript_prompt") or "").strip()
+    if prompt:
+        return prompt
+    return _env("MP3_VIDEO_TRANSCRIPT_PROMPT", DEFAULT_TRANSCRIPT_DEEPSEEK_PROMPT).strip()
 
 
 def list_audio_assets(
@@ -397,8 +463,11 @@ def process_job(task_id: str) -> bool:
         raise Mp3VideoWorkflowError(f"无效的 MP3 视频编排任务参数: {task_id}")
     if task.status == "canceled":
         return False
+    if task.status == "completed":
+        return True
 
     workflow = task.params.get(FEATURE_NAME) or {}
+    generate_subtitles = _workflow_generate_subtitles(workflow, task.result)
     audio = workflow.get("audio") if isinstance(workflow.get("audio"), dict) else {}
     audio_path = _resolve_project_path(audio.get("path"))
     if not audio_path or not audio_path.exists():
@@ -409,37 +478,106 @@ def process_job(task_id: str) -> bool:
     user_id = task.user_id or (task.params or {}).get("user_id")
     created_at = task.created_at or datetime.utcnow()
     _start_task(task)
+    _update_result(task.id, {"generate_subtitles": generate_subtitles})
     _queue_notification(task.id, "mp3_video_started", "MP3 视频编排已启动")
 
     try:
         image_path = artifact_path_for_job(task.id, "gemini_infographic", "png", created_at)
         gemini_result_path = artifact_path_for_job(task.id, "gemini_result", "json", created_at)
-        existing = _clear_invalid_gemini_shell_result(task.id, _fresh_result(task.id))
-        gemini_result, first_response, infographic = _reusable_gemini_result(existing, fallback_image_path=image_path)
-        if gemini_result:
-            _emit(task.id, "gemini_reused", 54, "复用已完成的 Gemini 第一轮返回和横向信息图")
-            _update_result(task.id, {
-                "gemini": _public_gemini_result(gemini_result),
-                "initial_response_text": first_response,
-                "infographic": _public_artifact(infographic, "Gemini 横向信息图"),
-            })
+        if _workflow_uses_direct_ds_response(workflow):
+            image_path = artifact_path_for_job(task.id, "direct_ds_infographic", "png", created_at)
+            direct_result_path = artifact_path_for_job(task.id, "direct_ds_result", "json", created_at)
+            existing = _fresh_result(task.id)
+            gemini_result, first_response, infographic = _reusable_text_source_result(existing, fallback_image_path=image_path)
+            if gemini_result:
+                _emit(task.id, "direct_ds_reused", 54, "复用已粘贴的 DS 返回值")
+                _update_result(task.id, {
+                    "input_source": "ds_response",
+                    "source": _public_text_source_result(gemini_result),
+                    "initial_response_text": first_response,
+                    "infographic": _public_artifact(infographic, "DS 文本信息图"),
+                })
+            else:
+                _emit(task.id, "direct_ds_response", 22, "读取手动粘贴的 DS 返回值")
+                gemini_result = _generate_from_direct_ds_response(
+                    task_id=task.id,
+                    workflow=workflow,
+                    audio=audio,
+                    output_path=direct_result_path,
+                )
+                first_response = gemini_result.get("initial_response_text") or gemini_result.get("response_text") or ""
+                draw_transcript_infographic(image_path, first_response, audio=audio)
+                infographic = _artifact_meta(image_path, "DS 文本信息图", renderer="pil:direct-ds-infographic")
+                gemini_result["image"] = infographic
+                _update_result(task.id, {
+                    "input_source": "ds_response",
+                    "source": _public_text_source_result(gemini_result),
+                    "initial_response_text": first_response,
+                    "infographic": _public_artifact(infographic, "DS 文本信息图"),
+                })
+            _queue_notification(task.id, "mp3_video_gemini_completed", "手动 DS 返回值已载入")
+        elif _workflow_uses_transcript(workflow):
+            image_path = artifact_path_for_job(task.id, "transcript_infographic", "png", created_at)
+            transcript_result_path = artifact_path_for_job(task.id, "transcript_deepseek_result", "json", created_at)
+            existing = _fresh_result(task.id)
+            gemini_result, first_response, infographic = _reusable_text_source_result(existing, fallback_image_path=image_path)
+            if gemini_result:
+                _emit(task.id, "transcript_source_reused", 54, "复用已完成的 IMA 全文 DS 处理结果")
+                _update_result(task.id, {
+                    "input_source": "ima_transcript",
+                    "source": _public_text_source_result(gemini_result),
+                    "initial_response_text": first_response,
+                    "infographic": _public_artifact(infographic, "DS 文本信息图"),
+                })
+            else:
+                _queue_notification(task.id, "mp3_video_gemini_started", "使用 IMA 全文调用 DS v4 pro")
+                _emit(task.id, "transcript_deepseek", 18, "使用 IMA 全文调用 DS v4 pro")
+                gemini_result = _generate_from_transcript(
+                    task_id=task.id,
+                    workflow=workflow,
+                    audio=audio,
+                    output_path=transcript_result_path,
+                )
+                first_response = gemini_result.get("initial_response_text") or gemini_result.get("response_text") or ""
+                draw_transcript_infographic(image_path, first_response, audio=audio)
+                infographic = _artifact_meta(image_path, "DS 文本信息图", renderer="pil:transcript-infographic")
+                gemini_result["image"] = infographic
+                _update_result(task.id, {
+                    "input_source": "ima_transcript",
+                    "source": _public_text_source_result(gemini_result),
+                    "initial_response_text": first_response,
+                    "infographic": _public_artifact(infographic, "DS 文本信息图"),
+                })
+            _queue_notification(task.id, "mp3_video_gemini_completed", "IMA 全文 DS 处理结果已生成")
         else:
-            _queue_notification(task.id, "mp3_video_gemini_started", "上传 MP3 到 Gemini Gem 并等待第一轮返回")
-            gemini_result = _generate_gemini_with_retries(
-                task_id=task.id,
-                audio_path=audio_path,
-                output_path=gemini_result_path,
-                workflow=workflow,
-                image_output_path=image_path,
-            )
-            first_response = gemini_result.get("initial_response_text") or gemini_result.get("response_text") or ""
-            infographic = gemini_result.get("image") or {"path": image_path}
-            _update_result(task.id, {
-                "gemini": _public_gemini_result(gemini_result),
-                "initial_response_text": first_response,
-                "infographic": _public_artifact(infographic, "Gemini 横向信息图"),
-            })
-        _queue_notification(task.id, "mp3_video_gemini_completed", "Gemini 第一轮返回和横向信息图已生成")
+            existing = _clear_invalid_gemini_shell_result(task.id, _fresh_result(task.id))
+            gemini_result, first_response, infographic = _reusable_gemini_result(existing, fallback_image_path=image_path)
+            if gemini_result:
+                _emit(task.id, "gemini_reused", 54, "复用已完成的 Gemini 第一轮返回和横向信息图")
+                _update_result(task.id, {
+                    "input_source": "gemini_audio",
+                    "gemini": _public_gemini_result(gemini_result),
+                    "initial_response_text": first_response,
+                    "infographic": _public_artifact(infographic, "Gemini 横向信息图"),
+                })
+            else:
+                _queue_notification(task.id, "mp3_video_gemini_started", "上传 MP3 到 Gemini Gem 并等待第一轮返回")
+                gemini_result = _generate_gemini_with_retries(
+                    task_id=task.id,
+                    audio_path=audio_path,
+                    output_path=gemini_result_path,
+                    workflow=workflow,
+                    image_output_path=image_path,
+                )
+                first_response = gemini_result.get("initial_response_text") or gemini_result.get("response_text") or ""
+                infographic = gemini_result.get("image") or {"path": image_path}
+                _update_result(task.id, {
+                    "input_source": "gemini_audio",
+                    "gemini": _public_gemini_result(gemini_result),
+                    "initial_response_text": first_response,
+                    "infographic": _public_artifact(infographic, "Gemini 横向信息图"),
+                })
+            _queue_notification(task.id, "mp3_video_gemini_completed", "Gemini 第一轮返回和横向信息图已生成")
 
         existing = _fresh_result(task.id)
         plan = _reusable_plan(existing)
@@ -447,12 +585,32 @@ def process_job(task_id: str) -> bool:
             audio = existing.get("audio") if isinstance(existing.get("audio"), dict) else audio
             _emit(task.id, "deepseek_plan_reused", 58, "复用已完成的 DS v4 pro 标题和音频时间戳规划")
         else:
-            _emit(task.id, "deepseek_plan", 58, "DS v4 pro 选择标题和音频时间戳")
+            if _workflow_uses_direct_ds_response(workflow):
+                _emit(task.id, "direct_ds_plan", 58, "本地解析 DS 返回值中的标题和音频时间戳")
+            else:
+                _emit(task.id, "deepseek_plan", 58, "DS v4 pro 选择标题和音频时间戳")
             duration = float(audio.get("duration_seconds") or 0) or probe_media_duration(str(audio_path))
             audio["duration_seconds"] = duration
-            plan = plan_from_first_response(first_response, audio=audio)
+            if _workflow_uses_direct_ds_response(workflow):
+                plan = plan_from_direct_ds_response(first_response, audio=audio)
+            else:
+                if _workflow_uses_transcript(workflow):
+                    _validate_ds_response_contract(first_response, source_label="IMA 全文 DS 返回值")
+                plan = plan_from_first_response(first_response, audio=audio)
             _update_result(task.id, {"plan": plan, "audio": audio})
-        _queue_notification(task.id, "mp3_video_plan_completed", "DS v4 pro 已完成标题、封面文案和音频时间戳规划")
+        if _workflow_uses_direct_ds_response(workflow) or _workflow_uses_transcript(workflow):
+            _validate_strict_ds_plan(
+                plan,
+                source_label="手动 DS 返回值" if _workflow_uses_direct_ds_response(workflow) else "IMA 全文 DS 返回值",
+            )
+        _queue_notification(
+            task.id,
+            "mp3_video_plan_completed",
+            "已从手动 DS 返回值解析标题、封面文案和音频时间戳规划"
+            if _workflow_uses_direct_ds_response(workflow)
+            else "DS v4 pro 已完成标题、封面文案和音频时间戳规划",
+        )
+        _raise_if_parent_canceled(task.id)
 
         existing = _fresh_result(task.id)
         artifacts = existing.get("artifacts") if isinstance(existing.get("artifacts"), dict) else {}
@@ -468,20 +626,97 @@ def process_job(task_id: str) -> bool:
             )
             _update_result(task.id, {"artifacts": artifacts})
         _queue_notification(task.id, "mp3_video_visuals_completed", "四张封皮/背景图已生成")
+        _raise_if_parent_canceled(task.id)
 
+        render_mode = _workflow_render_mode(workflow)
+        if render_mode == "keyframes":
+            existing = _fresh_result(task.id)
+            keyframes = existing.get("keyframes") if isinstance(existing.get("keyframes"), dict) else {}
+            if _keyframe_artifacts_ready(keyframes):
+                _emit(task.id, "video_keyframes_reused", 96, "复用已生成的视频关键帧预览")
+            else:
+                _emit(task.id, "generate_video_keyframes", 90, "生成横屏/竖屏视频关键帧预览")
+                keyframes = generate_video_keyframes(
+                    task.id,
+                    plan=plan,
+                    artifacts=artifacts,
+                    audio=audio,
+                    source_text=first_response,
+                    created_at=created_at,
+                )
+            artifacts = {**artifacts, **keyframes}
+            _update_result(task.id, {
+                "render_mode": render_mode,
+                "generate_subtitles": generate_subtitles,
+                "artifacts": artifacts,
+                "keyframes": keyframes,
+                "landscape_video": {"status": "skipped", "reason": "keyframes_preview"},
+                "vertical_video": {"status": "skipped", "reason": "keyframes_preview"},
+            })
+            _raise_if_parent_canceled(task.id)
+            output_path = storage_path_for_job(task.id, created_at)
+            fresh = _load_task(task.id, *TASK_RESULT_COLUMNS, PublicationTask.status)
+            if not fresh or fresh.status == "canceled":
+                raise ParentTaskCanceled("父编排任务已取消")
+            final_result = _without_waiting_state(fresh.result or {})
+            final_result.update({
+                "output_path": output_path,
+                "completed_at": datetime.utcnow().isoformat() + "Z",
+            })
+            Path(output_path).write_text(json.dumps({
+                "workflow_task_id": task.id,
+                "input_source": workflow.get("input_source") or ("ds_response" if _workflow_uses_direct_ds_response(workflow) else ("ima_transcript" if _workflow_uses_transcript(workflow) else "gemini_audio")),
+                "render_mode": render_mode,
+                "generate_subtitles": generate_subtitles,
+                "audio": audio,
+                "gemini": _public_gemini_result(gemini_result),
+                "source": _public_text_source_result(gemini_result),
+                "plan": plan,
+                "artifacts": artifacts,
+                "keyframes": keyframes,
+                "completed_at": final_result["completed_at"],
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            fresh.status = "completed"
+            fresh.current_step = "keyframes_ready"
+            fresh.progress = 100
+            fresh.completed_at = datetime.utcnow()
+            fresh.error_message = None
+            fresh.result = final_result
+            flag_modified(fresh, "result")
+            db.session.commit()
+            _queue_notification(task.id, "mp3_video_completed", "MP3 视频关键帧预览已生成，未合成完整视频")
+            return True
+
+        _raise_if_parent_canceled(task.id)
         existing = _fresh_result(task.id)
-        landscape_summary, landscape_task = _reusable_video_summary(existing, "landscape_video")
+        audio_segment = audio_segment_from_plan(audio, plan)
+        audio_signature = _audio_segment_signature(audio_segment)
+        landscape_summary, landscape_task = _reusable_video_summary(
+            existing,
+            "landscape_video",
+            parent_id=task.id,
+            generate_subtitles=generate_subtitles,
+            audio_signature=audio_signature,
+        )
         if landscape_summary:
             _emit(task.id, "landscape_video_reused", 90, "复用已完成的小君君横屏视频")
             if landscape_task:
                 _record_child(task.id, "landscape_video", landscape_task)
             _update_result(task.id, {"landscape_video": landscape_summary})
         else:
-            landscape_task = _active_child_from_result(existing, "landscape_video")
+            landscape_task = _active_child_from_result(
+                existing,
+                "landscape_video",
+                generate_subtitles=generate_subtitles,
+                audio_signature=audio_signature,
+            )
             if landscape_task:
                 _emit(task.id, "landscape_video_wait_existing", 80, "继续等待已提交的小君君横屏视频")
+                _sync_publisher_video_task_title(landscape_task, _publisher_video_title(plan, role="xiaojunjun_landscape"))
                 _record_child(task.id, "landscape_video", landscape_task)
             else:
+                _raise_if_parent_canceled(task.id)
                 _emit(task.id, "submit_landscape_video", 78, "提交小君君横屏视频合成任务")
                 landscape_task = create_publisher_video_task(
                     parent_id=task.id,
@@ -491,6 +726,7 @@ def process_job(task_id: str) -> bool:
                     image_path=artifacts["xiaojunjun_background"]["path"],
                     role="xiaojunjun_landscape",
                     aspect_ratio="16:9",
+                    generate_subtitles=generate_subtitles,
                 )
                 _record_child(task.id, "landscape_video", landscape_task)
                 _queue_notification(task.id, "mp3_video_landscape_submitted", "小君君横屏视频合成任务已提交")
@@ -501,19 +737,33 @@ def process_job(task_id: str) -> bool:
             _update_result(task.id, {"landscape_video": landscape_summary})
         _queue_notification(task.id, "mp3_video_landscape_completed", "小君君横屏视频已完成")
 
+        _raise_if_parent_canceled(task.id)
         existing = _fresh_result(task.id)
-        vertical_summary, vertical_task = _reusable_video_summary(existing, "vertical_video")
+        vertical_summary, vertical_task = _reusable_video_summary(
+            existing,
+            "vertical_video",
+            parent_id=task.id,
+            generate_subtitles=generate_subtitles,
+            audio_signature=audio_signature,
+        )
         if vertical_summary:
             _emit(task.id, "vertical_video_reused", 99, "复用已完成的此刻此声竖屏视频")
             if vertical_task:
                 _record_child(task.id, "vertical_video", vertical_task)
             _update_result(task.id, {"vertical_video": vertical_summary})
         else:
-            vertical_task = _active_child_from_result(existing, "vertical_video")
+            vertical_task = _active_child_from_result(
+                existing,
+                "vertical_video",
+                generate_subtitles=generate_subtitles,
+                audio_signature=audio_signature,
+            )
             if vertical_task:
                 _emit(task.id, "vertical_video_wait_existing", 92, "继续等待已提交的此刻此声竖屏视频")
+                _sync_publisher_video_task_title(vertical_task, _publisher_video_title(plan, role="ciketc_vertical"))
                 _record_child(task.id, "vertical_video", vertical_task)
             else:
+                _raise_if_parent_canceled(task.id)
                 _emit(task.id, "submit_vertical_video", 91, "提交此刻此声竖屏视频合成任务")
                 vertical_task = create_publisher_video_task(
                     parent_id=task.id,
@@ -523,6 +773,7 @@ def process_job(task_id: str) -> bool:
                     image_path=artifacts["audio_background"]["path"],
                     role="ciketc_vertical",
                     aspect_ratio="9:16",
+                    generate_subtitles=generate_subtitles,
                 )
                 _record_child(task.id, "vertical_video", vertical_task)
                 _queue_notification(task.id, "mp3_video_vertical_submitted", "此刻此声竖屏视频合成任务已提交")
@@ -533,17 +784,24 @@ def process_job(task_id: str) -> bool:
             _update_result(task.id, {"vertical_video": vertical_summary})
         _queue_notification(task.id, "mp3_video_vertical_completed", "此刻此声竖屏视频已完成")
 
+        _raise_if_parent_canceled(task.id)
         output_path = storage_path_for_job(task.id, created_at)
-        fresh = _load_task(task.id, *TASK_RESULT_COLUMNS)
-        final_result = dict(fresh.result or {})
+        fresh = _load_task(task.id, *TASK_RESULT_COLUMNS, PublicationTask.status)
+        if not fresh or fresh.status == "canceled":
+            raise ParentTaskCanceled("父编排任务已取消")
+        final_result = _without_waiting_state(fresh.result or {})
         final_result.update({
             "output_path": output_path,
             "completed_at": datetime.utcnow().isoformat() + "Z",
         })
         Path(output_path).write_text(json.dumps({
             "workflow_task_id": task.id,
+            "input_source": workflow.get("input_source") or ("ds_response" if _workflow_uses_direct_ds_response(workflow) else ("ima_transcript" if _workflow_uses_transcript(workflow) else "gemini_audio")),
+            "render_mode": _workflow_render_mode(workflow),
+            "generate_subtitles": generate_subtitles,
             "audio": audio,
             "gemini": _public_gemini_result(gemini_result),
+            "source": _public_text_source_result(gemini_result),
             "plan": plan,
             "artifacts": artifacts,
             "landscape_video": landscape_summary,
@@ -561,6 +819,9 @@ def process_job(task_id: str) -> bool:
         db.session.commit()
         _queue_notification(task.id, "mp3_video_completed", "MP3 视频编排完成，横屏和竖屏视频均已生成")
         return True
+    except ParentTaskCanceled:
+        logger.info("MP3 video workflow stopped because parent task is canceled: %s", task_id)
+        return False
     except ChildTaskStillRunning as exc:
         _defer_parent_retry(task_id, exc)
         logger.info("MP3 video workflow deferred: %s", exc)
@@ -628,6 +889,386 @@ def _generate_gemini_with_retries(
         return gemini_result
 
     raise Mp3VideoWorkflowError(f"Gemini 自动化失败: {last_error or '未知错误'}")
+
+
+def _workflow_uses_transcript(workflow: Dict[str, Any]) -> bool:
+    source = str(workflow.get("input_source") or workflow.get("source_mode") or "").strip().lower()
+    if source in {"ima_transcript", "transcript", "deepseek_transcript"}:
+        return True
+    return bool(str(workflow.get("transcript_text") or "").strip())
+
+
+def _workflow_uses_direct_ds_response(workflow: Dict[str, Any]) -> bool:
+    source = str(workflow.get("input_source") or workflow.get("source_mode") or "").strip().lower()
+    if source in {"ds_response", "direct_ds", "manual_ds", "ds_result", "deepseek_response"}:
+        return True
+    return bool(str(workflow.get("ds_response_text") or workflow.get("direct_ds_response") or "").strip())
+
+
+def _workflow_render_mode(workflow: Dict[str, Any]) -> str:
+    mode = str(workflow.get("render_mode") or workflow.get("output_mode") or "").strip().lower()
+    if mode in {"keyframe", "keyframes", "preview", "preview_keyframes", "frames"}:
+        return "keyframes"
+    if workflow.get("keyframes_only") is True or workflow.get("preview_only") is True:
+        return "keyframes"
+    return "full_video"
+
+
+def _truthy(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "y", "生成", "开启"}:
+        return True
+    if text in {"0", "false", "no", "off", "n", "不生成", "关闭"}:
+        return False
+    return bool(default)
+
+
+def _workflow_generate_subtitles(workflow: Dict[str, Any], result: Optional[Dict[str, Any]] = None) -> bool:
+    for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
+        if key in workflow:
+            return _truthy(workflow.get(key), default=True)
+    metadata = workflow.get("metadata") if isinstance(workflow.get("metadata"), dict) else {}
+    for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
+        if key in metadata:
+            return _truthy(metadata.get(key), default=True)
+    result = result if isinstance(result, dict) else {}
+    for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
+        if key in result:
+            return _truthy(result.get(key), default=True)
+    result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
+        if key in result_metadata:
+            return _truthy(result_metadata.get(key), default=True)
+    return True
+
+
+def _generate_from_direct_ds_response(
+    *,
+    task_id: str,
+    workflow: Dict[str, Any],
+    audio: Dict[str, Any],
+    output_path: str,
+) -> Dict[str, Any]:
+    response_text = str(workflow.get("ds_response_text") or workflow.get("direct_ds_response") or "").strip()
+    if len(response_text) < 20:
+        raise Mp3VideoWorkflowError("DS 返回值为空或过短")
+    result = {
+        "provider": "user_supplied_ds",
+        "input_source": "ds_response",
+        "model": "manual",
+        "response_text": response_text,
+        "initial_response_text": response_text,
+        "transcript_chars": 0,
+        "audio": {
+            "filename": audio.get("filename") or audio.get("name"),
+            "attachment_id": audio.get("attachment_id"),
+            "duration_seconds": audio.get("duration_seconds"),
+        },
+        "output_path": output_path,
+        "completed_at": datetime.utcnow().isoformat() + "Z",
+    }
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(output_path).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    _emit(task_id, "direct_ds_response_loaded", 54, "手动 DS 返回值已载入")
+    return result
+
+
+def _generate_from_transcript(
+    *,
+    task_id: str,
+    workflow: Dict[str, Any],
+    audio: Dict[str, Any],
+    output_path: str,
+) -> Dict[str, Any]:
+    transcript_text = str(workflow.get("transcript_text") or "").strip()
+    if len(transcript_text) < 20:
+        raise Mp3VideoWorkflowError("IMA 转录全文为空或过短，无法调用 DS")
+    prompt = initial_transcript_prompt(workflow)
+    if not prompt:
+        raise Mp3VideoWorkflowError("IMA 全文 DS Prompt 为空")
+
+    cache_key, cache_meta = _transcript_deepseek_cache_key(transcript_text, prompt=prompt, audio=audio)
+    cache_disabled = _bool_env("MP3_VIDEO_TRANSCRIPT_CACHE_DISABLED", False)
+    cache_payload = None if cache_disabled else _load_transcript_deepseek_cache(cache_key)
+    cache_status = "hit" if cache_payload else "miss"
+    cache_path = str(_transcript_deepseek_cache_path(cache_key))
+    if cache_payload:
+        response_text = str(cache_payload.get("response_text") or "").strip()
+        _emit(task_id, "transcript_deepseek_cache_hit", 54, "命中 IMA 全文 DS 缓存，跳过重复调用")
+    elif not cache_disabled:
+        previous_payload = _find_recent_transcript_deepseek_result(
+            transcript_text,
+            prompt=prompt,
+            audio=audio,
+            exclude_task_id=task_id,
+        )
+        if previous_payload:
+            response_text = str(previous_payload.get("response_text") or "").strip()
+            cache_status = "previous_task"
+            _write_transcript_deepseek_cache(cache_key, cache_meta, response_text, source="previous_task")
+            _emit(task_id, "transcript_deepseek_cache_seeded", 54, "复用近期同音频 IMA 全文 DS 结果，跳过重复调用")
+        else:
+            _emit(task_id, "transcript_deepseek_request", 26, "DS v4 pro 正在处理 IMA 转录全文")
+            response_text = deepseek_transcript_response(transcript_text, prompt=prompt, audio=audio)
+            _write_transcript_deepseek_cache(cache_key, cache_meta, response_text, source="deepseek")
+    else:
+        _emit(task_id, "transcript_deepseek_request", 26, "DS v4 pro 正在处理 IMA 转录全文")
+        response_text = deepseek_transcript_response(transcript_text, prompt=prompt, audio=audio)
+    if not response_text:
+        raise Mp3VideoWorkflowError("DS v4 pro 未返回可用文本")
+
+    result = {
+        "provider": "deepseek",
+        "input_source": "ima_transcript",
+        "model": transcript_model(),
+        "prompt": prompt,
+        "transcript_chars": len(transcript_text),
+        "response_text": response_text,
+        "initial_response_text": response_text,
+        "cache": {
+            "key": cache_key,
+            "status": cache_status,
+            "path": cache_path if Path(cache_path).exists() else None,
+            "version": TRANSCRIPT_DEEPSEEK_CACHE_VERSION,
+        },
+        "output_path": output_path,
+        "completed_at": datetime.utcnow().isoformat() + "Z",
+    }
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(output_path).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    _emit(task_id, "transcript_deepseek_completed", 54, "IMA 全文 DS 处理完成")
+    return result
+
+
+def deepseek_transcript_response(transcript_text: str, *, prompt: str, audio: Dict[str, Any]) -> str:
+    api_key = os.environ.get("MP3_VIDEO_TRANSCRIPT_API_KEY") or os.environ.get("MP3_VIDEO_PLANNER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise Mp3VideoWorkflowError("缺少 MP3_VIDEO_TRANSCRIPT_API_KEY / MP3_VIDEO_PLANNER_API_KEY / DEEPSEEK_API_KEY")
+    base_url = os.environ.get("MP3_VIDEO_TRANSCRIPT_BASE_URL") or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    timeout = _int_env("MP3_VIDEO_TRANSCRIPT_TIMEOUT", _int_env("MP3_VIDEO_PLANNER_TIMEOUT", 180))
+    system_prompt = (
+        "你是财经音频内容处理助手。严格根据用户给出的 Prompt 和 IMA 转录全文处理，"
+        "不要编造事实；如果转录中没有明确时间戳，可根据内容结构给出保守建议。"
+    )
+    user_prompt = _build_transcript_user_prompt(transcript_text, prompt=prompt, audio=audio)
+    response = requests.post(
+        f"{base_url.rstrip('/')}/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": transcript_model(),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.1,
+        },
+        timeout=timeout,
+    )
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise Mp3VideoWorkflowError(f"DeepSeek 转录全文处理失败: HTTP {response.status_code} {response.text[:600]}") from exc
+    content = response.json()["choices"][0]["message"]["content"]
+    return str(content or "").strip()
+
+
+def _build_transcript_user_prompt(transcript_text: str, *, prompt: str, audio: Dict[str, Any]) -> str:
+    compact_transcript = _compact_text(transcript_text, _int_env("MP3_VIDEO_TRANSCRIPT_INPUT_CHARS", 40000))
+    replacements = {
+        "{{transcript}}": compact_transcript,
+        "{transcript}": compact_transcript,
+        "{{audio_filename}}": str(audio.get("filename") or audio.get("name") or ""),
+        "{audio_filename}": str(audio.get("filename") or audio.get("name") or ""),
+    }
+    rendered = str(prompt or "")
+    for token, value in replacements.items():
+        rendered = rendered.replace(token, value)
+    if compact_transcript in rendered:
+        return rendered
+    return "\n".join([
+        rendered.strip(),
+        "",
+        f"音频文件名：{audio.get('filename') or audio.get('name') or ''}",
+        f"当前日期：{datetime.now().strftime('%Y-%m-%d')}",
+        f"音频总时长秒：{float(audio.get('duration_seconds') or 0):.3f}" if audio.get("duration_seconds") else "音频总时长秒：未知",
+        "",
+        "【IMA 转录全文】",
+        compact_transcript,
+    ])
+
+
+def _transcript_deepseek_cache_key(transcript_text: str, *, prompt: str, audio: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    user_prompt = _build_transcript_user_prompt(transcript_text, prompt=prompt, audio=audio)
+    audio_identity = _transcript_audio_cache_identity(audio)
+    prompt_hash = hashlib.sha256(user_prompt.encode("utf-8")).hexdigest()
+    transcript_hash = hashlib.sha256(str(transcript_text or "").strip().encode("utf-8")).hexdigest()
+    payload = {
+        "version": TRANSCRIPT_DEEPSEEK_CACHE_VERSION,
+        "provider": "deepseek",
+        "base_url": _transcript_base_url(),
+        "model": transcript_model(),
+        "audio": audio_identity,
+        "prompt_hash": prompt_hash,
+        "transcript_hash": transcript_hash,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    cache_key = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return cache_key, {
+        **payload,
+        "key": cache_key,
+        "prompt_chars": len(user_prompt),
+        "transcript_chars": len(str(transcript_text or "").strip()),
+    }
+
+
+def _transcript_base_url() -> str:
+    return (os.environ.get("MP3_VIDEO_TRANSCRIPT_BASE_URL") or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")).rstrip("/")
+
+
+def _transcript_audio_cache_identity(audio: Dict[str, Any]) -> Dict[str, Any]:
+    path_value = str(audio.get("path") or "").strip()
+    resolved_path = ""
+    if path_value:
+        try:
+            resolved = _resolve_project_path(path_value)
+            resolved_path = str(resolved) if resolved else path_value
+        except Exception:
+            resolved_path = path_value
+    duration = None
+    try:
+        duration = round(float(audio.get("duration_seconds") or 0), 3) if audio.get("duration_seconds") else None
+    except (TypeError, ValueError):
+        duration = None
+    return {
+        "attachment_id": _clean_line(audio.get("attachment_id")),
+        "path": resolved_path,
+        "filename": _clean_line(audio.get("filename") or audio.get("name")),
+        "duration_seconds": duration,
+        "group_id": _clean_line(audio.get("group_id")),
+        "tab_id": _clean_line(audio.get("tab_id")),
+        "topic_id": _clean_line(audio.get("topic_id")),
+    }
+
+
+def _transcript_deepseek_cache_root() -> Path:
+    configured = os.environ.get("MP3_VIDEO_TRANSCRIPT_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return project_root() / "data" / "processed" / FEATURE_NAME / "transcript_deepseek_cache"
+
+
+def _transcript_deepseek_cache_path(cache_key: str) -> Path:
+    safe_key = re.sub(r"[^a-f0-9]+", "", str(cache_key or "").lower())[:64]
+    return _transcript_deepseek_cache_root() / f"{safe_key or 'invalid'}.json"
+
+
+def _load_transcript_deepseek_cache(cache_key: str) -> Optional[Dict[str, Any]]:
+    if _bool_env("MP3_VIDEO_TRANSCRIPT_CACHE_DISABLED", False):
+        return None
+    payload = _load_json_file(_transcript_deepseek_cache_path(cache_key))
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("version") != TRANSCRIPT_DEEPSEEK_CACHE_VERSION or payload.get("key") != cache_key:
+        return None
+    if not str(payload.get("response_text") or "").strip():
+        return None
+    return payload
+
+
+def _write_transcript_deepseek_cache(cache_key: str, cache_meta: Dict[str, Any], response_text: str, *, source: str) -> str:
+    if _bool_env("MP3_VIDEO_TRANSCRIPT_CACHE_DISABLED", False):
+        return ""
+    response_text = str(response_text or "").strip()
+    if not response_text:
+        return ""
+    path = _transcript_deepseek_cache_path(cache_key)
+    payload = {
+        **cache_meta,
+        "version": TRANSCRIPT_DEEPSEEK_CACHE_VERSION,
+        "key": cache_key,
+        "source": source,
+        "response_text": response_text,
+        "response_chars": len(response_text),
+        "completed_at": datetime.utcnow().isoformat() + "Z",
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
+        return str(path)
+    except Exception:
+        logger.exception("Failed to write MP3 transcript DS cache: %s", path)
+        return ""
+
+
+def _find_recent_transcript_deepseek_result(
+    transcript_text: str,
+    *,
+    prompt: str,
+    audio: Dict[str, Any],
+    exclude_task_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    lookback_days = max(0, _int_env("MP3_VIDEO_TRANSCRIPT_PREVIOUS_TASK_CACHE_DAYS", 2))
+    if lookback_days <= 0:
+        return None
+    target_text = str(transcript_text or "").strip()
+    target_prompt = str(prompt or "").strip()
+    target_audio = _transcript_audio_cache_identity(audio)
+    since = datetime.utcnow() - timedelta(days=lookback_days)
+
+    def load_candidates():
+        return (
+            PublicationTask.query
+            .options(load_only(PublicationTask.id, PublicationTask.params, PublicationTask.result, PublicationTask.created_at))
+            .filter(PublicationTask.feature == FEATURE_NAME)
+            .filter(PublicationTask.created_at >= since)
+            .order_by(PublicationTask.created_at.desc())
+            .limit(_int_env("MP3_VIDEO_TRANSCRIPT_PREVIOUS_TASK_CACHE_LIMIT", 80))
+            .all()
+        )
+
+    candidates = _db_retry(load_candidates, "find recent transcript DS result")
+    today = datetime.now().date()
+    for candidate in candidates:
+        if exclude_task_id and str(candidate.id) == str(exclude_task_id):
+            continue
+        if candidate.created_at and candidate.created_at.date() != today:
+            continue
+        params = candidate.params if isinstance(candidate.params, dict) else {}
+        workflow = params.get(FEATURE_NAME) if isinstance(params.get(FEATURE_NAME), dict) else {}
+        if not _workflow_uses_transcript(workflow):
+            continue
+        if str(workflow.get("transcript_text") or "").strip() != target_text:
+            continue
+        if initial_transcript_prompt(workflow).strip() != target_prompt:
+            continue
+        candidate_audio = workflow.get("audio") if isinstance(workflow.get("audio"), dict) else {}
+        if _transcript_audio_cache_identity(candidate_audio) != target_audio:
+            continue
+        result = candidate.result if isinstance(candidate.result, dict) else {}
+        source = result.get("source") if isinstance(result.get("source"), dict) else {}
+        response_text = (
+            source.get("response_text")
+            or source.get("initial_response_text")
+            or result.get("initial_response_text")
+            or result.get("source_response_text")
+            or ""
+        )
+        response_text = str(response_text or "").strip()
+        if response_text:
+            return {
+                "response_text": response_text,
+                "source_task_id": str(candidate.id),
+                "completed_at": source.get("completed_at") or result.get("completed_at"),
+            }
+    return None
 
 
 def _record_retry_attempt(
@@ -699,6 +1340,316 @@ def plan_from_first_response(first_response: str, *, audio: Dict[str, Any]) -> D
     return validate_plan(payload, fallback=fallback, audio=audio)
 
 
+def plan_from_direct_ds_response(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, Any]:
+    first_response = (first_response or "").strip()
+    if not first_response:
+        raise Mp3VideoWorkflowError("DS 返回值为空，无法规划视频")
+    fallback = fallback_plan(first_response, audio=audio)
+    sections = _direct_ds_numbered_sections(first_response)
+    title_1 = _direct_ds_title_value(sections.get("1", ""))
+    title_2 = _direct_ds_title_value(sections.get("2", ""))
+    title_3 = _direct_ds_title_value(sections.get("3", ""))
+    title_6 = _direct_ds_closed_door_title(sections.get("6", ""), separator="/")
+    title_7 = _direct_ds_closed_door_title(sections.get("7", ""), separator="|")
+    audio_range = extract_audio_range(sections.get("4", "") or first_response)
+
+    title_options = [item for item in [title_1, title_2, title_3] if item]
+    base_title = title_2 or title_1 or title_3 or fallback.get("title")
+    finance_title = title_1 or base_title
+    vertical_title = title_2 or title_1 or base_title
+    audio_plan = dict(fallback.get("audio") if isinstance(fallback.get("audio"), dict) else {})
+    if audio_range:
+        audio_plan["start_seconds"] = round(audio_range[0], 3)
+        audio_plan["end_seconds"] = round(audio_range[1], 3)
+    audio_plan["speed"] = DEFAULT_SPEED
+
+    payload = {
+        "title": base_title,
+        "title_options": title_options,
+        "subtitle": title_3 or fallback.get("subtitle"),
+        "cover_main_title": "内资闭门会议",
+        "cover_title": _direct_ds_vertical_cover_title(vertical_title, title_7),
+        "cover_subtitle": _direct_ds_vertical_cover_subtitle(vertical_title, title_7, title_3),
+        "finance_cover_subtitle": _direct_ds_finance_cover_title(finance_title, title_6),
+        "xiaojunjun_title": "内资闭门会议",
+        "xiaojunjun_subtitle": _direct_ds_xiaojunjun_subtitle(title_6, finance_title or base_title, title_3),
+        "xiaojunjun_video_title": title_6 or fallback.get("xiaojunjun_video_title"),
+        "ciketc_video_title": title_7 or fallback.get("ciketc_video_title"),
+        "date_text": _direct_ds_date(title_7 or title_6 or first_response) or fallback.get("date_text"),
+        "emotion": fallback.get("emotion", "bull"),
+        "audio": audio_plan,
+        "provider": "direct_ds_local",
+    }
+    local_plan = validate_plan(payload, fallback=fallback, audio=audio)
+    try:
+        planner_payload = deepseek_plan(first_response, audio=audio)
+    except Exception as exc:
+        local_plan["planner_error"] = str(exc)
+        _validate_strict_ds_plan(local_plan, source_label="手动 DS 返回值")
+        return local_plan
+    if planner_payload:
+        plan = validate_plan(planner_payload, fallback=local_plan, audio=audio)
+        plan["provider"] = planner_payload.get("provider") or "deepseek"
+        plan["planner_input_source"] = "direct_ds_response"
+    else:
+        plan = local_plan
+    _validate_strict_ds_plan(plan, source_label="手动 DS 返回值")
+    return plan
+
+
+def _validate_ds_response_contract(first_response: str, *, source_label: str = "DS 返回值") -> None:
+    sections = _direct_ds_numbered_sections(first_response)
+    title_1 = _direct_ds_title_value(sections.get("1", ""))
+    title_2 = _direct_ds_title_value(sections.get("2", ""))
+    title_6 = _direct_ds_closed_door_title(sections.get("6", ""), separator="/")
+    title_7 = _direct_ds_closed_door_title(sections.get("7", ""), separator="|")
+    audio_range = extract_audio_range(sections.get("4", "") or first_response)
+    missing = []
+    if not (title_1 or title_2):
+        missing.append("第 1/2 条高密度标题")
+    if not audio_range:
+        missing.append("第 4 条开始/结束时间戳")
+    if not title_6:
+        missing.append("第 6 条斜杠版闭门会标题")
+    if not title_7:
+        missing.append("第 7 条竖线版闭门会标题")
+    if missing:
+        raise Mp3VideoWorkflowError(
+            f"{source_label}不合格，未识别到：{'、'.join(missing)}。"
+            "请粘贴完整 DS 返回值后重试；系统不会用占位文案继续生成封面或视频。"
+        )
+
+
+def _validate_strict_ds_plan(plan: Dict[str, Any], *, source_label: str = "DS 返回值") -> None:
+    plan = plan if isinstance(plan, dict) else {}
+    audio_plan = plan.get("audio") if isinstance(plan.get("audio"), dict) else {}
+    start = _parse_seconds(audio_plan.get("start_seconds"), default=0.0) or 0.0
+    end = _parse_seconds(audio_plan.get("end_seconds"), default=None)
+    missing = []
+    if end is None or end <= start:
+        missing.append("有效的精华片段结束时间戳")
+    if not _clean_closed_door_video_title(plan.get("xiaojunjun_video_title"), expected_separator="/"):
+        missing.append("小君君横屏第 6 条标题")
+    if not _clean_closed_door_video_title(plan.get("ciketc_video_title"), expected_separator="|"):
+        missing.append("此刻此声竖屏第 7 条标题")
+
+    bad_fields = []
+    for key in (
+        "title",
+        "subtitle",
+        "cover_title",
+        "cover_subtitle",
+        "finance_cover_subtitle",
+        "xiaojunjun_title",
+        "xiaojunjun_subtitle",
+        "xiaojunjun_video_title",
+        "ciketc_video_title",
+    ):
+        if _is_invalid_ds_plan_text(plan.get(key)):
+            bad_fields.append(key)
+    if bad_fields:
+        missing.append("非占位的封面/视频文案")
+
+    if missing:
+        raise Mp3VideoWorkflowError(
+            f"{source_label}规划不合格，缺少：{'、'.join(missing)}。"
+            "已停止生成封面/背景图/视频，请修正 DS 返回值后重新投递。"
+        )
+
+
+def _is_invalid_ds_plan_text(value: Any) -> bool:
+    text = _clean_line(value)
+    if not text:
+        return False
+    if _is_cover_process_text(text):
+        return True
+    return bool(re.search(
+        r"xxxx|当日日期|格式[（(]\s*版本|标题版本[一二三四五六七八九十A-Za-z]*|未识别到时间戳|"
+        r"DS\s*v4|IMA\s*转录|Gemini|Generated from transcript|推荐截取|最精华音频片段",
+        text,
+        flags=re.I,
+    ))
+
+
+def _direct_ds_numbered_sections(text: str) -> Dict[str, str]:
+    source = str(text or "").replace("\r", "\n")
+    if not source.strip():
+        return {}
+    marker_re = re.compile(
+        r"(?:(?<=\n)|^)\s*(?:[-*]\s*)?(?:\*\*)?\s*([1-7])\s*[.．、:：]\s*"
+        r"|(?:\*\*)\s*([1-7])\s*[.．、:：]\s*"
+    )
+    matches = list(marker_re.finditer(source))
+    sections: Dict[str, str] = {}
+    for index, match in enumerate(matches):
+        number = match.group(1) or match.group(2)
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        content = source[start:end].strip()
+        if number and content:
+            sections[number] = content
+    return sections
+
+
+def _direct_ds_content_lines(section: str) -> List[str]:
+    lines = []
+    for raw in str(section or "").replace("\r", "\n").split("\n"):
+        clean = _clean_line(raw).strip("* ：:，,。;；")
+        if not clean:
+            continue
+        if _is_direct_ds_section_heading(clean):
+            continue
+        cleaned_heading = re.sub(
+            r"^(?:标题版本[一二三四五六七八九十A-Za-z\d]*|短标题版本|投资(?:者)?视角标题|"
+            r"高信息密度.*标题|精简短标题|优化标题格式|优化标题|闭门会格式标题|"
+            r"最精华片段|音频片段|金句|说明)"
+            r"(?:（[^）]*）|\([^)]*\))?\s*[:：-]?\s*",
+            "",
+            clean,
+        ).strip()
+        if cleaned_heading != clean:
+            clean = cleaned_heading.strip("* ：:，,。;；")
+            if not clean or _is_direct_ds_section_heading(clean):
+                continue
+        lines.append(clean)
+    if lines:
+        return lines
+    clean = _clean_line(section).strip("* ：:，,。;；")
+    clean = re.sub(
+        r"^(?:投资(?:者)?视角标题|高信息密度.*标题|精简短标题|优化标题|闭门会格式标题|最精华片段)"
+        r"(?:（[^）]*）|\([^)]*\))?\s*[:：]?\s*",
+        "",
+        clean,
+    ).strip()
+    return [clean] if clean else []
+
+
+def _is_direct_ds_section_heading(value: Any) -> bool:
+    text = _clean_line(value).strip("* ：:，,。;；")
+    if not text:
+        return True
+    return bool(re.fullmatch(
+        r"(?:标题版本[一二三四五六七八九十A-Za-z\d]*(?:（[^）]*）|\([^)]*\))?|"
+        r"短标题版本|精简短标题|优化标题格式\s*(?:（[^）]*）|\([^)]*\))?|"
+        r"优化标题(?:（[^）]*）|\([^)]*\))?|闭门会格式标题(?:（[^）]*）|\([^)]*\))?|"
+        r"最精华(?:音频)?片段(?:（[^）]*）|\([^)]*\))?|音频金句|金句|说明)",
+        text,
+        flags=re.I,
+    ))
+
+
+def _direct_ds_title_value(section: str) -> str:
+    for line in _direct_ds_content_lines(section):
+        title = _normalize_title_candidate(line)
+        if title and not _is_cover_process_text(title):
+            return title
+    return ""
+
+
+def _direct_ds_closed_door_title(section: str, *, separator: str) -> str:
+    expected = "|" if separator in {"|", "｜"} else "/"
+    for line in _direct_ds_content_lines(section):
+        title = _clean_closed_door_video_title(line, expected_separator=expected)
+        if title:
+            return title
+    text = _clean_line(section)
+    text = re.sub(r"格式\s*[:：]\s*内资闭门会(?:议)?\s*[/|｜].*?(?:当日日期|日期)[)）]?", "", text)
+    pattern = r"内资闭门会(?:议)?\s*" + (r"/" if expected == "/" else r"[|｜]") + r"\s*.+"
+    matches = list(re.finditer(pattern, text))
+    for match in reversed(matches):
+        title = _clean_closed_door_video_title(match.group(0), expected_separator=expected)
+        if title:
+            return title
+    return ""
+
+
+def _direct_ds_date(value: Any) -> str:
+    date = _closed_door_video_date(value)
+    if re.match(r"[12]\d{3}-\d{2}-\d{2}$", date):
+        return date.replace("-", ".")
+    match = re.search(r"([12]\d{3})[./-](\d{1,2})[./-](\d{1,2})", str(value or ""))
+    if match:
+        return f"{int(match.group(1)):04d}.{int(match.group(2)):02d}.{int(match.group(3)):02d}"
+    return ""
+
+
+def _direct_ds_closed_door_parts(value: Any) -> List[str]:
+    text = _clean_line(value).replace("｜", "|")
+    parts = [_clean_line(part).strip("“”\"'《》") for part in re.split(r"\s*[|/]\s*", text) if _clean_line(part)]
+    output = []
+    for part in parts:
+        if re.match(r"^内资闭门会(?:议)?$", part):
+            continue
+        if _closed_door_video_date(part):
+            continue
+        if not _is_cover_process_text(part):
+            output.append(part)
+    return output
+
+
+def _direct_ds_finance_cover_title(title: Any, closed_door_title: Any = "") -> str:
+    closed_parts = _direct_ds_closed_door_parts(closed_door_title)
+    text = _normalize_title_candidate(title)
+    text = re.sub(r"^(?:专家密讲|独家)\s*[:：]\s*", "", text).strip()
+    clauses = [
+        _clean_line(item)
+        for item in re.split(r"[，,；;。.!！?？]", text)
+        if _clean_line(item) and not _is_cover_process_text(item)
+    ]
+    lines: List[str] = []
+    if closed_parts:
+        lines.append(closed_parts[0])
+    for clause in clauses:
+        if any(_clean_line(clause) in _clean_line(line) or _clean_line(line) in _clean_line(clause) for line in lines):
+            continue
+        lines.append(clause)
+        if len(lines) >= 3:
+            break
+    if lines:
+        return "\n".join(_clip_finance_visual_line(part, max_units=15) for part in lines[:3] if _clean_line(part))
+    clauses = [item for item in _title_clause_parts(text) if _clean_line(item)]
+    if clauses:
+        return "\n".join(_clip_finance_visual_line(part, max_units=15) for part in clauses[:3] if _clean_line(part))
+    if len(closed_parts) >= 2:
+        return "\n".join(_clip_finance_visual_line(part, max_units=15) for part in closed_parts[:3] if _clean_line(part))
+    return _finance_cover_title(text)
+
+
+def _direct_ds_vertical_cover_title(title: Any, closed_door_title: Any = "") -> str:
+    text = _normalize_title_candidate(title)
+    if re.search(r"Micro-?TEC", text, flags=re.I):
+        if "需求井喷" in text:
+            return "Micro-TEC\n需求井喷"
+        if "国产" in text and ("替代" in text or "突破" in text):
+            return "Micro-TEC\n国产突破"
+        return "Micro-TEC\n核心器件"
+    parts = _direct_ds_closed_door_parts(closed_door_title)
+    if parts:
+        return _cover_lines(parts[0], max_chars=8, max_lines=2)
+    return _vertical_cover_title(text)
+
+
+def _direct_ds_vertical_cover_subtitle(title: Any, closed_door_title: Any = "", fallback: Any = "") -> str:
+    parts = _direct_ds_closed_door_parts(closed_door_title)
+    for part in parts[1:]:
+        clean = _clip_title_line(part, 16)
+        if clean:
+            return clean
+    text = _normalize_title_candidate(title)
+    if "出口管制" in text and "误读" in text:
+        return "出口管制被误读"
+    if "客户验证" in text:
+        return "客户验证超预期"
+    return _vertical_cover_subtitle(text, fallback=fallback)
+
+
+def _direct_ds_xiaojunjun_subtitle(closed_door_title: Any, title: Any = "", fallback: Any = "") -> str:
+    parts = _direct_ds_closed_door_parts(closed_door_title)
+    if parts:
+        return "\n".join(_clip_title_line(part, 18) for part in parts[:3] if _clean_line(part))
+    return _xiaojunjun_cover_subtitle(title, fallback=fallback)
+
+
 def deepseek_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, Any]:
     api_key = os.environ.get("MP3_VIDEO_PLANNER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
@@ -712,33 +1663,43 @@ def deepseek_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
     if local_audio_range:
         local_audio_hint = f"{local_audio_range[0]:.3f}-{local_audio_range[1]:.3f} 秒"
     system_prompt = (
-        "你是财经音频视频编排策划器。你只能基于输入的 Gemini 第一轮返回做选择和规整，"
-        "不得新增事实。输出严格 JSON，不要 Markdown，不要解释。"
+        "你是财经音频视频编排策划器。你只能基于输入的第一轮返回做选择、重组和规整，"
+        "不得新增事实。第一轮返回可能来自 Gemini，也可能是 IMA 转录全文经 DS 处理后的结果。"
+        "输出严格 JSON，不要 Markdown，不要解释。"
     )
     user_prompt = "\n".join([
-        "请从 Gemini 第一轮返回中选择一个最适合成片的标题版本，并规划视频封面与音频截取。",
+        "请从第一轮返回中选择一个最适合成片的标题版本，并规划视频封面与音频截取。",
         "标题规则：如果原文包含“投资者视角长标题（3个版本）”或类似小节，必须优先从该小节的长标题中选择或融合；",
         "如果候选标题形如“内资闭门会 | 内容标题 | 260622”，title/title_options 必须去掉开头栏目词和末尾日期，只保留中间内容标题。",
+        "封面标题规则：你要负责判断第一轮返回里哪些信息最适合作为此刻此声竖屏背景的主标题，"
+        "优先选择投资者最想点击的资产结论、价格信号、风险变化、机会窗口或信息差；"
+        "不要机械使用高密度标题的第一句或第一个问句，上游原因/分析过程只有在点击价值更高时才放主标题。",
         "音频规则：如果原文出现“推荐截取时间戳：01:10 - 09:45”这类明确范围，audio.start_seconds/audio.end_seconds 必须使用该范围。",
         "必须输出 JSON 字段：",
         "- title: 最终视频标题，优先选择原文中已给出的标题版本，可轻微润色",
         "- title_options: 字符串数组，最多 5 个候选标题",
         "- subtitle: 一句事实型副标题，30 字以内",
         "- cover_main_title: 此刻此声横屏封皮栏目/场景主标题，默认可用“内资闭门会议”，不要把长内容标题放这里",
-        "- cover_title: 此刻此声竖屏纯音频背景板主标题，短促有冲击力，可用 \\n 分两行，每行不超过 10 个中文字符",
-        "- cover_subtitle: 此刻此声横屏封皮/竖屏背景看点文案，2-3 行，每行不超过 18 个中文字符，只基于原文事实",
+        "- cover_title: 此刻此声竖屏纯音频背景板主标题，必须是你从第一轮返回中判断出的最佳点击点，用 \\n 分成最多 2 行，每行不超过 10 个中文字符",
+        "- cover_subtitle: 此刻此声竖屏背景副标题，必须 1 行，不超过 16 个中文字符，只补充主标题背后的逻辑/信号/机会，不要重复主标题",
+        "- finance_cover_subtitle: 此刻此声横屏封皮黄色大标题，优先使用高信息密度标题版本一，改写成 3 行短句，每行约 10-13 个中文字符或等价视觉宽度，约占画面宽度 60%-75%，必须避免占满整行；不要直接截断长句，要提炼为短促标题文案",
         "- xiaojunjun_title: 小君君横屏封皮/背景栏目主标题，默认可用“内资闭门会议”，不要把长内容标题放这里",
         "- xiaojunjun_subtitle: 小君君横屏封皮/背景黄色高亮条文案，2-3 行，每行不超过 18 个中文字符，只基于原文事实",
+        "- xiaojunjun_video_title: 小君君横屏视频合成传入标题，必须优先使用原文第 6 条斜杠版完整标题，保留“内资闭门会 / ... / 日期”的完整格式，不要裁剪",
+        "- ciketc_video_title: 此刻此声视频合成传入标题，必须优先使用原文第 7 条竖线版完整标题，保留“内资闭门会 | ... | 日期”的完整格式，不要裁剪",
+        "小君君文案规则：xiaojunjun_subtitle 必须是小君君横屏版本，不能照抄 cover_title、cover_subtitle 或 finance_cover_subtitle；"
+        "它应该更完整地保留闭门会标题的信息密度和投资逻辑，而不是此刻此声竖屏那种短促标题。",
         "- date_text: 日期，格式 YYYY.M.D",
         "- emotion: pro/macro/bull/bear 之一",
-        "- audio: 对象，包含 start_seconds、end_seconds、speed。speed 必须是 1.2；start/end 要按 Gemini 返回中最适合成片的内容段落判断，如果没有明确范围则 start_seconds=0、end_seconds=null。",
+        "- audio: 对象，包含 start_seconds、end_seconds、speed。speed 必须是 1.2；start/end 要按第一轮返回中最适合成片的内容段落判断，如果没有明确范围则 start_seconds=0、end_seconds=null。",
+        "禁止把 DS v4 pro、IMA、Gemini、转录全文、Generated from transcript、推荐截取、源文件、最精华音频片段等流程说明写入任何封面字段。",
         "",
         f"音频文件名：{audio.get('filename') or audio.get('name') or ''}",
         f"音频总时长秒：{duration:.3f}" if duration else "音频总时长秒：未知",
         "本地已识别候选标题：" + ("；".join(local_titles) if local_titles else "无"),
         "本地已识别推荐截取：" + (local_audio_hint or "无"),
         "",
-        "【Gemini 第一轮返回】",
+        "【第一轮返回】",
         _compact_text(first_response, _int_env("MP3_VIDEO_PLANNER_INPUT_CHARS", 18000)),
     ])
     response = requests.post(
@@ -769,6 +1730,9 @@ def fallback_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
     candidates = extract_title_candidates(first_response)
     title = candidates[0] if candidates else _clip_text(_clean_line(first_response), 36) or "此刻此声精选"
     subtitle = extract_subtitle(first_response)
+    finance_title = candidates[0] if candidates else title
+    vertical_title = candidates[1] if len(candidates) > 1 else title
+    role_video_titles = extract_closed_door_video_titles(first_response)
     duration = float(audio.get("duration_seconds") or 0)
     audio_range = extract_audio_range(first_response)
     audio_plan = {"start_seconds": 0, "end_seconds": None if duration else None, "speed": DEFAULT_SPEED}
@@ -780,10 +1744,13 @@ def fallback_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
         "title_options": candidates[:5],
         "subtitle": subtitle,
         "cover_main_title": "内资闭门会议",
-        "cover_title": _cover_lines(title, max_chars=10),
-        "cover_subtitle": _cover_lines(subtitle or title, max_chars=18, max_lines=3),
+        "cover_title": _vertical_cover_title(vertical_title),
+        "cover_subtitle": _vertical_cover_subtitle(vertical_title, fallback=subtitle or title),
+        "finance_cover_subtitle": _finance_cover_title(finance_title),
         "xiaojunjun_title": "内资闭门会议",
-        "xiaojunjun_subtitle": _cover_lines(subtitle or title, max_chars=18, max_lines=3),
+        "xiaojunjun_subtitle": _xiaojunjun_cover_subtitle(title, fallback=subtitle),
+        "xiaojunjun_video_title": role_video_titles.get("xiaojunjun_video_title") or _format_closed_door_video_title(title, separator="/"),
+        "ciketc_video_title": role_video_titles.get("ciketc_video_title") or _format_closed_door_video_title(title, separator="|"),
         "date_text": datetime.now().strftime("%Y.%m.%d"),
         "emotion": "bull",
         "audio": audio_plan,
@@ -799,7 +1766,8 @@ def validate_plan(payload: Dict[str, Any], *, fallback: Dict[str, Any], audio: D
     title = _clip_text(_normalize_title_candidate(raw_title) or raw_title, 120)
     subtitle = _clip_text(payload.get("subtitle") or fallback.get("subtitle"), 60)
     cover_main_title = _clip_text(payload.get("cover_main_title") or fallback.get("cover_main_title") or "内资闭门会议", 16)
-    cover_title = _clean_multiline(payload.get("cover_title") or fallback.get("cover_title"))
+    planner_cover_title = _format_planner_vertical_title(payload.get("cover_title"))
+    planner_cover_subtitle = _format_planner_vertical_subtitle(payload.get("cover_subtitle"))
     x_title = _clean_multiline(payload.get("xiaojunjun_title") or fallback.get("xiaojunjun_title"))
     plan_audio = payload.get("audio") if isinstance(payload.get("audio"), dict) else {}
     fallback_audio = fallback.get("audio") if isinstance(fallback.get("audio"), dict) else {}
@@ -828,15 +1796,46 @@ def validate_plan(payload: Dict[str, Any], *, fallback: Dict[str, Any], audio: D
             continue
         seen_options.add(normalized)
         normalized_options.append(normalized)
+    finance_title = normalized_options[0] if normalized_options else title
+    vertical_title = normalized_options[1] if len(normalized_options) > 1 else title
+    fallback_cover_title = _format_planner_vertical_title(fallback.get("cover_title")) or _vertical_cover_title(vertical_title)
+    fallback_cover_subtitle = (
+        _format_planner_vertical_subtitle(fallback.get("cover_subtitle"))
+        or _vertical_cover_subtitle(vertical_title, fallback=subtitle or title)
+    )
+    finance_cover_subtitle = (
+        _format_planner_finance_cover_subtitle(payload.get("finance_cover_subtitle"))
+        or _format_planner_finance_cover_subtitle(fallback.get("finance_cover_subtitle"))
+        or _finance_cover_title(finance_title)
+    )
+    xiaojunjun_disallowed = [planner_cover_title, planner_cover_subtitle, finance_cover_subtitle]
+    xiaojunjun_subtitle = (
+        _format_planner_xiaojunjun_subtitle(payload.get("xiaojunjun_subtitle"), disallow=xiaojunjun_disallowed)
+        or _format_planner_xiaojunjun_subtitle(fallback.get("xiaojunjun_subtitle"), disallow=xiaojunjun_disallowed)
+        or _xiaojunjun_cover_subtitle(finance_title or title, fallback=subtitle)
+    )
+    xiaojunjun_video_title = (
+        _clean_closed_door_video_title(payload.get("xiaojunjun_video_title"), expected_separator="/")
+        or _clean_closed_door_video_title(fallback.get("xiaojunjun_video_title"), expected_separator="/")
+        or _format_closed_door_video_title(title, separator="/", date_text=payload.get("date_text") or fallback.get("date_text"))
+    )
+    ciketc_video_title = (
+        _clean_closed_door_video_title(payload.get("ciketc_video_title"), expected_separator="|")
+        or _clean_closed_door_video_title(fallback.get("ciketc_video_title"), expected_separator="|")
+        or _format_closed_door_video_title(title, separator="|", date_text=payload.get("date_text") or fallback.get("date_text"))
+    )
     return {
         "title": title,
         "title_options": [_clip_text(item, 120) for item in normalized_options if _clean_line(item)][:5],
         "subtitle": subtitle,
         "cover_main_title": cover_main_title or "内资闭门会议",
-        "cover_title": _cover_lines(cover_title or title, max_chars=10),
-        "cover_subtitle": _cover_lines(payload.get("cover_subtitle") or fallback.get("cover_subtitle") or subtitle or title, max_chars=18, max_lines=3),
+        "cover_title": planner_cover_title or fallback_cover_title,
+        "cover_subtitle": planner_cover_subtitle or fallback_cover_subtitle,
+        "finance_cover_subtitle": finance_cover_subtitle,
         "xiaojunjun_title": _clip_text(x_title or payload.get("cover_main_title") or fallback.get("xiaojunjun_title") or "内资闭门会议", 16),
-        "xiaojunjun_subtitle": _cover_lines(payload.get("xiaojunjun_subtitle") or fallback.get("xiaojunjun_subtitle") or subtitle or title, max_chars=18, max_lines=3),
+        "xiaojunjun_subtitle": xiaojunjun_subtitle,
+        "xiaojunjun_video_title": _clip_text(xiaojunjun_video_title, 180),
+        "ciketc_video_title": _clip_text(ciketc_video_title, 180),
         "date_text": _clip_text(payload.get("date_text") or fallback.get("date_text"), 20),
         "emotion": payload.get("emotion") if payload.get("emotion") in {"pro", "macro", "bull", "bear"} else fallback.get("emotion", "bull"),
         "audio": {"start_seconds": round(start, 3), "end_seconds": round(end, 3) if end is not None else None, "speed": DEFAULT_SPEED},
@@ -916,6 +1915,126 @@ def generate_visual_artifacts_with_browser(
     }
 
 
+def generate_video_keyframes(
+    job_id: str,
+    *,
+    plan: Dict[str, Any],
+    artifacts: Dict[str, Dict[str, Any]],
+    audio: Dict[str, Any],
+    source_text: str = "",
+    created_at: Optional[datetime] = None,
+) -> Dict[str, Dict[str, Any]]:
+    captions = _preview_caption_candidates(source_text, plan)
+    milestones = _keyframe_milestones(audio, plan, frame_count=3)
+    output: Dict[str, Dict[str, Any]] = {}
+    specs = [
+        ("landscape", "xiaojunjun_background", (1280, 720), "16:9"),
+        ("vertical", "audio_background", (1080, 1920), "9:16"),
+    ]
+    for prefix, source_key, size, ratio in specs:
+        source_path = (artifacts.get(source_key) or {}).get("path")
+        for index, milestone in enumerate(milestones, start=1):
+            key = f"keyframe_{prefix}_{index:02d}"
+            output_path = artifact_path_for_job(job_id, key, "jpg", created_at)
+            caption = captions[(index - 1) % len(captions)] if captions else (plan.get("subtitle") or plan.get("title") or "")
+            draw_video_keyframe(
+                output_path,
+                background_path=source_path,
+                size=size,
+                ratio=ratio,
+                title=plan.get("title") or "MP3 视频编排",
+                caption=caption,
+                timestamp=milestone.get("label") or "",
+            )
+            output[key] = _artifact_meta(
+                output_path,
+                f"{'横屏' if prefix == 'landscape' else '竖屏'}关键帧 {index}",
+                renderer="pil:mp3-video-keyframe",
+            )
+            output[key]["template_version"] = KEYFRAME_ARTIFACT_VERSION
+            output[key]["ratio"] = ratio
+            output[key]["timestamp_seconds"] = milestone.get("seconds")
+    return output
+
+
+def draw_video_keyframe(
+    output_path: str,
+    *,
+    background_path: Optional[str],
+    size: Tuple[int, int],
+    ratio: str,
+    title: str,
+    caption: str,
+    timestamp: str,
+) -> str:
+    w, h = size
+    source = _open_image(background_path or "")
+    if source:
+        img = ImageOps.fit(source.convert("RGB"), (w, h), method=Image.Resampling.LANCZOS)
+    else:
+        img = Image.new("RGB", (w, h), "#07111f")
+        draw = ImageDraw.Draw(img)
+        _draw_vertical_gradient(draw, w, h, (6, 12, 26), (9, 23, 42))
+        _draw_grid(draw, w, h, spacing=64 if ratio == "16:9" else 80, color=(255, 255, 255, 12))
+
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    bottom_alpha = 142 if ratio == "9:16" else 126
+    gradient_height = int(h * (0.32 if ratio == "9:16" else 0.26))
+    for offset in range(gradient_height):
+        alpha = int(bottom_alpha * (offset / max(1, gradient_height - 1)))
+        y = h - gradient_height + offset
+        overlay_draw.line([(0, y), (w, y)], fill=(2, 6, 14, alpha))
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    is_vertical = ratio == "9:16"
+    caption_font = _font(48 if is_vertical else 34, bold=True)
+    title_font = _font(30 if is_vertical else 24, bold=True)
+    time_font = _font(24 if is_vertical else 20, bold=True)
+    margin_x = 72 if is_vertical else 82
+    caption_box_w = w - margin_x * 2
+    caption_lines = _wrap_text(draw, _clean_line(caption), caption_font, caption_box_w, max_lines=2)
+    line_h = 66 if is_vertical else 48
+    caption_h = len(caption_lines) * line_h + (48 if is_vertical else 34)
+    box_bottom = h - (150 if is_vertical else 58)
+    box_top = max(40, box_bottom - caption_h)
+    draw.rounded_rectangle(
+        [margin_x, box_top, w - margin_x, box_bottom],
+        radius=22 if is_vertical else 16,
+        fill=(5, 12, 24, 205),
+        outline=(255, 255, 255, 48),
+        width=2,
+    )
+    text_y = box_top + (24 if is_vertical else 17)
+    for line in caption_lines:
+        _draw_centered_text(draw, line, w // 2 + 2, text_y + 3, caption_font, fill=(0, 0, 0, 160))
+        _draw_centered_text(draw, line, w // 2, text_y, caption_font, fill=(248, 250, 252))
+        text_y += line_h
+
+    title_text = _trim_text_to_width(draw, _clean_line(title), title_font, w - margin_x * 2)
+    draw.rounded_rectangle(
+        [margin_x, 34 if is_vertical else 26, margin_x + 210, 82 if is_vertical else 64],
+        radius=24 if is_vertical else 19,
+        fill=(15, 23, 42, 190),
+    )
+    draw.text((margin_x + 22, 46 if is_vertical else 34), "KEYFRAME", font=time_font, fill=(203, 213, 225))
+    draw.text((margin_x, 104 if is_vertical else 82), title_text, font=title_font, fill=(226, 232, 240))
+    if timestamp:
+        time_text = timestamp
+        bbox = draw.textbbox((0, 0), time_text, font=time_font)
+        pill_w = bbox[2] - bbox[0] + 40
+        pill_h = 46 if is_vertical else 38
+        x = w - margin_x - pill_w
+        y = 38 if is_vertical else 28
+        draw.rounded_rectangle([x, y, x + pill_w, y + pill_h], radius=pill_h // 2, fill=(22, 163, 74, 218))
+        draw.text((x + 20, y + (10 if is_vertical else 7)), time_text, font=time_font, fill=(255, 255, 255))
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    img.save(output_path, quality=95)
+    return output_path
+
+
 def _cover_browser_context():
     try:
         from playwright.sync_api import sync_playwright
@@ -949,6 +2068,7 @@ def _cover_browser_context():
                 device_scale_factor=1,
             )
             self._context.set_default_timeout(_int_env("MP3_VIDEO_COVER_BROWSER_TIMEOUT_MS", 30000))
+            self._context.route("**/*", _route_cover_render_request)
             return self._context
 
         def __exit__(self, exc_type, exc, tb):
@@ -961,6 +2081,19 @@ def _cover_browser_context():
                     self._playwright.stop()
 
     return _ContextManager()
+
+
+def _route_cover_render_request(route):
+    url = route.request.url
+    parsed = urlparse(url)
+    if parsed.scheme in {"http", "https"} and parsed.hostname not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        route.abort()
+        return
+    route.continue_()
 
 
 def _launch_cover_browser(chromium, kwargs: Dict[str, Any]):
@@ -1064,7 +2197,7 @@ def _canvas_result_size(result: Any) -> Optional[Tuple[int, int]]:
 def _finance_cover_payload(plan: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "mainTitle": _cover_main_title(plan),
-        "subTitle": _highlight_text(plan, preferred_key="cover_subtitle"),
+        "subTitle": _finance_cover_highlight_text(plan),
         "dateText": plan.get("date_text") or datetime.now().strftime("%Y.%m.%d"),
         "mainColor": "#ffffff",
         "subColor": "#FFE900",
@@ -1081,7 +2214,7 @@ def _audio_background_payload(plan: Dict[str, Any], infographic_data_url: str) -
         "mainTitle": _cover_lines(plan.get("cover_title") or plan.get("title"), max_chars=10, max_lines=2),
         "subTitle": _cover_lines(plan.get("cover_subtitle") or plan.get("subtitle"), max_chars=18, max_lines=2),
         "footerText": "此刻此声",
-        "emotion": plan.get("emotion") if plan.get("emotion") in {"pro", "macro", "bull", "bear"} else "bull",
+        "emotion": "bull",
         "imageDataUrl": infographic_data_url,
         "mimeType": "image/jpeg",
         "quality": 0.95,
@@ -1109,6 +2242,334 @@ def _cover_main_title(plan: Dict[str, Any]) -> str:
 def _highlight_text(plan: Dict[str, Any], *, preferred_key: str) -> str:
     value = plan.get(preferred_key) or plan.get("cover_subtitle") or plan.get("subtitle") or plan.get("title")
     return _cover_lines(value, max_chars=18, max_lines=3)
+
+
+def _finance_cover_highlight_text(plan: Dict[str, Any]) -> str:
+    value = plan.get("finance_cover_subtitle") or plan.get("cover_subtitle") or plan.get("subtitle") or plan.get("title")
+    return _finance_cover_copy_lines(value)
+
+
+def _finance_cover_title(value: Any) -> str:
+    text = _normalize_title_candidate(value)
+    if not text:
+        return ""
+    compact = text
+    compact = re.sub(r"多数人还在用\s*", "", compact)
+    compact = compact.replace("和信用周期分析", "和信用周期看")
+    compact = compact.replace("看美元美债时", "看美元美债")
+    compact = compact.replace("我们已全部抛掉", "抛掉旧框架")
+    compact = compact.replace("美债利率回不去了", "美债回不去")
+    compact = compact.replace("美元指数破不了90", "美元难破90")
+    compact = compact.replace("黄金今年不行但等这个信号就是暴利机会", "黄金等这个信号")
+    parts = _title_clause_parts(compact)
+    if re.search(r"GDP|信用周期", compact, flags=re.I) and "抛掉" in compact:
+        if parts:
+            parts[0] = "抛掉GDP和信用周期"
+    question_parts = [part for part in parts if re.search(r"科技|美债|美元|黄金|算力|泡沫|信用", part)]
+    parts = question_parts or parts
+    if len(parts) >= 3:
+        third_parts = parts[3:5] if len(parts) > 3 else parts[2:3]
+        lines = [parts[0], _join_short_title_parts(parts[1:3], max_chars=13), _join_short_title_parts(third_parts, max_chars=13)]
+    else:
+        lines = _smart_cover_lines(compact, max_chars=13, max_lines=3)
+    return "\n".join(_short_finance_cover_line(line, 13) for line in lines if _clean_line(line))[:80].strip()
+
+
+def _finance_cover_copy_lines(value: Any) -> str:
+    text = _clean_multiline(value)
+    if not text:
+        return ""
+    raw_lines = [
+        _clean_line(line).strip("“”\"'《》")
+        for line in text.split("\n")
+        if _clean_line(line) and not _is_cover_process_text(line)
+    ]
+    if not raw_lines:
+        return ""
+    if len(raw_lines) == 1:
+        return _finance_cover_title(raw_lines[0])
+    lines = [_short_finance_cover_line(line, 13) for line in raw_lines[:3]]
+    return "\n".join(line for line in lines if line)
+
+
+def _short_finance_cover_line(value: Any, max_chars: int = 13) -> str:
+    clean = _clean_line(value).strip("，,、。.;；:：!！?？ ")
+    if len(clean) <= max_chars:
+        return clean
+    compact = clean
+    replacements = (
+        ("市场恐慌", "市场恐慌"),
+        ("全球化工", "化工"),
+        ("供给侧", "供给"),
+        ("逻辑已定", ""),
+        ("为何", ""),
+        ("高呼", ""),
+        ("短期", ""),
+        ("当前", ""),
+        ("当下", ""),
+        ("砸出", ""),
+        ("品类", ""),
+        ("已经", "已"),
+        ("可能", ""),
+        ("是否", ""),
+        ("的", ""),
+    )
+    for old, new in replacements:
+        compact = compact.replace(old, new)
+    compact = _clean_line(compact).strip("，,、。.;；:：!！?？ ")
+    return _clip_finance_visual_line(compact or clean, max_units=max_chars)
+
+
+def _clip_finance_visual_line(value: Any, *, max_units: float = 13.0) -> str:
+    text = _clean_line(value).strip("，,、。.;；:：!！?？ ")
+    if not text:
+        return ""
+    output = ""
+    units = 0.0
+    for char in text:
+        char_units = 0.55 if char.isascii() else 1.0
+        if output and units + char_units > max_units:
+            break
+        output += char
+        units += char_units
+    return output.strip("，,、。.;；:：!！?？ ")
+
+
+def _vertical_cover_title(value: Any) -> str:
+    text = _normalize_title_candidate(value)
+    asset_title = _asset_focused_vertical_title(text)
+    if asset_title:
+        return asset_title
+    first = _title_clause_parts(text)[0] if _title_clause_parts(text) else text
+    first = first.replace("可能已经过剩", "可能过剩").replace("可能已经", "可能")
+    first = first.replace("？", "?")
+    first = re.sub(r"\?$", "？", first)
+    if "算力投资" in first and "过剩" in first:
+        return "算力投资\n可能过剩？"
+    if len(first) <= 6:
+        return first
+    for marker in ("可能", "已经", "会不会", "能否", "是否", "还能"):
+        index = first.find(marker)
+        if 2 <= index <= 8:
+            return "\n".join([first[:index], first[index:]])[:24]
+    return _cover_lines(first, max_chars=8, max_lines=2)
+
+
+def _vertical_cover_subtitle(value: Any, *, fallback: Any = "") -> str:
+    text = _normalize_title_candidate(value)
+    asset_subtitle = _asset_focused_vertical_subtitle(text)
+    if asset_subtitle:
+        return asset_subtitle
+    parts = _title_clause_parts(text)
+    if len(parts) > 1:
+        for part in parts[1:]:
+            clean = _clip_title_line(part, 16)
+            if 5 <= len(clean) <= 16:
+                return clean
+    if "三条脆弱线索" in text:
+        return "群体性误判的三条脆弱线索"
+    if "国家信用" in text:
+        return "回归国家信用看美债"
+    return _clip_title_line(fallback or text, 16)
+
+
+def _format_planner_vertical_title(value: Any) -> str:
+    text = _clean_multiline(value)
+    if not text:
+        return ""
+    raw_lines = [
+        _clean_line(line).strip("“”\"'《》")
+        for line in text.split("\n")
+        if _clean_line(line) and not _is_cover_process_text(line)
+    ]
+    if not raw_lines:
+        return ""
+    if len(raw_lines) >= 2:
+        lines = [_clip_title_line(line, 10) for line in raw_lines[:2]]
+    else:
+        lines = [
+            _clip_title_line(line, 10)
+            for line in _cover_lines(raw_lines[0], max_chars=10, max_lines=2).split("\n")
+            if _clean_line(line)
+        ]
+    return "\n".join(line for line in lines[:2] if line)
+
+
+def _format_planner_vertical_subtitle(value: Any) -> str:
+    text = _clean_multiline(value)
+    if not text:
+        return ""
+    for line in text.split("\n"):
+        clean = _clean_line(line).strip("“”\"'《》")
+        if clean and not _is_cover_process_text(clean):
+            return _clip_title_line(clean, 16)
+    return ""
+
+
+def _format_planner_finance_cover_subtitle(value: Any) -> str:
+    return _finance_cover_copy_lines(value)
+
+
+def _format_planner_xiaojunjun_subtitle(value: Any, *, disallow: Optional[List[Any]] = None) -> str:
+    text = _clean_multiline(value)
+    if not text:
+        return ""
+    raw_lines = [
+        _clean_line(line).strip("“”\"'《》")
+        for line in text.split("\n")
+        if _clean_line(line) and not _is_cover_process_text(line)
+    ]
+    if not raw_lines:
+        return ""
+    if len(raw_lines) == 1:
+        raw_lines = _cover_lines(raw_lines[0], max_chars=18, max_lines=3).split("\n")
+    result = "\n".join(_clip_title_line(line, 18) for line in raw_lines[:3] if _clean_line(line))
+    if _is_same_cover_copy(result, disallow or []):
+        return ""
+    return result
+
+
+def _xiaojunjun_cover_subtitle(value: Any, *, fallback: Any = "") -> str:
+    text = _normalize_title_candidate(value) or _clean_line(fallback)
+    if not text:
+        return ""
+    pipe_parts = [
+        _clip_title_line(part, 18)
+        for part in re.split(r"[|｜]", text)
+        if _clean_line(part) and not _is_cover_process_text(part)
+    ]
+    if len(pipe_parts) >= 2:
+        return "\n".join(pipe_parts[:3])
+    parts = _title_clause_parts(text)
+    if len(parts) >= 2:
+        return "\n".join(_clip_title_line(part, 18) for part in parts[:3] if _clean_line(part))
+    return _cover_lines(text, max_chars=18, max_lines=3)
+
+
+def _is_same_cover_copy(value: Any, others: List[Any]) -> bool:
+    key = _cover_compare_key(value)
+    if not key:
+        return False
+    return any(key == _cover_compare_key(other) for other in others if _cover_compare_key(other))
+
+
+def _cover_compare_key(value: Any) -> str:
+    return re.sub(r"[\s\n\r\t，,。.;；:：!！?？|｜、'\"“”‘’《》\-_()（）]+", "", _clean_line(value)).lower()
+
+
+def _is_cover_process_text(value: Any) -> bool:
+    text = _clean_line(value)
+    return bool(re.search(
+        r"DS\s*v?\d|IMA|Gemini|转录全文|Generated from transcript|推荐截取|源文件|最精华音频片段|"
+        r"精华音频片段|音频片段|片段说明|开始时间戳|结束时间戳|时间戳|无 Gemini upload|"
+        r"xxxx|当日日期|好的[，,]?\s*收到|收到您的指令|以下是基于|处理要求|输出结果|格式来写|"
+        r"请你|尝试优化|使用\s*内资闭门会",
+        text,
+        flags=re.I,
+    ))
+
+
+def _asset_focused_vertical_title(value: Any) -> str:
+    text = _clean_line(value)
+    assets = _extract_finance_asset_terms(text)
+    if len(assets) < 2:
+        return ""
+    line1 = "".join(assets[:2])
+    tail_asset = next((asset for asset in assets[2:] if asset not in line1), "")
+    tail_word = _asset_opportunity_word(text)
+    line2 = f"{tail_asset}{tail_word}" if tail_asset else _asset_fallback_theme(text)
+    return "\n".join([
+        _clip_title_line(line1, 8),
+        _clip_title_line(line2, 8),
+    ])
+
+
+def _asset_focused_vertical_subtitle(value: Any) -> str:
+    text = _clean_line(value)
+    if len(_extract_finance_asset_terms(text)) < 2:
+        return ""
+    if "国家信用" in text:
+        if re.search(r"回归|定价|锚|秤|底层逻辑", text):
+            return "回归国家信用定价锚"
+        return "国家信用重新定价"
+    info_diff = re.search(r"((?:20\d{2})?[^，。；;？?！!]{0,8}信息差)", text)
+    if info_diff:
+        return _clip_title_line(info_diff.group(1), 16)
+    if re.search(r"窗口|机会|信号", text):
+        return "资产重估机会窗口"
+    return ""
+
+
+def _extract_finance_asset_terms(value: Any) -> List[str]:
+    text = _clean_line(value)
+    priority = (
+        "美债", "美元", "黄金", "人民币", "日元", "港股", "A股", "美股", "纳指",
+        "科技股", "半导体", "铜", "原油", "油价", "国债", "债券", "利率", "汇率",
+    )
+    terms = []
+    for term in priority:
+        if term in text and term not in terms:
+            terms.append(term)
+    return terms
+
+
+def _asset_opportunity_word(value: Any) -> str:
+    text = _clean_line(value)
+    if re.search(r"窗口|机会|暴利|赚钱|信号", text):
+        return "窗口"
+    if re.search(r"定价|锚|信用|秤", text):
+        return "定价"
+    if re.search(r"拐点|反转", text):
+        return "拐点"
+    return "机会"
+
+
+def _asset_fallback_theme(value: Any) -> str:
+    text = _clean_line(value)
+    if re.search(r"定价|锚|信用|秤", text):
+        return "重新定价"
+    if re.search(r"信息差", text):
+        return "信息差"
+    return "机会窗口"
+
+
+def _title_clause_parts(value: Any) -> List[str]:
+    text = _normalize_title_candidate(value)
+    text = re.sub(r"[‘’“”\"《》]", "", text)
+    text = text.replace("——", "？").replace("--", "？")
+    raw_parts = re.split(r"[?？。；;！!]+|以及|，以及|、以及", text)
+    parts = []
+    for part in raw_parts:
+        clean = _clean_line(part).strip("，,、：: ")
+        clean = re.sub(r"^一个", "", clean)
+        if clean:
+            parts.append(clean)
+    return parts
+
+
+def _join_short_title_parts(parts: List[str], *, max_chars: int) -> str:
+    line = ""
+    for part in parts:
+        clean = _clip_title_line(part, max_chars)
+        candidate = f"{line}，{clean}" if line else clean
+        if len(candidate) <= max_chars:
+            line = candidate
+    return line or (_clip_title_line(parts[0], max_chars) if parts else "")
+
+
+def _smart_cover_lines(value: Any, *, max_chars: int, max_lines: int) -> List[str]:
+    parts = _title_clause_parts(value)
+    lines = []
+    for part in parts:
+        if len(lines) >= max_lines:
+            break
+        lines.extend(_cover_lines(part, max_chars=max_chars, max_lines=max_lines - len(lines)).split("\n"))
+    return lines[:max_lines] or _cover_lines(value, max_chars=max_chars, max_lines=max_lines).split("\n")
+
+
+def _clip_title_line(value: Any, max_chars: int) -> str:
+    clean = _clean_line(value).strip("，,、。.;；:：!！?？ ")
+    return clean[:max_chars]
 
 
 def _image_data_url(path_value: str) -> str:
@@ -1157,13 +2618,23 @@ def create_publisher_video_task(
     image_path: str,
     role: str,
     aspect_ratio: str,
+    generate_subtitles: bool = True,
 ) -> PublicationTask:
-    existing = _find_existing_publisher_video_task(parent_id, role=role, aspect_ratio=aspect_ratio)
+    title = _publisher_video_title(plan, role=role)
+    generate_subtitles = bool(generate_subtitles)
+    audio_segment = audio_segment_from_plan(audio, plan)
+    audio_signature = _audio_segment_signature(audio_segment)
+    existing = _find_existing_publisher_video_task(
+        parent_id,
+        role=role,
+        aspect_ratio=aspect_ratio,
+        generate_subtitles=generate_subtitles,
+        audio_signature=audio_signature,
+    )
     if existing:
+        _sync_publisher_video_task_title(existing, title)
         return existing
 
-    audio_segment = audio_segment_from_plan(audio, plan)
-    title = plan.get("title") or "MP3 视频编排"
     subtitle_y = 84 if aspect_ratio == "9:16" else 86
     params = {
         "feature": "publisher",
@@ -1174,14 +2645,15 @@ def create_publisher_video_task(
         "source_task_id": parent_id,
         "audio_segments": [audio_segment],
         "aspect_ratio": aspect_ratio,
+        "generate_subtitles": generate_subtitles,
         "asr_model": os.environ.get("MP3_VIDEO_ASR_MODEL", "medium"),
         "video": {
             "enabled": True,
             "image_path": image_path,
             "video_path": "",
             "media_type": "image",
-            "sub_burn_enabled": True,
-            "asr_enabled": True,
+            "sub_burn_enabled": generate_subtitles,
+            "asr_enabled": generate_subtitles,
             "asr_model": os.environ.get("MP3_VIDEO_ASR_MODEL", "medium"),
             "subtitle_position": {"y_pct": subtitle_y},
             "subtitle_size": "normal",
@@ -1200,7 +2672,9 @@ def create_publisher_video_task(
             "parent_task_id": parent_id,
             "role": role,
             "title": title,
+            "generate_subtitles": generate_subtitles,
             "audio": audio,
+            "audio_signature": audio_signature,
         },
     }
     child = PublicationTask(
@@ -1211,6 +2685,8 @@ def create_publisher_video_task(
         result={
             "metadata": params["metadata"],
             "source_task_id": parent_id,
+            "generate_subtitles": generate_subtitles,
+            "audio_signature": audio_signature,
             "video_path": None,
             "cover_path": None,
         },
@@ -1223,7 +2699,65 @@ def create_publisher_video_task(
     return child
 
 
-def _find_existing_publisher_video_task(parent_id: str, *, role: str, aspect_ratio: str) -> Optional[PublicationTask]:
+def _publisher_video_title(plan: Dict[str, Any], *, role: str) -> str:
+    if role == "xiaojunjun_landscape":
+        return _clean_closed_door_video_title(plan.get("xiaojunjun_video_title"), expected_separator="/") or _format_closed_door_video_title(
+            plan.get("title") or plan.get("xiaojunjun_subtitle"),
+            separator="/",
+            date_text=plan.get("date_text"),
+        ) or "MP3 视频编排"
+    if role == "ciketc_vertical":
+        return _clean_closed_door_video_title(plan.get("ciketc_video_title"), expected_separator="|") or _format_closed_door_video_title(
+            plan.get("title") or plan.get("cover_subtitle"),
+            separator="|",
+            date_text=plan.get("date_text"),
+        ) or "MP3 视频编排"
+    return _clip_text(plan.get("title") or "MP3 视频编排", 180)
+
+
+def _sync_publisher_video_task_title(task: PublicationTask, title: str) -> None:
+    title = _clip_text(title, 180)
+    if not task or not title or task.status in TERMINAL_STATUSES:
+        return
+    params = dict(task.params or {})
+    result = dict(task.result or {})
+    changed = False
+
+    bilibili = dict(params.get("bilibili") or {})
+    if bilibili.get("title") != title:
+        bilibili["title"] = title
+        params["bilibili"] = bilibili
+        changed = True
+
+    metadata = dict(params.get("metadata") or {})
+    if metadata.get("title") != title:
+        metadata["title"] = title
+        params["metadata"] = metadata
+        changed = True
+
+    result_metadata = dict(result.get("metadata") or {})
+    if result_metadata.get("title") != title:
+        result_metadata["title"] = title
+        result["metadata"] = result_metadata
+        changed = True
+
+    if not changed:
+        return
+    task.params = params
+    task.result = result
+    flag_modified(task, "params")
+    flag_modified(task, "result")
+    db.session.commit()
+
+
+def _find_existing_publisher_video_task(
+    parent_id: str,
+    *,
+    role: str,
+    aspect_ratio: str,
+    generate_subtitles: Optional[bool] = None,
+    audio_signature: Optional[str] = None,
+) -> Optional[PublicationTask]:
     candidates = (
         PublicationTask.query
         .filter(PublicationTask.feature == "publisher")
@@ -1236,9 +2770,13 @@ def _find_existing_publisher_video_task(parent_id: str, *, role: str, aspect_rat
     matching = [
         task for task in candidates
         if _publisher_child_role(task) == role and _publisher_child_aspect_ratio(task) == aspect_ratio
+        and _publisher_child_matches_generate_subtitles(task, generate_subtitles)
+        and _publisher_child_matches_audio_signature(task, audio_signature)
     ]
     if not matching:
         return None
+
+    matching = [_recover_completed_publisher_child_from_disk(task) for task in matching]
 
     for task in matching:
         if task.status == "completed" and _video_summary_ready(_publisher_result_summary(task)):
@@ -1264,6 +2802,55 @@ def _publisher_child_role(task: PublicationTask) -> str:
 def _publisher_child_aspect_ratio(task: PublicationTask) -> str:
     params = task.params if isinstance(task.params, dict) else {}
     return str(params.get("aspect_ratio") or "").strip()
+
+
+def _publisher_child_generate_subtitles(task: PublicationTask, *, default: bool = True) -> bool:
+    params = task.params if isinstance(task.params, dict) else {}
+    if "generate_subtitles" in params:
+        return _truthy(params.get("generate_subtitles"), default=default)
+    video = params.get("video") if isinstance(params.get("video"), dict) else {}
+    if "sub_burn_enabled" in video:
+        return _truthy(video.get("sub_burn_enabled"), default=default)
+    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    if "generate_subtitles" in metadata:
+        return _truthy(metadata.get("generate_subtitles"), default=default)
+    result = task.result if isinstance(task.result, dict) else {}
+    if "generate_subtitles" in result:
+        return _truthy(result.get("generate_subtitles"), default=default)
+    result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if "generate_subtitles" in result_metadata:
+        return _truthy(result_metadata.get("generate_subtitles"), default=default)
+    return bool(default)
+
+
+def _publisher_child_matches_generate_subtitles(task: PublicationTask, expected: Optional[bool]) -> bool:
+    if expected is None:
+        return True
+    return _publisher_child_generate_subtitles(task, default=True) == bool(expected)
+
+
+def _publisher_child_audio_signature(task: PublicationTask) -> Optional[str]:
+    params = task.params if isinstance(task.params, dict) else {}
+    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    result = task.result if isinstance(task.result, dict) else {}
+    result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    signature = (
+        metadata.get("audio_signature")
+        or result_metadata.get("audio_signature")
+        or result.get("audio_signature")
+    )
+    if signature:
+        return str(signature)
+    segments = params.get("audio_segments") if isinstance(params.get("audio_segments"), list) else []
+    if segments:
+        return _audio_segment_signature(segments[0])
+    return None
+
+
+def _publisher_child_matches_audio_signature(task: PublicationTask, expected: Optional[str]) -> bool:
+    if not expected:
+        return True
+    return _publisher_child_audio_signature(task) == expected
 
 
 def _cancel_duplicate_publisher_tasks(tasks: List[PublicationTask], *, keep_id: str) -> None:
@@ -1313,6 +2900,19 @@ def audio_segment_from_plan(audio: Dict[str, Any], plan: Dict[str, Any]) -> Dict
         "end_offset": round(end_offset, 3),
         "speed": DEFAULT_SPEED,
     }
+
+
+def _audio_segment_signature(segment: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(segment, dict) or not segment.get("path"):
+        return None
+    payload = {
+        "path": str(segment.get("path") or ""),
+        "start": round(float(segment.get("start") or 0), 3),
+        "end_offset": round(float(segment.get("end_offset") or 0), 3),
+        "speed": round(float(segment.get("speed") or DEFAULT_SPEED), 3),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
 def draw_finance_cover(output_path: str, plan: Dict[str, Any]) -> str:
@@ -1405,6 +3005,42 @@ def draw_audio_background(output_path: str, plan: Dict[str, Any], infographic_pa
     return output_path
 
 
+def draw_transcript_infographic(output_path: str, source_text: str, *, audio: Dict[str, Any]) -> str:
+    w, h = 1280, 720
+    img = Image.new("RGB", (w, h), "#f8fafc")
+    draw = ImageDraw.Draw(img)
+    _draw_vertical_gradient(draw, w, h, (248, 250, 252), (226, 232, 240))
+    _draw_grid(draw, w, h, spacing=48, color=(15, 23, 42, 10))
+
+    accent = (22, 163, 74)
+    title_font = _font(48, bold=True)
+    body_font = _font(30, bold=False)
+    small_font = _font(20, bold=False)
+
+    margin = 70
+    draw.rounded_rectangle([margin, 54, w - margin, h - 54], radius=28, fill=(255, 255, 255), outline=(203, 213, 225), width=2)
+    draw.rectangle([margin, 54, margin + 12, h - 54], fill=accent)
+
+    title = extract_title_candidates(source_text)
+    title_text = title[0] if title else _clip_text(_clean_line(source_text), 44) or (audio.get("filename") or "音频编排结果")
+    _draw_wrapped_text(draw, title_text, margin + 40, 100, w - margin * 2 - 96, title_font, fill=(15, 23, 42), line_height=62, max_lines=2)
+
+    subtitle = extract_subtitle(source_text)
+    y = 250
+    if subtitle:
+        y = _draw_wrapped_text(draw, subtitle, margin + 40, y, w - margin * 2 - 96, body_font, fill=(51, 65, 85), line_height=42, max_lines=2) + 24
+
+    bullets = _infographic_bullets(source_text)
+    for index, bullet in enumerate(bullets[:3], start=1):
+        top = y + (index - 1) * 76
+        draw.rounded_rectangle([margin + 40, top + 5, margin + 78, top + 43], radius=19, fill=(220, 252, 231))
+        _draw_centered_text(draw, str(index), margin + 59, top + 9, small_font, fill=(22, 101, 52))
+        _draw_wrapped_text(draw, bullet, margin + 98, top, w - margin * 2 - 150, body_font, fill=(30, 41, 59), line_height=40, max_lines=1)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    img.save(output_path, quality=95)
+    return output_path
+
+
 def draw_closed_door_cover(output_path: str, plan: Dict[str, Any], *, include_date: bool) -> str:
     w, h = 1920, 1080
     img = _closed_door_background(w, h)
@@ -1462,10 +3098,141 @@ def planner_model() -> str:
     return os.environ.get("MP3_VIDEO_PLANNER_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "deepseek-v4-pro"
 
 
+def transcript_model() -> str:
+    return os.environ.get("MP3_VIDEO_TRANSCRIPT_MODEL") or planner_model()
+
+
+def extract_closed_door_video_titles(text: str) -> Dict[str, str]:
+    candidates = _closed_door_full_title_candidates(text)
+    slash_title = _select_closed_door_video_title(candidates, separator="/")
+    pipe_title = _select_closed_door_video_title(candidates, separator="|")
+    return {
+        "xiaojunjun_video_title": slash_title,
+        "ciketc_video_title": pipe_title,
+    }
+
+
+def _closed_door_full_title_candidates(text: str) -> List[Dict[str, Any]]:
+    compact = _clean_line(text)
+    if not compact:
+        return []
+    date_re = r"(?:\d{6}|\d{8}|[12]\d{3}[./-]\d{1,2}[./-]\d{1,2})"
+    title_re = re.compile(
+        rf"(?P<title>"
+        rf"内资闭门会(?:议)?\s*(?P<sep>[/|｜])\s*"
+        rf".+?\s*(?P=sep)\s*(?P<date>{date_re})"
+        rf")(?=\s*(?:\*\*)?\s*\d+\s*[.、:：)]|$)",
+        flags=re.I,
+    )
+    candidates: List[Dict[str, Any]] = []
+    for match in title_re.finditer(compact):
+        separator = "|" if match.group("sep") in {"|", "｜"} else "/"
+        title = _clean_closed_door_video_title(match.group("title"), expected_separator=separator)
+        if not title:
+            continue
+        before = compact[max(0, match.start() - 120):match.start()]
+        candidates.append({
+            "title": title,
+            "separator": separator,
+            "context": before,
+            "start": match.start(),
+        })
+    return candidates
+
+
+def _select_closed_door_video_title(candidates: List[Dict[str, Any]], *, separator: str) -> str:
+    expected = "|" if separator in {"|", "｜"} else "/"
+    matches = [item for item in candidates if item.get("separator") == expected and _clean_line(item.get("title"))]
+    if not matches:
+        return ""
+
+    def score(item: Dict[str, Any]) -> Tuple[int, int]:
+        context = _clean_line(item.get("context"))
+        current = 0
+        if expected == "/" and re.search(r"斜杠|第?\s*6\s*[.、:：)]|^6\s*[.、:：)]", context):
+            current += 10
+        if expected == "|" and re.search(r"竖线|第?\s*7\s*[.、:：)]|^7\s*[.、:：)]", context):
+            current += 10
+        if "闭门会格式标题" in context or "标题优化" in context:
+            current += 2
+        return current, -int(item.get("start") or 0)
+
+    return sorted(matches, key=score, reverse=True)[0]["title"]
+
+
+def _clean_closed_door_video_title(value: Any, *, expected_separator: str) -> str:
+    text = _clean_line(value).strip("* ：:，,。;；")
+    if not text:
+        return ""
+    text = re.sub(r"^[“”\"'《》]+|[“”\"'《》]+$", "", text).strip()
+    if _is_cover_process_text(text):
+        return ""
+    expected = "|" if expected_separator in {"|", "｜"} else "/"
+    split_re = r"\s*[|｜]\s*" if expected == "|" else r"\s*/\s*"
+    if expected == "|" and "｜" in text:
+        text = text.replace("｜", "|")
+    if expected not in text:
+        return _format_closed_door_video_title(text, separator=expected)
+    parts = [_clean_line(part).strip("“”\"'《》") for part in re.split(split_re, text) if _clean_line(part)]
+    if len(parts) < 3:
+        return ""
+    if not re.match(r"^内资闭门会(?:议)?$", parts[0]):
+        if "内资闭门会" in parts[0]:
+            parts[0] = "内资闭门会"
+        else:
+            parts.insert(0, "内资闭门会")
+    if any(_is_cover_process_text(part) for part in parts):
+        return ""
+    sep_text = " | " if expected == "|" else " / "
+    return sep_text.join(parts[:5])[:180].strip()
+
+
+def _format_closed_door_video_title(value: Any, *, separator: str, date_text: Any = "") -> str:
+    title = _normalize_title_candidate(value)
+    if not title or _is_cover_process_text(title):
+        return ""
+    expected = "|" if separator in {"|", "｜"} else "/"
+    raw_parts = [
+        _clean_line(part).strip("“”\"'《》")
+        for part in re.split(r"\s*[|｜/]\s*", title)
+        if _clean_line(part)
+    ]
+    content_parts = []
+    for part in raw_parts:
+        if re.match(r"^内资闭门会(?:议)?$", part):
+            continue
+        if _closed_door_video_date(part):
+            continue
+        if not _is_cover_process_text(part):
+            content_parts.append(_clip_title_line(part, 24))
+    if not content_parts:
+        content_parts = [_clip_title_line(title, 36)]
+    date = _closed_door_video_date(date_text) or datetime.now().strftime("%Y-%m-%d")
+    sep_text = " | " if expected == "|" else " / "
+    return sep_text.join(["内资闭门会", *content_parts[:3], date])[:180].strip()
+
+
+def _closed_door_video_date(value: Any) -> str:
+    text = _clean_line(value)
+    match = re.search(r"([12]\d{3})[./-](\d{1,2})[./-](\d{1,2})", text)
+    if match:
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+    match = re.search(r"\b(\d{6}|\d{8})\b", text)
+    return match.group(1) if match else ""
+
+
 def extract_title_candidates(text: str) -> List[str]:
     text = str(text or "")
     candidates: List[str] = []
     compact_text = _clean_line(text)
+    high_density_inline_re = re.compile(
+        r"\d+\.\s*[^“”\"《》]{0,80}?(?:高信息密度|投资人|投资者视角)[^“”\"《》]{0,80}?(?:标题|题目|选题)[^“”\"《》]{0,80}?[“\"《](?P<title>[^”\"》]{4,220})[”\"》]"
+    )
+    for match in high_density_inline_re.finditer(compact_text):
+        candidate = _normalize_title_candidate(match.group("title"))
+        if _looks_like_title_candidate(candidate, prefer_long=True):
+            candidates.append(candidate)
+
     pipe_title_re = re.compile(
         r"(?:内资闭门会(?:议)?|内资闭门|投研闭门会|投研会议|内部交流)\s*[|｜]\s*"
         r"(?P<title>.+?)"
@@ -1484,8 +3251,16 @@ def extract_title_candidates(text: str) -> List[str]:
         clean = line.strip("#-—:： ")
         if not clean:
             continue
-        if re.search(r"投资者视角长标题|长标题\s*[（(]?\s*\d*\s*个版本|长标题", clean):
+        pipe_title = _extract_pipe_title_from_line(clean)
+        if pipe_title:
+            candidates.append(pipe_title)
+        if re.search(r"投资者视角长标题|高信息密度.*标题|投资人标题|长标题\s*[（(]?\s*\d*\s*个版本|长标题", clean):
             in_investor_title_section = True
+            inline = _extract_inline_title_after_heading(clean)
+            if inline:
+                candidate = _normalize_title_candidate(inline)
+                if _looks_like_title_candidate(candidate, prefer_long=True):
+                    candidates.append(candidate)
             continue
         if in_investor_title_section and section_stop_re.search(clean):
             in_investor_title_section = False
@@ -1500,11 +3275,14 @@ def extract_title_candidates(text: str) -> List[str]:
         if not clean:
             continue
         normalized = _normalize_title_candidate(clean)
+        pipe_title = _extract_pipe_title_from_line(clean)
+        if pipe_title:
+            candidates.append(pipe_title)
         if "｜" in clean or "|" in clean:
             if _looks_like_title_candidate(normalized, prefer_long=True):
                 candidates.append(normalized)
         if re.search(r"标题|题目|选题|封面", clean):
-            clean = re.sub(r"^(?:候选|标准|短|封面)?标题(?:方案)?\s*\d*\s*[:：-]?", "", clean).strip()
+            clean = _extract_inline_title_after_heading(clean) or re.sub(r"^(?:候选|标准|短|封面)?标题(?:方案)?\s*\d*\s*[:：-]?", "", clean).strip()
             for piece in re.split(r"[。；;]", clean):
                 piece = _normalize_title_candidate(piece)
                 if _looks_like_title_candidate(piece):
@@ -1529,9 +3307,39 @@ def extract_title_candidates(text: str) -> List[str]:
     return unique[:8]
 
 
+def _extract_pipe_title_from_line(value: Any) -> str:
+    clean = _clean_line(value)
+    if _is_cover_process_text(clean):
+        return ""
+    match = re.search(
+        r"(?:内资闭门会(?:议)?|内资闭门|投研闭门会|投研会议|内部交流)\s*[|｜]\s*"
+        r"(?P<title>.+?)"
+        r"\s*[|｜]\s*(?:\d{6}|\d{8}|[12]\d{3}[./-]\d{1,2}[./-]\d{1,2})(?=\s|$)",
+        clean,
+    )
+    if not match:
+        return ""
+    candidate = _normalize_title_candidate(match.group("title"))
+    return candidate if _looks_like_title_candidate(candidate, prefer_long=True) else ""
+
+
+def _extract_inline_title_after_heading(value: Any) -> str:
+    text = _clean_line(value)
+    if not re.search(r"标题|题目|选题|版本", text):
+        return ""
+    quoted = re.search(r"[“\"《](?P<title>[^”\"》]{4,180})[”\"》]", text)
+    if quoted:
+        return quoted.group("title")
+    cleaned = re.sub(r"^\s*(?:\*\*)?\s*\d+\s*[.、)]\s*", "", text).strip()
+    cleaned = re.sub(r"^(?:高信息密度)?(?:投资人|投资者视角)?(?:标题|题目|选题)(?:（[^）]+）|\([^)]*\))?\s*[:：-]?", "", cleaned).strip()
+    cleaned = re.sub(r"^(?:版本|方案)\s*[一二三四五六七八九十A-Za-z\d]*\s*[:：-]?", "", cleaned).strip()
+    cleaned = cleaned.strip("* ：:")
+    return cleaned if cleaned != text else ""
+
+
 def extract_audio_range(text: str) -> Optional[Tuple[float, float]]:
     normalized = str(text or "").replace("：", ":").replace("–", "-").replace("—", "-")
-    token = r"\d{1,2}:\d{2}(?::\d{2})?"
+    token = r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
     range_re = re.compile(
         rf"(?P<start>{token})\s*(?:-|~|～|至|到)\s*(?P<end>{token})"
     )
@@ -1545,8 +3353,8 @@ def extract_audio_range(text: str) -> Optional[Tuple[float, float]]:
             continue
         return float(start), float(end)
 
-    start_re = re.compile(rf"(?:开始|起始)(?:时间戳|时间)?\s*:\s*(?P<start>{token})")
-    end_re = re.compile(rf"(?:结束|截止|终止)(?:时间戳|时间)?\s*:\s*(?P<end>{token})")
+    start_re = re.compile(rf"(?:开始|起始)(?:时间戳|时间)?[*_\s]*:\s*[\[【(（]?\s*(?P<start>{token})")
+    end_re = re.compile(rf"(?:结束|截止|终止)(?:时间戳|时间)?[*_\s]*:\s*[\[【(（]?\s*(?P<end>{token})")
     start_match = start_re.search(normalized)
     end_match = end_re.search(normalized)
     if start_match and end_match:
@@ -1563,26 +3371,33 @@ def extract_audio_range(text: str) -> Optional[Tuple[float, float]]:
 
 def _normalize_title_candidate(value: Any) -> str:
     clean = _clean_line(value)
-    clean = clean.strip(" \t\r\n：:，,。；;|｜")
+    clean = clean.strip(" \t\r\n：:，,。；;|｜*_")
+    clean = re.sub(r"^\*+\s*", "", clean).strip()
     clean = re.sub(r"^(?:[-*•·●○o]\s*)+", "", clean, flags=re.I).strip()
     clean = re.sub(r"^\d+\s*[.、)]\s*", "", clean).strip()
     clean = re.sub(r"^[(（]\s*\d+\s*[)）]\s*", "", clean).strip()
+    clean = re.sub(r"^(?:标题优化|优化标题)\s*\**\s*[:：-]?\s*", "", clean).strip()
     clean = re.sub(
         r"^(?:标题|题目|版本|方案|候选标题|封面标题)\s*[一二三四五六七八九十A-Za-z\d]*\s*[:：-]\s*",
         "",
         clean,
     ).strip()
+    clean = re.sub(r"^优化\s*\**\s*(?=(?:内资闭门会|内资闭门|投研闭门会|投研会议|内部交流)\s*[|｜])", "", clean).strip()
     clean = re.sub(r"^(?:内资闭门会(?:议)?|内资闭门|投研闭门会|投研会议|内部交流)\s*[|｜]\s*", "", clean).strip()
     clean = re.sub(r"\s*[|｜]\s*(?:\d{6}|\d{8}|[12]\d{3}[./-]\d{1,2}[./-]\d{1,2})\s*$", "", clean).strip()
     clean = re.sub(r"\s+(?:\d{6}|\d{8})\s*$", "", clean).strip()
-    return clean.strip("“”\"'《》：:，,。；;|｜ ")
+    clean = re.sub(r"[“”‘’\"']", "", clean)
+    return clean.strip("《》：:，,。；;|｜ ")
 
 
 def _looks_like_title_candidate(value: Any, *, prefer_long: bool = False) -> bool:
     clean = _clean_line(value)
     if not clean or clean.lower().startswith(("http", "source", "参考")):
         return False
-    if len(clean) < 4 or len(clean) > 120:
+    if _is_cover_process_text(clean):
+        return False
+    max_length = 180 if prefer_long else 120
+    if len(clean) < 4 or len(clean) > max_length:
         return False
     bad_fragments = (
         "投资者视角长标题",
@@ -1601,12 +3416,12 @@ def _looks_like_title_candidate(value: Any, *, prefer_long: bool = False) -> boo
         "可以直接用于",
         "输出结果",
         "字段",
+        "标题优化",
+        "优化**",
     )
     if any(fragment in clean for fragment in bad_fragments):
         return False
-    if ("|" not in clean and "｜" not in clean) and len(clean) > 60:
-        return False
-    if prefer_long and ("|" not in clean and "｜" not in clean) and len(clean) > 42:
+    if ("|" not in clean and "｜" not in clean) and len(clean) > (180 if prefer_long else 60):
         return False
     return True
 
@@ -1615,7 +3430,7 @@ def extract_subtitle(text: str) -> str:
     clean = _clean_line(text)
     pieces = [piece.strip() for piece in re.split(r"[。！？!?；;]", clean) if piece.strip()]
     for piece in pieces:
-        if 8 <= len(piece) <= 55 and "标题" not in piece:
+        if 8 <= len(piece) <= 55 and "标题" not in piece and not _is_cover_process_text(piece):
             return _clip_text(piece, 40)
     return _clip_text(clean, 36)
 
@@ -1693,12 +3508,62 @@ def _reusable_gemini_result(result: Dict[str, Any], *, fallback_image_path: str)
     return reusable, first_response, infographic
 
 
+def _reusable_text_source_result(result: Dict[str, Any], *, fallback_image_path: str) -> Tuple[Optional[Dict[str, Any]], str, Dict[str, Any]]:
+    source = result.get("source") if isinstance(result.get("source"), dict) else {}
+    first_response = (
+        result.get("initial_response_text")
+        or result.get("source_response_text")
+        or source.get("initial_response_text")
+        or source.get("response_text")
+        or ""
+    )
+    if not first_response and _path_ready(source.get("output_path")):
+        loaded = _load_json_file(source.get("output_path"))
+        if isinstance(loaded, dict):
+            source = {**loaded, **source}
+            first_response = source.get("initial_response_text") or source.get("response_text") or ""
+
+    infographic = result.get("infographic") if isinstance(result.get("infographic"), dict) else {}
+    source_image = source.get("image") if isinstance(source.get("image"), dict) else {}
+    image_path = infographic.get("path") or source_image.get("path") or fallback_image_path
+    if not first_response or not _path_ready(image_path):
+        return None, "", {}
+
+    if not infographic:
+        infographic = _public_artifact(image_path, "DS 文本信息图")
+    reusable = {
+        **source,
+        "initial_response_text": first_response,
+        "response_text": source.get("response_text") or first_response,
+        "image": source_image or infographic,
+    }
+    return reusable, first_response, infographic
+
+
+def _keyframe_artifacts_ready(keyframes: Any) -> bool:
+    if not isinstance(keyframes, dict) or len(keyframes) < 2:
+        return False
+    for artifact in keyframes.values():
+        if not isinstance(artifact, dict) or artifact.get("template_version") != KEYFRAME_ARTIFACT_VERSION:
+            return False
+        if not _path_ready(artifact.get("path")):
+            return False
+    return True
+
+
 def _reusable_plan(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
     plan_audio = plan.get("audio") if isinstance(plan.get("audio"), dict) else {}
     if _clean_line(plan.get("title")) and plan_audio and plan.get("planner_version") == PLANNER_VERSION:
         return plan
     return None
+
+
+def _without_waiting_state(result: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = dict(result or {})
+    cleaned.pop("waiting_child", None)
+    cleaned.pop("deferred_waits", None)
+    return cleaned
 
 
 def _visual_artifacts_ready(artifacts: Any) -> bool:
@@ -1715,22 +3580,89 @@ def _visual_artifacts_ready(artifacts: Any) -> bool:
     return True
 
 
-def _reusable_video_summary(result: Dict[str, Any], label: str) -> Tuple[Optional[Dict[str, Any]], Optional[PublicationTask]]:
+def _reusable_video_summary(
+    result: Dict[str, Any],
+    label: str,
+    *,
+    parent_id: Optional[str] = None,
+    generate_subtitles: Optional[bool] = None,
+    audio_signature: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[PublicationTask]]:
     summary = result.get(label) if isinstance(result.get(label), dict) else {}
-    if _video_summary_ready(summary):
+    if (
+        _video_summary_ready(summary)
+        and _summary_matches_generate_subtitles(summary, generate_subtitles)
+        and _summary_matches_audio_signature(summary, audio_signature)
+    ):
         return summary, None
 
     child = _completed_child_from_result(result, label)
-    if child:
+    if (
+        child
+        and _publisher_child_matches_generate_subtitles(child, generate_subtitles)
+        and _publisher_child_matches_audio_signature(child, audio_signature)
+    ):
         child_summary = _publisher_result_summary(child)
         if _video_summary_ready(child_summary):
             return child_summary, child
+    existing = _find_existing_publisher_video_task_for_label(
+        result,
+        label,
+        parent_id=parent_id,
+        generate_subtitles=generate_subtitles,
+        audio_signature=audio_signature,
+    )
+    if existing and existing.status == "completed":
+        existing_summary = _publisher_result_summary(existing)
+        if _video_summary_ready(existing_summary):
+            return existing_summary, existing
     return None, None
 
 
-def _active_child_from_result(result: Dict[str, Any], label: str) -> Optional[PublicationTask]:
+def _find_existing_publisher_video_task_for_label(
+    result: Dict[str, Any],
+    label: str,
+    *,
+    parent_id: Optional[str] = None,
+    generate_subtitles: Optional[bool] = None,
+    audio_signature: Optional[str] = None,
+) -> Optional[PublicationTask]:
+    resolved_parent_id = str(parent_id or (result or {}).get("workflow_task_id") or "").strip()
+    if not resolved_parent_id:
+        return None
+    spec = _publisher_video_spec_for_label(label)
+    if not spec:
+        return None
+    kwargs = {"role": spec["role"], "aspect_ratio": spec["aspect_ratio"]}
+    if generate_subtitles is not None:
+        kwargs["generate_subtitles"] = generate_subtitles
+    if audio_signature:
+        kwargs["audio_signature"] = audio_signature
+    return _find_existing_publisher_video_task(resolved_parent_id, **kwargs)
+
+
+def _publisher_video_spec_for_label(label: str) -> Optional[Dict[str, str]]:
+    if label == "landscape_video":
+        return {"role": "xiaojunjun_landscape", "aspect_ratio": "16:9"}
+    if label == "vertical_video":
+        return {"role": "ciketc_vertical", "aspect_ratio": "9:16"}
+    return None
+
+
+def _active_child_from_result(
+    result: Dict[str, Any],
+    label: str,
+    *,
+    generate_subtitles: Optional[bool] = None,
+    audio_signature: Optional[str] = None,
+) -> Optional[PublicationTask]:
     child = _child_from_result(result, label)
-    if child and child.status not in TERMINAL_STATUSES:
+    if (
+        child
+        and child.status not in TERMINAL_STATUSES
+        and _publisher_child_matches_generate_subtitles(child, generate_subtitles)
+        and _publisher_child_matches_audio_signature(child, audio_signature)
+    ):
         return child
     return None
 
@@ -1766,6 +3698,20 @@ def _video_summary_ready(summary: Any) -> bool:
     return _path_ready(_video_output_message(summary))
 
 
+def _summary_matches_generate_subtitles(summary: Any, expected: Optional[bool]) -> bool:
+    if expected is None or not isinstance(summary, dict):
+        return True
+    if "generate_subtitles" not in summary:
+        return bool(expected) is True
+    return _truthy(summary.get("generate_subtitles"), default=True) == bool(expected)
+
+
+def _summary_matches_audio_signature(summary: Any, expected: Optional[str]) -> bool:
+    if not expected or not isinstance(summary, dict):
+        return True
+    return str(summary.get("audio_signature") or "").strip() == expected
+
+
 def _path_ready(path: Any) -> bool:
     text = str(path or "").strip()
     resolved = _resolve_project_path(text) if text else None
@@ -1797,6 +3743,83 @@ def _load_json_file(path: Any) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _recover_completed_publisher_child_from_disk(child: PublicationTask) -> PublicationTask:
+    if not child or child.feature != "publisher" or child.status in TERMINAL_STATUSES:
+        return child
+    video_path = _publisher_child_disk_video_path(child)
+    if not video_path:
+        return child
+
+    now = datetime.utcnow()
+    result = dict(child.result or {})
+    result.update({
+        "video_path": str(video_path),
+        "completed_at": now.isoformat() + "Z",
+        "disk_recovered_at": now.isoformat() + "Z",
+        "generate_subtitles": _publisher_child_generate_subtitles(child, default=True),
+    })
+    aspect_ratio = _publisher_child_aspect_ratio(child)
+    if aspect_ratio == "9:16":
+        result["vertical_video_path"] = str(video_path)
+    else:
+        result["landscape_video_path"] = str(video_path)
+
+    child.status = "completed"
+    child.current_step = "done"
+    child.progress = 100
+    child.error_message = None
+    child.completed_at = now
+    child.task_video_path = str(video_path)
+    child.result = result
+    flag_modified(child, "result")
+    db.session.commit()
+    logger.warning(
+        "Recovered completed publisher child from existing video file: child=%s path=%s",
+        child.id,
+        video_path,
+    )
+    return child
+
+
+def _publisher_child_disk_video_path(child: PublicationTask) -> Optional[Path]:
+    task_id = str(getattr(child, "id", "") or "")
+    if not task_id:
+        return None
+    processed_dir = project_root() / "data" / "processed"
+    if not processed_dir.exists():
+        return None
+    short_id = task_id[:6]
+    try:
+        candidates = [
+            path
+            for path in processed_dir.glob(f"*{short_id}.mp4")
+            if path.is_file() and _publisher_video_file_is_stable(path)
+        ]
+    except Exception:
+        logger.exception("Failed to inspect publisher disk video candidates: child=%s", task_id)
+        return None
+    if not candidates:
+        return None
+    aspect_ratio = _publisher_child_aspect_ratio(child)
+    if aspect_ratio == "9:16":
+        candidates.sort(key=lambda path: (not path.name.startswith("v_"), -path.stat().st_mtime))
+    else:
+        candidates.sort(key=lambda path: (path.name.startswith("v_"), -path.stat().st_mtime))
+    return candidates[0]
+
+
+def _publisher_video_file_is_stable(path: Path) -> bool:
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    min_bytes = max(1024 * 1024, _int_env("MP3_VIDEO_PUBLISHER_RECOVERY_MIN_BYTES", 1024 * 1024))
+    if stat.st_size < min_bytes:
+        return False
+    grace_seconds = max(0, _int_env("MP3_VIDEO_PUBLISHER_DISK_RECOVERY_GRACE_SECONDS", 20))
+    return (time.time() - stat.st_mtime) >= grace_seconds
+
+
 def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: int, end_progress: int) -> PublicationTask:
     timeout = _child_inline_wait_seconds(label)
     poll_seconds = max(1, _int_env("MP3_VIDEO_CHILD_POLL_SECONDS", 3))
@@ -1805,10 +3828,11 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
     while time.monotonic() < deadline:
         parent = _load_task(parent_id, *TASK_STATUS_COLUMNS)
         if not parent or parent.status == "canceled":
-            raise RuntimeError("父编排任务已取消")
+            raise ParentTaskCanceled("父编排任务已取消")
         child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
         if not child:
             raise RuntimeError(f"子任务不存在: {child_id}")
+        child = _recover_completed_publisher_child_from_disk(child)
         if child.current_step != last_step:
             last_step = child.current_step
             child_progress = int(child.progress or 0)
@@ -1836,6 +3860,12 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
         _record_child(parent_id, label, child)
         raise ChildTaskStillRunning(label, child.id, child.status or "", child.current_step or "")
     raise RuntimeError(f"等待子任务超时: {label} {child_id}")
+
+
+def _raise_if_parent_canceled(parent_id: str) -> None:
+    parent = _load_task(parent_id, *TASK_STATUS_COLUMNS)
+    if not parent or parent.status == "canceled":
+        raise ParentTaskCanceled("父编排任务已取消")
 
 
 def _defer_parent_retry(parent_id: str, exc: ChildTaskStillRunning) -> None:
@@ -1961,8 +3991,8 @@ def _start_task(task: PublicationTask) -> None:
 
 
 def _emit(parent_id: str, step: str, progress: int, message: str, *, result: Optional[Dict[str, Any]] = None) -> None:
-    fresh = _load_task(parent_id, *TASK_PROGRESS_RESULT_COLUMNS)
-    if not fresh:
+    fresh = _load_task(parent_id, *TASK_PROGRESS_RESULT_COLUMNS, PublicationTask.status)
+    if not fresh or fresh.status == "canceled":
         return
     current = dict(fresh.result or {})
     logs = list(current.get("logs") or [])
@@ -1983,8 +4013,8 @@ def _emit(parent_id: str, step: str, progress: int, message: str, *, result: Opt
 
 
 def _update_result(parent_id: str, values: Dict[str, Any]) -> None:
-    fresh = _load_task(parent_id, *TASK_RESULT_COLUMNS)
-    if not fresh:
+    fresh = _load_task(parent_id, *TASK_RESULT_COLUMNS, PublicationTask.status)
+    if not fresh or fresh.status == "canceled":
         return
     result = dict(fresh.result or {})
     result.update(values)
@@ -1994,8 +4024,8 @@ def _update_result(parent_id: str, values: Dict[str, Any]) -> None:
 
 
 def _record_child(parent_id: str, label: str, child: PublicationTask) -> None:
-    fresh = _load_task(parent_id, *TASK_RESULT_COLUMNS)
-    if not fresh:
+    fresh = _load_task(parent_id, *TASK_RESULT_COLUMNS, PublicationTask.status)
+    if not fresh or fresh.status == "canceled":
         return
     result = dict(fresh.result or {})
     children = dict(result.get("children") or {})
@@ -2108,7 +4138,7 @@ def _mark_child_failed(child: PublicationTask, message: str) -> None:
 def _queue_notification(task_id: str, event_type: str, message: Optional[str] = None) -> bool:
     try:
         fresh = _load_task(task_id, *TASK_NOTIFICATION_COLUMNS)
-        if not fresh:
+        if not fresh or fresh.status == "canceled":
             return False
         result = dict(fresh.result or {})
         notifications = dict(result.get("notifications") or {})
@@ -2176,6 +4206,8 @@ def _notification_payload(task: PublicationTask, event_type: str, message: Optio
     artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
     children = result.get("children") if isinstance(result.get("children"), dict) else {}
     gemini = result.get("gemini") if isinstance(result.get("gemini"), dict) else {}
+    source = result.get("source") if isinstance(result.get("source"), dict) else {}
+    first_stage = source or gemini
     infographic = result.get("infographic") if isinstance(result.get("infographic"), dict) else {}
     landscape = result.get("landscape_video") or children.get("landscape_video") or {}
     vertical = result.get("vertical_video") or children.get("vertical_video") or {}
@@ -2197,7 +4229,7 @@ def _notification_payload(task: PublicationTask, event_type: str, message: Optio
         "started_at": result.get("started_at"),
         "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else result.get("completed_at"),
         "stage_results": {
-            "stages": _notification_stages(task, audio, gemini, infographic, plan, artifacts, landscape, vertical),
+            "stages": _notification_stages(task, audio, first_stage, infographic, plan, artifacts, landscape, vertical),
             "outputs": _notification_outputs(result, audio, infographic, plan, artifacts, landscape, vertical),
         },
     }
@@ -2206,13 +4238,28 @@ def _notification_payload(task: PublicationTask, event_type: str, message: Optio
 def _notification_stages(
     task: PublicationTask,
     audio: Dict[str, Any],
-    gemini: Dict[str, Any],
+    source: Dict[str, Any],
     infographic: Dict[str, Any],
     plan: Dict[str, Any],
     artifacts: Dict[str, Any],
     landscape: Dict[str, Any],
     vertical: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
+    if source.get("input_source") == "ds_response":
+        source_name = "手动 DS 返回/信息图"
+        source_step = "direct_ds"
+        plan_name = "本地标题与时间戳规划"
+        plan_step = "direct_ds_plan"
+    elif source.get("input_source") == "ima_transcript":
+        source_name = "IMA 全文 DS 处理/信息图"
+        source_step = "transcript_deepseek"
+        plan_name = "DS v4 pro 标题与时间戳规划"
+        plan_step = "deepseek_plan"
+    else:
+        source_name = "Gemini Gem 解析/信息图"
+        source_step = "gemini"
+        plan_name = "DS v4 pro 标题与时间戳规划"
+        plan_step = "deepseek_plan"
     return [
         {
             "name": "MP3 输入",
@@ -2220,13 +4267,13 @@ def _notification_stages(
             "message": _audio_message(audio),
         },
         {
-            "name": "Gemini Gem 解析/信息图",
-            "status": _stage_status(task, bool(gemini or infographic), "gemini"),
-            "message": _gemini_message(gemini, infographic),
+            "name": source_name,
+            "status": _stage_status(task, bool(source or infographic), source_step),
+            "message": _gemini_message(source, infographic),
         },
         {
-            "name": "DS v4 pro 标题与时间戳规划",
-            "status": _stage_status(task, bool(plan), "deepseek_plan"),
+            "name": plan_name,
+            "status": _stage_status(task, bool(plan), plan_step),
             "message": _plan_message(plan),
         },
         {
@@ -2256,11 +4303,12 @@ def _notification_outputs(
     landscape: Dict[str, Any],
     vertical: Dict[str, Any],
 ) -> Dict[str, Any]:
+    infographic_label = infographic.get("label") if isinstance(infographic, dict) else ""
     outputs = {
         "音频": _audio_message(audio),
         "标题": plan.get("title") if isinstance(plan, dict) else None,
         "音频时间戳": _plan_audio_message(plan),
-        "Gemini 信息图": _artifact_message(infographic),
+        infographic_label or "信息图": _artifact_message(infographic),
         "封皮/背景图": _artifacts_message(artifacts),
         "横屏视频": _video_output_message(landscape),
         "竖屏视频": _video_output_message(vertical),
@@ -2297,6 +4345,8 @@ def _child_stage_status(child: Any) -> str:
     status = str(child.get("status") or "").lower()
     if status in {"completed", "succeeded"}:
         return "completed"
+    if status in {"skipped", "skip"}:
+        return "skipped"
     if status in {"failed", "canceled"}:
         return status
     if status in {"pending", "queued"}:
@@ -2323,7 +4373,14 @@ def _gemini_message(gemini: Any, infographic: Any) -> Optional[str]:
     parts = []
     if isinstance(gemini, dict):
         if gemini.get("initial_response_text") or gemini.get("response_text"):
-            parts.append("第一轮返回已获取")
+            if gemini.get("input_source") == "ds_response":
+                parts.append("手动 DS 返回已载入")
+            elif gemini.get("input_source") == "ima_transcript":
+                parts.append("DS 文本已返回")
+            else:
+                parts.append("第一轮返回已获取")
+        if gemini.get("transcript_chars"):
+            parts.append(f"转录 {gemini.get('transcript_chars')} 字")
         if gemini.get("target_url"):
             parts.append(gemini.get("target_url"))
     image_text = _artifact_message(infographic)
@@ -2463,11 +4520,21 @@ def _task_public_summary(task: Optional[PublicationTask]) -> Optional[Dict[str, 
 
 def _publisher_result_summary(task: PublicationTask) -> Dict[str, Any]:
     result = task.result or {}
+    params = task.params or {}
+    video_path = (
+        result.get("video_path")
+        or result.get("landscape_video_path")
+        or result.get("vertical_video_path")
+        or getattr(task, "task_video_path", None)
+    )
+    aspect_ratio = params.get("aspect_ratio")
     return {
         **(_task_public_summary(task) or {}),
-        "video_path": result.get("video_path"),
-        "landscape_video_path": result.get("video_path") if (task.params or {}).get("aspect_ratio") != "9:16" else None,
-        "vertical_video_path": result.get("vertical_video_path") or (result.get("video_path") if (task.params or {}).get("aspect_ratio") == "9:16" else None),
+        "generate_subtitles": _publisher_child_generate_subtitles(task, default=True),
+        "audio_signature": _publisher_child_audio_signature(task),
+        "video_path": video_path,
+        "landscape_video_path": video_path if aspect_ratio != "9:16" else None,
+        "vertical_video_path": result.get("vertical_video_path") or (video_path if aspect_ratio == "9:16" else None),
         "cover_path": result.get("cover_path"),
         "bilibili_result": result.get("bilibili_result"),
         "youtube_result": result.get("youtube_result"),
@@ -2475,15 +4542,34 @@ def _publisher_result_summary(task: PublicationTask) -> Dict[str, Any]:
 
 
 def _public_gemini_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    image_label = "DS 文本信息图" if result.get("input_source") == "ima_transcript" else "Gemini 横向信息图"
     return {
+        "provider": result.get("provider"),
+        "model": result.get("model"),
+        "input_source": result.get("input_source"),
         "initial_response_text": result.get("initial_response_text"),
         "response_text": result.get("response_text"),
         "final_response_text": result.get("final_response_text"),
         "turns": result.get("turns") or [],
         "file": result.get("file"),
-        "image": _public_artifact(result.get("image"), "Gemini 横向信息图") if result.get("image") else None,
+        "image": _public_artifact(result.get("image"), image_label) if result.get("image") else None,
         "target_url": result.get("target_url"),
         "page_url": result.get("page_url"),
+        "output_path": result.get("output_path"),
+        "completed_at": result.get("completed_at"),
+    }
+
+
+def _public_text_source_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "provider": result.get("provider"),
+        "model": result.get("model"),
+        "input_source": result.get("input_source"),
+        "initial_response_text": result.get("initial_response_text"),
+        "response_text": result.get("response_text"),
+        "transcript_chars": result.get("transcript_chars"),
+        "cache": result.get("cache"),
+        "image": _public_artifact(result.get("image"), "DS 文本信息图") if result.get("image") else None,
         "output_path": result.get("output_path"),
         "completed_at": result.get("completed_at"),
     }
@@ -2846,6 +4932,91 @@ def _draw_date_pill(draw: ImageDraw.ImageDraw, center_x: int, y: int, text: str,
     x = center_x - pill_w // 2
     draw.rounded_rectangle([x, y, x + pill_w, y + pill_h], radius=37, fill=(15, 23, 42, 210), outline=(255, 255, 255, 80), width=2)
     draw.text((x + 48, y + 14), text, font=font, fill=(255, 255, 255))
+
+
+def _infographic_bullets(text: str) -> List[str]:
+    candidates: List[str] = []
+    for raw in str(text or "").replace("\r", "\n").split("\n"):
+        clean = _clean_line(raw).strip("#*-•·、 ")
+        clean = re.sub(r"^\d+\s*[.、)]\s*", "", clean).strip()
+        if not clean or len(clean) < 8:
+            continue
+        if _is_cover_process_text(clean):
+            continue
+        if re.search(r"标题|时间戳|推荐截取|音频文件名|精华音频|音频片段|片段说明|约\d+分钟|Generated from transcript|Gemini upload", clean, flags=re.I):
+            continue
+        if len(clean) > 68:
+            clean = clean[:68]
+        candidates.append(clean)
+    if not candidates:
+        compact = _clean_line(text)
+        parts = [piece.strip() for piece in re.split(r"[。！？!?；;]", compact) if len(piece.strip()) >= 8]
+        candidates.extend(parts[:4])
+    return candidates[:4] or ["已根据 IMA 转录全文生成后续视频编排输入"]
+
+
+def _preview_caption_candidates(source_text: str, plan: Dict[str, Any]) -> List[str]:
+    captions: List[str] = []
+    for value in (
+        plan.get("subtitle"),
+        plan.get("cover_subtitle"),
+        plan.get("xiaojunjun_subtitle"),
+        plan.get("title"),
+    ):
+        for line in str(value or "").replace("\r", "\n").split("\n"):
+            clean = _clean_line(line)
+            if 6 <= len(clean) <= 72:
+                captions.append(clean)
+
+    for raw in re.split(r"[。！？!?；;\n]", str(source_text or "")):
+        clean = _clean_line(raw).strip("#*-•·、 ")
+        clean = re.sub(r"^\d+\s*[.、)]\s*", "", clean).strip()
+        if not clean or len(clean) < 8:
+            continue
+        if re.search(r"标题|时间戳|推荐截取|字段|JSON|封面|Prompt", clean, flags=re.I):
+            continue
+        captions.append(_clip_text(clean, 64))
+        if len(captions) >= 8:
+            break
+
+    seen = set()
+    unique = []
+    for caption in captions:
+        caption = _clean_line(caption)
+        if not caption or caption in seen:
+            continue
+        seen.add(caption)
+        unique.append(caption)
+    return unique[:6] or ["这是视频字幕预览位置，用于验证画面和字幕风格"]
+
+
+def _keyframe_milestones(audio: Dict[str, Any], plan: Dict[str, Any], *, frame_count: int = 3) -> List[Dict[str, Any]]:
+    plan_audio = plan.get("audio") if isinstance(plan.get("audio"), dict) else {}
+    duration = float(audio.get("duration_seconds") or 0)
+    start = _parse_seconds(plan_audio.get("start_seconds"), default=0.0) or 0.0
+    end = _parse_seconds(plan_audio.get("end_seconds"), default=None)
+    if end is None:
+        if duration and duration > start:
+            end = duration
+        else:
+            end = start + 120.0
+    end = max(start + 1.0, float(end))
+    if frame_count <= 1:
+        points = [start]
+    else:
+        span = end - start
+        ratios = [0.04, 0.5, 0.92][:frame_count]
+        points = [start + span * ratio for ratio in ratios]
+    return [{"seconds": round(point, 3), "label": _seconds_label(point)} for point in points]
+
+
+def _seconds_label(value: float) -> str:
+    total = max(0, int(round(float(value or 0))))
+    minutes, seconds = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
 
 
 def _wrap_text(draw: ImageDraw.ImageDraw, text: Any, font: ImageFont.ImageFont, max_width: int, *, max_lines: int = 4) -> List[str]:

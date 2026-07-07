@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
@@ -133,6 +134,20 @@ TASK_CHILD_COLUMNS = (
     PublicationTask.parent_task_id,
     PublicationTask.source_task_id,
 )
+TASK_CHILD_POLL_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.error_message,
+    PublicationTask.created_at,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
+    PublicationTask.feature,
+    PublicationTask.parent_task_id,
+    PublicationTask.source_task_id,
+)
 
 
 def _load_task(task_id, *columns):
@@ -144,7 +159,11 @@ def _load_task(task_id, *columns):
             continue
         seen.add(key)
         attrs.append(column)
-    return PublicationTask.query.options(load_only(*attrs)).get(task_id)
+    return (
+        PublicationTask.query.options(load_only(*attrs))
+        .filter(PublicationTask.id == task_id)
+        .one_or_none()
+    )
 
 TERMINAL_STATUSES = {"completed", "failed", "blocked_by_captcha", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
@@ -736,7 +755,7 @@ def _reusable_material_for_pdf(pdf, *, exclude_task_id=None):
                 PublicationTask.id,
                 PublicationTask.feature,
                 PublicationTask.status,
-                PublicationTask.result,
+                PublicationTask.final_script_chars,
                 PublicationTask.source_task_id,
                 PublicationTask.report_audio_pdf_attachment_id,
                 PublicationTask.created_at,
@@ -744,6 +763,7 @@ def _reusable_material_for_pdf(pdf, *, exclude_task_id=None):
             ))
             .filter(PublicationTask.feature.in_(MATERIAL_REUSE_FEATURES))
             .filter(PublicationTask.status == "completed")
+            .filter(PublicationTask.final_script_chars > 0)
             .filter(column == asset_id)
         )
         if exclude_task_id:
@@ -759,7 +779,8 @@ def _reusable_material_for_pdf(pdf, *, exclude_task_id=None):
         reverse=True,
     )
     for candidate in candidates:
-        structured = _valid_structured_result(candidate.result)
+        detail = _load_task(candidate.id, PublicationTask.result)
+        structured = _valid_structured_result(detail.result if detail else None)
         if structured:
             return {
                 "source": "reused_script_material",
@@ -803,7 +824,7 @@ def _reusable_audio_for_pdf(pdf, structured, *, exclude_task_id=None):
                 PublicationTask.id,
                 PublicationTask.feature,
                 PublicationTask.status,
-                PublicationTask.result,
+                PublicationTask.final_script_chars,
                 PublicationTask.source_task_id,
                 PublicationTask.report_audio_pdf_attachment_id,
                 PublicationTask.created_at,
@@ -811,6 +832,7 @@ def _reusable_audio_for_pdf(pdf, structured, *, exclude_task_id=None):
             ))
             .filter(PublicationTask.feature.in_(MATERIAL_REUSE_FEATURES))
             .filter(PublicationTask.status == "completed")
+            .filter(PublicationTask.final_script_chars > 0)
             .filter(column == asset_id)
         )
         if exclude_task_id:
@@ -826,7 +848,10 @@ def _reusable_audio_for_pdf(pdf, structured, *, exclude_task_id=None):
         reverse=True,
     )
     for candidate in candidates:
-        audio = _valid_reusable_audio(candidate, expected_script)
+        detail = _load_task(candidate.id, PublicationTask.result)
+        if not detail:
+            continue
+        audio = _valid_reusable_audio(detail, expected_script)
         if audio:
             return {
                 "source_task_id": candidate.id,
@@ -1423,6 +1448,13 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
         return existing
 
     video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+    vertical_scheme = str(
+        video_options.get("vertical_video_scheme")
+        or video_options.get("vertical_scheme")
+        or "scheme1"
+    ).strip().lower()
+    if vertical_scheme not in {"scheme1", "scheme2"}:
+        vertical_scheme = "scheme1"
     main_title = _publisher_main_title(structured, video_options)
     sub_title = _publisher_sub_title(structured, video_options)
     date_text = (
@@ -1432,6 +1464,31 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
     tag_text = str(video_options.get("tag_text") or "").strip() or "研报播客"
     audio_path = audio.get("wav_path") if isinstance(audio, dict) else None
     screenshot_path = pdf_screenshot.get("path") if isinstance(pdf_screenshot, dict) else None
+    vertical_subtitle_position = (
+        video_options.get("vertical_subtitle_position")
+        if isinstance(video_options.get("vertical_subtitle_position"), dict)
+        else ({"y_pct": 0.80} if vertical_scheme == "scheme2" else None)
+    )
+    vertical_subtitle_style = (
+        video_options.get("vertical_subtitle_style")
+        if isinstance(video_options.get("vertical_subtitle_style"), dict)
+        else (
+            {
+                "font_name": "Hiragino Sans GB",
+                "primary_color": "#FFF2D7",
+                "outline_color": "#07111F",
+                "back_color": "#000000",
+                "outline": 3,
+                "shadow": 1,
+                "margin_l": 72,
+                "margin_r": 72,
+                "font_size": 50,
+                "wrap_style": 0,
+            }
+            if vertical_scheme == "scheme2"
+            else None
+        )
+    )
 
     params = {
         "feature": "publisher",
@@ -1447,7 +1504,7 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             }
         ],
         "video": {
-            "enabled": True,
+            "enabled": _truthy(video_options.get("enabled", False)),
             "sub_burn_enabled": _publisher_sub_burn_enabled(video_options),
             "asr_model": str(video_options.get("asr_model") or "base"),
             "video_path": "",
@@ -1463,14 +1520,61 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "asr_model": str(video_options.get("asr_model") or "base"),
             "image_path": screenshot_path,
             "subtitles": [],
+            "scheme": vertical_scheme,
+            **({"subtitle_position": vertical_subtitle_position} if vertical_subtitle_position else {}),
+            **({"subtitle_style": vertical_subtitle_style} if vertical_subtitle_style else {}),
         },
         "vertical_video_2": {"enabled": False, "image_path": ""},
         "vertical_thumbnail": {
             "enabled": _truthy(video_options.get("vertical_enabled", False)),
+            "scheme": vertical_scheme,
             "main_title": main_title,
             "sub_title": sub_title,
             "date_text": date_text,
             "screenshot_path": screenshot_path,
+            "institution": _publisher_workbench_institution(structured, pdf, video_options),
+            "emotion": "bull",
+            "footer_text": str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
+            "image_transform": {
+                "anchor": "top-left",
+                "title_max_lines": 2,
+                "subtitle_max_lines": 1,
+                **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
+            },
+        },
+        "vertical_cover": {
+            "enabled": _truthy(video_options.get("vertical_enabled", False)) and vertical_scheme == "scheme2",
+            "scheme": vertical_scheme,
+            "format": "wx_cover",
+            "main_title": main_title,
+            "sub_title": sub_title,
+            "screenshot_path": screenshot_path,
+            "institution": _publisher_workbench_institution(structured, pdf, video_options),
+            "emotion": "bull",
+            "footer_text": str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
+            "image_transform": {
+                "anchor": "top-left",
+                "title_max_lines": 2,
+                "subtitle_max_lines": 1,
+                **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
+            },
+        },
+        "podcast_cover": {
+            "enabled": _truthy(video_options.get("vertical_enabled", False)) and vertical_scheme == "scheme2",
+            "scheme": vertical_scheme,
+            "format": "podcast",
+            "main_title": main_title,
+            "sub_title": sub_title,
+            "screenshot_path": screenshot_path,
+            "institution": _publisher_workbench_institution(structured, pdf, video_options),
+            "emotion": "bull",
+            "footer_text": str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
+            "image_transform": {
+                "anchor": "top-left",
+                "title_max_lines": 2,
+                "subtitle_max_lines": 1,
+                **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
+            },
         },
         "thumbnail": {
             "main_title": main_title,
@@ -1591,7 +1695,7 @@ def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
         parent = _load_task(parent_id, PublicationTask.status)
         if not parent or parent.status == "canceled":
             raise RuntimeError("父编排任务已取消")
-        child = _load_task(child_id, *TASK_CHILD_COLUMNS)
+        child = _load_task(child_id, *TASK_CHILD_POLL_COLUMNS)
         if not child:
             raise RuntimeError(f"子任务不存在: {child_id}")
         if child.current_step != last_step:
@@ -1601,15 +1705,20 @@ def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
             _emit(parent_id, f"{label}_{child.current_step}", mapped, f"{label}: {child.current_step}")
             _record_child(parent_id, label, child)
         if child.status in TERMINAL_STATUSES:
+            completed_child = _load_task(child_id, *TASK_CHILD_COLUMNS) or child
+            _record_child(parent_id, label, completed_child)
             _clear_waiting_child(parent_id, label)
-            return child
+            return completed_child
         celery_failure = _celery_child_failure_message(child)
         if celery_failure:
-            _mark_child_failed(child, celery_failure)
+            failed_child = _load_task(child_id, *TASK_STATE_COLUMNS) or child
+            _mark_child_failed(failed_child, celery_failure)
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_CHILD_COLUMNS)
-        if _is_doubao_child_label(label) and _mark_stale_doubao_child_if_needed(child):
+        if _is_doubao_child_label(label) and _is_stale_doubao_child(child):
+            stale_child = _load_task(child_id, *TASK_STATE_COLUMNS) or child
+            _mark_stale_doubao_child_if_needed(stale_child)
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_CHILD_COLUMNS)
@@ -1620,8 +1729,9 @@ def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
                 _record_child(parent_id, label, child)
                 last_step = None
         if time.monotonic() >= deadline:
-            _record_child(parent_id, label, child)
-            raise ChildTaskStillRunning(label, child.id, child.status or "", child.current_step or "")
+            waiting_child = _load_task(child_id, *TASK_CHILD_COLUMNS) or child
+            _record_child(parent_id, label, waiting_child)
+            raise ChildTaskStillRunning(label, _task_id(waiting_child) or child_id, _safe_task_attr(waiting_child, "status") or "", _safe_task_attr(waiting_child, "current_step") or "")
         release_db_session_quietly()
         sleep_seconds = min(poll_seconds, max(0.2, deadline - time.monotonic()))
         time.sleep(sleep_seconds)
@@ -1754,7 +1864,8 @@ def _record_child(parent_id, label, child):
         return
     result = dict(fresh.result or {})
     children = dict(result.get("children") or {})
-    children[label] = _task_public_summary(child)
+    previous = children.get(label) if isinstance(children.get(label), dict) else {}
+    children[label] = _merge_child_summary(previous, _task_public_summary(child) or {})
     result["children"] = children
     fresh.result = result
     flag_modified(fresh, "result")
@@ -1982,6 +2093,65 @@ def _publisher_date_text(created_at):
     return created_at.strftime("%b %Y") + " | 研报播客"
 
 
+def _publisher_workbench_institution(structured, pdf, video_options):
+    explicit = str(
+        (video_options or {}).get("institution")
+        or (video_options or {}).get("vertical_institution")
+        or ""
+    ).strip()
+    allowed = {"J.P. Morgan", "Goldman Sachs", "Morgan Stanley", "UBS", "Nomura", "BofA", "HSBC", "深度研报"}
+    if explicit in allowed:
+        return explicit
+
+    fields = [
+        explicit,
+        (pdf or {}).get("filename"),
+        (pdf or {}).get("topic_title"),
+        (structured or {}).get("cover_title"),
+        (structured or {}).get("title"),
+        (structured or {}).get("summary"),
+    ]
+    haystack = " ".join(str(item or "") for item in fields)
+    institution_aliases = [
+        ("Morgan Stanley", "Morgan Stanley"),
+        ("摩根士丹利", "Morgan Stanley"),
+        ("大摩", "Morgan Stanley"),
+        ("J.P. Morgan", "J.P. Morgan"),
+        ("JP Morgan", "J.P. Morgan"),
+        ("JPMorgan", "J.P. Morgan"),
+        ("摩根大通", "J.P. Morgan"),
+        ("小摩", "J.P. Morgan"),
+        ("Goldman Sachs", "Goldman Sachs"),
+        ("高盛", "Goldman Sachs"),
+        ("UBS", "UBS"),
+        ("瑞银", "UBS"),
+        ("Nomura", "Nomura"),
+        ("野村", "Nomura"),
+        ("BofA", "BofA"),
+        ("Bank of America", "BofA"),
+        ("美国银行", "BofA"),
+        ("美银", "BofA"),
+        ("HSBC", "HSBC"),
+        ("汇丰", "HSBC"),
+    ]
+    for alias, option in institution_aliases:
+        if re.search(re.escape(alias), haystack, flags=re.I):
+            return option
+    for alias, label in BANK_ALIASES:
+        if re.search(re.escape(alias), haystack, flags=re.I):
+            mapped = {
+                "大摩": "Morgan Stanley",
+                "摩根大通": "J.P. Morgan",
+                "高盛": "Goldman Sachs",
+                "瑞银": "UBS",
+                "野村": "Nomura",
+                "美银": "BofA",
+            }.get(label)
+            if mapped:
+                return mapped
+    return "深度研报"
+
+
 def _publisher_description(structured, pdf):
     title = str((structured or {}).get("title") or "").strip()
     summary = str((structured or {}).get("summary") or "").strip()
@@ -2169,6 +2339,8 @@ def _publisher_result_summary(publisher_task, pdf_screenshot):
         "video_path": video_path,
         "landscape_video_path": result.get("video_path"),
         "vertical_video_path": result.get("vertical_video_path"),
+        "vertical_cover_path": result.get("vertical_cover_path"),
+        "podcast_cover_path": result.get("podcast_cover_path"),
         "cover_path": result.get("cover_path"),
         "pdf_first_page_image": pdf_screenshot,
         "bilibili_result": result.get("bilibili_result"),
@@ -2556,6 +2728,14 @@ def _format_bytes(value):
 
 
 def _safe_task_attr(task, name, default=None):
+    if isinstance(task, dict):
+        return task.get(name, default)
+    try:
+        state = sqlalchemy_inspect(task)
+        if name in state.unloaded:
+            return default
+    except Exception:
+        pass
     try:
         return getattr(task, name, default)
     except Exception:
@@ -2688,6 +2868,15 @@ def _task_public_summary(task):
         "created_at": _isoformat_z(snapshot.get("created_at")),
         "completed_at": _isoformat_z(snapshot.get("completed_at")),
     }
+
+
+def _merge_child_summary(previous, summary):
+    merged = dict(previous or {})
+    merged.update(summary or {})
+    for key in ("metadata", "audio"):
+        if previous.get(key) and not merged.get(key):
+            merged[key] = previous.get(key)
+    return merged
 
 
 def _task_public_summary_by_id(task_id):

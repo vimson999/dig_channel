@@ -2,6 +2,7 @@ import sys
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -22,6 +23,50 @@ class CeleryMonitorWatchdogTest(unittest.TestCase):
             ("report_script_material_workflow",),
         )
         self.assertIn("report_script_material_workflow", celery_monitor.DEFAULT_WATCHDOG_SERVICES)
+
+    def test_platform_upload_service_tracks_upload_only_publisher_tasks(self):
+        row = SimpleNamespace(
+            feature="publisher",
+            current_step="upload_bilibili",
+            params={
+                "metadata": {"source": "mp3_video_workflow:bilibili_upload"},
+                "video": {"enabled": False, "media_type": "existing_video"},
+                "bilibili": {"enabled": True},
+            },
+        )
+
+        self.assertTrue(
+            celery_monitor._business_task_matches_service(
+                row,
+                "platform_upload",
+                celery_monitor.BUSINESS_TASK_FEATURES["platform_upload"],
+            )
+        )
+        self.assertFalse(
+            celery_monitor._business_task_matches_service(
+                row,
+                "render",
+                celery_monitor.BUSINESS_TASK_FEATURES["render"],
+            )
+        )
+
+    def test_platform_upload_stop_guard_blocks_processing_upload_task(self):
+        rows = [
+            SimpleNamespace(
+                id="upload-1",
+                status="processing",
+                current_step="upload_bilibili",
+                progress=10,
+                task_title="内资闭门会 | 测试",
+                updated_at=datetime.utcnow(),
+            )
+        ]
+
+        active = celery_monitor._active_non_interruptible_service_tasks("platform_upload", rows=rows)
+
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["id"], "upload-1")
+        self.assertEqual(active[0]["step"], "upload_bilibili")
 
     def _status(self, business_tasks):
         service = celery_monitor.SERVICES["report_audio_workflow"]
@@ -48,7 +93,7 @@ class CeleryMonitorWatchdogTest(unittest.TestCase):
             business_task_error=None,
         )
 
-    def test_recent_business_task_suppresses_consumer_warning(self):
+    def test_recent_business_task_keeps_consumer_warning(self):
         status = self._status([
             {
                 "id": "job-1",
@@ -59,8 +104,8 @@ class CeleryMonitorWatchdogTest(unittest.TestCase):
             }
         ])
 
-        self.assertIsNone(status["consumer_warning"])
-        self.assertIn("业务任务近期仍在推进", status["consumer_note"])
+        self.assertIn("Worker 在线但未领取积压任务", status["consumer_warning"])
+        self.assertIn("业务任务近期有更新", status["consumer_note"])
 
     def test_stale_or_pending_business_tasks_still_warn(self):
         old = datetime.utcnow() - timedelta(seconds=celery_monitor.BUSINESS_TASK_CONSUMER_GRACE_SECONDS_DEFAULT + 120)
@@ -179,7 +224,10 @@ class CeleryMonitorWatchdogTest(unittest.TestCase):
         ) as repair_processing, patch(
             "services.publisher_queue_repair.repair_stale_publication_tasks_once",
             return_value={"enabled": True, "requeued": 0, "items": []},
-        ) as repair_generic:
+        ) as repair_generic, patch(
+            "services.publisher_queue_repair.repair_stale_business_processing_tasks_once",
+            return_value={"enabled": True, "requeued": 0, "closed": 0, "items": []},
+        ):
             result = celery_monitor._watchdog_repair_stale_business_tasks({
                 "enabled": True,
                 "requeue_stale_tasks": True,

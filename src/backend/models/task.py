@@ -1,8 +1,10 @@
 from datetime import datetime
 import uuid
-from sqlalchemy import event
+from sqlalchemy import event, inspect as sqlalchemy_inspect
 
 from . import db
+
+_UNLOADED = object()
 
 
 def _compact_text(value, max_length=None):
@@ -48,6 +50,22 @@ def _boolish(value):
     if text in {"0", "false", "no", "off"}:
         return False
     return None
+
+
+def _script_chars_from_result(result):
+    structured = result.get('structured_result') if isinstance(result.get('structured_result'), dict) else {}
+    script = (
+        structured.get('final_script_for_tts')
+        or result.get('final_script_for_tts')
+        or _nested(result, 'script_material', 'final_script_for_tts')
+    )
+    text = str(script or "").strip()
+    if text:
+        return len(text)
+    try:
+        return max(0, int(_nested(result, 'script_material', 'chars') or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 class PublicationTask(db.Model):
@@ -112,6 +130,17 @@ class PublicationTask(db.Model):
     report_audio_video_message = db.Column(db.Text, nullable=True)
     report_audio_video_path = db.Column(db.String(600), nullable=True)
     report_audio_cover_path = db.Column(db.String(600), nullable=True)
+    final_script_chars = db.Column(db.Integer, nullable=False, default=0)
+
+    # Parent workflow hot-state projection. The full retry/children payload stays
+    # in result for audit/debug, while monitor and polling paths can read these
+    # columns without touching the large JSON document.
+    waiting_child_label = db.Column(db.String(80), nullable=True, index=True)
+    waiting_child_id = db.Column(db.String(36), nullable=True, index=True)
+    waiting_child_status = db.Column(db.String(40), nullable=True)
+    waiting_child_step = db.Column(db.String(80), nullable=True)
+    waiting_child_updated_at = db.Column(db.String(64), nullable=True)
+    retry_state_status = db.Column(db.String(40), nullable=True)
     
     # 时间戳
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -123,27 +152,48 @@ class PublicationTask(db.Model):
         self.sync_projection_fields()
 
     def sync_projection_fields(self):
-        params = self.params if isinstance(self.params, dict) else {}
-        result = self.result if isinstance(self.result, dict) else {}
+        params_value = _loaded_model_attr(self, 'params', _UNLOADED)
+        result_value = _loaded_model_attr(self, 'result', _UNLOADED)
+        params_loaded = params_value is not _UNLOADED
+        result_loaded = result_value is not _UNLOADED
+        if not params_loaded and not result_loaded:
+            return self
 
-        feature = _compact_text(params.get('feature'), 80)
-        self.feature = feature or 'publisher'
-        self.user_id = _compact_text(params.get('user_id'), 64)
-        self.parent_task_id = _compact_text(params.get('parent_task_id'), 36)
-        self.parent_feature = _compact_text(params.get('parent_feature'), 80)
+        params = params_value if isinstance(params_value, dict) else {}
+        result = result_value if isinstance(result_value, dict) else {}
 
-        zsxq_publish = params.get('zsxq_publish') if isinstance(params.get('zsxq_publish'), dict) else {}
-        self.source_task_id = _compact_text(
-            params.get('source_task_id')
-            or zsxq_publish.get('source_task_id')
-            or result.get('source_task_id'),
-            36,
+        if params_loaded:
+            feature = _compact_text(params.get('feature'), 80)
+            self.feature = feature or 'publisher'
+            self.user_id = _compact_text(params.get('user_id'), 64)
+            self.parent_task_id = _compact_text(params.get('parent_task_id'), 36)
+            self.parent_feature = _compact_text(params.get('parent_feature'), 80)
+
+            zsxq_publish = params.get('zsxq_publish') if isinstance(params.get('zsxq_publish'), dict) else {}
+            self.source_task_id = _compact_text(
+                params.get('source_task_id')
+                or zsxq_publish.get('source_task_id')
+                or (result.get('source_task_id') if result_loaded else None),
+                36,
+            )
+            self.source_feature = _compact_text(params.get('source_feature'), 80)
+        elif result_loaded and result.get('source_task_id'):
+            self.source_task_id = _compact_text(result.get('source_task_id'), 36)
+
+        if result_loaded:
+            self.task_video_path = _compact_text(result.get('video_path'), 600)
+
+        title = self._derive_task_title(params if params_loaded else {}, result if result_loaded else {})
+        if title or (params_loaded and result_loaded):
+            self.task_title = title
+
+        self._sync_report_audio_projection(
+            params if params_loaded else None,
+            result if result_loaded else None,
         )
-        self.source_feature = _compact_text(params.get('source_feature'), 80)
-        self.task_video_path = _compact_text(result.get('video_path'), 600)
-        self.task_title = self._derive_task_title(params, result)
-
-        self._sync_report_audio_projection(params, result)
+        if result_loaded:
+            self._sync_workflow_state_projection(result)
+        return self
 
     def _derive_task_title(self, params, result):
         candidates = [
@@ -179,7 +229,11 @@ class PublicationTask(db.Model):
                 return text
         return generic_fallback
 
-    def _sync_report_audio_projection(self, params, result):
+    def _sync_report_audio_projection(self, params=None, result=None):
+        params_loaded = params is not None
+        result_loaded = result is not None
+        params = params if isinstance(params, dict) else {}
+        result = result if isinstance(result, dict) else {}
         workflow = params.get('report_audio_workflow') if isinstance(params.get('report_audio_workflow'), dict) else {}
         if not workflow:
             workflow = (
@@ -187,40 +241,64 @@ class PublicationTask(db.Model):
                 if isinstance(params.get('report_script_material_workflow'), dict)
                 else {}
             )
-        request_pdf = workflow.get('pdf') if isinstance(workflow.get('pdf'), dict) else {}
-        result_pdf = result.get('pdf') if isinstance(result.get('pdf'), dict) else {}
-        structured = result.get('structured_result') if isinstance(result.get('structured_result'), dict) else {}
-        audio = result.get('audio') if isinstance(result.get('audio'), dict) else {}
-        video = result.get('video') if isinstance(result.get('video'), dict) else {}
+        if params_loaded:
+            request_pdf = workflow.get('pdf') if isinstance(workflow.get('pdf'), dict) else {}
+            self.report_audio_pdf_attachment_id = _compact_text(request_pdf.get('attachment_id'), 36)
+            self.report_audio_pdf_filename = _compact_text(request_pdf.get('filename'), 500)
+            self.report_audio_pdf_bytes = _compact_text(request_pdf.get('bytes'), 40)
+            self.report_audio_pdf_topic_title = _compact_text(request_pdf.get('topic_title'), 500)
+            self.report_audio_metadata_title = _compact_text(_nested(workflow, 'metadata', 'title'), 500)
+            self.report_audio_video_title = _compact_text(_nested(workflow, 'video', 'title'), 500)
 
-        self.report_audio_pdf_attachment_id = _compact_text(request_pdf.get('attachment_id'), 36)
-        self.report_audio_pdf_filename = _compact_text(request_pdf.get('filename'), 500)
-        self.report_audio_pdf_bytes = _compact_text(request_pdf.get('bytes'), 40)
-        self.report_audio_pdf_topic_title = _compact_text(request_pdf.get('topic_title'), 500)
-        self.report_audio_result_pdf_filename = _compact_text(result_pdf.get('filename'), 500)
-        self.report_audio_result_pdf_bytes = _compact_text(result_pdf.get('bytes'), 40)
-        self.report_audio_result_pdf_topic_title = _compact_text(result_pdf.get('topic_title'), 500)
-        self.report_audio_metadata_title = _compact_text(_nested(workflow, 'metadata', 'title'), 500)
-        self.report_audio_video_title = _compact_text(_nested(workflow, 'video', 'title'), 500)
-        self.report_audio_cover_title = _compact_text(structured.get('cover_title'), 500)
-        self.report_audio_cover_subtitle = _compact_text(
-            structured.get('cover_subtitle') or video.get('cover_subtitle'),
-            220,
+        if result_loaded:
+            result_pdf = result.get('pdf') if isinstance(result.get('pdf'), dict) else {}
+            structured = result.get('structured_result') if isinstance(result.get('structured_result'), dict) else {}
+            audio = result.get('audio') if isinstance(result.get('audio'), dict) else {}
+            video = result.get('video') if isinstance(result.get('video'), dict) else {}
+
+            self.report_audio_result_pdf_filename = _compact_text(result_pdf.get('filename'), 500)
+            self.report_audio_result_pdf_bytes = _compact_text(result_pdf.get('bytes'), 40)
+            self.report_audio_result_pdf_topic_title = _compact_text(result_pdf.get('topic_title'), 500)
+            self.report_audio_cover_title = _compact_text(structured.get('cover_title'), 500)
+            self.report_audio_cover_subtitle = _compact_text(
+                structured.get('cover_subtitle') or video.get('cover_subtitle'),
+                220,
+            )
+            self.report_audio_structured_title = _compact_text(structured.get('title'), 500)
+            self.report_audio_started_at = _compact_text(result.get('started_at'), 64)
+            self.report_audio_completed_at = _compact_text(result.get('completed_at'), 64)
+            self.report_audio_error = _compact_text(result.get('error'))
+            self.report_audio_output_path = _compact_text(result.get('output_path'), 600)
+            self.report_audio_wav_path = _compact_text(audio.get('wav_path'), 600)
+            self.report_audio_seconds = _compact_text(audio.get('seconds'), 40)
+            self.report_audio_audio_bytes = _compact_text(audio.get('bytes'), 40)
+            self.report_audio_video_enabled = _boolish(video.get('enabled'))
+            self.report_audio_video_status = _compact_text(video.get('status'), 80)
+            self.report_audio_video_publisher_task_id = _compact_text(video.get('publisher_task_id'), 36)
+            self.report_audio_video_message = _compact_text(video.get('message'))
+            self.report_audio_video_path = _compact_text(video.get('video_path'), 600)
+            self.report_audio_cover_path = _compact_text(video.get('cover_path'), 600)
+            self.final_script_chars = _script_chars_from_result(result)
+
+    def _sync_workflow_state_projection(self, result):
+        waiting_child = result.get('waiting_child') if isinstance(result.get('waiting_child'), dict) else {}
+        retry_state = result.get('retry_state') if isinstance(result.get('retry_state'), dict) else {}
+        latest_retry = None
+        for value in retry_state.values():
+            if isinstance(value, dict):
+                latest_retry = value
+        self.waiting_child_label = _compact_text(waiting_child.get('label'), 80)
+        self.waiting_child_id = _compact_text(
+            waiting_child.get('child_id') or waiting_child.get('task_id') or waiting_child.get('id'),
+            36,
         )
-        self.report_audio_structured_title = _compact_text(structured.get('title'), 500)
-        self.report_audio_started_at = _compact_text(result.get('started_at'), 64)
-        self.report_audio_completed_at = _compact_text(result.get('completed_at'), 64)
-        self.report_audio_error = _compact_text(result.get('error'))
-        self.report_audio_output_path = _compact_text(result.get('output_path'), 600)
-        self.report_audio_wav_path = _compact_text(audio.get('wav_path'), 600)
-        self.report_audio_seconds = _compact_text(audio.get('seconds'), 40)
-        self.report_audio_audio_bytes = _compact_text(audio.get('bytes'), 40)
-        self.report_audio_video_enabled = _boolish(video.get('enabled'))
-        self.report_audio_video_status = _compact_text(video.get('status'), 80)
-        self.report_audio_video_publisher_task_id = _compact_text(video.get('publisher_task_id'), 36)
-        self.report_audio_video_message = _compact_text(video.get('message'))
-        self.report_audio_video_path = _compact_text(video.get('video_path'), 600)
-        self.report_audio_cover_path = _compact_text(video.get('cover_path'), 600)
+        self.waiting_child_status = _compact_text(waiting_child.get('status'), 40)
+        self.waiting_child_step = _compact_text(waiting_child.get('step'), 80)
+        self.waiting_child_updated_at = _compact_text(waiting_child.get('updated_at'), 64)
+        self.retry_state_status = _compact_text(
+            latest_retry.get('status') if isinstance(latest_retry, dict) else None,
+            40,
+        )
 
     def to_dict(self):
         # Extract a human-readable title
@@ -273,6 +351,19 @@ class PublicationTask(db.Model):
             'updated_at': (self.updated_at.isoformat() + "Z") if self.updated_at else None,
             'completed_at': (self.completed_at.isoformat() + "Z") if self.completed_at else None
         }
+
+
+def _loaded_model_attr(record, name, default=None):
+    try:
+        state = sqlalchemy_inspect(record)
+        if name in state.unloaded:
+            return default
+    except Exception:
+        pass
+    try:
+        return getattr(record, name, default)
+    except Exception:
+        return default
 
 
 @event.listens_for(PublicationTask, "before_insert")

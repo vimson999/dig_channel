@@ -8,6 +8,7 @@ import json
 import datetime
 import subprocess
 import copy
+import re
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
@@ -78,9 +79,22 @@ class VideoEditorService:
             except: continue
         return srt_content
 
-    def _generate_ass(self, srt_content, alignment, margin_v, font_size, play_res_x, play_res_y):
+    def _ass_color(self, value, default):
+        """Return an ASS &HAABBGGRR color string from #RRGGBB or an ASS color."""
+        text = str(value or "").strip()
+        if re.match(r"^&H[0-9A-Fa-f]{8}$", text):
+            return text.upper()
+        match = re.match(r"^#?([0-9A-Fa-f]{6})$", text)
+        if not match:
+            return default
+        raw = match.group(1)
+        rr, gg, bb = raw[0:2], raw[2:4], raw[4:6]
+        return f"&H00{bb}{gg}{rr}".upper()
+
+    def _generate_ass(self, srt_content, alignment, margin_v, font_size, play_res_x, play_res_y, subtitle_style=None):
         """Convert SRT content to ASS with explicit PlayRes = video dimensions for exact pixel-level positioning."""
         import re
+        subtitle_style = subtitle_style if isinstance(subtitle_style, dict) else {}
 
         def srt_time_to_ass(t):
             # "HH:MM:SS,mmm" → "H:MM:SS.cc"
@@ -91,18 +105,46 @@ class VideoEditorService:
             cs = int(ms[:3]) // 10
             return f"{int(h)}:{int(m):02d}:{int(s):02d}.{cs:02d}"
 
+        font_name = str(subtitle_style.get("font_name") or "PingFang SC").replace(",", " ")
+        primary_color = self._ass_color(subtitle_style.get("primary_color"), "&H0000FFFF")
+        secondary_color = self._ass_color(subtitle_style.get("secondary_color"), "&H000000FF")
+        outline_color = self._ass_color(subtitle_style.get("outline_color"), "&H00000000")
+        back_color = self._ass_color(subtitle_style.get("back_color"), "&H00000000")
+        try:
+            outline = float(subtitle_style.get("outline", 2))
+        except (TypeError, ValueError):
+            outline = 2
+        try:
+            shadow = float(subtitle_style.get("shadow", 0))
+        except (TypeError, ValueError):
+            shadow = 0
+        try:
+            margin_l = int(subtitle_style.get("margin_l", 10))
+            margin_r = int(subtitle_style.get("margin_r", 10))
+        except (TypeError, ValueError):
+            margin_l = margin_r = 10
+        wrap_style = subtitle_style.get("wrap_style")
+        wrap_line = ""
+        if wrap_style is not None:
+            try:
+                wrap_line = f"WrapStyle: {int(wrap_style)}\n"
+            except (TypeError, ValueError):
+                wrap_line = ""
+
         header = (
             f"[Script Info]\n"
             f"ScriptType: v4.00+\n"
             f"PlayResX: {play_res_x}\n"
             f"PlayResY: {play_res_y}\n"
-            f"ScaledBorderAndShadow: yes\n\n"
+            f"ScaledBorderAndShadow: yes\n"
+            f"{wrap_line}"
+            f"\n"
             f"[V4+ Styles]\n"
             f"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
             f"Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
             f"Alignment, MarginL, MarginR, MarginV, Encoding\n"
-            f"Style: Default,PingFang SC,{font_size},&H0000FFFF,&H000000FF,&H00000000,&H00000000,"
-            f"-1,0,0,0,100,100,0,0,1,2,0,{alignment},10,10,{margin_v},1\n\n"
+            f"Style: Default,{font_name},{font_size},{primary_color},{secondary_color},{outline_color},{back_color},"
+            f"-1,0,0,0,100,100,0,0,1,{outline:g},{shadow:g},{alignment},{margin_l},{margin_r},{margin_v},1\n\n"
             f"[Events]\n"
             f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
         )
@@ -323,7 +365,7 @@ class VideoEditorService:
             logger.warning(f"⚠️ [FFPROBE] 无法读取媒体时长: {media_path} | {exc}")
             return 0
 
-    def _synthesize_ffmpeg_direct(self, image_file, audio_file, output_path, subtitles=None, cta_image_path=None, cta_pos=(0,0), is_vertical=False, audio_start=0, audio_duration=None, transform=None, margin_v_override=None, subtitle_position=None, subtitle_size='normal', export_params=None):
+    def _synthesize_ffmpeg_direct(self, image_file, audio_file, output_path, subtitles=None, cta_image_path=None, cta_pos=(0,0), is_vertical=False, audio_start=0, audio_duration=None, transform=None, margin_v_override=None, subtitle_position=None, subtitle_size='normal', subtitle_style=None, export_params=None):
         """High-performance synthesis using direct FFmpeg command with customizable export parameters."""
         import time
         s_t = time.time()
@@ -359,7 +401,20 @@ class VideoEditorService:
                     alignment, margin_v, font_size = self._compute_subtitle_params(
                         is_vertical, margin_v_override, subtitle_position, canvas_h=target_h, subtitle_size=subtitle_size
                     )
-                    ass_content = self._generate_ass(srt_content, alignment, margin_v, font_size, target_w, target_h)
+                    if isinstance(subtitle_style, dict) and subtitle_style.get("font_size"):
+                        try:
+                            font_size = max(16, int(subtitle_style.get("font_size")))
+                        except (TypeError, ValueError):
+                            pass
+                    ass_content = self._generate_ass(
+                        srt_content,
+                        alignment,
+                        margin_v,
+                        font_size,
+                        target_w,
+                        target_h,
+                        subtitle_style=subtitle_style,
+                    )
                     sub_path = os.path.join(self.upload_folder, f"temp_{uuid.uuid4().hex[:6]}.ass")
                     with open(sub_path, 'w', encoding='utf-8') as f:
                         f.write(ass_content)
@@ -457,7 +512,7 @@ class VideoEditorService:
         finally:
             if sub_path and os.path.exists(sub_path): os.remove(sub_path)
 
-    def process_vertical_video(self, image_file, audio_files, subtitles=None, output_filename=None, transform=None, margin_v_override=None, subtitle_position=None, subtitle_size='normal', export_params=None):
+    def process_vertical_video(self, image_file, audio_files, subtitles=None, output_filename=None, transform=None, margin_v_override=None, subtitle_position=None, subtitle_size='normal', subtitle_style=None, export_params=None, duration_limit=None):
         """Synthesize a 9:16 vertical video with correct sequential subtitles."""
         logger.info(f"🎥 [VIDEO_EDITOR] Starting Vertical Production: {os.path.basename(image_file)}")
         
@@ -477,6 +532,13 @@ class VideoEditorService:
             if not clips: raise ValueError("No valid audio clips.")
             
             final_audio = concatenate_audioclips(clips)
+            if duration_limit:
+                limit = max(0.1, float(duration_limit))
+                if getattr(final_audio, 'duration', 0) > limit:
+                    if hasattr(final_audio, 'subclipped'):
+                        final_audio = final_audio.subclipped(0, limit)
+                    else:
+                        final_audio = final_audio.subclip(0, limit)
             final_audio.write_audiofile(temp_audio, logger=None)
             for c in clips: c.close()
             final_audio.close()
@@ -492,6 +554,7 @@ class VideoEditorService:
                 margin_v_override=margin_v_override,
                 subtitle_position=subtitle_position,
                 subtitle_size=subtitle_size,
+                subtitle_style=subtitle_style,
                 export_params=export_params
             )
         finally:

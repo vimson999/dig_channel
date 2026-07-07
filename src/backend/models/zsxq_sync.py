@@ -1,7 +1,7 @@
 from datetime import datetime
 import uuid
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect as sqlalchemy_inspect
 
 from . import db
 
@@ -49,7 +49,10 @@ class ZsxqSyncRun(db.Model):
         self.sync_projection_fields()
 
     def sync_projection_fields(self):
-        result = self.result if isinstance(self.result, dict) else {}
+        result = _loaded_model_attr(self, "result")
+        if result is None:
+            return self
+        result = result if isinstance(result, dict) else {}
         partial = result.get("partial") if isinstance(result.get("partial"), dict) else {}
         meta = result.get("system_sync") if isinstance(result.get("system_sync"), dict) else {}
 
@@ -111,6 +114,8 @@ class ZsxqTopic(db.Model):
     __tablename__ = "zsxq_topics"
     __table_args__ = (
         db.UniqueConstraint("group_id", "tab_id", "topic_id", name="uq_zsxq_topics_group_tab_topic"),
+        db.Index("ix_zsxq_topics_group_tab_create_synced_desc", "group_id", "tab_id", db.text("create_time DESC"), db.text("last_synced_at DESC")),
+        db.Index("ix_zsxq_topics_group_create_synced_desc", "group_id", db.text("create_time DESC"), db.text("last_synced_at DESC")),
     )
 
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -123,6 +128,13 @@ class ZsxqTopic(db.Model):
     title = db.Column(db.String(500), nullable=True)
     author_name = db.Column(db.String(255), nullable=True)
     content = db.Column(db.Text, nullable=True)
+    topic_type = db.Column(db.String(32), nullable=True, index=True)
+    question_text = db.Column(db.Text, nullable=True)
+    answer_text = db.Column(db.Text, nullable=True)
+    article_title = db.Column(db.String(500), nullable=True)
+    article_excerpt = db.Column(db.Text, nullable=True)
+    files_count = db.Column(db.Integer, nullable=False, default=0)
+    images_count = db.Column(db.Integer, nullable=False, default=0)
     create_time = db.Column(db.String(64), nullable=True, index=True)
     raw_json_path = db.Column(db.String(600), nullable=True)
     raw_payload = db.Column(db.JSON, default=dict)
@@ -130,6 +142,51 @@ class ZsxqTopic(db.Model):
     last_sync_run_id = db.Column(db.String(36), nullable=True, index=True)
     first_synced_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     last_synced_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sync_projection_fields()
+
+    def sync_projection_fields(self):
+        payload = _loaded_model_attr(self, "raw_payload")
+        if payload is None:
+            return self
+        payload = payload if isinstance(payload, dict) else {}
+        question = payload.get("question") if isinstance(payload.get("question"), dict) else {}
+        answer = payload.get("answer") if isinstance(payload.get("answer"), dict) else {}
+        talk = payload.get("talk") if isinstance(payload.get("talk"), dict) else {}
+        article = talk.get("article") if isinstance(talk.get("article"), dict) else payload.get("article")
+        article = article if isinstance(article, dict) else {}
+
+        question_text = _normalize_topic_text(question.get("text"))
+        answer_text = _normalize_topic_text(answer.get("text"))
+        article_content = _normalize_topic_text(article.get("article_content"))
+        article_title = _text(article.get("title"), 500)
+        talk_text = _normalize_topic_text(talk.get("text"))
+
+        if question_text or answer_text:
+            self.topic_type = "question_answer"
+        elif article:
+            self.topic_type = "article"
+        else:
+            self.topic_type = "talk"
+
+        self.question_text = question_text or None
+        self.answer_text = answer_text or None
+        self.article_title = article_title
+        self.article_excerpt = _text(article_content or article_title, 1000)
+        if question_text and answer_text:
+            self.content = f"提问：{question_text}\n\n回答：{answer_text}"
+        elif question_text or answer_text:
+            self.content = question_text or answer_text
+        elif talk_text:
+            self.content = talk_text
+        elif article_content or article_title:
+            self.content = article_content or article_title
+
+        self.files_count = len(_topic_files(payload))
+        self.images_count = len(_topic_images(payload))
+        return self
 
     def to_dict(self):
         return {
@@ -143,6 +200,13 @@ class ZsxqTopic(db.Model):
             "title": self.title,
             "author_name": self.author_name,
             "content": self.content,
+            "topic_type": self.topic_type,
+            "question_text": self.question_text,
+            "answer_text": self.answer_text,
+            "article_title": self.article_title,
+            "article_excerpt": self.article_excerpt,
+            "files_count": self.files_count or 0,
+            "images_count": self.images_count or 0,
             "create_time": self.create_time,
             "raw_json_path": self.raw_json_path,
             "first_sync_run_id": self.first_sync_run_id,
@@ -251,6 +315,66 @@ def _attachment_file_ext(*values):
     return None
 
 
+def _normalize_topic_text(value):
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    lines = [" ".join(line.split()) for line in text.split("\n")]
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _topic_files(payload):
+    if not isinstance(payload, dict):
+        return []
+    talk = payload.get("talk") if isinstance(payload.get("talk"), dict) else {}
+    article = payload.get("article") if isinstance(payload.get("article"), dict) else {}
+    talk_article = talk.get("article") if isinstance(talk.get("article"), dict) else {}
+    for value in (
+        payload.get("files"),
+        talk.get("files"),
+        article.get("files"),
+        talk_article.get("files"),
+    ):
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _topic_images(payload):
+    if not isinstance(payload, dict):
+        return []
+    talk = payload.get("talk") if isinstance(payload.get("talk"), dict) else {}
+    article = payload.get("article") if isinstance(payload.get("article"), dict) else {}
+    talk_article = talk.get("article") if isinstance(talk.get("article"), dict) else {}
+    question = payload.get("question") if isinstance(payload.get("question"), dict) else {}
+    answer = payload.get("answer") if isinstance(payload.get("answer"), dict) else {}
+    images = []
+    for value in (
+        payload.get("images"),
+        talk.get("images"),
+        article.get("images"),
+        talk_article.get("images"),
+        question.get("images"),
+        answer.get("images"),
+    ):
+        if isinstance(value, list):
+            images.extend(value)
+    return images
+
+
+def _loaded_model_attr(record, name, default=None):
+    try:
+        state = sqlalchemy_inspect(record)
+        if name in state.unloaded:
+            return default
+    except Exception:
+        pass
+    try:
+        return getattr(record, name, default)
+    except Exception:
+        return default
+
+
 def _text(value, max_length):
     text = str(value or "").strip()
     if not text:
@@ -287,6 +411,12 @@ def _bool_or_none(value):
 @event.listens_for(ZsxqSyncRun, "before_insert")
 @event.listens_for(ZsxqSyncRun, "before_update")
 def _sync_zsxq_run_projection_fields(_mapper, _connection, target):
+    target.sync_projection_fields()
+
+
+@event.listens_for(ZsxqTopic, "before_insert")
+@event.listens_for(ZsxqTopic, "before_update")
+def _sync_zsxq_topic_projection_fields(_mapper, _connection, target):
     target.sync_projection_fields()
 
 

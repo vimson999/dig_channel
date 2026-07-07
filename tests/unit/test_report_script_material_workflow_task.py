@@ -27,11 +27,11 @@ class ReportScriptMaterialWorkflowTaskTest(unittest.TestCase):
         db.init_app(self.app)
         self.ctx = self.app.app_context()
         self.ctx.push()
-        db.create_all()
+        PublicationTask.__table__.create(bind=db.engine)
 
     def tearDown(self):
         db.session.remove()
-        db.drop_all()
+        PublicationTask.__table__.drop(bind=db.engine)
         self.ctx.pop()
 
     def test_process_job_reuses_completed_report_audio_material_for_same_pdf(self):
@@ -106,6 +106,16 @@ class ReportScriptMaterialWorkflowTaskTest(unittest.TestCase):
             self.assertEqual(task.result["script_material"]["source"], "reused_completed_material")
             self.assertEqual(task.result["script_material"]["source_task_id"], existing.id)
             self.assertEqual(task.result["output_path"], output_path)
+
+    def test_script_material_normalizer_uses_short_timeout(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(report_script_material_workflow._normalizer_timeout_seconds(), 20)
+
+        with patch.dict(os.environ, {"REPORT_SCRIPT_MATERIAL_NORMALIZER_TIMEOUT_SECONDS": "7"}):
+            self.assertEqual(report_script_material_workflow._normalizer_timeout_seconds(), 7)
+
+        with patch.dict(os.environ, {"REPORT_SCRIPT_MATERIAL_NORMALIZER_TIMEOUT_SECONDS": "600"}):
+            self.assertEqual(report_script_material_workflow._normalizer_timeout_seconds(), 120)
 
 
 if __name__ == "__main__":

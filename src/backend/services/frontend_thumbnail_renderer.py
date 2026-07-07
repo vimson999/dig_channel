@@ -3,7 +3,8 @@ import mimetypes
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 
 class FrontendThumbnailRenderError(RuntimeError):
@@ -76,6 +77,79 @@ class FrontendThumbnailRenderer:
         output.write_bytes(base64.b64decode(match.group(1)))
         return str(output)
 
+    def render_workbench_thumbnail(
+        self,
+        *,
+        output_path: str,
+        format_name: str = "vertical",
+        main_title: str,
+        sub_title: str = "",
+        footer_text: str = "听见资本",
+        institution: str = "深度研报",
+        emotion: str = "bull",
+        image_path: Optional[str] = None,
+        image_offset_x: float = 0,
+        image_offset_y: float = 0,
+        image_scale: float = 1,
+        image_anchor: str = "",
+        title_max_lines: Optional[int] = None,
+        title_min_size: Optional[int] = None,
+        subtitle_max_lines: Optional[int] = None,
+        subtitle_min_size: Optional[int] = None,
+        show_guides: bool = False,
+        quality: float = 0.95,
+        expected_size: Optional[Tuple[int, int]] = None,
+    ) -> str:
+        """Render a cover/background with thumbnail-workbench.html's canvas logic."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:  # pragma: no cover - depends on runtime deps
+            raise FrontendThumbnailRenderError("缺少 playwright 依赖，无法使用封面工具台渲染器") from exc
+
+        output = Path(output_path).expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+
+        payload = {
+            "format": format_name or "vertical",
+            "showGuides": bool(show_guides),
+            "inst": institution or "深度研报",
+            "mainTitle": str(main_title or ""),
+            "subTitle": str(sub_title or ""),
+            "footerText": str(footer_text or "听见资本"),
+            "emotion": emotion if emotion in {"pro", "macro", "bull", "bear"} else "bull",
+            "imageDataUrl": self._image_data_url(image_path) if image_path else "",
+            "imageOffsetX": image_offset_x or 0,
+            "imageOffsetY": image_offset_y or 0,
+            "imageScale": image_scale or 1,
+            "imageAnchor": image_anchor or "",
+            "titleMaxLines": title_max_lines,
+            "titleMinSize": title_min_size,
+            "subtitleMaxLines": subtitle_max_lines,
+            "subtitleMinSize": subtitle_min_size,
+            "mimeType": "image/jpeg",
+            "quality": max(0.1, min(1.0, float(quality or 0.95))),
+        }
+
+        timeout_ms = int(os.getenv("REPORT_COVER_RENDER_TIMEOUT_MS", "30000"))
+        with sync_playwright() as playwright:
+            browser = self._launch_browser(playwright)
+            context = None
+            try:
+                context = browser.new_context(
+                    viewport={"width": 1440, "height": 1000},
+                    device_scale_factor=1,
+                )
+                context.set_default_timeout(timeout_ms)
+                context.route("**/*", _route_local_render_request)
+                data_url = self._render_workbench_with_context(context, payload)
+            finally:
+                if context is not None:
+                    context.close()
+                browser.close()
+
+        self._write_data_url(data_url, output, expected_size=expected_size)
+        return str(output)
+
     def _launch_browser(self, playwright):
         kwargs: Dict[str, Any] = {"headless": True}
         chrome_path = (
@@ -126,6 +200,55 @@ class FrontendThumbnailRenderer:
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         return f"data:{mime};base64,{encoded}"
 
+    def _render_workbench_with_context(self, context, payload: Dict[str, Any]) -> str:
+        page = context.new_page()
+        try:
+            last_error: Optional[Exception] = None
+            for url in self._frontend_page_urls("thumbnail-workbench.html"):
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=int(os.getenv("REPORT_COVER_PAGE_TIMEOUT_MS", "25000")))
+                    page.wait_for_function("() => typeof window.renderWorkflowThumbnail === 'function'")
+                    result = page.evaluate("(payload) => window.renderWorkflowThumbnail(payload)", payload)
+                    return result.get("dataUrl") if isinstance(result, dict) else ""
+                except Exception as exc:
+                    last_error = exc
+            raise FrontendThumbnailRenderError(f"无法调用封面工具台页面: {last_error}")
+        finally:
+            page.close()
+
+    def _frontend_page_urls(self, page_name: str) -> List[str]:
+        urls: List[str] = []
+        local_path = self.project_root / "src" / "frontend" / page_name
+        if local_path.exists():
+            urls.append(local_path.resolve().as_uri())
+        base_url = (
+            os.getenv("REPORT_COVER_FRONTEND_BASE_URL")
+            or os.getenv("MP3_VIDEO_FRONTEND_BASE_URL")
+            or os.getenv("FRONTEND_BASE_URL")
+            or "http://localhost:8888"
+        ).strip()
+        if base_url and base_url.lower() not in {"file", "file://"}:
+            urls.append(f"{base_url.rstrip('/')}/{page_name.lstrip('/')}")
+        return urls
+
+    def _write_data_url(self, data_url: str, output: Path, *, expected_size: Optional[Tuple[int, int]] = None) -> None:
+        match = re.match(r"^data:image/(?:jpeg|jpg|png);base64,(.+)$", data_url or "")
+        if not match:
+            raise FrontendThumbnailRenderError("封面工具台未返回有效图片")
+        output.write_bytes(base64.b64decode(match.group(1)))
+        if expected_size:
+            try:
+                from PIL import Image
+
+                with Image.open(output) as image:
+                    size = image.size
+            except Exception as exc:
+                raise FrontendThumbnailRenderError(f"封面工具台输出无法读取: {output}") from exc
+            if size != expected_size:
+                raise FrontendThumbnailRenderError(
+                    f"封面工具台输出尺寸异常: {size[0]}x{size[1]}，期望 {expected_size[0]}x{expected_size[1]}"
+                )
+
     def _html_shell(self) -> str:
         return """<!doctype html>
 <html>
@@ -166,3 +289,16 @@ class FrontendThumbnailRenderer:
 
 
 frontend_thumbnail_renderer = FrontendThumbnailRenderer()
+
+
+def _route_local_render_request(route):
+    url = route.request.url
+    parsed = urlparse(url)
+    if parsed.scheme in {"http", "https"} and parsed.hostname not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        route.abort()
+        return
+    route.continue_()

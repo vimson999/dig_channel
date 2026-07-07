@@ -10,7 +10,7 @@ Worker 在线但未领取积压任务，消费连接可能卡住；建议重启�
 
 守护进程还会修复一种更隐蔽的业务卡死：数据库里的业务任务仍是 `pending`，但原 `celery_task_id` 在 worker `active/reserved/scheduled` 和 Redis 队列中都不可见。此时它会重投同一个业务任务 ID，并在 `result.queue_repair` 记录旧/新 Celery ID。
 
-守护进程还会收口另一类历史脏状态：`publisher` 视频子任务仍是 `pending/processing`，但父编排任务已经 `completed/failed/canceled/blocked_by_captcha`。这种子任务不会被重投，而是自动标记为 `canceled`，并在 `result.orphan_child_cleanup` 记录父任务状态和旧 Celery ID。
+守护进程还会收口另一类历史脏状态：`publisher` 视频生成子任务仍是 `pending/processing`，但父编排任务已经 `completed/failed/canceled/blocked_by_captcha`。这种子任务不会被重投，而是自动标记为 `canceled`，并在 `result.orphan_child_cleanup` 记录父任务状态和旧 Celery ID。父任务完成后由用户手动触发的上传型 publisher 子任务除外，例如 MP3 详情页的 B站后投上传任务。
 
 ## 配置
 
@@ -90,4 +90,4 @@ runtime/celery/watchdog_state.json
 
 默认不会新建业务任务，只会重投同一个 `PublicationTask.id`。
 
-`publisher` 视频任务的边界不同：watchdog 不会全局重投历史 `publisher` 任务，避免意外拉起旧视频；只会自动收口父编排已经终止的 publisher 子任务。
+`publisher` 视频任务的边界不同：watchdog 不会全局重投历史 `publisher` 任务，避免意外拉起旧视频；只会自动收口父编排已经终止的生成型 publisher 子任务。父编排完成后的手动上传型 publisher 子任务不按父终态取消。

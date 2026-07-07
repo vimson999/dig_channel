@@ -4,6 +4,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from sqlalchemy.orm import load_only, selectinload
+
 backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
@@ -13,6 +15,7 @@ from models import db
 from models.report_video import (
     ReportVideoAudio,
     ReportVideoOutput,
+    ReportVideoRenderPreview,
     ReportVideoReport,
     ReportVideoTask,
 )
@@ -22,7 +25,8 @@ from services.report_video_ai_service import (
     generate_topic_clusters,
     generate_topic_video_script,
 )
-from services.report_video_render_service import render_report_video, render_task_video
+from services.report_video_render_service import render_report_video, render_task_keyframes, render_task_preview_clip, render_task_video
+from services.report_video_remotion_service import render_task_video_with_remotion
 from services.report_video_service import PROJECT_ROOT, parse_pdf_file, report_dir
 from services.report_video_auto_service import (
     auto_scan_preview,
@@ -41,8 +45,208 @@ REPORT_VIDEO_TASK_FAILURE_STATUS = {
     "tasks.report_video.generate_topic_cards_task": "topic_cards_failed",
     "tasks.report_video.generate_topic_clusters_task": "topic_failed",
     "tasks.report_video.generate_topic_video_script_task": "topic_script_failed",
+    "tasks.report_video.generate_render_preview_task": "preview_failed",
     "tasks.report_video.generate_videos_task": "video_failed",
+    "tasks.report_video.generate_remotion_videos_task": "video_failed",
 }
+REPORT_VIDEO_TASK_BASE_COLUMNS = (
+    ReportVideoTask.id,
+    ReportVideoTask.task_name,
+    ReportVideoTask.video_type,
+    ReportVideoTask.default_segment_count,
+    ReportVideoTask.output_ratios,
+    ReportVideoTask.style,
+    ReportVideoTask.background_music_path,
+    ReportVideoTask.generate_subtitles,
+    ReportVideoTask.status,
+    ReportVideoTask.error_message,
+    ReportVideoTask.created_at,
+    ReportVideoTask.updated_at,
+)
+REPORT_VIDEO_TASK_RESULT_COLUMNS = REPORT_VIDEO_TASK_BASE_COLUMNS + (ReportVideoTask.result,)
+REPORT_VIDEO_REPORT_BASE_COLUMNS = (
+    ReportVideoReport.id,
+    ReportVideoReport.task_id,
+    ReportVideoReport.report_code,
+    ReportVideoReport.file_name,
+    ReportVideoReport.file_path,
+    ReportVideoReport.page_count,
+    ReportVideoReport.raw_text_path,
+    ReportVideoReport.cleaned_text_path,
+    ReportVideoReport.raw_text_chars,
+    ReportVideoReport.cleaned_text_chars,
+    ReportVideoReport.is_scanned,
+    ReportVideoReport.parse_status,
+    ReportVideoReport.ai_status,
+    ReportVideoReport.error_message,
+    ReportVideoReport.created_at,
+    ReportVideoReport.updated_at,
+)
+REPORT_VIDEO_REPORT_RAW_COLUMNS = REPORT_VIDEO_REPORT_BASE_COLUMNS + (ReportVideoReport.raw_meta,)
+
+
+def _load_report_video_task(
+    task_id,
+    *,
+    include_result=False,
+    include_reports=False,
+    include_report_raw=False,
+    include_audios=False,
+    include_outputs=False,
+    include_previews=False,
+):
+    columns = REPORT_VIDEO_TASK_RESULT_COLUMNS if include_result else REPORT_VIDEO_TASK_BASE_COLUMNS
+    options = [load_only(*columns)]
+    if include_reports:
+        report_columns = REPORT_VIDEO_REPORT_RAW_COLUMNS if include_report_raw else REPORT_VIDEO_REPORT_BASE_COLUMNS
+        options.append(selectinload(ReportVideoTask.reports).load_only(*report_columns))
+    if include_audios:
+        options.append(selectinload(ReportVideoTask.audios))
+    if include_outputs:
+        options.append(selectinload(ReportVideoTask.outputs))
+    if include_previews:
+        options.append(selectinload(ReportVideoTask.render_previews))
+    return (
+        ReportVideoTask.query
+        .options(*options)
+        .filter(ReportVideoTask.id == str(task_id))
+        .first()
+    )
+
+
+def _reset_db_session(reason=None):
+    try:
+        db.session.rollback()
+    except Exception as exc:
+        logger.warning(
+            "[REPORT_VIDEO] db session rollback skipped | reason=%s error=%s",
+            reason or "-",
+            exc,
+        )
+    try:
+        db.session.remove()
+    except Exception as exc:
+        logger.warning(
+            "[REPORT_VIDEO] db session remove skipped | reason=%s error=%s",
+            reason or "-",
+            exc,
+        )
+
+
+def _persist_video_output_after_render(task_id, report_id, result, reason):
+    """Write video output after a long ffmpeg run with a fresh DB connection."""
+    last_exc = None
+    for attempt in range(2):
+        try:
+            _reset_db_session(f"{reason}_before_persist_attempt_{attempt + 1}")
+            query = ReportVideoOutput.query.filter(
+                ReportVideoOutput.task_id == task_id,
+                ReportVideoOutput.ratio == result["ratio"],
+                ReportVideoOutput.file_path == result["file_path"],
+            )
+            if report_id is None:
+                query = query.filter(ReportVideoOutput.report_id.is_(None))
+            else:
+                query = query.filter(ReportVideoOutput.report_id == report_id)
+            output = query.first()
+            if output is None:
+                output = ReportVideoOutput(task_id=task_id, report_id=report_id)
+                db.session.add(output)
+            output.ratio = result["ratio"]
+            output.video_type = result["video_type"]
+            output.duration_sec = result["duration_sec"]
+            output.file_path = result["file_path"]
+            output.subtitle_path = result.get("subtitle_path")
+            output.status = "completed"
+            output.error_message = None
+            output.updated_at = datetime.utcnow()
+            db.session.flush()
+            data = output.to_dict()
+            db.session.commit()
+            return data
+        except Exception as exc:
+            last_exc = exc
+            _reset_db_session(f"{reason}_persist_failed_attempt_{attempt + 1}")
+            if attempt == 0:
+                logger.warning(
+                    "[REPORT_VIDEO_RENDER] output persist retry | task_id=%s report_id=%s ratio=%s error=%s",
+                    task_id,
+                    report_id,
+                    result.get("ratio"),
+                    exc,
+                )
+                continue
+            raise
+    raise last_exc
+
+
+def _latest_render_preview(task, preview_type, ratio):
+    previews = list(getattr(task, "render_previews", None) or [])
+    candidates = [
+        preview for preview in previews
+        if preview.preview_type == preview_type and preview.ratio == ratio
+    ]
+    return sorted(candidates, key=lambda item: item.created_at or datetime.min, reverse=True)[0] if candidates else None
+
+
+def _missing_render_preview_approvals(task, ratios):
+    missing = []
+    for ratio in ratios or []:
+        keyframes = _latest_render_preview(task, "keyframes", ratio)
+        preview_clip = _latest_render_preview(task, "preview_clip", ratio)
+        if not keyframes or keyframes.status != "approved" or not keyframes.approved_at:
+            missing.append(f"{ratio} 关键帧")
+        if not preview_clip or preview_clip.status != "approved" or not preview_clip.approved_at:
+            missing.append(f"{ratio} 里程碑样片组")
+    return missing
+
+
+def _upsert_render_preview(task_id, preview_type, ratio, values=None):
+    preview = (
+        ReportVideoRenderPreview.query
+        .filter_by(task_id=task_id, preview_type=preview_type, ratio=ratio)
+        .order_by(ReportVideoRenderPreview.created_at.desc())
+        .first()
+    )
+    if preview is None or preview.status in {"approved", "rejected"}:
+        preview = ReportVideoRenderPreview(
+            task_id=task_id,
+            preview_type=preview_type,
+            ratio=ratio,
+            status="pending",
+            created_at=datetime.utcnow(),
+        )
+        db.session.add(preview)
+    for key, value in (values or {}).items():
+        setattr(preview, key, value)
+    preview.updated_at = datetime.utcnow()
+    return preview
+
+
+def _persist_render_preview_result(task_id, preview_type, ratio, result):
+    _reset_db_session(f"render_preview_{preview_type}_{ratio}_before_persist")
+    preview = _upsert_render_preview(
+        task_id,
+        preview_type,
+        ratio,
+        {
+            "status": "completed",
+            "duration_sec": result.get("duration_sec"),
+            "file_path": result.get("file_path"),
+            "file_paths": result.get("file_paths") or [],
+            "segment_ids": result.get("segment_ids") or [],
+            "renderer_version": result.get("renderer_version"),
+            "meta": result.get("meta") or {},
+            "approved_at": None,
+            "rejected_at": None,
+            "reject_reason": None,
+            "error_message": None,
+        },
+    )
+    db.session.flush()
+    data = preview.to_dict()
+    db.session.commit()
+    return data
 
 
 class ReportVideoFailureTask(celery_app.Task):
@@ -176,7 +380,7 @@ def _mark_audio_timeline_failed(audio_id, message):
 def _mark_report_video_task_failed(task_id, message, status):
     if not task_id:
         return {"entity_type": "task", "entity_id": None}
-    task = ReportVideoTask.query.get(str(task_id))
+    task = _load_report_video_task(task_id, include_result=str(status or "").startswith("topic"))
     if not task:
         return {"entity_type": "task", "entity_id": str(task_id)}
 
@@ -349,7 +553,7 @@ def generate_ai_scripts_task(self, task_id, segment_count=4):
 
     app = create_app()
     with app.app_context():
-        task = ReportVideoTask.query.get(task_id)
+        task = _load_report_video_task(task_id, include_reports=True)
         if not task:
             logger.error("[REPORT_VIDEO_AI] task not found: %s", task_id)
             return {"status": "missing", "task_id": task_id}
@@ -390,7 +594,7 @@ def generate_ai_scripts_task(self, task_id, segment_count=4):
                         })
                         db.session.commit()
 
-            task = ReportVideoTask.query.get(task_id)
+            task = _load_report_video_task(task_id)
             task.status = "script_ready" if generated else task.status
             task.updated_at = datetime.utcnow()
             db.session.commit()
@@ -398,7 +602,7 @@ def generate_ai_scripts_task(self, task_id, segment_count=4):
             return {"status": task.status, "task_id": task_id, "generated": generated, "failed": failed}
         except Exception:
             db.session.rollback()
-            task = ReportVideoTask.query.get(task_id)
+            task = _load_report_video_task(task_id)
             if task:
                 task.status = "ai_failed"
                 task.error_message = "AI 文案生成任务失败"
@@ -414,7 +618,7 @@ def generate_topic_cards_task(self, task_id):
 
     app = create_app()
     with app.app_context():
-        task = ReportVideoTask.query.get(task_id)
+        task = _load_report_video_task(task_id, include_result=True, include_reports=True)
         if not task:
             logger.error("[REPORT_VIDEO_TOPIC_CARDS] task not found: %s", task_id)
             return {"status": "missing", "task_id": task_id}
@@ -438,7 +642,7 @@ def generate_topic_cards_task(self, task_id):
                     db.session.commit()
                 except Exception as exc:
                     db.session.rollback()
-                    task = ReportVideoTask.query.get(task_id)
+                    task = _load_report_video_task(task_id, include_result=True)
                     failed.append({
                         "report_id": report.id,
                         "file_name": report.file_name,
@@ -447,7 +651,7 @@ def generate_topic_cards_task(self, task_id):
                     _touch_topic_planning(task, report_cards=generated, card_errors=failed, status="cards_generating")
                     db.session.commit()
 
-            task = ReportVideoTask.query.get(task_id)
+            task = _load_report_video_task(task_id, include_result=True)
             task.status = "topic_cards_ready" if generated else "topic_cards_failed"
             _touch_topic_planning(
                 task,
@@ -461,7 +665,7 @@ def generate_topic_cards_task(self, task_id):
             return {"status": task.status, "task_id": task_id, "cards": generated, "failed": failed}
         except Exception:
             db.session.rollback()
-            task = ReportVideoTask.query.get(task_id)
+            task = _load_report_video_task(task_id, include_result=True)
             if task:
                 task.status = "topic_cards_failed"
                 task.error_message = "主题摘要卡生成任务失败"
@@ -477,7 +681,7 @@ def generate_topic_clusters_task(self, task_id):
 
     app = create_app()
     with app.app_context():
-        task = ReportVideoTask.query.get(task_id)
+        task = _load_report_video_task(task_id, include_result=True, include_reports=True)
         if not task:
             logger.error("[REPORT_VIDEO_TOPIC_CLUSTER] task not found: %s", task_id)
             return {"status": "missing", "task_id": task_id}
@@ -499,7 +703,7 @@ def generate_topic_clusters_task(self, task_id):
             db.session.commit()
 
             clustered = generate_topic_clusters(task, report_cards)
-            task = ReportVideoTask.query.get(task_id)
+            task = _load_report_video_task(task_id, include_result=True)
             task.status = "topic_ready"
             planning = _touch_topic_planning(
                 task,
@@ -522,7 +726,7 @@ def generate_topic_clusters_task(self, task_id):
             }
         except Exception:
             db.session.rollback()
-            task = ReportVideoTask.query.get(task_id)
+            task = _load_report_video_task(task_id, include_result=True)
             if task:
                 task.status = "topic_failed"
                 task.error_message = "主题聚类任务失败"
@@ -538,7 +742,7 @@ def generate_topic_video_script_task(self, task_id, topic_id):
 
     app = create_app()
     with app.app_context():
-        task = ReportVideoTask.query.get(task_id)
+        task = _load_report_video_task(task_id, include_result=True, include_reports=True)
         if not task:
             logger.error("[REPORT_VIDEO_TOPIC_SCRIPT] task not found: %s", task_id)
             return {"status": "missing", "task_id": task_id}
@@ -558,7 +762,7 @@ def generate_topic_video_script_task(self, task_id, topic_id):
             db.session.commit()
 
             script = generate_topic_video_script(task, topic, report_cards)
-            task = ReportVideoTask.query.get(task_id)
+            task = _load_report_video_task(task_id, include_result=True)
             scripts = dict((_topic_planning_result(task).get("topic_scripts") or {}))
             scripts[topic_id] = script
             task.status = "topic_script_ready"
@@ -574,7 +778,7 @@ def generate_topic_video_script_task(self, task_id, topic_id):
             return {"status": task.status, "task_id": task_id, "topic_id": topic_id, "script": script}
         except Exception:
             db.session.rollback()
-            task = ReportVideoTask.query.get(task_id)
+            task = _load_report_video_task(task_id, include_result=True)
             if task:
                 task.status = "topic_script_failed"
                 task.error_message = "主题脚本生成任务失败"
@@ -769,18 +973,129 @@ def process_audio_timeline_task(self, audio_id, options=None):
             raise
 
 
-@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.generate_videos_task")
-def generate_videos_task(self, task_id, ratios=None, report_id=None):
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.generate_render_preview_task")
+def generate_render_preview_task(self, task_id, preview_type, ratios=None, duration_sec=10, selected_milestones=None):
     from app import create_app
 
     app = create_app()
     with app.app_context():
-        task = ReportVideoTask.query.get(task_id)
+        task = _load_report_video_task(
+            task_id,
+            include_result=True,
+            include_reports=True,
+            include_report_raw=True,
+            include_audios=True,
+            include_outputs=True,
+            include_previews=True,
+        )
+        if not task:
+            logger.error("[REPORT_VIDEO_PREVIEW] task not found: %s", task_id)
+            return {"status": "missing", "task_id": task_id}
+
+        preview_type = "preview_clip" if preview_type in {"clip", "preview_clip", "key_render"} else "keyframes"
+        ratios = ratios or task.output_ratios or ["16:9"]
+        generated = []
+        failed = []
+        task.status = "preview_generating" if preview_type == "preview_clip" else "keyframes_generating"
+        task.error_message = None
+        task.updated_at = datetime.utcnow()
+        for ratio in ratios:
+            _upsert_render_preview(
+                task.id,
+                preview_type,
+                ratio,
+                {
+                    "status": "processing",
+                    "celery_task_id": self.request.id,
+                    "error_message": None,
+                    "approved_at": None,
+                    "rejected_at": None,
+                    "reject_reason": None,
+                },
+            )
+        db.session.commit()
+
+        for ratio in ratios:
+            try:
+                render_task = _load_report_video_task(
+                    task_id,
+                    include_result=True,
+                    include_reports=True,
+                    include_report_raw=True,
+                    include_audios=True,
+                    include_outputs=True,
+                    include_previews=True,
+                )
+                if preview_type == "preview_clip":
+                    result = render_task_preview_clip(
+                        render_task,
+                        ratio,
+                        duration_sec=duration_sec,
+                        selected_milestones=selected_milestones,
+                    )
+                else:
+                    result = render_task_keyframes(render_task, ratio)
+                generated.append(_persist_render_preview_result(task_id, preview_type, ratio, result))
+            except Exception as exc:
+                _reset_db_session("generate_render_preview_ratio_failed")
+                failed.append({"ratio": ratio, "preview_type": preview_type, "error": str(exc)})
+                preview = _upsert_render_preview(
+                    task_id,
+                    preview_type,
+                    ratio,
+                    {
+                        "status": "failed",
+                        "celery_task_id": self.request.id,
+                        "error_message": str(exc),
+                    },
+                )
+                db.session.commit()
+                logger.exception("[REPORT_VIDEO_PREVIEW] failed | task_id=%s type=%s ratio=%s", task_id, preview_type, ratio)
+
+        task = _load_report_video_task(task_id, include_result=True)
+        if task:
+            if generated and not failed:
+                task.status = "preview_ready" if preview_type == "preview_clip" else "keyframes_ready"
+                task.error_message = None
+            elif generated:
+                task.status = "preview_partial"
+                task.error_message = "; ".join(item["error"] for item in failed[:3])
+            else:
+                task.status = "preview_failed"
+                task.error_message = "; ".join(item["error"] for item in failed[:3])
+            task.updated_at = datetime.utcnow()
+            db.session.commit()
+        return {
+            "status": task.status if task else "missing",
+            "task_id": task_id,
+            "preview_type": preview_type,
+            "generated": generated,
+            "failed": failed,
+        }
+
+
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.generate_videos_task")
+def generate_videos_task(self, task_id, ratios=None, report_id=None, force_preview_gate=False):
+    from app import create_app
+
+    app = create_app()
+    with app.app_context():
+        task = _load_report_video_task(task_id, include_result=True, include_reports=True, include_previews=True)
         if not task:
             logger.error("[REPORT_VIDEO_RENDER] task not found: %s", task_id)
             return {"status": "missing", "task_id": task_id}
 
         ratios = ratios or task.output_ratios or ["16:9"]
+        missing_gate = _missing_render_preview_approvals(task, ratios)
+        if missing_gate and not force_preview_gate:
+            message = "请先确认预览质量闸门：" + "、".join(missing_gate)
+            task.status = "waiting_video"
+            task.error_message = message
+            task.updated_at = datetime.utcnow()
+            db.session.commit()
+            logger.warning("[REPORT_VIDEO_RENDER] blocked by preview gate | task_id=%s missing=%s", task_id, missing_gate)
+            return {"status": "blocked_by_preview_gate", "task_id": task_id, "missing": missing_gate}
+        task_name = task.task_name
         generated = []
         failed = []
         try:
@@ -799,59 +1114,58 @@ def generate_videos_task(self, task_id, ratios=None, report_id=None):
                     )
                 for ratio in ratios:
                     try:
-                        result = render_task_video(task, ratio)
-                        output = ReportVideoOutput(
-                            task_id=task.id,
-                            report_id=None,
-                            ratio=result["ratio"],
-                            video_type=result["video_type"],
-                            duration_sec=result["duration_sec"],
-                            file_path=result["file_path"],
-                            status="completed",
+                        render_task = _load_report_video_task(
+                            task_id,
+                            include_result=True,
+                            include_reports=True,
+                            include_report_raw=True,
+                            include_audios=True,
+                            include_outputs=True,
                         )
-                        db.session.add(output)
-                        db.session.flush()
-                        generated.append(output.to_dict())
-                        db.session.commit()
+                        result = render_task_video(render_task, ratio)
+                        generated.append(_persist_video_output_after_render(
+                            task_id,
+                            None,
+                            result,
+                            "generate_task_video",
+                        ))
                     except Exception as exc:
-                        db.session.rollback()
+                        _reset_db_session("generate_task_video_ratio_failed")
                         failed.append({
                             "report_id": None,
-                            "file_name": task.task_name,
+                            "file_name": task_name,
                             "ratio": ratio,
                             "error": str(exc),
                         })
             else:
-                reports = [report for report in task.reports if report.analysis and report.segments]
+                reports = [
+                    {"id": report.id, "file_name": report.file_name}
+                    for report in task.reports
+                    if report.analysis and report.segments
+                ]
                 if report_id:
-                    reports = [report for report in reports if report.id == report_id]
-                for report in reports:
+                    reports = [report for report in reports if report["id"] == report_id]
+                for report_item in reports:
                     for ratio in ratios:
                         try:
+                            report = ReportVideoReport.query.get(report_item["id"])
                             result = render_report_video(report, ratio)
-                            output = ReportVideoOutput(
-                                task_id=task.id,
-                                report_id=report.id,
-                                ratio=result["ratio"],
-                                video_type=result["video_type"],
-                                duration_sec=result["duration_sec"],
-                                file_path=result["file_path"],
-                                status="completed",
-                            )
-                            db.session.add(output)
-                            db.session.flush()
-                            generated.append(output.to_dict())
-                            db.session.commit()
+                            generated.append(_persist_video_output_after_render(
+                                task_id,
+                                report_item["id"],
+                                result,
+                                "generate_report_video",
+                            ))
                         except Exception as exc:
-                            db.session.rollback()
+                            _reset_db_session("generate_report_video_ratio_failed")
                             failed.append({
-                                "report_id": report.id,
-                                "file_name": report.file_name,
+                                "report_id": report_item["id"],
+                                "file_name": report_item["file_name"],
                                 "ratio": ratio,
                                 "error": str(exc),
                             })
 
-            task = ReportVideoTask.query.get(task_id)
+            task = _load_report_video_task(task_id, include_result=True)
             task.status = "completed" if generated and not failed else ("video_failed" if failed and not generated else "video_partial")
             task.error_message = None if generated else "; ".join(item["error"] for item in failed[:3])
             task.updated_at = datetime.utcnow()
@@ -865,14 +1179,97 @@ def generate_videos_task(self, task_id, ratios=None, report_id=None):
                 "subtitle_calibration": (task.result or {}).get("subtitle_calibration"),
             }
         except Exception:
-            db.session.rollback()
-            task = ReportVideoTask.query.get(task_id)
+            _reset_db_session("generate_videos_task_failed")
+            task = _load_report_video_task(task_id)
             if task:
                 task.status = "video_failed"
                 task.error_message = "视频生成任务失败"
                 task.updated_at = datetime.utcnow()
                 db.session.commit()
             logger.exception("[REPORT_VIDEO_RENDER] failed | task_id=%s", task_id)
+            raise
+
+
+@celery_app.task(bind=True, base=ReportVideoFailureTask, name="tasks.report_video.generate_remotion_videos_task")
+def generate_remotion_videos_task(self, task_id, ratios=None):
+    from app import create_app
+
+    app = create_app()
+    with app.app_context():
+        task = _load_report_video_task(
+            task_id,
+            include_result=True,
+            include_reports=True,
+            include_report_raw=True,
+            include_audios=True,
+            include_outputs=True,
+        )
+        if not task:
+            logger.error("[REPORT_VIDEO_REMOTION] task not found: %s", task_id)
+            return {"status": "missing", "task_id": task_id}
+
+        ratios = ratios or task.output_ratios or ["16:9"]
+        generated = []
+        failed = []
+        try:
+            task.status = "remotion_generating"
+            task.error_message = None
+            task.updated_at = datetime.utcnow()
+            db.session.commit()
+
+            for ratio in ratios:
+                try:
+                    render_task = _load_report_video_task(
+                        task_id,
+                        include_result=True,
+                        include_reports=True,
+                        include_report_raw=True,
+                        include_audios=True,
+                        include_outputs=True,
+                    )
+                    result = render_task_video_with_remotion(render_task, ratio)
+                    generated.append(_persist_video_output_after_render(
+                        task_id,
+                        None,
+                        result,
+                        "generate_remotion_task_video",
+                    ))
+                except Exception as exc:
+                    _reset_db_session("generate_remotion_task_video_ratio_failed")
+                    failed.append({
+                        "report_id": None,
+                        "file_name": task.task_name,
+                        "ratio": ratio,
+                        "error": str(exc),
+                    })
+                    logger.exception("[REPORT_VIDEO_REMOTION] ratio failed | task_id=%s ratio=%s", task_id, ratio)
+
+            task = _load_report_video_task(task_id, include_result=True)
+            task.status = "completed" if generated and not failed else ("video_failed" if failed and not generated else "video_partial")
+            task.error_message = None if generated else "; ".join(item["error"] for item in failed[:3])
+            task.updated_at = datetime.utcnow()
+            db.session.commit()
+            logger.info(
+                "[REPORT_VIDEO_REMOTION] complete | task_id=%s generated=%s failed=%s",
+                task_id,
+                len(generated),
+                len(failed),
+            )
+            return {
+                "status": task.status,
+                "task_id": task_id,
+                "generated": generated,
+                "failed": failed,
+            }
+        except Exception:
+            _reset_db_session("generate_remotion_videos_task_failed")
+            task = _load_report_video_task(task_id)
+            if task:
+                task.status = "video_failed"
+                task.error_message = "Remotion 视频生成任务失败"
+                task.updated_at = datetime.utcnow()
+                db.session.commit()
+            logger.exception("[REPORT_VIDEO_REMOTION] failed | task_id=%s", task_id)
             raise
 
 
@@ -888,6 +1285,8 @@ def auto_process_report_task(self, report_id):
             return {"status": "missing", "report_id": report_id}
 
         task = report.task
+        task_id_value = task.id
+        report_file_name = report.file_name
         generated = []
         failed = []
         try:
@@ -927,7 +1326,7 @@ def auto_process_report_task(self, report_id):
             db.session.commit()
 
             if parse_status != "parsed":
-                task = ReportVideoTask.query.get(task.id)
+                task = _load_report_video_task(task.id)
                 task.status = "parse_failed"
                 task.error_message = error_message or "PDF 未解析出有效正文，自动制作已停止"
                 task.updated_at = datetime.utcnow()
@@ -939,7 +1338,7 @@ def auto_process_report_task(self, report_id):
                     "error": task.error_message,
                 }
 
-            task = ReportVideoTask.query.get(task.id)
+            task = _load_report_video_task(task.id)
             task.status = "ai_generating"
             report = ReportVideoReport.query.get(report.id)
             report.ai_status = "ai_generating"
@@ -948,39 +1347,32 @@ def auto_process_report_task(self, report_id):
             payload = generate_report_ai_content(report, int(task.default_segment_count or 4))
             db.session.commit()
 
-            task = ReportVideoTask.query.get(task.id)
+            task = _load_report_video_task(task.id)
             task.status = "video_generating"
             task.updated_at = datetime.utcnow()
             db.session.commit()
 
             ratios = task.output_ratios or ["16:9"]
-            report = ReportVideoReport.query.get(report.id)
             for ratio in ratios:
                 try:
-                    result = render_report_video(report, ratio)
-                    output = ReportVideoOutput(
-                        task_id=task.id,
-                        report_id=report.id,
-                        ratio=result["ratio"],
-                        video_type=result["video_type"],
-                        duration_sec=result["duration_sec"],
-                        file_path=result["file_path"],
-                        status="completed",
-                    )
-                    db.session.add(output)
-                    db.session.flush()
-                    generated.append(output.to_dict())
-                    db.session.commit()
+                    report_for_render = ReportVideoReport.query.get(report_id)
+                    result = render_report_video(report_for_render, ratio)
+                    generated.append(_persist_video_output_after_render(
+                        task_id_value,
+                        report_id,
+                        result,
+                        "auto_process_report_video",
+                    ))
                 except Exception as exc:
-                    db.session.rollback()
+                    _reset_db_session("auto_process_report_video_ratio_failed")
                     failed.append({
-                        "report_id": report.id,
-                        "file_name": report.file_name,
+                        "report_id": report_id,
+                        "file_name": report_file_name,
                         "ratio": ratio,
                         "error": str(exc),
                     })
 
-            task = ReportVideoTask.query.get(task.id)
+            task = _load_report_video_task(task_id_value, include_result=True)
             task.status = "completed" if generated and not failed else ("video_failed" if failed and not generated else "video_partial")
             task.error_message = None if generated else "; ".join(item["error"] for item in failed[:3])
             result = dict(task.result or {})
@@ -995,10 +1387,10 @@ def auto_process_report_task(self, report_id):
             task.result = result
             task.updated_at = datetime.utcnow()
             db.session.commit()
-            logger.info("[REPORT_VIDEO_AUTO_PROCESS] complete | task_id=%s generated=%s failed=%s", task.id, len(generated), len(failed))
-            return {"status": task.status, "task_id": task.id, "report_id": report.id, "generated": generated, "failed": failed}
+            logger.info("[REPORT_VIDEO_AUTO_PROCESS] complete | task_id=%s generated=%s failed=%s", task_id_value, len(generated), len(failed))
+            return {"status": task.status, "task_id": task_id_value, "report_id": report_id, "generated": generated, "failed": failed}
         except Exception as exc:
-            db.session.rollback()
+            _reset_db_session("auto_process_report_failed")
             report = ReportVideoReport.query.get(report_id)
             if report:
                 report.error_message = str(exc)

@@ -1,3 +1,4 @@
+import os
 import sys
 import unittest
 from datetime import datetime, timedelta
@@ -14,6 +15,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from models import db  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
+from api.mp3_video_workflow import _cancel_bilibili_upload_child  # noqa: E402
 from services import publisher_queue_repair  # noqa: E402
 
 
@@ -41,11 +43,11 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         db.init_app(self.app)
         self.ctx = self.app.app_context()
         self.ctx.push()
-        db.create_all()
+        PublicationTask.__table__.create(bind=db.engine)
 
     def tearDown(self):
         db.session.remove()
-        db.drop_all()
+        PublicationTask.__table__.drop(bind=db.engine)
         self.ctx.pop()
 
     def _task(self, *, feature="content_audio_clean", step="init", minutes_old=10):
@@ -143,7 +145,11 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         task = self._task()
         dummy = DummyCeleryTask()
 
-        with patch.object(publisher_queue_repair, "_celery_message_visible", return_value=(False, True)), \
+        with patch.dict(os.environ, {
+            "BUSINESS_TASK_QUEUE_REPAIR_ENABLED": "1",
+            "BUSINESS_TASK_QUEUE_REPAIR_LIMIT": "3",
+        }), \
+             patch.object(publisher_queue_repair, "_celery_message_visible", return_value=(False, True)), \
              patch.object(publisher_queue_repair, "_repair_target_for_feature", return_value=dummy):
             updated, requeued = publisher_queue_repair.maybe_requeue_stale_publication_task(task)
 
@@ -167,6 +173,25 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
 
         self.assertFalse(requeued)
         self.assertEqual(updated.celery_task_id, "old-celery-id")
+        self.assertEqual(dummy.calls, [])
+
+    def test_closes_pending_task_when_repair_limit_is_reached_and_message_missing(self):
+        task = self._task(step="deferred_capacity")
+        task.result = {"queue_repair": {"count": 3}}
+        task.updated_at = datetime.utcnow() - timedelta(minutes=10)
+        db.session.commit()
+        dummy = DummyCeleryTask()
+
+        with patch.object(publisher_queue_repair, "_celery_message_visible", return_value=(False, True)), \
+             patch.object(publisher_queue_repair, "_repair_target_for_feature", return_value=dummy):
+            updated, requeued = publisher_queue_repair.maybe_requeue_stale_publication_task(task)
+
+        self.assertFalse(requeued)
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.current_step, "failed")
+        self.assertIn("修复已达到上限", updated.error_message)
+        self.assertEqual(updated.result["queue_repair"]["reason"], "queue_repair_limit_reached")
+        self.assertEqual(updated.result["error_type"], "queue_repair_limit_reached")
         self.assertEqual(dummy.calls, [])
 
     def test_requeues_deferred_publish_task_after_message_vanishes(self):
@@ -202,6 +227,36 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(task.current_step, "queued")
         self.assertEqual(task.celery_task_id, "new-celery-id")
         self.assertIsNone(task.error_message)
+
+    def test_requeues_post_completion_bilibili_upload_to_platform_upload_queue(self):
+        _, child = self._parent_with_publisher_child(parent_status="completed")
+        child.params = {
+            **child.params,
+            "video": {
+                "enabled": False,
+                "media_type": "existing_video",
+                "video_path": "/tmp/done.mp4",
+            },
+            "bilibili": {"enabled": True, "title": "内资闭门会 | 测试 | 2026-07-07"},
+            "metadata": {
+                "source": "mp3_video_workflow:bilibili_upload",
+                "parent_task_id": child.parent_task_id,
+            },
+        }
+        child.updated_at = datetime.utcnow() - timedelta(minutes=18)
+        db.session.commit()
+        dummy = DummyCeleryTask()
+
+        with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
+             patch.object(publisher_queue_repair, "_message_visible_in_queue", return_value=(False, True)) as queue_scan, \
+             patch("tasks.publisher.run_bilibili_upload_only", dummy):
+            updated, requeued = publisher_queue_repair.maybe_requeue_stale_publisher_child(child)
+
+        self.assertTrue(requeued)
+        self.assertEqual(updated.celery_task_id, "new-celery-id")
+        self.assertEqual(dummy.calls[0]["queue"], "platform_upload")
+        self.assertEqual(queue_scan.call_args.kwargs["queue"], "platform_upload")
+        self.assertEqual(updated.result["queue_repair"]["queue"], "platform_upload")
 
     def test_requeues_deferred_publisher_task_when_message_is_unacked_but_not_active(self):
         task = self._pending_publisher_task(step="deferred_capacity")
@@ -252,6 +307,91 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(cleanup["parent_task_id"], parent.id)
         self.assertEqual(cleanup["parent_status"], "canceled")
 
+    def test_keeps_post_completion_bilibili_upload_child_when_parent_completed(self):
+        _, child = self._parent_with_publisher_child(parent_status="completed")
+        child.params = {
+            **child.params,
+            "video": {
+                "enabled": False,
+                "media_type": "existing_video",
+                "video_path": "/tmp/done.mp4",
+            },
+            "bilibili": {"enabled": True, "title": "内资闭门会 | 测试 | 2026-07-07"},
+            "metadata": {
+                "source": "mp3_video_workflow:bilibili_upload",
+                "parent_task_id": child.parent_task_id,
+            },
+        }
+        db.session.commit()
+
+        with patch.object(publisher_queue_repair, "_revoke_celery_task") as revoke:
+            result = publisher_queue_repair.cleanup_publisher_children_of_terminal_parents_once()
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["cleaned"], 0)
+        revoke.assert_not_called()
+        db.session.refresh(child)
+        self.assertEqual(child.status, "pending")
+        self.assertEqual(child.current_step, "queued")
+
+    def test_cancel_bilibili_upload_child_marks_pending_task_canceled(self):
+        _, child = self._parent_with_publisher_child(parent_status="completed")
+        child.params = {
+            **child.params,
+            "video": {
+                "enabled": False,
+                "media_type": "existing_video",
+                "video_path": "/tmp/done.mp4",
+            },
+            "bilibili": {"enabled": True, "title": "内资闭门会 | 测试 | 2026-07-07"},
+            "metadata": {
+                "source": "mp3_video_workflow:bilibili_upload",
+                "parent_task_id": child.parent_task_id,
+            },
+        }
+        db.session.commit()
+
+        with patch("api.mp3_video_workflow.celery_app.control.revoke") as revoke:
+            ok, message = _cancel_bilibili_upload_child(child)
+
+        self.assertTrue(ok)
+        self.assertIn("已取消", message)
+        revoke.assert_called_once_with("old-render-celery-id", terminate=False)
+        db.session.refresh(child)
+        self.assertEqual(child.status, "canceled")
+        self.assertEqual(child.current_step, "canceled")
+        self.assertIsNone(child.error_message)
+        self.assertEqual(child.result["bilibili_upload_cancel_reason"], "user_canceled_queued_upload")
+
+    def test_cancel_bilibili_upload_child_rejects_processing_task(self):
+        _, child = self._parent_with_publisher_child(parent_status="completed")
+        child.status = "processing"
+        child.current_step = "upload_bilibili"
+        child.params = {
+            **child.params,
+            "video": {
+                "enabled": False,
+                "media_type": "existing_video",
+                "video_path": "/tmp/done.mp4",
+            },
+            "bilibili": {"enabled": True, "title": "内资闭门会 | 测试 | 2026-07-07"},
+            "metadata": {
+                "source": "mp3_video_workflow:bilibili_upload",
+                "parent_task_id": child.parent_task_id,
+            },
+        }
+        db.session.commit()
+
+        with patch("api.mp3_video_workflow.celery_app.control.revoke") as revoke:
+            ok, message = _cancel_bilibili_upload_child(child)
+
+        self.assertFalse(ok)
+        self.assertIn("已开始运行", message)
+        revoke.assert_not_called()
+        db.session.refresh(child)
+        self.assertEqual(child.status, "processing")
+        self.assertEqual(child.current_step, "upload_bilibili")
+
     def test_keeps_publisher_child_when_parent_workflow_is_processing(self):
         _, child = self._parent_with_publisher_child(parent_status="processing")
 
@@ -283,6 +423,67 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         repair = updated.result["processing_orphan_repair"]
         self.assertEqual(repair["previous_celery_id"], "old-render-celery-id")
         self.assertEqual(repair["previous_step"], "v_synthesis")
+
+    def test_closes_stale_bilibili_upload_processing_task_on_platform_upload_queue(self):
+        task = self._processing_publisher_task(step="upload_bilibili")
+        task.params = {
+            "feature": "publisher",
+            "video": {
+                "enabled": False,
+                "media_type": "existing_video",
+                "video_path": "/tmp/done.mp4",
+            },
+            "bilibili": {"enabled": True, "title": "内资闭门会 | 测试 | 2026-07-07"},
+            "metadata": {
+                "source": "mp3_video_workflow:bilibili_upload",
+                "parent_task_id": "parent-1",
+            },
+        }
+        task.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+
+        with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
+             patch.object(publisher_queue_repair, "_revoke_celery_task"), \
+             patch.object(publisher_queue_repair, "_message_visible_in_queue") as queue_scan:
+            updated, repaired, action = publisher_queue_repair.maybe_repair_stale_publisher_processing_task(task)
+
+        self.assertTrue(repaired)
+        self.assertEqual(action, "closed")
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.current_step, "orphaned_processing")
+        self.assertEqual(updated.result["processing_orphan_repair"]["queue"], "platform_upload")
+        queue_scan.assert_not_called()
+
+    def test_closes_upload_processing_task_after_short_upload_grace(self):
+        task = self._processing_publisher_task(step="upload_bilibili")
+        task.params = {
+            "feature": "publisher",
+            "video": {
+                "enabled": False,
+                "media_type": "existing_video",
+                "video_path": "/tmp/done.mp4",
+            },
+            "bilibili": {"enabled": True, "title": "内资闭门会 | 测试 | 2026-07-07"},
+            "metadata": {
+                "source": "mp3_video_workflow:bilibili_upload",
+                "parent_task_id": "parent-1",
+            },
+        }
+        task.updated_at = datetime.utcnow() - timedelta(minutes=2)
+        db.session.commit()
+
+        with patch.dict(os.environ, {
+            "PUBLISHER_PROCESSING_ORPHAN_GRACE_SECONDS": "600",
+            "PUBLISHER_UPLOAD_PROCESSING_ORPHAN_GRACE_SECONDS": "90",
+        }), \
+             patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
+             patch.object(publisher_queue_repair, "_revoke_celery_task"):
+            updated, repaired, action = publisher_queue_repair.maybe_repair_stale_publisher_processing_task(task)
+
+        self.assertTrue(repaired)
+        self.assertEqual(action, "closed")
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.result["processing_orphan_repair"]["reason"], "upload_step_not_requeued")
 
     def test_does_not_repair_processing_publisher_task_when_celery_message_is_visible(self):
         task = self._processing_publisher_task(step="v_synthesis")

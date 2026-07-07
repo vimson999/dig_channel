@@ -101,7 +101,7 @@ class BiliUploader:
             meta["no_disturbance"] = 0
         return {key: value for key, value in meta.items() if value is not None}
 
-    def _fetch_default_upower_level_id(self) -> str:
+    def _fetch_charging_pay_info(self) -> Dict[str, Any]:
         cookies = {
             "SESSDATA": self.sessdata,
             "bili_jct": self.bili_jct,
@@ -130,17 +130,79 @@ class BiliUploader:
         info = ((body.get("data") or {}).get("charging_pay_info") or {})
         if not self._truthy(info.get("upower_auth")):
             raise RuntimeError("当前账号未开放充电专属视频权限")
+        return info
 
-        levels = [item for item in (info.get("upower_level_list") or []) if item]
-        level = levels[0] if levels else info.get("upower_level") or {}
+    def charging_pay_options(self) -> Dict[str, Any]:
+        info = self._fetch_charging_pay_info()
+        levels = [item for item in (info.get("upower_level_list") or info.get("levels") or []) if item]
+        if not levels and isinstance(info.get("upower_level"), dict):
+            levels = [info.get("upower_level")]
+        if not levels and isinstance(info.get("default_upower_level"), dict):
+            levels = [info.get("default_upower_level")]
+        output = []
+        for level in levels:
+            if not isinstance(level, dict):
+                continue
+            publish_info = level.get("publish_info") or level.get("publishInfo") or {}
+            level_id = (
+                level.get("id")
+                or level.get("level_id")
+                or level.get("upower_level_id")
+                or publish_info.get("id")
+                or publish_info.get("level_id")
+                or publish_info.get("upower_level_id")
+            )
+            if not level_id:
+                continue
+            label = (
+                publish_info.get("level_title_str")
+                or publish_info.get("level_title")
+                or publish_info.get("title")
+                or level.get("level_title_str")
+                or level.get("level_title")
+                or level.get("name")
+                or level.get("title")
+                or f"充电档位 {level_id}"
+            )
+            unit_price = (
+                level.get("upower_unit_price")
+                or level.get("unit_price")
+                or level.get("price")
+                or publish_info.get("upower_unit_price")
+                or publish_info.get("unit_price")
+                or publish_info.get("price")
+                or 0
+            )
+            output.append({
+                "id": str(level_id),
+                "label": str(label),
+                "upower_unit_price": int(unit_price or 0),
+                "raw": {
+                    "publish_info": publish_info,
+                },
+            })
+        if not output:
+            raise RuntimeError("当前账号没有可用的充电档位")
+        return {
+            "upower_auth": True,
+            "levels": output,
+            "default_level_id": str(
+                info.get("upower_level_id")
+                or info.get("default_upower_level_id")
+                or output[0]["id"]
+            ),
+        }
+
+    def _fetch_default_upower_level_id(self) -> str:
+        options = self.charging_pay_options()
+        level = (options.get("levels") or [{}])[0]
         level_id = level.get("id") if isinstance(level, dict) else None
         if not level_id:
             raise RuntimeError("当前账号没有可用的充电档位")
 
-        publish_info = level.get("publish_info") or {}
         logger.info(
             "Using Bilibili charging level: %s (%s)",
-            publish_info.get("level_title_str") or "default",
+            level.get("label") or "default",
             level_id,
         )
         return str(level_id)

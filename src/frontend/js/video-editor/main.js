@@ -4,8 +4,9 @@
 
 // 缩放对数映射：slider(0-100) ↔ zoom(0.1-10000px/s)
 const ZOOM_MIN = 0.1, ZOOM_MAX = 10000, ZOOM_DEFAULT = 50;
+const ZOOM_INITIAL_RATIO = 0.1;
 const DEFAULT_SUBTITLE_Y_BY_RATIO = {
-    '16:9': 0.90,
+    '16:9': 0.83,
     '9:16': 0.72
 };
 function sliderToZoom(v) { return ZOOM_MIN * Math.pow(ZOOM_MAX / ZOOM_MIN, v / 100); }
@@ -33,7 +34,7 @@ const state = {
     previewVideo: (() => { const video = document.createElement('video'); video.crossOrigin = "anonymous"; video.muted = true; video.playsInline = true; video.preload = "metadata"; return video; })(),
     current_time: 0,
     total_duration: 0,
-    zoom: ZOOM_DEFAULT,
+    zoom: ZOOM_DEFAULT * ZOOM_INITIAL_RATIO,
     active_index: -1,
     is_playing: false,
     play_raf: null,
@@ -110,7 +111,7 @@ function initSubtitleDrag() {
 }
 
 function getDefaultSubtitleY(ratio) {
-    return DEFAULT_SUBTITLE_Y_BY_RATIO[ratio] ?? 0.90;
+    return DEFAULT_SUBTITLE_Y_BY_RATIO[ratio] ?? DEFAULT_SUBTITLE_Y_BY_RATIO['16:9'];
 }
 
 function setSubtitlePosition(pct) {

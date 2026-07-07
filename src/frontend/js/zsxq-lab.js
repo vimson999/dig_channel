@@ -21,6 +21,7 @@ const state = {
     credentialLoadError: '',
     selectedGroup: null,
     groups: [],
+    groupSource: 'local',
     fileMap: new Map(),
     topicMap: new Map(),
     selectedTopicKeys: new Set(),
@@ -67,6 +68,7 @@ const els = {
     countInput: document.getElementById('count-input'),
     scopeSelect: document.getElementById('scope-select'),
     loadGroupsBtn: document.getElementById('load-groups-btn'),
+    loadRemoteGroupsBtn: document.getElementById('load-remote-groups-btn'),
     clearBtn: document.getElementById('clear-btn'),
     groupsList: document.getElementById('groups-list'),
     topicsTitle: document.getElementById('topics-title'),
@@ -116,7 +118,10 @@ const els = {
     topicsList: document.getElementById('topics-list'),
 };
 
+let zsxqKnowledgeGraph = null;
+
 document.addEventListener('DOMContentLoaded', () => {
+    initZsxqKnowledgeGraph();
     renderCookieProfiles();
     updateCookieSummary('正在读取平台凭据...', 'muted');
     setCookieEditorOpen(false);
@@ -134,6 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
         els.manualPlanAutoPublishCheckbox.checked = true;
     }
     bindEvents();
+    loadGroups({ source: 'local', auto: true });
     initializeCookieProfiles();
 
     loadSystemSyncSchedulerStatus({ render: false })
@@ -143,6 +149,193 @@ document.addEventListener('DOMContentLoaded', () => {
             renderSystemSyncBatches();
         });
 });
+
+function initZsxqKnowledgeGraph() {
+    const root = document.getElementById('zsxq-knowledge-map');
+    if (!root || !window.ShioaThreeGraph) return;
+    zsxqKnowledgeGraph = window.ShioaThreeGraph.mount(root, {
+        kicker: 'Knowledge Graph',
+        title: '知识对象图谱',
+        subtitle: '星球、Tab、主题、附件、外链、总结和语音的当前连接。',
+    });
+    updateZsxqKnowledgeGraph();
+}
+
+function updateZsxqKnowledgeGraph() {
+    if (!zsxqKnowledgeGraph) return;
+    zsxqKnowledgeGraph.update(buildZsxqKnowledgeGraphModel());
+}
+
+function buildZsxqKnowledgeGraphModel() {
+    const selectedGroup = state.selectedGroup || null;
+    const tabs = typeof getTabDefinitions === 'function' ? getTabDefinitions() : [];
+    const activeTab = typeof getActiveTabConfig === 'function' ? getActiveTabConfig() : null;
+    const topics = Array.isArray(state.currentTopics) ? state.currentTopics : [];
+    const visibleTopics = topics.slice(0, 5);
+    const nodes = [];
+    const links = [];
+    const groupId = selectedGroup ? `group:${selectedGroup.group_id}` : 'group:pending';
+    const groupLabel = selectedGroup?.name || '选择星球';
+    let fileCount = 0;
+    let externalCount = 0;
+    let summaryCount = 0;
+    let audioCount = 0;
+
+    nodes.push({
+        id: groupId,
+        type: 'group',
+        label: groupLabel,
+        primary: true,
+        rank: 0,
+        value: selectedGroup ? 10 : 5,
+        status: selectedGroup ? 'success' : 'idle',
+        labelMax: 24,
+    });
+
+    if (!selectedGroup && state.groups.length) {
+        state.groups.slice(0, 6).forEach(group => {
+            const id = `group-option:${group.group_id}`;
+            nodes.push({
+                id,
+                type: 'group',
+                label: group.name || group.group_id,
+                rank: 1,
+                value: group.topic_count ? 4 : 2,
+                status: 'idle',
+                labelMax: 18,
+            });
+            links.push({ source: groupId, target: id, opacity: 0.26 });
+        });
+    }
+
+    topics.forEach(topic => {
+        const files = topicFiles(topic);
+        const docs = Array.isArray(topic.external_documents) ? topic.external_documents : [];
+        fileCount += files.length;
+        externalCount += docs.length;
+        docs.forEach(link => {
+            const document = link?.document || {};
+            const summaryStatus = document.summary_status || 'pending';
+            const ttsStatus = document.tts_status || 'not_submitted';
+            if (summaryStatus === 'completed' || summaryStatus === 'summarized') summaryCount += 1;
+            if (ttsStatus === 'completed') audioCount += 1;
+        });
+    });
+
+    if (selectedGroup) {
+        const activeTabNode = activeTab || tabs[0] || null;
+        const graphTabs = [];
+        if (activeTabNode) graphTabs.push(activeTabNode);
+        tabs
+            .filter(tab => !activeTabNode || tab.id !== activeTabNode.id)
+            .slice(0, 4)
+            .forEach(tab => graphTabs.push(tab));
+
+        graphTabs.forEach(tab => {
+            const id = `tab:${tab.id}`;
+            const active = tab.id === state.activeTab;
+            nodes.push({
+                id,
+                type: 'tab',
+                label: tab.label || tab.id,
+                rank: 1,
+                value: active ? 7 : 4,
+                status: active ? 'success' : 'idle',
+                labelMax: 18,
+            });
+            links.push({ source: groupId, target: id, opacity: active ? 0.78 : 0.28 });
+        });
+
+        if (tabs.length > graphTabs.length) {
+            const moreTabId = 'tab:more';
+            nodes.push({
+                id: moreTabId,
+                type: 'tab',
+                label: `其余 ${tabs.length - graphTabs.length} 个 Tab`,
+                rank: 1,
+                value: 3,
+                status: 'idle',
+                labelMax: 16,
+            });
+            links.push({ source: groupId, target: moreTabId, opacity: 0.18 });
+        }
+
+        const activeTabId = activeTabNode ? `tab:${activeTabNode.id}` : groupId;
+        visibleTopics.forEach((topic, index) => {
+            const topicId = `topic:${topicKeyForRender(topic)}`;
+            const title = normalizeTopicTitle(topic.title || topic?.article?.title || topic?.talk?.text || `主题 ${index + 1}`) || `主题 ${index + 1}`;
+            const files = topicFiles(topic);
+            const docs = Array.isArray(topic.external_documents) ? topic.external_documents : [];
+            nodes.push({
+                id: topicId,
+                type: 'topic',
+                label: title,
+                rank: 2,
+                value: Math.min(9, 3 + files.length + docs.length),
+                status: files.length || docs.length ? 'success' : 'idle',
+                labelMax: 22,
+            });
+            links.push({ source: activeTabId, target: topicId, opacity: 0.44 });
+        });
+
+        if (topics.length > visibleTopics.length) {
+            const moreTopicId = 'topic:more';
+            nodes.push({
+                id: moreTopicId,
+                type: 'topic',
+                label: `其余 ${topics.length - visibleTopics.length} 条主题`,
+                rank: 2,
+                value: 4,
+                status: 'idle',
+                labelMax: 16,
+            });
+            links.push({ source: activeTabId, target: moreTopicId, opacity: 0.2 });
+        }
+
+        const aggregateSource = visibleTopics.length ? activeTabId : groupId;
+        [
+            { id: 'aggregate:files', type: 'attachment', label: `附件 ${fileCount || state.fileMap.size}`, value: Math.min(9, 3 + (fileCount || state.fileMap.size) / 8), count: fileCount || state.fileMap.size },
+            { id: 'aggregate:external', type: 'external', label: `外链 ${externalCount}`, value: Math.min(8, 3 + externalCount / 5), count: externalCount },
+            { id: 'aggregate:summary', type: 'summary', label: `总结 ${summaryCount}`, value: Math.min(8, 3 + summaryCount / 4), count: summaryCount },
+            { id: 'aggregate:audio', type: 'audio', label: `语音 ${audioCount}`, value: Math.min(8, 3 + audioCount / 4), count: audioCount },
+        ].forEach(item => {
+            nodes.push({
+                id: item.id,
+                type: item.type,
+                label: item.label,
+                rank: 3,
+                value: item.value,
+                status: item.count ? 'success' : 'idle',
+                labelMax: 14,
+            });
+            links.push({ source: aggregateSource, target: item.id, opacity: item.count ? 0.36 : 0.16 });
+        });
+    }
+
+    const loadedText = topics.length ? `${topics.length} 条主题` : (selectedGroup ? '等待主题' : '等待星球');
+    const assetText = `附件 ${fileCount || state.fileMap.size} · 外链 ${externalCount} · AI ${summaryCount}/${audioCount}`;
+    return {
+        layout: 'columns',
+        title: selectedGroup ? groupLabel : '知识星球实验台',
+        subtitle: activeTab ? `${activeTab.label} · ${loadedText} · ${assetText}` : '选择星球后形成主题、附件和外部文档网络',
+        metrics: [
+            { label: '星球', value: selectedGroup ? 1 : state.groups.length },
+            { label: 'Tab', value: tabs.length },
+            { label: '主题', value: topics.length },
+            { label: '附件', value: fileCount || state.fileMap.size },
+        ],
+        legend: [
+            { label: '星球', color: window.ShioaThreeGraph.colors.group },
+            { label: 'Tab', color: window.ShioaThreeGraph.colors.tab },
+            { label: '主题', color: window.ShioaThreeGraph.colors.topic },
+            { label: '附件', color: window.ShioaThreeGraph.colors.attachment },
+            { label: '外链', color: window.ShioaThreeGraph.colors.external },
+            { label: '总结/语音', color: window.ShioaThreeGraph.colors.summary },
+        ],
+        nodes,
+        links,
+    };
+}
 
 function loadSystemSyncSchedulerPanelsAfterBootstrap() {
     const groupId = getSystemSyncTargetGroupId();
@@ -208,7 +401,8 @@ function bindEvents() {
         setCookieEditorOpen(els.cookieEditor.classList.contains('hidden'));
     });
 
-    els.loadGroupsBtn.addEventListener('click', loadGroups);
+    els.loadGroupsBtn.addEventListener('click', () => loadGroups({ source: 'local' }));
+    els.loadRemoteGroupsBtn?.addEventListener('click', () => loadGroups({ source: 'remote' }));
     els.refreshTopicsBtn.addEventListener('click', () => {
         if (state.selectedGroup) loadActiveTabPage({ reset: true });
     });
@@ -511,7 +705,7 @@ function resetZsxqWorkspace() {
     state.lastTopicsResponse = null;
     state.lastTopicsRequest = null;
     state.menuError = null;
-    showGroupsMessage('等待获取...');
+    showGroupsMessage('等待读取本地缓存...');
     els.topicsTitle.textContent = '最新主题';
     els.topicsSubtitle.textContent = '选择一个星球后查看主题内容。';
     els.refreshTopicsBtn.classList.add('hidden');
@@ -655,23 +849,57 @@ function apiBaseUrl() {
     return window.API_BASE_URL || window.CONFIG?.API_BASE_URL || 'http://localhost:5001/api/v1';
 }
 
-async function loadGroups() {
-    if (!hasRequestCredential()) {
-        showGroupsMessage('请先选择 DB Cookie，或新增保存 Cookie。', 'warning');
+async function loadGroups(options = {}) {
+    const source = options.source === 'remote' ? 'remote' : 'local';
+    if (source === 'remote') {
+        await loadRemoteGroups();
         return;
     }
 
-    setLoading(els.loadGroupsBtn, true, '获取中...');
+    await loadLocalGroups();
+}
+
+async function loadLocalGroups() {
+    state.groupSource = 'local';
+    setLoading(els.loadGroupsBtn, true, '读取中...');
+    showGroupsMessage('正在读取本地缓存星球...');
+    try {
+        const result = await apiGet('/zsxq/groups/local');
+        const groups = (result?.resp_data?.groups || []).map(group => ({
+            ...group,
+            local_cached: true,
+        }));
+        state.groups = groups;
+        renderGroups(groups);
+    } catch (error) {
+        showGroupsMessage(`本地缓存读取失败：${error.message}`, 'error');
+    } finally {
+        setLoading(els.loadGroupsBtn, false, '<i class="fas fa-database mr-2"></i>本地缓存');
+    }
+}
+
+async function loadRemoteGroups() {
+    if (!hasRequestCredential()) {
+        showGroupsMessage('远端刷新需要先选择 DB Cookie，或新增保存 Cookie。', 'warning');
+        return;
+    }
+
+    state.groupSource = 'remote';
+    setLoading(els.loadRemoteGroupsBtn, true, '刷新中...');
     showGroupsMessage('正在请求知识星球 API...');
     try {
         const result = await apiPost('/zsxq/groups', { ...credentialRequestPayload(), count: 50 });
-        const groups = result?.resp_data?.groups || [];
+        const groups = (result?.resp_data?.groups || []).map(group => ({
+            ...group,
+            local_cached: false,
+            remote_loaded: true,
+        }));
         state.groups = groups;
         renderGroups(groups);
     } catch (error) {
         showGroupsMessage(error.message, 'error');
     } finally {
-        setLoading(els.loadGroupsBtn, false, '<i class="fas fa-satellite-dish mr-2"></i>获取星球');
+        setLoading(els.loadRemoteGroupsBtn, false, '<i class="fas fa-cloud-arrow-down mr-2"></i>远端刷新');
     }
 }
 
@@ -690,9 +918,12 @@ async function loadTopics(group, options = {}) {
     setSystemSyncControlsVisible(systemSyncEnabledForGroup);
     els.copyTopicsJsonBtn?.classList.add('hidden');
     els.topicsTitle.textContent = group.name || `星球 ${group.group_id}`;
-    els.topicsSubtitle.textContent = `Group ID: ${group.group_id}`;
+    const sourceLabel = group.local_cached === false ? '远端刷新' : '本地缓存';
+    els.topicsSubtitle.textContent = `Group ID: ${group.group_id} · ${sourceLabel}`;
     els.topicsList.innerHTML = loadingCard('正在读取本地主题...');
-    state.officialMenus = await loadOfficialMenus(group.group_id);
+    state.officialMenus = await loadOfficialMenus(group.group_id, {
+        allowRemote: Boolean(options.allowRemoteMenus || group.remote_loaded || group.local_cached === false),
+    });
     const tabs = getTabDefinitions();
     if (!tabs.length) {
         els.topicsTabs.classList.add('hidden');
@@ -720,11 +951,21 @@ async function loadTopics(group, options = {}) {
     await loadActiveTabPage({ reset: true });
 }
 
-async function loadOfficialMenus(groupId) {
+async function loadOfficialMenus(groupId, options = {}) {
     state.menuError = null;
     const cachedTabs = await loadLocalCachedTabs(groupId);
     if (cachedTabs.length) {
         return cachedTabs;
+    }
+
+    if (!options.allowRemote) {
+        state.menuError = '本地库暂无这个星球的 Tab。请先同步这个星球，或点击左侧“远端刷新”后再选择。';
+        return [];
+    }
+
+    if (!hasRequestCredential()) {
+        state.menuError = '本地库暂无这个星球的 Tab；远端获取 Tab 需要先选择 DB Cookie。';
+        return [];
     }
 
     try {
@@ -2044,6 +2285,7 @@ function renderActiveTab() {
     updatePublishTabState();
     if (tabState.error && !tabState.topics.length) {
         els.topicsList.innerHTML = emptyCard(tabState.error, 'error');
+        updateZsxqKnowledgeGraph();
         return;
     }
     renderTopics(tabState.topics, tabState);
@@ -2141,6 +2383,7 @@ function renderTopicTabs() {
         });
     });
     updatePublishTabState();
+    updateZsxqKnowledgeGraph();
 }
 
 async function activateTopicTab(tabId, options = {}) {
@@ -2321,20 +2564,34 @@ function safeDecodeZsxqAttr(value) {
 
 function renderGroups(groups) {
     if (!groups.length) {
-        showGroupsMessage('没有获取到星球。请检查 Cookie 是否过期。', 'warning');
+        const message = state.groupSource === 'remote'
+            ? '远端没有获取到星球。请检查 Cookie 是否过期。'
+            : '本地暂无星球缓存。请先执行同步，或点击“远端刷新”查看账号星球。';
+        showGroupsMessage(message, 'warning');
+        updateZsxqKnowledgeGraph();
         return;
     }
 
     els.groupsList.innerHTML = groups.map(group => {
         const active = state.selectedGroup?.group_id === group.group_id;
+        const sourceBadge = group.local_cached === false ? '远端' : '本地';
+        const sourceClass = group.local_cached === false
+            ? 'bg-blue-50 text-blue-700'
+            : 'bg-emerald-50 text-emerald-700';
+        const metaParts = [
+            `ID: ${group.group_id}`,
+            group.topic_count ? `${group.topic_count} 篇主题` : '',
+            group.tab_count ? `${group.tab_count} 个 Tab` : '',
+            group.last_synced_at ? `同步 ${formatZsxqTime(group.last_synced_at)}` : '',
+        ].filter(Boolean);
         return `
             <button class="w-full text-left p-4 hover:bg-blue-50 transition-colors ${active ? 'bg-blue-50' : ''}" data-group-id="${escapeHtml(String(group.group_id))}">
                 <div class="flex items-start justify-between gap-3">
-                    <div>
+                    <div class="min-w-0">
                         <div class="font-bold text-slate-800">${escapeHtml(group.name || '未命名星球')}</div>
-                        <div class="text-xs text-slate-400 mt-1">ID: ${escapeHtml(String(group.group_id))}</div>
+                        <div class="text-xs text-slate-400 mt-1">${escapeHtml(metaParts.join(' · '))}</div>
                     </div>
-                    <span class="text-[10px] font-bold uppercase rounded-full px-2 py-1 ${group.type === 'paid' ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'}">${escapeHtml(group.type || 'group')}</span>
+                    <span class="shrink-0 text-[10px] font-bold rounded-full px-2 py-1 ${sourceClass}">${escapeHtml(sourceBadge)}</span>
                 </div>
             </button>
         `;
@@ -2346,10 +2603,11 @@ function renderGroups(groups) {
             if (group) {
                 const tab = getTabDefinitions().find(item => !item.hashtagId && item.scope === els.scopeSelect.value);
                 state.activeTab = tab?.id || 'preset:all';
-                loadTopics(group);
+                loadTopics(group, { allowRemoteMenus: Boolean(group.remote_loaded || group.local_cached === false) });
             }
         });
     });
+    updateZsxqKnowledgeGraph();
 }
 
 function renderTopics(topics, tabState = null) {
@@ -2367,6 +2625,7 @@ function renderTopics(topics, tabState = null) {
         updateSelectAllButton();
         renderHotRankList();
         bindLoadMoreAction();
+        updateZsxqKnowledgeGraph();
         return;
     }
 
@@ -2404,7 +2663,7 @@ function renderTopics(topics, tabState = null) {
                         <span class="text-xs text-slate-400">#${escapeHtml(String(topic.topic_id || ''))}</span>
                     </div>
                 </div>
-                <p class="mt-3 text-sm text-slate-600 leading-6 whitespace-pre-wrap break-words">${renderTopicText(content, 900)}</p>
+                <div class="mt-3 text-sm text-slate-600 leading-6 whitespace-pre-wrap break-words">${renderTopicText(content)}</div>
                 ${articleLink}
                 ${externalDocuments}
                 ${renderTopicHashtags(hashtags)}
@@ -2422,6 +2681,7 @@ function renderTopics(topics, tabState = null) {
     updateBatchDownloadButton();
     renderHotRankList();
     refreshAttachmentStatusBadges();
+    updateZsxqKnowledgeGraph();
 }
 
 function activeTabState() {
@@ -2461,16 +2721,23 @@ function oldestTopicTime(topics) {
 }
 
 function extractContent(topic) {
+    const questionText = normalizeTopicText(topic?.question?.text || '');
+    const answerText = normalizeTopicText(topic?.answer?.text || '');
+    if (questionText && answerText) return `提问：${questionText}\n\n回答：${answerText}`;
     if (topic?.talk?.text) return normalizeTopicText(topic.talk.text);
     if (topic?.article?.article_content) return normalizeTopicText(topic.article.article_content);
     if (topic?.article?.title) return normalizeTopicText(topic.article.title);
-    if (topic?.question?.text) return normalizeTopicText(topic.question.text);
+    if (questionText) return questionText;
+    if (answerText) return answerText;
     if (topic?.files?.length) return `[附件] ${topic.files[0].name || '未命名附件'}`;
     return '无正文预览';
 }
 
-function renderTopicText(text, maxLength) {
-    const value = truncate(normalizeTopicText(text), maxLength);
+function renderTopicText(text, maxLength = 0) {
+    const normalized = normalizeTopicText(text);
+    const value = Number.isFinite(Number(maxLength)) && Number(maxLength) > 0
+        ? truncate(normalized, Number(maxLength))
+        : normalized;
     const urlRegex = /https?:\/\/[^\s<>"'）)]+/g;
     let html = '';
     let cursor = 0;
@@ -2514,6 +2781,7 @@ function renderExternalDocumentItem(link) {
     const documentId = document.id || link.external_document_id || '';
     const url = safeExternalUrl(document.canonical_url || link.canonical_url || document.source_url || link.source_url);
     const title = externalDocumentTitle(link);
+    const providerLabel = externalProviderLabel(document.provider || link.provider);
     const fetchMeta = externalDocumentStatusMeta('fetch', document.fetch_status);
     const summaryMeta = externalDocumentStatusMeta('summary', document.summary_status);
     const ttsMeta = externalDocumentStatusMeta('tts', document.tts_status);
@@ -2526,36 +2794,41 @@ function renderExternalDocumentItem(link) {
     const audioHref = documentId ? `${apiBaseUrl()}/external-documents/${encodeURIComponent(documentId)}/tts/audio` : '';
 
     return `
-        <div class="rounded-lg border border-sky-100 bg-sky-50/40 p-3 min-w-0" data-external-doc-id="${escapeHtml(documentId)}">
-            <div class="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
-                <div class="min-w-0">
-                    <div class="flex flex-wrap items-center gap-2">
-                        <span class="rounded border border-sky-200 bg-white px-2 py-0.5 text-[11px] font-black text-sky-700">${escapeHtml(externalProviderLabel(document.provider || link.provider))}</span>
-                        ${document.content_chars ? `<span class="text-[11px] font-bold text-slate-400">${escapeHtml(String(document.content_chars))} 字</span>` : ''}
+        <div class="rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition hover:border-sky-200 hover:shadow-md min-w-0" data-external-doc-id="${escapeHtml(documentId)}">
+            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div class="flex min-w-0 items-start gap-3">
+                    <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-sky-100 bg-sky-50 text-sky-700">
+                        <i class="fas fa-file-lines text-sm"></i>
                     </div>
-                    ${url ? `
-                        <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="mt-2 inline-flex max-w-full items-center gap-2 text-sm font-black text-slate-800 hover:text-blue-700">
-                            <i class="fas fa-file-lines shrink-0 text-sky-600"></i>
-                            <span class="min-w-0 truncate">${escapeHtml(title)}</span>
-                        </a>
-                    ` : `<div class="mt-2 text-sm font-black text-slate-800 break-words">${escapeHtml(title)}</div>`}
+                    <div class="min-w-0 flex-1">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <span class="inline-flex items-center rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-black text-slate-700">${escapeHtml(providerLabel)}</span>
+                            ${document.content_chars ? `<span class="text-[11px] font-bold text-slate-400">${escapeHtml(String(document.content_chars))} 字</span>` : ''}
+                        </div>
+                        ${url ? `
+                            <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="mt-1.5 flex max-w-full items-center gap-1.5 text-sm font-black text-slate-900 hover:text-blue-700">
+                                <span class="min-w-0 truncate">${escapeHtml(title)}</span>
+                                <i class="fas fa-arrow-up-right-from-square shrink-0 text-[10px] text-slate-300"></i>
+                            </a>
+                        ` : `<div class="mt-1.5 text-sm font-black text-slate-900 break-words">${escapeHtml(title)}</div>`}
+                        <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                            ${renderExternalDocumentStatusBadge('抓取', fetchMeta)}
+                            ${renderExternalDocumentStatusBadge('总结', summaryMeta)}
+                            ${renderExternalDocumentStatusBadge('语音', ttsMeta)}
+                        </div>
+                    </div>
                 </div>
-                <div class="flex shrink-0 flex-wrap gap-1">
-                    ${renderExternalDocumentButton('external-detail', documentId, '<i class="fas fa-eye mr-1"></i>详情')}
-                    ${renderExternalDocumentButton('external-fetch', documentId, '<i class="fas fa-cloud-arrow-down mr-1"></i>抓取', document.fetch_status === 'fetching')}
-                    ${renderExternalDocumentButton('external-summarize', documentId, '<i class="fas fa-wand-magic-sparkles mr-1"></i>总结', document.summary_status === 'summarizing' || !canSummarize)}
-                    ${renderExternalDocumentButton('external-tts', documentId, '<i class="fas fa-volume-high mr-1"></i>TTS', ['queued', 'running'].includes(document.tts_status) || !canTts)}
+                <div class="flex shrink-0 flex-wrap items-center gap-1.5 md:justify-end">
+                    ${renderExternalDocumentButton('external-detail', documentId, 'fas fa-eye', '详情')}
+                    ${renderExternalDocumentButton('external-fetch', documentId, 'fas fa-cloud-arrow-down', '抓取', document.fetch_status === 'fetching')}
+                    ${renderExternalDocumentButton('external-summarize', documentId, 'fas fa-wand-magic-sparkles', '总结', document.summary_status === 'summarizing' || !canSummarize)}
+                    ${renderExternalDocumentButton('external-tts', documentId, 'fas fa-volume-high', 'TTS', ['queued', 'running'].includes(document.tts_status) || !canTts)}
                     ${document.tts_status === 'completed' && audioHref ? `
-                        <a href="${escapeHtml(audioHref)}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-emerald-200 bg-white px-2 py-1 text-xs font-black text-emerald-700 hover:bg-emerald-50">
+                        <a href="${escapeHtml(audioHref)}" target="_blank" rel="noopener noreferrer" class="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 text-xs font-black text-emerald-700 transition hover:bg-emerald-100" title="下载音频">
                             <i class="fas fa-download mr-1"></i>音频
                         </a>
                     ` : ''}
                 </div>
-            </div>
-            <div class="mt-2 flex flex-wrap gap-1.5">
-                ${renderExternalDocumentStatusBadge('抓取', fetchMeta)}
-                ${renderExternalDocumentStatusBadge('总结', summaryMeta)}
-                ${renderExternalDocumentStatusBadge('语音', ttsMeta)}
             </div>
             ${summary ? `<div class="mt-2 rounded-md border border-sky-100 bg-white px-3 py-2 text-xs leading-5 text-slate-600 break-words">${renderExternalTextPreview(summary, 500)}</div>` : ''}
             ${fetchError}${summaryError}${ttsError}
@@ -2564,18 +2837,18 @@ function renderExternalDocumentItem(link) {
     `;
 }
 
-function renderExternalDocumentButton(action, documentId, html, disabled = false) {
+function renderExternalDocumentButton(action, documentId, iconClass, label, disabled = false) {
     const isDisabled = disabled || !documentId;
     return `
         <button type="button" data-external-action="${escapeHtml(action)}" data-document-id="${escapeHtml(documentId)}"
-            class="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-black text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50" ${isDisabled ? 'disabled' : ''}>
-            ${html}
+            class="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-black text-slate-600 transition hover:border-slate-300 hover:bg-white disabled:cursor-not-allowed disabled:opacity-45" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}" ${isDisabled ? 'disabled' : ''}>
+            <i class="${escapeHtml(iconClass)} text-[11px]"></i><span>${escapeHtml(label)}</span>
         </button>
     `;
 }
 
 function renderExternalDocumentStatusBadge(label, meta) {
-    return `<span class="rounded-full border px-2 py-0.5 text-[11px] font-black ${meta.className}">${escapeHtml(label)}: ${escapeHtml(meta.text)}</span>`;
+    return `<span class="inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-black leading-5 ${meta.className}">${escapeHtml(label)} · ${escapeHtml(meta.text)}</span>`;
 }
 
 function externalDocumentStatusMeta(kind, status) {
@@ -2628,7 +2901,7 @@ function renderExternalTextPreview(text, limit) {
 }
 
 function topicArticleLink(topic) {
-    const article = topic?.talk?.article || topic?.article || topic?.question?.article || null;
+    const article = topic?.talk?.article || topic?.article || topic?.question?.article || topic?.answer?.article || null;
     if (!article || typeof article !== 'object') return null;
     const url = safeExternalUrl(article.article_url || article.url || article.link || article.inline_article_url);
     if (!url) return null;
@@ -2648,7 +2921,13 @@ function topicFiles(topic) {
 }
 
 function topicImages(topic) {
-    return topic.images || topic?.talk?.images || topic?.article?.images || [];
+    return dedupeTopicImages([
+        ...(topic.images || []),
+        ...(topic?.talk?.images || []),
+        ...(topic?.article?.images || []),
+        ...(topic?.question?.images || []),
+        ...(topic?.answer?.images || []),
+    ]);
 }
 
 function renderTopicHashtags(tags) {
@@ -2726,23 +3005,109 @@ function attachmentViewEmptyText(filter = currentAttachmentViewFilter()) {
 
 function renderImages(images) {
     const visibleImages = images.slice(0, 9);
+    const cards = visibleImages.map(image => {
+        const thumb = topicImageUrl(image, ['thumbnail', 'small', 'large', 'original']);
+        const full = topicImageUrl(image, ['large', 'original', 'thumbnail', 'small']) || thumb;
+        const width = topicImageDimension(image, 'width') || 1;
+        const height = topicImageDimension(image, 'height') || 1;
+        if (!thumb) return '';
+        const ratio = Math.max(0.6, Math.min(1.6, height / width));
+        return `
+            <a href="${escapeHtml(full || thumb)}" target="_blank" rel="noopener noreferrer" class="block overflow-hidden rounded-lg border border-slate-200 bg-slate-100 hover:border-blue-300 transition-colors" style="aspect-ratio: 1 / ${ratio.toFixed(3)}">
+                <img src="${escapeHtml(thumb)}" alt="主题图片" loading="lazy" referrerpolicy="no-referrer" class="h-full w-full object-cover">
+            </a>
+        `;
+    }).filter(Boolean);
+    if (!cards.length) return '';
     return `
         <div class="mt-3 grid grid-cols-2 md:grid-cols-3 gap-2">
-            ${visibleImages.map(image => {
-                const thumb = image?.thumbnail?.url || image?.large?.url || image?.original?.url || image?.url;
-                const full = image?.large?.url || image?.original?.url || thumb;
-                const width = image?.thumbnail?.width || image?.large?.width || image?.original?.width || 1;
-                const height = image?.thumbnail?.height || image?.large?.height || image?.original?.height || 1;
-                if (!thumb) return '';
-                const ratio = Math.max(0.6, Math.min(1.6, height / width));
-                return `
-                    <a href="${escapeHtml(full)}" target="_blank" rel="noopener noreferrer" class="block overflow-hidden rounded-lg border border-slate-200 bg-slate-100 hover:border-blue-300 transition-colors" style="aspect-ratio: 1 / ${ratio.toFixed(3)}">
-                        <img src="${escapeHtml(thumb)}" alt="主题图片" loading="lazy" referrerpolicy="no-referrer" class="h-full w-full object-cover">
-                    </a>
-                `;
-            }).join('')}
+            ${cards.join('')}
         </div>
     `;
+}
+
+function topicImageUrl(image, preferredVariants = []) {
+    if (!image) return '';
+    if (typeof image === 'string') return image.trim();
+    if (typeof image !== 'object') return '';
+    const candidates = [];
+    preferredVariants.forEach(variant => {
+        const value = image[variant];
+        if (typeof value === 'string') {
+            candidates.push(value);
+        } else if (value && typeof value === 'object') {
+            candidates.push(value.url, value.src, value.href, value.link, value.image_url);
+        }
+    });
+    [
+        image.thumbnail_url,
+        image.small_url,
+        image.large_url,
+        image.original_url,
+        image.url,
+        image.image_url,
+        image.raw_url,
+        image.source_url,
+        image.download_url,
+        image.src,
+        image.href,
+        image.link,
+    ].forEach(value => candidates.push(value));
+    ['file', 'picture', 'photo'].forEach(key => {
+        const value = image[key];
+        if (typeof value === 'string') {
+            candidates.push(value);
+        } else if (value && typeof value === 'object') {
+            candidates.push(value.url, value.src, value.href, value.link, value.image_url);
+        }
+    });
+    return String(candidates.find(value => String(value || '').trim()) || '').trim();
+}
+
+function dedupeTopicImages(images) {
+    const seen = new Set();
+    return (images || []).filter(image => {
+        if (!image) return false;
+        const key = topicImageKey(image);
+        if (!key) return true;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function topicImageKey(image) {
+    if (typeof image === 'string') return image.trim();
+    if (!image || typeof image !== 'object') return '';
+    return String(
+        image.image_id
+        || image.file_id
+        || image.id
+        || image.hash_id
+        || topicImageUrl(image, ['original', 'large', 'thumbnail', 'small'])
+        || ''
+    ).trim();
+}
+
+function topicImageDimension(image, axis) {
+    if (!image || typeof image !== 'object') return 0;
+    const directKeys = axis === 'width'
+        ? ['width', 'w', 'image_width', 'natural_width']
+        : ['height', 'h', 'image_height', 'natural_height'];
+    const nestedKeys = ['thumbnail', 'small', 'large', 'original'];
+    for (const key of directKeys) {
+        const value = Number(image[key]);
+        if (Number.isFinite(value) && value > 0) return value;
+    }
+    for (const nestedKey of nestedKeys) {
+        const nested = image[nestedKey];
+        if (!nested || typeof nested !== 'object') continue;
+        for (const key of directKeys) {
+            const value = Number(nested[key]);
+            if (Number.isFinite(value) && value > 0) return value;
+        }
+    }
+    return 0;
 }
 
 function extractHashtags(topic) {
@@ -2753,6 +3118,7 @@ function extractHashtags(topic) {
         topic?.article?.title,
         topic?.article?.article_content,
         topic?.question?.text,
+        topic?.answer?.text,
     ].filter(Boolean).join('\n');
 
     const tags = new Set();
@@ -3877,6 +4243,7 @@ function emptyCard(message, type = 'muted') {
 }
 
 function setLoading(button, isLoading, html) {
+    if (!button) return;
     button.disabled = isLoading;
     button.classList.toggle('opacity-60', isLoading);
     button.innerHTML = isLoading ? `<i class="fas fa-circle-notch fa-spin mr-2"></i>${html}` : html;

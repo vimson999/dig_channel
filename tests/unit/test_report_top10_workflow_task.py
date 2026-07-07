@@ -15,6 +15,11 @@ from tasks import report_top10_workflow  # noqa: E402
 
 
 class ReportTop10WorkflowTaskTest(unittest.TestCase):
+    def test_single_progress_uses_dynamic_total(self):
+        self.assertEqual(report_top10_workflow._single_progress(0, 4), 5)
+        self.assertEqual(report_top10_workflow._single_progress(2, 4), 37)
+        self.assertEqual(report_top10_workflow._single_progress(4, 4), 70)
+
     def test_mark_failed_safely_rolls_back_before_loading_task(self):
         events = []
 
@@ -78,7 +83,7 @@ class ReportTop10WorkflowTaskTest(unittest.TestCase):
         db.init_app(app)
 
         with app.app_context():
-            db.create_all()
+            db.metadata.create_all(bind=db.engine, tables=[PublicationTask.__table__])
             structured = {
                 "title": "AI 算力深度报告",
                 "final_script_for_tts": "这是一段可用于 Top10 编排的单篇研报文案。",
@@ -111,7 +116,7 @@ class ReportTop10WorkflowTaskTest(unittest.TestCase):
             self.assertEqual(report["single_report_script"], structured["final_script_for_tts"])
 
             db.session.remove()
-            db.drop_all()
+            db.metadata.drop_all(bind=db.engine, tables=[PublicationTask.__table__])
 
 
 if __name__ == "__main__":

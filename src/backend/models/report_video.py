@@ -1,6 +1,8 @@
 from datetime import datetime
 import uuid
 
+from sqlalchemy import inspect
+
 from . import db
 
 
@@ -42,8 +44,17 @@ class ReportVideoTask(db.Model):
         lazy=True,
         order_by="ReportVideoOutput.created_at.desc()",
     )
+    render_previews = db.relationship(
+        "ReportVideoRenderPreview",
+        backref="task",
+        cascade="all, delete-orphan",
+        lazy=True,
+        order_by="ReportVideoRenderPreview.created_at.desc()",
+    )
 
     def to_dict(self, include_reports=False, include_ai=False):
+        reports_loaded = "reports" not in inspect(self).unloaded
+        report_count = len(self.reports) if include_reports or reports_loaded else None
         data = {
             "id": self.id,
             "task_name": self.task_name,
@@ -56,7 +67,7 @@ class ReportVideoTask(db.Model):
             "status": self.status,
             "result": self.result or {},
             "error_message": self.error_message,
-            "report_count": len(self.reports) if self.reports is not None else 0,
+            "report_count": report_count,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -64,6 +75,7 @@ class ReportVideoTask(db.Model):
             data["reports"] = [report.to_dict(include_ai=include_ai) for report in self.reports]
             data["audios"] = [audio.to_dict() for audio in self.audios]
             data["outputs"] = [output.to_dict() for output in self.outputs]
+            data["render_previews"] = [preview.to_dict() for preview in self.render_previews]
         return data
 
 
@@ -306,6 +318,53 @@ class ReportVideoOutput(db.Model):
             "file_path": self.file_path,
             "subtitle_path": self.subtitle_path,
             "status": self.status,
+            "error_message": self.error_message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ReportVideoRenderPreview(db.Model):
+    __tablename__ = "report_video_render_previews"
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    task_id = db.Column(db.String(36), db.ForeignKey("report_video_tasks.id"), nullable=False, index=True)
+    report_id = db.Column(db.String(36), db.ForeignKey("report_video_reports.id"), nullable=True, index=True)
+    preview_type = db.Column(db.String(30), nullable=False, index=True)
+    ratio = db.Column(db.String(10), nullable=False, index=True)
+    status = db.Column(db.String(30), nullable=False, default="pending", index=True)
+    duration_sec = db.Column(db.Float, nullable=True)
+    file_path = db.Column(db.String(600), nullable=True)
+    file_paths = db.Column(db.JSON, default=list)
+    segment_ids = db.Column(db.JSON, default=list)
+    renderer_version = db.Column(db.String(80), nullable=True)
+    celery_task_id = db.Column(db.String(80), nullable=True, index=True)
+    meta = db.Column(db.JSON, default=dict)
+    approved_at = db.Column(db.DateTime, nullable=True)
+    rejected_at = db.Column(db.DateTime, nullable=True)
+    reject_reason = db.Column(db.Text, nullable=True)
+    error_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "task_id": self.task_id,
+            "report_id": self.report_id,
+            "preview_type": self.preview_type,
+            "ratio": self.ratio,
+            "status": self.status,
+            "duration_sec": self.duration_sec,
+            "file_path": self.file_path,
+            "file_paths": self.file_paths or [],
+            "segment_ids": self.segment_ids or [],
+            "renderer_version": self.renderer_version,
+            "celery_task_id": self.celery_task_id,
+            "meta": self.meta or {},
+            "approved_at": self.approved_at.isoformat() if self.approved_at else None,
+            "rejected_at": self.rejected_at.isoformat() if self.rejected_at else None,
+            "reject_reason": self.reject_reason,
             "error_message": self.error_message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

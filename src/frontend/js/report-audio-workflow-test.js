@@ -20,8 +20,11 @@ class ReportAudioWorkflowPage {
         this.historyLoading = false;
         this.pollTimer = null;
         this.verticalVideoRequestIds = new Set();
+        this.podcastCoverRequestIds = new Set();
         this.coverRegeneratingIds = new Set();
         this.coverRegenerateJobId = '';
+        this.geminiEnvUrl = '';
+        this.geminiUrlPresets = this.defaultGeminiUrlPresets();
         this.els = {
             providerStatus: document.getElementById('provider-status'),
             workerStatus: document.getElementById('worker-status'),
@@ -41,9 +44,12 @@ class ReportAudioWorkflowPage {
             pdfAssetPagination: document.getElementById('pdf-asset-pagination'),
             promptInput: document.getElementById('prompt-input'),
             reviewPromptInput: document.getElementById('review-prompt-input'),
+            geminiUrlSelect: document.getElementById('gemini-url-select'),
             geminiUrlInput: document.getElementById('gemini-url-input'),
+            geminiUrlCurrent: document.getElementById('gemini-url-current'),
             landscapeVideoEnabled: document.getElementById('landscape-video-enabled'),
             verticalVideoEnabled: document.getElementById('vertical-video-enabled'),
+            verticalVideoScheme: document.getElementById('vertical-video-scheme'),
             bilibiliEnabled: document.getElementById('bilibili-enabled'),
             videoTitleInput: document.getElementById('video-title-input'),
             videoSubtitleInput: document.getElementById('video-subtitle-input'),
@@ -59,6 +65,7 @@ class ReportAudioWorkflowPage {
         };
         this.ensureDynamicElements();
         this.defaults();
+        this.renderGeminiUrlOptions();
         this.bind();
         this.syncJobStatusFilter();
         this.syncJobSearchInput();
@@ -148,6 +155,58 @@ class ReportAudioWorkflowPage {
         this.els.reviewPromptInput.value = '担任首席责任主编，利用提供的PDF材料和可查网络信息，对上文内容逐条复核与勘误，确认事实准确、逻辑清晰、表达规范，列出每条修正点及依据，并给出最终优化后的信息版本，附上核对过程说明和参考来源。';
     }
 
+    defaultGeminiUrlPresets() {
+        return [
+            { value: '', label: '使用 .env 默认' },
+            { value: 'https://gemini.google.com/gem/099a92ae7888', label: '文案编辑v4' },
+            { value: 'https://gemini.google.com/gem/b71a9220571e', label: '文案编辑v5' },
+            { value: 'https://gemini.google.com/gem/3d1eca63c142', label: '今日研报严选总编辑 Gem' },
+            { value: 'https://gemini.google.com/gem/f9e84d5e215c', label: 'MP3 视频解析 Gem' },
+            { value: '__custom__', label: '自定义 URL' },
+        ];
+    }
+
+    renderGeminiUrlOptions() {
+        if (!this.els.geminiUrlSelect) return;
+        const previousValue = this.els.geminiUrlSelect.value || '';
+        const options = this.geminiUrlPresets.slice();
+        this.els.geminiUrlSelect.innerHTML = options.map((item) => (
+            `<option value="${this.escape(item.value)}">${this.escape(item.label)}</option>`
+        )).join('');
+        if (options.some((item) => item.value === previousValue)) {
+            this.els.geminiUrlSelect.value = previousValue;
+        }
+        this.updateGeminiUrlUi();
+    }
+
+    updateGeminiUrlUi() {
+        const selected = this.els.geminiUrlSelect?.value || '';
+        const isCustom = selected === '__custom__';
+        if (this.els.geminiUrlInput) {
+            this.els.geminiUrlInput.classList.toggle('hidden', !isCustom);
+            this.els.geminiUrlInput.disabled = !isCustom;
+            if (!isCustom) this.els.geminiUrlInput.value = '';
+        }
+        if (!this.els.geminiUrlCurrent) return;
+        const envText = this.geminiEnvUrl || 'REPORT_PDF_GEMINI_URL / GEMINI_BROWSER_URL';
+        if (isCustom) {
+            this.els.geminiUrlCurrent.textContent = '自定义 URL 会覆盖 .env 默认值';
+        } else if (selected) {
+            this.els.geminiUrlCurrent.textContent = `覆盖：${selected}`;
+        } else {
+            this.els.geminiUrlCurrent.textContent = `默认：${envText}`;
+        }
+        this.els.geminiUrlCurrent.title = this.els.geminiUrlCurrent.textContent;
+    }
+
+    selectedGeminiUrl() {
+        const select = document.getElementById('gemini-url-select') || this.els.geminiUrlSelect;
+        const input = document.getElementById('gemini-url-input') || this.els.geminiUrlInput;
+        const selected = select?.value || '';
+        if (selected === '__custom__') return input?.value.trim() || '';
+        return selected.trim();
+    }
+
     initialJobPage() {
         const page = Number(new URLSearchParams(window.location.search).get('job_page') || 1);
         return Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
@@ -188,6 +247,18 @@ class ReportAudioWorkflowPage {
         return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 80);
     }
 
+    normalizeVerticalScheme(value) {
+        const text = String(value || '').trim().toLowerCase();
+        if (['scheme2', '2', '方案二', 'workbench', 'thumbnail_workbench', 'thumbnail-workbench'].includes(text)) {
+            return 'scheme2';
+        }
+        return 'scheme1';
+    }
+
+    verticalSchemeLabel(value) {
+        return this.normalizeVerticalScheme(value) === 'scheme2' ? '方案二' : '方案一';
+    }
+
     syncJobStatusFilter() {
         if (!this.els.jobStatusFilter) return;
         const nextValue = this.normalizeJobFilterStatus(this.jobStatus);
@@ -223,6 +294,7 @@ class ReportAudioWorkflowPage {
         });
         this.els.pdfAssetPagination.addEventListener('click', (event) => this.handlePdfAssetPageClick(event));
         this.els.pdfAssetPagination.addEventListener('submit', (event) => this.handlePdfAssetPageJump(event));
+        this.els.geminiUrlSelect?.addEventListener('change', () => this.updateGeminiUrlUi());
         this.els.submitBtn.addEventListener('click', () => this.submit());
         this.els.loadHistoryBtn.addEventListener('click', () => this.loadHistory({ page: 1, force: true }));
         this.els.refreshJobsBtn.addEventListener('click', () => this.refreshJobs());
@@ -320,6 +392,8 @@ class ReportAudioWorkflowPage {
             const provider = result.data?.provider || {};
             const gemini = result.data?.report_pdf_gemini || result.data?.gemini_browser || {};
             const doubao = result.data?.doubao_browser_tts || {};
+            this.geminiEnvUrl = (gemini.gemini_url || '').trim();
+            this.updateGeminiUrlUi();
             if (provider.configured && gemini.configured && doubao.configured) {
                 const normalizer = provider.deepseek_configured
                     ? `DS: ${provider.normalizer_model || 'deepseek-v4-pro'}`
@@ -508,9 +582,10 @@ class ReportAudioWorkflowPage {
             const previewPath = item.preview_url || `/api/report-audio-workflows/pdf-assets/${encodeURIComponent(item.id)}/preview`;
             const previewUrl = `${this.apiRoot()}${previewPath}`;
             const itemTitle = [item.filename, item.topic_title, item.tab_label].filter(Boolean).join('\n');
-            const downloadText = Number.isFinite(Number(item.download_count))
-                ? `下载 ${Number(item.download_count)} 次`
-                : '下载 -';
+            const downloadText = window.DownloadCountHighlight?.badgeText(item.download_count)
+                || (Number.isFinite(Number(item.download_count)) ? `下载 ${Number(item.download_count)} 次` : '下载 -');
+            const downloadBadgeClass = window.DownloadCountHighlight?.badgeClass(item.download_count)
+                || 'border-slate-200 bg-slate-100 text-slate-500';
             const workflowMeta = this.pdfAssetWorkflowMeta(item);
             const syncTime = this.formatDateTime(item.topic_last_synced_at || item.updated_at);
             const topicTime = this.formatDateTime(item.topic_create_time) || item.topic_create_time || '';
@@ -533,7 +608,7 @@ class ReportAudioWorkflowPage {
                     </div>
                     <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(metaLine)}</div>
                     <div class="mt-2 flex flex-wrap items-center gap-1.5">
-                        <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500">
+                        <span class="rounded-full border px-2 py-0.5 text-[11px] font-bold ${downloadBadgeClass}">
                             <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
                         </span>
                         <span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${workflowMeta.className}">
@@ -641,10 +716,11 @@ class ReportAudioWorkflowPage {
             }
             form.append('prompt', this.els.promptInput.value.trim());
             form.append('review_prompt', this.els.reviewPromptInput.value.trim());
-            const geminiUrl = this.els.geminiUrlInput.value.trim();
+            const geminiUrl = this.selectedGeminiUrl();
             if (geminiUrl) form.append('gemini_url', geminiUrl);
             form.append('landscape_video_enabled', this.els.landscapeVideoEnabled.checked ? '1' : '0');
             form.append('vertical_video_enabled', this.els.verticalVideoEnabled.checked ? '1' : '0');
+            form.append('vertical_video_scheme', this.normalizeVerticalScheme(this.els.verticalVideoScheme?.value));
             form.append('bilibili_enabled', this.els.bilibiliEnabled.checked ? '1' : '0');
             form.append('video_title', this.els.videoTitleInput.value.trim());
             form.append('video_subtitle', this.els.videoSubtitleInput.value.trim());
@@ -909,7 +985,12 @@ class ReportAudioWorkflowPage {
         }
         if (action === 'refresh') this.refreshJob(jobId);
         if (action === 'retry') this.retryJob(jobId);
-        if (action === 'generate-vertical') this.generateVerticalVideo(jobId);
+        if (action === 'generate-vertical' || action === 'generate-vertical-preview' || action === 'generate-vertical-full') {
+            this.generateVerticalVideo(jobId, this.verticalGenerateOptionsFromButton(button, action));
+        }
+        if (action === 'generate-podcast-cover') {
+            this.generatePodcastCover(jobId, this.podcastCoverOptionsFromButton(button));
+        }
         if (action === 'open-cover-regenerate') this.openCoverRegenerateModal(jobId);
         if (action === 'remove') {
             this.jobs = this.jobs.filter((job) => (job.job_id || job.local_id) !== jobId);
@@ -975,40 +1056,113 @@ class ReportAudioWorkflowPage {
         }
     }
 
-    async generateVerticalVideo(jobId) {
+    verticalGenerateOptionsFromButton(button, action) {
+        const card = button.closest('[data-job-card]');
+        const scheme = this.normalizeVerticalScheme(card?.querySelector('[data-vertical-scheme]')?.value || this.els.verticalVideoScheme?.value);
+        const previewSeconds = action === 'generate-vertical-preview'
+            ? Number(button.dataset.previewSeconds || 10)
+            : 0;
+        return {
+            scheme,
+            previewSeconds: Number.isFinite(previewSeconds) && previewSeconds > 0 ? previewSeconds : 0,
+            force: true,
+        };
+    }
+
+    podcastCoverOptionsFromButton(button) {
+        const card = button.closest('[data-job-card]');
+        return {
+            scheme: this.normalizeVerticalScheme(card?.querySelector('[data-vertical-scheme]')?.value || this.els.verticalVideoScheme?.value),
+            force: false,
+        };
+    }
+
+    async generatePodcastCover(jobId, options = {}) {
+        if (!jobId || this.podcastCoverRequestIds.has(jobId)) return;
+        const job = this.jobs.find((item) => item.job_id === jobId);
+        const scheme = this.normalizeVerticalScheme(options.scheme || this.els.verticalVideoScheme?.value);
+        this.podcastCoverRequestIds.add(jobId);
+        this.render();
+        try {
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/generate-podcast-cover`, {
+                method: 'POST',
+                timeoutMs: 30000,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    scheme,
+                    force: options.force === true,
+                }),
+            });
+            const payload = result.data || result;
+            const index = this.jobs.findIndex((item) => item.job_id === jobId);
+            if (index >= 0) this.jobs[index] = { ...this.jobs[index], ...payload };
+            this.setNotice(result.message || '播客封皮已生成。', 'success');
+            this.render();
+            this.refreshJob(jobId);
+        } catch (error) {
+            if (job) {
+                job.video = {
+                    ...(job.video || {}),
+                    podcast_cover_error: error.message,
+                };
+            }
+            this.setNotice(`播客封皮生成失败：${error.message}`, 'error');
+            this.render();
+        } finally {
+            this.podcastCoverRequestIds.delete(jobId);
+            this.render();
+        }
+    }
+
+    async generateVerticalVideo(jobId, options = {}) {
         if (!jobId || this.verticalVideoRequestIds.has(jobId)) return;
         const job = this.jobs.find((item) => item.job_id === jobId);
+        const scheme = this.normalizeVerticalScheme(options.scheme || this.els.verticalVideoScheme?.value);
+        const previewSeconds = Math.max(0, Number(options.previewSeconds || 0));
+        const isPreview = previewSeconds > 0;
         this.verticalVideoRequestIds.add(jobId);
         if (job) {
             const pendingChild = {
                 status: 'queued',
                 step: 'queued',
                 feature: 'publisher',
-                metadata: { source: 'report_audio_workflow_vertical_backfill' },
+                vertical_video_scheme: scheme,
+                vertical_video_scheme_label: this.verticalSchemeLabel(scheme),
+                preview_seconds: previewSeconds,
+                is_preview: isPreview,
+                metadata: { source: 'report_audio_workflow_vertical_backfill', vertical_video_scheme: scheme, preview_seconds: previewSeconds },
             };
-            job.publisher_vertical_video = pendingChild;
-            job.children = { ...(job.children || {}), publisher_vertical_video: pendingChild };
+            const key = isPreview ? 'publisher_vertical_preview_video' : 'publisher_vertical_video';
+            job[key] = pendingChild;
+            job.children = { ...(job.children || {}), [key]: pendingChild };
             this.render();
         }
         try {
             const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/generate-vertical-video`, {
                 method: 'POST',
                 timeoutMs: 20000,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    scheme,
+                    preview_seconds: previewSeconds,
+                    force: options.force !== false,
+                }),
             });
             const payload = result.data || result;
             const index = this.jobs.findIndex((item) => item.job_id === jobId);
             if (index >= 0) this.jobs[index] = { ...this.jobs[index], ...payload };
-            this.setNotice(result.message || '竖屏 MP4 已提交生成。', 'success');
+            this.setNotice(result.message || `竖屏 MP4 已提交生成（${this.verticalSchemeLabel(scheme)}${isPreview ? ` · ${previewSeconds}s预览` : ''}）。`, 'success');
             this.render();
             this.refreshJob(jobId);
         } catch (error) {
             if (job) {
-                job.publisher_vertical_video = {
-                    ...(job.publisher_vertical_video || {}),
+                const key = isPreview ? 'publisher_vertical_preview_video' : 'publisher_vertical_video';
+                job[key] = {
+                    ...(job[key] || {}),
                     status: 'failed',
                     error: error.message,
                 };
-                job.children = { ...(job.children || {}), publisher_vertical_video: job.publisher_vertical_video };
+                job.children = { ...(job.children || {}), [key]: job[key] };
             }
             this.setNotice(`竖屏 MP4 提交失败：${error.message}`, 'error');
             this.render();
@@ -1328,9 +1482,19 @@ class ReportAudioWorkflowPage {
         const verticalVideoUrl = job.download_vertical_video_url
             ? `${this.apiRoot()}${job.download_vertical_video_url}`
             : (video?.vertical_video?.download_url ? `${this.apiRoot()}${video.vertical_video.download_url}` : '');
+        const verticalPreviewVideoUrl = video?.vertical_preview_video?.download_url
+            ? `${this.apiRoot()}${video.vertical_preview_video.download_url}`
+            : '';
+        const verticalCoverUrl = job.download_vertical_cover_url
+            ? `${this.apiRoot()}${job.download_vertical_cover_url}`
+            : (video?.vertical_cover?.download_url ? `${this.apiRoot()}${video.vertical_cover.download_url}` : '');
+        const podcastCoverUrl = job.download_podcast_cover_url
+            ? `${this.apiRoot()}${job.download_podcast_cover_url}`
+            : (video?.podcast_cover?.download_url ? `${this.apiRoot()}${video.podcast_cover.download_url}` : '');
         const showLandscapeVideoUrl = Boolean(videoUrl && video?.landscape_enabled !== false);
         const coverUrl = job.download_cover_url ? `${this.apiRoot()}${job.download_cover_url}` : '';
         const coverRegenerating = this.coverRegeneratingIds.has(job.job_id);
+        const podcastCoverGenerating = this.podcastCoverRequestIds.has(job.job_id);
         const pdf = job.pdf || job.request?.pdf || null;
         const parentStatus = job.status || '';
         const materialChild = this.scriptMaterialChild(job);
@@ -1342,15 +1506,29 @@ class ReportAudioWorkflowPage {
         const doubaoDisplayItems = this.doubaoDisplayItems(doubaoItems);
         const publisherChild = job.publisher_video || job.children?.publisher_video;
         const verticalPublisherChild = job.publisher_vertical_video || job.children?.publisher_vertical_video;
+        const verticalPreviewChild = job.publisher_vertical_preview_video || job.children?.publisher_vertical_preview_video;
         const verticalPublisherStatus = this.normalizeStatus(verticalPublisherChild?.status || '');
-        const verticalPublisherActive = this.verticalVideoRequestIds.has(job.job_id) || ['queued', 'running'].includes(verticalPublisherStatus);
+        const verticalPreviewStatus = this.normalizeStatus(verticalPreviewChild?.status || '');
+        const verticalPublisherActive = ['queued', 'running'].includes(verticalPublisherStatus);
+        const verticalPreviewActive = ['queued', 'running'].includes(verticalPreviewStatus);
+        const verticalAnyActive = this.verticalVideoRequestIds.has(job.job_id) || verticalPublisherActive || verticalPreviewActive;
         const verticalPublisherFailed = verticalPublisherStatus === 'failed';
+        const verticalPreviewFailed = verticalPreviewStatus === 'failed';
         const canRequestVerticalVideo = Boolean(showLandscapeVideoUrl || audioUrl);
-        const canGenerateVerticalVideo = Boolean(job.job_id && canRequestVerticalVideo && !verticalVideoUrl && !verticalPublisherActive);
+        const canGenerateVerticalVideo = Boolean(job.job_id && canRequestVerticalVideo && !verticalAnyActive);
+        const showVideoPanel = Boolean(video || canRequestVerticalVideo);
+        const canGeneratePodcastCover = Boolean(job.job_id && showVideoPanel && !podcastCoverUrl && !podcastCoverGenerating);
+        const defaultVerticalScheme = this.normalizeVerticalScheme(
+            job.request?.video?.vertical_video_scheme
+            || job.request?.video?.vertical_scheme
+            || video?.vertical_video_scheme
+            || video?.vertical_preview_scheme
+            || this.els.verticalVideoScheme?.value
+        );
         const retryState = job.retry_state || {};
         const childAttempts = job.child_attempts || {};
         return `
-            <article class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+            <article data-job-card data-job-id="${this.escape(job.job_id || job.local_id || '')}" class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="flex items-start justify-between gap-3">
                     <div class="min-w-0">
                         <div class="flex items-center gap-2">
@@ -1408,20 +1586,33 @@ class ReportAudioWorkflowPage {
                     </div>
                 ` : ''}
 
-                ${video ? `
+                ${showVideoPanel ? `
                     <div class="mt-3 rounded-md border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-800">
                         <div class="flex flex-wrap items-center justify-between gap-2">
-                            <span>${this.videoSummary(video)}</span>
+                            <span>${this.videoSummary(video || { vertical_enabled: true })}</span>
                             <div class="flex flex-wrap items-center justify-end gap-2">
                                 ${coverUrl ? `<a href="${coverUrl}" download class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50"><i class="fas fa-image mr-1"></i>封面</a>` : ''}
                                 ${coverUrl ? `<button type="button" data-job-action="open-cover-regenerate" data-job-id="${this.escape(job.job_id)}" ${coverRegenerating ? 'disabled' : ''} class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60"><i class="fas ${coverRegenerating ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${coverRegenerating ? '生成中' : '重做封面'}</button>` : ''}
                                 ${showLandscapeVideoUrl ? `<a href="${videoUrl}" download class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800"><i class="fas fa-film mr-1"></i>横屏 MP4</a>` : ''}
                                 ${verticalVideoUrl ? `<a href="${verticalVideoUrl}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : ''}
-                                ${verticalPublisherActive ? `<button type="button" disabled class="cursor-wait rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700"><i class="fas fa-spinner fa-spin mr-1"></i>竖屏生成中</button>` : ''}
-                                ${canGenerateVerticalVideo ? `<button type="button" data-job-action="generate-vertical" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-mobile-screen-button mr-1"></i>${verticalPublisherFailed ? '重试竖屏' : '补生成竖屏'}</button>` : ''}
+                                ${verticalPreviewVideoUrl ? `<a href="${verticalPreviewVideoUrl}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>10秒预览</a>` : ''}
+                                ${verticalCoverUrl ? `<a href="${verticalCoverUrl}" download class="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><i class="fas fa-image-portrait mr-1"></i>竖版封皮</a>` : ''}
+                                ${podcastCoverUrl ? `<a href="${podcastCoverUrl}" download class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50"><i class="fas fa-record-vinyl mr-1"></i>播客封皮</a>` : ''}
+                                ${podcastCoverGenerating ? `<button type="button" disabled class="cursor-wait rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700"><i class="fas fa-spinner fa-spin mr-1"></i>封皮生成中</button>` : ''}
+                                ${canGeneratePodcastCover ? `<button type="button" data-job-action="generate-podcast-cover" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50"><i class="fas fa-record-vinyl mr-1"></i>补生成播客封皮</button>` : ''}
+                                ${canRequestVerticalVideo ? `
+                                    <select data-vertical-scheme class="rounded-md border border-fuchsia-200 bg-white px-2 py-1.5 text-xs font-bold text-fuchsia-800 focus:border-fuchsia-400 focus:outline-none">
+                                        <option value="scheme1" ${defaultVerticalScheme === 'scheme1' ? 'selected' : ''}>方案一</option>
+                                        <option value="scheme2" ${defaultVerticalScheme === 'scheme2' ? 'selected' : ''}>方案二</option>
+                                    </select>
+                                ` : ''}
+                                ${verticalAnyActive ? `<button type="button" disabled class="cursor-wait rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700"><i class="fas fa-spinner fa-spin mr-1"></i>${verticalPreviewActive ? '预览生成中' : '竖屏生成中'}</button>` : ''}
+                                ${canGenerateVerticalVideo ? `<button type="button" data-job-action="generate-vertical-preview" data-preview-seconds="10" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-bolt mr-1"></i>10秒预览</button>` : ''}
+                                ${canGenerateVerticalVideo ? `<button type="button" data-job-action="generate-vertical-full" data-job-id="${this.escape(job.job_id)}" class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen-button mr-1"></i>${verticalPublisherFailed ? '重试完整竖屏' : (verticalVideoUrl ? '完整重合成' : '生成完整竖屏')}</button>` : ''}
                             </div>
                         </div>
                         ${verticalPublisherFailed && !verticalVideoUrl ? `<div class="mt-2 rounded border border-red-100 bg-white/80 px-2 py-1 text-xs text-red-700">竖屏生成失败：${this.escape(verticalPublisherChild?.error || '请重试')}</div>` : ''}
+                        ${verticalPreviewFailed && !verticalPreviewVideoUrl ? `<div class="mt-2 rounded border border-red-100 bg-white/80 px-2 py-1 text-xs text-red-700">10秒预览失败：${this.escape(verticalPreviewChild?.error || '请重试')}</div>` : ''}
                     </div>
                 ` : ''}
 
@@ -2102,6 +2293,9 @@ class ReportAudioWorkflowPage {
         }
         if (video.vertical_video?.bytes) {
             parts.push(`竖屏 ${this.formatBytes(video.vertical_video.bytes)}`);
+        }
+        if (video.vertical_preview_video?.bytes) {
+            parts.push(`${Number(video.vertical_preview_seconds || 10)}秒预览 ${this.formatBytes(video.vertical_preview_video.bytes)}`);
         }
         if (video.video?.bytes && onlyVertical && !video.vertical_video?.bytes) {
             parts.push(`竖屏 ${this.formatBytes(video.video.bytes)}`);

@@ -3,7 +3,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from services.report_audio_workflow import DEFAULT_INITIAL_PROMPT, DEFAULT_REVIEW_PROMPT
+from services.report_audio_workflow import (
+    DEFAULT_INITIAL_PROMPT,
+    DEFAULT_REVIEW_PROMPT,
+    status_payload as audio_workflow_status_payload,
+)
 
 
 FEATURE_NAME = "report_script_material_workflow"
@@ -47,12 +51,17 @@ def write_result_file(
 
 
 def status_payload() -> Dict[str, Any]:
+    normalizer = audio_workflow_status_payload()
     return {
-        "configured": True,
+        "configured": bool(normalizer.get("configured")),
         "mode": "celery_orchestrator",
         "feature": FEATURE_NAME,
         "queue": QUEUE_NAME,
         "output": "structured_result.final_script_for_tts",
+        "normalizer": normalizer,
+        "normalizer_provider": normalizer.get("normalizer_provider"),
+        "normalizer_available": normalizer.get("normalizer_available"),
+        "local_fallback_allowed": normalizer.get("local_fallback_allowed"),
     }
 
 

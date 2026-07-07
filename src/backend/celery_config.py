@@ -109,6 +109,7 @@ def make_celery(app_name=__name__):
         task_default_queue='render',
         task_queues=(
             Queue('render', Exchange('render'), routing_key='render'),
+            Queue('platform_upload', Exchange('platform_upload'), routing_key='platform_upload'),
             Queue('cloud_tts', Exchange('cloud_tts'), routing_key='cloud_tts'),
             Queue('doubao_browser_tts', Exchange('doubao_browser_tts'), routing_key='doubao_browser_tts'),
             Queue('report_pdf_gemini', Exchange('report_pdf_gemini'), routing_key='report_pdf_gemini'),
@@ -152,7 +153,8 @@ def make_celery(app_name=__name__):
             'tasks.content_pipeline.run_pdf_clean_task': {'queue': 'content_pipeline'},
             'tasks.content_pipeline.run_audio_clean_task': {'queue': 'content_pipeline'},
             'tasks.publisher.run_publication_pipeline': {'queue': 'render'},
-            'tasks.publisher.run_youtube_upload_only': {'queue': 'render'},
+            'tasks.publisher.run_youtube_upload_only': {'queue': 'platform_upload'},
+            'tasks.publisher.run_bilibili_upload_only': {'queue': 'platform_upload'},
             'tasks.podcast_visualizer.run_podcast_visualizer_task': {'queue': 'podcast_visualizer'},
             'tasks.downloader.download_video_task': {'queue': 'render'},
         },

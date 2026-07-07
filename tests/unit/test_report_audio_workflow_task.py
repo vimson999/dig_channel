@@ -24,6 +24,7 @@ from tasks.report_audio_workflow import (  # noqa: E402
     _active_tts_task_for_chunk,
     _current_step_code,
     _create_doubao_tts_task,
+    _create_publisher_video_task,
     _format_cover_subtitle,
     _format_cover_title,
     _is_retryable_child_error,
@@ -127,6 +128,54 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertTrue(_video_stage_enabled({"video": {"enabled": False, "vertical_enabled": True}}))
         self.assertTrue(_video_stage_enabled({"video": {"enabled": True, "vertical_enabled": False}}))
         self.assertFalse(_video_stage_enabled({"video": {"enabled": False, "vertical_enabled": False}}))
+
+    def test_publisher_video_task_respects_landscape_toggle_when_vertical_only(self):
+        class FakePublisherTask:
+            latest = None
+
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+                self.id = "publisher-child"
+                FakePublisherTask.latest = self
+
+        fake_session = SimpleNamespace(add=lambda child: None, flush=lambda: None, commit=lambda: None)
+        parent = SimpleNamespace(id="parent-1", created_at=datetime.utcnow())
+
+        with patch.object(report_audio_workflow, "_find_existing_publisher_video_task", return_value=None), \
+            patch.object(report_audio_workflow, "PublicationTask", FakePublisherTask), \
+            patch.object(report_audio_workflow, "db", SimpleNamespace(session=fake_session)), \
+            patch.object(
+                report_audio_workflow.run_publication_pipeline,
+                "apply_async",
+                return_value=SimpleNamespace(id="celery-1"),
+            ), \
+            patch.object(report_audio_workflow, "_load_task", side_effect=lambda *args: FakePublisherTask.latest):
+            child = _create_publisher_video_task(
+                parent,
+                audio={"wav_path": "/tmp/audio.wav", "seconds": 12},
+                structured={
+                    "title": "只生成竖屏测试",
+                    "cover_title": "只生成竖屏测试",
+                    "cover_subtitle": "横屏开关关闭时不应合成横屏",
+                    "final_script_for_tts": "这是一段用于测试竖屏单独生成的视频文案。",
+                },
+                pdf={"filename": "source.pdf"},
+                pdf_screenshot={"path": "/tmp/source-page.jpg", "width": 100, "height": 100},
+                payload={
+                    "video": {
+                        "enabled": False,
+                        "vertical_enabled": True,
+                        "vertical_video_scheme": "scheme2",
+                        "bilibili_enabled": False,
+                    }
+                },
+            )
+
+        self.assertFalse(child.params["video"]["enabled"])
+        self.assertTrue(child.params["vertical_video"]["enabled"])
+        self.assertTrue(child.params["vertical_thumbnail"]["enabled"])
+        self.assertTrue(child.params["vertical_cover"]["enabled"])
+        self.assertTrue(child.params["podcast_cover"]["enabled"])
 
     def test_publisher_result_summary_exposes_vertical_video(self):
         class FakePublisherTask:

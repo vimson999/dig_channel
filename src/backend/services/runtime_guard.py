@@ -20,6 +20,7 @@ RUNNING_STATUSES = ("processing",)
 
 DEFAULT_FEATURE_LIMITS = {
     "publisher": 4,
+    "publisher_upload": 2,
     "report_audio_workflow": 2,
     "report_pdf_audio_workflow": 2,
     "report_script_material_workflow": 2,
@@ -32,6 +33,7 @@ DEFAULT_FEATURE_LIMITS = {
 
 DEFAULT_FEATURE_BACKLOG_LIMITS = {
     "publisher": 12,
+    "publisher_upload": 20,
     "report_audio_workflow": 10,
     "report_pdf_audio_workflow": 10,
     "report_script_material_workflow": 50,
@@ -45,6 +47,12 @@ DEFAULT_FEATURE_BACKLOG_LIMITS = {
 FEATURE_ALIASES = {
     "report_audio_workflow": ("report_audio_workflow", "report_pdf_audio_workflow"),
     "report_pdf_audio_workflow": ("report_audio_workflow", "report_pdf_audio_workflow"),
+}
+PASSIVE_RUNNING_STEPS = {
+    "mp3_video_workflow": (
+        "landscape_video_waiting",
+        "vertical_video_waiting",
+    ),
 }
 
 _DB_PRESSURE_CACHE = {
@@ -302,9 +310,20 @@ def _publication_task_active_count(feature, *, task_id=None, mode="start"):
         .filter(PublicationTask.feature.in_(aliases))
         .filter(PublicationTask.status.in_(statuses))
     )
+    if mode == "start":
+        passive_steps = _passive_running_steps(feature)
+        if passive_steps:
+            query = query.filter(~PublicationTask.current_step.in_(passive_steps))
     if task_id:
         query = query.filter(PublicationTask.id != str(task_id))
     return int(query.count() or 0)
+
+
+def _passive_running_steps(feature):
+    values = []
+    for item in FEATURE_ALIASES.get(feature, (feature,)):
+        values.extend(PASSIVE_RUNNING_STEPS.get(item, ()))
+    return tuple(dict.fromkeys(values))
 
 
 def _mark_publication_task_deferred(task_id, *, admission, queue, countdown):

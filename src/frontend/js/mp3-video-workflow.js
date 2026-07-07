@@ -35,8 +35,17 @@ class Mp3VideoWorkflowPage {
             selectedAudioTitle: document.getElementById('selected-audio-title'),
             selectedAudioMeta: document.getElementById('selected-audio-meta'),
             selectedAudioPlayer: document.getElementById('selected-audio-player'),
+            inputSourceSelect: document.getElementById('input-source-select'),
+            renderModeSelect: document.getElementById('render-mode-select'),
+            generateSubtitlesCheckbox: document.getElementById('generate-subtitles-checkbox'),
+            geminiConfigPanel: document.getElementById('gemini-config-panel'),
             geminiUrlInput: document.getElementById('gemini-url-input'),
             imagePromptInput: document.getElementById('image-prompt-input'),
+            transcriptConfigPanel: document.getElementById('transcript-config-panel'),
+            transcriptTextInput: document.getElementById('transcript-text-input'),
+            transcriptPromptInput: document.getElementById('transcript-prompt-input'),
+            dsResponseConfigPanel: document.getElementById('ds-response-config-panel'),
+            dsResponseInput: document.getElementById('ds-response-input'),
             submitBtn: document.getElementById('submit-btn'),
             loadHistoryBtn: document.getElementById('load-history-btn'),
             refreshJobsBtn: document.getElementById('refresh-jobs-btn'),
@@ -48,6 +57,7 @@ class Mp3VideoWorkflowPage {
             jobPagination: document.getElementById('job-pagination'),
         };
         this.defaults();
+        this.updateSourceMode();
         this.bind();
         this.syncJobStatusFilter();
         this.syncJobSearchInput();
@@ -63,6 +73,41 @@ class Mp3VideoWorkflowPage {
             '根据以上内容',
             '请创造一张横向排版的信息图，以简短、干净、极简为排版原则；视觉上采用手绘笔记风格，并严格参照《华尔街日报》经典插图的黑白钢笔画、点刻/Hedcut、细密排线表现形式来呈现主题图案；所有说明文字请使用简体中文；排版中不得出现任何机构名称或字符串“FCCNN88”；保持整体手绘质感，图文协调，适合直接用于展示。'
         ].join('\n');
+        this.els.transcriptPromptInput.value = [
+            '1：请你使用投资者的视角，用投资者最关心的信息视角为这个内容起一个标题，告诉投资者信息差和赚钱机会，这个标题要包括足够的信息密度同时又能提高点击率',
+            '2：再来一个版本的，请你使用投资者的视角，用投资者最关心的信息视角为这个内容起一个标题，告诉投资者信息差和赚钱机会，这个标题要包括足够的信息密度同时又能提高点击率',
+            '3：再精简一个短标题',
+            '4：从这段音频中识别出最精华的一段，要让别人一打开这个音频就立即被吸引住，我们需要提取出来，需要标识出来开始、结束的时间戳，',
+            '注意：如果音频总时长超过了30分钟，那么你就识别出来的片段应该大约25分钟，如果音频总时长不超过30分分钟，那么识别出来片段应该尽量接近15分分钟。',
+            '5：找出这段音频里的几段金句',
+            '6：尝试优化下标题，使用 内资闭门会 / xxxx / xxxx / xxxx / 当日日期 ，这样的格式来写',
+            '7：尝试优化下标题，并给我另外一个版本，使用 内资闭门会 | xxxx | xxxx | xxxx | 当日日期 ，这样的格式来写'
+        ].join('\n');
+    }
+
+    currentInputSource() {
+        const value = String(this.els.inputSourceSelect?.value || '').trim();
+        if (value === 'ima_transcript') return 'ima_transcript';
+        if (value === 'ds_response') return 'ds_response';
+        return 'gemini_audio';
+    }
+
+    currentRenderMode() {
+        const value = String(this.els.renderModeSelect?.value || '').trim();
+        return value === 'full_video' ? 'full_video' : 'keyframes';
+    }
+
+    currentGenerateSubtitles() {
+        return this.els.generateSubtitlesCheckbox ? this.els.generateSubtitlesCheckbox.checked !== false : true;
+    }
+
+    updateSourceMode() {
+        const source = this.currentInputSource();
+        const usesTranscript = source === 'ima_transcript';
+        const usesDirectDs = source === 'ds_response';
+        this.els.geminiConfigPanel?.classList.toggle('hidden', usesTranscript || usesDirectDs);
+        this.els.transcriptConfigPanel?.classList.toggle('hidden', !usesTranscript);
+        this.els.dsResponseConfigPanel?.classList.toggle('hidden', !usesDirectDs);
     }
 
     initialJobPage() {
@@ -139,6 +184,7 @@ class Mp3VideoWorkflowPage {
         });
         this.els.audioAssetPagination.addEventListener('click', (event) => this.handleAudioAssetPageClick(event));
         this.els.audioAssetPagination.addEventListener('submit', (event) => this.handleAudioAssetPageJump(event));
+        this.els.inputSourceSelect?.addEventListener('change', () => this.updateSourceMode());
         this.els.submitBtn.addEventListener('click', () => this.submit());
         this.els.loadHistoryBtn.addEventListener('click', () => this.loadHistory({ page: 1, force: true }));
         this.els.refreshJobsBtn.addEventListener('click', () => this.refreshJobs());
@@ -210,11 +256,16 @@ class Mp3VideoWorkflowPage {
         try {
             const result = await this.request('/api/mp3-video-workflows/status', { timeoutMs: 10000 });
             const provider = result.data?.provider || {};
-            const ds = provider.deepseek_configured ? `DS: ${provider.planner_model || 'deepseek-v4-pro'}` : 'DS 未配，使用兜底';
-            if (provider.configured) {
-                this.setBadge(this.els.providerStatus, `配置正常 · ${ds}`, 'success');
+            const dsParts = [
+                provider.planner_deepseek_configured ? `规划: ${provider.planner_model || 'deepseek-v4-pro'}` : '',
+                provider.transcript_deepseek_configured ? `IMA+DS: ${provider.transcript_model || provider.planner_model || 'deepseek-v4-pro'}` : '',
+            ].filter(Boolean);
+            const ds = dsParts.length ? dsParts.join(' / ') : 'DS 未配，使用兜底';
+            const gemini = provider.gemini_configured ? 'Gemini 可用' : 'Gemini 未配';
+            if (provider.gemini_configured || provider.deepseek_configured) {
+                this.setBadge(this.els.providerStatus, `${gemini} · ${ds}`, provider.deepseek_configured ? 'success' : 'warning');
             } else {
-                this.setBadge(this.els.providerStatus, 'Gemini 未配置', 'warning');
+                this.setBadge(this.els.providerStatus, 'Gemini / DS 均未配置', 'warning');
             }
         } catch (error) {
             this.setBadge(this.els.providerStatus, '配置检查失败', 'error');
@@ -405,16 +456,38 @@ class Mp3VideoWorkflowPage {
             this.setNotice('请先选择一个已同步 MP3。', 'warning');
             return;
         }
+        const inputSource = this.currentInputSource();
+        const renderMode = this.currentRenderMode();
+        const generateSubtitles = this.currentGenerateSubtitles();
+        const transcriptText = this.els.transcriptTextInput?.value.trim() || '';
+        const dsResponseText = this.els.dsResponseInput?.value.trim() || '';
+        if (inputSource === 'ima_transcript' && transcriptText.length < 20) {
+            this.setNotice('请先粘贴 IMA 的复制全文。', 'warning');
+            return;
+        }
+        if (inputSource === 'ds_response' && dsResponseText.length < 20) {
+            this.setNotice('请先粘贴 DS 返回值。', 'warning');
+            return;
+        }
         this.els.submitBtn.disabled = true;
         this.els.submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>投递中';
         try {
             const payload = {
                 audio_asset_id: this.selectedAudioAsset.attachment_id,
+                input_source: inputSource,
+                render_mode: renderMode,
+                generate_subtitles: generateSubtitles,
                 gemini_url: this.els.geminiUrlInput.value.trim(),
                 image_prompt: this.els.imagePromptInput.value.trim(),
+                transcript_text: inputSource === 'ima_transcript' ? transcriptText : '',
+                transcript_prompt: inputSource === 'ima_transcript' ? (this.els.transcriptPromptInput?.value.trim() || '') : '',
+                ds_response_text: inputSource === 'ds_response' ? dsResponseText : '',
                 metadata: {
                     title: this.selectedAudioAsset.topic_title || this.selectedAudioAsset.filename,
-                    source: 'mp3-video-workflow.html'
+                    source: 'mp3-video-workflow.html',
+                    input_source: inputSource,
+                    render_mode: renderMode,
+                    generate_subtitles: generateSubtitles,
                 }
             };
             const result = await this.request('/api/mp3-video-workflows/jobs', {
@@ -607,6 +680,7 @@ class Mp3VideoWorkflowPage {
         const selected = this.selectedAudioAsset?.attachment_id === asset.attachment_id;
         const itemTitle = [asset.filename, asset.topic_title, asset.tab_label].filter(Boolean).join('\n');
         const downloadText = this.audioAssetDownloadText(asset);
+        const downloadBadgeClass = this.audioAssetDownloadBadgeClass(asset);
         const workflowMeta = this.audioAssetWorkflowMeta(asset);
         const syncTime = this.formatDateTime(asset.topic_last_synced_at || asset.updated_at);
         const topicTime = this.formatDateTime(asset.topic_create_time) || asset.topic_create_time || '';
@@ -634,7 +708,7 @@ class Mp3VideoWorkflowPage {
                 </div>
                 <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(metaLine)}</div>
                 <div class="mt-2 flex flex-wrap items-center gap-1.5">
-                    <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-500">
+                    <span class="rounded-full border px-2 py-0.5 text-[11px] font-bold ${downloadBadgeClass}">
                         <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
                     </span>
                     <span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${workflowMeta.className}">
@@ -649,8 +723,14 @@ class Mp3VideoWorkflowPage {
     }
 
     audioAssetDownloadText(asset) {
-        const count = Number(asset?.download_count);
-        return Number.isFinite(count) ? `下载 ${count} 次` : '下载 -';
+        const count = asset?.download_count;
+        return window.DownloadCountHighlight?.badgeText(count)
+            || (Number.isFinite(Number(count)) ? `下载 ${Number(count)} 次` : '下载 -');
+    }
+
+    audioAssetDownloadBadgeClass(asset) {
+        return window.DownloadCountHighlight?.badgeClass(asset?.download_count)
+            || 'border-slate-200 bg-slate-100 text-slate-500';
     }
 
     audioAssetWorkflowMeta(asset) {
@@ -805,6 +885,9 @@ class Mp3VideoWorkflowPage {
                     </div>
                     <div class="flex flex-wrap items-center gap-2">
                         <span class="rounded-full px-2.5 py-1 text-xs font-bold ${status.className}">${status.label}</span>
+                        <a href="${this.escapeAttr(this.jobDetailUrl(job.job_id))}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-indigo-200 px-2.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50">
+                            <i class="fas fa-up-right-from-square mr-1"></i>详情新页
+                        </a>
                         <button data-action="refresh" data-job-id="${this.escapeAttr(job.job_id)}" class="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50">刷新</button>
                         ${canCancel ? `<button data-action="cancel" data-job-id="${this.escapeAttr(job.job_id)}" class="rounded-md border border-rose-200 px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50">取消</button>` : ''}
                         ${canRetry ? `<button data-action="retry" data-job-id="${this.escapeAttr(job.job_id)}" class="rounded-md border border-emerald-200 px-2.5 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50" title="从失败处续跑">失败续跑</button>` : ''}
@@ -821,6 +904,7 @@ class Mp3VideoWorkflowPage {
                 </div>
                 ${this.renderGeminiRetry(job)}
                 ${this.renderPlan(job)}
+                ${this.renderKeyframes(job)}
                 ${this.renderDownloads(job)}
                 ${this.renderLogs(job.logs || [])}
             </article>
@@ -875,10 +959,18 @@ class Mp3VideoWorkflowPage {
         const plan = job.plan || {};
         if (!Object.keys(plan).length && !job.initial_response_text) return '';
         const audio = plan.audio || {};
+        const inputSource = job.input_source || job.request?.input_source || 'gemini_audio';
+        const sourceLabel = inputSource === 'ds_response'
+            ? '手动 DS 返回'
+            : (inputSource === 'ima_transcript' ? 'IMA + DS 返回' : 'Gemini 第一轮');
+        const renderMode = job.render_mode || job.request?.render_mode || 'full_video';
+        const generateSubtitles = job.generate_subtitles ?? job.request?.generate_subtitles ?? true;
         const timeText = [
-            audio.start_seconds !== undefined ? `起点 ${audio.start_seconds}s` : null,
-            audio.end_seconds !== null && audio.end_seconds !== undefined ? `终点 ${audio.end_seconds}s` : '终点自动',
-            `倍速 ${audio.speed || 1.2}`
+            audio.start_seconds !== undefined ? `起点 ${this.formatDuration(audio.start_seconds)}` : null,
+            audio.end_seconds !== null && audio.end_seconds !== undefined ? `终点 ${this.formatDuration(audio.end_seconds)}` : '终点自动',
+            `倍速 ${audio.speed || 1.2}`,
+            renderMode === 'keyframes' ? '关键帧预览' : '完整视频',
+            generateSubtitles ? '生成字幕' : '无字幕'
         ].filter(Boolean).join(' · ');
         return `
             <div class="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
@@ -889,8 +981,36 @@ class Mp3VideoWorkflowPage {
                     <div class="mt-2 text-xs font-bold text-slate-500">${this.escape(timeText)}</div>
                 </div>
                 <div class="rounded-md bg-slate-50 p-3">
-                    <div class="text-[11px] font-black uppercase text-slate-400">Gemini 第一轮</div>
-                    <div class="mt-1 max-h-24 overflow-auto text-xs leading-5 text-slate-600">${this.escape(job.initial_response_text || job.gemini?.initial_response_text || '等待返回')}</div>
+                    <div class="text-[11px] font-black uppercase text-slate-400">${this.escape(sourceLabel)}</div>
+                    <div class="mt-1 max-h-24 overflow-auto text-xs leading-5 text-slate-600">${this.escape(job.initial_response_text || job.source?.initial_response_text || job.gemini?.initial_response_text || '等待返回')}</div>
+                </div>
+            </div>
+        `;
+    }
+
+    renderKeyframes(job) {
+        const urls = job.artifact_download_urls || {};
+        const artifacts = job.artifacts || {};
+        const frames = Object.entries(urls)
+            .filter(([key]) => key.startsWith('keyframe_'))
+            .map(([key, url]) => ({ key, url, label: artifacts[key]?.label || key, ratio: artifacts[key]?.ratio || '' }));
+        if (!frames.length) return '';
+        return `
+            <div class="mt-3 rounded-md border border-emerald-100 bg-emerald-50/50 p-3">
+                <div class="mb-2 flex items-center justify-between gap-2">
+                    <div class="text-[11px] font-black uppercase text-emerald-700">关键帧预览</div>
+                    <div class="text-[11px] font-bold text-emerald-700">${frames.length} 张</div>
+                </div>
+                <div class="grid grid-cols-2 gap-2 lg:grid-cols-3">
+                    ${frames.map((frame) => `
+                        <a href="${this.absoluteUrl(frame.url)}" target="_blank" rel="noopener noreferrer" class="group overflow-hidden rounded-md border border-emerald-100 bg-white">
+                            <img src="${this.absoluteUrl(frame.url)}" alt="${this.escapeAttr(frame.label)}" class="${frame.ratio === '9:16' ? 'aspect-[9/16]' : 'aspect-video'} w-full object-cover">
+                            <div class="flex items-center justify-between gap-2 px-2 py-1.5 text-[11px] font-bold text-slate-600">
+                                <span class="truncate">${this.escape(frame.label)}</span>
+                                <span class="text-slate-400">${this.escape(frame.ratio)}</span>
+                            </div>
+                        </a>
+                    `).join('')}
                 </div>
             </div>
         `;
@@ -899,7 +1019,7 @@ class Mp3VideoWorkflowPage {
     renderDownloads(job) {
         const links = [];
         if (job.download_input_audio_url) links.push(['原始 MP3', job.download_input_audio_url]);
-        if (job.download_infographic_url) links.push(['Gemini 信息图', job.download_infographic_url]);
+        if (job.download_infographic_url) links.push([job.infographic?.label || '信息图', job.download_infographic_url]);
         Object.entries(job.artifact_download_urls || {}).forEach(([key, url]) => {
             const label = job.artifacts?.[key]?.label || key;
             links.push([label, url]);
@@ -952,6 +1072,11 @@ class Mp3VideoWorkflowPage {
         url.searchParams.set('job_page', String(Math.max(1, page)));
         this.applyJobStatusToUrl(url);
         return `${url.pathname}${url.search}${url.hash}`;
+    }
+
+    jobDetailUrl(jobId) {
+        const params = new URLSearchParams({ job_id: String(jobId || '') });
+        return `mp3-video-workflow-detail.html?${params.toString()}`;
     }
 
     updateJobPageUrl(page) {
@@ -1108,6 +1233,20 @@ class Mp3VideoWorkflowPage {
         }).formatToParts(date);
         const pick = (type) => parts.find((part) => part.type === type)?.value || '';
         return `${pick('month')}-${pick('day')} ${pick('hour')}:${pick('minute')}`;
+    }
+
+    formatDuration(value) {
+        const seconds = Number(value);
+        if (!Number.isFinite(seconds)) return String(value || '');
+        const total = Math.max(0, Math.round(seconds));
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const remainder = total % 60;
+        const pad = (item) => String(item).padStart(2, '0');
+        if (hours > 0) {
+            return `${pad(hours)}:${pad(minutes)}:${pad(remainder)}`;
+        }
+        return `${pad(minutes)}:${pad(remainder)}`;
     }
 
     formatBytes(value) {

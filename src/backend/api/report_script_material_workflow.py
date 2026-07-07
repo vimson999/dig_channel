@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_file
-from sqlalchemy import String, and_, cast, or_
+from sqlalchemy import String, and_, cast, inspect as sqlalchemy_inspect, or_
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -21,6 +21,7 @@ from services.report_script_material_workflow import (
     status_payload as workflow_status_payload,
     storage_path_for_job,
 )
+from services.report_audio_workflow import clean_final_script_for_tts
 from services.runtime_guard import maybe_guarded_apply_async
 from tasks.report_script_material_workflow import process_report_script_material_workflow_job
 from utils.auth_utils import require_login
@@ -58,6 +59,7 @@ TASK_LIST_COLUMNS = (
     PublicationTask.report_audio_pdf_topic_title,
     PublicationTask.report_audio_structured_title,
     PublicationTask.report_audio_output_path,
+    PublicationTask.final_script_chars,
     PublicationTask.created_at,
     PublicationTask.updated_at,
     PublicationTask.completed_at,
@@ -550,6 +552,7 @@ def _job_payload(task, include_detail=False):
     payload = params.get(FEATURE_NAME) if isinstance(params.get(FEATURE_NAME), dict) else {}
     structured = _structured_result_from_task_result(result)
     script = _final_script_from_structured(structured)
+    script_chars = len(script) if include_detail else int(task.final_script_chars or 0)
     script_material = result.get("script_material") if isinstance(result.get("script_material"), dict) else {}
     pdf = payload.get("pdf") if isinstance(payload.get("pdf"), dict) else {}
     if not pdf:
@@ -571,7 +574,7 @@ def _job_payload(task, include_detail=False):
             "topic_title": task.report_audio_pdf_topic_title,
         },
         "script_material": script_material or None,
-        "script_chars": len(script),
+        "script_chars": script_chars,
         "download_result_url": f"/api/report-script-material-workflows/jobs/{task.id}/download-result" if task.status == "completed" else None,
     }
     if include_detail:
@@ -649,7 +652,7 @@ def _latest_material_task_for_asset(asset_id, *, current_user=None, include_resu
     asset_id = str(asset_id or "").strip()
     if not asset_id:
         return None
-    columns = TASK_DETAIL_COLUMNS if include_result else (*TASK_LIST_COLUMNS, PublicationTask.result)
+    columns = TASK_DETAIL_COLUMNS if include_result else TASK_LIST_COLUMNS
     query = (
         PublicationTask.query
         .options(load_only(*columns))
@@ -675,12 +678,26 @@ def _best_material_task(candidates):
     if not tasks:
         return None
     for task in tasks:
-        if _final_script_from_task_result(task.result if isinstance(task.result, dict) else {}):
+        if int(getattr(task, "final_script_chars", 0) or 0) > 0:
+            return task
+    for task in tasks:
+        result = _loaded_task_result(task)
+        if result and _final_script_from_task_result(result):
             return task
     for task in tasks:
         if task.status == "completed":
             return task
     return tasks[0]
+
+
+def _loaded_task_result(task):
+    try:
+        if "result" in sqlalchemy_inspect(task).unloaded:
+            return {}
+    except Exception:
+        pass
+    result = getattr(task, "result", None)
+    return result if isinstance(result, dict) else {}
 
 
 def _material_task_payload(task):
@@ -689,6 +706,7 @@ def _material_task_payload(task):
     payload = _workflow_payload_from_params(params)
     structured = _structured_result_from_task_result(result)
     script = _final_script_from_structured(structured)
+    script_chars = len(script) if script else int(task.final_script_chars or 0)
     script_material = result.get("script_material") if isinstance(result.get("script_material"), dict) else {}
     pdf = payload.get("pdf") if isinstance(payload.get("pdf"), dict) else {}
     if not pdf:
@@ -715,7 +733,7 @@ def _material_task_payload(task):
         "script_material": script_material or None,
         "structured_result": structured or None,
         "final_script_for_tts": script,
-        "script_chars": len(script),
+        "script_chars": script_chars,
         "logs": result.get("logs") or [],
     }
     if task.feature == FEATURE_NAME and task.status == "completed":
@@ -745,7 +763,7 @@ def _final_script_from_task_result(result):
 
 
 def _final_script_from_structured(structured):
-    return str((structured or {}).get("final_script_for_tts") or "").strip()
+    return clean_final_script_for_tts((structured or {}).get("final_script_for_tts") or "")
 
 
 def _material_feature_label(feature):
@@ -835,7 +853,7 @@ def _attach_material_status(items):
             PublicationTask.report_audio_pdf_attachment_id,
             PublicationTask.created_at,
             PublicationTask.completed_at,
-            PublicationTask.result,
+            PublicationTask.final_script_chars,
         )
         .filter(PublicationTask.feature.in_(MATERIAL_STATUS_FEATURES))
         .filter(PublicationTask.status != "canceled")
@@ -852,14 +870,14 @@ def _attach_material_status(items):
         by_asset.setdefault(key, []).append(row)
     for item in items:
         row = _best_material_task(by_asset.get(str(item.get("id") or "")))
-        script = _final_script_from_task_result(row.result if row else {})
+        script_chars = int(row.final_script_chars or 0) if row else 0
         item["material_task_status"] = row.status if row else ""
         item["material_task_id"] = row.id if row else ""
         item["material_task_step"] = row.current_step if row else ""
         item["material_task_feature"] = row.feature if row else ""
         item["material_task_feature_label"] = _material_feature_label(row.feature) if row else ""
-        item["material_has_script"] = bool(script)
-        item["material_script_chars"] = len(script)
+        item["material_has_script"] = script_chars > 0
+        item["material_script_chars"] = script_chars
         item["material_completed_at"] = row.completed_at.isoformat() + "Z" if row and row.completed_at else None
 
 

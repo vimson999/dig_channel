@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -88,6 +89,61 @@ class ContentRetentionSchedulerServiceTest(unittest.TestCase):
         self.assertIn("未收尾任务保护：3 天", body)
         self.assertIn("下次计划：2026-06-25T00:00:00Z", body)
 
+    def test_scheduled_next_run_preserves_future_persisted_time(self):
+        now = datetime(2026, 7, 1, 1, 0, 0, tzinfo=timezone.utc)
+        target = scheduler_service.scheduled_next_run_datetime(
+            {
+                "interval_hours": 24,
+                "next_run_at": "2026-07-01T02:19:00Z",
+            },
+            now=now,
+        )
+
+        self.assertEqual(scheduler_service.utc_datetime_iso(target), "2026-07-01T02:19:00Z")
+
+    def test_scheduled_next_run_preserves_overdue_time_for_catchup(self):
+        now = datetime(2026, 7, 1, 3, 0, 0, tzinfo=timezone.utc)
+        target = scheduler_service.scheduled_next_run_datetime(
+            {
+                "interval_hours": 24,
+                "next_run_at": "2026-07-01T02:19:00Z",
+            },
+            now=now,
+        )
+
+        self.assertLess(target, now)
+        self.assertEqual(scheduler_service.utc_datetime_iso(target), "2026-07-01T02:19:00Z")
+
+    def test_scheduled_next_run_defaults_from_now_when_no_persisted_time(self):
+        now = datetime(2026, 7, 1, 1, 0, 0, tzinfo=timezone.utc)
+        target = scheduler_service.scheduled_next_run_datetime(
+            {"interval_hours": 6},
+            now=now,
+        )
+
+        self.assertEqual(target, now + timedelta(hours=6))
+
+    def test_zombie_pid_is_not_considered_running(self):
+        class Completed:
+            returncode = 0
+            stdout = "Z\n"
+
+        with patch.object(scheduler_service.subprocess, "run", return_value=Completed()), \
+             patch.object(scheduler_service.os, "kill") as kill:
+            self.assertFalse(scheduler_service._is_pid_running(12345))
+
+        kill.assert_not_called()
+
+    def test_start_scheduler_skips_when_start_lock_is_held(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with _patched_paths(Path(temp_dir)), \
+                 patch.object(scheduler_service, "acquire_scheduler_start_lock", return_value=None):
+                result = scheduler_service.start_scheduler()
+
+        self.assertFalse(result["started"])
+        self.assertFalse(result["running"])
+        self.assertIn("正在启动", result["message"])
+
 
 def _patched_paths(root: Path):
     runtime = root / "runtime"
@@ -97,6 +153,8 @@ def _patched_paths(root: Path):
         RUNTIME_DIR=runtime,
         CONFIG_PATH=runtime / "content_retention_cleanup_config.json",
         PID_PATH=runtime / "content_retention_cleanup_scheduler.pid",
+        START_LOCK_PATH=runtime / "content_retention_cleanup_scheduler_start.lock",
+        PROCESS_LOCK_PATH=runtime / "content_retention_cleanup_scheduler_process.lock",
         LOG_PATH=logs / "content_retention_cleanup_scheduler.log",
     )
 

@@ -242,7 +242,7 @@
                         <div id="subtitle-drag-overlay" class="absolute inset-0 pointer-events-none z-20">
                             <div id="subtitle-handle"
                                  class="absolute left-0 right-0 pointer-events-auto cursor-ns-resize group opacity-50 hover:opacity-100 transition-opacity duration-200"
-                                 style="top: 90%; transform: translateY(-50%);">
+                                 style="top: 83%; transform: translateY(-50%);">
                                 <div class="absolute inset-x-0 h-px bg-yellow-400/40 group-hover:bg-yellow-400/90 transition-colors" style="top: 50%;"></div>
                                 <div class="flex justify-center relative py-1">
                                     <div class="bg-black/80 border border-yellow-400/40 group-hover:border-yellow-400/80 text-yellow-300 text-[10px] font-bold px-3 py-0.5 rounded-sm select-none flex items-center gap-2 transition-colors">
@@ -251,7 +251,7 @@
                                         <i class="fas fa-grip-lines text-[8px] opacity-60"></i>
                                     </div>
                                 </div>
-                                <div id="subtitle-pos-hint" class="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-mono text-yellow-400/60 bg-black/50 px-1.5 py-0.5 rounded select-none">90%</div>
+                                <div id="subtitle-pos-hint" class="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-mono text-yellow-400/60 bg-black/50 px-1.5 py-0.5 rounded select-none">83%</div>
                             </div>
                         </div>
                     </div>
@@ -299,11 +299,11 @@
                     <button id="zoom-out-btn" class="w-5 h-5 flex items-center justify-center text-zinc-500 hover:text-emerald-400 transition-colors" title="缩小 (减小缩放)">
                         <i class="fas fa-magnifying-glass-minus text-[10px]"></i>
                     </button>
-                    <input type="range" id="timeline-zoom-slider" min="0" max="100" value="61" step="1" class="w-24 h-1 accent-emerald-500 bg-zinc-800 rounded-lg appearance-none cursor-pointer">
+                    <input type="range" id="timeline-zoom-slider" min="0" max="100" value="34" step="1" class="w-24 h-1 accent-emerald-500 bg-zinc-800 rounded-lg appearance-none cursor-pointer">
                     <button id="zoom-in-btn" class="w-5 h-5 flex items-center justify-center text-zinc-500 hover:text-emerald-400 transition-colors" title="放大 (增大缩放)">
                         <i class="fas fa-magnifying-glass-plus text-[10px]"></i>
                     </button>
-                    <span id="zoom-label" class="text-[9px] font-mono text-zinc-500 min-w-[28px] text-right">1×</span>
+                    <span id="zoom-label" class="text-[9px] font-mono text-zinc-500 min-w-[28px] text-right">0.1×</span>
                 </div>
                 <div class="ml-auto flex items-center gap-3">
                     <div class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
@@ -326,6 +326,6 @@
     <script src="js/api.js"></script>
     <script src="js/shared-navigation.js"></script>
     <script src="js/publisher/services.js"></script>
-    <script src="js/video-editor/main.js?v=20260624-publisher-guard-state"></script>
+    <script src="js/video-editor/main.js?v=20260701-timeline-zoom-01x"></script>
 </body>
 </html>
