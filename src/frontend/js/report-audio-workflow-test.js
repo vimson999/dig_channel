@@ -587,6 +587,7 @@ class ReportAudioWorkflowPage {
             const downloadBadgeClass = window.DownloadCountHighlight?.badgeClass(item.download_count)
                 || 'border-slate-200 bg-slate-100 text-slate-500';
             const workflowMeta = this.pdfAssetWorkflowMeta(item);
+            const materialMeta = this.pdfAssetMaterialMeta(item);
             const syncTime = this.formatDateTime(item.topic_last_synced_at || item.updated_at);
             const topicTime = this.formatDateTime(item.topic_create_time) || item.topic_create_time || '';
             const metaLine = [
@@ -615,8 +616,13 @@ class ReportAudioWorkflowPage {
                             ${workflowMeta.latestMeta ? `<span class="mr-1 inline-block h-1.5 w-1.5 rounded-full ${workflowMeta.latestMeta.dot}"></span>` : ''}
                             ${this.escape(workflowMeta.text)}
                         </span>
+                        <span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${materialMeta.className}" title="${this.escape(materialMeta.title)}">
+                            ${materialMeta.dot ? `<span class="mr-1 inline-block h-1.5 w-1.5 rounded-full ${materialMeta.dot}"></span>` : ''}
+                            ${this.escape(materialMeta.text)}
+                        </span>
                         ${workflowMeta.latestMeta ? `<span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${workflowMeta.latestMeta.className}">最近 ${this.escape(workflowMeta.latestMeta.label)}</span>` : ''}
                         ${workflowMeta.detail ? `<span class="text-[11px] font-bold text-slate-400">${this.escape(workflowMeta.detail)}</span>` : ''}
+                        ${materialMeta.detail ? `<span class="text-[11px] font-bold text-slate-400">${this.escape(materialMeta.detail)}</span>` : ''}
                     </div>
                 </div>
             `;
@@ -1383,6 +1389,69 @@ class ReportAudioWorkflowPage {
             detail,
             className: latestMeta.className,
         };
+    }
+
+    pdfAssetMaterialMeta(item) {
+        if (item.workflow_loading) {
+            return {
+                text: '基础文案加载中',
+                detail: '',
+                title: '正在读取基础文案状态',
+                className: 'bg-indigo-50 text-indigo-600',
+                dot: 'bg-indigo-500',
+            };
+        }
+        if (item.workflow_load_error) {
+            return {
+                text: '文案状态待刷新',
+                detail: '',
+                title: '基础文案状态读取失败，请刷新',
+                className: 'bg-amber-50 text-amber-700',
+                dot: 'bg-amber-500',
+            };
+        }
+
+        const material = item.workflow?.material || item.material || {};
+        if (!material.has_material && !material.job_id) {
+            return {
+                text: '无基础文案',
+                detail: '',
+                title: '这份 PDF 暂无可复用基础文案',
+                className: 'bg-slate-100 text-slate-500',
+                dot: 'bg-slate-300',
+            };
+        }
+
+        const status = this.normalizeStatus(material.status || '');
+        const statusMeta = this.statusMeta(status);
+        const chars = Number(material.script_chars || 0);
+        const hasScript = Boolean(material.has_script || chars > 0 || status === 'succeeded');
+        let text = '基础文案';
+        let className = statusMeta.className;
+        let dot = statusMeta.dot;
+        if (hasScript) {
+            text = '已有基础文案';
+            className = 'bg-emerald-50 text-emerald-700';
+            dot = 'bg-emerald-500';
+        } else if (status === 'failed') {
+            text = '文案失败';
+        } else if (['queued', 'running', 'submitting'].includes(status)) {
+            text = '文案生成中';
+        } else if (status) {
+            text = `文案${statusMeta.label}`;
+        }
+
+        const detail = [
+            chars ? `${chars} 字` : '',
+            material.feature_label || '',
+        ].filter(Boolean).join(' · ');
+        const title = [
+            material.feature_label || '基础文案',
+            statusMeta.label,
+            chars ? `${chars} 字` : '',
+            material.job_id || '',
+        ].filter(Boolean).join(' · ');
+        return { text, detail, title, className, dot };
     }
 
     renderJobPagination() {

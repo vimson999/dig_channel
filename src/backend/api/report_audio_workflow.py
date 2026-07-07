@@ -90,6 +90,8 @@ SYSTEM_USER_ID = "system"
 TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 VERTICAL_BACKFILL_SOURCE = "report_audio_workflow_vertical_backfill"
 BILIBILI_UPLOAD_SOURCE = f"{FEATURE_NAME}:bilibili_upload"
+SCRIPT_MATERIAL_FEATURE_NAME = "report_script_material_workflow"
+MATERIAL_STATUS_FEATURES = (SCRIPT_MATERIAL_FEATURE_NAME, FEATURE_NAME, "report_audio_workflow")
 VERTICAL_VIDEO_SCHEME_DEFAULT = "scheme1"
 VERTICAL_VIDEO_SCHEMES = {"scheme1", "scheme2"}
 VERTICAL_PREVIEW_SECONDS_DEFAULT = 10
@@ -2674,6 +2676,23 @@ def _empty_pdf_asset_workflow_stats():
         "failed": 0,
         "running": 0,
         "latest": None,
+        "material": _empty_pdf_asset_material_stats(),
+    }
+
+
+def _empty_pdf_asset_material_stats():
+    return {
+        "has_material": False,
+        "job_id": "",
+        "feature": "",
+        "feature_label": "",
+        "status": "",
+        "step": "",
+        "progress": 0,
+        "has_script": False,
+        "script_chars": 0,
+        "created_at": None,
+        "completed_at": None,
     }
 
 
@@ -2723,7 +2742,96 @@ def _pdf_asset_workflow_stats(asset_ids, user_id=None):
                 "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
                 "completed_at": row.completed_at.isoformat() + "Z" if row.completed_at else None,
             }
+    material_stats = _pdf_asset_material_stats(ids, user_id=user_id)
+    for asset_id, bucket in stats.items():
+        bucket["material"] = material_stats.get(asset_id) or _empty_pdf_asset_material_stats()
     return stats
+
+
+def _pdf_asset_material_stats(asset_ids, user_id=None):
+    ids = [str(item or "").strip() for item in asset_ids if str(item or "").strip()]
+    if not ids:
+        return {}
+
+    rows = (
+        PublicationTask.query
+        .with_entities(
+            PublicationTask.id.label("id"),
+            PublicationTask.status.label("status"),
+            PublicationTask.current_step.label("current_step"),
+            PublicationTask.progress.label("progress"),
+            PublicationTask.feature.label("feature"),
+            PublicationTask.source_task_id.label("source_task_id"),
+            PublicationTask.report_audio_pdf_attachment_id.label("attachment_id"),
+            PublicationTask.final_script_chars.label("final_script_chars"),
+            PublicationTask.created_at.label("created_at"),
+            PublicationTask.completed_at.label("completed_at"),
+        )
+        .filter(PublicationTask.feature.in_(MATERIAL_STATUS_FEATURES))
+        .filter(PublicationTask.status != "canceled")
+        .filter(or_(
+            PublicationTask.source_task_id.in_(ids),
+            PublicationTask.report_audio_pdf_attachment_id.in_(ids),
+        ))
+    )
+    if user_id:
+        rows = rows.filter(PublicationTask.user_id.in_(_visible_user_ids(user_id)))
+
+    by_asset = {asset_id: [] for asset_id in ids}
+    for row in rows.order_by(PublicationTask.created_at.desc()).all():
+        keys = {
+            str(row.source_task_id or "").strip(),
+            str(row.attachment_id or "").strip(),
+        }
+        for key in keys:
+            if key in by_asset:
+                by_asset[key].append(row)
+
+    return {
+        asset_id: _pdf_asset_material_row_payload(_best_pdf_asset_material_row(rows_for_asset))
+        for asset_id, rows_for_asset in by_asset.items()
+    }
+
+
+def _best_pdf_asset_material_row(rows):
+    candidates = [row for row in rows or [] if row]
+    if not candidates:
+        return None
+    for row in candidates:
+        if int(row.final_script_chars or 0) > 0:
+            return row
+    for row in candidates:
+        if row.status == "completed":
+            return row
+    return candidates[0]
+
+
+def _pdf_asset_material_row_payload(row):
+    if not row:
+        return _empty_pdf_asset_material_stats()
+    status = STATUS_MAP.get(row.status, row.status or "queued")
+    script_chars = int(row.final_script_chars or 0)
+    return {
+        "has_material": True,
+        "job_id": row.id,
+        "feature": row.feature or "",
+        "feature_label": _material_feature_label(row.feature),
+        "status": status,
+        "step": row.current_step or "",
+        "progress": row.progress or 0,
+        "has_script": script_chars > 0 or status == "succeeded",
+        "script_chars": script_chars,
+        "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+        "completed_at": row.completed_at.isoformat() + "Z" if row.completed_at else None,
+    }
+
+
+def _material_feature_label(feature):
+    return {
+        SCRIPT_MATERIAL_FEATURE_NAME: "基础文案物料",
+        FEATURE_NAME: "研报转语音",
+        "report_audio_workflow": "研报转语音",
+    }.get(feature or "", feature or "")
 
 
 def _resolve_pdf_path(value):
