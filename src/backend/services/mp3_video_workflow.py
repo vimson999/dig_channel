@@ -709,15 +709,12 @@ def process_job(task_id: str) -> bool:
                 _record_child(task.id, "landscape_video", landscape_task)
             _update_result(task.id, {"landscape_video": landscape_summary})
         else:
-            if force_video_regenerate:
-                landscape_task = None
-            else:
-                landscape_task = _active_child_from_result(
-                    existing,
-                    "landscape_video",
-                    generate_subtitles=generate_subtitles,
-                    audio_signature=audio_signature,
-                )
+            landscape_task = _active_child_from_result(
+                existing,
+                "landscape_video",
+                generate_subtitles=generate_subtitles,
+                audio_signature=audio_signature,
+            )
             if landscape_task:
                 _emit(task.id, "landscape_video_wait_existing", 80, "继续等待已提交的小君君横屏视频")
                 _sync_publisher_video_task_title(landscape_task, _publisher_video_title(plan, role="xiaojunjun_landscape"))
@@ -763,15 +760,12 @@ def process_job(task_id: str) -> bool:
                 _record_child(task.id, "vertical_video", vertical_task)
             _update_result(task.id, {"vertical_video": vertical_summary})
         else:
-            if force_video_regenerate:
-                vertical_task = None
-            else:
-                vertical_task = _active_child_from_result(
-                    existing,
-                    "vertical_video",
-                    generate_subtitles=generate_subtitles,
-                    audio_signature=audio_signature,
-                )
+            vertical_task = _active_child_from_result(
+                existing,
+                "vertical_video",
+                generate_subtitles=generate_subtitles,
+                audio_signature=audio_signature,
+            )
             if vertical_task:
                 _emit(task.id, "vertical_video_wait_existing", 92, "继续等待已提交的此刻此声竖屏视频")
                 _sync_publisher_video_task_title(vertical_task, _publisher_video_title(plan, role="ciketc_vertical"))
@@ -841,6 +835,17 @@ def process_job(task_id: str) -> bool:
         _defer_parent_retry(task_id, exc)
         logger.info("MP3 video workflow deferred: %s", exc)
         return True
+    except OperationalError:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        try:
+            db.session.remove()
+        except Exception:
+            pass
+        logger.warning("MP3 video workflow hit a transient database error; letting Celery retry: %s", task_id, exc_info=True)
+        raise
     except Exception as exc:
         mark_job_failed_safely(task_id, str(exc), notify=True)
         logger.error("MP3 video workflow failed: %s", exc, exc_info=True)
