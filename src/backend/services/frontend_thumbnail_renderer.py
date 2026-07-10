@@ -1,7 +1,11 @@
 import base64
+import json
 import mimetypes
 import os
 import re
+import signal
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -97,6 +101,93 @@ class FrontendThumbnailRenderer:
         subtitle_max_lines: Optional[int] = None,
         subtitle_min_size: Optional[int] = None,
         show_guides: bool = False,
+        show_footer: bool = True,
+        quality: float = 0.95,
+        expected_size: Optional[Tuple[int, int]] = None,
+    ) -> str:
+        """Render through an isolated process so a wedged browser cannot block a worker."""
+        render_kwargs = {
+            "output_path": output_path,
+            "format_name": format_name,
+            "main_title": main_title,
+            "sub_title": sub_title,
+            "footer_text": footer_text,
+            "institution": institution,
+            "emotion": emotion,
+            "image_path": image_path,
+            "image_offset_x": image_offset_x,
+            "image_offset_y": image_offset_y,
+            "image_scale": image_scale,
+            "image_anchor": image_anchor,
+            "title_max_lines": title_max_lines,
+            "title_min_size": title_min_size,
+            "subtitle_max_lines": subtitle_max_lines,
+            "subtitle_min_size": subtitle_min_size,
+            "show_guides": show_guides,
+            "show_footer": show_footer,
+            "quality": quality,
+            "expected_size": list(expected_size) if expected_size else None,
+        }
+        if os.getenv("REPORT_COVER_RENDER_INLINE", "").strip().lower() in {"1", "true", "yes", "on"}:
+            return self._render_workbench_thumbnail_direct(**render_kwargs)
+
+        worker_path = Path(__file__).with_name("frontend_thumbnail_render_worker.py")
+        hard_timeout_ms = max(1000, int(os.getenv("REPORT_COVER_HARD_TIMEOUT_MS", "70000")))
+        payload = json.dumps(
+            {
+                "project_root": str(self.project_root),
+                "render_kwargs": render_kwargs,
+            },
+            ensure_ascii=False,
+        )
+        process = subprocess.Popen(
+            [sys.executable, str(worker_path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(payload, timeout=hard_timeout_ms / 1000)
+        except subprocess.TimeoutExpired as exc:
+            self._terminate_render_process(process)
+            stdout, stderr = process.communicate()
+            detail = (stderr or stdout or "no child output").strip()[-1000:]
+            raise FrontendThumbnailRenderError(
+                f"封面工具台渲染超过硬超时 {hard_timeout_ms}ms: {detail}"
+            ) from exc
+
+        if process.returncode != 0:
+            detail = (stderr or stdout or f"exit={process.returncode}").strip()[-2000:]
+            raise FrontendThumbnailRenderError(f"封面工具台子进程失败: {detail}")
+
+        output = Path(output_path).expanduser().resolve()
+        if not output.is_file():
+            raise FrontendThumbnailRenderError(f"封面工具台子进程未生成文件: {output}")
+        return str(output)
+
+    def _render_workbench_thumbnail_direct(
+        self,
+        *,
+        output_path: str,
+        format_name: str = "vertical",
+        main_title: str,
+        sub_title: str = "",
+        footer_text: str = "听见资本",
+        institution: str = "深度研报",
+        emotion: str = "bull",
+        image_path: Optional[str] = None,
+        image_offset_x: float = 0,
+        image_offset_y: float = 0,
+        image_scale: float = 1,
+        image_anchor: str = "",
+        title_max_lines: Optional[int] = None,
+        title_min_size: Optional[int] = None,
+        subtitle_max_lines: Optional[int] = None,
+        subtitle_min_size: Optional[int] = None,
+        show_guides: bool = False,
+        show_footer: bool = True,
         quality: float = 0.95,
         expected_size: Optional[Tuple[int, int]] = None,
     ) -> str:
@@ -112,6 +203,7 @@ class FrontendThumbnailRenderer:
         payload = {
             "format": format_name or "vertical",
             "showGuides": bool(show_guides),
+            "showFooter": bool(show_footer),
             "inst": institution or "深度研报",
             "mainTitle": str(main_title or ""),
             "subTitle": str(sub_title or ""),
@@ -149,6 +241,24 @@ class FrontendThumbnailRenderer:
 
         self._write_data_url(data_url, output, expected_size=expected_size)
         return str(output)
+
+    @staticmethod
+    def _terminate_render_process(process: subprocess.Popen) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            process.terminate()
+        try:
+            process.wait(timeout=3)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            process.kill()
 
     def _launch_browser(self, playwright):
         kwargs: Dict[str, Any] = {"headless": True}

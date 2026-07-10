@@ -1400,7 +1400,6 @@ def _business_tasks_snapshot(force_refresh=False):
                 PublicationTask.current_step.label("current_step"),
                 PublicationTask.progress.label("progress"),
                 PublicationTask.task_title.label("task_title"),
-                PublicationTask.params.label("params"),
                 PublicationTask.parent_feature.label("parent_feature"),
                 PublicationTask.parent_task_id.label("parent_task_id"),
                 PublicationTask.source_feature.label("source_feature"),

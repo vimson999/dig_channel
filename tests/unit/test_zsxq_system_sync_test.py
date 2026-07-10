@@ -10,6 +10,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services import zsxq_system_sync_test as system_sync_test  # noqa: E402
+from services.platform_credential_service import CredentialError  # noqa: E402
 from services.zsxq_sync_service import ZsxqSyncService, ZsxqTransientUpstreamError  # noqa: E402
 from services.zsxq_workflow_service import ZsxqWorkflowService  # noqa: E402
 
@@ -125,6 +126,88 @@ class ZsxqSystemSyncTest(unittest.TestCase):
             self.assertTrue(system_sync_test._runtime_cookie_configured())
             self.assertEqual(system_sync_test._runtime_cookie_source(), "page")
 
+    def test_runtime_cookie_info_falls_back_when_configured_credential_was_deleted(self):
+        replacement = {
+            "cookie": "zsxq_access_token=new-token",
+            "credential_id": "cred-new",
+            "credential_name": "new credential",
+            "credential_source": "db",
+        }
+        with patch.dict(
+            os.environ,
+            {
+                system_sync_test.COOKIE_ENV_NAME: "",
+                system_sync_test.COOKIE_OVERRIDE_ENV_NAME: "",
+            },
+        ):
+            with patch(
+                "services.platform_credential_service.resolve_zsxq_cookie",
+                side_effect=[CredentialError("没有可用的平台凭据"), replacement],
+            ) as resolve_cookie:
+                with patch.object(system_sync_test, "_reset_db_session"):
+                    info = system_sync_test.runtime_cookie_info(account_id="cred-deleted", required=True)
+
+        self.assertEqual(info["credential_id"], "cred-new")
+        self.assertEqual(resolve_cookie.call_args_list[0].kwargs["account_id"], "cred-deleted")
+        self.assertIsNone(resolve_cookie.call_args_list[1].kwargs["account_id"])
+
+    def test_valid_sync_cookie_rebinds_config_to_discovered_credential(self):
+        config = {"credential_id": "cred-deleted"}
+        replacement = {
+            "cookie": "zsxq_access_token=new-token",
+            "credential_id": "cred-new",
+            "credential_source": "db",
+        }
+        with patch.object(system_sync_test, "runtime_cookie_info", return_value=replacement):
+            with patch.object(system_sync_test, "_validate_group_id_with_retry") as validate_group:
+                info = system_sync_test._resolve_valid_sync_cookie(
+                    config,
+                    group_id="28888112822211",
+                    max_retries=2,
+                    delay_seconds=0,
+                )
+
+        self.assertEqual(info["credential_id"], "cred-new")
+        self.assertEqual(config["credential_id"], "cred-new")
+        self.assertEqual(config["last_credential_rebound_from"], "cred-deleted")
+        self.assertEqual(config["last_credential_rebound_to"], "cred-new")
+        validate_group.assert_called_once()
+
+    def test_valid_sync_cookie_rotates_past_credential_without_group_access(self):
+        config = {"credential_id": "cred-wrong-group"}
+        candidates = [
+            {
+                "cookie": "zsxq_access_token=wrong-token",
+                "credential_id": "cred-wrong-group",
+                "credential_source": "db",
+            },
+            {
+                "cookie": "zsxq_access_token=valid-token",
+                "credential_id": "cred-valid",
+                "credential_source": "db",
+            },
+        ]
+        with patch.object(system_sync_test, "runtime_cookie_info", side_effect=candidates) as runtime_cookie:
+            with patch.object(
+                system_sync_test,
+                "_validate_group_id_with_retry",
+                side_effect=[ValueError("知识星球返回失败 code=1005：登录的用户不是星球成员"), None],
+            ):
+                with patch("services.platform_credential_service.mark_credential_error") as mark_error:
+                    info = system_sync_test._resolve_valid_sync_cookie(
+                        config,
+                        group_id="28888112822211",
+                        max_retries=2,
+                        delay_seconds=0,
+                    )
+
+        self.assertEqual(info["credential_id"], "cred-valid")
+        self.assertEqual(config["credential_id"], "cred-valid")
+        self.assertEqual(runtime_cookie.call_args_list[0].kwargs["account_id"], "cred-wrong-group")
+        self.assertIsNone(runtime_cookie.call_args_list[1].kwargs["account_id"])
+        mark_error.assert_called_once()
+        self.assertTrue(mark_error.call_args.kwargs["expired"])
+
     def test_validate_group_id_treats_1059_as_transient(self):
         with patch.object(
             system_sync_test.zsxq_service,
@@ -231,7 +314,7 @@ class ZsxqSystemSyncTest(unittest.TestCase):
         write_config.assert_called_once()
         runtime_cookie_info.assert_not_called()
 
-    def test_invalid_group_skip_records_and_notifies(self):
+    def test_auth_failure_exhaustion_reports_missing_credential_and_keeps_config_enabled(self):
         config = {
             "enabled": True,
             "group_id": "28888112822211",
@@ -264,28 +347,70 @@ class ZsxqSystemSyncTest(unittest.TestCase):
                         "_validate_group_id_with_retry",
                         side_effect=ValueError("知识星球返回失败 code=401：Unauthorized"),
                     ):
-                        with patch.object(system_sync_test, "_write_config") as write_config:
-                            with patch(
-                                "services.workflow_notification_service.workflow_notification_service.send_email_message"
-                            ) as send_email:
-                                result = system_sync_test.queue_configured_jobs(
-                                    trigger="scheduler",
-                                    attempt_id="20260618-210105",
-                                )
+                        with patch("services.platform_credential_service.mark_credential_error"):
+                            with patch.object(system_sync_test, "_write_config") as write_config:
+                                with patch(
+                                    "services.workflow_notification_service.workflow_notification_service.send_email_message"
+                                ) as send_email:
+                                    result = system_sync_test.queue_configured_jobs(
+                                        trigger="scheduler",
+                                        attempt_id="20260618-210105",
+                                    )
 
         self.assertTrue(result["skipped"])
-        self.assertEqual(result["reason"], "invalid_group")
-        self.assertEqual(config["last_skip_reason"], "invalid_group")
+        self.assertEqual(result["reason"], "missing_credential")
+        self.assertEqual(config["last_skip_reason"], "missing_credential")
         self.assertIn("401", config["last_skip_error"])
-        self.assertFalse(config["enabled"])
+        self.assertTrue(config["enabled"])
         write_config.assert_called_once()
         send_email.assert_called_once()
         subject, body = send_email.call_args[0]
-        self.assertIn("系统同步触发失败", subject)
+        self.assertIn("缺少可用凭据", subject)
         self.assertIn("401", body)
         self.assertIn("本轮未入队", body)
-        self.assertIn("调度器已停止", body)
-        self.assertIn("认证失效", body)
+        self.assertIn("自动识别", body)
+
+    def test_missing_credential_is_not_reported_as_invalid_group(self):
+        config = {
+            "enabled": True,
+            "credential_id": "cred-deleted",
+            "group_id": "28888112822211",
+            "group_name": "前沿信息收录",
+            "interval_minutes": 240,
+            "count": 40,
+            "max_pages": 2,
+            "max_download_files": 40,
+            "rounds_completed": 51,
+            "max_rounds": None,
+            "jobs": [
+                {
+                    "key": "foreign_report_pdf",
+                    "file_type": "pdf",
+                    "mode_code": "fr",
+                    "tab": {"id": "tab-1", "label": "外资研报", "scope": "all"},
+                }
+            ],
+        }
+        with patch.object(system_sync_test, "load_config", return_value=config):
+            with patch.object(system_sync_test, "_pending_system_sync_work", return_value={"pending": False}):
+                with patch.object(
+                    system_sync_test,
+                    "_resolve_valid_sync_cookie",
+                    side_effect=CredentialError("没有可用的平台凭据"),
+                ):
+                    with patch.object(system_sync_test, "_write_config") as write_config:
+                        with patch.object(system_sync_test, "_notify_missing_credential_skip") as notify:
+                            result = system_sync_test.queue_configured_jobs(
+                                trigger="scheduler",
+                                attempt_id="20260710-134148",
+                            )
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "missing_credential")
+        self.assertEqual(config["last_skip_reason"], "missing_credential")
+        self.assertTrue(config["enabled"])
+        write_config.assert_called_once()
+        notify.assert_called_once()
 
 
 if __name__ == "__main__":

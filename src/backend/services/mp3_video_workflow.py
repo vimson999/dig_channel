@@ -1,4 +1,5 @@
 import base64
+import copy
 import hashlib
 import json
 import logging
@@ -6,14 +7,16 @@ import mimetypes
 import os
 import re
 import time
+from contextvars import ContextVar
 from datetime import datetime, timedelta
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
-from sqlalchemy import or_
+from sqlalchemy import inspect, or_, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
@@ -35,6 +38,7 @@ from tasks.publisher import run_publication_pipeline
 
 
 logger = logging.getLogger(__name__)
+_active_workflow_state = ContextVar("mp3_video_workflow_state", default=None)
 FEATURE_NAME = "mp3_video_workflow"
 QUEUE_NAME = "mp3_video_workflow"
 DEFAULT_GEMINI_URL = "https://gemini.google.com/gem/f9e84d5e215c"
@@ -71,7 +75,7 @@ VISUAL_ARTIFACT_KEYS = (
     "xiaojunjun_cover",
     "xiaojunjun_background",
 )
-VISUAL_ARTIFACT_VERSION = "mp3_video_visuals_20260706_v9"
+VISUAL_ARTIFACT_VERSION = "mp3_video_visuals_20260708_v10"
 KEYFRAME_ARTIFACT_VERSION = "mp3_video_keyframes_20260706_v6"
 TRANSCRIPT_DEEPSEEK_CACHE_VERSION = "mp3_transcript_deepseek_cache_20260706_v1"
 VISUAL_ARTIFACT_EXPECTED_SIZES = {
@@ -79,6 +83,18 @@ VISUAL_ARTIFACT_EXPECTED_SIZES = {
     "audio_background": (1080, 1920),
     "xiaojunjun_cover": (1280, 720),
     "xiaojunjun_background": (1280, 720),
+}
+VISUAL_ARTIFACT_LABELS = {
+    "finance_cover": "此刻此声-横屏视频封皮 1",
+    "audio_background": "此刻此声-竖屏视频背景图 1",
+    "xiaojunjun_cover": "小君君-横屏视频封皮",
+    "xiaojunjun_background": "小君君 横屏视频 背景",
+}
+VISUAL_ARTIFACT_RENDERERS = {
+    "finance_cover": "browser:finance-cover-generator",
+    "audio_background": "browser:thumbnail-workbench",
+    "xiaojunjun_cover": "browser:closed-door-card-cover-generator",
+    "xiaojunjun_background": "browser:closed-door-card-cover-generator",
 }
 GEMINI_RETRY_LIMIT_ENV_NAME = "MP3_VIDEO_GEMINI_RETRY_LIMIT"
 DEFAULT_GEMINI_RETRY_LIMIT = 2
@@ -135,20 +151,23 @@ TASK_STATUS_COLUMNS = (
     PublicationTask.id,
     PublicationTask.status,
 )
-TASK_PUBLIC_COLUMNS = (
+TASK_PUBLIC_STATUS_COLUMNS = (
     PublicationTask.id,
     PublicationTask.celery_task_id,
     PublicationTask.status,
     PublicationTask.current_step,
     PublicationTask.progress,
-    PublicationTask.params,
-    PublicationTask.result,
     PublicationTask.error_message,
     PublicationTask.feature,
     PublicationTask.task_video_path,
     PublicationTask.created_at,
     PublicationTask.updated_at,
     PublicationTask.completed_at,
+)
+TASK_PUBLIC_COLUMNS = (
+    *TASK_PUBLIC_STATUS_COLUMNS,
+    PublicationTask.params,
+    PublicationTask.result,
 )
 TASK_FAIL_COLUMNS = (
     PublicationTask.id,
@@ -227,9 +246,60 @@ def _load_task(task_id: Any, *columns: Any) -> Optional[PublicationTask]:
         query = PublicationTask.query
         if columns:
             query = query.options(load_only(*columns))
-        return query.get(str(task_id))
+        task = query.filter(PublicationTask.id == str(task_id)).first()
+        state = _active_workflow_state.get()
+        if task and state and state.get("task_id") == str(task_id):
+            if "params" in task.__dict__:
+                state["params"] = copy.deepcopy(task.__dict__.get("params") or {})
+            if "result" in task.__dict__:
+                state["result"] = copy.deepcopy(task.__dict__.get("result") or {})
+        return task
 
     return _db_retry(operation, f"load task {task_id}")
+
+
+def _model_attr_loaded(record: Any, name: str) -> bool:
+    try:
+        return name not in inspect(record).unloaded
+    except Exception:
+        return True
+
+
+def _workflow_result_scope(operation):
+    @wraps(operation)
+    def wrapped(task_id: str, *args: Any, **kwargs: Any):
+        token = _active_workflow_state.set({
+            "task_id": str(task_id),
+            "params": None,
+            "result": None,
+        })
+        try:
+            return operation(task_id, *args, **kwargs)
+        finally:
+            _active_workflow_state.reset(token)
+
+    return wrapped
+
+
+def _cached_workflow_result(task_id: Any) -> Optional[Dict[str, Any]]:
+    state = _active_workflow_state.get()
+    if not state or state.get("task_id") != str(task_id) or state.get("result") is None:
+        return None
+    return copy.deepcopy(state["result"])
+
+
+def _merge_cached_workflow_result(task_id: Any, values: Dict[str, Any]) -> None:
+    state = _active_workflow_state.get()
+    if not state or state.get("task_id") != str(task_id) or state.get("result") is None:
+        return
+    state["result"].update(copy.deepcopy(values))
+
+
+def _replace_cached_workflow_result(task_id: Any, result: Dict[str, Any]) -> None:
+    state = _active_workflow_state.get()
+    if not state or state.get("task_id") != str(task_id):
+        return
+    state["result"] = copy.deepcopy(result)
 
 
 
@@ -455,6 +525,7 @@ def audio_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
     return item
 
 
+@_workflow_result_scope
 def process_job(task_id: str) -> bool:
     task = _load_task(task_id, *TASK_WORKFLOW_COLUMNS)
     if not task:
@@ -1613,8 +1684,23 @@ def _direct_ds_closed_door_parts(value: Any) -> List[str]:
     return output
 
 
+def _closed_door_visual_lines(value: Any, *, max_units: float, max_lines: int = 3) -> str:
+    lines: List[str] = []
+    for part in _direct_ds_closed_door_parts(value):
+        line = _clip_finance_visual_line(part, max_units=max_units)
+        if not line or line in lines:
+            continue
+        lines.append(line)
+        if len(lines) >= max_lines:
+            break
+    return "\n".join(lines)
+
+
 def _direct_ds_finance_cover_title(title: Any, closed_door_title: Any = "") -> str:
     closed_parts = _direct_ds_closed_door_parts(closed_door_title)
+    closed_visual = _closed_door_visual_lines(closed_door_title, max_units=14, max_lines=3)
+    if closed_visual:
+        return closed_visual
     text = _normalize_title_candidate(title)
     text = re.sub(r"^(?:专家密讲|独家)\s*[:：]\s*", "", text).strip()
     clauses = [
@@ -1829,17 +1915,6 @@ def validate_plan(payload: Dict[str, Any], *, fallback: Dict[str, Any], audio: D
         _format_planner_vertical_subtitle(fallback.get("cover_subtitle"))
         or _vertical_cover_subtitle(vertical_title, fallback=subtitle or title)
     )
-    finance_cover_subtitle = (
-        _format_planner_finance_cover_subtitle(payload.get("finance_cover_subtitle"))
-        or _format_planner_finance_cover_subtitle(fallback.get("finance_cover_subtitle"))
-        or _finance_cover_title(finance_title)
-    )
-    xiaojunjun_disallowed = [planner_cover_title, planner_cover_subtitle, finance_cover_subtitle]
-    xiaojunjun_subtitle = (
-        _format_planner_xiaojunjun_subtitle(payload.get("xiaojunjun_subtitle"), disallow=xiaojunjun_disallowed)
-        or _format_planner_xiaojunjun_subtitle(fallback.get("xiaojunjun_subtitle"), disallow=xiaojunjun_disallowed)
-        or _xiaojunjun_cover_subtitle(finance_title or title, fallback=subtitle)
-    )
     xiaojunjun_video_title = (
         _clean_closed_door_video_title(payload.get("xiaojunjun_video_title"), expected_separator="/")
         or _clean_closed_door_video_title(fallback.get("xiaojunjun_video_title"), expected_separator="/")
@@ -1849,6 +1924,19 @@ def validate_plan(payload: Dict[str, Any], *, fallback: Dict[str, Any], audio: D
         _clean_closed_door_video_title(payload.get("ciketc_video_title"), expected_separator="|")
         or _clean_closed_door_video_title(fallback.get("ciketc_video_title"), expected_separator="|")
         or _format_closed_door_video_title(title, separator="|", date_text=payload.get("date_text") or fallback.get("date_text"))
+    )
+    finance_cover_subtitle = (
+        _closed_door_visual_lines(ciketc_video_title, max_units=14, max_lines=3)
+        or _format_planner_finance_cover_subtitle(payload.get("finance_cover_subtitle"))
+        or _format_planner_finance_cover_subtitle(fallback.get("finance_cover_subtitle"))
+        or _finance_cover_title(finance_title)
+    )
+    xiaojunjun_disallowed = [planner_cover_title, planner_cover_subtitle, finance_cover_subtitle]
+    xiaojunjun_subtitle = (
+        _closed_door_visual_lines(xiaojunjun_video_title, max_units=18, max_lines=3)
+        or _format_planner_xiaojunjun_subtitle(payload.get("xiaojunjun_subtitle"), disallow=xiaojunjun_disallowed)
+        or _format_planner_xiaojunjun_subtitle(fallback.get("xiaojunjun_subtitle"), disallow=xiaojunjun_disallowed)
+        or _xiaojunjun_cover_subtitle(finance_title or title, fallback=subtitle)
     )
     return {
         "title": title,
@@ -1934,11 +2022,104 @@ def generate_visual_artifacts_with_browser(
         )
 
     return {
-        "finance_cover": _artifact_meta(finance_cover, "此刻此声-横屏视频封皮 1", renderer="browser:finance-cover-generator"),
-        "audio_background": _artifact_meta(audio_background, "此刻此声-竖屏视频背景图 1", renderer="browser:thumbnail-workbench"),
-        "xiaojunjun_cover": _artifact_meta(xiaojunjun_cover, "小君君-横屏视频封皮", renderer="browser:closed-door-card-cover-generator"),
-        "xiaojunjun_background": _artifact_meta(xiaojunjun_background, "小君君 横屏视频 背景", renderer="browser:closed-door-card-cover-generator"),
+        key: _artifact_meta(path, VISUAL_ARTIFACT_LABELS[key], renderer=VISUAL_ARTIFACT_RENDERERS[key])
+        for key, path in {
+            "finance_cover": finance_cover,
+            "audio_background": audio_background,
+            "xiaojunjun_cover": xiaojunjun_cover,
+            "xiaojunjun_background": xiaojunjun_background,
+        }.items()
     }
+
+
+def regenerate_visual_artifact(
+    job_id: str,
+    artifact_key: str,
+    *,
+    plan: Dict[str, Any],
+    title_text: Any,
+    infographic_path: Optional[str] = None,
+    created_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Regenerate one visual artifact with manually supplied title copy."""
+    key = str(artifact_key or "").strip()
+    if key not in VISUAL_ARTIFACT_KEYS:
+        raise Mp3VideoWorkflowError(f"不支持重做这个封皮/背景图: {key}")
+
+    lines = _manual_visual_title_lines(title_text)
+    if not lines:
+        raise Mp3VideoWorkflowError("请输入 1-3 行标题文案")
+
+    render_plan = _visual_artifact_plan_with_manual_title(plan, key, lines)
+    output_path = artifact_path_for_job(
+        job_id,
+        f"{key}_manual_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
+        "jpg",
+        created_at,
+    )
+    expected_size = VISUAL_ARTIFACT_EXPECTED_SIZES[key]
+
+    with _cover_browser_context() as context:
+        if key == "finance_cover":
+            _render_canvas_artifact(
+                context,
+                page_name="finance-cover-generator.html",
+                function_name="renderWorkflowFinanceCover",
+                payload=_finance_cover_payload(render_plan),
+                output_path=output_path,
+                expected_size=expected_size,
+            )
+        elif key == "audio_background":
+            if not infographic_path:
+                raise Mp3VideoWorkflowError("当前任务缺少信息图，不能重做此刻此声竖屏背景图")
+            _render_canvas_artifact(
+                context,
+                page_name="thumbnail-workbench.html",
+                function_name="renderWorkflowThumbnail",
+                payload=_audio_background_payload(render_plan, _image_data_url(infographic_path)),
+                output_path=output_path,
+                expected_size=expected_size,
+            )
+        elif key in {"xiaojunjun_cover", "xiaojunjun_background"}:
+            _render_canvas_artifact(
+                context,
+                page_name="closed-door-card-cover-generator.html",
+                function_name="renderWorkflowClosedDoorCover",
+                payload=_closed_door_payload(render_plan, include_date=(key == "xiaojunjun_cover")),
+                output_path=output_path,
+                expected_size=expected_size,
+            )
+
+    artifact = _artifact_meta(output_path, VISUAL_ARTIFACT_LABELS[key], renderer=VISUAL_ARTIFACT_RENDERERS[key])
+    artifact["manual_regenerated_at"] = datetime.utcnow().isoformat() + "Z"
+    artifact["manual_title_text"] = "\n".join(lines)
+    artifact["manual_title_lines"] = lines
+    return artifact
+
+
+def _manual_visual_title_lines(value: Any) -> List[str]:
+    if isinstance(value, list):
+        raw_lines = [str(item or "") for item in value]
+    else:
+        raw_lines = re.split(r"[\r\n]+", str(value or ""))
+    return [_clean_line(line)[:80] for line in raw_lines if _clean_line(line)][:3]
+
+
+def _visual_artifact_plan_with_manual_title(plan: Dict[str, Any], artifact_key: str, lines: List[str]) -> Dict[str, Any]:
+    updated = dict(plan or {})
+    text = "\n".join(lines)
+    if artifact_key == "finance_cover":
+        updated["manual_finance_cover_subtitle"] = text
+        updated["finance_cover_subtitle"] = text
+    elif artifact_key == "audio_background":
+        updated["manual_cover_title"] = "\n".join(lines[:2])
+        updated["manual_cover_subtitle"] = lines[2] if len(lines) >= 3 else ""
+        updated["cover_title"] = "\n".join(lines[:2])
+        updated["cover_subtitle"] = lines[2] if len(lines) >= 3 else (updated.get("cover_subtitle") or updated.get("subtitle") or "")
+    elif artifact_key in {"xiaojunjun_cover", "xiaojunjun_background"}:
+        updated["manual_xiaojunjun_subtitle"] = text
+        updated["xiaojunjun_subtitle"] = text
+    return updated
 
 
 def generate_video_keyframes(
@@ -2237,8 +2418,8 @@ def _audio_background_payload(plan: Dict[str, Any], infographic_data_url: str) -
         "format": "video_bg_audio",
         "showGuides": False,
         "inst": "深度研报",
-        "mainTitle": _cover_lines(plan.get("cover_title") or plan.get("title"), max_chars=10, max_lines=2),
-        "subTitle": _cover_lines(plan.get("cover_subtitle") or plan.get("subtitle"), max_chars=18, max_lines=2),
+        "mainTitle": _cover_lines(plan.get("manual_cover_title") or plan.get("cover_title") or plan.get("title"), max_chars=10, max_lines=2),
+        "subTitle": _cover_lines(plan.get("manual_cover_subtitle") or plan.get("cover_subtitle") or plan.get("subtitle"), max_chars=18, max_lines=2),
         "footerText": "此刻此声",
         "emotion": "bull",
         "imageDataUrl": infographic_data_url,
@@ -2266,11 +2447,24 @@ def _cover_main_title(plan: Dict[str, Any]) -> str:
 
 
 def _highlight_text(plan: Dict[str, Any], *, preferred_key: str) -> str:
+    if preferred_key == "xiaojunjun_subtitle":
+        manual = plan.get("manual_xiaojunjun_subtitle")
+        if manual:
+            return _cover_lines(manual, max_chars=18, max_lines=3)
+        closed_visual = _closed_door_visual_lines(plan.get("xiaojunjun_video_title"), max_units=18, max_lines=3)
+        if closed_visual:
+            return closed_visual
     value = plan.get(preferred_key) or plan.get("cover_subtitle") or plan.get("subtitle") or plan.get("title")
     return _cover_lines(value, max_chars=18, max_lines=3)
 
 
 def _finance_cover_highlight_text(plan: Dict[str, Any]) -> str:
+    manual = plan.get("manual_finance_cover_subtitle")
+    if manual:
+        return _finance_cover_copy_lines(manual)
+    closed_visual = _closed_door_visual_lines(plan.get("ciketc_video_title"), max_units=14, max_lines=3)
+    if closed_visual:
+        return closed_visual
     value = plan.get("finance_cover_subtitle") or plan.get("cover_subtitle") or plan.get("subtitle") or plan.get("title")
     return _finance_cover_copy_lines(value)
 
@@ -3466,6 +3660,9 @@ def extract_subtitle(text: str) -> str:
 
 
 def _fresh_result(parent_id: str) -> Dict[str, Any]:
+    cached = _cached_workflow_result(parent_id)
+    if cached is not None:
+        return cached
     fresh = _load_task(parent_id, *TASK_RESULT_COLUMNS)
     return dict(fresh.result or {}) if fresh and isinstance(fresh.result, dict) else {}
 
@@ -3853,16 +4050,26 @@ def _publisher_video_file_is_stable(path: Path) -> bool:
 def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: int, end_progress: int) -> PublicationTask:
     timeout = _child_inline_wait_seconds(label)
     poll_seconds = max(1, _int_env("MP3_VIDEO_CHILD_POLL_SECONDS", 3))
+    recovery_check_seconds = max(10, _int_env("MP3_VIDEO_CHILD_FULL_RECOVERY_CHECK_SECONDS", 30))
     deadline = time.monotonic() + timeout
+    next_full_recovery_check = 0.0
     last_step = None
     while time.monotonic() < deadline:
         parent = _load_task(parent_id, *TASK_STATUS_COLUMNS)
         if not parent or parent.status == "canceled":
             raise ParentTaskCanceled("父编排任务已取消")
-        child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+        child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS)
         if not child:
             raise RuntimeError(f"子任务不存在: {child_id}")
-        child = _recover_completed_publisher_child_from_disk(child)
+        now_mono = time.monotonic()
+        full_child_for_repair = None
+        if child.status not in TERMINAL_STATUSES and now_mono >= next_full_recovery_check:
+            full_child_for_repair = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+            if full_child_for_repair:
+                recovered_child = _recover_completed_publisher_child_from_disk(full_child_for_repair)
+                if recovered_child.status in TERMINAL_STATUSES:
+                    child = recovered_child
+            next_full_recovery_check = now_mono + recovery_check_seconds
         if child.current_step != last_step:
             last_step = child.current_step
             child_progress = int(child.progress or 0)
@@ -3871,18 +4078,20 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
             _record_child(parent_id, label, child)
         if child.status in TERMINAL_STATUSES:
             _clear_waiting_child(parent_id, label)
-            return child
+            return _load_task(child_id, *TASK_PUBLIC_COLUMNS) or child
         celery_failure = _celery_failure_message(child)
         if celery_failure:
-            _mark_child_failed(child, celery_failure)
+            full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS) or child
+            _mark_child_failed(full_child, celery_failure)
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_PUBLIC_COLUMNS)
-        child, requeued = maybe_requeue_stale_publisher_child(child, log=logger)
-        if requeued:
-            _emit(parent_id, f"{label}_requeued", start_progress, f"{label}: requeued")
-            _record_child(parent_id, label, child)
-            last_step = None
+        if full_child_for_repair and child.status not in TERMINAL_STATUSES:
+            child, requeued = maybe_requeue_stale_publisher_child(full_child_for_repair, log=logger)
+            if requeued:
+                _emit(parent_id, f"{label}_requeued", start_progress, f"{label}: requeued")
+                _record_child(parent_id, label, child)
+                last_step = None
         time.sleep(poll_seconds)
         db.session.expire_all()
     child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
@@ -4018,52 +4227,120 @@ def _start_task(task: PublicationTask) -> None:
     task.result = result
     flag_modified(task, "result")
     db.session.commit()
+    _replace_cached_workflow_result(task.id, result)
 
 
 def _emit(parent_id: str, step: str, progress: int, message: str, *, result: Optional[Dict[str, Any]] = None) -> None:
-    fresh = _load_task(parent_id, *TASK_PROGRESS_RESULT_COLUMNS, PublicationTask.status)
-    if not fresh or fresh.status == "canceled":
-        return
-    current = dict(fresh.result or {})
-    logs = list(current.get("logs") or [])
-    logs.append({
+    log_entry = {
         "step": step,
         "message": message,
         "progress": progress,
         "updated_at": datetime.utcnow().isoformat() + "Z",
-    })
-    current["logs"] = logs[-160:]
-    if result:
-        current.update(result)
-    fresh.current_step = _safe_step_code(step)
-    fresh.progress = max(0, min(100, int(progress or fresh.progress or 0)))
-    fresh.result = current
-    flag_modified(fresh, "result")
-    db.session.commit()
+    }
+    patch = result if isinstance(result, dict) else {}
+
+    def operation():
+        updated = db.session.execute(
+            text("""
+                UPDATE public.publication_tasks
+                SET current_step = :step,
+                    progress = :progress,
+                    result = jsonb_set(
+                        COALESCE(result, '{}'::jsonb) || CAST(:patch AS jsonb),
+                        '{logs}',
+                        CASE
+                            WHEN CAST(:patch AS jsonb) ? 'logs'
+                            THEN COALESCE(CAST(:patch AS jsonb)->'logs', '[]'::jsonb)
+                            WHEN jsonb_array_length(COALESCE(result->'logs', '[]'::jsonb)) >= 160
+                            THEN (COALESCE(result->'logs', '[]'::jsonb) #- '{0}') || CAST(:entry AS jsonb)
+                            ELSE COALESCE(result->'logs', '[]'::jsonb) || CAST(:entry AS jsonb)
+                        END,
+                        true
+                    ),
+                    updated_at = NOW()
+                WHERE id = :task_id
+                  AND status IS DISTINCT FROM 'canceled'
+            """),
+            {
+                "task_id": str(parent_id),
+                "step": _safe_step_code(step),
+                "progress": max(0, min(100, int(progress or 0))),
+                "patch": json.dumps(patch, ensure_ascii=False),
+                "entry": json.dumps([log_entry], ensure_ascii=False),
+            },
+        )
+        db.session.commit()
+        return updated.rowcount
+
+    if _db_retry(operation, f"emit workflow progress {parent_id}"):
+        cached = _cached_workflow_result(parent_id)
+        if cached is not None:
+            logs = list(cached.get("logs") or [])
+            logs.append(log_entry)
+            cached["logs"] = logs[-160:]
+            cached.update(copy.deepcopy(patch))
+            state = _active_workflow_state.get()
+            state["result"] = cached
 
 
 def _update_result(parent_id: str, values: Dict[str, Any]) -> None:
-    fresh = _load_task(parent_id, *TASK_RESULT_COLUMNS, PublicationTask.status)
-    if not fresh or fresh.status == "canceled":
+    if not isinstance(values, dict) or not values:
         return
-    result = dict(fresh.result or {})
-    result.update(values)
-    fresh.result = result
-    flag_modified(fresh, "result")
-    db.session.commit()
+
+    def operation():
+        updated = db.session.execute(
+            text("""
+                UPDATE public.publication_tasks
+                SET result = COALESCE(result, '{}'::jsonb) || CAST(:patch AS jsonb),
+                    updated_at = NOW()
+                WHERE id = :task_id
+                  AND status IS DISTINCT FROM 'canceled'
+            """),
+            {
+                "task_id": str(parent_id),
+                "patch": json.dumps(values, ensure_ascii=False),
+            },
+        )
+        db.session.commit()
+        return updated.rowcount
+
+    if _db_retry(operation, f"update workflow result {parent_id}"):
+        _merge_cached_workflow_result(parent_id, values)
 
 
 def _record_child(parent_id: str, label: str, child: PublicationTask) -> None:
-    fresh = _load_task(parent_id, *TASK_RESULT_COLUMNS, PublicationTask.status)
-    if not fresh or fresh.status == "canceled":
-        return
-    result = dict(fresh.result or {})
-    children = dict(result.get("children") or {})
-    children[label] = _task_public_summary(child)
-    result["children"] = children
-    fresh.result = result
-    flag_modified(fresh, "result")
-    db.session.commit()
+    child_summary = _task_public_summary(child)
+
+    def operation():
+        updated = db.session.execute(
+            text("""
+                UPDATE public.publication_tasks
+                SET result = jsonb_set(
+                        COALESCE(result, '{}'::jsonb),
+                        '{children}',
+                        COALESCE(result->'children', '{}'::jsonb)
+                            || jsonb_build_object(CAST(:label AS text), CAST(:child AS jsonb)),
+                        true
+                    ),
+                    updated_at = NOW()
+                WHERE id = :task_id
+                  AND status IS DISTINCT FROM 'canceled'
+            """),
+            {
+                "task_id": str(parent_id),
+                "label": str(label),
+                "child": json.dumps(child_summary, ensure_ascii=False),
+            },
+        )
+        db.session.commit()
+        return updated.rowcount
+
+    if _db_retry(operation, f"record workflow child {parent_id}:{label}"):
+        cached = _cached_workflow_result(parent_id)
+        if cached is not None:
+            children = dict(cached.get("children") or {})
+            children[label] = copy.deepcopy(child_summary)
+            _merge_cached_workflow_result(parent_id, {"children": children})
 
 
 def _mark_failed(task: PublicationTask, message: str) -> None:
@@ -4535,14 +4812,16 @@ def _celery_failure_message(child: PublicationTask) -> Optional[str]:
 def _task_public_summary(task: Optional[PublicationTask]) -> Optional[Dict[str, Any]]:
     if not task:
         return None
+    params = task.params if _model_attr_loaded(task, "params") and isinstance(task.params, dict) else {}
+    result = task.result if _model_attr_loaded(task, "result") and isinstance(task.result, dict) else {}
     return {
         "job_id": task.id,
         "celery_id": task.celery_task_id,
         "status": task.status,
         "step": task.current_step,
         "progress": task.progress or 0,
-        "feature": task.feature or (task.params or {}).get("feature"),
-        "error": task.error_message or (task.result or {}).get("error"),
+        "feature": task.feature or params.get("feature"),
+        "error": task.error_message or result.get("error"),
         "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
         "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else None,
     }

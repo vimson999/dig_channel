@@ -3,16 +3,17 @@
  * 集成至 YouTube Analytics 项目
  */
 
-document.addEventListener('DOMContentLoaded', () => {
+function initThumbnailWorkbench() {
     // 初始化 Canvas 和 上下文
     const canvas = document.getElementById('thumbnailCanvas');
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
-    
+
     // UI 元素引用
     const inputs = {
         format: document.getElementById('formatSelect'),
         showGuides: document.getElementById('showGuides'),
+        showFooter: document.getElementById('showFooter'),
         inst: document.getElementById('instSelect'),
         mainTitle: document.getElementById('mainTitle'),
         subTitle: document.getElementById('subTitle'),
@@ -32,7 +33,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     let reportImg = null;
-    
+
     // 拖拽/缩放状态
     let imgOffsetX = 0;
     let imgOffsetY = 0;
@@ -55,6 +56,8 @@ document.addEventListener('DOMContentLoaded', () => {
         horizontal: { w: 1920, h: 1080, aspectClass: 'max-w-5xl aspect-video', title: '横版预览区', size: '1920 x 1080 (16:9)', btn: '下载横版封面 (1920x1080)' },
         horizontal_reverse: { w: 1920, h: 1080, aspectClass: 'max-w-5xl aspect-video', title: '横版反向预览区', size: '1920 x 1080 (16:9)', btn: '下载横版反向封面 (1920x1080)' },
         horizontal_v2: { w: 1920, h: 1080, aspectClass: 'max-w-5xl aspect-video', title: '横版 V2 霓虹预览区', size: '1920 x 1080 (16:9)', btn: '下载横版 V2 封面 (1920x1080)' },
+        bilibili_cover: { w: 1146, h: 717, aspectClass: 'max-w-4xl aspect-[1146/717]', title: 'B站封皮预览区', size: '1146 x 717 (B站封皮)', btn: '下载B站封皮 (1146x717)' },
+        bilibili_wx_cover: { w: 1146, h: 717, aspectClass: 'max-w-4xl aspect-[1146/717]', title: 'B站封皮（视频号样式）预览区', size: '1146 x 717 (B站封皮)', btn: '下载B站视频号样式封皮 (1146x717)' },
         horizontal_stack: { w: 1920, h: 1080, aspectClass: 'max-w-5xl aspect-video', title: '横版上下分层预览', size: '1920 x 1080 (16:9)', btn: '下载横版上下封面 (1920x1080)' },
         horizontal_diagonal: { w: 1920, h: 1080, aspectClass: 'max-w-5xl aspect-video', title: '横版斜线对角预览', size: '1920 x 1080 (16:9)', btn: '下载横版斜线封面 (1920x1080)' },
         vertical: { w: 1080, h: 1920, aspectClass: 'max-w-[42vh] aspect-[9/16]', title: '竖版预览区', size: '1080 x 1920 (9:16)', btn: '下载竖版封面 (1080x1920)' },
@@ -70,6 +73,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // 事件绑定
     if (inputs.format) inputs.format.addEventListener('change', updateLayoutAndDraw);
     if (inputs.showGuides) inputs.showGuides.addEventListener('change', draw);
+    if (inputs.showFooter) inputs.showFooter.addEventListener('change', draw);
     if (inputs.inst) inputs.inst.addEventListener('change', draw);
     if (inputs.mainTitle) inputs.mainTitle.addEventListener('input', draw);
     if (inputs.subTitle) inputs.subTitle.addEventListener('input', draw);
@@ -189,6 +193,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function wrapText(context, text, x, y, maxWidth, lineHeight) {
         let line = '';
         let currentY = y;
+        const shouldStayWithPrevious = (ch) => /[!！?？,，.。;；:：、）)]/.test(ch);
         for(let n = 0; n < text.length; n++) {
             let testLine = line + text[n];
             if(text[n] === '\n') {
@@ -200,8 +205,16 @@ document.addEventListener('DOMContentLoaded', () => {
             let metrics = context.measureText(testLine);
             let testWidth = metrics.width;
             if (testWidth > maxWidth && n > 0) {
-                context.fillText(line, x, currentY);
-                line = text[n];
+                if (shouldStayWithPrevious(text[n]) && line.length > 1) {
+                    context.fillText(line.slice(0, -1), x, currentY);
+                    line = line.slice(-1) + text[n];
+                } else if (shouldStayWithPrevious(text[n])) {
+                    line = testLine;
+                    continue;
+                } else {
+                    context.fillText(line, x, currentY);
+                    line = text[n];
+                }
                 currentY += lineHeight;
             } else {
                 line = testLine;
@@ -216,21 +229,48 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function wrapTextLines(context, text, maxWidth) {
-        const value = compactText(text);
         const lines = [];
-        let line = '';
-        for (let n = 0; n < value.length; n++) {
-            const ch = value[n];
-            const testLine = line + ch;
-            if (line && context.measureText(testLine).width > maxWidth) {
-                lines.push(line);
-                line = ch;
-            } else {
-                line = testLine;
+        const shouldStayWithPrevious = (ch) => /[!！?？,，.。;；:：、）)]/.test(ch);
+        const explicitLines = String(text || '')
+            .replace(/\r\n/g, '\n')
+            .split('\n')
+            .map(compactText)
+            .filter(Boolean);
+
+        (explicitLines.length ? explicitLines : ['']).forEach((value) => {
+            let line = '';
+            for (let n = 0; n < value.length; n++) {
+                const ch = value[n];
+                const testLine = line + ch;
+                if (line && context.measureText(testLine).width > maxWidth) {
+                    if (shouldStayWithPrevious(ch)) {
+                        if (line.length > 1) {
+                            lines.push(line.slice(0, -1));
+                            line = line.slice(-1) + ch;
+                        } else {
+                            line = testLine;
+                        }
+                        continue;
+                    }
+                    lines.push(line);
+                    line = ch;
+                } else {
+                    line = testLine;
+                }
             }
-        }
-        if (line || lines.length === 0) lines.push(line);
+            if (line) lines.push(line);
+        });
+        if (lines.length === 0) lines.push('');
         return lines;
+    }
+
+    function normalizeFittedText(text) {
+        return String(text || '')
+            .replace(/\r\n/g, '\n')
+            .split('\n')
+            .map(compactText)
+            .filter(Boolean)
+            .join('\n');
     }
 
     function ellipsizeLine(context, text, maxWidth) {
@@ -244,7 +284,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function drawFittedWrappedText(context, text, x, y, maxWidth, options = {}) {
-        const value = compactText(text);
+        const value = normalizeFittedText(text);
         const maxLines = Math.max(1, Number(options.maxLines || 1));
         const startSize = Math.max(1, Number(options.startSize || 64));
         const minSize = Math.max(1, Math.min(startSize, Number(options.minSize || startSize)));
@@ -310,14 +350,14 @@ document.addEventListener('DOMContentLoaded', () => {
         imgOffsetX = 0;
         imgOffsetY = 0;
         imgScale = 1.0;
-        
+
         // 更新容器类名
         uiElements.container.className = `canvas-container w-full ${layout.aspectClass}`;
-        
+
         // 健壮地提取 max-width 类名并应用给 header，确保 header 宽度与 canvas 对齐
         const maxWidthClass = (layout.aspectClass || '').split(' ').find(c => c.startsWith('max-w-')) || '';
         uiElements.header.className = `flex justify-between items-end mb-4 w-full ${maxWidthClass}`;
-        
+
         uiElements.title.innerText = layout.title;
         uiElements.size.innerText = layout.size;
         uiElements.btnText.innerText = layout.btn;
@@ -333,8 +373,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const colors = getCurrentColor();
 
         const bgGradient = ctx.createLinearGradient(0, 0, w, h);
-        bgGradient.addColorStop(0, '#0a1128'); 
-        bgGradient.addColorStop(1, '#050814'); 
+        bgGradient.addColorStop(0, '#0a1128');
+        bgGradient.addColorStop(1, '#050814');
         ctx.fillStyle = bgGradient;
         ctx.fillRect(0, 0, w, h);
 
@@ -349,19 +389,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (imgRatio > targetRatio) {
                     let dw = reportImg.width * (targetHeight / reportImg.height);
                     let sDw = dw * imgScale; let sDh = targetHeight * imgScale;
-                    drawX = targetX - (sDw - targetWidth) / 2 + imgOffsetX; 
+                    drawX = targetX - (sDw - targetWidth) / 2 + imgOffsetX;
                     drawY = 0 - (sDh - targetHeight) / 2 + imgOffsetY;
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 } else {
                     let dh = reportImg.height * (targetWidth / reportImg.width);
                     let sDw = targetWidth * imgScale; let sDh = dh * imgScale;
-                    drawX = targetX - (sDw - targetWidth) / 2 + imgOffsetX; 
+                    drawX = targetX - (sDw - targetWidth) / 2 + imgOffsetX;
                     drawY = -(sDh - targetHeight) / 2 + imgOffsetY;
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 }
                 const mask = ctx.createLinearGradient(400, 0, 1200, 0);
                 mask.addColorStop(0, '#0a1128');
-                mask.addColorStop(0.5, 'rgba(10, 17, 40, 0.9)'); 
+                mask.addColorStop(0.5, 'rgba(10, 17, 40, 0.9)');
                 mask.addColorStop(1, 'rgba(10, 17, 40, 0)');
                 ctx.fillStyle = mask; ctx.fillRect(0, 0, w, h);
             } else if (format === 'horizontal_reverse') {
@@ -369,7 +409,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.save();
                 ctx.globalAlpha = 0.98;
                 // 采用高度优先的填充逻辑，并靠左侧放置
-                let dh = h; 
+                let dh = h;
                 let dw = reportImg.width * (h / reportImg.height);
                 ctx.drawImage(reportImg, imgOffsetX, imgOffsetY, dw * imgScale, dh * imgScale);
                 ctx.restore();
@@ -378,55 +418,82 @@ document.addEventListener('DOMContentLoaded', () => {
                 const morganBlue = '#001529';
                 const maskStart = w * 0.4;  // 768px (40%)
                 const maskEnd = w * 0.55;   // 1056px (55% 处达到完全不透明)
-                
+
                 const grad = ctx.createLinearGradient(maskStart, 0, maskEnd, 0);
                 grad.addColorStop(0, 'rgba(0, 21, 41, 0)'); // 40% 处完全露出研报
                 grad.addColorStop(1, morganBlue);           // 55% 处完全遮挡
-                
+
                 ctx.fillStyle = grad;
                 ctx.fillRect(maskStart, 0, maskEnd - maskStart, h);
                 ctx.fillStyle = morganBlue;
                 ctx.fillRect(maskEnd, 0, w - maskEnd, h);
-            } else if (format === 'horizontal_v2') {
-                const splitPos = w * 0.48;
+            } else if (format === 'horizontal_v2' || format === 'bilibili_cover') {
+                const isBiliCover = format === 'bilibili_cover';
+                const splitPos = w * (isBiliCover ? 0.505 : 0.48);
                 const neonColor = '#00FF66';
-                const darkBg = '#050B14';
+                const darkBg = isBiliCover ? '#06101F' : '#050B14';
+                const panelX = isBiliCover ? Math.round(w * 0.016) : 0;
+                const panelY = isBiliCover ? Math.round(h * 0.02) : 0;
+                const panelW = isBiliCover ? splitPos - panelX + 22 : splitPos;
+                const panelH = isBiliCover ? h - panelY + 12 : h;
 
                 // 1. 绘制研报底图 (回归全屏贴边)
                 ctx.save();
-                
-                // 仅保留左侧微圆角 (16px)
-                const r = 16;
-                ctx.beginPath();
-                ctx.moveTo(r, 0); ctx.lineTo(splitPos, 0);
-                ctx.lineTo(splitPos, h); ctx.lineTo(r, h);
-                ctx.quadraticCurveTo(0, h, 0, h - r); 
-                ctx.lineTo(0, r); ctx.quadraticCurveTo(0, 0, r, 0);
-                ctx.clip();
 
-                // 2. 绘制图片 (基础清晰度)
-                ctx.filter = 'brightness(0.95) contrast(1.02)';
-                let dh = h; 
-                let dw = reportImg.width * (h / reportImg.height);
-                const zoom = 1.05;
-                ctx.drawImage(reportImg, imgOffsetX, imgOffsetY, dw * imgScale * zoom, dh * imgScale * zoom);
+                if (isBiliCover) {
+                    roundRect(ctx, panelX, panelY, panelW, panelH, 28);
+                    ctx.clip();
+                } else {
+                    // 仅保留左侧微圆角 (16px)
+                    const r = 16;
+                    ctx.beginPath();
+                    ctx.moveTo(r, 0); ctx.lineTo(splitPos, 0);
+                    ctx.lineTo(splitPos, h); ctx.lineTo(r, h);
+                    ctx.quadraticCurveTo(0, h, 0, h - r);
+                    ctx.lineTo(0, r); ctx.quadraticCurveTo(0, 0, r, 0);
+                    ctx.clip();
+                }
+
+                // 2. 绘制图片。B站版参考封皮保留左侧研报清晰度，再用渐隐压暗正文。
+                ctx.filter = isBiliCover ? 'brightness(0.96) contrast(1.04) saturate(0.92)' : 'brightness(0.95) contrast(1.02)';
+                let dh = isBiliCover ? panelH : h;
+                let dw = reportImg.width * (dh / reportImg.height);
+                const zoom = isBiliCover ? 1 : 1.05;
+                ctx.drawImage(reportImg, panelX + imgOffsetX, panelY + imgOffsetY, dw * imgScale * zoom, dh * imgScale * zoom);
                 ctx.filter = 'none';
 
                 // 3. 模拟顶部柔和暗角 (代替硬黑条)
-                const topShadow = ctx.createLinearGradient(0, 0, 0, 120);
-                topShadow.addColorStop(0, 'rgba(0, 0, 0, 0.75)');
+                const topShadow = ctx.createLinearGradient(0, 0, 0, isBiliCover ? 76 : 120);
+                topShadow.addColorStop(0, isBiliCover ? 'rgba(0, 0, 0, 0.62)' : 'rgba(0, 0, 0, 0.75)');
                 topShadow.addColorStop(1, 'transparent');
                 ctx.fillStyle = topShadow;
-                ctx.fillRect(0, 0, splitPos, 120);
+                ctx.fillRect(panelX, panelY, panelW, isBiliCover ? 76 : 120);
+
+                if (isBiliCover) {
+                    const bottomShade = ctx.createLinearGradient(0, h * 0.5, 0, h);
+                    bottomShade.addColorStop(0, 'rgba(5, 11, 20, 0)');
+                    bottomShade.addColorStop(0.48, 'rgba(5, 11, 20, 0.26)');
+                    bottomShade.addColorStop(1, 'rgba(5, 11, 20, 0.72)');
+                    ctx.fillStyle = bottomShade;
+                    ctx.fillRect(panelX, panelY, panelW, panelH);
+
+                    const leftReadableMask = ctx.createLinearGradient(panelX, 0, splitPos, 0);
+                    leftReadableMask.addColorStop(0, 'rgba(0, 0, 0, 0)');
+                    leftReadableMask.addColorStop(0.44, 'rgba(5, 11, 20, 0.08)');
+                    leftReadableMask.addColorStop(0.72, 'rgba(5, 11, 20, 0.38)');
+                    leftReadableMask.addColorStop(1, 'rgba(5, 11, 20, 0.92)');
+                    ctx.fillStyle = leftReadableMask;
+                    ctx.fillRect(panelX, panelY, panelW, panelH);
+                }
 
                 // 4. 核心：用【环境色渐变叠加】实现完美隐形 (彻底废弃 Mask)
-                const blendOverlay = ctx.createLinearGradient(splitPos * 0.4, 0, splitPos, 0);
+                const blendOverlay = ctx.createLinearGradient(splitPos * (isBiliCover ? 0.55 : 0.4), 0, splitPos, 0);
                 blendOverlay.addColorStop(0, 'rgba(5, 11, 20, 0)'); // 透明
-                blendOverlay.addColorStop(0.7, 'rgba(5, 11, 20, 0.95)'); // 平滑过渡
+                blendOverlay.addColorStop(isBiliCover ? 0.62 : 0.7, isBiliCover ? 'rgba(5, 11, 20, 0.66)' : 'rgba(5, 11, 20, 0.95)'); // 平滑过渡
                 blendOverlay.addColorStop(1, darkBg); // 严格对齐底色
                 ctx.fillStyle = blendOverlay;
-                ctx.fillRect(0, 0, splitPos + 2, h); // 稍微多出2px压缝
-                
+                ctx.fillRect(panelX, panelY, panelW, panelH); // 稍微多出压缝
+
                 ctx.restore(); // 退出裁剪与状态栈
 
                 // 8. 绘制右侧氛围环境光
@@ -434,10 +501,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.fillStyle = darkBg;
                 ctx.fillRect(splitPos, 0, w - splitPos, h);
                 const radialGrad = ctx.createRadialGradient(
-                    splitPos + (w - splitPos) * 0.35, h * 0.5, 0, 
-                    splitPos + (w - splitPos) * 0.35, h * 0.5, h * 0.8
+                    splitPos + (w - splitPos) * (isBiliCover ? 0.36 : 0.35), h * 0.5, 0,
+                    splitPos + (w - splitPos) * (isBiliCover ? 0.36 : 0.35), h * 0.5, h * (isBiliCover ? 0.72 : 0.8)
                 );
-                radialGrad.addColorStop(0, 'rgba(0, 255, 102, 0.15)');
+                radialGrad.addColorStop(0, isBiliCover ? 'rgba(0, 255, 102, 0.09)' : 'rgba(0, 255, 102, 0.15)');
                 radialGrad.addColorStop(0.65, 'transparent');
                 ctx.fillStyle = radialGrad;
                 ctx.fillRect(splitPos, 0, w - splitPos, h);
@@ -445,7 +512,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // 9. 霓虹分割线
                 ctx.save();
-                const dividerH = h * 0.75;
+                const dividerH = h * (isBiliCover ? 0.72 : 0.75);
                 const dividerY = (h - dividerH) / 2;
                 const dividerGrad = ctx.createLinearGradient(0, dividerY, 0, dividerY + dividerH);
                 dividerGrad.addColorStop(0, 'transparent');
@@ -453,29 +520,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 dividerGrad.addColorStop(0.85, neonColor);
                 dividerGrad.addColorStop(1, 'transparent');
                 ctx.shadowColor = neonColor;
-                ctx.shadowBlur = 12;
+                ctx.shadowBlur = isBiliCover ? 16 : 12;
                 ctx.fillStyle = dividerGrad;
                 ctx.fillRect(splitPos - 2, dividerY, 4, dividerH);
-                ctx.shadowBlur = 25;
-                ctx.shadowColor = 'rgba(0, 255, 102, 0.45)';
+                ctx.shadowBlur = isBiliCover ? 28 : 25;
+                ctx.shadowColor = isBiliCover ? 'rgba(0, 255, 102, 0.58)' : 'rgba(0, 255, 102, 0.45)';
                 ctx.fillRect(splitPos - 2, dividerY, 4, dividerH);
                 ctx.restore();
             } else if (format === 'horizontal_stack') {                targetWidth = 1920; targetHeight = 1080;
                 let dw = reportImg.width * (targetHeight / reportImg.height);
                 let sDw = dw * imgScale; let sDh = targetHeight * imgScale;
-                drawX = 0 - (sDw - targetWidth) / 2 + imgOffsetX; 
+                drawX = 0 - (sDw - targetWidth) / 2 + imgOffsetX;
                 drawY = 0 - (sDh - targetHeight) / 2 + imgOffsetY;
                 ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 const mask = ctx.createLinearGradient(0, 400, 0, 1080);
                 mask.addColorStop(0, 'rgba(10, 17, 40, 0)');
-                mask.addColorStop(0.6, 'rgba(10, 17, 40, 0.9)'); 
+                mask.addColorStop(0.6, 'rgba(10, 17, 40, 0.9)');
                 mask.addColorStop(1, '#0a1128');
                 ctx.fillStyle = mask; ctx.fillRect(0, 0, w, h);
             } else if (format === 'horizontal_diagonal') {
                 targetWidth = 1600; targetHeight = 1080;
                 let dw = reportImg.width * (targetHeight / reportImg.height);
                 let sDw = dw * imgScale; let sDh = targetHeight * imgScale;
-                drawX = 600 - (sDw - targetWidth) / 2 + imgOffsetX; 
+                drawX = 600 - (sDw - targetWidth) / 2 + imgOffsetX;
                 drawY = 0 - (sDh - targetHeight) / 2 + imgOffsetY;
                 ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 ctx.beginPath();
@@ -509,11 +576,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 const mask = ctx.createLinearGradient(0, 400, 0, 1200);
                 mask.addColorStop(0, 'rgba(10, 17, 40, 0)');
-                mask.addColorStop(0.7, 'rgba(10, 17, 40, 0.9)'); 
+                mask.addColorStop(0.7, 'rgba(10, 17, 40, 0.9)');
                 mask.addColorStop(1, '#0a1128');
                 ctx.fillStyle = mask; ctx.fillRect(0, 0, w, h);
-            } else if (format === 'wx_cover') {
-                targetWidth = w; targetHeight = 900;
+            } else if (format === 'wx_cover' || format === 'bilibili_wx_cover') {
+                const isBiliWxCover = format === 'bilibili_wx_cover';
+                targetWidth = w; targetHeight = isBiliWxCover ? Math.round(h * 0.625) : 900;
                 const targetRatio = targetWidth / targetHeight;
                 const anchorTopLeft = workflowRenderOptions.imageAnchor === 'top-left';
                 if (imgRatio > targetRatio) {
@@ -529,9 +597,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     drawY = (anchorTopLeft ? 0 : 0 - (sDh - targetHeight) / 2) + imgOffsetY;
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 }
-                const mask = ctx.createLinearGradient(0, 300, 0, 900);
+                const mask = ctx.createLinearGradient(0, Math.round(targetHeight * 0.33), 0, targetHeight);
                 mask.addColorStop(0, 'rgba(10, 17, 40, 0)');
-                mask.addColorStop(0.7, 'rgba(10, 17, 40, 0.9)'); 
+                mask.addColorStop(0.7, 'rgba(10, 17, 40, 0.9)');
                 mask.addColorStop(1, '#0a1128');
                 ctx.fillStyle = mask; ctx.fillRect(0, 0, w, h);
             } else if (format === 'podcast') {
@@ -553,17 +621,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 const mask = ctx.createLinearGradient(0, 200, 0, 900);
                 mask.addColorStop(0, 'rgba(10, 17, 40, 0)');
-                mask.addColorStop(0.6, 'rgba(10, 17, 40, 0.9)'); 
+                mask.addColorStop(0.6, 'rgba(10, 17, 40, 0.9)');
                 mask.addColorStop(1, '#0a1128');
                 ctx.fillStyle = mask; ctx.fillRect(0, 0, w, h);
             } else if (format === 'video_bg') {
-                ctx.globalAlpha = 0.15; 
+                ctx.globalAlpha = 0.15;
                 let dw = reportImg.width * (h / reportImg.height);
                 let sDw = dw * imgScale; let sDh = h * imgScale;
                 ctx.drawImage(reportImg, -(sDw - w) / 2 + imgOffsetX, 0 - (sDh - h) / 2 + imgOffsetY, sDw, sDh);
                 ctx.globalAlpha = 1.0;
             } else if (format === 'video_bg_audio') {
-                ctx.globalAlpha = 0.15; 
+                ctx.globalAlpha = 0.15;
                 let dwBg = reportImg.width * (h / reportImg.height);
                 let sDwBg = dwBg * imgScale; let sDhBg = h * imgScale;
                 ctx.drawImage(reportImg, -(sDwBg - w) / 2 + imgOffsetX, 0 - (sDhBg - h) / 2 + imgOffsetY, sDwBg, sDhBg);
@@ -580,6 +648,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const mainText = inputs.mainTitle.value || "请输入主标题";
         const subText = inputs.subTitle.value;
         const footerText = inputs.footerText ? inputs.footerText.value : "听见资本";
+        const showFooter = !inputs.showFooter || inputs.showFooter.checked;
 
         if (format === 'horizontal') {
             const margin = 120;
@@ -596,102 +665,171 @@ document.addEventListener('DOMContentLoaded', () => {
                 wrapText(ctx, subText, margin, nextY + 60, 1200, 90);
                 ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             }
-            const by = 960; ctx.fillStyle = colors.main;
-            ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 45px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#94a3b8'; ctx.fillText(footerText, margin + 70, by);
+            if (showFooter) {
+                const by = 960; ctx.fillStyle = colors.main;
+                ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
+                ctx.font = 'bold 45px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#94a3b8'; ctx.fillText(footerText, margin + 70, by);
+            }
         } else if (format === 'horizontal_reverse') {
             const margin = 1100; // 严格起始于 55% 的深色区
-            
+
             // 机构标识
-            ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; 
+            ctx.font = 'bold 36px "Microsoft YaHei", sans-serif';
             ctx.fillStyle = colors.main;
-            ctx.fillRect(margin, 160, 10, 45); 
+            ctx.fillRect(margin, 160, 10, 45);
             ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
             ctx.fillText(instText + " · 研报解构", margin + 30, 195);
-            
+
             // 视觉对比：主标题大字 (135px 900)，副标题小字 (60px)
-            ctx.font = '900 135px "Microsoft YaHei", "PingFang SC", sans-serif'; 
+            ctx.font = '900 135px "Microsoft YaHei", "PingFang SC", sans-serif';
             ctx.fillStyle = colors.main;
-            ctx.shadowBlur = 0; 
+            ctx.shadowBlur = 0;
             let nextY = wrapText(ctx, mainText, margin, 400, 720, 155);
-            
+
             if (subText) {
                 // 副标题缩小一点 (60px) 制造强烈的主次感
-                ctx.font = 'bold 60px "Microsoft YaHei", sans-serif'; 
+                ctx.font = 'bold 60px "Microsoft YaHei", sans-serif';
                 ctx.fillStyle = '#FFFFFF';
                 wrapText(ctx, subText, margin, nextY + 40, 720, 85);
             }
-            
-            // 水印：移至左侧与标题对齐 (建立统一垂直轴线)
-            const footerX = margin; 
-            const footerY = 960; 
-            
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.5)'; // 半透明白色
-            ctx.font = 'bold 45px "Microsoft YaHei", sans-serif';
-            ctx.fillText(footerText, footerX + 70, footerY);
-            
-            ctx.fillStyle = colors.main;
-            ctx.fillRect(footerX, footerY-15, 6, 15); ctx.fillRect(footerX+12, footerY-30, 6, 30); ctx.fillRect(footerX+24, footerY-20, 6, 20); 
-        } else if (format === 'horizontal_v2') {
-            const margin = 1020; // 稍微左移，增加排版空间
-            const neonColor = '#00FF66'; 
-            
+
+            if (showFooter) {
+                // 水印：移至左侧与标题对齐 (建立统一垂直轴线)
+                const footerX = margin;
+                const footerY = 960;
+
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.5)'; // 半透明白色
+                ctx.font = 'bold 45px "Microsoft YaHei", sans-serif';
+                ctx.fillText(footerText, footerX + 70, footerY);
+
+                ctx.fillStyle = colors.main;
+                ctx.fillRect(footerX, footerY-15, 6, 15); ctx.fillRect(footerX+12, footerY-30, 6, 30); ctx.fillRect(footerX+24, footerY-20, 6, 20);
+            }
+        } else if (format === 'horizontal_v2' || format === 'bilibili_cover') {
+            const isBiliCover = format === 'bilibili_cover';
+            const margin = isBiliCover ? Math.round(w * 0.55) : 1020; // 稍微左移，增加排版空间
+            const neonColor = '#00FF66';
+            const maxTextWidth = isBiliCover ? w - margin - 34 : 880;
+            const biliFontFamily = '"PingFang SC", "Hiragino Sans GB", "Heiti SC", "Microsoft YaHei", sans-serif';
+            const fontFamily = isBiliCover ? biliFontFamily : '"Microsoft YaHei", sans-serif';
+            const titleFontFamily = isBiliCover ? biliFontFamily : '"Microsoft YaHei", "PingFang SC", sans-serif';
+
             // 1. 顶部机构标识
-            ctx.font = 'bold 48px "Microsoft YaHei", sans-serif'; 
-            ctx.fillStyle = '#C8FFD8'; 
+            const eyebrowText = instText + " · 研报解构";
+            ctx.font = `bold ${isBiliCover ? 36 : 48}px ${fontFamily}`;
+            ctx.fillStyle = isBiliCover ? '#69FFA2' : '#C8FFD8';
             ctx.shadowColor = neonColor;
-            ctx.shadowBlur = 10;
-            ctx.fillText(instText + " · 研报解构", margin, 180);
+            ctx.shadowBlur = isBiliCover ? 9 : 10;
+            ctx.fillText(eyebrowText, margin, isBiliCover ? 126 : 180);
             ctx.shadowBlur = 0;
-            
+
             // 2. 主标题：多重发光效果 (158px 核心，提供 880px 宽度)
-            ctx.font = '900 158px "Microsoft YaHei", "PingFang SC", sans-serif'; 
-            const mainTextColor = '#C8FFD8'; 
-            const maxTextWidth = 880; 
-            
+            ctx.font = `900 ${isBiliCover ? 126 : 158}px ${titleFontFamily}`;
+            const mainTextColor = isBiliCover ? '#31FF82' : '#C8FFD8';
+            const titleY = isBiliCover ? 286 : 420;
+            const titleStartSize = isBiliCover ? 126 : 158;
+            const titleMinSize = isBiliCover ? 92 : 158;
+            const titleLineHeight = isBiliCover ? 136 : 185;
+
             ctx.save();
-            ctx.shadowColor = 'rgba(0, 204, 82, 0.45)'; 
-            ctx.shadowBlur = 50;
+            ctx.shadowColor = 'rgba(0, 204, 82, 0.45)';
+            ctx.shadowBlur = isBiliCover ? 34 : 50;
             ctx.fillStyle = mainTextColor;
-            wrapText(ctx, mainText, margin, 420, maxTextWidth, 185);
-            
+            let nextY;
+            if (isBiliCover) {
+                drawFittedWrappedText(ctx, mainText, margin, titleY, maxTextWidth, {
+                    maxLines: 2,
+                    startSize: titleStartSize,
+                    minSize: titleMinSize,
+                    step: 2,
+                    weight: '900',
+                    family: titleFontFamily,
+                    lineHeightRatio: isBiliCover ? 1.08 : 1.15
+                });
+            } else {
+                wrapText(ctx, mainText, margin, titleY, maxTextWidth, titleLineHeight);
+            }
+
             ctx.shadowColor = neonColor;
-            ctx.shadowBlur = 25;
-            wrapText(ctx, mainText, margin, 420, maxTextWidth, 185);
-            
-            ctx.shadowBlur = 10;
-            let nextY = wrapText(ctx, mainText, margin, 420, maxTextWidth, 185);
+            ctx.shadowBlur = isBiliCover ? 19 : 25;
+            if (isBiliCover) {
+                drawFittedWrappedText(ctx, mainText, margin, titleY, maxTextWidth, {
+                    maxLines: 2,
+                    startSize: titleStartSize,
+                    minSize: titleMinSize,
+                    step: 2,
+                    weight: '900',
+                    family: titleFontFamily,
+                    lineHeightRatio: isBiliCover ? 1.08 : 1.15
+                });
+            } else {
+                wrapText(ctx, mainText, margin, titleY, maxTextWidth, titleLineHeight);
+            }
+
+            ctx.shadowBlur = isBiliCover ? 7 : 10;
+            if (isBiliCover) {
+                nextY = drawFittedWrappedText(ctx, mainText, margin, titleY, maxTextWidth, {
+                    maxLines: 2,
+                    startSize: titleStartSize,
+                    minSize: titleMinSize,
+                    step: 2,
+                    weight: '900',
+                    family: titleFontFamily,
+                    lineHeightRatio: isBiliCover ? 1.08 : 1.15
+                }).nextY;
+            } else {
+                nextY = wrapText(ctx, mainText, margin, titleY, maxTextWidth, titleLineHeight);
+            }
             ctx.restore();
-            
+
             // 3. 副标题 (85px)
             if (subText) {
-                ctx.font = 'bold 85px "Microsoft YaHei", sans-serif'; 
-                ctx.fillStyle = '#AACCBB'; 
+                ctx.font = `bold ${isBiliCover ? 42 : 85}px ${fontFamily}`;
+                ctx.fillStyle = isBiliCover ? '#9EF0BF' : '#AACCBB';
                 ctx.shadowColor = 'rgba(0, 255, 102, 0.35)';
-                ctx.shadowBlur = 15;
-                wrapText(ctx, subText, margin, nextY + 75, maxTextWidth, 105);
+                ctx.shadowBlur = isBiliCover ? 14 : 15;
+                if (isBiliCover) {
+                    drawFittedWrappedText(ctx, subText, margin, nextY + 4, maxTextWidth, {
+                        maxLines: 1,
+                        startSize: 42,
+                        minSize: 32,
+                        step: 2,
+                        weight: 'bold',
+                        family: fontFamily,
+                        lineHeightRatio: 1.13
+                    });
+                } else {
+                    wrapText(ctx, subText, margin, nextY + 75, maxTextWidth, 105);
+                }
                 ctx.shadowBlur = 0;
             }
-            
-            // 4. 左下角 Logo (极具质感的毛玻璃效果)
-            const logoX = 75;
-            const logoY = 960;
-            ctx.save();
-            // 模拟 backdrop-filter: blur + 边框高亮
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.18)'; 
-            roundRect(ctx, logoX, logoY - 55, 310, 100, 12);
-            ctx.fill();
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
-            ctx.lineWidth = 2.5;
-            ctx.stroke();
-            
-            ctx.fillStyle = '#FFFFFF';
-            ctx.font = 'bold 45px "Microsoft YaHei", sans-serif';
-            ctx.fillRect(logoX + 25, logoY-10, 6, 20); 
-            ctx.fillRect(logoX + 37, logoY-20, 6, 40); 
-            ctx.fillRect(logoX + 49, logoY-15, 6, 30);
-            ctx.fillText(footerText, logoX + 85, logoY + 15);
-            ctx.restore();
+
+            if (showFooter) {
+                // 4. 左下角 Logo (极具质感的毛玻璃效果)
+                const logoX = isBiliCover ? 53 : 75;
+                const logoY = isBiliCover ? h - 55 : 960;
+                const logoW = isBiliCover ? 152 : 310;
+                const logoH = isBiliCover ? 54 : 100;
+                ctx.save();
+                // 模拟 backdrop-filter: blur + 边框高亮
+                ctx.fillStyle = isBiliCover ? 'rgba(255, 255, 255, 0.13)' : 'rgba(255, 255, 255, 0.18)';
+                roundRect(ctx, logoX, logoY - logoH + 14, logoW, logoH, isBiliCover ? 9 : 12);
+                ctx.fill();
+                ctx.strokeStyle = isBiliCover ? 'rgba(255, 255, 255, 0.28)' : 'rgba(255, 255, 255, 0.4)';
+                ctx.lineWidth = isBiliCover ? 1.5 : 2.5;
+                ctx.stroke();
+
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = `bold ${isBiliCover ? 24 : 45}px ${fontFamily}`;
+                const barX = logoX + (isBiliCover ? 17 : 25);
+                const barY = logoY + (isBiliCover ? -15 : -10);
+                const barW = isBiliCover ? 4 : 6;
+                ctx.fillRect(barX, barY, barW, isBiliCover ? 14 : 20);
+                ctx.fillRect(barX + (isBiliCover ? 9 : 12), barY - (isBiliCover ? 7 : 10), barW, isBiliCover ? 28 : 40);
+                ctx.fillRect(barX + (isBiliCover ? 18 : 24), barY - (isBiliCover ? 3 : 5), barW, isBiliCover ? 21 : 30);
+                ctx.fillText(footerText, logoX + (isBiliCover ? 48 : 85), logoY + (isBiliCover ? 4 : 15));
+                ctx.restore();
+            }
         } else if (format === 'horizontal_stack') {
             const margin = 120;
             ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
@@ -707,9 +845,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 wrapText(ctx, subText, margin, nextY + 40, 1680, 90);
                 ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             }
-            const by = 1020; ctx.fillStyle = colors.main;
-            ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#94a3b8'; ctx.fillText(footerText, margin + 70, by);
+            if (showFooter) {
+                const by = 1020; ctx.fillStyle = colors.main;
+                ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
+                ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#94a3b8'; ctx.fillText(footerText, margin + 70, by);
+            }
         } else if (format === 'horizontal_diagonal') {
             const margin = 100;
             ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
@@ -725,9 +865,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 wrapText(ctx, subText, margin, nextY + 60, 700, 85);
                 ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             }
-            const by = 960; ctx.fillStyle = colors.main;
-            ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 45px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#94a3b8'; ctx.fillText(footerText, margin + 70, by);
+            if (showFooter) {
+                const by = 960; ctx.fillStyle = colors.main;
+                ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
+                ctx.font = 'bold 45px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#94a3b8'; ctx.fillText(footerText, margin + 70, by);
+            }
         } else if (format === 'vertical') {
             const margin = 80; const maxW = w - margin * 2;
             ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
@@ -756,40 +898,57 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
                 ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             }
-            const by = 1750; ctx.fillStyle = colors.main;
-            ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 70, by);
-        } else if (format === 'wx_cover') {
-            const margin = 80; const maxW = w - margin * 2;
-            ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
-            ctx.fillRect(margin, 700, 10, 40); ctx.fillStyle = '#e2e8f0';
-            ctx.fillText(instText + " · 研报解构", margin + 25, 732);
+            if (showFooter) {
+                const by = 1750; ctx.fillStyle = colors.main;
+                ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
+                ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 70, by);
+            }
+        } else if (format === 'wx_cover' || format === 'bilibili_wx_cover') {
+            const isBiliWxCover = format === 'bilibili_wx_cover';
+            const margin = isBiliWxCover ? 64 : 80;
+            const maxW = w - margin * 2;
+            const labelY = isBiliWxCover ? Math.round(h * 0.42) : 700;
+            const labelFont = isBiliWxCover ? 24 : 36;
+            const labelBarW = isBiliWxCover ? 7 : 10;
+            const labelBarH = isBiliWxCover ? 30 : 40;
+            const labelGap = isBiliWxCover ? 18 : 25;
+            ctx.font = `bold ${labelFont}px "Microsoft YaHei", sans-serif`; ctx.fillStyle = colors.main;
+            ctx.fillRect(margin, labelY, labelBarW, labelBarH); ctx.fillStyle = '#e2e8f0';
+            ctx.fillText(instText + " · 研报解构", margin + labelGap, labelY + Math.round(labelBarH * 0.8));
             ctx.fillStyle = colors.main;
             ctx.shadowColor = colors.glow; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
-            const titleResult = drawFittedWrappedText(ctx, mainText, margin, 870, maxW, {
+            const titleResult = drawFittedWrappedText(ctx, mainText, margin, isBiliWxCover ? Math.round(h * 0.60) : 870, maxW, {
                 maxLines: Number(workflowRenderOptions.titleMaxLines || 2),
-                startSize: Number(workflowRenderOptions.titleStartSize || 110),
-                minSize: Number(workflowRenderOptions.titleMinSize || 72),
+                startSize: Number(workflowRenderOptions.titleStartSize || (isBiliWxCover ? 68 : 110)),
+                minSize: Number(workflowRenderOptions.titleMinSize || (isBiliWxCover ? 44 : 72)),
                 weight: '900',
-                lineHeightRatio: 1.18
+                lineHeightRatio: isBiliWxCover ? 1.08 : 1.18
             });
             let nextY = titleResult.nextY;
             ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             if (subText) {
                 ctx.fillStyle = '#ffffff';
                 ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 5;
-                drawFittedWrappedText(ctx, subText, margin, nextY + 50, maxW, {
+                drawFittedWrappedText(ctx, subText, margin, nextY + (isBiliWxCover ? 24 : 50), maxW, {
                     maxLines: Number(workflowRenderOptions.subtitleMaxLines || 1),
-                    startSize: Number(workflowRenderOptions.subtitleStartSize || 56),
-                    minSize: Number(workflowRenderOptions.subtitleMinSize || 40),
+                    startSize: Number(workflowRenderOptions.subtitleStartSize || (isBiliWxCover ? 34 : 56)),
+                    minSize: Number(workflowRenderOptions.subtitleMinSize || (isBiliWxCover ? 26 : 40)),
                     weight: 'bold',
-                    lineHeightRatio: 1.24
+                    lineHeightRatio: isBiliWxCover ? 1.18 : 1.24
                 });
                 ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             }
-            const by = 1300; ctx.fillStyle = colors.main;
-            ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 70, by);
+            if (showFooter) {
+                const by = isBiliWxCover ? h - 42 : 1300; ctx.fillStyle = colors.main;
+                const barW = isBiliWxCover ? 4 : 6;
+                const barGap = isBiliWxCover ? 9 : 12;
+                const barHeights = isBiliWxCover ? [12, 24, 16, 28, 8] : [15, 30, 20, 35, 10];
+                barHeights.forEach((barH, index) => {
+                    ctx.fillRect(margin + index * barGap, by - barH, barW, barH);
+                });
+                ctx.font = `bold ${isBiliWxCover ? 24 : 40}px "Microsoft YaHei", sans-serif`;
+                ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + (isBiliWxCover ? 54 : 70), by);
+            }
         } else if (format === 'podcast') {
             const margin = 100; const maxW = w - margin * 2;
             ctx.font = 'bold 45px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
@@ -818,8 +977,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
                 ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             }
-            const by = 1340; ctx.fillStyle = colors.main; ctx.fillRect(margin, by-20, 8, 20); ctx.fillRect(margin+16, by-40, 8, 40); ctx.fillRect(margin+32, by-25, 8, 25); ctx.fillRect(margin+48, by-45, 8, 45); ctx.fillRect(margin+64, by-15, 8, 15);
-            ctx.font = 'bold 55px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 95, by);
+            if (showFooter) {
+                const by = 1340; ctx.fillStyle = colors.main; ctx.fillRect(margin, by-20, 8, 20); ctx.fillRect(margin+16, by-40, 8, 40); ctx.fillRect(margin+32, by-25, 8, 25); ctx.fillRect(margin+48, by-45, 8, 45); ctx.fillRect(margin+64, by-15, 8, 15);
+                ctx.font = 'bold 55px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 95, by);
+            }
         } else if (format === 'video_bg') {
             const margin = 80; const maxW = w - margin * 2;
             ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
@@ -833,7 +994,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.font = 'bold 55px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#ffffff';
                 wrapText(ctx, subText, margin, nextY + 40, maxW, 75);
             }
-            const videoH = w * (9/16); const videoY = 620; 
+            const videoH = w * (9/16); const videoY = 620;
             ctx.fillStyle = '#000000'; ctx.fillRect(0, videoY, w, videoH);
             if (inputs.showGuides.checked) {
                 ctx.setLineDash([15, 15]); ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 4;
@@ -843,9 +1004,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.textAlign = 'left'; ctx.font = '30px "Microsoft YaHei"'; ctx.fillStyle = 'rgba(255,255,255,0.15)';
                 ctx.textAlign = 'center'; ctx.fillText('--- 字幕安全区 ---', w/2, 1450); ctx.textAlign = 'left';
             }
-            const by = 1750; ctx.fillStyle = colors.main;
-            ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 70, by);
+            if (showFooter) {
+                const by = 1750; ctx.fillStyle = colors.main;
+                ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
+                ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 70, by);
+            }
         } else if (format === 'video_bg_audio') {
             const margin = 80; const maxW = w - margin * 2;
             ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
@@ -886,9 +1049,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.font = '30px "Microsoft YaHei"'; ctx.fillStyle = 'rgba(255,255,255,0.15)';
                 ctx.fillText('--- 字幕安全区 ---', w/2, boxY + boxH + 260); ctx.textAlign = 'left';
             }
-            const by = 1750; ctx.fillStyle = colors.main;
-            ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
-            ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 70, by);
+            if (showFooter) {
+                const by = 1750; ctx.fillStyle = colors.main;
+                ctx.fillRect(margin, by-15, 6, 15); ctx.fillRect(margin+12, by-30, 6, 30); ctx.fillRect(margin+24, by-20, 6, 20); ctx.fillRect(margin+36, by-35, 6, 35); ctx.fillRect(margin+48, by-10, 6, 10);
+                ctx.font = 'bold 40px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(footerText, margin + 70, by);
+            }
         }
     }
 
@@ -928,6 +1093,7 @@ document.addEventListener('DOMContentLoaded', () => {
             updateLayoutAndDraw();
         }
         if (typeof payload.showGuides === 'boolean') inputs.showGuides.checked = payload.showGuides;
+        if (typeof payload.showFooter === 'boolean' && inputs.showFooter) inputs.showFooter.checked = payload.showFooter;
         if (payload.inst) inputs.inst.value = payload.inst;
         if (payload.mainTitle !== undefined) inputs.mainTitle.value = payload.mainTitle || '';
         if (payload.subTitle !== undefined) inputs.subTitle.value = payload.subTitle || '';
@@ -971,6 +1137,8 @@ document.addEventListener('DOMContentLoaded', () => {
         let formatName = '横版';
         if (currentFormat === 'horizontal_reverse') formatName = '横版(反向)';
         if (currentFormat === 'horizontal_v2') formatName = '横版(V2霓虹)';
+        if (currentFormat === 'bilibili_cover') formatName = 'B站封皮';
+        if (currentFormat === 'bilibili_wx_cover') formatName = 'B站封皮(视频号样式)';
         if (currentFormat === 'horizontal_stack') formatName = '横版(上下)';
         if (currentFormat === 'horizontal_diagonal') formatName = '横版(斜线)';
         if (currentFormat === 'vertical') formatName = '竖版';
@@ -987,4 +1155,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 初始运行
     updateLayoutAndDraw();
-});
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initThumbnailWorkbench);
+} else {
+    initThumbnailWorkbench();
+}

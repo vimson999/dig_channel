@@ -17,8 +17,11 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from flask import Blueprint, request, jsonify, send_file
+from sqlalchemy.orm import load_only
 from werkzeug.utils import secure_filename
 import logging
+
+from models.task import PublicationTask
 
 # 创建蓝图
 bp = Blueprint('documents', __name__, url_prefix='/api/v1/documents')
@@ -52,10 +55,33 @@ PODCAST_TEMPLATE_PATH = (
 PODCAST_VISUALIZER_RENDERER_VERSION = '20260520-audio-controls-v9'
 PODCAST_PREVIEW_CACHE_DIR = Path(tempfile.gettempdir()) / 'shioa_podcast_preview_cache'
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
+PODCAST_TASK_PAYLOAD_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.feature,
+    PublicationTask.created_at,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
+)
+
+
+def _get_podcast_visualizer_task(task_id, *columns):
+    selected = columns or PODCAST_TASK_PAYLOAD_COLUMNS
+    return (
+        PublicationTask.query.options(load_only(*selected))
+        .filter(PublicationTask.id == str(task_id))
+        .first()
+    )
 
 def _is_podcast_visualizer_task(task):
     params = task.params if isinstance(task.params, dict) else {}
-    return params.get('feature') == 'podcast_visualizer'
+    return (task.feature or params.get('feature')) == 'podcast_visualizer'
 
 def _enqueue_podcast_visualizer_task(task):
     from models import db
@@ -1880,17 +1906,17 @@ def preview_podcast_visualizer_frame():
 
 @bp.route('/podcast-visualizer/tasks', methods=['GET'])
 def list_podcast_visualizer_tasks():
-    from models.task import PublicationTask
-
     page = max(1, request.args.get('page', default=1, type=int) or 1)
     per_page = request.args.get('per_page', default=20, type=int) or 20
     per_page = min(50, max(1, per_page))
 
-    recent_tasks = PublicationTask.query.order_by(PublicationTask.created_at.desc()).limit(1000).all()
-    tasks = [
-        task for task in recent_tasks
-        if task.params and task.params.get('feature') == 'podcast_visualizer'
-    ]
+    tasks = (
+        PublicationTask.query.options(load_only(*PODCAST_TASK_PAYLOAD_COLUMNS))
+        .filter(PublicationTask.feature == 'podcast_visualizer')
+        .order_by(PublicationTask.created_at.desc())
+        .limit(1000)
+        .all()
+    )
     total = len(tasks)
     total_pages = max(1, math.ceil(total / per_page))
     page = min(page, total_pages)
@@ -1912,10 +1938,9 @@ def list_podcast_visualizer_tasks():
 @bp.route('/podcast-visualizer/requeue/<task_id>', methods=['POST'])
 def requeue_podcast_visualizer_task(task_id):
     from models import db
-    from models.task import PublicationTask
 
     try:
-        task = PublicationTask.query.get(task_id)
+        task = _get_podcast_visualizer_task(task_id)
         if not task:
             return jsonify({'success': False, 'message': '任务不存在'}), 404
         if not _is_podcast_visualizer_task(task):
@@ -1946,18 +1971,20 @@ def requeue_podcast_visualizer_task(task_id):
 
 @bp.route('/podcast-visualizer/task/<task_id>', methods=['GET'])
 def get_podcast_visualizer_task(task_id):
-    from models.task import PublicationTask
-
-    task = PublicationTask.query.get(task_id)
-    if not task or not task.params or task.params.get('feature') != 'podcast_visualizer':
+    task = _get_podcast_visualizer_task(task_id)
+    if not task or not _is_podcast_visualizer_task(task):
         return jsonify({'success': False, 'message': '任务不存在'}), 404
     return jsonify({'success': True, 'data': task.to_dict()})
 
 @bp.route('/podcast-visualizer/task/<task_id>/download', methods=['GET'])
 def download_podcast_visualizer_task(task_id):
-    from models.task import PublicationTask
-
-    task = PublicationTask.query.get(task_id)
+    task = _get_podcast_visualizer_task(
+        task_id,
+        PublicationTask.id,
+        PublicationTask.params,
+        PublicationTask.result,
+        PublicationTask.feature,
+    )
     if not task or not task.result or not task.result.get('video_path'):
         return jsonify({'success': False, 'message': '视频不存在'}), 404
     video_path = task.result.get('video_path')

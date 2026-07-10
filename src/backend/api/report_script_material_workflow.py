@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_file
-from sqlalchemy import String, and_, cast, inspect as sqlalchemy_inspect, or_
+from sqlalchemy import and_, inspect as sqlalchemy_inspect, or_
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -304,10 +304,11 @@ def list_jobs(current_user):
     if search:
         pattern = f"%{_escape_like(search)}%"
         query = query.filter(or_(
+            PublicationTask.id.ilike(pattern, escape="\\"),
             PublicationTask.task_title.ilike(pattern, escape="\\"),
             PublicationTask.report_audio_pdf_filename.ilike(pattern, escape="\\"),
             PublicationTask.report_audio_pdf_topic_title.ilike(pattern, escape="\\"),
-            cast(PublicationTask.params, String).ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_structured_title.ilike(pattern, escape="\\"),
         ))
     pagination = query.order_by(PublicationTask.created_at.desc()).paginate(
         page=page,
@@ -595,7 +596,7 @@ def _job_payload(task, include_detail=False):
 
 def _get_owned_task(current_user, job_id, include_result=True):
     columns = TASK_DETAIL_COLUMNS if include_result else TASK_REQUEST_COLUMNS
-    task = PublicationTask.query.options(load_only(*columns)).get(job_id)
+    task = PublicationTask.query.options(load_only(*columns)).filter(PublicationTask.id == str(job_id)).one_or_none()
     if not task or (task.feature or (task.params or {}).get("feature")) != FEATURE_NAME:
         return None
     if str(task.user_id or (task.params or {}).get("user_id") or "").strip() not in _visible_user_ids(current_user):

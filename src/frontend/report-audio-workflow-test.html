@@ -96,6 +96,12 @@
                         <div id="gemini-url-current" class="mt-1 truncate text-[11px] font-bold text-slate-400"></div>
                     </label>
 
+                    <label class="mt-4 block">
+                        <span class="mb-1 block text-xs font-bold text-slate-500">手动 Gemini 返回值（可选）</span>
+                        <textarea id="manual-gemini-result-input" rows="7" class="w-full resize-y rounded-md border border-emerald-200 bg-emerald-50/40 px-3 py-2 text-sm leading-6 text-slate-800 focus:border-emerald-500 focus:bg-white focus:outline-none" placeholder="粘贴 Gemini 第一步/最终返回文本；填写后跳过 Gemini 浏览器抓取，直接进入 DeepSeek 结构化。"></textarea>
+                        <div class="mt-1 text-[11px] font-bold text-emerald-700">适合 Gemini 页面卡住时使用；PDF 仍用于封面、截图和后续视频底图。</div>
+                    </label>
+
                     <div class="mt-4 rounded-md border border-indigo-100 bg-indigo-50/50 p-3">
                         <div class="flex items-center justify-between gap-3">
                             <div>
@@ -117,6 +123,14 @@
                                 <select id="vertical-video-scheme" class="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 focus:border-slate-400 focus:outline-none">
                                     <option value="scheme1">方案一：当前竖屏背景</option>
                                     <option value="scheme2">方案二：封面工具台竖版背景</option>
+                                </select>
+                            </label>
+                            <label class="block rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
+                                <span class="mb-1 block text-slate-500">生成模式</span>
+                                <select id="video-render-mode" class="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 focus:border-slate-400 focus:outline-none">
+                                    <option value="full_video">生成完整视频</option>
+                                    <option value="keyframes">只生成关键帧/封皮</option>
+                                    <option value="preview_10s">生成 10 秒短视频</option>
                                 </select>
                             </label>
                             <label class="flex items-center gap-2 rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-400">
@@ -190,6 +204,6 @@
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260614-report-audio-workflow"></script>
     <script src="js/download-count-highlight.js?v=20260702"></script>
-    <script src="js/report-audio-workflow-test.js?v=20260707-pdf-material-status"></script>
+    <script src="js/report-audio-workflow-test.js?v=20260708-video-preview-modes"></script>
 </body>
 </html>

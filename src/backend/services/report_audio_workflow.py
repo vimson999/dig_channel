@@ -263,6 +263,7 @@ def _deepseek_normalize(
         "- editor_notes: 字符串，简短说明整理策略",
         "如果原文中没有某字段内容，用空字符串或空数组。",
         "final_script_for_tts 必须适合直接朗读，保留必要的投资风险提示。",
+        "final_script_for_tts 不能包含“第一部分、第二部分、开场与变量切换、产业背景、深度数据支撑、核心观测信号”等结构标签；这些是写作提纲，不是口播正文。",
         "",
         "标题选择规则：",
         "1. 先扫描 Gemini 审核后结果中的“标题方案、标准标题、短标题、封面标题、核心观点、段落标题”，从中选择最贴合研报结论的一条；只有没有可用标题时，才从正文抽取重写。",
@@ -487,6 +488,7 @@ def _clean_tts_script(value: Any) -> str:
     text = _strip_gemini_capture_artifacts(value)
     text = re.sub(r"(^|\s)PDF(?:\s*\+\s*\d+)?(?=\s|$)", " ", text, flags=re.I)
     text = _strip_leading_style_fragments(text)
+    text = _strip_tts_structure_labels(text)
     return _strip_trailing_section_stub(_clean_text(text))
 
 
@@ -505,6 +507,28 @@ def _strip_leading_style_fragments(value: Any) -> str:
 def _strip_trailing_section_stub(value: Any) -> str:
     text = _clean_text(value)
     return re.sub(r"\s*(?:[一二三四五六七八九十]|\d+)[、.．]\s*$", "", text).strip()
+
+
+def _strip_tts_structure_labels(value: Any) -> str:
+    text = str(value or "").replace("\r", "\n")
+    if not text.strip():
+        return ""
+
+    # Remove outline headings that DeepSeek sometimes leaves inside the text
+    # handed to Doubao, for example: "第一部分：开场与变量切换（引入悬念）".
+    boundary = r"(^|[\n。！？!?；;]\s*)"
+    section_index = r"(?:第\s*)?(?:[一二三四五六七八九十\d]+)\s*部分"
+    text = re.sub(
+        boundary + section_index + r"\s*[:：]\s*[^。！？!?；;\n]{0,80}?（[^）\n]{1,80}）\s*",
+        lambda match: match.group(1),
+        text,
+    )
+    text = re.sub(
+        boundary + section_index + r"\s*[:：]\s*[^。！？!?；;\n]{1,28}(?=\s+(?:过去|今天|接下来|关于|最后|首先|其次|再来看|从|在|我们|这|高盛|摩根|大摩|美银|瑞银|花旗|中金|华泰|欢迎))",
+        lambda match: match.group(1),
+        text,
+    )
+    return _clean_text(text)
 
 
 def _looks_like_editor_review_notes(value: Any) -> bool:
@@ -549,7 +573,19 @@ def _tts_script_quality_issue(value: Any) -> str:
         return "包含 PDF 上传控件残留"
     if _looks_like_editor_review_notes(text):
         return "包含编辑复核/勘误说明残留"
+    if _contains_tts_structure_label(text):
+        return "包含分段结构标签"
     return ""
+
+
+def _contains_tts_structure_label(value: Any) -> bool:
+    text = _clean_text(value)
+    if not text:
+        return False
+    return bool(re.search(
+        r"(^|[。！？!?；;]\s*)(?:第\s*)?[一二三四五六七八九十\d]+\s*部分\s*[:：]",
+        text,
+    ))
 
 
 def _clean_multiline_text(value: Any) -> str:

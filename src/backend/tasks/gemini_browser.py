@@ -39,7 +39,22 @@ TASK_PAYLOAD_COLUMNS = (
 
 def _load_task(task_id, *columns):
     attrs = columns or TASK_PAYLOAD_COLUMNS
-    return PublicationTask.query.options(load_only(*attrs)).get(task_id)
+    return (
+        PublicationTask.query.options(load_only(*attrs))
+        .filter(PublicationTask.id == str(task_id))
+        .first()
+    )
+
+
+def _update_active_task(task_id, values):
+    updated = (
+        PublicationTask.query
+        .filter(PublicationTask.id == str(task_id))
+        .filter(PublicationTask.status != "canceled")
+        .update(values, synchronize_session=False)
+    )
+    db.session.commit()
+    return bool(updated)
 
 
 def _run_with_app_context(task_id):
@@ -106,13 +121,12 @@ def _process_job(task_id):
     flag_modified(task, "result")
     db.session.commit()
     db.session.expunge_all()
+    progress_result = result
 
     def update_progress(event):
-        fresh = _load_task(job_id, *TASK_UPDATE_COLUMNS)
-        if not fresh or fresh.status == "canceled":
-            raise RuntimeError("任务已取消")
-        current_result = dict(fresh.result or {})
-        logs = list(current_result.get("logs") or [])
+        nonlocal progress_result
+        current_result = dict(progress_result)
+        logs = list(progress_result.get("logs") or [])
         logs.append({
             "step": event.get("step"),
             "message": event.get("message"),
@@ -122,12 +136,13 @@ def _process_job(task_id):
         current_result["logs"] = logs[-80:]
         if event.get("result"):
             current_result.update(event["result"])
-        fresh.current_step = event.get("step") or fresh.current_step
-        fresh.progress = int(event.get("progress") or fresh.progress or 0)
-        fresh.result = current_result
-        flag_modified(fresh, "result")
-        db.session.commit()
-        db.session.expunge(fresh)
+        progress_result = current_result
+        if not _update_active_task(job_id, {
+            PublicationTask.current_step: event.get("step") or "processing",
+            PublicationTask.progress: int(event.get("progress") or 0),
+            PublicationTask.result: current_result,
+        }):
+            raise RuntimeError("任务已取消或不存在")
 
     try:
         output_path = storage_path_for_job(job_id, job_created_at)
@@ -142,11 +157,7 @@ def _process_job(task_id):
             progress_callback=update_progress,
         )
 
-        fresh = _load_task(job_id, *TASK_UPDATE_COLUMNS)
-        if not fresh:
-            logger.error("Report PDF Gemini task disappeared before final update: %s", job_id)
-            return False
-        final_result = dict(fresh.result or {})
+        final_result = dict(progress_result)
         final_result.update({
             "response_text": gemini_result.get("response_text"),
             "final_response_text": gemini_result.get("final_response_text") or gemini_result.get("response_text"),
@@ -159,21 +170,33 @@ def _process_job(task_id):
             "output_path": gemini_result.get("output_path"),
             "completed_at": datetime.utcnow().isoformat() + "Z",
         })
-        fresh.status = "completed"
-        fresh.current_step = "done"
-        fresh.progress = 100
-        fresh.completed_at = datetime.utcnow()
-        fresh.error_message = None
-        fresh.result = final_result
-        flag_modified(fresh, "result")
-        db.session.commit()
+        final_response = final_result.get("final_response_text") or final_result.get("response_text") or ""
+        if not _update_active_task(job_id, {
+            PublicationTask.status: "completed",
+            PublicationTask.current_step: "done",
+            PublicationTask.progress: 100,
+            PublicationTask.completed_at: datetime.utcnow(),
+            PublicationTask.error_message: None,
+            PublicationTask.result: final_result,
+            PublicationTask.gemini_response_chars: len("".join(str(final_response).split())),
+        }):
+            logger.warning("Report PDF Gemini task was canceled before final update: %s", job_id)
+            return False
         logger.info("Report PDF Gemini task completed: %s", job_id)
         return True
     except Exception as exc:
         db.session.rollback()
-        task = _load_task(job_id, *TASK_UPDATE_COLUMNS)
-        if task:
-            _mark_failed(task, str(exc))
+        failure_result = dict(progress_result)
+        failure_result["error"] = str(exc)
+        failure_result["completed_at"] = datetime.utcnow().isoformat() + "Z"
+        _update_active_task(job_id, {
+            PublicationTask.status: "failed",
+            PublicationTask.current_step: "failed",
+            PublicationTask.error_message: str(exc),
+            PublicationTask.completed_at: datetime.utcnow(),
+            PublicationTask.result: failure_result,
+            PublicationTask.gemini_response_chars: 0,
+        })
         logger.error("Report PDF Gemini task failed: %s", exc, exc_info=True)
         return False
 

@@ -82,6 +82,8 @@
                         <option value="horizontal">💻 横版封面 (文字在左)</option>
                         <option value="horizontal_reverse">💻 横版封面 (文字在右)</option>
                         <option value="horizontal_v2">💻 横版封面 (V2 霓虹研报)</option>
+                        <option value="bilibili_cover">📺 B站封皮 (研报解构 1146×717)</option>
+                        <option value="bilibili_wx_cover">📺 B站封皮 (视频号样式 1146×717)</option>
                         <option value="horizontal_stack">💻 横版封面 (上下分层)</option>
                         <option value="horizontal_diagonal">💻 横版封面 (斜线对角)</option>
                         <option value="vertical">📱 竖版视频 (9:16)</option>
@@ -158,7 +160,13 @@
                         <input type="text" id="subTitle" class="w-full bg-white border border-gray-200 rounded-xl p-3 text-gray-700 focus:ring-2 focus:ring-primary-500 outline-none shadow-sm transition-all" value="阿里AI被小摩看空？">
                     </div>
                     <div>
-                        <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">底款文字</label>
+                        <div class="flex items-center justify-between mb-2">
+                            <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider">底款文字</label>
+                            <label class="inline-flex items-center gap-2 text-xs font-bold text-gray-500 cursor-pointer select-none">
+                                <input type="checkbox" id="showFooter" class="w-4 h-4 text-primary-600 bg-white border-gray-300 rounded focus:ring-primary-500 cursor-pointer" checked>
+                                显示
+                            </label>
+                        </div>
                         <input type="text" id="footerText" class="w-full bg-white border border-gray-200 rounded-xl p-3 text-gray-700 focus:ring-2 focus:ring-primary-500 outline-none shadow-sm transition-all" value="听见资本">
                     </div>
                 </div>
@@ -214,6 +222,6 @@
     <script src="js/utils.js"></script>
     <script src="js/api.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/thumbnail-workbench.js?v=20260618-workflow-render-api"></script>
+    <script src="js/thumbnail-workbench.js?v=20260709-footer-toggle"></script>
 </body>
 </html>

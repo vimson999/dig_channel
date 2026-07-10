@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from models.task import PublicationTask
 from models import db
 from sqlalchemy import or_
+from sqlalchemy.orm import load_only
 from datetime import datetime, timedelta
 from copy import deepcopy
 import base64
@@ -18,6 +19,29 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..
 PUBLISHER_TASK_LIST_CACHE_TTL_SECONDS = float(os.environ.get('PUBLISHER_TASK_LIST_CACHE_TTL', '10'))
 PUBLISHER_TASK_LIST_CACHE = {}
 PUBLISHER_TASK_LIST_CACHE_LOCK = threading.Lock()
+PUBLISHER_TASK_PAYLOAD_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.feature,
+    PublicationTask.created_at,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
+)
+
+
+def _get_publication_task(task_id, *columns):
+    selected = columns or PUBLISHER_TASK_PAYLOAD_COLUMNS
+    return (
+        PublicationTask.query.options(load_only(*selected))
+        .filter(PublicationTask.id == str(task_id))
+        .first()
+    )
 
 
 def _clear_publisher_task_list_cache():
@@ -291,7 +315,12 @@ def retry_task(task_id):
     Retry an existing task by creating a new one with same params.
     """
     try:
-        original_task = PublicationTask.query.get(task_id)
+        original_task = _get_publication_task(
+            task_id,
+            PublicationTask.id,
+            PublicationTask.params,
+            PublicationTask.feature,
+        )
         if not original_task:
             return jsonify({'error': 'Task not found'}), 404
         if not _is_publisher_task(original_task):
@@ -326,7 +355,7 @@ def requeue_task(task_id):
     Useful for tasks stuck in pending because the original Celery publish failed.
     """
     try:
-        task = PublicationTask.query.get(task_id)
+        task = _get_publication_task(task_id)
         if not task:
             return jsonify({'error': 'Task not found'}), 404
         if not _is_publisher_task(task):
@@ -444,7 +473,11 @@ def post_to_youtube(task_id):
     from tasks.publisher import PLATFORM_UPLOAD_QUEUE, run_youtube_upload_only
     
     try:
-        task = PublicationTask.query.get(task_id)
+        task = _get_publication_task(
+            task_id,
+            PublicationTask.id,
+            PublicationTask.result,
+        )
         if not task:
             return jsonify({'error': 'Task not found'}), 404
             
@@ -470,7 +503,7 @@ def get_task_status(task_id):
     """
     Get status of a specific task.
     """
-    task = PublicationTask.query.get(task_id)
+    task = _get_publication_task(task_id)
     if not task:
         return jsonify({'error': 'Task not found'}), 404
         

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import requests
 from bilibili_api import Credential
+from bilibili_api.exceptions import NetworkException, ResponseCodeException
 from bilibili_api.video_uploader import VideoUploader, VideoUploaderPage, VideoMeta
 from .utils import extract_cover
 
@@ -45,6 +46,41 @@ class BiliUploader:
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
+
+    @staticmethod
+    def _is_auth_upload_error(error: Exception) -> bool:
+        if isinstance(error, ResponseCodeException) and int(error.code or 0) in {-101, -111}:
+            return True
+        text = str(error or "").lower()
+        return any(hint in text for hint in (
+            "账号未登录",
+            "未登录",
+            "csrf",
+            "sessdata",
+            "cookie",
+            "credential",
+            "unauthorized",
+            "forbidden",
+        ))
+
+    @classmethod
+    def _is_non_retryable_upload_error(cls, error: Exception) -> bool:
+        if cls._is_auth_upload_error(error):
+            return True
+        if isinstance(error, ResponseCodeException):
+            return True
+        text = str(error or "")
+        return "接口返回错误代码" in text
+
+    @staticmethod
+    def _friendly_upload_error(error: Exception) -> Exception:
+        if isinstance(error, NetworkException) and int(getattr(error, "status", 0) or 0) == 403:
+            return RuntimeError(
+                "B站上传被拒绝（HTTP 403）。通常是账号登录态失效、B站风控，"
+                "或该账号无权使用当前合集/充电配置；请重新登录账号，或去掉合集/充电后重试。"
+                f"原始错误：{error}"
+            )
+        return error
 
     @staticmethod
     def _base_meta_dict(
@@ -408,10 +444,18 @@ class BiliUploader:
                 logger.info(f"Bilibili upload successful for {title}! Result: {result}")
                 return result
             except Exception as e:
+                error = self._friendly_upload_error(e)
+                if self._is_non_retryable_upload_error(e):
+                    logger.error(
+                        "Bilibili upload failed for %s with non-retryable error: %s",
+                        title,
+                        error,
+                    )
+                    raise error
                 if attempt < max_retries - 1:
                     wait_time = 5
-                    logger.warning(f"Upload attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {wait_time}s...")
+                    logger.warning(f"Upload attempt {attempt + 1}/{max_retries} failed: {error}. Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(f"Bilibili upload failed for {title} after {max_retries} attempts: {e}")
-                    raise
+                    logger.error(f"Bilibili upload failed for {title} after {max_retries} attempts: {error}")
+                    raise error

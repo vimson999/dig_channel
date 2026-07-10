@@ -2,6 +2,7 @@
 性能监控中间件
 记录系统性能指标，包括响应时间、内存使用、CPU使用率等
 """
+import os
 import time
 import psutil
 import threading
@@ -23,16 +24,19 @@ class PerformanceMonitor:
             'slow_requests': 0
         }
         self.lock = threading.Lock()
+        self._monitor_lock = threading.Lock()
+        self._monitor_thread = None
+        self._monitor_pid = None
         if app is not None:
             self.init_app(app)
     
-    def init_app(self, app):
+    def init_app(self, app, *, start_system_monitor=True):
         """初始化性能监控"""
         app.before_request(self.before_request)
         app.after_request(self.after_request)
         
-        # 启动性能监控线程
-        self._start_system_monitor()
+        if start_system_monitor:
+            self._start_system_monitor()
     
     def before_request(self):
         """请求开始前记录"""
@@ -121,7 +125,7 @@ class PerformanceMonitor:
             logger.debug(f"⚠️ [{request_id}] 获取资源使用情况失败: {e}")
     
     def _start_system_monitor(self):
-        """启动系统监控线程"""
+        """Start one system monitor thread per process."""
         def monitor_system():
             while True:
                 try:
@@ -131,8 +135,24 @@ class PerformanceMonitor:
                 except Exception as e:
                     logger.error(f"🚨 系统监控异常: {e}")
         
-        monitor_thread = threading.Thread(target=monitor_system, daemon=True)
-        monitor_thread.start()
+        with self._monitor_lock:
+            current_pid = os.getpid()
+            if (
+                self._monitor_pid == current_pid
+                and self._monitor_thread is not None
+                and self._monitor_thread.is_alive()
+            ):
+                return False
+
+            monitor_thread = threading.Thread(
+                target=monitor_system,
+                name="performance-system-monitor",
+                daemon=True,
+            )
+            monitor_thread.start()
+            self._monitor_pid = current_pid
+            self._monitor_thread = monitor_thread
+            return True
     
     def _log_system_metrics(self):
         """记录系统整体指标"""

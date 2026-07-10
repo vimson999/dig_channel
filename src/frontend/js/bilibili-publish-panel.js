@@ -67,16 +67,24 @@ class BilibiliPublishPanel {
         });
     }
 
-    setJob(job) {
+    setJob(job, options = {}) {
         const previousJobId = this.job?.job_id || this.job?.id || '';
         const nextJobId = job?.job_id || job?.id || '';
+        const incomingDraft = options.formDraft ? { ...options.formDraft } : null;
         if (previousJobId !== nextJobId) {
-            this.formDraft = null;
+            this.formDraft = incomingDraft || null;
             this.lastUpload = null;
+        } else if (incomingDraft) {
+            this.formDraft = incomingDraft;
         }
         this.job = job || {};
         this.render();
         this.loadCredentials();
+    }
+
+    updateJobData(job) {
+        this.job = job || this.job || {};
+        this.refreshHistory();
     }
 
     apiRoot() {
@@ -228,10 +236,10 @@ class BilibiliPublishPanel {
             hasVideos ? '' : this.options.emptyDescription,
             !this.credentials.length && !this.credentialsLoading ? '暂无可用 B站上传账号。请先在账号管理里导入或新增用途为「B站视频上传」的账号。' : '',
         ].filter(Boolean);
-        const defaultTitle = this.formDraft?.title ?? this.defaultTitle(selectedVideo);
+        const defaultTitle = this.firstNonBlank(this.formDraft?.title, this.defaultTitle(selectedVideo));
         const defaultDesc = this.formDraft?.desc ?? '';
-        const defaultTags = this.formDraft?.tags ?? this.options.defaultTags;
-        const defaultTid = this.formDraft?.tid ?? this.options.defaultTid;
+        const defaultTags = this.firstNonBlank(this.formDraft?.tags, this.options.defaultTags);
+        const defaultTid = this.firstNonBlank(this.formDraft?.tid, this.options.defaultTid);
         const onlySelfChecked = this.formDraft?.is_only_self === '1';
 
         this.container.innerHTML = `
@@ -388,22 +396,35 @@ class BilibiliPublishPanel {
         const form = this.container?.querySelector('[data-bili-shared-form]');
         if (!form) return this.formDraft;
         const data = new FormData(form);
+        const previous = this.formDraft || {};
+        const credentialId = data.get('credential_id') || '';
+        const credentialSelect = form.elements.credential_id;
+        const seasonSelect = form.elements.season_id;
+        const chargingLevelSelect = form.elements.upower_level_id;
+        const formHasCredentialChoices = this.hasNonEmptyOption(credentialSelect);
+        const formHasSeasonChoices = this.hasNonEmptyOption(seasonSelect);
+        const formHasChargingChoices = this.hasNonEmptyOption(chargingLevelSelect);
         return {
-            credential_id: data.get('credential_id') || '',
+            credential_id: formHasCredentialChoices || credentialId ? credentialId : (previous.credential_id || ''),
             video_key: data.get('video_key') || '',
             cover_key: data.get('cover_key') || '',
             title: data.get('title') || '',
             desc: data.get('desc') || '',
             tags: data.get('tags') || '',
             tid: data.get('tid') || '',
-            season_id: data.get('season_id') || '',
+            season_id: formHasSeasonChoices || data.get('season_id') ? (data.get('season_id') || '') : (previous.season_id || ''),
             is_only_self: data.get('is_only_self') ? '1' : '0',
             charging_enabled: data.get('charging_enabled') ? '1' : '0',
             charging_preview_end_time: data.get('charging_preview_end_time') || '00:03:00',
-            upower_level_id: data.get('upower_level_id') || '',
+            upower_level_id: formHasChargingChoices || data.get('upower_level_id') ? (data.get('upower_level_id') || '') : (previous.upower_level_id || ''),
             schedule_enabled: data.get('schedule_enabled') ? '1' : '0',
             schedule_time: data.get('schedule_time') || '',
         };
+    }
+
+    hasNonEmptyOption(select) {
+        if (!select?.options) return false;
+        return Array.from(select.options).some((option) => String(option.value || '').trim());
     }
 
     field(name) {
@@ -432,6 +453,14 @@ class BilibiliPublishPanel {
     defaultTitle(video) {
         const title = video?.defaultTitle || (this.options.defaultTitle ? this.options.defaultTitle(this.job, video?.key || '') : '') || '';
         return String(title || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    }
+
+    firstNonBlank(...values) {
+        for (const value of values) {
+            const text = String(value ?? '').trim();
+            if (text) return text;
+        }
+        return '';
     }
 
     applyVideoDefaults(videoKey) {
@@ -571,6 +600,8 @@ class BilibiliPublishPanel {
         const originalHtml = button?.innerHTML || '';
         const data = new FormData(form);
         const chargingEnabled = Boolean(data.get('charging_enabled'));
+        const videoKey = data.get('video_key') || 'landscape';
+        const selectedVideo = this.videoOptions().find((item) => item.key === videoKey);
         let delayTime = null;
         try {
             delayTime = this.getScheduleTimestamp(data);
@@ -580,12 +611,12 @@ class BilibiliPublishPanel {
         }
         const payload = {
             credential_id: data.get('credential_id') || '',
-            video_key: data.get('video_key') || 'landscape',
+            video_key: videoKey,
             cover_key: data.get('cover_key') || '',
-            title: data.get('title') || '',
+            title: this.firstNonBlank(data.get('title'), this.defaultTitle(selectedVideo)),
             desc: data.get('desc') || '',
-            tags: data.get('tags') || '',
-            tid: data.get('tid') || this.options.defaultTid,
+            tags: this.firstNonBlank(data.get('tags'), this.options.defaultTags),
+            tid: this.firstNonBlank(data.get('tid'), this.options.defaultTid),
             is_only_self: data.get('is_only_self') ? 1 : 0,
             season_id: data.get('season_id') || '',
         };
@@ -641,6 +672,7 @@ class BilibiliPublishPanel {
             });
             this.lastUpload = result.data?.upload_task || result.upload_task || null;
             this.formDraft = this.readFormDraft();
+            this.refreshHistory();
             if (this.options.onAfterSubmit) await this.options.onAfterSubmit(result);
             this.notify(`已投递 B站上传任务：${this.lastUpload?.task_id || ''}`, 'success');
         } catch (error) {
@@ -667,6 +699,7 @@ class BilibiliPublishPanel {
             if (!cancelPath) throw new Error('缺少 B站上传取消接口');
             const result = await this.request(cancelPath, { method: 'POST', timeoutMs: 15000 });
             this.lastUpload = result.data?.upload_task || result.upload_task || this.lastUpload;
+            this.refreshHistory();
             if (this.options.onAfterCancel) await this.options.onAfterCancel(result);
             this.notify(`已取消 B站上传任务：${id}`, 'success');
         } catch (error) {
@@ -679,10 +712,15 @@ class BilibiliPublishPanel {
         }
     }
 
+    refreshHistory() {
+        const target = this.container?.querySelector('[data-bili-history]');
+        if (target) target.outerHTML = this.renderHistory(this.uploads());
+    }
+
     renderHistory(items) {
-        if (!items.length) return '';
+        if (!items.length) return '<div data-bili-history></div>';
         return `
-            <div class="mt-4 border-t border-slate-100 pt-3">
+            <div data-bili-history class="mt-4 border-t border-slate-100 pt-3">
                 <div class="mb-2 text-[11px] font-black uppercase text-slate-400">上传记录</div>
                 <div class="space-y-2">
                     ${items.slice(0, 8).map((item) => {
@@ -709,13 +747,28 @@ class BilibiliPublishPanel {
                                     ${item.charging_pay?.enabled ? `<span>充电 ${this.escape(item.charging_pay.upower_level_id || '默认档')}</span>` : ''}
                                     <a href="${this.absoluteUrl(`/api/v1/publisher/task/${encodeURIComponent(item.task_id)}`)}" target="_blank" rel="noopener noreferrer" class="font-bold text-indigo-700 hover:text-indigo-900">任务 JSON</a>
                                 </div>
-                                ${item.error ? `<div class="mt-1 text-rose-600">${this.escape(item.error)}</div>` : ''}
+                                ${item.error ? `<div class="mt-1 text-rose-600">${this.escape(this.friendlyUploadError(item))}</div>` : ''}
                             </div>
                         `;
                     }).join('')}
                 </div>
             </div>
         `;
+    }
+
+    friendlyUploadError(item) {
+        const error = String(item?.error || '').trim();
+        if (!error) return '';
+        if (/状态码：?403|HTTP\s*403/i.test(error)) {
+            const context = [
+                item.credential_name ? `账号：${item.credential_name}` : '',
+                item.season_id ? `合集：${item.season_id}` : '',
+                item.charging_pay?.enabled ? `充电档：${item.charging_pay.upower_level_id || '默认档'}` : '',
+            ].filter(Boolean).join('，');
+            const suffix = context ? `（${context}）` : '';
+            return `${error} B站拒绝访问：常见原因是账号登录态失效、B站风控，或该账号无权使用当前合集/充电配置${suffix}。请重新登录账号后重试，或先去掉合集/充电配置重试。`;
+        }
+        return error;
     }
 
     videoLabel(key) {

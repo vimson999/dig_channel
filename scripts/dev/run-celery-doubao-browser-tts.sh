@@ -36,6 +36,7 @@ fi
 export PYTHONPATH=$PROJECT_ROOT/src/backend
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export DATABASE_TYPE=${DATABASE_TYPE:-postgresql}
+export DB_PROCESS_ROLE=${DB_PROCESS_ROLE:-worker}
 export DOUBAO_BROWSER_TTS_WORKER_ID="$WORKER_ID"
 # 真实浏览器任务必须串行执行，避免同一 Chrome profile 被并发控制。
 

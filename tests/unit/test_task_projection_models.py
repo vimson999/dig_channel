@@ -122,6 +122,45 @@ class TaskProjectionModelTest(unittest.TestCase):
         self.assertEqual(task.task_title, "发布标题")
         self.assertEqual(task.task_video_path, "/tmp/a.mp4")
 
+    def test_publication_task_projects_gemini_response_chars_without_whitespace(self):
+        task = PublicationTask(
+            params={"feature": "report_pdf_gemini"},
+            result={"final_response_text": "第一段。\n  第二段。"},
+        )
+
+        self.assertEqual(task.gemini_response_chars, len("第一段。第二段。"))
+
+    def test_publication_task_projects_publisher_match_fields(self):
+        task = PublicationTask(
+            params={
+                "feature": "publisher",
+                "video": {"enabled": True},
+                "vertical_video": {"enabled": False, "preview_seconds": 10},
+                "metadata": {"render_mode": "preview_10s"},
+            },
+            result={},
+        )
+
+        self.assertTrue(task.publisher_landscape_enabled)
+        self.assertFalse(task.publisher_vertical_enabled)
+        self.assertEqual(task.publisher_render_mode, "preview_10s")
+        self.assertEqual(task.publisher_preview_seconds, 10)
+
+    def test_doubao_projection_is_not_gated_by_publisher_fields(self):
+        task = PublicationTask(
+            params={
+                "feature": "doubao_browser_tts",
+                "doubao_browser_tts": {
+                    "metadata": {"text_hash": "a" * 64, "chunk_index": 2},
+                },
+            },
+            result={},
+        )
+
+        self.assertEqual(task.doubao_tts_text_hash, "a" * 64)
+        self.assertEqual(task.doubao_tts_chunk_index, 2)
+        self.assertIsNone(task.publisher_render_mode)
+
     def test_zsxq_attachment_file_ext_projection(self):
         attachment = ZsxqAttachment(
             group_id="g",

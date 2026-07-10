@@ -1,5 +1,6 @@
 from datetime import datetime
 import uuid
+from sqlalchemy import inspect as sqlalchemy_inspect
 
 from . import db
 
@@ -28,6 +29,11 @@ class ZsxqWorkflowRun(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def to_dict(self):
+        unloaded = sqlalchemy_inspect(self).unloaded
+        config_snapshot = {} if "config_snapshot" in unloaded else (self.config_snapshot or {})
+        stage_results = {} if "stage_results" in unloaded else (self.stage_results or {})
+        clean_task_ids = [] if "clean_task_ids" in unloaded else (self.clean_task_ids or [])
+        publish_task_ids = [] if "publish_task_ids" in unloaded else (self.publish_task_ids or [])
         return {
             "id": self.id,
             "batch_id": self.batch_id,
@@ -38,11 +44,11 @@ class ZsxqWorkflowRun(db.Model):
             "current_stage": self.current_stage,
             "round": self.round,
             "max_rounds": self.max_rounds,
-            "config_snapshot": self.config_snapshot or {},
-            "stage_results": self.stage_results or {},
+            "config_snapshot": config_snapshot,
+            "stage_results": stage_results,
             "sync_run_id": self.sync_run_id,
-            "clean_task_ids": self.clean_task_ids or [],
-            "publish_task_ids": self.publish_task_ids or [],
+            "clean_task_ids": clean_task_ids,
+            "publish_task_ids": publish_task_ids,
             "error_message": self.error_message,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,

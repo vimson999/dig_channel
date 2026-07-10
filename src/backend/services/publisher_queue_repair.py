@@ -115,6 +115,11 @@ PUBLISHER_REPAIR_SCAN_COLUMNS = (
     PublicationTask.updated_at,
     PublicationTask.completed_at,
 )
+PUBLISHER_REPAIR_CANDIDATE_COLUMNS = tuple(
+    column
+    for column in PUBLISHER_REPAIR_SCAN_COLUMNS
+    if column.key not in {"params", "result"}
+)
 PUBLISHER_PARENT_CLEANUP_SCAN_COLUMNS = (
     PublicationTask.id,
     PublicationTask.celery_task_id,
@@ -130,11 +135,24 @@ PUBLISHER_PARENT_CLEANUP_SCAN_COLUMNS = (
     PublicationTask.updated_at,
     PublicationTask.completed_at,
 )
+PUBLISHER_PARENT_CLEANUP_CANDIDATE_COLUMNS = tuple(
+    column
+    for column in PUBLISHER_PARENT_CLEANUP_SCAN_COLUMNS
+    if column.key != "params"
+)
 PARENT_STATUS_COLUMNS = (
     PublicationTask.id,
     PublicationTask.feature,
     PublicationTask.status,
 )
+
+
+def _load_repair_task(task_id, *columns):
+    return (
+        PublicationTask.query.options(load_only(*(columns or PUBLISHER_REPAIR_SCAN_COLUMNS)))
+        .filter(PublicationTask.id == str(task_id))
+        .one_or_none()
+    )
 
 
 def maybe_requeue_stale_publisher_child(
@@ -276,8 +294,7 @@ def repair_stale_publisher_pending_tasks_once(
 
     scan_limit = limit or _int_env("PUBLISHER_PENDING_QUEUE_REPAIR_SCAN_LIMIT", 50, 1)
     rows = (
-        PublicationTask.query
-        .options(load_only(*PUBLISHER_REPAIR_SCAN_COLUMNS))
+        db.session.query(*PUBLISHER_REPAIR_CANDIDATE_COLUMNS)
         .filter(PublicationTask.feature == "publisher")
         .filter(PublicationTask.status == "pending")
         .filter(PublicationTask.current_step.in_(tuple(PUBLISHER_PENDING_REPAIR_STEPS)))
@@ -291,8 +308,11 @@ def repair_stale_publisher_pending_tasks_once(
     for row in rows:
         previous_celery_id = row.celery_task_id
         previous_step = row.current_step
+        task = _load_repair_task(row.id, *PUBLISHER_REPAIR_SCAN_COLUMNS)
+        if not task:
+            continue
         try:
-            updated, did_requeue = maybe_requeue_stale_publisher_child(row, log=active_logger)
+            updated, did_requeue = maybe_requeue_stale_publisher_child(task, log=active_logger)
         except Exception as exc:
             db.session.rollback()
             active_logger.exception("Publisher pending queue repair failed: task=%s", getattr(row, "id", "-"))
@@ -341,8 +361,7 @@ def cleanup_publisher_children_of_terminal_parents_once(
 
     scan_limit = limit or _int_env("PUBLISHER_CHILD_PARENT_CLEANUP_SCAN_LIMIT", 50, 1)
     rows = (
-        PublicationTask.query
-        .options(load_only(*PUBLISHER_PARENT_CLEANUP_SCAN_COLUMNS))
+        db.session.query(*PUBLISHER_PARENT_CLEANUP_CANDIDATE_COLUMNS)
         .filter(PublicationTask.feature == "publisher")
         .filter(PublicationTask.status.in_(tuple(ACTIVE_TASK_STATUSES)))
         .filter(or_(PublicationTask.parent_task_id.isnot(None), PublicationTask.source_task_id.isnot(None)))
@@ -353,10 +372,8 @@ def cleanup_publisher_children_of_terminal_parents_once(
 
     items = []
     cleaned = 0
-    for child in rows:
-        if _publisher_child_is_post_completion_upload(child):
-            continue
-        parent_id = _publisher_child_parent_id(child)
+    for row in rows:
+        parent_id = _publisher_child_parent_id(row)
         if not parent_id:
             continue
         parent = (
@@ -372,6 +389,11 @@ def cleanup_publisher_children_of_terminal_parents_once(
             continue
         parent_status = str(parent.status or "").lower()
         if parent_status not in TERMINAL_PARENT_STATUSES:
+            continue
+        child = _load_repair_task(row.id, *PUBLISHER_PARENT_CLEANUP_SCAN_COLUMNS)
+        if not child:
+            continue
+        if parent_status == "completed" and _publisher_child_is_post_completion_upload(child):
             continue
 
         try:
@@ -561,8 +583,7 @@ def repair_stale_publisher_processing_tasks_once(
     )
     cutoff = datetime.utcnow() - timedelta(seconds=scan_grace_seconds)
     rows = (
-        PublicationTask.query
-        .options(load_only(*PUBLISHER_REPAIR_SCAN_COLUMNS))
+        db.session.query(*PUBLISHER_REPAIR_CANDIDATE_COLUMNS)
         .filter(PublicationTask.feature == "publisher")
         .filter(PublicationTask.status == "processing")
         .filter(or_(PublicationTask.updated_at == None, PublicationTask.updated_at <= cutoff))  # noqa: E711
@@ -578,8 +599,11 @@ def repair_stale_publisher_processing_tasks_once(
     for row in rows:
         previous_celery_id = row.celery_task_id
         previous_step = row.current_step
+        task = _load_repair_task(row.id, *PUBLISHER_REPAIR_SCAN_COLUMNS)
+        if not task:
+            continue
         try:
-            updated, did_repair, action = maybe_repair_stale_publisher_processing_task(row, log=active_logger)
+            updated, did_repair, action = maybe_repair_stale_publisher_processing_task(task, log=active_logger)
         except Exception as exc:
             db.session.rollback()
             active_logger.exception(
@@ -788,8 +812,7 @@ def repair_stale_publication_tasks_once(
         return {"enabled": True, "checked": 0, "requeued": 0, "items": [], "skipped": "all_features_paused"}
 
     rows = (
-        PublicationTask.query
-        .options(load_only(*PUBLISHER_REPAIR_SCAN_COLUMNS))
+        db.session.query(*PUBLISHER_REPAIR_CANDIDATE_COLUMNS)
         .filter(PublicationTask.feature.in_(tuple(features)))
         .filter(PublicationTask.status == "pending")
         .order_by(PublicationTask.updated_at.asc(), PublicationTask.created_at.asc())
@@ -800,8 +823,11 @@ def repair_stale_publication_tasks_once(
     requeued = 0
     for row in rows:
         previous_celery_id = row.celery_task_id
+        task = _load_repair_task(row.id, *PUBLISHER_REPAIR_SCAN_COLUMNS)
+        if not task:
+            continue
         try:
-            updated, did_requeue = maybe_requeue_stale_publication_task(row, log=active_logger)
+            updated, did_requeue = maybe_requeue_stale_publication_task(task, log=active_logger)
         except Exception as exc:
             db.session.rollback()
             active_logger.exception("Business task queue repair failed: task=%s", getattr(row, "id", "-"))
@@ -1003,8 +1029,7 @@ def repair_stale_business_processing_tasks_once(
     scan_limit = limit or _int_env("BUSINESS_PROCESSING_ORPHAN_SCAN_LIMIT", 50, 1)
     grace_seconds = _int_env("BUSINESS_PROCESSING_ORPHAN_GRACE_SECONDS", 600, 120)
     rows = (
-        PublicationTask.query
-        .options(load_only(*PUBLISHER_REPAIR_SCAN_COLUMNS))
+        db.session.query(*PUBLISHER_REPAIR_CANDIDATE_COLUMNS)
         .filter(PublicationTask.feature.in_(tuple(features)))
         .filter(PublicationTask.status == "processing")
         .order_by(PublicationTask.updated_at.asc(), PublicationTask.created_at.asc())
@@ -1020,8 +1045,11 @@ def repair_stale_business_processing_tasks_once(
             continue
         previous_celery_id = row.celery_task_id
         previous_step = row.current_step
+        task = _load_repair_task(row.id, *PUBLISHER_REPAIR_SCAN_COLUMNS)
+        if not task:
+            continue
         try:
-            updated, did_repair, action = maybe_repair_stale_business_processing_task(row, log=active_logger)
+            updated, did_repair, action = maybe_repair_stale_business_processing_task(task, log=active_logger)
         except Exception as exc:
             db.session.rollback()
             active_logger.exception("Business processing orphan repair failed: task=%s", getattr(row, "id", "-"))
@@ -1165,6 +1193,7 @@ def _publisher_child_is_post_completion_upload(child: PublicationTask) -> bool:
     source = str(metadata.get("source") or "").strip()
     if source in {
         "mp3_video_workflow:bilibili_upload",
+        "report_audio_workflow_vertical_backfill",
     }:
         return True
 

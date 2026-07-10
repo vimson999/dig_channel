@@ -12,8 +12,19 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(backend_dir))
 from celery_config import celery_app
 from models.task import PublicationTask
 from models import db
+from sqlalchemy.orm import load_only
 
 logger = logging.getLogger(__name__)
+PODCAST_TASK_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.completed_at,
+)
 
 
 @celery_app.task(bind=True)
@@ -34,7 +45,11 @@ def run_podcast_visualizer_task(self, task_id):
 
     app = create_app()
     with app.app_context():
-        task = PublicationTask.query.get(task_id)
+        task = (
+            PublicationTask.query.options(load_only(*PODCAST_TASK_COLUMNS))
+            .filter(PublicationTask.id == str(task_id))
+            .first()
+        )
         if not task:
             logger.error("Podcast visualizer task not found: %s", task_id)
             return

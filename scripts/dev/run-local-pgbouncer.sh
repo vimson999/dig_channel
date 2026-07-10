@@ -25,6 +25,13 @@ if [ -f "$PID_FILE" ]; then
   rm -f "$PID_FILE"
 fi
 
+listening_pid="$(lsof -ti "tcp:${LOCAL_PGBOUNCER_PORT:-6432}" -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
+if [ -n "$listening_pid" ] && ps -p "$listening_pid" -o command= 2>/dev/null | grep -q "pgbouncer"; then
+  echo "$listening_pid" > "$PID_FILE"
+  echo "✅ 本地 PgBouncer 已运行 PID: $listening_pid"
+  exit 0
+fi
+
 "$PGBOUNCER_BIN" -d "$CONFIG_FILE"
 sleep 0.8
 

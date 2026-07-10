@@ -569,15 +569,23 @@ def _db_publish_cookie_account_count(group_id=None):
     if not has_app_context():
         return 0
     try:
-        from models import db
         from models.platform_credential import PlatformCredentialAccount
+        from services.platform_credential_service import _credential_has_purpose
+        from sqlalchemy.orm import load_only
 
-        query = PlatformCredentialAccount.query.filter(
+        query = PlatformCredentialAccount.query.options(load_only(
+            PlatformCredentialAccount.id,
+            PlatformCredentialAccount.purposes,
+            PlatformCredentialAccount.extra,
+        )).filter(
             PlatformCredentialAccount.status == "active",
             PlatformCredentialAccount.platform == "zsxq",
-            db.cast(PlatformCredentialAccount.purposes, db.String).ilike('%"zsxq.publish"%'),
         )
-        accounts = query.all()
+        accounts = [
+            account
+            for account in query.all()
+            if _credential_has_purpose(account, "zsxq.publish")
+        ]
         target_group_id = str(group_id or "").strip()
         if not target_group_id:
             return len(accounts)

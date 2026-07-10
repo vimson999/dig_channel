@@ -40,6 +40,20 @@ TOPIC_PAGE_SIZE_HINT = 20
 ATTACHMENT_STATUS_CACHE_TTL_SECONDS = 20
 PUBLISH_STATUS_CONTEXT_CACHE_TTL_SECONDS = 60
 MAX_ATTACHMENT_STATUS_CACHE_ENTRIES = 128
+PUBLISH_TASK_CONTEXT_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.source_task_id,
+    PublicationTask.completed_at,
+    PublicationTask.updated_at,
+)
+CLEAN_TASK_CONTEXT_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.params,
+    PublicationTask.result,
+)
 REQUIRED_ATTACHMENT_COLUMNS = {
     "error_message",
     "publish_status",
@@ -1139,7 +1153,7 @@ class ZsxqSyncService:
 
     def mark_run_failed(self, run_id, error_message, result_update=None):
         self.ensure_schema()
-        run = ZsxqSyncRun.query.get(str(run_id))
+        run = ZsxqSyncRun.query.filter(ZsxqSyncRun.id == str(run_id)).first()
         if not run:
             return None
         result = dict(run.result) if isinstance(run.result, dict) else {}
@@ -1154,11 +1168,14 @@ class ZsxqSyncService:
 
     def submit_pdf_clean_for_run(self, run_id, cleaner=None, trigger="zsxq_sync", auto_publish=None, workflow_run_id=None):
         """Submit downloaded PDFs from one sync run to the content pipeline."""
-        run = ZsxqSyncRun.query.get(str(run_id))
+        run = ZsxqSyncRun.query.filter(ZsxqSyncRun.id == str(run_id)).first()
         if not run:
             raise ValueError(f"同步任务不存在: {run_id}")
 
-        cleanable = self.downloaded_pdf_files_for_run(run_id)
+        cleanable = {
+            "files": self._downloaded_pdf_files_from_run_result(run),
+            "source_root": self._run_source_root(run),
+        }
         files = [item["path"] for item in cleanable["files"]]
         if not files:
             result = {
@@ -1198,7 +1215,7 @@ class ZsxqSyncService:
         return result
 
     def set_run_pdf_clean_result(self, run_id, pdf_clean_result):
-        run = ZsxqSyncRun.query.get(str(run_id))
+        run = ZsxqSyncRun.query.filter(ZsxqSyncRun.id == str(run_id)).first()
         if not run:
             raise ValueError(f"同步任务不存在: {run_id}")
         self._merge_run_pipeline_result(run, pdf_clean_result)
@@ -1206,11 +1223,14 @@ class ZsxqSyncService:
 
     def submit_audio_clean_for_run(self, run_id, cleaner=None, trigger="zsxq_sync", auto_publish=None, workflow_run_id=None):
         """Submit newly downloaded audio files from one sync run."""
-        run = ZsxqSyncRun.query.get(str(run_id))
+        run = ZsxqSyncRun.query.filter(ZsxqSyncRun.id == str(run_id)).first()
         if not run:
             raise ValueError(f"同步任务不存在: {run_id}")
 
-        cleanable = self.downloaded_audio_files_for_run(run_id)
+        cleanable = {
+            "files": self._downloaded_audio_files_from_run_result(run),
+            "source_root": self._run_source_root(run),
+        }
         files = [item["path"] for item in cleanable["files"]]
         if not files:
             result = {
@@ -1250,14 +1270,14 @@ class ZsxqSyncService:
         return result
 
     def set_run_audio_clean_result(self, run_id, audio_clean_result):
-        run = ZsxqSyncRun.query.get(str(run_id))
+        run = ZsxqSyncRun.query.filter(ZsxqSyncRun.id == str(run_id)).first()
         if not run:
             raise ValueError(f"同步任务不存在: {run_id}")
         self._merge_run_content_pipeline_result(run, "audio_clean", audio_clean_result)
         return run.to_dict()
 
     def downloaded_pdf_files_for_run(self, run_id):
-        run = ZsxqSyncRun.query.get(str(run_id))
+        run = ZsxqSyncRun.query.filter(ZsxqSyncRun.id == str(run_id)).first()
         if not run:
             raise ValueError(f"同步任务不存在: {run_id}")
 
@@ -1267,7 +1287,7 @@ class ZsxqSyncService:
         }
 
     def downloaded_audio_files_for_run(self, run_id):
-        run = ZsxqSyncRun.query.get(str(run_id))
+        run = ZsxqSyncRun.query.filter(ZsxqSyncRun.id == str(run_id)).first()
         if not run:
             raise ValueError(f"同步任务不存在: {run_id}")
 
@@ -2602,8 +2622,12 @@ class ZsxqSyncService:
         else:
             image_topics = [topic for topic in topics if (topic.images_count or 0) > 0]
             if image_topics:
-                self._hydrate_topic_raw_payloads(image_topics)
-        attachments = self._attachments_by_topic(group_id, topics, include_raw_payload=include_raw_payload)
+                self._hydrate_topic_raw_payloads(image_topics, allow_db_fallback=False)
+        attachments = self._attachments_by_topic(
+            group_id,
+            topics,
+            include_raw_payload=True,
+        )
         external_links = self._external_links_for_cached_topics(group_id, topics)
         payloads = []
         for topic in topics:
@@ -2730,8 +2754,12 @@ class ZsxqSyncService:
             for item in self._topic_feed_images(raw_payload)
             if item
         ]
+        attachment_images = []
+        answer_attachment_images = []
+        unknown_attachment_images = []
         for attachment in attachments or []:
             item = dict(self._loaded_model_attr(attachment, "raw_payload", {}) or {})
+            image_context = str(item.pop("_zsxq_image_context", "") or "").strip()
             item.setdefault("name", attachment.name)
             if attachment.file_id:
                 item.setdefault("file_id", attachment.file_id)
@@ -2740,12 +2768,28 @@ class ZsxqSyncService:
             item.setdefault("attachment_key", attachment.attachment_key)
             if attachment.attachment_type == "image":
                 if self._image_payload_has_url(item):
-                    images.append(item)
+                    if image_context == "answer":
+                        answer_attachment_images.append(item)
+                    elif image_context:
+                        attachment_images.append(item)
+                    else:
+                        unknown_attachment_images.append(item)
             else:
                 files.append(item)
 
         if files:
             payload["files"] = files
+        if answer_attachment_images and payload.get("answer") is not None:
+            payload["answer"]["images"] = self._dedupe_topic_images(
+                (payload["answer"].get("images") or []) + answer_attachment_images
+            )
+        if unknown_attachment_images and not raw_payload and payload.get("answer") is not None:
+            payload["answer"]["images"] = self._dedupe_topic_images(
+                (payload["answer"].get("images") or []) + unknown_attachment_images
+            )
+        else:
+            images.extend(unknown_attachment_images)
+        images.extend(attachment_images)
         if images:
             payload["images"] = self._dedupe_topic_images(images)
         return payload
@@ -2816,9 +2860,23 @@ class ZsxqSyncService:
                 return True
         return False
 
-    def _hydrate_topic_raw_payloads(self, topics):
-        topic_ids = [topic.id for topic in topics or [] if topic and topic.id]
+    def _hydrate_topic_raw_payloads(self, topics, *, allow_db_fallback=True):
+        missing_topics = []
+        for topic in topics or []:
+            if not topic or not topic.id:
+                continue
+            payload = self._topic_raw_payload_from_path(getattr(topic, "raw_json_path", None))
+            if isinstance(payload, dict):
+                topic._cached_raw_payload = payload
+            else:
+                missing_topics.append(topic)
+
+        topic_ids = [topic.id for topic in missing_topics if topic.id]
         if not topic_ids:
+            return
+        if not allow_db_fallback:
+            for topic in missing_topics:
+                topic._cached_raw_payload = {}
             return
         rows = (
             db.session.query(ZsxqTopic.id, ZsxqTopic.raw_payload)
@@ -2830,8 +2888,26 @@ class ZsxqSyncService:
             for row in rows
             if isinstance(row.raw_payload, dict)
         }
-        for topic in topics:
+        for topic in missing_topics:
             topic._cached_raw_payload = raw_by_id.get(topic.id) or {}
+
+    def _topic_raw_payload_from_path(self, raw_json_path):
+        if not raw_json_path:
+            return None
+        try:
+            path = Path(str(raw_json_path)).expanduser()
+            if not path.is_absolute():
+                path = self._project_root() / path
+            resolved = path.resolve()
+            allowed_roots = [self._project_root().resolve(), self._data_root().resolve()]
+            if not any(resolved.is_relative_to(root) for root in allowed_roots):
+                return None
+            if not resolved.is_file() or resolved.stat().st_size <= 0:
+                return None
+            payload = json.loads(resolved.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else None
+        except Exception:
+            return None
 
     def _loaded_model_attr(self, record, name, default=None):
         try:
@@ -3158,7 +3234,11 @@ class ZsxqSyncService:
 
         publish_task = publish_task_or_id
         if not isinstance(publish_task_or_id, PublicationTask):
-            publish_task = PublicationTask.query.get(str(publish_task_or_id))
+            publish_task = (
+                PublicationTask.query.options(load_only(*PUBLISH_TASK_CONTEXT_COLUMNS))
+                .filter(PublicationTask.id == str(publish_task_or_id))
+                .first()
+            )
         if not publish_task:
             return {"updated": 0, "matched": 0, "reason": "publish_task_not_found"}
         if self._task_feature(publish_task) != "zsxq_clean_output_publish":
@@ -3168,7 +3248,11 @@ class ZsxqSyncService:
         if not source_task_id:
             return {"updated": 0, "matched": 0, "reason": "missing_source_task_id"}
 
-        clean_task = PublicationTask.query.get(source_task_id)
+        clean_task = (
+            PublicationTask.query.options(load_only(*CLEAN_TASK_CONTEXT_COLUMNS))
+            .filter(PublicationTask.id == source_task_id)
+            .first()
+        )
         if not clean_task:
             return {"updated": 0, "matched": 0, "reason": "source_task_not_found"}
 
@@ -4240,7 +4324,6 @@ class ZsxqSyncService:
                         ZsxqTopic.author_name,
                         ZsxqTopic.content,
                         ZsxqTopic.create_time,
-                        ZsxqTopic.raw_payload,
                         ZsxqTopic.last_sync_run_id,
                     )
                 ).first()
@@ -4454,6 +4537,33 @@ class ZsxqSyncService:
         if not stale_ids:
             return
 
+        now = datetime.utcnow()
+        if db.engine.url.get_backend_name() == "postgresql":
+            patch = json.dumps({
+                "interrupted": True,
+                "queued": False,
+                "running": False,
+            }, ensure_ascii=False)
+            db.session.execute(
+                text("""
+                    UPDATE public.zsxq_sync_runs
+                    SET
+                        status = 'failed',
+                        completed_at = :completed_at,
+                        error_message = :error_message,
+                        result = COALESCE(result::jsonb, '{}'::jsonb) || CAST(:patch AS jsonb)
+                    WHERE id = ANY(:ids)
+                """),
+                {
+                    "completed_at": now,
+                    "error_message": "同步请求中断：后端重启、连接断开或长时间无进度，已自动标记失败。",
+                    "patch": patch,
+                    "ids": stale_ids,
+                },
+            )
+            db.session.commit()
+            return
+
         stale_runs = (
             ZsxqSyncRun.query
             .options(load_only(
@@ -4466,7 +4576,6 @@ class ZsxqSyncService:
             .filter(ZsxqSyncRun.id.in_(stale_ids))
             .all()
         )
-        now = datetime.utcnow()
         for run in stale_runs:
             result = dict(run.result) if isinstance(run.result, dict) else {}
             result["interrupted"] = True
@@ -4509,15 +4618,14 @@ class ZsxqSyncService:
             "author_name": meta["author_name"],
             "content": meta["content"],
             "create_time": meta["create_time"],
-            "raw_payload": topic,
             "last_sync_run_id": run.id,
         }
         for key, value in updates.items():
             if getattr(record, key) != value:
                 setattr(record, key, value)
                 changed = True
-        if changed:
-            record.raw_json_path = self._write_topic_json(record.group_id, tab, record.topic_id, topic)
+        record.raw_payload = topic
+        record.raw_json_path = self._write_topic_json(record.group_id, tab, record.topic_id, topic)
         return changed
 
     def _upsert_attachments(self, group_id, tab, topic):
@@ -4525,7 +4633,7 @@ class ZsxqSyncService:
         attachments = []
         for file_item in self._topic_files(topic):
             attachments.append(("file", file_item))
-        for image_item in self._topic_images(topic):
+        for _context, image_item in self._topic_images_with_context(topic):
             attachments.append(("image", image_item))
 
         stats = {
@@ -5182,15 +5290,36 @@ class ZsxqSyncService:
 
     def _topic_images(self, topic):
         images = []
-        for item in (
-            topic.get("images"),
-            (topic.get("talk") or {}).get("images"),
-            (topic.get("article") or {}).get("images"),
-            (topic.get("question") or {}).get("images"),
-            (topic.get("answer") or {}).get("images"),
+        for _context, payload in self._topic_images_with_context(topic):
+            item = dict(payload)
+            item.pop("_zsxq_image_context", None)
+            images.append(item)
+        return images
+
+    def _topic_images_with_context(self, topic):
+        images = []
+        topic = topic if isinstance(topic, dict) else {}
+        talk = topic.get("talk") if isinstance(topic.get("talk"), dict) else {}
+        article = topic.get("article") if isinstance(topic.get("article"), dict) else {}
+        talk_article = talk.get("article") if isinstance(talk.get("article"), dict) else {}
+        question = topic.get("question") if isinstance(topic.get("question"), dict) else {}
+        answer = topic.get("answer") if isinstance(topic.get("answer"), dict) else {}
+        for context, item in (
+            ("topic", topic.get("images")),
+            ("talk", talk.get("images")),
+            ("article", article.get("images")),
+            ("talk_article", talk_article.get("images")),
+            ("question", question.get("images")),
+            ("answer", answer.get("images")),
         ):
             if isinstance(item, list):
-                images.extend(item)
+                for image in item:
+                    if isinstance(image, dict):
+                        payload = dict(image)
+                    else:
+                        payload = {"url": str(image)}
+                    payload.setdefault("_zsxq_image_context", context)
+                    images.append((context, payload))
         return images
 
     def _attachment_key(self, payload, index, attachment_type):

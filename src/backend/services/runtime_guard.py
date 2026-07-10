@@ -7,6 +7,7 @@ from datetime import datetime
 from celery.exceptions import Retry
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
 from models import db
@@ -59,6 +60,15 @@ _DB_PRESSURE_CACHE = {
     "expires_at": 0.0,
     "snapshot": None,
 }
+
+DEFERRED_TASK_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.completed_at,
+)
 
 
 class TaskAdmissionDenied(RuntimeError):
@@ -330,7 +340,11 @@ def _mark_publication_task_deferred(task_id, *, admission, queue, countdown):
     if not task_id:
         return False
     try:
-        task = PublicationTask.query.get(str(task_id))
+        task = (
+            PublicationTask.query.options(load_only(*DEFERRED_TASK_COLUMNS))
+            .filter(PublicationTask.id == str(task_id))
+            .first()
+        )
         if not task or task.status == "canceled":
             return False
         now = datetime.utcnow().isoformat() + "Z"

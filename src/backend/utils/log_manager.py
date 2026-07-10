@@ -6,6 +6,7 @@ import os
 import gzip
 import shutil
 import logging
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
@@ -13,6 +14,12 @@ from config.base import BaseConfig
 from .colored_logger import setup_colored_logger
 
 logger = setup_colored_logger(__name__)
+
+_application_logging_lock = threading.Lock()
+_application_logging_pid = None
+_maintenance_lock = threading.Lock()
+_maintenance_thread = None
+_maintenance_pid = None
 
 class LogManager:
     def __init__(self, log_dir=None):
@@ -280,60 +287,74 @@ def _get_flag(config, key: str) -> bool:
 
 def setup_application_logging(config=None):
     """设置应用程序日志"""
-    # 应用主日志
-    log_manager.setup_timed_rotating_logger(
-        'app', 'app.log', when='midnight', interval=1
-    )
-    
-    # 错误日志
-    log_manager.setup_rotating_logger(
-        'error', 'error.log', level=logging.ERROR
-    )
-    
-    # 慢查询日志
-    log_manager.setup_rotating_logger(
-        'slow_query', 'slow_query.log', level=logging.WARNING
-    )
-    
-    # 性能日志
-    log_manager.setup_timed_rotating_logger(
-        'performance', 'performance.log', when='midnight', interval=1
-    )
-    
-    # 安全日志
-    log_manager.setup_rotating_logger(
-        'security', 'security.log', level=logging.INFO
-    )
+    global _application_logging_pid
+    current_pid = os.getpid()
+    with _application_logging_lock:
+        if _application_logging_pid == current_pid:
+            return False
 
-    # Google API key轮询日志
-    log_manager.setup_rotating_logger(
-        'google_key_manager', 'google_key_manager.log', level=logging.INFO
-    )
-
-    # Bilibili 业务日志
-    log_manager.setup_rotating_logger(
-        'bilibili', 'bilibili.log', level=logging.INFO
-    )
-
-    # YouTube 业务日志
-    log_manager.setup_rotating_logger(
-        'youtube', 'youtube.log', level=logging.INFO
-    )
-
-    # 可选功能日志
-    if _get_flag(config, 'ENABLE_TTS_API'):
-        log_manager.setup_rotating_logger('TTS_API', 'tts.log')
-
-    if _get_flag(config, 'ENABLE_MHTML_API'):
-        log_manager.setup_rotating_logger('MHTML_PDF_API', 'mhtml_pdf.log')
-        log_manager.setup_rotating_logger('MHTML_CONVERTER', 'mhtml_converter.log')
+        # 应用主日志
+        log_manager.setup_timed_rotating_logger(
+            'app', 'app.log', when='midnight', interval=1
+        )
     
-    logger.info("📝 应用程序日志配置完成")
+        # 错误日志
+        log_manager.setup_rotating_logger(
+            'error', 'error.log', level=logging.ERROR
+        )
+    
+        # 慢查询日志
+        log_manager.setup_rotating_logger(
+            'slow_query', 'slow_query.log', level=logging.WARNING
+        )
+
+        # publication_tasks is the shared hot table. Keep its 500ms warnings,
+        # risky JSON query shapes, and failed SQL in a dedicated audit stream.
+        log_manager.setup_rotating_logger(
+            'publication_tasks_query', 'publication_tasks_query.log', level=logging.WARNING
+        )
+    
+        # 性能日志
+        log_manager.setup_timed_rotating_logger(
+            'performance', 'performance.log', when='midnight', interval=1
+        )
+    
+        # 安全日志
+        log_manager.setup_rotating_logger(
+            'security', 'security.log', level=logging.INFO
+        )
+
+        # Google API key轮询日志
+        log_manager.setup_rotating_logger(
+            'google_key_manager', 'google_key_manager.log', level=logging.INFO
+        )
+
+        # Bilibili 业务日志
+        log_manager.setup_rotating_logger(
+            'bilibili', 'bilibili.log', level=logging.INFO
+        )
+
+        # YouTube 业务日志
+        log_manager.setup_rotating_logger(
+            'youtube', 'youtube.log', level=logging.INFO
+        )
+
+        # 可选功能日志
+        if _get_flag(config, 'ENABLE_TTS_API'):
+            log_manager.setup_rotating_logger('TTS_API', 'tts.log')
+
+        if _get_flag(config, 'ENABLE_MHTML_API'):
+            log_manager.setup_rotating_logger('MHTML_PDF_API', 'mhtml_pdf.log')
+            log_manager.setup_rotating_logger('MHTML_CONVERTER', 'mhtml_converter.log')
+
+        _application_logging_pid = current_pid
+        logger.info("📝 应用程序日志配置完成")
+        return True
 
 def schedule_log_maintenance():
     """调度日志维护任务"""
-    import threading
     import time
+    global _maintenance_pid, _maintenance_thread
     
     def maintenance_worker():
         while True:
@@ -354,7 +375,22 @@ def schedule_log_maintenance():
                 logger.error(f"❌ 日志维护任务异常: {e}")
                 time.sleep(3600)  # 出错后等待1小时再试
     
-    # 启动维护线程
-    maintenance_thread = threading.Thread(target=maintenance_worker, daemon=True)
-    maintenance_thread.start()
-    logger.info("⏰ 日志维护任务已启动")
+    with _maintenance_lock:
+        current_pid = os.getpid()
+        if (
+            _maintenance_pid == current_pid
+            and _maintenance_thread is not None
+            and _maintenance_thread.is_alive()
+        ):
+            return False
+
+        maintenance_thread = threading.Thread(
+            target=maintenance_worker,
+            name="log-maintenance",
+            daemon=True,
+        )
+        maintenance_thread.start()
+        _maintenance_pid = current_pid
+        _maintenance_thread = maintenance_thread
+        logger.info("⏰ 日志维护任务已启动")
+        return True

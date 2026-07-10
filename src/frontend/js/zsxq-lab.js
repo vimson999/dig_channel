@@ -41,6 +41,7 @@ const state = {
     autoSyncTestRound: 0,
     autoSyncTestTimer: null,
     syncPollTimer: null,
+    syncPollInFlight: false,
     systemSyncSchedulerStatus: null,
     systemSyncSchedulerPollTimer: null,
     syncRuns: [],
@@ -1561,13 +1562,19 @@ function startSyncPolling() {
     stopSyncPolling();
     if (!state.selectedGroup) return;
     state.syncPollTimer = setInterval(async () => {
-        await loadSyncRuns(state.selectedGroup.group_id, { render: true });
-        const stillActive = state.syncRuns.some(run => ['queued', 'running'].includes(run.status));
-        if (!stillActive) {
-            stopSyncPolling();
-            state.attachmentStatusCache.clear();
-            await loadActiveTabPage({ reset: true });
-            refreshAttachmentStatusBadges();
+        if (state.syncPollInFlight) return;
+        state.syncPollInFlight = true;
+        try {
+            await loadSyncRuns(state.selectedGroup.group_id, { render: true });
+            const stillActive = state.syncRuns.some(run => ['queued', 'running'].includes(run.status));
+            if (!stillActive) {
+                stopSyncPolling();
+                state.attachmentStatusCache.clear();
+                await loadActiveTabPage({ reset: true });
+                refreshAttachmentStatusBadges();
+            }
+        } finally {
+            state.syncPollInFlight = false;
         }
     }, 5000);
 }
@@ -1844,6 +1851,16 @@ function stopSystemSyncSchedulerPolling() {
     }
 }
 
+function renderLabRuntimeItem(label, value, tone = 'muted', wide = false) {
+    const safeValue = String(value || '-');
+    return `
+        <div class="zsxq-lab-runtime-item${wide ? ' zsxq-lab-runtime-item--wide' : ''}" data-tone="${escapeHtml(tone)}">
+            <span class="zsxq-lab-runtime-label">${escapeHtml(label)}</span>
+            <strong class="zsxq-lab-runtime-value" title="${escapeHtml(safeValue)}">${escapeHtml(safeValue)}</strong>
+        </div>
+    `;
+}
+
 function renderSystemSyncSchedulerPanel() {
     if (!els.systemSyncSchedulerPanel) return;
     if (!isSelectedSystemSyncGroup()) {
@@ -1868,7 +1885,7 @@ function renderSystemSyncSchedulerPanel() {
             els.systemSyncSchedulerOpenLogsBtn.classList.add('hidden');
         }
         const detail = scheduler.message || '未检测到系统计划配置，请先点击“保存系统计划配置”。';
-        els.systemSchedulerContent.innerHTML = `<div>当前状态：${escapeHtml(detail)}</div>`;
+        els.systemSchedulerContent.innerHTML = `<div class="zsxq-lab-runtime-empty">${escapeHtml(detail)}</div>`;
         return;
     }
 
@@ -1887,14 +1904,18 @@ function renderSystemSyncSchedulerPanel() {
     els.systemSyncSchedulerPanel.classList.toggle('border-emerald-200', running);
     els.systemSyncSchedulerPanel.classList.toggle('border-slate-200', !running);
 
+    const scheduleText = `${interval} 分钟一次 · 每批 ${count} 条`;
+    const nextText = `${lastTrigger} / ${nextRun}`;
     els.systemSchedulerContent.innerHTML = `
-        <div class="space-y-1">
-            <div>进程状态：${escapeHtml(scheduler.running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
-            <div>调度配置：${escapeHtml(String(interval))} 分钟一次 · 每批 ${escapeHtml(String(count))} 条 · ${escapeHtml(downloadText)}</div>
-            <div>本轮状态：${escapeHtml(roundsText)} · ${escapeHtml(scheduler.message || '')}</div>
-            <div>上次触发：${escapeHtml(lastTrigger)} · 下一次：${escapeHtml(nextRun)}</div>
-            <div>日志：<span class="font-mono break-all">${escapeHtml(scheduler.log_path || '-')}</span></div>
+        <div class="zsxq-lab-runtime-grid">
+            ${renderLabRuntimeItem('进程', scheduler.running ? `已启动 · PID ${scheduler.pid || '-'}` : '未启动', scheduler.running ? 'success' : 'muted')}
+            ${renderLabRuntimeItem('节奏', scheduleText, 'info')}
+            ${renderLabRuntimeItem('下载规则', downloadText, 'info', true)}
+            ${renderLabRuntimeItem('轮次', roundsText, scheduler.continuous || running ? 'success' : 'muted', true)}
+            ${renderLabRuntimeItem('上次 / 下次', nextText, nextRun !== '尚未预测' ? 'success' : 'warning', true)}
         </div>
+        ${scheduler.message ? `<div class="zsxq-lab-runtime-empty">${escapeHtml(scheduler.message)}</div>` : ''}
+        <div class="zsxq-lab-runtime-path">日志：<span>${escapeHtml(scheduler.log_path || '-')}</span></div>
     `;
     if (els.systemSyncSchedulerOpenLogsBtn) {
         els.systemSyncSchedulerOpenLogsBtn.classList.remove('hidden');

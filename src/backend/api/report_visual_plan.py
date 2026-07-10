@@ -90,7 +90,18 @@ def create_preview(current_user):
         db.session.commit()
     except Exception as exc:
         db.session.rollback()
-        task = PublicationTask.query.get(task.id)
+        task = (
+            PublicationTask.query.options(load_only(
+                PublicationTask.id,
+                PublicationTask.status,
+                PublicationTask.current_step,
+                PublicationTask.progress,
+                PublicationTask.result,
+                PublicationTask.error_message,
+            ))
+            .filter(PublicationTask.id == task.id)
+            .first()
+        )
         if task:
             task.status = "failed"
             task.current_step = "failed"

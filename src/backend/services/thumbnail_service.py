@@ -505,6 +505,57 @@ class ThumbnailService:
         logger.info("Workbench podcast cover generated: %s", rendered)
         return rendered
 
+    def generate_workbench_bilibili_cover(
+        self,
+        main_title: str,
+        sub_title: str = "",
+        *,
+        screenshot_path: str = None,
+        output_filename: str = None,
+        institution: str = "深度研报",
+        emotion: str = "bull",
+        footer_text: str = "听见资本",
+        image_transform: Optional[Dict[str, Any]] = None,
+        show_footer: bool = False,
+    ) -> str:
+        """Generate the Bilibili cover with the WeChat Channels cover style."""
+        if not output_filename:
+            output_filename = f"workbench_bilibili_cover_{uuid.uuid4().hex[:8]}.jpg"
+        if not output_filename.lower().endswith((".jpg", ".jpeg")):
+            output_filename += ".jpg"
+        output_path = os.path.join(self.output_dir, output_filename)
+        transform = image_transform if isinstance(image_transform, dict) else {}
+
+        def _int_transform(name: str, default: int) -> int:
+            try:
+                return int(transform.get(name) or default)
+            except (TypeError, ValueError):
+                return default
+
+        rendered = frontend_thumbnail_renderer.render_workbench_thumbnail(
+            output_path=output_path,
+            format_name="bilibili_wx_cover",
+            main_title=main_title,
+            sub_title=sub_title,
+            footer_text=footer_text,
+            institution=institution or "深度研报",
+            emotion=emotion if emotion in {"pro", "macro", "bull", "bear"} else "bull",
+            image_path=screenshot_path,
+            image_offset_x=transform.get("x") or 0,
+            image_offset_y=transform.get("y") or 0,
+            image_scale=transform.get("scale") or 1,
+            image_anchor=transform.get("anchor") or transform.get("image_anchor") or "top-left",
+            title_max_lines=_int_transform("title_max_lines", 2),
+            title_min_size=_int_transform("title_min_size", 42),
+            subtitle_max_lines=_int_transform("subtitle_max_lines", 1),
+            subtitle_min_size=_int_transform("subtitle_min_size", 32),
+            show_guides=False,
+            show_footer=show_footer,
+            expected_size=(1146, 717),
+        )
+        logger.info("Workbench Bilibili cover generated: %s", rendered)
+        return rendered
+
     def generate_thumbnail(self, main_title: str, sub_title: str = "", date_text: str = "", tag_text: str = "",
                           bg_preset_index: int = 0, layout: str = 'left', output_filename: str = None,
                           custom_bg_path: str = None, overlay_opacity: float = 0.5, transform: dict = None,

@@ -334,6 +334,53 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(child.status, "pending")
         self.assertEqual(child.current_step, "queued")
 
+    def test_keeps_report_audio_vertical_backfill_when_parent_completed(self):
+        parent, child = self._parent_with_publisher_child(parent_status="completed")
+        child.params = {
+            **child.params,
+            "source_task_id": parent.id,
+            "vertical_video": {"enabled": True, "scheme": "scheme2"},
+            "metadata": {
+                "source": "report_audio_workflow_vertical_backfill",
+                "parent_task_id": parent.id,
+                "is_preview": False,
+            },
+        }
+        db.session.commit()
+
+        with patch.object(publisher_queue_repair, "_revoke_celery_task") as revoke:
+            result = publisher_queue_repair.cleanup_publisher_children_of_terminal_parents_once()
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["cleaned"], 0)
+        revoke.assert_not_called()
+        db.session.refresh(child)
+        self.assertEqual(child.status, "pending")
+        self.assertEqual(child.current_step, "queued")
+
+    def test_cleans_report_audio_vertical_backfill_when_parent_canceled(self):
+        parent, child = self._parent_with_publisher_child(parent_status="canceled")
+        child.params = {
+            **child.params,
+            "source_task_id": parent.id,
+            "vertical_video": {"enabled": True, "scheme": "scheme2"},
+            "metadata": {
+                "source": "report_audio_workflow_vertical_backfill",
+                "parent_task_id": parent.id,
+                "is_preview": False,
+            },
+        }
+        db.session.commit()
+
+        with patch.object(publisher_queue_repair, "_revoke_celery_task") as revoke:
+            result = publisher_queue_repair.cleanup_publisher_children_of_terminal_parents_once()
+
+        self.assertEqual(result["cleaned"], 1)
+        revoke.assert_called_once()
+        db.session.refresh(child)
+        self.assertEqual(child.status, "canceled")
+        self.assertIn("父编排任务已终止(canceled)", child.error_message)
+
     def test_cancel_bilibili_upload_child_marks_pending_task_canceled(self):
         _, child = self._parent_with_publisher_child(parent_status="completed")
         child.params = {

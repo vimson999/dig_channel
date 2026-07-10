@@ -19,8 +19,9 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
         super().end_headers()
 
-class ReusableTCPServer(socketserver.TCPServer):
+class ReusableThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
+    daemon_threads = True
 
 if __name__ == "__main__":
     # 切换到前端目录
@@ -28,10 +29,10 @@ if __name__ == "__main__":
     os.chdir(frontend_dir)
     
     # 启动服务器
-    with ReusableTCPServer(("", PORT), MyHTTPRequestHandler) as httpd:
+    with ReusableThreadingTCPServer(("", PORT), MyHTTPRequestHandler) as httpd:
         print(f"🌐 前端服务器启动在: http://localhost:{PORT}")
         print(f"📁 服务目录: {frontend_dir}")
-        print("🔗 可以打开浏览器访问 http://localhost:8080")
+        print(f"🔗 可以打开浏览器访问 http://localhost:{PORT}")
         print("按 Ctrl+C 停止服务器")
         try:
             httpd.serve_forever()

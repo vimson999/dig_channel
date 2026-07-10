@@ -284,7 +284,7 @@ def cancel_job(current_user, job_id):
 
 
 def _get_owned_task(current_user, job_id):
-    task = PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).get(job_id)
+    task = PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).filter(PublicationTask.id == str(job_id)).one_or_none()
     if not task or (task.feature or (task.params or {}).get("feature")) not in {FEATURE_NAME, LEGACY_FEATURE_NAME}:
         return None
     if str(task.user_id or (task.params or {}).get("user_id")) != str(getattr(current_user, "id", None)):

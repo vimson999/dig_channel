@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 import wave
 from datetime import datetime, timedelta
@@ -16,7 +17,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from models import db  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
-from tasks import report_audio_workflow  # noqa: E402
+from tasks import publisher, report_audio_workflow  # noqa: E402
 from tasks.report_audio_workflow import (  # noqa: E402
     CURRENT_STEP_MAX_LENGTH,
     _child_id_from_result,
@@ -176,6 +177,73 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertTrue(child.params["vertical_thumbnail"]["enabled"])
         self.assertTrue(child.params["vertical_cover"]["enabled"])
         self.assertTrue(child.params["podcast_cover"]["enabled"])
+        self.assertTrue(child.params["bilibili_cover"]["enabled"])
+        self.assertFalse(child.params["bilibili_cover"]["show_footer"])
+
+    def test_scheme2_publisher_generates_bilibili_cover_without_footer(self):
+        with patch.object(
+            publisher.thumbnail_service,
+            "generate_workbench_bilibili_cover",
+            return_value="/tmp/bilibili-cover.jpg",
+        ) as generate_cover:
+            path = publisher._generate_scheme2_bilibili_cover(
+                params={"enabled": True, "main_title": "方案二标题", "show_footer": False},
+                main_title="默认标题",
+                sub_title="副标题",
+                screenshot_path="/tmp/page.jpg",
+                base_name="job-1",
+                institution="J.P. Morgan",
+                emotion="bull",
+                footer_text="听见资本",
+                image_transform={"anchor": "top-left"},
+            )
+
+        self.assertEqual(path, "/tmp/bilibili-cover.jpg")
+        generate_cover.assert_called_once()
+        self.assertEqual(generate_cover.call_args.kwargs["output_filename"], "bcover2_job-1.jpg")
+        self.assertFalse(generate_cover.call_args.kwargs["show_footer"])
+
+    def test_keyframe_mode_also_generates_bilibili_cover_without_footer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            landscape_path = tmp / "landscape.jpg"
+            bilibili_path = tmp / "bilibili.jpg"
+            landscape_path.write_bytes(b"landscape")
+            bilibili_path.write_bytes(b"bilibili")
+
+            with patch.object(report_audio_workflow.thumbnail_service, "generate_thumbnail", return_value=str(landscape_path)), \
+                patch.object(
+                    report_audio_workflow.thumbnail_service,
+                    "generate_workbench_bilibili_cover",
+                    return_value=str(bilibili_path),
+                ) as generate_bilibili:
+                result = report_audio_workflow._generate_report_audio_keyframes(
+                    "parent-1",
+                    datetime(2026, 7, 9, 12, 0, 0),
+                    structured={
+                        "cover_title": "核心大牛\n集体出走",
+                        "cover_subtitle": "阿里AI被小摩看空?",
+                        "final_script_for_tts": "测试文案",
+                    },
+                    pdf={"filename": "source.pdf"},
+                    audio={"seconds": 60},
+                    pdf_screenshot={"path": "/tmp/source-page.jpg"},
+                    payload={
+                        "video": {
+                            "enabled": True,
+                            "vertical_enabled": False,
+                            "vertical_video_scheme": "scheme2",
+                        }
+                    },
+                )
+
+        generate_bilibili.assert_called_once()
+        self.assertFalse(generate_bilibili.call_args.kwargs["show_footer"])
+        self.assertEqual(generate_bilibili.call_args.kwargs["main_title"], "核心大牛\n集体出走")
+        self.assertEqual(result["bilibili_cover_path"], str(bilibili_path))
+        self.assertIn("bilibili_cover", result["keyframes"])
+        self.assertEqual(result["keyframes"]["bilibili_cover"]["label"], "B站封皮关键帧")
+        self.assertEqual(result["keyframes"]["bilibili_cover"]["ratio"], "1146:717")
 
     def test_publisher_result_summary_exposes_vertical_video(self):
         class FakePublisherTask:
@@ -189,6 +257,7 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
             result = {
                 "vertical_video_path": "/tmp/vertical.mp4",
                 "cover_path": "/tmp/cover.jpg",
+                "bilibili_cover_path": "/tmp/bilibili-cover.jpg",
             }
 
         summary = _publisher_result_summary(FakePublisherTask(), {"path": "/tmp/page.jpg"})
@@ -197,6 +266,7 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertTrue(summary["vertical_enabled"])
         self.assertEqual(summary["video_path"], "/tmp/vertical.mp4")
         self.assertEqual(summary["vertical_video_path"], "/tmp/vertical.mp4")
+        self.assertEqual(summary["bilibili_cover_path"], "/tmp/bilibili-cover.jpg")
 
     def test_script_subtitles_are_generated_from_tts_text(self):
         subtitles = _publisher_script_subtitles(
@@ -363,6 +433,106 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
                     retry_limit=0,
                 )
 
+    def test_gemini_wait_defer_uses_saved_id_after_task_detaches(self):
+        class DetachableTask:
+            def __init__(self):
+                self.detached = False
+                self._fields = {
+                    "id": "gemini-child-1",
+                    "celery_task_id": "celery-gemini-child-1",
+                    "status": "processing",
+                    "current_step": "upload_pdf",
+                    "progress": 20,
+                    "error_message": None,
+                    "result": {"logs": []},
+                    "params": {"feature": "report_pdf_gemini"},
+                    "feature": "report_pdf_gemini",
+                    "parent_task_id": "parent-1",
+                    "source_task_id": None,
+                    "created_at": datetime.utcnow(),
+                    "completed_at": None,
+                }
+
+            def __getattr__(self, name):
+                if name not in self._fields:
+                    raise AttributeError(name)
+                if self.detached:
+                    raise RuntimeError("detached task attribute refresh")
+                return self._fields[name]
+
+        child = DetachableTask()
+
+        def detach_and_defer(parent_id, child_id, label, **kwargs):
+            self.assertEqual(child_id, "gemini-child-1")
+            child.detached = True
+            raise report_audio_workflow.ChildTaskStillRunning(
+                label,
+                child_id,
+                "processing",
+                "upload_pdf",
+            )
+
+        with patch.object(report_audio_workflow, "_emit"), \
+            patch.object(report_audio_workflow, "_create_gemini_task", return_value=child), \
+            patch.object(report_audio_workflow, "_record_child"), \
+            patch.object(report_audio_workflow, "_record_child_attempt"), \
+            patch.object(report_audio_workflow, "_wait_child", side_effect=detach_and_defer), \
+            patch.object(report_audio_workflow, "_load_task", return_value=None):
+            with self.assertRaises(report_audio_workflow.ChildTaskStillRunning) as raised:
+                report_audio_workflow._run_gemini_task_with_retries(
+                    SimpleNamespace(id="parent-1"),
+                    pdf={"filename": "report.pdf"},
+                    pdf_path="/tmp/report.pdf",
+                    prompt="解析研报",
+                    followups=[],
+                    payload={},
+                    start_progress=10,
+                    end_progress=52,
+                )
+
+        self.assertEqual(raised.exception.child_id, "gemini-child-1")
+
+    def test_gemini_wait_transient_db_error_does_not_fail_or_revoke_child(self):
+        child = SimpleNamespace(
+            id="gemini-child-db-retry",
+            celery_task_id="celery-gemini-db-retry",
+            status="processing",
+            current_step="upload_pdf",
+            progress=20,
+            error_message=None,
+            result={"logs": []},
+            params={"feature": "report_pdf_gemini"},
+            feature="report_pdf_gemini",
+            parent_task_id="parent-1",
+            source_task_id=None,
+            created_at=datetime.utcnow(),
+            completed_at=None,
+        )
+        transient_error = RuntimeError("server closed the connection unexpectedly")
+
+        with patch.object(report_audio_workflow, "_emit"), \
+            patch.object(report_audio_workflow, "_create_gemini_task", return_value=child), \
+            patch.object(report_audio_workflow, "_record_child"), \
+            patch.object(report_audio_workflow, "_record_child_attempt"), \
+            patch.object(report_audio_workflow, "_wait_child", side_effect=transient_error), \
+            patch.object(report_audio_workflow, "_is_retryable_db_error", return_value=True), \
+            patch.object(report_audio_workflow, "_revoke_child_task") as revoke_child, \
+            patch.object(report_audio_workflow, "_mark_child_failed") as mark_child_failed:
+            with self.assertRaisesRegex(RuntimeError, "server closed the connection unexpectedly"):
+                report_audio_workflow._run_gemini_task_with_retries(
+                    SimpleNamespace(id="parent-1"),
+                    pdf={"filename": "report.pdf"},
+                    pdf_path="/tmp/report.pdf",
+                    prompt="解析研报",
+                    followups=[],
+                    payload={},
+                    start_progress=10,
+                    end_progress=52,
+                )
+
+        revoke_child.assert_not_called()
+        mark_child_failed.assert_not_called()
+
 
 class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
     def setUp(self):
@@ -380,6 +550,31 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         db.session.remove()
         db.drop_all()
         self.ctx.pop()
+
+    def test_completed_parent_ignores_duplicate_delayed_delivery(self):
+        completed = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "report_audio_workflow": {"pdf_path": "/tmp/already-done.pdf"},
+            },
+            result={"completed_at": datetime.utcnow().isoformat() + "Z"},
+            completed_at=datetime.utcnow(),
+        )
+        db.session.add(completed)
+        db.session.commit()
+
+        with patch.object(report_audio_workflow, "_queue_notification") as queue_notification:
+            ok = _process_job(completed.id)
+
+        self.assertTrue(ok)
+        queue_notification.assert_not_called()
+        db.session.refresh(completed)
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(completed.current_step, "done")
+        self.assertEqual(completed.progress, 100)
 
     def test_reusable_material_for_pdf_reads_script_material_workflow(self):
         structured = {
@@ -574,7 +769,16 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         db.session.add_all([parent, second, first])
         db.session.commit()
 
-        task_ids, wav_paths = _ordered_doubao_tts_outputs(parent.id, chunks, {2: second, 1: first})
+        db.session.refresh(first)
+        first_snapshot = report_audio_workflow._task_state_snapshot(first)
+        db.session.refresh(second)
+        second_snapshot = report_audio_workflow._task_state_snapshot(second)
+
+        task_ids, wav_paths = _ordered_doubao_tts_outputs(
+            parent.id,
+            chunks,
+            {2: second_snapshot, 1: first_snapshot},
+        )
 
         self.assertEqual(task_ids, [first.id, second.id])
         self.assertEqual(wav_paths, [str(first_wav), str(second_wav)])
@@ -665,8 +869,144 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
             patch.dict(os.environ, {"REPORT_AUDIO_PUBLISHER_INLINE_WAIT_SECONDS": "0"}, clear=False):
             child = _wait_child(parent_id, child_id, "publisher_video", start_progress=95, end_progress=99)
 
-        self.assertEqual(child.status, "completed")
+        self.assertEqual(report_audio_workflow._task_state_snapshot(child)["status"], "completed")
         clear_waiting.assert_called_once_with(parent_id, "publisher_video")
+
+    def test_wait_child_reloads_terminal_child_after_parent_summary_commit(self):
+        parent = PublicationTask(
+            status="processing",
+            current_step="gemini_waiting",
+            progress=50,
+            params={"feature": "report_pdf_audio_workflow"},
+            result={},
+        )
+        child = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "report_pdf_gemini",
+                "parent_task_id": None,
+            },
+            result={"final_response_text": "已完成的 Gemini 返回值" * 20},
+            completed_at=datetime.utcnow(),
+        )
+        db.session.add_all([parent, child])
+        db.session.flush()
+        child.parent_task_id = parent.id
+        child.params["parent_task_id"] = parent.id
+        db.session.commit()
+
+        with patch.object(report_audio_workflow, "_emit"), \
+            patch.dict(os.environ, {"REPORT_AUDIO_CHILD_TIMEOUT_SECONDS": "1"}, clear=False):
+            returned = _wait_child(parent.id, child.id, "gemini", start_progress=10, end_progress=52)
+
+        snapshot = report_audio_workflow._task_state_snapshot(returned)
+        self.assertEqual(snapshot["id"], child.id)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["current_step"], "done")
+        self.assertIn("Gemini", snapshot["result"]["final_response_text"])
+
+        db.session.expire_all()
+        refreshed_parent = PublicationTask.query.filter(PublicationTask.id == parent.id).one()
+        self.assertEqual(refreshed_parent.result["children"]["gemini"]["job_id"], child.id)
+        self.assertEqual(refreshed_parent.result["children"]["gemini"]["status"], "completed")
+
+    def test_wait_child_freezes_waiting_status_before_parent_summary_commit(self):
+        parent_id = "parent-waiting"
+        child_id = "child-waiting"
+        parent = SimpleNamespace(id=parent_id, status="processing")
+        child = SimpleNamespace(
+            id=child_id,
+            status="processing",
+            current_step="capture_audio",
+            progress=40,
+            celery_task_id="celery-child",
+            result={},
+            params={},
+            error_message=None,
+            feature="doubao_browser_tts",
+            parent_task_id=parent_id,
+            source_task_id=None,
+            created_at=datetime.utcnow(),
+            completed_at=None,
+        )
+        record_calls = {"count": 0}
+
+        def fake_load_task(task_id, *columns):
+            return parent if task_id == parent_id else child
+
+        def fake_record_child(parent_task_id, label, value):
+            record_calls["count"] += 1
+            if record_calls["count"] == 2 and not isinstance(value, dict):
+                value.status = None
+                value.current_step = None
+
+        with patch.object(report_audio_workflow, "_load_task", side_effect=fake_load_task), \
+            patch.object(report_audio_workflow, "_emit"), \
+            patch.object(report_audio_workflow, "_record_child", side_effect=fake_record_child), \
+            patch.object(report_audio_workflow, "_celery_child_failure_message", return_value=None), \
+            patch.object(report_audio_workflow.time, "monotonic", side_effect=[0.0, 2.0]), \
+            patch.dict(os.environ, {"REPORT_AUDIO_CHILD_TIMEOUT_SECONDS": "1"}, clear=False):
+            with self.assertRaises(report_audio_workflow.ChildTaskStillRunning) as raised:
+                _wait_child(parent_id, child_id, "gemini", start_progress=10, end_progress=52)
+
+        self.assertEqual(raised.exception.child_id, child_id)
+        self.assertEqual(raised.exception.status, "processing")
+        self.assertEqual(raised.exception.step, "capture_audio")
+
+    def test_gemini_retry_runner_returns_snapshot_not_session_bound_orm(self):
+        parent = SimpleNamespace(id="parent-1")
+        created = SimpleNamespace(
+            id="gemini-1",
+            status="pending",
+            current_step="queued",
+            progress=0,
+            celery_task_id="celery-1",
+            result={},
+            params={},
+            error_message=None,
+            feature="report_pdf_gemini",
+            parent_task_id="parent-1",
+            source_task_id=None,
+            created_at=datetime.utcnow(),
+            completed_at=None,
+        )
+        completed = SimpleNamespace(
+            id="gemini-1",
+            status="completed",
+            current_step="done",
+            progress=100,
+            celery_task_id="celery-1",
+            result={"final_response_text": "Gemini 完整返回" * 100},
+            params={},
+            error_message=None,
+            feature="report_pdf_gemini",
+            parent_task_id="parent-1",
+            source_task_id=None,
+            created_at=datetime.utcnow(),
+            completed_at=datetime.utcnow(),
+        )
+
+        with patch.object(report_audio_workflow, "_emit"), \
+            patch.object(report_audio_workflow, "_create_gemini_task", return_value=created), \
+            patch.object(report_audio_workflow, "_wait_child", return_value=completed), \
+            patch.object(report_audio_workflow, "_record_child"), \
+            patch.object(report_audio_workflow, "_record_child_attempt"):
+            returned = report_audio_workflow._run_gemini_task_with_retries(
+                parent,
+                pdf={"filename": "report.pdf"},
+                pdf_path="/tmp/report.pdf",
+                prompt="解析研报",
+                followups=[],
+                payload={},
+                start_progress=10,
+                end_progress=52,
+            )
+
+        self.assertIsInstance(returned, dict)
+        self.assertEqual(returned["job_id"], "gemini-1")
+        self.assertEqual(returned["status"], "completed")
 
     def test_pdf_video_workflow_reuses_script_material_and_cached_audio_before_video(self):
         root = Path(self.app.instance_path)
@@ -675,7 +1015,7 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         pdf_path = root / "source.pdf"
         pdf_path.write_bytes(b"%PDF-1.4\n% test pdf\n")
         script = "".join(
-            f"第{index}部分：这是一段可以复用的基础文案，用来模拟已经由 Gemini Gem 清洗后的口播稿，"
+            f"观点{index}，这是一段可以复用的基础文案，用来模拟已经由 Gemini Gem 清洗后的口播稿，"
             f"并且保留唯一编号 {index}，避免不同分段文本完全相同。"
             for index in range(1, 13)
         )

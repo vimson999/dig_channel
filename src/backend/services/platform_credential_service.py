@@ -59,6 +59,25 @@ RUNTIME_CREDENTIAL_COLUMNS = (
     PlatformCredentialAccount.extra,
     PlatformCredentialAccount.updated_at,
 )
+LIST_CREDENTIAL_COLUMNS = (
+    PlatformCredentialAccount.id,
+    PlatformCredentialAccount.platform,
+    PlatformCredentialAccount.name,
+    PlatformCredentialAccount.credential_type,
+    PlatformCredentialAccount.purposes,
+    PlatformCredentialAccount.status,
+    PlatformCredentialAccount.priority,
+    PlatformCredentialAccount.owner_label,
+    PlatformCredentialAccount.payload_fingerprint,
+    PlatformCredentialAccount.masked_summary,
+    PlatformCredentialAccount.notes,
+    PlatformCredentialAccount.last_validated_at,
+    PlatformCredentialAccount.last_used_at,
+    PlatformCredentialAccount.last_error,
+    PlatformCredentialAccount.extra,
+    PlatformCredentialAccount.created_at,
+    PlatformCredentialAccount.updated_at,
+)
 
 
 class CredentialError(ValueError):
@@ -96,6 +115,26 @@ def decrypt_payload(encrypted_payload: str) -> str:
 
 def _runtime_credential_query():
     return PlatformCredentialAccount.query.options(load_only(*RUNTIME_CREDENTIAL_COLUMNS))
+
+
+def _credential_has_purpose(account: PlatformCredentialAccount, purpose: Optional[str]) -> bool:
+    purpose = str(purpose or "").strip()
+    if not purpose:
+        return True
+    purposes = getattr(account, "purposes", None) or []
+    if isinstance(purposes, str):
+        parsed = _safe_json_loads(purposes)
+        purposes = parsed if isinstance(parsed, list) else [purposes]
+    if not isinstance(purposes, list):
+        return False
+    return purpose in {str(item).strip() for item in purposes}
+
+
+def _filter_accounts_by_purpose(
+    accounts: Iterable[PlatformCredentialAccount],
+    purpose: Optional[str],
+) -> List[PlatformCredentialAccount]:
+    return [account for account in accounts if _credential_has_purpose(account, purpose)]
 
 
 def _mark_credential_used_if_due(account: PlatformCredentialAccount, now: Optional[datetime] = None) -> bool:
@@ -272,7 +311,7 @@ def _normalize_status(raw: str, default: str = "active") -> str:
 def list_credentials(filters: Dict[str, Any]) -> Tuple[List[PlatformCredentialAccount], int]:
     page = max(int(filters.get("page") or 1), 1)
     per_page = min(max(int(filters.get("per_page") or 20), 1), 100)
-    query = PlatformCredentialAccount.query
+    query = PlatformCredentialAccount.query.options(load_only(*LIST_CREDENTIAL_COLUMNS))
 
     platform = (filters.get("platform") or "").strip().lower()
     if platform:
@@ -285,8 +324,6 @@ def list_credentials(filters: Dict[str, Any]) -> Tuple[List[PlatformCredentialAc
         query = query.filter(PlatformCredentialAccount.status != "deleted")
 
     purpose = (filters.get("purpose") or "").strip()
-    if purpose:
-        query = query.filter(db.cast(PlatformCredentialAccount.purposes, db.String).ilike(f'%"{purpose}"%'))
 
     keyword = (filters.get("q") or "").strip()
     if keyword:
@@ -300,17 +337,19 @@ def list_credentials(filters: Dict[str, Any]) -> Tuple[List[PlatformCredentialAc
             )
         )
 
-    total = query.count()
-    items = (
-        query.order_by(
-            PlatformCredentialAccount.platform.asc(),
-            PlatformCredentialAccount.priority.asc(),
-            PlatformCredentialAccount.updated_at.desc(),
-        )
-        .offset((page - 1) * per_page)
-        .limit(per_page)
-        .all()
+    ordered_query = query.order_by(
+        PlatformCredentialAccount.platform.asc(),
+        PlatformCredentialAccount.priority.asc(),
+        PlatformCredentialAccount.updated_at.desc(),
     )
+    if purpose:
+        matched = _filter_accounts_by_purpose(ordered_query.all(), purpose)
+        total = len(matched)
+        start = (page - 1) * per_page
+        return matched[start:start + per_page], total
+
+    total = ordered_query.count()
+    items = ordered_query.offset((page - 1) * per_page).limit(per_page).all()
     return items, total
 
 
@@ -435,12 +474,15 @@ def resolve_credential_payload(
 
 
 def has_active_credential(*, platform: str, purpose: Optional[str] = None) -> bool:
-    query = PlatformCredentialAccount.query.filter(
+    query = PlatformCredentialAccount.query.options(load_only(
+        PlatformCredentialAccount.id,
+        PlatformCredentialAccount.purposes,
+    )).filter(
         PlatformCredentialAccount.status == "active",
         PlatformCredentialAccount.platform == platform,
     )
     if purpose:
-        query = query.filter(db.cast(PlatformCredentialAccount.purposes, db.String).ilike(f'%"{purpose}"%'))
+        return any(_credential_has_purpose(account, purpose) for account in query.all())
     return db.session.query(query.exists()).scalar()
 
 
@@ -455,12 +497,15 @@ def resolve_credential_record(
         query = query.filter(PlatformCredentialAccount.id == account_id)
     if platform:
         query = query.filter(PlatformCredentialAccount.platform == platform)
-    if purpose:
-        query = query.filter(db.cast(PlatformCredentialAccount.purposes, db.String).ilike(f'%"{purpose}"%'))
-    account = query.order_by(
+    ordered_query = query.order_by(
         PlatformCredentialAccount.priority.asc(),
         PlatformCredentialAccount.updated_at.desc(),
-    ).first()
+    )
+    if purpose:
+        accounts = _filter_accounts_by_purpose(ordered_query.all(), purpose)
+        account = accounts[0] if accounts else None
+    else:
+        account = ordered_query.first()
     if not account:
         raise CredentialError("没有可用的平台凭据")
     if _mark_credential_used_if_due(account):
@@ -480,12 +525,12 @@ def resolve_credential_records(
     )
     if account_id:
         query = query.filter(PlatformCredentialAccount.id == account_id)
-    if purpose:
-        query = query.filter(db.cast(PlatformCredentialAccount.purposes, db.String).ilike(f'%"{purpose}"%'))
     accounts = query.order_by(
         PlatformCredentialAccount.priority.asc(),
         PlatformCredentialAccount.updated_at.desc(),
     ).all()
+    if purpose:
+        accounts = _filter_accounts_by_purpose(accounts, purpose)
     if not accounts:
         raise CredentialError("没有可用的平台凭据")
     now = datetime.utcnow()
@@ -595,12 +640,12 @@ def resolve_zsxq_cookie_accounts(
     )
     if account_id:
         query = query.filter(PlatformCredentialAccount.id == account_id)
-    if purpose:
-        query = query.filter(db.cast(PlatformCredentialAccount.purposes, db.String).ilike(f'%"{purpose}"%'))
     accounts = query.order_by(
         PlatformCredentialAccount.priority.asc(),
         PlatformCredentialAccount.updated_at.desc(),
     ).all()
+    if purpose:
+        accounts = _filter_accounts_by_purpose(accounts, purpose)
     now = datetime.utcnow()
     touched = False
     for account in accounts:

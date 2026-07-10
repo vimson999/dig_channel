@@ -77,6 +77,7 @@ for index in $(seq 1 "$COUNT"); do
         PYTHONPATH="$PROJECT_ROOT/src/backend" \
         OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES \
         DATABASE_TYPE="${DATABASE_TYPE:-postgresql}" \
+        DB_PROCESS_ROLE="${DB_PROCESS_ROLE:-worker}" \
         DOUBAO_BROWSER_TTS_WORKER_ID="$slot" \
         DOUBAO_BROWSER_TTS_USER_DATA_DIR="$profile_dir" \
         DOUBAO_BROWSER_TTS_PROFILE_POOL_ROOT="$PROFILE_POOL_ROOT" \

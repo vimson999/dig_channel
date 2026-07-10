@@ -58,7 +58,7 @@ TASK_PAYLOAD_COLUMNS = (
 
 def _load_task(task_id, *columns):
     attrs = columns or TASK_PAYLOAD_COLUMNS
-    return PublicationTask.query.options(load_only(*attrs)).get(task_id)
+    return PublicationTask.query.options(load_only(*attrs)).filter(PublicationTask.id == str(task_id)).one_or_none()
 
 
 def _create_content_pipeline_app():

@@ -2,14 +2,37 @@
 数据库操作日志记录中间件
 记录所有数据库操作的详细信息，包括查询、执行时间、影响行数等
 """
-import time
+import hashlib
 import logging
+import os
+import re
+import sys
+import threading
+import time
+import traceback
+from datetime import datetime, timezone
+from pathlib import Path
 from flask import g
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from utils.colored_logger import setup_colored_logger, log_database_operation
 
 logger = setup_colored_logger(__name__)
+_listener_lock = threading.Lock()
+_backend_root = Path(__file__).resolve().parents[1]
+_process_started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+_publication_task_table_pattern = re.compile(
+    r'\b(?:from|update|into|delete\s+from)\s+(?:"?public"?\.)?"?publication_tasks"?\b',
+    re.IGNORECASE,
+)
+_sql_parameter_pattern = re.compile(r"%\([^)]+\)s|:\w+|\$\d+")
+_sql_literal_pattern = re.compile(r"'(?:''|[^'])*'|\b\d+(?:\.\d+)?\b")
+_query_origin_helper_names = {
+    "_load_task",
+    "_load_repair_task",
+    "_load_publication_task",
+    "_load_task_with_retries",
+}
 
 class DatabaseLoggerMiddleware:
     def __init__(self, app=None):
@@ -19,9 +42,13 @@ class DatabaseLoggerMiddleware:
     
     def init_app(self, app):
         """初始化数据库日志记录"""
-        # 监听SQLAlchemy事件
-        event.listen(Engine, "before_cursor_execute", self._before_cursor_execute)
-        event.listen(Engine, "after_cursor_execute", self._after_cursor_execute)
+        with _listener_lock:
+            if not event.contains(Engine, "before_cursor_execute", self._before_cursor_execute):
+                event.listen(Engine, "before_cursor_execute", self._before_cursor_execute)
+            if not event.contains(Engine, "after_cursor_execute", self._after_cursor_execute):
+                event.listen(Engine, "after_cursor_execute", self._after_cursor_execute)
+            if not event.contains(Engine, "handle_error", self._handle_error):
+                event.listen(Engine, "handle_error", self._handle_error)
         
         # 配置SQLAlchemy日志
         self._configure_sqlalchemy_logging(app)
@@ -87,8 +114,44 @@ class DatabaseLoggerMiddleware:
         # 记录慢查询
         if duration_ms > 1000:
             self._log_slow_query(statement, parameters, duration_ms, request_id)
+
+        diagnostic = self._publication_task_diagnostic(statement, duration_ms=duration_ms)
+        if diagnostic:
+            self._log_publication_task_query(
+                statement,
+                duration_ms=duration_ms,
+                request_id=request_id,
+                diagnostic=diagnostic,
+            )
+
+    def _handle_error(self, exception_context):
+        """Capture failed hot-table statements; after_cursor_execute is not called on failure."""
+        try:
+            connection = getattr(exception_context, "connection", None)
+            query_start_times = connection.info.setdefault('query_start_time', []) if connection is not None else []
+            started_at = query_start_times.pop(-1) if query_start_times else time.time()
+            duration_ms = round((time.time() - started_at) * 1000, 2)
+            statement = getattr(exception_context, "statement", None) or ""
+            error = getattr(exception_context, "original_exception", None)
+            diagnostic = self._publication_task_diagnostic(
+                statement,
+                duration_ms=duration_ms,
+                error=error,
+            )
+            if diagnostic:
+                self._log_publication_task_query(
+                    statement,
+                    duration_ms=duration_ms,
+                    request_id=self._request_id(),
+                    diagnostic=diagnostic,
+                    error=error,
+                )
+        except Exception:
+            # Diagnostics must never replace the original database exception.
+            logger.exception("Failed to record publication_tasks SQL error diagnostics")
     
-    def _get_query_type(self, statement):
+    @staticmethod
+    def _get_query_type(statement):
         """获取查询类型"""
         statement_upper = statement.strip().upper()
         if statement_upper.startswith('SELECT'):
@@ -159,7 +222,144 @@ class DatabaseLoggerMiddleware:
         
         # 记录到专门的慢查询日志
         slow_query_logger = setup_colored_logger('slow_query')
-        slow_query_logger.warning(f"慢查询 [{request_id}] {duration_ms}ms: {statement}")
+        slow_query_logger.warning(
+            "慢查询 [%s] %sms [pid=%s role=%s process=%s origin=%s]: %s",
+            request_id,
+            duration_ms,
+            os.getpid(),
+            os.environ.get("DB_PROCESS_ROLE") or "unknown",
+            Path(sys.argv[0] or "python").name,
+            self._query_origin(),
+            statement,
+        )
+
+    @classmethod
+    def _publication_task_diagnostic(cls, statement, *, duration_ms, error=None):
+        """Classify risky or slow publication_tasks SQL without inspecting parameter values."""
+        sql = str(statement or "")
+        if not _publication_task_table_pattern.search(sql):
+            return None
+
+        compact = " ".join(sql.split())
+        lowered = compact.lower()
+        query_type = cls._get_query_type(compact)
+        projection = ""
+        predicate = ""
+        if query_type == "SELECT" and " from " in lowered:
+            from_index = lowered.index(" from ")
+            projection = lowered[:from_index]
+            predicate = lowered[from_index:]
+
+        payload_columns = [
+            column
+            for column in ("params", "result")
+            if re.search(rf'\bpublication_tasks[."]+{column}\b', projection)
+        ]
+        json_predicate = bool(
+            query_type == "SELECT"
+            and re.search(
+                r'(?:publication_tasks[."]+)?(?:params|result)\b\s*(?:->|#>)'
+                r'|jsonb?_extract_path(?:_text)?\s*\([^)]*(?:params|result)',
+                predicate,
+            )
+        )
+        point_lookup = bool(
+            re.search(r'\bpublication_tasks[."]+id\b\s*=\s*(?:%\(|:\w+|\$\d+)', predicate)
+        )
+        multirow_payload = bool(payload_columns and not point_lookup)
+        slow_threshold_ms = cls._publication_task_slow_ms()
+
+        categories = []
+        if error is not None:
+            categories.append("error")
+        if json_predicate:
+            categories.append("json_predicate")
+        if multirow_payload:
+            categories.append("multirow_payload")
+        if payload_columns and duration_ms >= slow_threshold_ms:
+            categories.append("slow_payload")
+        if duration_ms >= slow_threshold_ms:
+            categories.append("slow")
+        if not categories:
+            return None
+
+        return {
+            "categories": tuple(categories),
+            "fingerprint": cls._sql_fingerprint(compact),
+            "operation": query_type,
+            "payload_columns": tuple(payload_columns),
+            "point_lookup": point_lookup,
+        }
+
+    @staticmethod
+    def _publication_task_slow_ms():
+        try:
+            return max(50.0, float(os.environ.get("PUBLICATION_TASK_SLOW_MS", "500")))
+        except (TypeError, ValueError):
+            return 500.0
+
+    @staticmethod
+    def _sql_fingerprint(statement):
+        normalized = _sql_parameter_pattern.sub("?", statement.lower())
+        normalized = _sql_literal_pattern.sub("?", normalized)
+        normalized = " ".join(normalized.split())
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+    def _log_publication_task_query(
+        self,
+        statement,
+        *,
+        duration_ms,
+        request_id,
+        diagnostic,
+        error=None,
+    ):
+        hot_table_logger = setup_colored_logger("publication_tasks_query")
+        error_name = type(error).__name__ if error is not None else "none"
+        error_text = str(error or "").replace("\n", " ")[:500]
+        hot_table_logger.warning(
+            "publication_tasks SQL categories=%s fingerprint=%s duration_ms=%s "
+            "operation=%s payload=%s point_lookup=%s request_id=%s pid=%s "
+            "role=%s process=%s process_started_at=%s origin=%s error_type=%s error=%s sql=%s",
+            ",".join(diagnostic["categories"]),
+            diagnostic["fingerprint"],
+            duration_ms,
+            diagnostic["operation"],
+            ",".join(diagnostic["payload_columns"]) or "none",
+            diagnostic["point_lookup"],
+            request_id,
+            os.getpid(),
+            os.environ.get("DB_PROCESS_ROLE") or "unknown",
+            Path(sys.argv[0] or "python").name,
+            _process_started_at,
+            self._query_origin(),
+            error_name,
+            error_text or "none",
+            statement,
+        )
+
+    @staticmethod
+    def _request_id():
+        try:
+            return getattr(g, "request_id", "unknown")
+        except RuntimeError:
+            return "unknown"
+
+    @staticmethod
+    def _query_origin():
+        for frame in reversed(traceback.extract_stack(limit=50)):
+            if str(frame.filename).startswith("<"):
+                continue
+            try:
+                relative = Path(frame.filename).resolve().relative_to(_backend_root)
+            except (OSError, ValueError):
+                continue
+            if relative.as_posix() == "middleware/database_logger.py":
+                continue
+            if frame.name in _query_origin_helper_names:
+                continue
+            return f"{relative.as_posix()}:{frame.lineno}:{frame.name}"
+        return "unknown"
 
 def log_model_operation(operation_type, model_name, record_id=None, changes=None):
     """记录模型操作"""

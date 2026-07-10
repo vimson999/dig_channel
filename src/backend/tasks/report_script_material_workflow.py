@@ -39,7 +39,9 @@ DEFAULT_GEMINI_RETRY_LIMIT = 2
 DEFAULT_CHILD_TIMEOUT_SECONDS = 1800
 DEFAULT_PARENT_RETRY_DELAY_SECONDS = 300
 DEFAULT_PARENT_MAX_DEFERS = 144
-DEFAULT_NORMALIZER_TIMEOUT_SECONDS = 20
+DEFAULT_NORMALIZER_TIMEOUT_SECONDS = 90
+DEFAULT_NORMALIZER_RETRY_LIMIT = 2
+DEFAULT_NORMALIZER_RETRY_DELAY_SECONDS = 15
 MATERIAL_REUSE_FEATURES = (
     FEATURE_NAME,
     "report_pdf_audio_workflow",
@@ -272,7 +274,6 @@ def _process_job(task_id: str) -> bool:
                     raise RuntimeError(
                         f"Gemini 子任务返回内容过短: {final_chars} 字，低于 {min_final_chars} 字"
                     )
-                _emit(workflow_task_id, "normalize_result", 58, "使用结构化解析器整理 Gemini 结果")
                 normalizer_timeout = _normalizer_timeout_seconds()
                 logger.info(
                     "Normalizing report script material: task=%s gemini_task=%s timeout=%ss",
@@ -280,7 +281,8 @@ def _process_job(task_id: str) -> bool:
                     gemini_task.id,
                     normalizer_timeout,
                 )
-                structured = normalize_for_tts(
+                structured = _normalize_for_tts_with_retries(
+                    workflow_task_id,
                     raw_final,
                     initial_text=initial_text,
                     metadata={
@@ -463,8 +465,9 @@ def _reusable_material_for_pdf(pdf: Dict[str, Any], *, exclude_task_id: Optional
     if exclude_task_id:
         query = query.filter(PublicationTask.id != exclude_task_id)
     candidates = query.order_by(PublicationTask.completed_at.desc(), PublicationTask.created_at.desc()).limit(20).all()
+    details = _load_task_results(candidate.id for candidate in candidates)
     for candidate in candidates:
-        detail = _load_task(candidate.id, PublicationTask.result)
+        detail = details.get(candidate.id)
         structured = _valid_structured_result(detail.result if detail else None)
         if structured:
             return {
@@ -489,19 +492,16 @@ def _completed_gemini_task(parent_id: str, result: Dict[str, Any]) -> Optional[P
         task = _load_task(candidate_id, *TASK_CHILD_COLUMNS)
         if task and task.status == "completed" and _valid_gemini_task_result(task.result):
             return task
-    candidates = (
-        PublicationTask.query.options(load_only(*TASK_CHILD_COLUMNS))
+    candidate = (
+        db.session.query(PublicationTask.id)
         .filter(PublicationTask.feature == gemini_service.FEATURE_NAME)
         .filter(PublicationTask.parent_task_id == parent_id)
         .filter(PublicationTask.status == "completed")
+        .filter(PublicationTask.gemini_response_chars >= _min_gemini_final_chars())
         .order_by(PublicationTask.created_at.desc())
-        .limit(10)
-        .all()
+        .first()
     )
-    for task in candidates:
-        if _valid_gemini_task_result(task.result):
-            return task
-    return None
+    return _load_task(candidate.id, *TASK_CHILD_COLUMNS) if candidate else None
 
 
 def _active_gemini_task(parent_id: str, result: Dict[str, Any]) -> Optional[PublicationTask]:
@@ -514,16 +514,14 @@ def _active_gemini_task(parent_id: str, result: Dict[str, Any]) -> Optional[Publ
         task = _load_task(candidate_id, *TASK_CHILD_COLUMNS)
         if task and task.status not in TERMINAL_STATUSES and task.feature == gemini_service.FEATURE_NAME:
             return task
-    candidates = (
-        PublicationTask.query.options(load_only(*TASK_CHILD_COLUMNS))
+    return (
+        PublicationTask.query.options(load_only(*TASK_CHILD_POLL_COLUMNS))
         .filter(PublicationTask.feature == gemini_service.FEATURE_NAME)
         .filter(PublicationTask.parent_task_id == parent_id)
         .filter(PublicationTask.status.notin_(list(TERMINAL_STATUSES)))
         .order_by(PublicationTask.created_at.desc())
-        .limit(10)
-        .all()
+        .first()
     )
-    return candidates[0] if candidates else None
 
 
 def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: int, end_progress: int):
@@ -755,6 +753,87 @@ def _update_result(parent_id: str, values: Dict[str, Any]) -> None:
     db.session.commit()
 
 
+def _normalize_for_tts_with_retries(
+    parent_id: str,
+    raw_text: str,
+    *,
+    initial_text: str,
+    metadata: Dict[str, Any],
+    normalizer_timeout: int,
+) -> Dict[str, Any]:
+    max_attempts = _normalizer_retry_limit() + 1
+    retry_delay = _normalizer_retry_delay_seconds()
+    last_error = ""
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            _emit(
+                parent_id,
+                "normalize_retry",
+                58,
+                f"结构化器第 {attempt}/{max_attempts} 次重试，等待 {retry_delay}s 后继续",
+            )
+            time.sleep(retry_delay)
+        else:
+            _emit(parent_id, "normalize_result", 58, "使用结构化解析器整理 Gemini 结果")
+
+        _record_normalizer_attempt(parent_id, attempt, max_attempts, "running")
+        release_db_session_quietly()
+        try:
+            structured = normalize_for_tts(
+                raw_text,
+                initial_text=initial_text,
+                metadata=metadata,
+                normalizer_timeout=normalizer_timeout,
+            )
+        except Exception as exc:
+            last_error = str(exc)
+            _record_normalizer_attempt(parent_id, attempt, max_attempts, "failed", error=last_error)
+            if attempt < max_attempts and _is_retryable_normalizer_error(last_error):
+                logger.warning(
+                    "Report script material normalizer retrying: task=%s attempt=%s/%s error=%s",
+                    parent_id,
+                    attempt,
+                    max_attempts,
+                    last_error,
+                )
+                continue
+            raise
+
+        _record_normalizer_attempt(parent_id, attempt, max_attempts, "completed")
+        return structured
+
+    raise RuntimeError(f"结构化器不可用或返回不可用结果：{last_error}")
+
+
+def _record_normalizer_attempt(
+    parent_id: str,
+    attempt: int,
+    max_attempts: int,
+    status: str,
+    *,
+    error: Optional[str] = None,
+) -> None:
+    parent = _load_task(parent_id, *TASK_STATE_COLUMNS)
+    if not parent:
+        return
+    result = dict(parent.result or {})
+    attempts = list(result.get("normalizer_attempts") or [])
+    updated_at = datetime.utcnow().isoformat() + "Z"
+    attempts = [item for item in attempts if int(item.get("attempt") or 0) != int(attempt or 1)]
+    attempts.append({
+        "attempt": int(attempt or 1),
+        "max_attempts": int(max_attempts or 1),
+        "status": status,
+        "error": error,
+        "updated_at": updated_at,
+    })
+    result["normalizer_attempts"] = attempts[-int(max_attempts or 1):]
+    parent.result = result
+    flag_modified(parent, "result")
+    db.session.commit()
+
+
 def _emit(parent_id: str, step: str, progress: int, message: str) -> None:
     task = _load_task(parent_id, *TASK_STATE_COLUMNS)
     if not task:
@@ -926,6 +1005,18 @@ def _load_task(task_id: str, *columns) -> Optional[PublicationTask]:
     )
 
 
+def _load_task_results(task_ids) -> Dict[str, PublicationTask]:
+    ids = [str(task_id) for task_id in dict.fromkeys(task_ids or []) if task_id]
+    if not ids:
+        return {}
+    rows = (
+        PublicationTask.query.options(load_only(PublicationTask.id, PublicationTask.result))
+        .filter(PublicationTask.id.in_(ids))
+        .all()
+    )
+    return {row.id: row for row in rows}
+
+
 def _load_task_snapshot(task_id: str, *, include_payload: bool = True):
     columns = TASK_CHILD_COLUMNS if include_payload else TASK_CHILD_POLL_COLUMNS
     return _task_snapshot(_load_task(task_id, *columns), include_payload=include_payload)
@@ -1014,6 +1105,43 @@ def _normalizer_timeout_seconds() -> int:
         "REPORT_SCRIPT_MATERIAL_NORMALIZER_TIMEOUT_SECONDS",
         DEFAULT_NORMALIZER_TIMEOUT_SECONDS,
     ), 120))
+
+
+def _normalizer_retry_limit() -> int:
+    return max(0, min(_int_env(
+        "REPORT_SCRIPT_MATERIAL_NORMALIZER_RETRY_LIMIT",
+        DEFAULT_NORMALIZER_RETRY_LIMIT,
+    ), 5))
+
+
+def _normalizer_retry_delay_seconds() -> int:
+    return max(1, min(_int_env(
+        "REPORT_SCRIPT_MATERIAL_NORMALIZER_RETRY_DELAY_SECONDS",
+        DEFAULT_NORMALIZER_RETRY_DELAY_SECONDS,
+    ), 300))
+
+
+def _is_retryable_normalizer_error(message: str) -> bool:
+    text = str(message or "").lower()
+    retryable_fragments = (
+        "timeout",
+        "timed out",
+        "read timed out",
+        "connect timeout",
+        "connection aborted",
+        "connection reset",
+        "connection pool",
+        "remote end closed",
+        "temporarily unavailable",
+        "too many requests",
+        "rate limit",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+    )
+    return any(fragment in text for fragment in retryable_fragments)
 
 
 def _plain_text(value: Any) -> str:

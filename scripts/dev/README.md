@@ -6,7 +6,7 @@ Run them from the project root or by path, for example `./scripts/dev/run-backen
 
 Full local restart:
 
-- `./scripts/dev/restart-dev-stack.sh` 先停止 Flask 后端，再停止所有 Celery worker、Watchdog 和计划任务，最后后台启动后端；后端启动后默认补齐所有 Celery worker，但不启动 scheduler
+- `./scripts/dev/restart-dev-stack.sh` 先停止 Flask 后端，再停止所有 Celery worker、Watchdog 和计划任务，最后以 detached 方式后台启动后端；后端启动后默认补齐所有 Celery worker、Watchdog，并按 `BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS` 启动托管计划任务（默认 `zsxq_auto,content_retention`）
 - `./scripts/dev/stop-backend.sh` 只停止本地 Flask 后端，默认端口 `5001`
 - `./scripts/dev/stop-all-background-jobs.sh` 只停止 Celery worker、Watchdog 和计划任务，不停止 Flask 后端
 
@@ -39,9 +39,16 @@ Report script material workflow worker:
 
 Runtime configuration should come from `.env` or shell environment variables. Do not hardcode service credentials in these scripts.
 
+`publication_tasks` query audit:
+
+- `python3 scripts/dev/analyze-publication-task-queries.py --since "2026-07-10 12:00:00"` 汇总指定时间后的专项日志和旧慢查询日志
+- `python3 scripts/dev/analyze-publication-task-queries.py --minutes 60` 检查最近一小时
+- 输出按参数化 SQL 指纹聚合的次数、平均/P95/最大耗时、PID 和后端调用位置
+
 Backend startup bootstrap:
 
 - `./scripts/dev/run-backend.sh` 默认启用 `BACKEND_PROCESS_BOOTSTRAP_ENABLED=1`
+- 需要完整重启本地环境时优先使用 `./scripts/dev/restart-dev-stack.sh`；它会用独立 session 启动后端，适合从 Codex/终端一键重启。`./scripts/dev/run-backend.sh` 更适合前台调试。
 - 默认 `BACKEND_PROCESS_BOOTSTRAP_MODE=ensure`，后端启动后补启动缺失的托管 worker；开发环境按进程角色分配数据库连接：Web 后端 `WEB_DB_POOL_SIZE=4` 保留小连接池，Celery worker 与 scheduler/watchdog 默认 `WORKER_DB_POOL_MODE=null` / `SCHEDULER_DB_POOL_MODE=null`，用完即释放连接，且默认 `*_DB_MAX_OVERFLOW=0`
 - 每个 Flask/Celery/scheduler 进程都会独立初始化 SQLAlchemy engine，`DB_POOL_SIZE=1` 仅作为未设置角色变量时的兜底值；连接会设置 `application_name`，便于在 `pg_stat_activity` 中定位占用来源
 - 任务准入保护默认启用：数据库压力过高、同类运行任务超过并发预算或同类排队任务超过积压预算时，任务会进入 `deferred_db_pressure` / `deferred_capacity` / `deferred_backlog` 并自动延迟重试，不会继续压数据库

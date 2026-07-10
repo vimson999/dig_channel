@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "reviewed_through": "2026-07-10",
+  "max_days_between_reviews": 7,
+  "clusters": [
+    {
+      "key": "DB-SESSION-LIFECYCLE",
+      "title": "数据库 Session 生命周期与热查询",
+      "priority": "P0",
+      "status": "in_progress",
+      "systemic_guardrail": "短事务边界、跨等待只传 ID/快照、热点查询投影和跨工作流 Session 契约测试",
+      "records": [
+        "2026-06-23-report-audio-detached-session.md",
+        "2026-06-24-report-top10-failure-marker-pending-rollback.md",
+        "2026-06-24-watchdog-idle-in-transaction.md",
+        "2026-06-24-zsxq-sync-db-connection-closed-mid-download.md",
+        "2026-06-24-zsxq-sync-download-held-db-session.md",
+        "2026-06-29-report-audio-doubao-child-detached-after-failure-record.md",
+        "2026-07-03-zsxq-workflow-queue-failure-and-sync-orphan.md",
+        "2026-07-10-celery-runtime-leak-and-mp3-db-roundtrips.md",
+        "2026-07-10-report-audio-gemini-completed-snapshot-expired.md",
+        "2026-07-10-report-audio-gemini-defer-detached-id.md",
+        "2026-07-10-report-audio-projection-and-parent-roundtrips.md"
+      ]
+    },
+    {
+      "key": "ORCH-PARENT-CHILD-STATE",
+      "title": "父子任务状态机与运行时对账",
+      "priority": "P0",
+      "status": "in_progress",
+      "systemic_guardrail": "统一父子任务生命周期策略、集中状态迁移 API、reconciler 和父状态/子策略契约矩阵",
+      "records": [
+        "2026-06-23-mp3-video-parent-long-wait.md",
+        "2026-06-23-publisher-child-left-active-after-parent-canceled.md",
+        "2026-06-23-zsxq-workflow-stale-celery-message.md",
+        "2026-06-24-publisher-processing-orphan-capacity-block.md",
+        "2026-06-24-watchdog-killed-active-render-tasks.md",
+        "2026-06-26-doubao-browser-tts-stale-processing-child.md",
+        "2026-06-26-report-audio-publisher-child-completed-parent-waiting.md",
+        "2026-06-29-celery-worker-fake-alive-backlog-not-consuming.md",
+        "2026-07-02-report-script-material-orphan-pending-after-repair-limit.md",
+        "2026-07-03-zsxq-workflow-queue-failure-and-sync-orphan.md",
+        "2026-07-07-mp3-bilibili-upload-canceled-and-dirty-title.md",
+        "2026-07-07-mp3-detail-bilibili-upload-status-stale.md",
+        "2026-07-07-mp3-video-publisher-file-done-parent-waiting.md",
+        "2026-07-07-platform-upload-worker-restart-orphan.md",
+        "2026-07-10-report-audio-completed-parent-redelivered.md",
+        "2026-07-10-report-audio-vertical-backfill-auto-canceled.md"
+      ]
+    },
+    {
+      "key": "HOT-PATH-PAYLOAD-POLLING",
+      "title": "热点接口大字段、轮询重叠与超时误报",
+      "priority": "P0",
+      "status": "in_progress",
+      "systemic_guardrail": "投影列白名单、响应体预算、单飞轮询、热点接口冷请求基准，以及 publication_tasks 500ms SQL 指纹/JSON 条件/批量载荷运行时守卫",
+      "records": [
+        "2026-06-23-report-audio-history-timeout-large-result.md",
+        "2026-06-24-report-top10-detail-flicker-and-missing-item-detail.md",
+        "2026-06-24-report-top10-detail-raw-result-timeout.md",
+        "2026-06-24-workflow-retry-api-timeout-false-failure.md",
+        "2026-07-10-report-audio-tts-cache-full-json-scan.md",
+        "2026-07-10-report-audio-projection-and-parent-roundtrips.md",
+        "2026-07-10-zsxq-poll-overlap-and-duplicate-result-load.md"
+      ]
+    },
+    {
+      "key": "OUTPUT-SEMANTIC-VALIDATION",
+      "title": "AI/媒体产物缺少语义校验",
+      "priority": "P0",
+      "status": "in_progress",
+      "systemic_guardrail": "结构化 schema、fail-closed、禁止不可用 local_fallback、生成前后产物语义验收",
+      "records": [
+        "2026-06-23-report-audio-local-fallback-gemini-artifact.md",
+        "2026-06-24-report-top10-final-script-placeholder.md",
+        "2026-07-02-report-video-keyframe-placeholder-labels.md",
+        "2026-07-07-mp3-bilibili-upload-canceled-and-dirty-title.md",
+        "2026-07-07-mp3-detail-ds-cleaning-false-missing-timestamp.md",
+        "2026-07-07-mp3-invalid-ds-response-generated-garbage-assets.md",
+        "2026-07-07-mp3-video-audio-speed-not-applied.md",
+        "2026-07-09-report-audio-tts-section-outline-labels.md"
+      ]
+    },
+    {
+      "key": "EXTERNAL-CALL-RESILIENCE",
+      "title": "外部 AI/浏览器调用超时与重试不一致",
+      "priority": "P1",
+      "status": "in_progress",
+      "systemic_guardrail": "统一外部调用超时、错误分类、有限重试、文件就绪确认和失败收口包装器；浏览器/媒体子进程必须有 OS 级硬超时并清理进程组",
+      "records": [
+        "2026-06-24-report-top10-editor-prompt-too-large.md",
+        "2026-06-24-report-top10-gemini-child-no-retry.md",
+        "2026-06-26-doubao-standalone-short-audio-no-auto-retry.md",
+        "2026-07-07-mp3-cover-render-cdn-timeout.md",
+        "2026-07-09-report-script-material-normalizer-timeout-no-retry.md",
+        "2026-07-10-publisher-cover-browser-no-hard-timeout.md"
+      ]
+    },
+    {
+      "key": "ASSET-PROJECTION-CONSISTENCY",
+      "title": "视觉资产生成、投影与操作合同不完整",
+      "priority": "P1",
+      "status": "in_progress",
+      "systemic_guardrail": "统一视觉资产注册，契约覆盖生成、持久化、父子回写、API 投影、下载、预览、操作 resolver 和历史补生",
+      "records": [
+        "2026-06-26-report-audio-vertical-video-download-missing.md",
+        "2026-07-10-report-audio-bilibili-cover-not-promoted.md",
+        "2026-07-10-report-audio-scheme2-bilibili-cover-missing.md"
+      ]
+    },
+    {
+      "key": "RUNTIME-TOPOLOGY-RELOAD",
+      "title": "Worker/调度器注册、队列拓扑与代码重载",
+      "priority": "P1",
+      "status": "in_progress",
+      "systemic_guardrail": "单一服务注册表、启动后拓扑验收、代码版本指纹和队列消费者契约测试",
+      "records": [
+        "2026-06-23-zsxq-system-scheduler-not-autostarted.md",
+        "2026-06-29-feishu-cookie-import-stale-celery-workers.md",
+        "2026-07-02-content-retention-duplicate-scheduler-overwrote-result.md",
+        "2026-07-07-platform-upload-used-render-queue.md",
+        "2026-07-07-platform-upload-worker-restart-orphan.md",
+        "2026-07-10-celery-stop-script-killed-controller.md"
+      ]
+    }
+  ],
+  "standalone_records": [
+    {
+      "record": "2026-06-23-task-admission-backlog-limit.md",
+      "watch_for": "准入、并发和 backlog 容量再次混用"
+    },
+    {
+      "record": "2026-06-24-content-retention-batch-file-mtime-gap.md",
+      "watch_for": "清理规则再次依赖目录 mtime 而不是文件/引用事实"
+    },
+    {
+      "record": "2026-06-26-report-audio-ignored-script-material-cache.md",
+      "watch_for": "跨编排缓存复用契约再次丢失"
+    },
+    {
+      "record": "2026-07-10-zsxq-sync-stale-credential-binding.md",
+      "watch_for": "运行配置保存的凭据 ID 失效后再次阻塞动态凭据发现，或凭据错误再次被归类为资源无效"
+    }
+  ]
+}

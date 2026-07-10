@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 
 from sqlalchemy import inspect, or_, text
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
 from models import db
@@ -41,6 +42,83 @@ DEFAULT_AUTO_VIDEO_PDF_THRESHOLD = 35
 DEFAULT_AUTO_VIDEO_MP3_THRESHOLD = 25
 DEFAULT_AUTO_SCRIPT_MATERIAL_PDF_THRESHOLD = 40
 TOPIC_PAGE_SIZE_HINT = 20
+WORKFLOW_CLEAN_TASK_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.error_message,
+    PublicationTask.feature,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
+    PublicationTask.created_at,
+    PublicationTask.params,
+    PublicationTask.result,
+)
+WORKFLOW_CLEAN_RESULT_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.result,
+)
+ZSXQ_SYNC_RUN_STATE_COLUMNS = (
+    ZsxqSyncRun.id,
+    ZsxqSyncRun.status,
+    ZsxqSyncRun.error_message,
+    ZsxqSyncRun.completed_at,
+    ZsxqSyncRun.updated_at,
+)
+ZSXQ_SYNC_RUN_RESULT_COLUMNS = (
+    *ZSXQ_SYNC_RUN_STATE_COLUMNS,
+    ZsxqSyncRun.group_id,
+    ZsxqSyncRun.group_name,
+    ZsxqSyncRun.tab_id,
+    ZsxqSyncRun.tab_label,
+    ZsxqSyncRun.mode,
+    ZsxqSyncRun.requested_tabs,
+    ZsxqSyncRun.result,
+    ZsxqSyncRun.system_batch_id,
+    ZsxqSyncRun.system_attempt_id,
+    ZsxqSyncRun.system_round,
+    ZsxqSyncRun.system_max_rounds,
+    ZsxqSyncRun.system_trigger,
+    ZsxqSyncRun.system_queued_at,
+    ZsxqSyncRun.system_max_download_files,
+    ZsxqSyncRun.topics_fetched,
+    ZsxqSyncRun.topics_new,
+    ZsxqSyncRun.topics_updated,
+    ZsxqSyncRun.topics_existing,
+    ZsxqSyncRun.attachments_seen,
+    ZsxqSyncRun.attachments_downloaded,
+    ZsxqSyncRun.attachments_failed,
+    ZsxqSyncRun.attachments_skipped,
+    ZsxqSyncRun.download_limit_reached,
+    ZsxqSyncRun.started_at,
+    ZsxqSyncRun.created_at,
+)
+ZSXQ_WORKFLOW_STATE_COLUMNS = (
+    ZsxqWorkflowRun.id,
+    ZsxqWorkflowRun.batch_id,
+    ZsxqWorkflowRun.group_id,
+    ZsxqWorkflowRun.group_name,
+    ZsxqWorkflowRun.trigger,
+    ZsxqWorkflowRun.status,
+    ZsxqWorkflowRun.current_stage,
+    ZsxqWorkflowRun.round,
+    ZsxqWorkflowRun.max_rounds,
+    ZsxqWorkflowRun.sync_run_id,
+    ZsxqWorkflowRun.error_message,
+    ZsxqWorkflowRun.started_at,
+    ZsxqWorkflowRun.completed_at,
+    ZsxqWorkflowRun.created_at,
+    ZsxqWorkflowRun.updated_at,
+)
+ZSXQ_WORKFLOW_RUNTIME_COLUMNS = (
+    *ZSXQ_WORKFLOW_STATE_COLUMNS,
+    ZsxqWorkflowRun.config_snapshot,
+    ZsxqWorkflowRun.stage_results,
+    ZsxqWorkflowRun.clean_task_ids,
+    ZsxqWorkflowRun.publish_task_ids,
+)
 
 
 class ZsxqWorkflowService:
@@ -168,7 +246,7 @@ class ZsxqWorkflowService:
 
     def enqueue_workflow_task(self, workflow_run_id, *, cookie=None, credential_id=None):
         self.ensure_schema()
-        workflow = ZsxqWorkflowRun.query.get(str(workflow_run_id))
+        workflow = self._load_workflow_run(workflow_run_id, include_runtime=True)
         if not workflow:
             raise ValueError(f"工作流不存在: {workflow_run_id}")
 
@@ -208,7 +286,7 @@ class ZsxqWorkflowService:
     def start_workflow(self, workflow_run_id, runtime=None):
         self.ensure_schema()
         runtime = runtime if isinstance(runtime, dict) else {}
-        workflow = ZsxqWorkflowRun.query.get(str(workflow_run_id))
+        workflow = self._load_workflow_run(workflow_run_id, include_runtime=True)
         if not workflow:
             raise ValueError(f"工作流不存在: {workflow_run_id}")
         if workflow.status in TERMINAL_WORKFLOW_STATUSES:
@@ -308,7 +386,7 @@ class ZsxqWorkflowService:
                 raise
 
             logger.exception("[ZSXQ_WORKFLOW] sync stage queue failed | workflow=%s", workflow.id)
-            workflow = ZsxqWorkflowRun.query.get(str(workflow_run_id))
+            workflow = self._load_workflow_run(workflow_run_id, include_runtime=True)
             if workflow:
                 self._mark_failed(workflow, f"同步阶段入队失败: {exc}", stage="sync")
             db.session.commit()
@@ -316,11 +394,38 @@ class ZsxqWorkflowService:
 
     def record_sync_finished(self, workflow_run_id, *, run_id, success, result=None, error=None):
         self.ensure_schema()
-        workflow = ZsxqWorkflowRun.query.get(str(workflow_run_id))
+        workflow = self._load_workflow_run(workflow_run_id, include_runtime=True)
         if not workflow:
             logger.warning("[ZSXQ_WORKFLOW] sync finish ignored, workflow missing: %s", workflow_run_id)
             return None
+        return self._record_sync_finished_loaded(
+            workflow,
+            run_id=run_id,
+            success=success,
+            result=result,
+            error=error,
+            commit=True,
+        )
 
+    def record_sync_finished_and_advance(self, workflow_run_id, *, run_id, success, result=None, error=None):
+        self.ensure_schema()
+        workflow = self._load_workflow_run(workflow_run_id, include_runtime=True)
+        if not workflow:
+            logger.warning("[ZSXQ_WORKFLOW] sync finish ignored, workflow missing: %s", workflow_run_id)
+            return None
+        self._record_sync_finished_loaded(
+            workflow,
+            run_id=run_id,
+            success=success,
+            result=result,
+            error=error,
+            commit=False,
+        )
+        if not success:
+            return self._commit_and_payload(workflow)
+        return self._advance_workflow_loaded(workflow, reason="sync_finished")
+
+    def _record_sync_finished_loaded(self, workflow, *, run_id, success, result=None, error=None, commit=True):
         stage_results = self._stage_results(workflow)
         sync_result = dict(stage_results.get("sync") or {})
         sync_result.update({
@@ -346,13 +451,18 @@ class ZsxqWorkflowService:
             workflow.completed_at = datetime.utcnow()
             self._queue_notification(workflow, "sync_failed")
             self._queue_notification(workflow, "workflow_failed")
-        return self._commit_and_payload(workflow)
+        if commit:
+            return self._commit_and_payload(workflow)
+        return workflow
 
     def advance_workflow(self, workflow_run_id, reason=None):
         self.ensure_schema()
-        workflow = ZsxqWorkflowRun.query.get(str(workflow_run_id))
+        workflow = self._load_workflow_run(workflow_run_id, include_runtime=True)
         if not workflow:
             raise ValueError(f"工作流不存在: {workflow_run_id}")
+        return self._advance_workflow_loaded(workflow, reason=reason)
+
+    def _advance_workflow_loaded(self, workflow, reason=None):
         if workflow.status in TERMINAL_WORKFLOW_STATUSES:
             return workflow.to_dict()
 
@@ -414,19 +524,23 @@ class ZsxqWorkflowService:
 
     def list_runs(self, group_id=None, limit=20):
         self.ensure_schema()
-        query = ZsxqWorkflowRun.query.order_by(ZsxqWorkflowRun.created_at.desc())
+        query = (
+            ZsxqWorkflowRun.query
+            .options(load_only(*ZSXQ_WORKFLOW_STATE_COLUMNS))
+            .order_by(ZsxqWorkflowRun.created_at.desc())
+        )
         if group_id:
             query = query.filter(ZsxqWorkflowRun.group_id == str(group_id))
         return [item.to_dict() for item in query.limit(min(max(int(limit or 20), 1), 100)).all()]
 
     def get_run(self, workflow_run_id):
         self.ensure_schema()
-        workflow = ZsxqWorkflowRun.query.get(str(workflow_run_id))
+        workflow = self._load_workflow_run(workflow_run_id, include_runtime=True)
         return workflow.to_dict() if workflow else None
 
     def mark_failed_by_id(self, workflow_run_id, message, stage="workflow"):
         self.ensure_schema()
-        workflow = ZsxqWorkflowRun.query.get(str(workflow_run_id))
+        workflow = self._load_workflow_run(workflow_run_id, include_runtime=True)
         if not workflow:
             return None
         self._mark_failed(workflow, message, stage=stage)
@@ -438,7 +552,11 @@ class ZsxqWorkflowService:
             self.recover_stale_initial_workflows(group_id=group_id)
             self.recover_stale_running_sync_workflows(group_id=group_id)
             self.recover_stale_running_clean_workflows(group_id=group_id)
-        query = ZsxqWorkflowRun.query.filter(ZsxqWorkflowRun.status.in_(("queued", "running")))
+        query = (
+            ZsxqWorkflowRun.query
+            .options(load_only(*ZSXQ_WORKFLOW_STATE_COLUMNS))
+            .filter(ZsxqWorkflowRun.status.in_(("queued", "running")))
+        )
         if group_id:
             query = query.filter(ZsxqWorkflowRun.group_id == str(group_id))
         workflow = query.order_by(ZsxqWorkflowRun.created_at.desc()).first()
@@ -459,7 +577,13 @@ class ZsxqWorkflowService:
         if group_id:
             query = query.filter(ZsxqWorkflowRun.group_id == str(group_id))
 
-        workflows = query.order_by(ZsxqWorkflowRun.created_at.asc()).limit(20).all()
+        workflows = (
+            query
+            .options(load_only(*ZSXQ_WORKFLOW_RUNTIME_COLUMNS))
+            .order_by(ZsxqWorkflowRun.created_at.asc())
+            .limit(20)
+            .all()
+        )
         if not workflows:
             return []
 
@@ -496,14 +620,20 @@ class ZsxqWorkflowService:
         if group_id:
             query = query.filter(ZsxqWorkflowRun.group_id == str(group_id))
 
-        workflows = query.order_by(ZsxqWorkflowRun.updated_at.asc(), ZsxqWorkflowRun.created_at.asc()).limit(20).all()
+        workflows = (
+            query
+            .options(load_only(*ZSXQ_WORKFLOW_RUNTIME_COLUMNS))
+            .order_by(ZsxqWorkflowRun.updated_at.asc(), ZsxqWorkflowRun.created_at.asc())
+            .limit(20)
+            .all()
+        )
         if not workflows:
             return []
 
         now = datetime.utcnow()
         recovered = []
         for workflow in workflows:
-            sync_run = ZsxqSyncRun.query.get(str(workflow.sync_run_id))
+            sync_run = self._load_sync_run_state(workflow.sync_run_id, include_result=True)
             sync_result = sync_run.result if sync_run and isinstance(sync_run.result, dict) else {}
             partial = sync_result.get("partial") if isinstance(sync_result.get("partial"), dict) else {}
             heartbeat = _parse_iso_datetime(
@@ -561,7 +691,13 @@ class ZsxqWorkflowService:
         if group_id:
             query = query.filter(ZsxqWorkflowRun.group_id == str(group_id))
 
-        workflows = query.order_by(ZsxqWorkflowRun.updated_at.asc(), ZsxqWorkflowRun.created_at.asc()).limit(20).all()
+        workflows = (
+            query
+            .options(load_only(*ZSXQ_WORKFLOW_RUNTIME_COLUMNS))
+            .order_by(ZsxqWorkflowRun.updated_at.asc(), ZsxqWorkflowRun.created_at.asc())
+            .limit(20)
+            .all()
+        )
         recovered = []
         workflow_ids_to_advance = []
         now = datetime.utcnow()
@@ -730,7 +866,12 @@ class ZsxqWorkflowService:
             workflow.stage_results = stage_results
             return
 
-        tasks = PublicationTask.query.filter(PublicationTask.id.in_(task_ids)).all()
+        tasks = (
+            PublicationTask.query
+            .options(load_only(*WORKFLOW_CLEAN_TASK_COLUMNS))
+            .filter(PublicationTask.id.in_(task_ids))
+            .all()
+        )
         for task in tasks:
             self._recover_publish_task_from_runtime(task)
         task_map = {task.id: task for task in tasks}
@@ -780,7 +921,11 @@ class ZsxqWorkflowService:
         publish_tasks = []
 
         for clean_task_id in clean_task_ids:
-            clean_task = PublicationTask.query.get(clean_task_id)
+            clean_task = (
+                PublicationTask.query.options(load_only(*WORKFLOW_CLEAN_TASK_COLUMNS))
+                .filter(PublicationTask.id == clean_task_id)
+                .first()
+            )
             if not clean_task or clean_task.status != "completed":
                 continue
             output_dir = (clean_task.result or {}).get("local_output_dir")
@@ -1126,13 +1271,18 @@ class ZsxqWorkflowService:
             self._mark_failed(workflow, sync_result.get("error") or "同步阶段失败", stage="sync")
             return False
         if workflow.sync_run_id:
-            run = ZsxqSyncRun.query.get(workflow.sync_run_id)
+            run = self._load_sync_run_state(workflow.sync_run_id)
             if run and run.status == "completed":
+                detail_run = self._load_sync_run_state(run.id, include_result=True) or run
+                detail_result = detail_run.result if detail_run is not run and isinstance(detail_run.result, dict) else {}
                 sync_result.update({
                     "status": "completed",
                     "run_id": run.id,
                     "finished_at": self._now_iso(),
-                    "summary": self._sync_summary({"run": run.to_dict(), "summary": run.result or {}}),
+                    "summary": self._sync_summary({
+                        "run": self._sync_run_payload(detail_run),
+                        "summary": detail_result,
+                    }),
                 })
                 stage_results["sync"] = sync_result
                 workflow.stage_results = stage_results
@@ -1150,6 +1300,63 @@ class ZsxqWorkflowService:
                 self._queue_notification(workflow, "sync_failed")
                 self._mark_failed(workflow, run.error_message or "同步阶段失败", stage="sync")
         return False
+
+    def _load_workflow_run(self, workflow_run_id, *, include_runtime=True):
+        if not workflow_run_id:
+            return None
+        columns = ZSXQ_WORKFLOW_RUNTIME_COLUMNS if include_runtime else ZSXQ_WORKFLOW_STATE_COLUMNS
+        return (
+            ZsxqWorkflowRun.query
+            .options(load_only(*columns))
+            .filter(ZsxqWorkflowRun.id == str(workflow_run_id))
+            .first()
+        )
+
+    def _load_sync_run_state(self, run_id, *, include_result=False):
+        if not run_id:
+            return None
+        columns = ZSXQ_SYNC_RUN_RESULT_COLUMNS if include_result else ZSXQ_SYNC_RUN_STATE_COLUMNS
+        return (
+            ZsxqSyncRun.query
+            .options(load_only(*columns))
+            .filter(ZsxqSyncRun.id == str(run_id))
+            .first()
+        )
+
+    def _sync_run_payload(self, run):
+        if not run:
+            return {}
+        return {
+            "id": run.id,
+            "group_id": getattr(run, "group_id", None),
+            "group_name": getattr(run, "group_name", None),
+            "tab_id": getattr(run, "tab_id", None),
+            "tab_label": getattr(run, "tab_label", None),
+            "mode": getattr(run, "mode", None),
+            "status": run.status,
+            "requested_tabs": getattr(run, "requested_tabs", None) or [],
+            "system_batch_id": getattr(run, "system_batch_id", None),
+            "system_attempt_id": getattr(run, "system_attempt_id", None),
+            "system_round": getattr(run, "system_round", None),
+            "system_max_rounds": getattr(run, "system_max_rounds", None),
+            "system_trigger": getattr(run, "system_trigger", None),
+            "system_queued_at": getattr(run, "system_queued_at", None),
+            "system_max_download_files": getattr(run, "system_max_download_files", None),
+            "topics_fetched": getattr(run, "topics_fetched", None) or 0,
+            "topics_new": getattr(run, "topics_new", None) or 0,
+            "topics_updated": getattr(run, "topics_updated", None) or 0,
+            "topics_existing": getattr(run, "topics_existing", None) or 0,
+            "attachments_seen": getattr(run, "attachments_seen", None) or 0,
+            "attachments_downloaded": getattr(run, "attachments_downloaded", None) or 0,
+            "attachments_failed": getattr(run, "attachments_failed", None) or 0,
+            "attachments_skipped": getattr(run, "attachments_skipped", None) or 0,
+            "download_limit_reached": bool(getattr(run, "download_limit_reached", False)),
+            "error_message": run.error_message,
+            "started_at": run.started_at.isoformat() if getattr(run, "started_at", None) else None,
+            "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+            "created_at": run.created_at.isoformat() if getattr(run, "created_at", None) else None,
+            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        }
 
     def _clean_stage_status(self, workflow):
         return (self._stage_results(workflow).get("clean") or {}).get("status")
@@ -1303,7 +1510,11 @@ class ZsxqWorkflowService:
         if not source_task_id:
             return 0
 
-        clean_task = PublicationTask.query.get(source_task_id)
+        clean_task = (
+            PublicationTask.query.options(load_only(*WORKFLOW_CLEAN_RESULT_COLUMNS))
+            .filter(PublicationTask.id == source_task_id)
+            .first()
+        )
         result = clean_task.result if clean_task and isinstance(clean_task.result, dict) else {}
         for key in ("cleaned_files", "files"):
             files = result.get(key)

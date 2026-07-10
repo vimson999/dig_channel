@@ -6,7 +6,7 @@
     <title>知识星球任务与策略 - Shioa</title>
     <link href="css/zsxq-lab.css" rel="stylesheet">
     <link href="css/zsxq-auto-publish.css" rel="stylesheet">
-    <link href="css/zsxq-system-sync.css?v=20260612-e2e-handoff" rel="stylesheet">
+    <link href="css/zsxq-system-sync.css?v=20260709-console-ux-pass" rel="stylesheet">
     <link href="css/three-workspaces.css?v=20260702-sync-flow" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 </head>
@@ -55,11 +55,33 @@
             <p class="zsxq-inline-tip">
                 系统同步和自动发帖现在各自维护独立的 DB Cookie 与星球上下文。持续调度会优先使用平台凭据数据库里的知识星球 Cookie，再回退到环境变量。
             </p>
-        </section>
 
-        <section id="system-sync-flow-map" class="three-workspace-panel">
-            <div class="three-workspace-scene" data-three-scene></div>
-            <aside class="three-workspace-side" data-three-side></aside>
+            <div class="zsxq-command-strip" aria-label="页面操作导览">
+                <a class="zsxq-command-card" href="#system-sync-section">
+                    <span class="zsxq-command-index">1</span>
+                    <span>
+                        <strong>先确认配置</strong>
+                        <em>Cookie、星球、阈值和清洗策略</em>
+                    </span>
+                    <i class="fas fa-arrow-right" aria-hidden="true"></i>
+                </a>
+                <a class="zsxq-command-card" href="#system-sync-runtime-card">
+                    <span class="zsxq-command-index">2</span>
+                    <span>
+                        <strong>再看调度</strong>
+                        <em>立即试跑、启动计划、查看日志</em>
+                    </span>
+                    <i class="fas fa-arrow-right" aria-hidden="true"></i>
+                </a>
+                <a class="zsxq-command-card" href="#system-sync-batches-card">
+                    <span class="zsxq-command-index">3</span>
+                    <span>
+                        <strong>最后查结果</strong>
+                        <em>批次明细、下载、失败附件</em>
+                    </span>
+                    <i class="fas fa-arrow-right" aria-hidden="true"></i>
+                </a>
+            </div>
         </section>
 
         <section class="zsxq-console-layout">
@@ -261,7 +283,7 @@
                         </section>
 
                         <div class="zsxq-console-stack">
-                            <section class="zsxq-console-card">
+                            <section id="system-sync-runtime-card" class="zsxq-console-card zsxq-runtime-card">
                                 <div class="zsxq-card-head">
                                     <div>
                                         <h4 class="zsxq-card-title">调度控制</h4>
@@ -308,7 +330,7 @@
                         </div>
                     </div>
 
-                    <section class="zsxq-console-card">
+                    <section id="system-sync-batches-card" class="zsxq-console-card">
                         <div class="zsxq-card-head">
                             <div>
                                 <h4 class="zsxq-card-title">系统测试批次</h4>
@@ -658,6 +680,24 @@
                 </section>
             </section>
         </section>
+
+        <section class="zsxq-flow-overview" aria-label="同步链路概览">
+            <div class="zsxq-flow-overview__head">
+                <div>
+                    <p class="zsxq-workspace-eyebrow">Sync Pipeline</p>
+                    <h3>同步链路概览</h3>
+                    <p>辅助理解数据从 Cookie、星球、Tab 到清洗和发布的走向；日常操作优先看上方配置与调度。</p>
+                </div>
+                <a href="#system-sync-runtime-card" class="zsxq-flow-overview__jump">
+                    回到调度控制
+                    <i class="fas fa-arrow-up" aria-hidden="true"></i>
+                </a>
+            </div>
+            <div id="system-sync-flow-map" class="three-workspace-panel three-workspace-panel--compact">
+                <div class="three-workspace-scene" data-three-scene></div>
+                <aside class="three-workspace-side" data-three-side></aside>
+            </div>
+        </section>
     </main>
 
     <script src="js/env.js"></script>
@@ -665,6 +705,6 @@
     <script src="js/shared-navigation.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
     <script src="js/three-workspace-graph.js?v=20260702-sync-flow"></script>
-    <script src="js/zsxq-system-sync.js?v=20260702-three-sync-flow"></script>
+    <script src="js/zsxq-system-sync.js?v=20260709-console-ux-pass"></script>
 </body>
 </html>

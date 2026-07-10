@@ -82,14 +82,13 @@ def finalize_zsxq_sync_stage(self, workflow_run_id, run_id, *, success, result=N
             success,
         )
         try:
-            zsxq_workflow_service.record_sync_finished(
+            return zsxq_workflow_service.record_sync_finished_and_advance(
                 workflow_run_id,
                 run_id=run_id,
                 success=success,
                 result=result,
                 error=error,
             )
-            return zsxq_workflow_service.advance_workflow(workflow_run_id, reason="sync_finished")
         except retry_exception_types():
             raise
         except Exception as exc:

@@ -4,10 +4,15 @@ import logging
 import os
 import re
 import time
+import copy
+from collections import OrderedDict
+from contextvars import ContextVar
 from datetime import datetime, timezone
+from functools import wraps
+from threading import Lock
 from types import SimpleNamespace
 
-from sqlalchemy import inspect as sqlalchemy_inspect
+from sqlalchemy import inspect as sqlalchemy_inspect, text
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
@@ -31,6 +36,7 @@ from services.report_audio_workflow import (
     storage_path_for_job,
     structured_result_quality_issue,
 )
+from services.thumbnail_service import thumbnail_service
 from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
 from services.runtime_guard import (
     guard_publication_task_start,
@@ -45,6 +51,10 @@ from tasks.publisher import run_publication_pipeline
 
 
 logger = logging.getLogger("REPORT_AUDIO_WORKFLOW_TASK")
+_active_workflow_state = ContextVar("report_audio_workflow_state", default=None)
+_workflow_resume_cache = OrderedDict()
+_workflow_resume_cache_lock = Lock()
+_WORKFLOW_RESUME_CACHE_LIMIT = 8
 
 DEFAULT_DB_RETRIES = 5
 DEFAULT_DB_RETRY_DELAY_SECONDS = 60
@@ -129,7 +139,6 @@ TASK_PAYLOAD_COLUMNS = (
 )
 TASK_CHILD_COLUMNS = (
     *TASK_STATE_COLUMNS,
-    PublicationTask.params,
     PublicationTask.feature,
     PublicationTask.parent_task_id,
     PublicationTask.source_task_id,
@@ -148,6 +157,40 @@ TASK_CHILD_POLL_COLUMNS = (
     PublicationTask.parent_task_id,
     PublicationTask.source_task_id,
 )
+TASK_RESUME_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.error_message,
+    PublicationTask.feature,
+    PublicationTask.created_at,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
+    PublicationTask.waiting_child_label,
+    PublicationTask.waiting_child_id,
+    PublicationTask.waiting_child_status,
+    PublicationTask.waiting_child_step,
+)
+TASK_PUBLISHER_MATCH_COLUMNS = (
+    *TASK_CHILD_POLL_COLUMNS,
+    PublicationTask.task_video_path,
+    PublicationTask.publisher_landscape_enabled,
+    PublicationTask.publisher_vertical_enabled,
+    PublicationTask.publisher_render_mode,
+    PublicationTask.publisher_vertical_scheme,
+    PublicationTask.publisher_preview_seconds,
+    PublicationTask.publisher_vertical_video_path,
+    PublicationTask.publisher_vertical_cover_path,
+    PublicationTask.publisher_podcast_cover_path,
+)
+TASK_TTS_MATCH_COLUMNS = (
+    *TASK_CHILD_POLL_COLUMNS,
+    PublicationTask.doubao_tts_text_hash,
+    PublicationTask.doubao_tts_chunk_index,
+    PublicationTask.doubao_tts_chunk_attempt,
+    PublicationTask.doubao_tts_wav_path,
+)
 
 
 def _load_task(task_id, *columns):
@@ -159,11 +202,143 @@ def _load_task(task_id, *columns):
             continue
         seen.add(key)
         attrs.append(column)
-    return (
+    task = (
         PublicationTask.query.options(load_only(*attrs))
         .filter(PublicationTask.id == task_id)
         .one_or_none()
     )
+    state = _active_workflow_state.get()
+    if task and state and state.get("task_id") == str(task_id):
+        for name in (
+            "params", "result", "status", "current_step", "progress",
+            "error_message", "created_at", "updated_at", "completed_at",
+        ):
+            if name in task.__dict__:
+                value = task.__dict__.get(name)
+                state[name] = copy.deepcopy(value) if name in {"params", "result"} else value
+    return task
+
+
+def _workflow_result_scope(operation):
+    @wraps(operation)
+    def wrapped(task_id, *args, **kwargs):
+        task_key = str(task_id)
+        with _workflow_resume_cache_lock:
+            cached = _workflow_resume_cache.pop(task_key, None)
+        state = copy.deepcopy(cached) if cached else {"task_id": task_key, "params": None, "result": None}
+        state["task_id"] = task_key
+        token = _active_workflow_state.set(state)
+        try:
+            return operation(task_id, *args, **kwargs)
+        finally:
+            latest = _active_workflow_state.get()
+            cacheable = (
+                latest
+                and latest.get("params") is not None
+                and latest.get("result") is not None
+                and latest.get("status") not in {"completed", "failed", "blocked_by_captcha", "canceled"}
+            )
+            if cacheable:
+                with _workflow_resume_cache_lock:
+                    _workflow_resume_cache[task_key] = copy.deepcopy(latest)
+                    _workflow_resume_cache.move_to_end(task_key)
+                    while len(_workflow_resume_cache) > _WORKFLOW_RESUME_CACHE_LIMIT:
+                        _workflow_resume_cache.popitem(last=False)
+            else:
+                with _workflow_resume_cache_lock:
+                    _workflow_resume_cache.pop(task_key, None)
+            _active_workflow_state.reset(token)
+    return wrapped
+
+
+def _cached_workflow_result(task_id):
+    state = _active_workflow_state.get()
+    if not state or state.get("task_id") != str(task_id) or state.get("result") is None:
+        return None
+    return copy.deepcopy(state["result"])
+
+
+def _replace_cached_workflow_result(task_id, result):
+    state = _active_workflow_state.get()
+    if state and state.get("task_id") == str(task_id):
+        state["result"] = copy.deepcopy(result or {})
+
+
+def _merge_cached_workflow_result(task_id, values):
+    state = _active_workflow_state.get()
+    if state and state.get("task_id") == str(task_id) and state.get("result") is not None:
+        state["result"].update(copy.deepcopy(values or {}))
+
+
+def _merge_cached_workflow_fields(task_id, **values):
+    state = _active_workflow_state.get()
+    if state and state.get("task_id") == str(task_id):
+        state.update(values)
+
+
+def _cached_workflow_task(task_id):
+    state = _active_workflow_state.get()
+    if not state or state.get("task_id") != str(task_id) or state.get("result") is None:
+        return None
+    return SimpleNamespace(
+        id=str(task_id),
+        params=copy.deepcopy(state.get("params") or {}),
+        result=copy.deepcopy(state.get("result") or {}),
+        status=state.get("status"),
+        current_step=state.get("current_step"),
+        progress=state.get("progress"),
+        error_message=state.get("error_message"),
+        created_at=state.get("created_at"),
+        completed_at=state.get("completed_at"),
+    )
+
+
+def _is_postgresql_session():
+    try:
+        return db.session.get_bind().dialect.name == "postgresql"
+    except Exception:
+        return False
+
+
+def _execute_parent_update(statement, params, description):
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            updated = db.session.execute(text(statement), params)
+            db.session.commit()
+            return updated.rowcount
+        except Exception as exc:
+            last_error = exc
+            db.session.rollback()
+            if attempt < 3:
+                time.sleep(0.2 * attempt)
+    logger.error("[REPORT_AUDIO_WORKFLOW] %s failed: %s", description, last_error)
+    raise last_error
+
+
+def _persist_parent_result_fallback(parent_id, result, **fields):
+    values = {PublicationTask.result: result, PublicationTask.updated_at: datetime.utcnow()}
+    for name, value in fields.items():
+        values[getattr(PublicationTask, name)] = value
+    updated = (
+        PublicationTask.query
+        .filter(PublicationTask.id == str(parent_id), PublicationTask.status != "canceled")
+        .update(values, synchronize_session=False)
+    )
+    db.session.commit()
+    return updated
+
+
+def _load_task_results(task_ids):
+    ids = [str(task_id) for task_id in dict.fromkeys(task_ids or []) if task_id]
+    if not ids:
+        return {}
+    rows = (
+        PublicationTask.query.options(load_only(PublicationTask.id, PublicationTask.result))
+        .filter(PublicationTask.id.in_(ids))
+        .all()
+    )
+    return {row.id: row for row in rows}
 
 TERMINAL_STATUSES = {"completed", "failed", "blocked_by_captcha", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
@@ -270,7 +445,37 @@ def process_report_audio_workflow_job(self, task_id):
         return _handle_report_audio_task_failure(self, task_id, exc)
 
 
+@_workflow_result_scope
 def _process_job(task_id):
+    resume = _load_task(task_id, *TASK_RESUME_COLUMNS)
+    if not resume:
+        logger.error("Report audio workflow task not found: %s", task_id)
+        return False
+    if resume.status == "completed":
+        logger.info("Report audio workflow already completed; skip duplicate delivery: %s", task_id)
+        return True
+    if resume.status == "canceled":
+        return False
+
+    cached = _cached_workflow_task(task_id)
+    cached_waiting = cached.result.get("waiting_child") if cached and isinstance(cached.result, dict) else {}
+    waiting_label = str(resume.waiting_child_label or "")
+    waiting_child_id = str(resume.waiting_child_id or "")
+    if (
+        cached
+        and waiting_label == "publisher_video"
+        and waiting_child_id
+        and cached_waiting.get("label") == waiting_label
+        and str(cached_waiting.get("child_id") or "") == waiting_child_id
+    ):
+        try:
+            _wait_child(task_id, waiting_child_id, waiting_label, start_progress=95, end_progress=99)
+        except ChildTaskStillRunning as exc:
+            db.session.rollback()
+            _defer_parent_retry(task_id, exc)
+            logger.info("Report audio workflow resumed with lightweight publisher wait: %s", exc)
+            return True
+
     task = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
     if not task:
         logger.error("Report audio workflow task not found: %s", task_id)
@@ -278,9 +483,6 @@ def _process_job(task_id):
     if not isinstance(task.params, dict) or task.params.get("feature") != FEATURE_NAME:
         logger.error("Invalid report audio workflow task params: %s", task_id)
         return False
-    if task.status == "canceled":
-        return False
-
     workflow_task_id = task.id
     workflow_created_at = task.created_at
     workflow_user_id = task.user_id or (task.params or {}).get("user_id")
@@ -322,8 +524,19 @@ def _process_job(task_id):
     task.error_message = None
     task.completed_at = None
     task.result = result
+    active_step = task.current_step
+    active_progress = task.progress
     flag_modified(task, "result")
     db.session.commit()
+    _replace_cached_workflow_result(workflow_task_id, result)
+    _merge_cached_workflow_fields(
+        workflow_task_id,
+        status="processing",
+        current_step=active_step,
+        progress=active_progress,
+        error_message=None,
+        completed_at=None,
+    )
 
     try:
         _queue_notification(workflow_task_id, "report_audio_started", "研报 PDF 到语音编排已启动")
@@ -334,9 +547,12 @@ def _process_job(task_id):
         active_gemini_task = None
         gemini_task_id = None
         gemini_result = None
+        gemini_public_summary = None
+        gemini_task_snapshot = None
+        manual_gemini_result = _manual_gemini_payload(payload)
         script_material_result = result.get("script_material") if isinstance(result.get("script_material"), dict) else None
         audio_reuse_result = result.get("audio_reuse") if isinstance(result.get("audio_reuse"), dict) else None
-        if not structured:
+        if not structured and not manual_gemini_result:
             reused_material = _reusable_material_for_pdf(pdf, exclude_task_id=workflow_task_id)
         if reused_material:
             structured = reused_material["structured_result"]
@@ -351,26 +567,60 @@ def _process_job(task_id):
         else:
             gemini_task = _completed_gemini_task(workflow_task_id, result)
             active_gemini_task = None if gemini_task else _active_gemini_task(workflow_task_id, result)
-            gemini_task_id = gemini_task.id if gemini_task else None
+            gemini_task_id = _task_id(gemini_task)
+            gemini_task_snapshot = _task_state_snapshot(gemini_task)
             if structured:
                 _clear_waiting_child(workflow_task_id, "gemini")
                 _emit(workflow_task_id, "reuse_structured_result", 58, "复用已有 Gemini 结构化结果")
-                gemini_result = gemini_task.result if gemini_task else {}
+                gemini_result = _task_result_payload(gemini_task_snapshot)
                 if gemini_task:
-                    _record_child(workflow_task_id, "gemini", gemini_task)
-                    _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
+                    _record_child(workflow_task_id, "gemini", gemini_task_snapshot)
+                    _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task_snapshot)})
             else:
-                if gemini_task:
+                if manual_gemini_result:
+                    _clear_waiting_child(workflow_task_id, "gemini")
+                    gemini_result = manual_gemini_result
+                    gemini_public_summary = _manual_gemini_public_summary(manual_gemini_result)
+                    _emit(workflow_task_id, "manual_gemini_result", 52, "使用手动粘贴的 Gemini 返回值，跳过 Gemini 浏览器子任务")
+                    _update_result(workflow_task_id, {"gemini": gemini_public_summary})
+                    raw_final = (
+                        gemini_result.get("final_response_text")
+                        or gemini_result.get("response_text")
+                        or ""
+                    )
+                    initial_text = gemini_result.get("initial_response_text") or ""
+                    final_chars = len(_plain_text(raw_final))
+                    min_final_chars = _min_gemini_final_chars()
+                    if final_chars < min_final_chars:
+                        raise RuntimeError(
+                            f"手动 Gemini 返回内容过短: {final_chars} 字，低于 {min_final_chars} 字，停止进入 DeepSeek 结构化"
+                        )
+                    _emit(workflow_task_id, "normalize_result", 58, "使用结构化解析器整理手动 Gemini 返回值")
+                    structured = normalize_for_tts(
+                        raw_final,
+                        initial_text=initial_text,
+                        metadata={
+                            "workflow_task_id": workflow_task_id,
+                            "gemini_source": "manual_input",
+                            "pdf_filename": pdf.get("filename"),
+                        },
+                    )
+                elif gemini_task:
                     _clear_waiting_child(workflow_task_id, "gemini")
                     _emit(workflow_task_id, "reuse_gemini_result", 52, "复用已完成的 Gemini 子任务")
-                    _record_child(workflow_task_id, "gemini", gemini_task)
-                    _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
+                    _record_child(workflow_task_id, "gemini", gemini_task_snapshot)
+                    _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task_snapshot)})
                 elif active_gemini_task:
+                    active_gemini_snapshot = _task_state_snapshot(active_gemini_task)
+                    active_gemini_task_id = _task_id(active_gemini_snapshot)
+                    if not active_gemini_task_id:
+                        raise RuntimeError("已有 Gemini 子任务缺少任务 ID")
                     _emit(workflow_task_id, "gemini_wait_existing", 10, "继续等待已提交的研报 PDF Gem 解析子任务")
-                    _record_child(workflow_task_id, "gemini", active_gemini_task)
-                    gemini_task = _wait_child(workflow_task_id, active_gemini_task.id, "gemini", start_progress=10, end_progress=52)
-                    gemini_task_id = gemini_task.id
-                    if gemini_task.status != "completed":
+                    _record_child(workflow_task_id, "gemini", active_gemini_snapshot)
+                    gemini_task = _wait_child(workflow_task_id, active_gemini_task_id, "gemini", start_progress=10, end_progress=52)
+                    gemini_task_id = _task_id(gemini_task) or active_gemini_task_id
+                    gemini_task_snapshot = _task_state_snapshot(gemini_task)
+                    if (gemini_task_snapshot or {}).get("status") != "completed":
                         raise RuntimeError(f"Gemini 子任务失败: {_child_error_message(gemini_task)}")
                     _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
                     _queue_notification(workflow_task_id, "report_audio_gemini_completed", "研报 PDF Gem 第一轮解析和自审追问已完成")
@@ -386,36 +636,39 @@ def _process_job(task_id):
                         start_progress=10,
                         end_progress=52,
                     )
-                    gemini_task_id = gemini_task.id
+                    gemini_task_id = _task_id(gemini_task)
+                    gemini_task_snapshot = _task_state_snapshot(gemini_task)
                     _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
                     _queue_notification(workflow_task_id, "report_audio_gemini_completed", "研报 PDF Gem 第一轮解析和自审追问已完成")
 
-                gemini_result = gemini_task.result or {}
-                raw_final = (
-                    gemini_result.get("final_response_text")
-                    or gemini_result.get("response_text")
-                    or ""
-                )
-                initial_text = gemini_result.get("initial_response_text") or ""
-                if not raw_final:
-                    raise RuntimeError("Gemini 子任务没有返回 final_response_text")
-                final_chars = len(_plain_text(raw_final))
-                min_final_chars = _min_gemini_final_chars()
-                if final_chars < min_final_chars:
-                    raise RuntimeError(
-                        f"Gemini 子任务返回内容过短: {final_chars} 字，低于 {min_final_chars} 字，疑似未抓到有效研报解析结果"
+                if not manual_gemini_result:
+                    fresh_gemini_task = _load_task(gemini_task_id, *TASK_CHILD_COLUMNS) if gemini_task_id else None
+                    gemini_result = _task_result_payload(fresh_gemini_task) or _task_result_payload(gemini_task_snapshot)
+                    raw_final = (
+                        gemini_result.get("final_response_text")
+                        or gemini_result.get("response_text")
+                        or ""
                     )
+                    initial_text = gemini_result.get("initial_response_text") or ""
+                    if not raw_final:
+                        raise RuntimeError("Gemini 子任务没有返回 final_response_text")
+                    final_chars = len(_plain_text(raw_final))
+                    min_final_chars = _min_gemini_final_chars()
+                    if final_chars < min_final_chars:
+                        raise RuntimeError(
+                            f"Gemini 子任务返回内容过短: {final_chars} 字，低于 {min_final_chars} 字，疑似未抓到有效研报解析结果"
+                        )
 
-                _emit(workflow_task_id, "normalize_result", 58, "使用结构化解析器整理 Gemini 结果")
-                structured = normalize_for_tts(
-                    raw_final,
-                    initial_text=initial_text,
-                    metadata={
-                        "workflow_task_id": workflow_task_id,
-                        "gemini_task_id": gemini_task_id,
-                        "pdf_filename": pdf.get("filename"),
-                    },
-                )
+                    _emit(workflow_task_id, "normalize_result", 58, "使用结构化解析器整理 Gemini 结果")
+                    structured = normalize_for_tts(
+                        raw_final,
+                        initial_text=initial_text,
+                        metadata={
+                            "workflow_task_id": workflow_task_id,
+                            "gemini_task_id": gemini_task_id,
+                            "pdf_filename": pdf.get("filename"),
+                        },
+                    )
         chunks = split_tts_text(structured.get("final_script_for_tts") or "")
         if not chunks:
             raise RuntimeError("结构化结果没有可朗读正文")
@@ -427,7 +680,7 @@ def _process_job(task_id):
             )
 
         structured_update = {
-            "gemini": _task_public_summary(gemini_task),
+            "gemini": gemini_public_summary or _task_public_summary(gemini_task) or result.get("gemini"),
             "structured_result": structured,
             "tts_text": {
                 "chars": len(structured.get("final_script_for_tts") or ""),
@@ -504,38 +757,74 @@ def _process_job(task_id):
         publisher_task_id = None
         video_result = None
         if _video_stage_enabled(payload):
+            video_render_mode = _video_render_mode(payload)
             _emit(workflow_task_id, "render_pdf_first_page", 94, "生成 PDF 首屏截图")
             pdf_screenshot = render_pdf_first_page_image(
                 pdf_path,
                 pdf_first_page_image_path_for_job(workflow_task_id, workflow_created_at),
             )
             _update_result(workflow_task_id, {"pdf_first_page_image": pdf_screenshot})
-            current_result = _fresh_result(workflow_task_id)
-            publisher_task = _existing_child_from_result(current_result, "publisher_video")
-            if publisher_task and publisher_task.status not in {"failed", "canceled"}:
-                _emit(workflow_task_id, "publisher_video_wait_existing", 95, "继续等待已提交的视频合成子任务")
-                _record_child(workflow_task_id, "publisher_video", publisher_task)
-            else:
-                _emit(workflow_task_id, "submit_publisher_video", 95, "提交视频合成子任务")
-                publisher_task = _create_publisher_video_task(
-                    parent_ref,
-                    audio=audio,
+
+            if video_render_mode == "keyframes":
+                _emit(workflow_task_id, "generate_video_keyframes", 96, "生成视频关键帧/封皮预览，跳过 MP4 合成")
+                video_result = _generate_report_audio_keyframes(
+                    workflow_task_id,
+                    workflow_created_at,
                     structured=structured,
                     pdf=pdf,
+                    audio=audio,
                     pdf_screenshot=pdf_screenshot,
                     payload=payload,
                 )
-                _record_child(workflow_task_id, "publisher_video", publisher_task)
-            publisher_task = _wait_child(workflow_task_id, publisher_task.id, "publisher_video", start_progress=95, end_progress=99)
-            if publisher_task.status != "completed":
-                raise RuntimeError(f"视频合成子任务失败: {publisher_task.error_message or (publisher_task.result or {}).get('error')}")
-            publisher_task_id = publisher_task.id
-            video_result = _publisher_result_summary(publisher_task, pdf_screenshot)
-            _update_result(workflow_task_id, {
-                "publisher_video": _task_public_summary_by_id(publisher_task_id),
-                "video": video_result,
-            })
-            _emit(workflow_task_id, "publisher_video_done", 99, "视频合成完成")
+                _update_result(workflow_task_id, {"video": video_result})
+                _emit(workflow_task_id, "video_keyframes_done", 99, "视频关键帧预览已生成")
+            else:
+                current_result = _fresh_result(workflow_task_id)
+                publisher_task = _existing_child_from_result(current_result, "publisher_video")
+                expected_preview_seconds = (
+                    _video_preview_seconds(payload.get("video") if isinstance(payload.get("video"), dict) else {})
+                    if video_render_mode == "preview_10s"
+                    else 0
+                )
+                if publisher_task and (
+                    _publisher_child_render_mode(publisher_task) != video_render_mode
+                    or _publisher_child_preview_seconds(publisher_task) != expected_preview_seconds
+                ):
+                    publisher_task = None
+                if publisher_task and publisher_task.status not in {"failed", "canceled"}:
+                    _emit(workflow_task_id, "publisher_video_wait_existing", 95, "继续等待已提交的视频合成子任务")
+                else:
+                    step_message = "提交 10 秒短视频预览子任务" if video_render_mode == "preview_10s" else "提交视频合成子任务"
+                    _emit(workflow_task_id, "submit_publisher_video", 95, step_message)
+                    publisher_task = _create_publisher_video_task(
+                        parent_ref,
+                        audio=audio,
+                        structured=structured,
+                        pdf=pdf,
+                        pdf_screenshot=pdf_screenshot,
+                        payload=payload,
+                    )
+                publisher_task_id = _task_id(publisher_task)
+                if publisher_task_id:
+                    publisher_task = _load_task(publisher_task_id, *TASK_PUBLISHER_MATCH_COLUMNS) or publisher_task
+                publisher_task_snapshot = _task_state_snapshot(publisher_task)
+                _record_child(workflow_task_id, "publisher_video", publisher_task_snapshot)
+                publisher_task_id = _task_id(publisher_task_snapshot) or publisher_task_id
+                if not publisher_task_id:
+                    raise RuntimeError("视频合成子任务缺少任务 ID")
+                publisher_task = _wait_child(workflow_task_id, publisher_task_id, "publisher_video", start_progress=95, end_progress=99)
+                publisher_snapshot = _task_state_snapshot(publisher_task) or {}
+                if publisher_snapshot.get("status") != "completed":
+                    publisher_result = publisher_snapshot.get("result") if isinstance(publisher_snapshot.get("result"), dict) else {}
+                    raise RuntimeError(f"视频合成子任务失败: {publisher_snapshot.get('error_message') or publisher_result.get('error')}")
+                publisher_task_id = _task_id(publisher_snapshot) or publisher_task_id
+                video_result = _publisher_result_summary(publisher_task, pdf_screenshot)
+                _update_result(workflow_task_id, {
+                    "publisher_video": _task_public_summary_by_id(publisher_task_id),
+                    "video": video_result,
+                })
+                done_message = "10 秒短视频预览完成" if video_render_mode == "preview_10s" else "视频合成完成"
+                _emit(workflow_task_id, "publisher_video_done", 99, done_message)
         else:
             video_result = {"enabled": False, "status": "skipped", "message": "未勾选生成视频"}
             _update_result(workflow_task_id, {"video": video_result})
@@ -560,10 +849,8 @@ def _process_job(task_id):
 
             json.dump(final_payload, file, ensure_ascii=False, indent=2)
 
-        current = _load_task(workflow_task_id, *TASK_STATE_COLUMNS)
-        final_result = dict((current.result if current else {}) or {})
-        final_result.update({
-            "gemini": _task_public_summary_by_id(gemini_task_id) if gemini_task_id else None,
+        final_update = {
+            "gemini": _task_public_summary_by_id(gemini_task_id) if gemini_task_id else gemini_public_summary,
             "doubao_browser_tts": _task_public_summaries_by_ids(tts_task_ids),
             "publisher_video": _task_public_summary_by_id(publisher_task_id) if publisher_task_id else None,
             "structured_result": structured,
@@ -573,18 +860,55 @@ def _process_job(task_id):
             "video": video_result,
             "output_path": output_path,
             "completed_at": datetime.utcnow().isoformat() + "Z",
-        })
-        fresh = _load_task(workflow_task_id, *TASK_STATE_COLUMNS)
-        if not fresh:
-            raise RuntimeError("编排任务不存在")
-        fresh.status = "completed"
-        fresh.current_step = "done"
-        fresh.progress = 100
-        fresh.completed_at = datetime.utcnow()
-        fresh.error_message = None
-        fresh.result = final_result
-        flag_modified(fresh, "result")
+        }
+        current_result = _fresh_result(workflow_task_id)
+        final_update["gemini"] = final_update["gemini"] or current_result.get("gemini")
+        _update_result(workflow_task_id, final_update)
+        completed_at = datetime.utcnow()
+        video_payload = video_result if isinstance(video_result, dict) else {}
+        audio_payload = audio if isinstance(audio, dict) else {}
+        structured_payload = structured if isinstance(structured, dict) else {}
+        updated = (
+            PublicationTask.query
+            .filter(PublicationTask.id == str(workflow_task_id), PublicationTask.status != "canceled")
+            .update(
+                {
+                    PublicationTask.status: "completed",
+                    PublicationTask.current_step: "done",
+                    PublicationTask.progress: 100,
+                    PublicationTask.completed_at: completed_at,
+                    PublicationTask.error_message: None,
+                    PublicationTask.report_audio_completed_at: final_update["completed_at"],
+                    PublicationTask.report_audio_output_path: output_path,
+                    PublicationTask.report_audio_wav_path: audio_payload.get("wav_path"),
+                    PublicationTask.report_audio_seconds: str(audio_payload.get("seconds")) if audio_payload.get("seconds") is not None else None,
+                    PublicationTask.report_audio_audio_bytes: str(audio_payload.get("bytes")) if audio_payload.get("bytes") is not None else None,
+                    PublicationTask.report_audio_video_enabled: _truthy(video_payload.get("enabled"), False),
+                    PublicationTask.report_audio_video_status: video_payload.get("status"),
+                    PublicationTask.report_audio_video_publisher_task_id: video_payload.get("publisher_task_id"),
+                    PublicationTask.report_audio_video_message: video_payload.get("message"),
+                    PublicationTask.report_audio_video_path: video_payload.get("video_path"),
+                    PublicationTask.report_audio_cover_path: video_payload.get("cover_path"),
+                    PublicationTask.report_audio_cover_title: structured_payload.get("cover_title"),
+                    PublicationTask.report_audio_cover_subtitle: structured_payload.get("cover_subtitle") or video_payload.get("cover_subtitle"),
+                    PublicationTask.report_audio_structured_title: structured_payload.get("title"),
+                    PublicationTask.final_script_chars: len(str(structured_payload.get("final_script_for_tts") or "")),
+                    PublicationTask.updated_at: completed_at,
+                },
+                synchronize_session=False,
+            )
+        )
+        if not updated:
+            raise RuntimeError("编排任务不存在或已取消")
         db.session.commit()
+        _merge_cached_workflow_fields(
+            workflow_task_id,
+            status="completed",
+            current_step="done",
+            progress=100,
+            completed_at=completed_at,
+            error_message=None,
+        )
         _queue_notification(workflow_task_id, "report_audio_completed", "研报转语音编排完成，最终 WAV 和 JSON 已生成")
         logger.info("Report audio workflow completed: %s", task_id)
         return True
@@ -595,6 +919,9 @@ def _process_job(task_id):
         return True
     except Exception as exc:
         db.session.rollback()
+        if _is_retryable_db_error(exc):
+            release_db_session_quietly()
+            raise
         task = _load_task(task_id, *TASK_STATE_COLUMNS)
         notification_queued = False
         if task:
@@ -630,38 +957,48 @@ def _run_gemini_task_with_retries(parent, *, pdf, pdf_path, prompt, followups, p
             attempt=attempt,
             max_attempts=max_attempts,
         )
-        last_task = gemini_task
-        _record_child(parent.id, "gemini", gemini_task)
-        _record_child_attempt(parent.id, "gemini", gemini_task, attempt, max_attempts, "running")
+        gemini_task_id = _task_id(gemini_task)
+        if not gemini_task_id:
+            raise RuntimeError("Gemini 子任务缺少任务 ID")
+        gemini_task_snapshot = _task_state_snapshot(gemini_task)
+        last_task = gemini_task_snapshot
+        _record_child(parent.id, "gemini", gemini_task_snapshot)
+        _record_child_attempt(parent.id, "gemini", gemini_task_snapshot, attempt, max_attempts, "running")
 
         try:
             gemini_task = _wait_child(
                 parent.id,
-                gemini_task.id,
+                gemini_task_id,
                 "gemini",
                 start_progress=start_progress,
                 end_progress=end_progress,
             )
         except ChildTaskStillRunning:
-            _record_child(parent.id, "gemini", _load_task(gemini_task.id, *TASK_CHILD_COLUMNS) or gemini_task)
+            latest = _load_task(gemini_task_id, *TASK_CHILD_COLUMNS)
+            _record_child(parent.id, "gemini", _task_state_snapshot(latest) or gemini_task_snapshot)
             raise
         except Exception as exc:
+            if _is_retryable_db_error(exc):
+                raise
             last_error = str(exc)
-            latest = _load_task(gemini_task.id, *TASK_CHILD_COLUMNS) or gemini_task
-            if latest and latest.status not in TERMINAL_STATUSES:
+            latest = _load_task(gemini_task_id, *TASK_CHILD_COLUMNS)
+            latest_snapshot = _task_state_snapshot(latest) or gemini_task_snapshot
+            if latest and latest_snapshot and latest_snapshot.get("status") not in TERMINAL_STATUSES:
                 _revoke_child_task(latest)
                 _mark_child_failed(latest, last_error)
-                latest = _load_task(latest.id, *TASK_CHILD_COLUMNS) or latest
-            last_task = latest
-            _record_child_attempt(parent.id, "gemini", latest, attempt, max_attempts, "failed", error=last_error)
+                latest = _load_task(gemini_task_id, *TASK_CHILD_COLUMNS)
+                latest_snapshot = _task_state_snapshot(latest) or dict(latest_snapshot, status="failed", error=last_error)
+            last_task = latest_snapshot
+            _record_child_attempt(parent.id, "gemini", latest_snapshot, attempt, max_attempts, "failed", error=last_error)
         else:
-            last_task = gemini_task
-            _record_child(parent.id, "gemini", gemini_task)
-            if gemini_task.status == "completed":
-                _record_child_attempt(parent.id, "gemini", gemini_task, attempt, max_attempts, "completed")
-                return gemini_task
-            last_error = _child_error_message(gemini_task)
-            _record_child_attempt(parent.id, "gemini", gemini_task, attempt, max_attempts, "failed", error=last_error)
+            gemini_task_snapshot = _task_state_snapshot(gemini_task)
+            last_task = gemini_task_snapshot
+            _record_child(parent.id, "gemini", gemini_task_snapshot)
+            if gemini_task_snapshot and gemini_task_snapshot.get("status") == "completed":
+                _record_child_attempt(parent.id, "gemini", gemini_task_snapshot, attempt, max_attempts, "completed")
+                return gemini_task_snapshot
+            last_error = _child_error_message(gemini_task_snapshot)
+            _record_child_attempt(parent.id, "gemini", gemini_task_snapshot, attempt, max_attempts, "failed", error=last_error)
 
         if attempt < max_attempts and _is_retryable_child_error("gemini", last_error):
             _emit(
@@ -724,6 +1061,56 @@ def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload, *, at
     return _load_task(child_id, *TASK_CHILD_COLUMNS)
 
 
+def _manual_gemini_payload(payload):
+    manual = (payload or {}).get("manual_gemini")
+    if not manual:
+        return None
+    if isinstance(manual, str):
+        final_text = manual.strip()
+        initial_text = ""
+        provided_at = None
+    elif isinstance(manual, dict):
+        final_text = str(
+            manual.get("final_response_text")
+            or manual.get("response_text")
+            or manual.get("text")
+            or manual.get("content")
+            or ""
+        ).strip()
+        initial_text = str(manual.get("initial_response_text") or manual.get("initial_text") or "").strip()
+        provided_at = manual.get("provided_at")
+    else:
+        return None
+    if not final_text:
+        return None
+    return {
+        "source": "manual_input",
+        "initial_response_text": initial_text,
+        "final_response_text": final_text,
+        "chars": len(final_text),
+        "provided_at": provided_at or datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def _manual_gemini_public_summary(manual):
+    if not manual:
+        return None
+    return {
+        "job_id": "manual-gemini",
+        "celery_id": None,
+        "status": "completed",
+        "step": "manual_input",
+        "progress": 100,
+        "error": None,
+        "metadata": {
+            "source": "manual_input",
+            "chars": int(manual.get("chars") or len(manual.get("final_response_text") or "")),
+        },
+        "created_at": manual.get("provided_at"),
+        "completed_at": manual.get("provided_at"),
+    }
+
+
 def _valid_structured_result(result):
     structured = result.get("structured_result") if isinstance(result, dict) else None
     if not isinstance(structured, dict):
@@ -778,8 +1165,9 @@ def _reusable_material_for_pdf(pdf, *, exclude_task_id=None):
         key=lambda item: (item.completed_at or item.created_at or datetime.min, item.created_at or datetime.min),
         reverse=True,
     )
+    details = _load_task_results(candidate.id for candidate in candidates)
     for candidate in candidates:
-        detail = _load_task(candidate.id, PublicationTask.result)
+        detail = details.get(candidate.id)
         structured = _valid_structured_result(detail.result if detail else None)
         if structured:
             return {
@@ -847,8 +1235,9 @@ def _reusable_audio_for_pdf(pdf, structured, *, exclude_task_id=None):
         key=lambda item: (item.completed_at or item.created_at or datetime.min, item.created_at or datetime.min),
         reverse=True,
     )
+    details = _load_task_results(candidate.id for candidate in candidates)
     for candidate in candidates:
-        detail = _load_task(candidate.id, PublicationTask.result)
+        detail = details.get(candidate.id)
         if not detail:
             continue
         audio = _valid_reusable_audio(detail, expected_script)
@@ -896,15 +1285,18 @@ def _completed_gemini_task(parent_id, result):
         task = _load_task(candidate_id, *TASK_CHILD_COLUMNS)
         if task and task.status == "completed" and _valid_gemini_task_result(task.result):
             return task
-    candidates = PublicationTask.query.filter(
-        PublicationTask.feature == gemini_service.FEATURE_NAME,
-        PublicationTask.parent_task_id == parent_id,
-        PublicationTask.status == "completed",
-    ).options(load_only(*TASK_CHILD_COLUMNS)).order_by(PublicationTask.created_at.desc()).limit(10).all()
-    for task in candidates:
-        if _valid_gemini_task_result(task.result):
-            return task
-    return None
+    candidate = (
+        db.session.query(PublicationTask.id)
+        .filter(
+            PublicationTask.feature == gemini_service.FEATURE_NAME,
+            PublicationTask.parent_task_id == parent_id,
+            PublicationTask.status == "completed",
+            PublicationTask.gemini_response_chars >= _min_gemini_final_chars(),
+        )
+        .order_by(PublicationTask.created_at.desc())
+        .first()
+    )
+    return _load_task(candidate.id, *TASK_CHILD_COLUMNS) if candidate else None
 
 
 def _active_gemini_task(parent_id, result):
@@ -917,12 +1309,16 @@ def _active_gemini_task(parent_id, result):
         task = _load_task(candidate_id, *TASK_CHILD_COLUMNS)
         if task and task.status not in TERMINAL_STATUSES and task.feature == gemini_service.FEATURE_NAME:
             return task
-    candidates = PublicationTask.query.filter(
-        PublicationTask.feature == gemini_service.FEATURE_NAME,
-        PublicationTask.parent_task_id == parent_id,
-        PublicationTask.status.notin_(list(TERMINAL_STATUSES)),
-    ).options(load_only(*TASK_CHILD_COLUMNS)).order_by(PublicationTask.created_at.desc()).limit(10).all()
-    return candidates[0] if candidates else None
+    return (
+        PublicationTask.query.filter(
+            PublicationTask.feature == gemini_service.FEATURE_NAME,
+            PublicationTask.parent_task_id == parent_id,
+            PublicationTask.status.notin_(list(TERMINAL_STATUSES)),
+        )
+        .options(load_only(*TASK_CHILD_POLL_COLUMNS))
+        .order_by(PublicationTask.created_at.desc())
+        .first()
+    )
 
 
 def _valid_gemini_task_result(result):
@@ -1022,6 +1418,9 @@ def _complete_script_material_task(
 
 
 def _fresh_result(parent_id):
+    cached = _cached_workflow_result(parent_id)
+    if cached is not None:
+        return cached
     fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
     return dict(fresh.result or {}) if fresh and isinstance(fresh.result, dict) else {}
 
@@ -1030,7 +1429,8 @@ def _existing_child_from_result(result, label):
     child_id = _child_id_from_result(result, label)
     if not child_id:
         return None
-    return _load_task(child_id, *TASK_CHILD_COLUMNS)
+    columns = TASK_PUBLISHER_MATCH_COLUMNS if label == "publisher_video" else TASK_CHILD_POLL_COLUMNS
+    return _load_task(child_id, *columns)
 
 
 def _child_id_from_result(result, label):
@@ -1196,7 +1596,11 @@ def _ordered_doubao_tts_outputs(parent_id, chunks, completed_by_index):
         task = completed_by_index.get(index)
         if not task:
             raise RuntimeError(f"豆包浏览器朗读缺少第 {index}/{len(chunks)} 段")
-        if _plain_text(_task_tts_text(task)) != _plain_text(chunk):
+        expected_hash = _tts_text_hash(chunk)
+        task_hash = _task_tts_text_hash(task)
+        if task_hash and task_hash != expected_hash:
+            raise RuntimeError(f"豆包浏览器朗读第 {index}/{len(chunks)} 段文本校验失败")
+        if not task_hash and _plain_text(_task_tts_text(task)) != _plain_text(chunk):
             raise RuntimeError(f"豆包浏览器朗读第 {index}/{len(chunks)} 段文本校验失败")
         wav_path = _task_audio_wav_path(task)
         if not wav_path or not os.path.exists(wav_path):
@@ -1221,15 +1625,18 @@ def _ordered_doubao_tts_outputs(parent_id, chunks, completed_by_index):
 
 
 def _completed_tts_task_for_chunk(parent_id, chunk_index, expected_text):
+    expected_hash = _tts_text_hash(expected_text)
     candidates = PublicationTask.query.filter(
         PublicationTask.feature == doubao_service.FEATURE_NAME,
         PublicationTask.parent_task_id == parent_id,
         PublicationTask.status == "completed",
-    ).options(load_only(*TASK_CHILD_COLUMNS)).order_by(PublicationTask.created_at.asc()).all()
+        PublicationTask.doubao_tts_chunk_index == int(chunk_index),
+        PublicationTask.doubao_tts_text_hash == expected_hash,
+    ).options(load_only(*TASK_TTS_MATCH_COLUMNS)).order_by(PublicationTask.created_at.asc()).limit(20).all()
     for candidate in candidates:
         if _task_chunk_index(candidate) != chunk_index:
             continue
-        if _plain_text(_task_tts_text(candidate)) != _plain_text(expected_text):
+        if _task_tts_text_hash(candidate) != expected_hash:
             continue
         wav_path = _task_audio_wav_path(candidate)
         if wav_path and os.path.exists(wav_path):
@@ -1239,21 +1646,20 @@ def _completed_tts_task_for_chunk(parent_id, chunk_index, expected_text):
 
 def _completed_tts_task_for_text(expected_text):
     expected_hash = _tts_text_hash(expected_text)
-    scan_limit = max(20, min(_int_env("REPORT_AUDIO_DOUBAO_CACHE_SCAN_LIMIT", 500), 2000))
+    match_limit = max(1, min(_int_env("REPORT_AUDIO_DOUBAO_CACHE_MATCH_LIMIT", 20), 100))
     candidates = (
         PublicationTask.query.filter(
             PublicationTask.feature == doubao_service.FEATURE_NAME,
             PublicationTask.status == "completed",
+            PublicationTask.doubao_tts_text_hash == expected_hash,
         )
-        .options(load_only(*TASK_CHILD_COLUMNS))
+        .options(load_only(*TASK_TTS_MATCH_COLUMNS))
         .order_by(PublicationTask.created_at.desc())
-        .limit(scan_limit)
+        .limit(match_limit)
         .all()
     )
     for candidate in candidates:
         if _task_tts_text_hash(candidate) and _task_tts_text_hash(candidate) != expected_hash:
-            continue
-        if _plain_text(_task_tts_text(candidate)) != _plain_text(expected_text):
             continue
         wav_path = _task_audio_wav_path(candidate)
         if wav_path and os.path.exists(wav_path):
@@ -1262,15 +1668,18 @@ def _completed_tts_task_for_text(expected_text):
 
 
 def _active_tts_task_for_chunk(parent_id, chunk_index, expected_text):
+    expected_hash = _tts_text_hash(expected_text)
     candidates = PublicationTask.query.filter(
         PublicationTask.feature == doubao_service.FEATURE_NAME,
         PublicationTask.parent_task_id == parent_id,
         PublicationTask.status.notin_(list(TERMINAL_STATUSES)),
-    ).options(load_only(*TASK_CHILD_COLUMNS)).order_by(PublicationTask.created_at.desc()).limit(50).all()
+        PublicationTask.doubao_tts_chunk_index == int(chunk_index),
+        PublicationTask.doubao_tts_text_hash == expected_hash,
+    ).options(load_only(*TASK_TTS_MATCH_COLUMNS)).order_by(PublicationTask.created_at.desc()).limit(20).all()
     for candidate in candidates:
         if _task_chunk_index(candidate) != chunk_index:
             continue
-        if _plain_text(_task_tts_text(candidate)) != _plain_text(expected_text):
+        if _task_tts_text_hash(candidate) != expected_hash:
             continue
         if _mark_stale_doubao_child_if_needed(candidate):
             continue
@@ -1286,11 +1695,12 @@ def _mark_stale_doubao_child_if_needed(child):
 
 
 def _is_stale_doubao_child(child):
-    if not child or child.status in TERMINAL_STATUSES:
+    status = _safe_task_attr(child, "status")
+    if not child or status in TERMINAL_STATUSES:
         return False
-    if getattr(child, "feature", None) != doubao_service.FEATURE_NAME:
+    if _safe_task_attr(child, "feature") != doubao_service.FEATURE_NAME:
         return False
-    updated_at = getattr(child, "updated_at", None)
+    updated_at = _safe_task_attr(child, "updated_at")
     if not updated_at:
         return False
     if updated_at.tzinfo:
@@ -1300,7 +1710,7 @@ def _is_stale_doubao_child(child):
 
 def _doubao_stale_child_message(child):
     stale_seconds = _doubao_child_stale_seconds()
-    updated_at = getattr(child, "updated_at", None)
+    updated_at = _safe_task_attr(child, "updated_at")
     updated_text = updated_at.isoformat() if updated_at else "-"
     return f"豆包浏览器朗读子任务超过 {stale_seconds}s 未更新，判定为 stale 并释放重试；last_updated={updated_text}"
 
@@ -1312,18 +1722,21 @@ def _doubao_child_stale_seconds():
 
 def _failed_tts_tasks_for_chunk(parent_id, chunk_index, expected_text, *, since=None):
     cutoff = _parse_utc_datetime(since)
+    expected_hash = _tts_text_hash(expected_text)
     candidates = PublicationTask.query.filter(
         PublicationTask.feature == doubao_service.FEATURE_NAME,
         PublicationTask.parent_task_id == parent_id,
         PublicationTask.status.in_(["failed", "blocked_by_captcha"]),
-    ).options(load_only(*TASK_CHILD_COLUMNS)).order_by(PublicationTask.created_at.asc()).all()
+        PublicationTask.doubao_tts_chunk_index == int(chunk_index),
+        PublicationTask.doubao_tts_text_hash == expected_hash,
+    ).options(load_only(*TASK_TTS_MATCH_COLUMNS)).order_by(PublicationTask.created_at.asc()).limit(20).all()
     matched = []
     for candidate in candidates:
         if cutoff and candidate.created_at and candidate.created_at < cutoff:
             continue
         if _task_chunk_index(candidate) != chunk_index:
             continue
-        if _plain_text(_task_tts_text(candidate)) != _plain_text(expected_text):
+        if _task_tts_text_hash(candidate) != expected_hash:
             continue
         matched.append(candidate)
     return matched
@@ -1343,6 +1756,14 @@ def _parse_utc_datetime(value):
 
 
 def _task_chunk_index(task):
+    projected = _safe_task_attr(task, "doubao_tts_chunk_index")
+    if isinstance(projected, (int, float, str)) and str(projected).strip():
+        try:
+            parsed = int(float(projected or 0))
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
     metadata = _task_doubao_metadata(task)
     try:
         return int(metadata.get("chunk_index") or 0)
@@ -1351,6 +1772,14 @@ def _task_chunk_index(task):
 
 
 def _task_chunk_attempt(task):
+    projected = _safe_task_attr(task, "doubao_tts_chunk_attempt")
+    if isinstance(projected, (int, float, str)) and str(projected).strip():
+        try:
+            parsed = int(float(projected or 0))
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
     metadata = _task_doubao_metadata(task)
     try:
         return int(metadata.get("chunk_attempt") or 0)
@@ -1359,18 +1788,36 @@ def _task_chunk_attempt(task):
 
 
 def _task_tts_text_hash(task):
+    projected = _safe_task_attr(task, "doubao_tts_text_hash")
+    if isinstance(projected, str) and projected.strip():
+        return projected.strip()
     metadata = _task_doubao_metadata(task)
     return str(metadata.get("text_hash") or "").strip()
 
 
 def _task_audio_wav_path(task):
+    projected = _safe_task_attr(task, "doubao_tts_wav_path")
+    if isinstance(projected, str) and projected.strip():
+        return projected
     result = _task_result_payload(task)
+    if not result and not isinstance(task, dict):
+        try:
+            raw_result = task.result
+            result = raw_result if isinstance(raw_result, dict) else {}
+        except Exception:
+            result = {}
     audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
     return audio.get("wav_path") or result.get("wav_path")
 
 
 def _task_tts_text(task):
     params = _task_params_payload(task)
+    if not params and not isinstance(task, dict):
+        try:
+            raw_params = task.params
+            params = raw_params if isinstance(raw_params, dict) else {}
+        except Exception:
+            params = {}
     doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
     return str(doubao_payload.get("text") or "")
 
@@ -1443,11 +1890,18 @@ def _doubao_queue_name():
 
 
 def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screenshot, payload):
-    existing = _find_existing_publisher_video_task(parent.id, pdf_screenshot)
+    video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+    render_mode = _video_render_mode(payload)
+    preview_seconds = _video_preview_seconds(video_options) if render_mode == "preview_10s" else 0
+    existing = _find_existing_publisher_video_task(parent.id, pdf_screenshot, render_mode=render_mode, preview_seconds=preview_seconds)
     if existing:
         return existing
 
-    video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+    try:
+        audio_seconds = float((audio or {}).get("seconds") or 0)
+    except (TypeError, ValueError):
+        audio_seconds = 0
+    preview_end_offset = max(0.0, audio_seconds - preview_seconds) if preview_seconds > 0 and audio_seconds > preview_seconds else 0.0
     vertical_scheme = str(
         video_options.get("vertical_video_scheme")
         or video_options.get("vertical_scheme")
@@ -1499,7 +1953,7 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
                 "path": audio_path,
                 "subtitle": _publisher_script_subtitles(structured, audio),
                 "start": 0,
-                "end_offset": 0,
+                "end_offset": preview_end_offset,
                 "speed": 1.0,
             }
         ],
@@ -1511,7 +1965,7 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "audio_path": audio_path,
             "image_path": screenshot_path,
             "audio_start": 0,
-            "audio_end_offset": 0,
+            "audio_end_offset": preview_end_offset,
             "transform": _publisher_video_transform(video_options),
             "cta": _publisher_cta(video_options),
         },
@@ -1521,6 +1975,7 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "image_path": screenshot_path,
             "subtitles": [],
             "scheme": vertical_scheme,
+            **({"preview_seconds": preview_seconds} if preview_seconds > 0 else {}),
             **({"subtitle_position": vertical_subtitle_position} if vertical_subtitle_position else {}),
             **({"subtitle_style": vertical_subtitle_style} if vertical_subtitle_style else {}),
         },
@@ -1576,6 +2031,24 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
                 **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
             },
         },
+        "bilibili_cover": {
+            "enabled": _truthy(video_options.get("vertical_enabled", False)) and vertical_scheme == "scheme2",
+            "scheme": vertical_scheme,
+            "format": "bilibili_wx_cover",
+            "main_title": main_title,
+            "sub_title": sub_title,
+            "screenshot_path": screenshot_path,
+            "institution": _publisher_workbench_institution(structured, pdf, video_options),
+            "emotion": "bull",
+            "footer_text": str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
+            "show_footer": False,
+            "image_transform": {
+                "anchor": "top-left",
+                "title_max_lines": 2,
+                "subtitle_max_lines": 1,
+                **(video_options.get("bilibili_cover_image_transform") if isinstance(video_options.get("bilibili_cover_image_transform"), dict) else {}),
+            },
+        },
         "thumbnail": {
             "main_title": main_title,
             "sub_title": sub_title,
@@ -1606,6 +2079,8 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "source": FEATURE_NAME,
             "parent_task_id": parent.id,
             "pdf": pdf,
+            "render_mode": render_mode,
+            "preview_seconds": preview_seconds,
         },
     }
 
@@ -1620,6 +2095,9 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "pdf_first_page_image": pdf_screenshot,
             "video_path": None,
             "cover_path": None,
+            "bilibili_cover_path": None,
+            "render_mode": render_mode,
+            "preview_seconds": preview_seconds,
         },
     )
     db.session.add(child)
@@ -1633,12 +2111,12 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
     return _load_task(child_id, *TASK_CHILD_COLUMNS)
 
 
-def _find_existing_publisher_video_task(parent_id, pdf_screenshot):
+def _find_existing_publisher_video_task(parent_id, pdf_screenshot, *, render_mode="full_video", preview_seconds=0):
     candidates = (
         PublicationTask.query
         .filter(PublicationTask.feature == "publisher")
         .filter(PublicationTask.source_task_id == parent_id)
-        .options(load_only(*TASK_CHILD_COLUMNS))
+        .options(load_only(*TASK_PUBLISHER_MATCH_COLUMNS))
         .order_by(PublicationTask.created_at.desc())
         .limit(30)
         .all()
@@ -1646,12 +2124,20 @@ def _find_existing_publisher_video_task(parent_id, pdf_screenshot):
     if not candidates:
         return None
 
-    for task in candidates:
+    matching = [
+        task for task in candidates
+        if _publisher_child_render_mode(task) == render_mode
+        and _publisher_child_preview_seconds(task) == int(preview_seconds or 0)
+    ]
+    if not matching:
+        return None
+
+    for task in matching:
         if task.status == "completed" and _publisher_video_output_ready(task, pdf_screenshot):
-            _cancel_duplicate_publisher_tasks(candidates, keep_id=task.id)
+            _cancel_duplicate_publisher_tasks(matching, keep_id=task.id)
             return task
 
-    active = [task for task in candidates if task.status not in TERMINAL_STATUSES]
+    active = [task for task in matching if task.status not in TERMINAL_STATUSES]
     if active:
         keep = active[0]
         _cancel_duplicate_publisher_tasks(active[1:], keep_id=keep.id)
@@ -1659,9 +2145,44 @@ def _find_existing_publisher_video_task(parent_id, pdf_screenshot):
     return None
 
 
+def _publisher_child_render_mode(task):
+    projected = _safe_task_attr(task, "publisher_render_mode")
+    if projected:
+        return str(projected)
+    result = _copy_dict(_safe_task_attr(task, "result"))
+    params = _copy_dict(_safe_task_attr(task, "params"))
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if not metadata:
+        metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    raw = metadata.get("render_mode") or result.get("render_mode") or params.get("render_mode") or "full_video"
+    return "preview_10s" if str(raw).strip().lower() in {"preview", "preview_10s", "short", "short_video"} else "full_video"
+
+
+def _publisher_child_preview_seconds(task):
+    projected = _safe_task_attr(task, "publisher_preview_seconds")
+    if projected is not None:
+        return int(projected or 0)
+    result = _copy_dict(_safe_task_attr(task, "result"))
+    params = _copy_dict(_safe_task_attr(task, "params"))
+    vertical = params.get("vertical_video") if isinstance(params.get("vertical_video"), dict) else {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if not metadata:
+        metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    raw = metadata.get("preview_seconds") or result.get("preview_seconds") or vertical.get("preview_seconds") or 0
+    try:
+        return int(float(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _publisher_video_output_ready(task, pdf_screenshot):
     summary = _publisher_result_summary(task, pdf_screenshot)
-    path = summary.get("video_path") or summary.get("landscape_video_path") or summary.get("vertical_video_path")
+    path = (
+        summary.get("video_path")
+        or summary.get("landscape_video_path")
+        or summary.get("vertical_video_path")
+        or summary.get("vertical_preview_video_path")
+    )
     return bool(path and os.path.exists(path))
 
 
@@ -1698,40 +2219,51 @@ def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
         child = _load_task(child_id, *TASK_CHILD_POLL_COLUMNS)
         if not child:
             raise RuntimeError(f"子任务不存在: {child_id}")
-        if child.current_step != last_step:
-            last_step = child.current_step
-            child_progress = int(child.progress or 0)
+        child_snapshot = _task_state_snapshot(child) or {}
+        child_step = str(child_snapshot.get("current_step") or child_snapshot.get("step") or "")
+        child_status = str(child_snapshot.get("status") or "")
+        if child_step != last_step:
+            last_step = child_step
+            child_progress = int(child_snapshot.get("progress") or 0)
             mapped = start_progress + int((end_progress - start_progress) * child_progress / 100)
-            _emit(parent_id, f"{label}_{child.current_step}", mapped, f"{label}: {child.current_step}")
-            _record_child(parent_id, label, child)
-        if child.status in TERMINAL_STATUSES:
+            _emit(parent_id, f"{label}_{child_step}", mapped, f"{label}: {child_step}")
+            _record_child(parent_id, label, child_snapshot)
+        if child_status in TERMINAL_STATUSES:
             completed_child = _load_task(child_id, *TASK_CHILD_COLUMNS) or child
-            _record_child(parent_id, label, completed_child)
+            completed_snapshot = _task_state_snapshot(completed_child)
+            _record_child(parent_id, label, completed_snapshot)
             _clear_waiting_child(parent_id, label)
-            return completed_child
-        celery_failure = _celery_child_failure_message(child)
+            return _load_task(child_id, *TASK_CHILD_COLUMNS) or completed_snapshot
+        celery_failure = _celery_child_failure_message(child_snapshot)
         if celery_failure:
             failed_child = _load_task(child_id, *TASK_STATE_COLUMNS) or child
             _mark_child_failed(failed_child, celery_failure)
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_CHILD_COLUMNS)
-        if _is_doubao_child_label(label) and _is_stale_doubao_child(child):
+        if _is_doubao_child_label(label) and _is_stale_doubao_child(child_snapshot):
             stale_child = _load_task(child_id, *TASK_STATE_COLUMNS) or child
             _mark_stale_doubao_child_if_needed(stale_child)
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_CHILD_COLUMNS)
         if label == "publisher_video":
+            child = _load_task(child_id, *TASK_CHILD_POLL_COLUMNS) or child
             child, requeued = maybe_requeue_stale_publisher_child(child, log=logger)
             if requeued:
                 _emit(parent_id, "publisher_video_requeued", start_progress, "重新入队视频合成子任务")
                 _record_child(parent_id, label, child)
                 last_step = None
         if time.monotonic() >= deadline:
-            waiting_child = _load_task(child_id, *TASK_CHILD_COLUMNS) or child
-            _record_child(parent_id, label, waiting_child)
-            raise ChildTaskStillRunning(label, _task_id(waiting_child) or child_id, _safe_task_attr(waiting_child, "status") or "", _safe_task_attr(waiting_child, "current_step") or "")
+            waiting_child = _load_task(child_id, *TASK_CHILD_POLL_COLUMNS) or child
+            waiting_snapshot = _task_state_snapshot(waiting_child)
+            _record_child(parent_id, label, waiting_snapshot)
+            raise ChildTaskStillRunning(
+                label,
+                _task_id(waiting_snapshot) or child_id,
+                str((waiting_snapshot or {}).get("status") or ""),
+                str((waiting_snapshot or {}).get("current_step") or (waiting_snapshot or {}).get("step") or ""),
+            )
         release_db_session_quietly()
         sleep_seconds = min(poll_seconds, max(0.2, deadline - time.monotonic()))
         time.sleep(sleep_seconds)
@@ -1768,11 +2300,13 @@ def _is_doubao_child_label(label):
 def _defer_parent_retry(parent_id, exc):
     delay = _parent_retry_delay_seconds(exc.label)
     max_defers = _parent_max_defers(exc.label)
-    fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
+    fresh = _cached_workflow_task(parent_id)
+    if fresh is None:
+        fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
     if not fresh or fresh.status == "canceled":
         return
 
-    result = dict(fresh.result or {})
+    result = _fresh_result(parent_id)
     deferred_waits = dict(result.get("deferred_waits") or {})
     state = dict(deferred_waits.get(exc.label) or {})
     count = int(state.get("defer_count") or state.get("count") or 0) + 1
@@ -1792,13 +2326,63 @@ def _defer_parent_retry(parent_id, exc):
     deferred_waits[exc.label] = waiting_child
     result["waiting_child"] = waiting_child
     result["deferred_waits"] = deferred_waits
-    fresh.status = "processing"
-    fresh.current_step = _current_step_code(f"{exc.label}_waiting")
-    fresh.progress = max(int(fresh.progress or 0), 95 if exc.label == "publisher_video" else int(fresh.progress or 0))
-    fresh.error_message = None
-    fresh.result = result
-    flag_modified(fresh, "result")
-    db.session.commit()
+    step_code = _current_step_code(f"{exc.label}_waiting")
+    progress_value = max(int(fresh.progress or 0), 95 if exc.label == "publisher_video" else int(fresh.progress or 0))
+    if _is_postgresql_session():
+        _execute_parent_update(
+            """
+            UPDATE public.publication_tasks
+            SET status = 'processing',
+                current_step = :step,
+                progress = :progress,
+                error_message = NULL,
+                result = COALESCE(result, '{}'::jsonb) || CAST(:patch AS jsonb),
+                waiting_child_label = :waiting_label,
+                waiting_child_id = :waiting_id,
+                waiting_child_status = :waiting_status,
+                waiting_child_step = :waiting_step,
+                waiting_child_updated_at = :waiting_updated_at,
+                updated_at = NOW()
+            WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+            """,
+            {
+                "task_id": str(parent_id),
+                "step": step_code,
+                "progress": progress_value,
+                "patch": json.dumps({
+                    "waiting_child": waiting_child,
+                    "deferred_waits": deferred_waits,
+                }, ensure_ascii=False),
+                "waiting_label": str(exc.label),
+                "waiting_id": str(exc.child_id),
+                "waiting_status": str(exc.status or "") or None,
+                "waiting_step": str(exc.step or "") or None,
+                "waiting_updated_at": waiting_child["updated_at"],
+            },
+            f"defer parent {parent_id}:{exc.label}",
+        )
+    else:
+        _persist_parent_result_fallback(
+            parent_id,
+            result,
+            status="processing",
+            current_step=step_code,
+            progress=progress_value,
+            error_message=None,
+            waiting_child_label=str(exc.label),
+            waiting_child_id=str(exc.child_id),
+            waiting_child_status=str(exc.status or "") or None,
+            waiting_child_step=str(exc.step or "") or None,
+            waiting_child_updated_at=waiting_child["updated_at"],
+        )
+    _replace_cached_workflow_result(parent_id, result)
+    _merge_cached_workflow_fields(
+        parent_id,
+        status="processing",
+        current_step=step_code,
+        progress=progress_value,
+        error_message=None,
+    )
 
     celery_app.send_task(
         "tasks.report_audio_workflow.process_job",
@@ -1809,28 +2393,46 @@ def _defer_parent_retry(parent_id, exc):
 
 
 def _clear_waiting_child(parent_id, label):
-    fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
-    if not fresh or not isinstance(fresh.result, dict):
-        return
-    result = dict(fresh.result or {})
+    result = _cached_workflow_result(parent_id)
+    if result is None:
+        fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
+        if not fresh or not isinstance(fresh.result, dict):
+            return
+        result = dict(fresh.result or {})
     waiting_child = result.get("waiting_child")
     if not isinstance(waiting_child, dict) or waiting_child.get("label") != label:
         return
     result.pop("waiting_child", None)
-    fresh.result = result
-    flag_modified(fresh, "result")
-    db.session.commit()
+    if _is_postgresql_session():
+        _execute_parent_update(
+            """
+            UPDATE public.publication_tasks
+            SET result = COALESCE(result, '{}'::jsonb) - 'waiting_child',
+                waiting_child_label = NULL,
+                waiting_child_id = NULL,
+                waiting_child_status = NULL,
+                waiting_child_step = NULL,
+                waiting_child_updated_at = NULL,
+                updated_at = NOW()
+            WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+            """,
+            {"task_id": str(parent_id)},
+            f"clear waiting child {parent_id}:{label}",
+        )
+    else:
+        _persist_parent_result_fallback(parent_id, result)
+    _replace_cached_workflow_result(parent_id, result)
 
 
 def _celery_child_failure_message(child):
-    celery_task_id = getattr(child, "celery_task_id", None)
+    celery_task_id = _safe_task_attr(child, "celery_task_id") or _safe_task_attr(child, "celery_id")
     if not celery_task_id:
         return None
     try:
         async_result = celery_app.AsyncResult(celery_task_id)
         state = async_result.state
     except Exception as exc:
-        logger.warning("读取 Celery 子任务状态失败: child=%s error=%s", child.id, exc)
+        logger.warning("读取 Celery 子任务状态失败: child=%s error=%s", _task_id(child), exc)
         return None
     if state not in CELERY_FAILURE_STATES:
         return None
@@ -1859,24 +2461,40 @@ def _mark_child_failed(child, message):
 
 
 def _record_child(parent_id, label, child):
-    fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
-    if not fresh:
-        return
-    result = dict(fresh.result or {})
+    result = _fresh_result(parent_id)
     children = dict(result.get("children") or {})
     previous = children.get(label) if isinstance(children.get(label), dict) else {}
-    children[label] = _merge_child_summary(previous, _task_public_summary(child) or {})
+    child_summary = _merge_child_summary(previous, _task_public_summary(child) or {})
+    children[label] = child_summary
     result["children"] = children
-    fresh.result = result
-    flag_modified(fresh, "result")
-    db.session.commit()
+    if _is_postgresql_session():
+        _execute_parent_update(
+            """
+            UPDATE public.publication_tasks
+            SET result = jsonb_set(
+                    COALESCE(result, '{}'::jsonb),
+                    '{children}',
+                    COALESCE(result->'children', '{}'::jsonb)
+                        || jsonb_build_object(CAST(:label AS text), CAST(:child AS jsonb)),
+                    true
+                ),
+                updated_at = NOW()
+            WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+            """,
+            {
+                "task_id": str(parent_id),
+                "label": str(label),
+                "child": json.dumps(child_summary, ensure_ascii=False),
+            },
+            f"record child {parent_id}:{label}",
+        )
+    else:
+        _persist_parent_result_fallback(parent_id, result)
+    _replace_cached_workflow_result(parent_id, result)
 
 
 def _record_child_attempt(parent_id, label, child, attempt, max_attempts, status, *, error=None):
-    fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
-    if not fresh:
-        return
-    result = dict(fresh.result or {})
+    result = _fresh_result(parent_id)
     attempts = dict(result.get("child_attempts") or {})
     items = list(attempts.get(label) or [])
     summary = _task_public_summary(child) or {}
@@ -1901,20 +2519,34 @@ def _record_child_attempt(parent_id, label, child, attempt, max_attempts, status
         "updated_at": updated_at,
     }
     result["retry_state"] = retry_state
-    fresh.result = result
-    flag_modified(fresh, "result")
-    db.session.commit()
+    _update_result(parent_id, {
+        "child_attempts": attempts,
+        "retry_state": retry_state,
+    })
 
 
 def _update_result(parent_id, values):
-    fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
-    if not fresh:
+    if not isinstance(values, dict) or not values:
         return
-    result = dict(fresh.result or {})
-    result.update(values)
-    fresh.result = result
-    flag_modified(fresh, "result")
-    db.session.commit()
+    if _is_postgresql_session():
+        _execute_parent_update(
+            """
+            UPDATE public.publication_tasks
+            SET result = COALESCE(result, '{}'::jsonb) || CAST(:patch AS jsonb),
+                updated_at = NOW()
+            WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+            """,
+            {
+                "task_id": str(parent_id),
+                "patch": json.dumps(values, ensure_ascii=False),
+            },
+            f"update result {parent_id}",
+        )
+    else:
+        result = _fresh_result(parent_id)
+        result.update(copy.deepcopy(values))
+        _persist_parent_result_fallback(parent_id, result)
+    _merge_cached_workflow_result(parent_id, values)
 
 
 def _child_error_message(child):
@@ -1962,23 +2594,54 @@ def _compact_error(message, limit=180):
 
 
 def _emit(parent_id, step, progress, message):
-    fresh = _load_task(parent_id, *TASK_STATE_COLUMNS)
-    if not fresh:
-        return
-    result = dict(fresh.result or {})
+    result = _fresh_result(parent_id)
     logs = list(result.get("logs") or [])
-    logs.append({
+    log_entry = {
         "step": step,
         "message": message,
         "progress": progress,
         "updated_at": datetime.utcnow().isoformat() + "Z",
-    })
+    }
+    logs.append(log_entry)
     result["logs"] = logs[-120:]
-    fresh.current_step = _current_step_code(step)
-    fresh.progress = max(0, min(100, int(progress or fresh.progress or 0)))
-    fresh.result = result
-    flag_modified(fresh, "result")
-    db.session.commit()
+    step_code = _current_step_code(step)
+    progress_value = max(0, min(100, int(progress or 0)))
+    if _is_postgresql_session():
+        _execute_parent_update(
+            """
+            UPDATE public.publication_tasks
+            SET current_step = :step,
+                progress = :progress,
+                result = jsonb_set(
+                    COALESCE(result, '{}'::jsonb),
+                    '{logs}',
+                    CASE
+                        WHEN jsonb_array_length(COALESCE(result->'logs', '[]'::jsonb)) >= 120
+                        THEN (COALESCE(result->'logs', '[]'::jsonb) #- '{0}') || CAST(:entry AS jsonb)
+                        ELSE COALESCE(result->'logs', '[]'::jsonb) || CAST(:entry AS jsonb)
+                    END,
+                    true
+                ),
+                updated_at = NOW()
+            WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+            """,
+            {
+                "task_id": str(parent_id),
+                "step": step_code,
+                "progress": progress_value,
+                "entry": json.dumps([log_entry], ensure_ascii=False),
+            },
+            f"emit progress {parent_id}:{step}",
+        )
+    else:
+        _persist_parent_result_fallback(
+            parent_id,
+            result,
+            current_step=step_code,
+            progress=progress_value,
+        )
+    _replace_cached_workflow_result(parent_id, result)
+    _merge_cached_workflow_fields(parent_id, current_step=step_code, progress=progress_value)
 
 
 def _current_step_code(step):
@@ -2038,6 +2701,194 @@ def _vertical_video_enabled(payload):
 
 def _video_stage_enabled(payload):
     return _landscape_video_enabled(payload) or _vertical_video_enabled(payload)
+
+
+def _video_render_mode(payload):
+    video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+    raw = str(
+        video_options.get("render_mode")
+        or video_options.get("video_render_mode")
+        or video_options.get("output_mode")
+        or "full_video"
+    ).strip().lower()
+    if raw in {"keyframe", "keyframes", "frames", "preview_keyframes"}:
+        return "keyframes"
+    if raw in {"preview", "short", "short_video", "preview_10s", "10s", "10sec", "ten_seconds"}:
+        return "preview_10s"
+    return "full_video"
+
+
+def _video_preview_seconds(video_options):
+    raw = (
+        video_options.get("preview_seconds")
+        or video_options.get("duration_seconds")
+        or video_options.get("short_video_seconds")
+        or 10
+    )
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        value = 10
+    return max(3, min(value, 60))
+
+
+def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, audio, pdf_screenshot, payload):
+    video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+    scheme = _normalize_vertical_scheme(
+        video_options.get("vertical_video_scheme")
+        or video_options.get("vertical_scheme")
+        or "scheme1"
+    )
+    main_title = _publisher_main_title(structured, video_options)
+    sub_title = _publisher_sub_title(structured, video_options)
+    date_text = str(video_options.get("date_text") or "").strip() or _publisher_date_text(created_at)
+    tag_text = str(video_options.get("tag_text") or "").strip() or "研报播客"
+    screenshot_path = pdf_screenshot.get("path") if isinstance(pdf_screenshot, dict) else None
+    transform = {
+        "anchor": "top-left",
+        "title_max_lines": 2,
+        "subtitle_max_lines": 1,
+        **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
+    }
+    institution = _publisher_workbench_institution(structured, pdf, video_options)
+    footer_text = str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本"
+
+    keyframes = {}
+    cover_path = None
+    vertical_background_path = None
+    vertical_cover_path = None
+    podcast_cover_path = None
+    bilibili_cover_path = None
+
+    if _truthy(video_options.get("enabled", False)):
+        cover_path = thumbnail_service.generate_thumbnail(
+            main_title=main_title,
+            sub_title=sub_title,
+            date_text=date_text,
+            tag_text=tag_text,
+            bg_preset_index=int(video_options.get("bg_index") or 0),
+            layout="left",
+            output_filename=f"report_audio_keyframe_landscape_{parent_id[:8]}_{int(time.time())}.jpg",
+            custom_bg_path=screenshot_path,
+            overlay_opacity=float(video_options.get("overlay_opacity") or 0.5),
+            transform=video_options.get("cover_transform") or {"x": 0, "y": 0, "scale": 1},
+            mode="screenshot",
+        )
+        keyframes["landscape_cover"] = _keyframe_artifact(cover_path, "横屏封面关键帧", "16:9")
+
+    if _truthy(video_options.get("vertical_enabled", False)):
+        if scheme == "scheme2":
+            vertical_background_path = thumbnail_service.generate_workbench_vertical_thumbnail(
+                main_title=main_title,
+                sub_title=sub_title,
+                screenshot_path=screenshot_path,
+                output_filename=f"report_audio_keyframe_vertical_bg_{parent_id[:8]}_{int(time.time())}.jpg",
+                institution=institution,
+                emotion="bull",
+                footer_text=footer_text,
+                image_transform=transform,
+            )
+            vertical_cover_path = thumbnail_service.generate_workbench_vertical_cover(
+                main_title=main_title,
+                sub_title=sub_title,
+                screenshot_path=screenshot_path,
+                output_filename=f"report_audio_keyframe_vertical_cover_{parent_id[:8]}_{int(time.time())}.jpg",
+                institution=institution,
+                emotion="bull",
+                footer_text=footer_text,
+                image_transform=transform,
+            )
+            podcast_cover_path = thumbnail_service.generate_workbench_podcast_cover(
+                main_title=main_title,
+                sub_title=sub_title,
+                screenshot_path=screenshot_path,
+                output_filename=f"report_audio_keyframe_podcast_cover_{parent_id[:8]}_{int(time.time())}.jpg",
+                institution=institution,
+                emotion="bull",
+                footer_text=footer_text,
+                image_transform=transform,
+            )
+        else:
+            vertical_background_path = thumbnail_service.generate_vertical_thumbnail(
+                main_title=main_title,
+                sub_title=sub_title,
+                date_text=date_text,
+                screenshot_path=screenshot_path,
+                output_filename=f"report_audio_keyframe_vertical_bg_{parent_id[:8]}_{int(time.time())}.jpg",
+            )
+        keyframes["vertical_background"] = _keyframe_artifact(vertical_background_path, "竖屏背景关键帧", "9:16")
+        if vertical_cover_path:
+            keyframes["vertical_cover"] = _keyframe_artifact(vertical_cover_path, "竖版封皮关键帧", "3:4")
+        if podcast_cover_path:
+            keyframes["podcast_cover"] = _keyframe_artifact(podcast_cover_path, "播客封皮关键帧", "1:1")
+
+    bilibili_transform = {
+        **transform,
+        **(
+            video_options.get("bilibili_cover_image_transform")
+            if isinstance(video_options.get("bilibili_cover_image_transform"), dict)
+            else {}
+        ),
+    }
+    bilibili_cover_path = thumbnail_service.generate_workbench_bilibili_cover(
+        main_title=main_title,
+        sub_title=sub_title,
+        screenshot_path=screenshot_path,
+        output_filename=f"report_audio_keyframe_bilibili_cover_{parent_id[:8]}_{int(time.time())}.jpg",
+        institution=institution,
+        emotion="bull",
+        footer_text=footer_text,
+        image_transform=bilibili_transform,
+        show_footer=False,
+    )
+    keyframes["bilibili_cover"] = _keyframe_artifact(bilibili_cover_path, "B站封皮关键帧", "1146:717")
+
+    return {
+        "enabled": True,
+        "status": "keyframes_ready",
+        "render_mode": "keyframes",
+        "message": "仅生成关键帧/封皮预览，未合成 MP4",
+        "landscape_enabled": _truthy(video_options.get("enabled", False)),
+        "vertical_enabled": _truthy(video_options.get("vertical_enabled", False)),
+        "cover_title": main_title,
+        "cover_subtitle": sub_title,
+        "vertical_video_scheme": scheme,
+        "cover_path": cover_path,
+        "vertical_background_path": vertical_background_path,
+        "vertical_cover_path": vertical_cover_path,
+        "podcast_cover_path": podcast_cover_path,
+        "bilibili_cover_path": bilibili_cover_path,
+        "pdf_first_page_image": pdf_screenshot,
+        "keyframes": {key: value for key, value in keyframes.items() if value},
+        "audio_seconds": (audio or {}).get("seconds"),
+    }
+
+
+def _keyframe_artifact(path, label, ratio):
+    if not path or not os.path.exists(path):
+        return None
+    artifact = {
+        "path": path,
+        "label": label,
+        "ratio": ratio,
+        "bytes": os.path.getsize(path),
+    }
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            artifact["width"] = image.width
+            artifact["height"] = image.height
+    except Exception:
+        pass
+    return artifact
+
+
+def _normalize_vertical_scheme(value):
+    text = str(value or "").strip().lower()
+    if text in {"scheme2", "2", "方案二", "workbench", "thumbnail_workbench", "thumbnail-workbench"}:
+        return "scheme2"
+    return "scheme1"
 
 
 def _is_generic_cover_title_override(value):
@@ -2324,28 +3175,48 @@ def _split_subtitle_script(script, max_chars=18):
 
 
 def _publisher_result_summary(publisher_task, pdf_screenshot):
-    result = publisher_task.result or {}
-    params = publisher_task.params or {}
+    result = _copy_dict(_safe_task_attr(publisher_task, "result"))
+    params = _copy_dict(_safe_task_attr(publisher_task, "params"))
     landscape_options = params.get("video") if isinstance(params.get("video"), dict) else {}
     vertical_options = params.get("vertical_video") if isinstance(params.get("vertical_video"), dict) else {}
-    video_path = result.get("video_path") or result.get("vertical_video_path")
-    return {
+    render_mode = _publisher_child_render_mode(publisher_task)
+    preview_seconds = _publisher_child_preview_seconds(publisher_task)
+    landscape_enabled = _safe_task_attr(publisher_task, "publisher_landscape_enabled")
+    vertical_enabled = _safe_task_attr(publisher_task, "publisher_vertical_enabled")
+    landscape_path = result.get("video_path") or _safe_task_attr(publisher_task, "task_video_path")
+    vertical_path = result.get("vertical_video_path") or _safe_task_attr(
+        publisher_task,
+        "publisher_vertical_video_path",
+    )
+    video_path = landscape_path or vertical_path
+    summary = {
         "enabled": True,
-        "status": publisher_task.status,
+        "status": "preview_ready" if publisher_task.status == "completed" and render_mode == "preview_10s" else publisher_task.status,
+        "render_mode": render_mode,
         "publisher_task_id": publisher_task.id,
         "celery_id": publisher_task.celery_task_id,
-        "landscape_enabled": _truthy(landscape_options.get("enabled", False)),
-        "vertical_enabled": _truthy(vertical_options.get("enabled", False)),
+        "landscape_enabled": bool(landscape_enabled) if landscape_enabled is not None else _truthy(landscape_options.get("enabled", False)),
+        "vertical_enabled": bool(vertical_enabled) if vertical_enabled is not None else _truthy(vertical_options.get("enabled", False)),
         "video_path": video_path,
-        "landscape_video_path": result.get("video_path"),
-        "vertical_video_path": result.get("vertical_video_path"),
-        "vertical_cover_path": result.get("vertical_cover_path"),
-        "podcast_cover_path": result.get("podcast_cover_path"),
+        "landscape_video_path": landscape_path,
+        "vertical_video_path": vertical_path,
+        "vertical_preview_video_path": vertical_path if preview_seconds > 0 else result.get("vertical_preview_video_path"),
+        "vertical_preview_seconds": preview_seconds or result.get("vertical_preview_seconds"),
+        "vertical_preview_scheme": _safe_task_attr(publisher_task, "publisher_vertical_scheme") or vertical_options.get("scheme") or result.get("vertical_video_scheme"),
+        "vertical_cover_path": result.get("vertical_cover_path") or _safe_task_attr(publisher_task, "publisher_vertical_cover_path"),
+        "podcast_cover_path": result.get("podcast_cover_path") or _safe_task_attr(publisher_task, "publisher_podcast_cover_path"),
+        "bilibili_cover_path": result.get("bilibili_cover_path"),
         "cover_path": result.get("cover_path"),
         "pdf_first_page_image": pdf_screenshot,
         "bilibili_result": result.get("bilibili_result"),
         "youtube_result": result.get("youtube_result"),
     }
+    if preview_seconds > 0:
+        summary["message"] = f"{preview_seconds} 秒短视频预览已生成，未生成完整视频"
+        summary["vertical_video_path"] = None
+        summary["video_path"] = None
+        summary["landscape_video_path"] = None
+    return summary
 
 
 def _format_cover_title(value):
@@ -2452,7 +3323,9 @@ def _truthy(value, default=False):
 
 def _queue_notification(task_id, event_type, message=None):
     try:
-        fresh = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
+        fresh = _cached_workflow_task(task_id)
+        if fresh is None:
+            fresh = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
         if not fresh:
             return False
         result = dict(fresh.result or {})
@@ -2471,10 +3344,7 @@ def _queue_notification(task_id, event_type, message=None):
             "celery_task_id": queued.get("celery_task_id"),
             "queued_at": datetime.utcnow().isoformat() + "Z",
         }
-        result["notifications"] = notifications
-        fresh.result = result
-        flag_modified(fresh, "result")
-        db.session.commit()
+        _update_result(task_id, {"notifications": notifications})
         return True
     except Exception:
         db.session.rollback()
@@ -2732,6 +3602,8 @@ def _safe_task_attr(task, name, default=None):
         return task.get(name, default)
     try:
         state = sqlalchemy_inspect(task)
+        if name == "id" and state.identity:
+            return state.identity[0]
         if name in state.unloaded:
             return default
     except Exception:
@@ -2763,6 +3635,12 @@ def _task_id(task):
         value = task.get("id") or task.get("job_id")
     else:
         value = _safe_task_attr(task, "id")
+        if not value:
+            try:
+                identity = sqlalchemy_inspect(task).identity
+                value = identity[0] if identity else None
+            except Exception:
+                value = None
     text = str(value or "").strip()
     return text or None
 
@@ -2798,6 +3676,27 @@ def _task_state_snapshot(task):
 
     result = _copy_dict(_safe_task_attr(task, "result"))
     params = _copy_dict(_safe_task_attr(task, "params"))
+    raw_text_hash = _safe_task_attr(task, "doubao_tts_text_hash")
+    raw_chunk_index = _safe_task_attr(task, "doubao_tts_chunk_index")
+    raw_chunk_attempt = _safe_task_attr(task, "doubao_tts_chunk_attempt")
+    raw_wav_path = _safe_task_attr(task, "doubao_tts_wav_path")
+    text_hash = raw_text_hash if isinstance(raw_text_hash, str) else None
+    chunk_index = raw_chunk_index if isinstance(raw_chunk_index, (int, float, str)) else None
+    chunk_attempt = raw_chunk_attempt if isinstance(raw_chunk_attempt, (int, float, str)) else None
+    wav_path = raw_wav_path if isinstance(raw_wav_path, str) else None
+    if text_hash or chunk_index or chunk_attempt:
+        metadata = dict(result.get("metadata") or {})
+        if text_hash:
+            metadata.setdefault("text_hash", text_hash)
+        if chunk_index:
+            metadata.setdefault("chunk_index", chunk_index)
+        if chunk_attempt:
+            metadata.setdefault("chunk_attempt", chunk_attempt)
+        result["metadata"] = metadata
+    if wav_path:
+        audio = dict(result.get("audio") or {})
+        audio.setdefault("wav_path", wav_path)
+        result["audio"] = audio
     task_id = _safe_task_attr(task, "id")
     celery_task_id = _safe_task_attr(task, "celery_task_id")
     current_step = _safe_task_attr(task, "current_step")
@@ -2816,6 +3715,10 @@ def _task_state_snapshot(task):
         "feature": _safe_task_attr(task, "feature"),
         "parent_task_id": _safe_task_attr(task, "parent_task_id"),
         "source_task_id": _safe_task_attr(task, "source_task_id"),
+        "doubao_tts_text_hash": text_hash,
+        "doubao_tts_chunk_index": chunk_index,
+        "doubao_tts_chunk_attempt": chunk_attempt,
+        "doubao_tts_wav_path": wav_path,
         "params": params,
         "result": result,
         "created_at": _safe_task_attr(task, "created_at"),
@@ -2843,6 +3746,12 @@ def _task_doubao_metadata(task):
     if metadata:
         return metadata
     params = snapshot.get("params") if isinstance(snapshot.get("params"), dict) else {}
+    if not params and not isinstance(task, dict):
+        try:
+            raw_params = task.params
+            params = raw_params if isinstance(raw_params, dict) else {}
+        except Exception:
+            params = {}
     doubao_payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
     metadata = doubao_payload.get("metadata") if isinstance(doubao_payload.get("metadata"), dict) else {}
     return metadata

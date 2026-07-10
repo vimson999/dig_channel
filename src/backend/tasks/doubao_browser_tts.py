@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import load_only
@@ -77,7 +78,11 @@ def _load_task(task_id, *columns):
             continue
         seen.add(key)
         attrs.append(column)
-    return PublicationTask.query.options(load_only(*attrs)).get(task_id)
+    return (
+        PublicationTask.query.options(load_only(*attrs))
+        .filter(PublicationTask.id == str(task_id))
+        .one_or_none()
+    )
 
 
 @celery_app.task(
@@ -106,6 +111,8 @@ def _process_job(task_id, celery_task=None):
     job_created_at = task.created_at
     payload = task.params.get("doubao_browser_tts") or {}
     text = (payload.get("text") or "").strip()
+    retry_limit = _retry_limit(task)
+    retry_delay_seconds = _retry_delay_seconds(task)
     if not text:
         _mark_failed(task, "文本不能为空")
         return False
@@ -119,12 +126,11 @@ def _process_job(task_id, celery_task=None):
     task.result = result
     flag_modified(task, "result")
     db.session.commit()
+    progress_result = dict(result)
 
     def update_progress(event):
-        fresh = _load_task(task_id, *TASK_UPDATE_COLUMNS)
-        if not fresh or fresh.status == "canceled":
-            raise RuntimeError("任务已取消")
-        current_result = dict(fresh.result or {})
+        nonlocal progress_result
+        current_result = dict(progress_result)
         logs = list(current_result.get("logs") or [])
         logs.append({
             "step": event.get("step"),
@@ -135,11 +141,43 @@ def _process_job(task_id, celery_task=None):
         current_result["logs"] = logs[-80:]
         if event.get("result"):
             current_result.update(event["result"])
-        fresh.current_step = event.get("step") or fresh.current_step
-        fresh.progress = int(event.get("progress") or fresh.progress or 0)
-        fresh.result = current_result
-        flag_modified(fresh, "result")
-        db.session.commit()
+        step = event.get("step") or "processing"
+        progress = int(event.get("progress") or 0)
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                db.session.rollback()
+                updated = (
+                    PublicationTask.query
+                    .filter(
+                        PublicationTask.id == str(task_id),
+                        PublicationTask.status != "canceled",
+                    )
+                    .update(
+                        {
+                            PublicationTask.current_step: step,
+                            PublicationTask.progress: progress,
+                            PublicationTask.result: current_result,
+                            PublicationTask.updated_at: datetime.utcnow(),
+                        },
+                        synchronize_session=False,
+                    )
+                )
+                if not updated:
+                    raise RuntimeError("任务已取消")
+                db.session.commit()
+                progress_result = current_result
+                return
+            except RuntimeError:
+                db.session.rollback()
+                raise
+            except Exception as exc:
+                last_error = exc
+                db.session.rollback()
+                db.session.remove()
+                if attempt < 3:
+                    time.sleep(attempt)
+        raise last_error
 
     try:
         output_path = storage_path_for_job(job_id, job_created_at)
@@ -195,22 +233,28 @@ def _process_job(task_id, celery_task=None):
         db.session.rollback()
         task = _load_task(task_id, *TASK_UPDATE_COLUMNS)
         if task:
-            if _should_auto_retry(task, exc, celery_task):
-                _mark_retrying(task, exc, celery_task)
+            if _should_auto_retry(task, exc, celery_task, retry_limit=retry_limit):
+                _mark_retrying(
+                    task,
+                    exc,
+                    celery_task,
+                    retry_limit=retry_limit,
+                    retry_delay_seconds=retry_delay_seconds,
+                )
                 raise celery_task.retry(
                     exc=exc,
-                    countdown=_retry_delay_seconds(task),
-                    max_retries=_retry_limit(task),
+                    countdown=retry_delay_seconds,
+                    max_retries=retry_limit,
                 )
             _mark_failed(task, str(exc))
         logger.error("Doubao browser TTS task failed: %s", exc, exc_info=True)
         return False
 
 
-def _should_auto_retry(task, exc, celery_task):
+def _should_auto_retry(task, exc, celery_task, *, retry_limit=None):
     if not celery_task or not hasattr(celery_task, "retry"):
         return False
-    limit = _retry_limit(task)
+    limit = _retry_limit(task) if retry_limit is None else int(retry_limit)
     if limit <= 0:
         return False
     retries = int(getattr(getattr(celery_task, "request", None), "retries", 0) or 0)
@@ -258,13 +302,13 @@ def _retry_delay_seconds(task):
         return DEFAULT_RETRY_DELAY_SECONDS
 
 
-def _mark_retrying(task, exc, celery_task):
+def _mark_retrying(task, exc, celery_task, *, retry_limit=None, retry_delay_seconds=None):
     now_dt = datetime.utcnow()
     now = now_dt.isoformat() + "Z"
     retries = int(getattr(getattr(celery_task, "request", None), "retries", 0) or 0)
     retry_number = retries + 1
-    limit = _retry_limit(task)
-    delay = _retry_delay_seconds(task)
+    limit = _retry_limit(task) if retry_limit is None else int(retry_limit)
+    delay = _retry_delay_seconds(task) if retry_delay_seconds is None else int(retry_delay_seconds)
     message = str(exc)
     result = dict(task.result or {})
     logs = list(result.get("logs") or [])

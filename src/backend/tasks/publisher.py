@@ -6,6 +6,7 @@ import json
 import subprocess
 import time
 from datetime import datetime
+from types import SimpleNamespace
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 # Ensure src/backend is in sys.path for Celery worker
@@ -60,11 +61,21 @@ TASK_PAYLOAD_COLUMNS = (
     PublicationTask.user_id,
     PublicationTask.created_at,
 )
+TASK_START_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.celery_task_id,
+    PublicationTask.status,
+    PublicationTask.feature,
+)
 
 
 def _load_task(task_id, *columns):
     attrs = columns or TASK_PAYLOAD_COLUMNS
-    return PublicationTask.query.options(load_only(*attrs)).get(task_id)
+    return (
+        PublicationTask.query.options(load_only(*attrs))
+        .filter(PublicationTask.id == str(task_id))
+        .first()
+    )
 
 
 def _load_task_with_retries(task_id, *columns):
@@ -121,13 +132,23 @@ def update_task_record(task_id, retries=3, **fields):
     for attempt in range(1, retries + 1):
         try:
             db.session.rollback()
-            task = _load_task(task_id, *TASK_UPDATE_COLUMNS)
-            if not task:
+            values = {}
+            persisted_fields = dict(fields)
+            persisted_fields.update(_publisher_hot_projection_values(fields))
+            for key, value in persisted_fields.items():
+                column = getattr(PublicationTask, key, None)
+                if column is None:
+                    raise ValueError(f"Unknown PublicationTask field: {key}")
+                values[column] = value
+            updated = (
+                PublicationTask.query
+                .filter(PublicationTask.id == str(task_id))
+                .update(values, synchronize_session=False)
+            )
+            if not updated:
                 raise ValueError(f"Task {task_id} not found")
-            for key, value in fields.items():
-                setattr(task, key, value)
             db.session.commit()
-            return task
+            return SimpleNamespace(id=str(task_id), **fields)
         except Exception as exc:
             last_error = exc
             db.session.rollback()
@@ -143,6 +164,55 @@ def update_task_record(task_id, retries=3, **fields):
             if attempt < retries:
                 time.sleep(min(2 * attempt, 5))
     raise last_error
+
+
+def _publisher_hot_projection_values(fields):
+    values = {}
+    params = fields.get("params") if isinstance(fields.get("params"), dict) else None
+    result = fields.get("result") if isinstance(fields.get("result"), dict) else None
+
+    if params is not None:
+        landscape = params.get("video") if isinstance(params.get("video"), dict) else {}
+        vertical = params.get("vertical_video") if isinstance(params.get("vertical_video"), dict) else {}
+        metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+        if "enabled" in landscape:
+            values["publisher_landscape_enabled"] = _enabled(landscape.get("enabled"), False)
+        values["publisher_render_mode"] = str(
+            metadata.get("render_mode") or params.get("render_mode") or "full_video"
+        )[:32]
+        if "enabled" in vertical:
+            values["publisher_vertical_enabled"] = _enabled(vertical.get("enabled"), False)
+        if vertical.get("scheme"):
+            values["publisher_vertical_scheme"] = str(vertical.get("scheme"))[:32]
+        if "preview_seconds" in vertical:
+            values["publisher_preview_seconds"] = _bounded_non_negative_int(vertical.get("preview_seconds"))
+
+    if result is not None:
+        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        if metadata.get("render_mode") or result.get("render_mode"):
+            values["publisher_render_mode"] = str(
+                metadata.get("render_mode") or result.get("render_mode")
+            )[:32]
+        if "video_path" in result:
+            values["task_video_path"] = str(result.get("video_path") or "")[:600] or None
+        if "vertical_video_path" in result:
+            values["publisher_vertical_video_path"] = str(result.get("vertical_video_path") or "")[:600] or None
+        if "vertical_cover_path" in result:
+            values["publisher_vertical_cover_path"] = str(result.get("vertical_cover_path") or "")[:600] or None
+        if "podcast_cover_path" in result:
+            values["publisher_podcast_cover_path"] = str(result.get("podcast_cover_path") or "")[:600] or None
+        if result.get("vertical_video_scheme"):
+            values["publisher_vertical_scheme"] = str(result.get("vertical_video_scheme"))[:32]
+        if "vertical_preview_seconds" in result:
+            values["publisher_preview_seconds"] = _bounded_non_negative_int(result.get("vertical_preview_seconds"))
+    return values
+
+
+def _bounded_non_negative_int(value):
+    try:
+        return max(0, int(float(value or 0)))
+    except (TypeError, ValueError):
+        return 0
 
 def to_abs_path(rel_path):
     """Helper to convert path to absolute, staying robust regardless of current working directory."""
@@ -315,6 +385,23 @@ def _first_existing_path(*candidates):
             return path
     return None
 
+
+def _generate_scheme2_bilibili_cover(*, params, main_title, sub_title, screenshot_path, base_name,
+                                      institution, emotion, footer_text, image_transform):
+    if not isinstance(params, dict) or not _enabled(params.get('enabled'), False):
+        return None
+    return thumbnail_service.generate_workbench_bilibili_cover(
+        main_title=params.get('main_title') or main_title,
+        sub_title=params.get('sub_title') or sub_title,
+        screenshot_path=params.get('screenshot_path') or screenshot_path,
+        output_filename=f"bcover2_{base_name}.jpg",
+        institution=params.get('institution') or institution,
+        emotion=params.get('emotion') or emotion,
+        footer_text=params.get('footer_text') or footer_text,
+        image_transform=params.get('image_transform') or image_transform,
+        show_footer=_enabled(params.get('show_footer'), False),
+    )
+
 @celery_app.task(bind=True)
 def run_publication_pipeline(self, task_id):
     """
@@ -332,12 +419,12 @@ def run_publication_pipeline(self, task_id):
     app = create_app()
     
     with app.app_context():
-        task = _load_task_with_retries(task_id, *TASK_PAYLOAD_COLUMNS)
-        if not task:
+        start_state = _load_task_with_retries(task_id, *TASK_START_COLUMNS)
+        if not start_state:
             logger.error(f"Task {task_id} not found in DB")
             return
         request_id = str(getattr(getattr(self, "request", None), "id", "") or "")
-        current_celery_id = str(task.celery_task_id or "")
+        current_celery_id = str(start_state.celery_task_id or "")
         if request_id and current_celery_id and request_id != current_celery_id:
             logger.info(
                 "Task %s received stale celery message %s, current celery id is %s; skipping.",
@@ -346,12 +433,17 @@ def run_publication_pipeline(self, task_id):
                 current_celery_id,
             )
             return
-        if task.status in {"completed", "failed", "canceled"}:
+        if start_state.status in {"completed", "failed", "canceled"}:
             logger.info(
                 "Task %s is terminal (%s) before publisher start; skipping duplicate message.",
                 task_id,
-                task.status,
+                start_state.status,
             )
+            return
+
+        task = _load_task_with_retries(task_id, *TASK_PAYLOAD_COLUMNS)
+        if not task:
+            logger.error(f"Task {task_id} not found in DB after start check")
             return
         guard_publication_task_start(
             self,
@@ -619,6 +711,7 @@ def run_publication_pipeline(self, task_id):
                 vertical_thumb_params = params.get('vertical_thumbnail') if isinstance(params.get('vertical_thumbnail'), dict) else {}
                 vertical_cover_params = params.get('vertical_cover') if isinstance(params.get('vertical_cover'), dict) else {}
                 podcast_cover_params = params.get('podcast_cover') if isinstance(params.get('podcast_cover'), dict) else {}
+                bilibili_cover_params = params.get('bilibili_cover') if isinstance(params.get('bilibili_cover'), dict) else {}
                 
                 v_image_path = to_abs_path(active_v_params.get('image_path'))
                 if vertical_thumb_params and _enabled(vertical_thumb_params.get('enabled'), True):
@@ -670,10 +763,22 @@ def run_publication_pipeline(self, task_id):
                             footer_text=podcast_cover_params.get('footer_text') or workbench_footer,
                             image_transform=podcast_cover_params.get('image_transform') or workbench_transform,
                         )
+                        bilibili_cover_path = _generate_scheme2_bilibili_cover(
+                            params=bilibili_cover_params,
+                            main_title=main_title,
+                            sub_title=sub_title,
+                            screenshot_path=screenshot_path,
+                            base_name=base_name,
+                            institution=workbench_institution,
+                            emotion=workbench_emotion,
+                            footer_text=workbench_footer,
+                            image_transform=workbench_transform,
+                        )
                     else:
                         vertical_scheme = 'scheme1'
                         vertical_cover_path = None
                         podcast_cover_path = None
+                        bilibili_cover_path = None
                         v_image_path = thumbnail_service.generate_vertical_thumbnail(
                             main_title=main_title,
                             sub_title=sub_title,
@@ -687,6 +792,7 @@ def run_publication_pipeline(self, task_id):
                         'vertical_video_scheme': vertical_scheme,
                         **({'vertical_cover_path': vertical_cover_path} if vertical_cover_path else {}),
                         **({'podcast_cover_path': podcast_cover_path} if podcast_cover_path else {}),
+                        **({'bilibili_cover_path': bilibili_cover_path} if bilibili_cover_path else {}),
                     }
                     task = update_task_record(task_id, result=result_state)
 
@@ -799,6 +905,7 @@ def run_publication_pipeline(self, task_id):
                     account_id=bili_params.get("credential_id") or bili_params.get("platform_credential_id"),
                     required=True,
                 )
+                db.session.remove()
                 uploader = BiliUploader(
                     sessdata=bili_auth.get('sessdata'),
                     bili_jct=bili_auth.get('bili_jct'),
@@ -896,6 +1003,7 @@ def run_publication_pipeline(self, task_id):
                 current_step='done',
                 progress=100,
                 result=result_state,
+                error_message=None,
                 completed_at=datetime.utcnow(),
             )
             
@@ -1079,6 +1187,7 @@ def run_bilibili_upload_only(self, task_id):
                 account_id=bili_params.get("credential_id") or bili_params.get("platform_credential_id"),
                 required=True,
             )
+            db.session.remove()
             uploader = BiliUploader(
                 sessdata=bili_auth.get("sessdata"),
                 bili_jct=bili_auth.get("bili_jct"),

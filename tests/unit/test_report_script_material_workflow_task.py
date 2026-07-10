@@ -107,15 +107,27 @@ class ReportScriptMaterialWorkflowTaskTest(unittest.TestCase):
             self.assertEqual(task.result["script_material"]["source_task_id"], existing.id)
             self.assertEqual(task.result["output_path"], output_path)
 
-    def test_script_material_normalizer_uses_short_timeout(self):
+    def test_script_material_normalizer_uses_production_timeout_and_retry_budget(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(report_script_material_workflow._normalizer_timeout_seconds(), 20)
+            self.assertEqual(report_script_material_workflow._normalizer_timeout_seconds(), 90)
+            self.assertEqual(report_script_material_workflow._normalizer_retry_limit(), 2)
+            self.assertEqual(report_script_material_workflow._normalizer_retry_delay_seconds(), 15)
 
         with patch.dict(os.environ, {"REPORT_SCRIPT_MATERIAL_NORMALIZER_TIMEOUT_SECONDS": "7"}):
             self.assertEqual(report_script_material_workflow._normalizer_timeout_seconds(), 7)
 
         with patch.dict(os.environ, {"REPORT_SCRIPT_MATERIAL_NORMALIZER_TIMEOUT_SECONDS": "600"}):
             self.assertEqual(report_script_material_workflow._normalizer_timeout_seconds(), 120)
+
+        with patch.dict(os.environ, {"REPORT_SCRIPT_MATERIAL_NORMALIZER_RETRY_LIMIT": "9"}):
+            self.assertEqual(report_script_material_workflow._normalizer_retry_limit(), 5)
+
+        with patch.dict(os.environ, {"REPORT_SCRIPT_MATERIAL_NORMALIZER_RETRY_DELAY_SECONDS": "0"}):
+            self.assertEqual(report_script_material_workflow._normalizer_retry_delay_seconds(), 1)
+
+        self.assertTrue(report_script_material_workflow._is_retryable_normalizer_error("Read timed out"))
+        self.assertTrue(report_script_material_workflow._is_retryable_normalizer_error("HTTP 503"))
+        self.assertFalse(report_script_material_workflow._is_retryable_normalizer_error("返回内容缺少 final_script_for_tts"))
 
 
 if __name__ == "__main__":

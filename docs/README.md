@@ -160,6 +160,7 @@ youtube-analytics/
 - [数据库 Session 生命周期纪律](rules/database-session-lifecycle-discipline.md)：Web、Celery、scheduler、watchdog、CLI 和诊断脚本必须遵守的 DB session 释放规则。
 - [成功经验复用纪律](rules/reuse-proven-patterns-discipline.md)：新增功能和修 bug 前必须先查找并复用已有成熟实现，避免重复踩同类坑。
 - [Bug 修复记录纪律](rules/bugfix-record-discipline.md)：每次修复真实 bug 后，必须记录现象、影响、根因、解决方案、验证和复发预防。
+- [数据库性能修复验收纪律](rules/database-performance-acceptance-discipline.md)：性能修复必须经过定位、代码修改、进程部署和真实负载四级验收，禁止用单测代替运行结论。
 - [Bug 修复记录索引](bugs/README.md)：项目已处理 bug 的沉淀目录。
 - [故障排除指南](TROUBLESHOOTING.md)：通用依赖、数据库、认证和 API 连接问题。
 

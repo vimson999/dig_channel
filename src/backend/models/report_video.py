@@ -126,6 +126,7 @@ class ReportVideoReport(db.Model):
     )
 
     def to_dict(self, include_ai=False):
+        raw_meta = self.raw_meta if "raw_meta" not in inspect(self).unloaded else {}
         data = {
             "id": self.id,
             "task_id": self.task_id,
@@ -141,7 +142,7 @@ class ReportVideoReport(db.Model):
             "parse_status": self.parse_status,
             "ai_status": self.ai_status,
             "error_message": self.error_message,
-            "raw_meta": self.raw_meta or {},
+            "raw_meta": raw_meta or {},
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

@@ -52,6 +52,8 @@ from services.mp3_video_workflow import (
     _keyframe_artifacts_ready,
     _parent_max_defers,
     _parent_retry_delay_seconds,
+    _replace_cached_workflow_result,
+    _fresh_result,
     _publisher_child_generate_subtitles,
     _publisher_result_summary,
     _publisher_video_title,
@@ -59,6 +61,7 @@ from services.mp3_video_workflow import (
     _video_summary_ready,
     _visual_artifacts_ready,
     _without_waiting_state,
+    _workflow_result_scope,
     _write_data_url,
     _workflow_generate_subtitles,
     _workflow_render_mode,
@@ -84,6 +87,17 @@ from services.mp3_video_workflow import (
 
 
 class Mp3VideoWorkflowServiceTest(unittest.TestCase):
+    def test_workflow_result_scope_reuses_loaded_state_without_db_read(self):
+        @_workflow_result_scope
+        def exercise(task_id):
+            _replace_cached_workflow_result(task_id, {"plan": {"title": "cached"}})
+            with patch("services.mp3_video_workflow._load_task") as load_task:
+                result = _fresh_result(task_id)
+            load_task.assert_not_called()
+            return result
+
+        self.assertEqual({"plan": {"title": "cached"}}, exercise("job-cached"))
+
     def test_api_bilibili_upload_parses_schedule_and_season(self):
         with patch("api.mp3_video_workflow.time.time", return_value=1000):
             self.assertEqual(

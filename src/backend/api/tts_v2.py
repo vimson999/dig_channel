@@ -250,7 +250,7 @@ def _find_segment(task_id, sequence):
 
 
 def _get_tts_task(task_id):
-    return PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).get(task_id)
+    return PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).filter(PublicationTask.id == str(task_id)).one_or_none()
 
 
 @tts_v2_bp.route('/task/<task_id>/segment/<int:sequence>/audio', methods=['GET'])

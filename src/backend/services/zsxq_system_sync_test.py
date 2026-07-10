@@ -19,6 +19,7 @@ from services.zsxq_sync_service import (
     ZsxqTransientUpstreamError,
     zsxq_sync_service,
 )
+from services.platform_credential_service import CredentialError
 
 
 logger = logging.getLogger(__name__)
@@ -347,15 +348,13 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
     validation_retry_count = _transient_validation_retry_count()
     validation_retry_delay = _transient_validation_retry_delay_seconds()
     try:
-        cookie_info = runtime_cookie_info(account_id=config.get("credential_id"), required=True)
-        cookie = cookie_info["cookie"]
-        credential_id = cookie_info.get("credential_id")
-        _validate_group_id_with_retry(
-            group_id,
-            cookie=cookie,
+        cookie_info = _resolve_valid_sync_cookie(
+            config,
+            group_id=group_id,
             max_retries=validation_retry_count,
             delay_seconds=validation_retry_delay,
         )
+        credential_id = cookie_info.get("credential_id")
     except ZsxqTransientUpstreamError as exc:
         snapshot = _record_transient_validation_skip(
             config,
@@ -379,6 +378,28 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
             "error": str(exc),
             "retry_count": validation_retry_count,
             "retry_delay_seconds": validation_retry_delay,
+            "config": snapshot,
+        }
+    except CredentialError as exc:
+        snapshot = _record_missing_credential_skip(
+            config,
+            attempt_id=attempt_id,
+            group_id=group_id,
+            error=exc,
+        )
+        _notify_missing_credential_skip(
+            attempt_id=attempt_id,
+            trigger=trigger,
+            group_id=group_id,
+            group_name=config.get("group_name"),
+            error=str(exc),
+            config=snapshot,
+        )
+        return {
+            "queued": [],
+            "skipped": True,
+            "reason": "missing_credential",
+            "error": str(exc),
             "config": snapshot,
         }
     except ValueError as exc:
@@ -510,6 +531,10 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
         config["rounds_completed"] = batch_round
         config["last_batch_id"] = batch_id
         config["last_trigger_at"] = queued_at
+        config.pop("last_skip_at", None)
+        config.pop("last_skip_reason", None)
+        config.pop("last_skip_error", None)
+        config.pop("last_transient_retry_count", None)
         config.pop("last_queue_failed_at", None)
         config.pop("last_queue_error", None)
         config.pop("last_failed_batch_id", None)
@@ -574,6 +599,25 @@ def _record_invalid_group_skip(config, *, attempt_id, group_id, error, disabled=
     return _snapshot_config(config)
 
 
+def _record_missing_credential_skip(config, *, attempt_id, group_id, error):
+    skipped_at = datetime.utcnow().isoformat() + "Z"
+    config["last_trigger_at"] = skipped_at
+    config["last_skip_at"] = skipped_at
+    config["last_skip_reason"] = "missing_credential"
+    config["last_skip_error"] = str(error)
+    config["last_failed_batch_id"] = attempt_id
+    config["updated_at"] = skipped_at
+    _write_config(config)
+    logger.error(
+        "[ZSXQ_SYSTEM_SYNC_TEST] skipped missing credential during preflight | "
+        "attempt_id=%s group_id=%s error=%s",
+        attempt_id or "-",
+        group_id,
+        error,
+    )
+    return _snapshot_config(config)
+
+
 def _notify_transient_validation_skip(
     *,
     attempt_id,
@@ -628,6 +672,28 @@ def _notify_invalid_group_skip(
         )
     except Exception:
         logger.exception("[ZSXQ_SYSTEM_SYNC_TEST] invalid group notification failed | attempt_id=%s", attempt_id)
+
+
+def _notify_missing_credential_skip(*, attempt_id, trigger, group_id, group_name, error, config):
+    try:
+        from services.workflow_notification_service import workflow_notification_service
+
+        lines = _invalid_group_skip_email_lines(
+            attempt_id=attempt_id,
+            trigger=trigger,
+            group_id=group_id,
+            group_name=group_name,
+            error=error,
+            config=config,
+            disabled=False,
+        )
+        lines[-1] = "处理：本轮已跳过；调度器保持运行，新增有效的 zsxq.sync 凭据后会自动识别。"
+        workflow_notification_service.send_email_message(
+            "[知识星球工作流] 系统同步缺少可用凭据",
+            "\n".join(lines),
+        )
+    except Exception:
+        logger.exception("[ZSXQ_SYSTEM_SYNC_TEST] missing credential notification failed | attempt_id=%s", attempt_id)
 
 
 def _invalid_group_skip_email_lines(*, attempt_id, trigger, group_id, group_name, error, config, disabled=False):
@@ -758,17 +824,120 @@ def _pending_system_sync_work(group_id):
     }
 
 
+def _resolve_valid_sync_cookie(config, *, group_id, max_retries, delay_seconds):
+    preferred_id = str(config.get("credential_id") or "").strip() or None
+    attempted = set()
+    last_auth_error = None
+
+    for _ in range(20):
+        try:
+            cookie_info = runtime_cookie_info(account_id=preferred_id, required=True)
+        except CredentialError as exc:
+            if last_auth_error:
+                raise CredentialError(
+                    f"没有可用于当前星球的知识星球同步凭据；最后一次校验失败：{last_auth_error}"
+                ) from exc
+            raise
+
+        credential_id = str(cookie_info.get("credential_id") or "").strip() or None
+        source = str(cookie_info.get("credential_source") or "unknown").strip()
+        candidate_key = credential_id or f"source:{source}"
+        if candidate_key in attempted:
+            detail = f"；最后一次校验失败：{last_auth_error}" if last_auth_error else ""
+            raise CredentialError(f"没有可用于当前星球的知识星球同步凭据{detail}")
+
+        try:
+            _validate_group_id_with_retry(
+                group_id,
+                cookie=cookie_info["cookie"],
+                max_retries=max_retries,
+                delay_seconds=delay_seconds,
+            )
+        except ZsxqTransientUpstreamError:
+            raise
+        except ValueError as exc:
+            if not _is_auth_validation_error(exc):
+                raise
+            attempted.add(candidate_key)
+            last_auth_error = exc
+            if not credential_id:
+                raise CredentialError(f"{source}知识星球凭据无法访问当前星球：{exc}") from exc
+            try:
+                from services.platform_credential_service import mark_credential_error
+
+                mark_credential_error(credential_id, exc, expired=True)
+            except Exception:
+                logger.exception(
+                    "[ZSXQ_SYSTEM_SYNC_TEST] candidate credential error mark failed | credential=%s",
+                    credential_id,
+                )
+            logger.warning(
+                "[ZSXQ_SYSTEM_SYNC_TEST] sync credential rejected; trying next active candidate | "
+                "credential=%s group_id=%s error=%s",
+                credential_id,
+                group_id,
+                exc,
+            )
+            preferred_id = None
+            continue
+
+        previous_id = str(config.get("credential_id") or "").strip() or None
+        if credential_id != previous_id:
+            rebound_at = datetime.utcnow().isoformat() + "Z"
+            config["credential_id"] = credential_id
+            config["last_credential_rebound_at"] = rebound_at
+            config["last_credential_rebound_from"] = previous_id
+            config["last_credential_rebound_to"] = credential_id or source
+            logger.warning(
+                "[ZSXQ_SYSTEM_SYNC_TEST] sync credential automatically rebound | from=%s to=%s source=%s",
+                previous_id or "-",
+                credential_id or "-",
+                source,
+            )
+        return cookie_info
+
+    raise CredentialError("知识星球同步凭据候选数量异常，未能选出可用凭据")
+
+
 def runtime_cookie(account_id=None):
     return runtime_cookie_info(account_id=account_id, required=True)["cookie"]
 
 
 def runtime_cookie_info(account_id=None, required=True):
+    db_error = None
     try:
         from services.platform_credential_service import resolve_zsxq_cookie
 
         info = resolve_zsxq_cookie(account_id=account_id, purpose="zsxq.sync", required=required)
         if info.get("cookie"):
             return info
+        if account_id:
+            info = resolve_zsxq_cookie(account_id=None, purpose="zsxq.sync", required=False)
+            if info.get("cookie"):
+                logger.warning(
+                    "[ZSXQ_SYSTEM_SYNC_TEST] configured sync credential unavailable; selected active candidate | "
+                    "credential=%s candidate=%s",
+                    account_id,
+                    info.get("credential_id") or "-",
+                )
+                return info
+    except CredentialError as exc:
+        db_error = exc
+        _reset_db_session("runtime_cookie_info")
+        if account_id:
+            logger.warning(
+                "[ZSXQ_SYSTEM_SYNC_TEST] configured sync credential unavailable; selecting active candidate | "
+                "credential=%s error=%s",
+                account_id,
+                exc,
+            )
+            try:
+                info = resolve_zsxq_cookie(account_id=None, purpose="zsxq.sync", required=True)
+                if info.get("cookie"):
+                    return info
+            except CredentialError as fallback_exc:
+                db_error = fallback_exc
+                _reset_db_session("runtime_cookie_info_fallback")
     except Exception:
         _reset_db_session("runtime_cookie_info")
         if required:
@@ -786,6 +955,8 @@ def runtime_cookie_info(account_id=None, required=True):
     cookie = _strip_wrapped_quotes((os.environ.get(COOKIE_ENV_NAME) or "").strip())
     if not cookie:
         if required:
+            if db_error:
+                raise db_error
             raise ValueError("未找到可用的知识星球同步凭据，请先在平台凭据管理里保存 zsxq.sync Cookie")
         return {}
     return {
@@ -981,6 +1152,9 @@ def _is_auth_validation_error(error):
         or "unauthorized" in message
         or "未授权" in message
         or "登录" in message
+        or "1005" in message
+        or "不是星球成员" in message
+        or "权限" in message
     )
 
 

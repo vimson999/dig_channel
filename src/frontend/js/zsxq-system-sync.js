@@ -1810,6 +1810,16 @@ async function toggleSchedulerLogs() {
     els.openLogsBtn.innerHTML = '<i class="fas fa-list-ul mr-2"></i>查看最近日志';
 }
 
+function renderRuntimeItem(label, value, tone = 'muted', wide = false) {
+    const safeValue = String(value || '-');
+    return `
+        <div class="zsxq-runtime-item${wide ? ' zsxq-runtime-item--wide' : ''}" data-tone="${escapeHtml(tone)}">
+            <span class="zsxq-runtime-label">${escapeHtml(label)}</span>
+            <strong class="zsxq-runtime-value" title="${escapeHtml(safeValue)}">${escapeHtml(safeValue)}</strong>
+        </div>
+    `;
+}
+
 function renderSyncSchedulerPanel() {
     const scheduler = state.schedulerStatus || {};
     const config = scheduler.config || state.syncConfig || {};
@@ -1839,21 +1849,29 @@ function renderSyncSchedulerPanel() {
         ? `已运行 ${scheduler.rounds_completed || 0} 轮（持续）`
         : `进度 ${scheduler.rounds_completed || 0}/${scheduler.max_rounds || 0} 轮`;
 
+    const hasConfig = Boolean(config?.exists || config?.group_id || scheduler?.config?.group_id);
+    const hasRuntimeCookie = systemSyncCookieReady(config, scheduler);
+    const workflowText = `同步 -> ${cleanText}${publishEnabled ? ' -> 发布' : ''}`;
+    const lastAndNextText = `${lastTrigger || '-'} / ${nextRun || '-'}`;
+    const noticeText = hasConfig
+        ? (!running && scheduler.message ? scheduler.message : '')
+        : (scheduler.message || '未检测到配置');
+
     els.schedulerContent.innerHTML = `
-        <div class="space-y-1">
-            <div>进程状态：${escapeHtml(running ? '已启动' : '未启动')} · PID ${escapeHtml(String(scheduler.pid || '-'))}</div>
-            <div>计划配置：${escapeHtml(String(interval))} 分钟一次 · 每目标 Tab ${escapeHtml(String(count))} 条 · ${escapeHtml(downloadText)}</div>
-            <div>旁路任务：${escapeHtml(videoDispatchText)} · ${escapeHtml(scriptMaterialDispatchText)}</div>
-            <div>工作流：同步 → ${escapeHtml(cleanText)}${escapeHtml(publishEnabled ? ' → 发布' : '')}</div>
-            <div>轮次：${escapeHtml(rounds)}</div>
-            <div>Cookie：${escapeHtml(cookieMode)}</div>
-            <div>上次触发：${escapeHtml(lastTrigger)} · 下一次：${escapeHtml(nextRun)}</div>
-            <div>日志：<span class="font-mono break-all">${escapeHtml(scheduler.log_path || (config.log_path || '-'))}</span></div>
-            <div class="text-slate-400">${escapeHtml(scheduler.message || config.group_id ? '' : '未检测到配置')}</div>
+        <div class="zsxq-runtime-grid">
+            ${renderRuntimeItem('进程', running ? `已启动 · PID ${scheduler.pid || '-'}` : '未启动', running ? 'success' : 'muted')}
+            ${renderRuntimeItem('节奏', `${interval} 分钟一次`, 'info')}
+            ${renderRuntimeItem('抓取', `每目标 Tab ${count} 条 · ${downloadText}`, 'info', true)}
+            ${renderRuntimeItem('旁路', `${videoDispatchText} · ${scriptMaterialDispatchText}`, 'info', true)}
+            ${renderRuntimeItem('轮次', rounds, scheduler.continuous || running ? 'success' : 'muted', true)}
+            ${renderRuntimeItem('Cookie', cookieMode, hasRuntimeCookie ? 'success' : 'warning', true)}
+            ${renderRuntimeItem('上次 / 下次', lastAndNextText, nextRun ? 'success' : 'warning', true)}
         </div>
+        <div class="zsxq-runtime-workflow">${escapeHtml(workflowText)}</div>
+        <div class="zsxq-runtime-path">日志：<span>${escapeHtml(scheduler.log_path || (config.log_path || '-'))}</span></div>
+        ${noticeText ? `<div class="zsxq-runtime-empty">${escapeHtml(noticeText)}</div>` : ''}
     `;
 
-    const hasConfig = Boolean(config?.exists || config?.group_id || scheduler?.config?.group_id);
     if (!hasConfig) {
         els.startBtn.disabled = true;
         els.stopBtn.disabled = true;

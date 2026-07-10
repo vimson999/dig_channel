@@ -56,6 +56,24 @@ from tasks.doubao_browser_tts import process_doubao_browser_tts_job
 
 bp = Blueprint("report_video", __name__, url_prefix="/api/v1/report-video")
 logger = logging.getLogger(__name__)
+REPORT_VIDEO_REPORT_API_COLUMNS = (
+    ReportVideoReport.id,
+    ReportVideoReport.task_id,
+    ReportVideoReport.report_code,
+    ReportVideoReport.file_name,
+    ReportVideoReport.file_path,
+    ReportVideoReport.page_count,
+    ReportVideoReport.raw_text_path,
+    ReportVideoReport.cleaned_text_path,
+    ReportVideoReport.raw_text_chars,
+    ReportVideoReport.cleaned_text_chars,
+    ReportVideoReport.is_scanned,
+    ReportVideoReport.parse_status,
+    ReportVideoReport.ai_status,
+    ReportVideoReport.error_message,
+    ReportVideoReport.created_at,
+    ReportVideoReport.updated_at,
+)
 DOUBAO_TTS_PARENT_FEATURE = "report_video_factory"
 DOUBAO_TTS_TERMINAL_STATUSES = {"completed", "failed", "blocked_by_captcha", "canceled"}
 DOUBAO_TTS_ACTIVE_STATUSES = {"pending", "processing"}
@@ -167,6 +185,7 @@ def _task_or_404(task_id, *, include_details=False):
     query = ReportVideoTask.query
     if include_details:
         query = query.options(
+            selectinload(ReportVideoTask.reports).load_only(*REPORT_VIDEO_REPORT_API_COLUMNS),
             selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.analysis),
             selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.mindmap),
             selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.segments),
@@ -213,7 +232,12 @@ def _preview_file_path(preview, file_index=0):
 
 
 def _report_or_404(report_id):
-    report = ReportVideoReport.query.get(report_id)
+    report = (
+        ReportVideoReport.query
+        .options(load_only(*REPORT_VIDEO_REPORT_API_COLUMNS))
+        .filter(ReportVideoReport.id == str(report_id))
+        .one_or_none()
+    )
     if not report:
         return None, (jsonify({"success": False, "error": "Report not found"}), 404)
     return report, None
@@ -1838,6 +1862,7 @@ def submit_doubao_tts(task_id):
             })
 
     task = ReportVideoTask.query.options(
+        selectinload(ReportVideoTask.reports).load_only(*REPORT_VIDEO_REPORT_API_COLUMNS),
         selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.analysis),
         selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.mindmap),
         selectinload(ReportVideoTask.reports).selectinload(ReportVideoReport.segments),
@@ -3036,7 +3061,9 @@ def apply_topic_script_route(task_id, topic_id):
     try:
         _apply_topic_script_to_task(task, topic_id)
         db.session.commit()
-        task = ReportVideoTask.query.get(task.id)
+        task, reload_error = _task_or_404(task.id, include_details=True)
+        if reload_error:
+            return reload_error
         return jsonify({
             "success": True,
             "data": {
@@ -3186,6 +3213,8 @@ def upload_audios(task_id):
         task.result = result
         task.updated_at = datetime.utcnow()
         db.session.commit()
+        detail_task, _ = _task_or_404(task.id, include_details=True)
+        task = detail_task or task
 
         return jsonify({
             "success": True,

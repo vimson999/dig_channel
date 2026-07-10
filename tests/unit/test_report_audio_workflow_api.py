@@ -37,6 +37,125 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.ctx.pop()
         self.tmpdir.cleanup()
 
+    def test_job_payload_exposes_audio_script_quality_issue(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"filename": "sample.pdf"},
+                },
+            },
+            result={
+                "structured_result": {
+                    "provider": "deepseek",
+                    "final_script_for_tts": "第一部分：开场与变量切换 这里才是正文。",
+                },
+                "tts_text": {"chars": 23, "chunks": 1},
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        payload = report_audio_api._job_payload(parent)
+
+        self.assertEqual(payload["audio_script"]["provider"], "deepseek")
+        self.assertEqual(payload["audio_script"]["chunks"], 1)
+        self.assertIn("第一部分", payload["audio_script"]["text"])
+        self.assertIn("结构", payload["audio_script"]["quality_issue"])
+
+    def test_bilibili_cover_is_promoted_and_accepted_by_upload_resolver(self):
+        root = Path(self.tmpdir.name)
+        bilibili_cover_path = root / "bilibili-cover.jpg"
+        bilibili_cover_path.write_bytes(b"jpeg-bilibili-cover")
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {"pdf": {"filename": "sample.pdf"}},
+            },
+            result={
+                "video": {
+                    "enabled": True,
+                    "status": "completed",
+                    "bilibili_cover_path": str(bilibili_cover_path),
+                    "keyframes": {
+                        "bilibili_cover": {
+                            "path": str(bilibili_cover_path),
+                            "label": "B站封皮关键帧",
+                            "ratio": "1146:717",
+                            "width": 1146,
+                            "height": 717,
+                        },
+                    },
+                },
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        payload = report_audio_api._job_payload(parent)
+        cover_path, cover_key = report_audio_api._report_bilibili_cover_path(
+            parent,
+            "vertical",
+            "bilibili_cover",
+        )
+
+        expected_url = f"/api/report-audio-workflows/jobs/{parent.id}/download-bilibili-cover"
+        self.assertEqual(payload["download_bilibili_cover_url"], expected_url)
+        self.assertEqual(payload["video"]["bilibili_cover"]["download_url"], expected_url)
+        self.assertEqual(payload["video"]["bilibili_cover"]["ratio"], "1146:717")
+        self.assertEqual(cover_path, str(bilibili_cover_path))
+        self.assertEqual(cover_key, "bilibili_cover")
+
+    def test_completed_scheme2_job_can_backfill_bilibili_cover_without_video_rerender(self):
+        root = Path(self.tmpdir.name)
+        screenshot_path = root / "page.jpg"
+        screenshot_path.write_bytes(b"jpeg-page")
+        bilibili_cover_path = root / "bilibili-cover.jpg"
+        bilibili_cover_path.write_bytes(b"jpeg-bilibili-cover")
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"filename": "sample.pdf"},
+                    "video": {"vertical_enabled": True, "vertical_video_scheme": "scheme2"},
+                },
+            },
+            result={
+                "structured_result": {
+                    "cover_title": "方案二标题",
+                    "cover_subtitle": "方案二副标题",
+                },
+                "pdf_first_page_image": {"path": str(screenshot_path), "bytes": 9},
+                "video": {"status": "completed", "vertical_video_scheme": "scheme2"},
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        with patch.object(
+            report_audio_api.thumbnail_service,
+            "generate_workbench_bilibili_cover",
+            return_value=str(bilibili_cover_path),
+        ) as generate_cover:
+            cover = report_audio_api._generate_bilibili_cover_for_task(parent)
+
+        self.assertEqual(cover["path"], str(bilibili_cover_path))
+        self.assertFalse(generate_cover.call_args.kwargs["show_footer"])
+        db.session.refresh(parent)
+        self.assertEqual(parent.result["video"]["bilibili_cover_path"], str(bilibili_cover_path))
+
     def test_vertical_backfill_creates_vertical_only_publisher_task(self):
         root = Path(self.tmpdir.name)
         audio_path = root / "audio.wav"
@@ -80,7 +199,7 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             "apply_async",
             return_value=SimpleNamespace(id="celery-vertical"),
         ) as apply_async:
-            child = report_audio_api._create_vertical_video_backfill_task(parent)
+            child = report_audio_api._create_vertical_video_backfill_task(parent, scheme="scheme2")
 
         apply_async.assert_called_once_with(args=[child.id], queue="render", retry=False)
         self.assertEqual(child.celery_task_id, "celery-vertical")
@@ -91,6 +210,8 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertTrue(child.params["vertical_video"]["enabled"])
         self.assertEqual(child.params["vertical_video"]["image_path"], str(screenshot_path))
         self.assertTrue(child.params["vertical_thumbnail"]["enabled"])
+        self.assertTrue(child.params["bilibili_cover"]["enabled"])
+        self.assertFalse(child.params["bilibili_cover"]["show_footer"])
         self.assertFalse(child.params["bilibili"]["enabled"])
         self.assertNotIn("thumbnail", child.params)
         self.assertEqual(child.result["metadata"]["source"], report_audio_api.VERTICAL_BACKFILL_SOURCE)

@@ -387,26 +387,36 @@ def enqueue_bilibili_upload_task(child):
 
 def bilibili_upload_children(parent_id, *, parent_feature=None, source_label=None, limit=20):
     query = (
-        PublicationTask.query.options(load_only(
-            PublicationTask.id,
-            PublicationTask.celery_task_id,
-            PublicationTask.status,
-            PublicationTask.current_step,
-            PublicationTask.progress,
-            PublicationTask.error_message,
-            PublicationTask.params,
-            PublicationTask.result,
-            PublicationTask.created_at,
-            PublicationTask.completed_at,
-        ))
+        db.session.query(PublicationTask.id)
         .filter(PublicationTask.parent_task_id == parent_id)
         .filter(PublicationTask.feature == "publisher")
     )
     if parent_feature:
         query = query.filter(PublicationTask.parent_feature == parent_feature)
-    rows = query.order_by(PublicationTask.created_at.desc()).limit(limit).all()
+    candidate_ids = [
+        row.id
+        for row in query.order_by(PublicationTask.created_at.desc()).limit(limit).all()
+    ]
     items = []
-    for row in rows:
+    for candidate_id in candidate_ids:
+        row = (
+            PublicationTask.query.options(load_only(
+                PublicationTask.id,
+                PublicationTask.celery_task_id,
+                PublicationTask.status,
+                PublicationTask.current_step,
+                PublicationTask.progress,
+                PublicationTask.error_message,
+                PublicationTask.params,
+                PublicationTask.result,
+                PublicationTask.created_at,
+                PublicationTask.completed_at,
+            ))
+            .filter(PublicationTask.id == candidate_id)
+            .one_or_none()
+        )
+        if not row:
+            continue
         item = bilibili_upload_child_payload(row, source_label=source_label)
         if item:
             items.append(item)

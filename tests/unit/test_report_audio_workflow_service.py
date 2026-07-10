@@ -98,6 +98,34 @@ class ReportAudioWorkflowServiceTest(unittest.TestCase):
 
         self.assertEqual(deepseek.call_args.kwargs["timeout_seconds"], 7)
 
+    def test_normalizer_strips_section_outline_labels_from_tts_script(self):
+        payload = {
+            "final_script_for_tts": (
+                "第一部分：开场与变量切换（引入悬念与核心结论） "
+                "过去我们分析硬件产业链，最关心的是单一的成本优势。"
+                "第二部分：产业背景与实地调研印证（铺垫与底层逻辑） "
+                "在当前AI基础设施狂飙突进的表象下，顶级投行正在关注供应链安全重构。"
+            ),
+        }
+
+        with patch.object(report_audio_service, "_deepseek_normalize", return_value=payload):
+            normalized = normalize_for_tts("原始 Gemini 文本")
+
+        script = normalized["final_script_for_tts"]
+        self.assertTrue(script.startswith("过去我们分析硬件产业链"))
+        self.assertIn("在当前AI基础设施狂飙突进", script)
+        self.assertNotIn("第一部分", script)
+        self.assertNotIn("第二部分", script)
+        self.assertNotIn("开场与变量切换", script)
+        self.assertNotIn("产业背景与实地调研印证", script)
+
+    def test_structured_result_quality_detects_section_outline_labels(self):
+        issue = structured_result_quality_issue({
+            "final_script_for_tts": "第一部分：开场与变量切换 这里才是正文。",
+        })
+
+        self.assertIn("结构", issue)
+
     def test_structured_result_quality_detects_cached_capture_artifacts(self):
         issue = structured_result_quality_issue({
             "final_script_for_tts": "研报pdf解析视频文案 自定义 Gem 研报pdf解析视频文案说 这是一段正文。",

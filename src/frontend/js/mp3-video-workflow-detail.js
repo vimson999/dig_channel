@@ -13,6 +13,8 @@ class Mp3VideoWorkflowDetailPage {
         this.biliSeasonsPromises = {};
         this.biliSeasonsLoading = '';
         this.biliPanel = null;
+        this.biliPanelDraft = null;
+        this.biliPanelDraftJobId = '';
         this.lastBiliUpload = null;
         this.refreshTimer = null;
         this.autoRefreshMs = 5000;
@@ -75,6 +77,12 @@ class Mp3VideoWorkflowDetailPage {
             if (select) select.value = '';
         });
         this.els.root?.addEventListener('submit', (event) => {
+            const artifactForm = event.target.closest('[data-artifact-regenerate-form]');
+            if (artifactForm) {
+                event.preventDefault();
+                this.regenerateArtifact(artifactForm);
+                return;
+            }
             const form = event.target.closest('#bili-upload-form');
             if (!form) return;
             event.preventDefault();
@@ -165,17 +173,34 @@ class Mp3VideoWorkflowDetailPage {
         if (!this.hasActiveBiliUpload(this.job)) return;
         this.refreshTimer = setTimeout(() => {
             this.refreshTimer = null;
-            this.load();
+            this.refreshBilibiliUploads();
         }, this.autoRefreshMs);
     }
 
     hasActiveBiliUpload(job) {
         const items = Array.isArray(job?.bilibili_uploads) ? job.bilibili_uploads : [];
         const merged = [...items];
-        if (this.lastBiliUpload && !merged.some((item) => item.task_id === this.lastBiliUpload.task_id)) {
-            merged.push(this.lastBiliUpload);
+        const localUpload = this.biliPanel?.lastUpload || this.lastBiliUpload;
+        if (localUpload && !merged.some((item) => item.task_id === localUpload.task_id)) {
+            merged.push(localUpload);
         }
         return merged.some((item) => ['queued', 'pending', 'running', 'processing', 'submitting'].includes(String(item?.status || '').toLowerCase()));
+    }
+
+    async refreshBilibiliUploads() {
+        if (!this.jobId) return;
+        try {
+            const result = await this.request(`/api/mp3-video-workflows/jobs/${encodeURIComponent(this.jobId)}/bilibili-uploads`, { timeoutMs: 15000 });
+            this.job = {
+                ...(this.job || {}),
+                bilibili_uploads: result.data?.items || result.items || [],
+            };
+            this.biliPanel?.updateJobData?.(this.job);
+            this.scheduleAutoRefresh();
+        } catch (error) {
+            this.setNotice(`刷新 B站上传记录失败：${error.message}`, 'warning');
+            this.scheduleAutoRefresh();
+        }
     }
 
     async loadBiliCredentials() {
@@ -249,6 +274,7 @@ class Mp3VideoWorkflowDetailPage {
     render() {
         const job = this.job || {};
         const title = job.plan?.title || job.request?.audio?.topic_title || job.request?.audio?.filename || job.job_id || 'MP3 视频编排详情';
+        const biliPanelDraft = this.captureBilibiliPanelDraft(job);
         this.els.title.textContent = title;
         this.els.subtitle.textContent = [
             job.request?.audio?.filename || '',
@@ -265,7 +291,7 @@ class Mp3VideoWorkflowDetailPage {
             this.renderLogs(job),
             this.renderRaw(job),
         ].join('');
-        this.mountBilibiliPanel(job);
+        this.mountBilibiliPanel(job, biliPanelDraft);
         this.refreshBiliScheduleInput();
         const credentialId = document.getElementById('bili-credential-id')?.value || '';
         if (credentialId) {
@@ -274,7 +300,22 @@ class Mp3VideoWorkflowDetailPage {
         }
     }
 
-    mountBilibiliPanel(job) {
+    captureBilibiliPanelDraft(job) {
+        const nextJobId = String(job?.job_id || job?.id || this.jobId || '');
+        const currentJobId = String(this.biliPanel?.job?.job_id || this.biliPanel?.job?.id || this.biliPanelDraftJobId || '');
+        const sameJob = !currentJobId || !nextJobId || currentJobId === nextJobId;
+        if (sameJob && this.biliPanel?.readFormDraft) {
+            this.biliPanelDraft = this.biliPanel.readFormDraft() || this.biliPanelDraft;
+            this.biliPanelDraftJobId = nextJobId;
+        }
+        if (this.biliPanelDraftJobId && nextJobId && this.biliPanelDraftJobId !== nextJobId) {
+            this.biliPanelDraft = null;
+            this.biliPanelDraftJobId = nextJobId;
+        }
+        return this.biliPanelDraft ? { ...this.biliPanelDraft } : null;
+    }
+
+    mountBilibiliPanel(job, formDraft = null) {
         const container = document.getElementById('mp3-bilibili-publish-panel');
         if (!container || !window.BilibiliPublishPanel) return;
         if (!this.biliPanel || this.biliPanel.container !== container) {
@@ -292,11 +333,13 @@ class Mp3VideoWorkflowDetailPage {
                 defaultTitle: (payload, videoKey) => this.defaultBiliTitle(payload, videoKey),
                 defaultTags: '财经,音频,内资闭门会',
                 emptyDescription: '当前任务还没有完整视频文件。请先用“完整横竖屏视频”模式生成横屏或竖屏视频，关键帧预览不能直接投递 B站。',
-                onAfterSubmit: async () => this.load(),
-                onAfterCancel: async () => this.load(),
+                onAfterSubmit: async () => this.refreshBilibiliUploads(),
+                onAfterCancel: async () => this.refreshBilibiliUploads(),
             });
         }
-        this.biliPanel.setJob(job);
+        this.biliPanel.setJob(job, { formDraft });
+        this.biliPanelDraft = this.biliPanel.readFormDraft?.() || formDraft || null;
+        this.biliPanelDraftJobId = String(job?.job_id || job?.id || this.jobId || '');
     }
 
     sourceLabel(job) {
@@ -316,6 +359,12 @@ class Mp3VideoWorkflowDetailPage {
         const generateSubtitles = job.generate_subtitles ?? job.request?.generate_subtitles ?? true;
         const canContinueFullVideo = this.canContinueFullVideo(job);
         const canRegenerateVideos = this.canRegenerateVideos(job);
+        const continueStartText = planAudio.start_seconds !== undefined && planAudio.start_seconds !== null
+            ? this.formatDuration(planAudio.start_seconds)
+            : '00:00';
+        const continueEndText = planAudio.end_seconds !== undefined && planAudio.end_seconds !== null
+            ? this.formatDuration(planAudio.end_seconds)
+            : '';
         const range = [
             planAudio.start_seconds !== undefined ? `起点 ${this.formatDuration(planAudio.start_seconds)}` : '',
             planAudio.end_seconds !== undefined && planAudio.end_seconds !== null ? `终点 ${this.formatDuration(planAudio.end_seconds)}` : '终点自动',
@@ -340,9 +389,22 @@ class Mp3VideoWorkflowDetailPage {
                     </div>
                     <div class="flex flex-col items-start gap-2 lg:items-end">
                         ${canContinueFullVideo ? `
-                            <button type="button" data-continue-full-video="1" class="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-black text-white hover:bg-emerald-700">
-                                <i class="fas fa-film mr-1.5"></i>继续生成完整视频
-                            </button>
+                            <div class="w-full rounded-lg border border-emerald-100 bg-emerald-50 p-2.5 lg:w-72">
+                                <div class="mb-2 text-[11px] font-black text-emerald-800">完整视频截取范围</div>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <label class="text-[11px] font-bold text-slate-500">
+                                        起点
+                                        <input type="text" data-continue-start-seconds value="${this.escapeAttr(continueStartText)}" placeholder="00:37" inputmode="numeric" class="mt-1 w-full rounded-md border border-emerald-200 bg-white px-2 py-1.5 text-xs font-black text-slate-900 focus:border-emerald-500 focus:outline-none">
+                                    </label>
+                                    <label class="text-[11px] font-bold text-slate-500">
+                                        终点
+                                        <input type="text" data-continue-end-seconds value="${this.escapeAttr(continueEndText)}" placeholder="14:39" inputmode="numeric" class="mt-1 w-full rounded-md border border-emerald-200 bg-white px-2 py-1.5 text-xs font-black text-slate-900 focus:border-emerald-500 focus:outline-none">
+                                    </label>
+                                </div>
+                                <button type="button" data-continue-full-video="1" class="mt-2 w-full rounded-lg bg-emerald-600 px-3 py-2 text-xs font-black text-white hover:bg-emerald-700">
+                                    <i class="fas fa-film mr-1.5"></i>继续生成完整视频
+                                </button>
+                            </div>
                         ` : ''}
                         ${canRegenerateVideos ? `
                             <button type="button" data-regenerate-videos="1" class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-800 hover:bg-amber-100">
@@ -493,14 +555,78 @@ class Mp3VideoWorkflowDetailPage {
                 <div class="mb-3 text-sm font-black text-slate-900">封皮 / 背景图预览</div>
                 <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     ${images.map((item) => `
-                        <a href="${this.absoluteUrl(item.url)}" target="_blank" rel="noopener noreferrer" class="overflow-hidden rounded-md border border-slate-200 bg-slate-50">
-                            <img src="${this.absoluteUrl(item.url)}" alt="${this.escapeAttr(item.label)}" class="aspect-video w-full object-cover">
-                            <div class="px-2 py-1.5 text-xs font-bold text-slate-600">${this.escape(item.label)}</div>
-                        </a>
+                        <div class="overflow-hidden rounded-md border border-slate-200 bg-slate-50">
+                            <a href="${this.absoluteUrl(item.url)}" target="_blank" rel="noopener noreferrer" class="block">
+                                <img src="${this.absoluteUrl(item.url)}" alt="${this.escapeAttr(item.label)}" class="aspect-video w-full object-cover">
+                            </a>
+                            <div class="space-y-2 px-2 py-2">
+                                <div class="text-xs font-bold text-slate-600">${this.escape(item.label)}</div>
+                                ${this.renderArtifactRegenerateForm(job, item)}
+                            </div>
+                        </div>
                     `).join('')}
                 </div>
             </section>
         `;
+    }
+
+    renderArtifactRegenerateForm(job, item) {
+        if (!this.canRegenerateArtifact(item.key)) return '';
+        const canSubmit = this.canEditArtifactNow(job);
+        const defaultText = this.defaultArtifactTitleText(job, item.key);
+        return `
+            <details class="rounded-md border border-indigo-100 bg-white">
+                <summary class="cursor-pointer select-none px-2.5 py-2 text-[11px] font-black text-indigo-700 hover:bg-indigo-50">
+                    <i class="fas fa-wand-magic-sparkles mr-1"></i>重做封皮
+                </summary>
+                <form data-artifact-regenerate-form data-artifact-key="${this.escapeAttr(item.key)}" class="space-y-2 border-t border-indigo-50 p-2.5">
+                    <label class="block text-[11px] font-bold text-slate-500">
+                        标题文案（最多 3 行）
+                        <textarea name="title_text" rows="3" maxlength="240" class="mt-1 w-full resize-y rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-bold leading-5 text-slate-900 focus:border-indigo-500 focus:outline-none" placeholder="${this.escapeAttr(this.artifactTitlePlaceholder(item.key))}">${this.escape(defaultText)}</textarea>
+                    </label>
+                    <div class="text-[10px] leading-4 text-slate-400">${this.escape(this.artifactRegenerateHint(item.key))}</div>
+                    ${canSubmit ? '' : '<div class="rounded-md border border-amber-100 bg-amber-50 px-2 py-1.5 text-[10px] font-bold text-amber-700">当前任务运行中，结束后再替换封皮。</div>'}
+                    <button type="submit" ${canSubmit ? '' : 'disabled'} class="w-full rounded-md bg-indigo-600 px-2.5 py-1.5 text-[11px] font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+                        <i class="fas fa-rotate mr-1"></i>生成并替换
+                    </button>
+                </form>
+            </details>
+        `;
+    }
+
+    canRegenerateArtifact(key) {
+        return ['finance_cover', 'audio_background', 'xiaojunjun_cover', 'xiaojunjun_background'].includes(String(key || ''));
+    }
+
+    canEditArtifactNow(job) {
+        return ['succeeded', 'completed', 'failed', 'canceled'].includes(String(job?.status || '').toLowerCase());
+    }
+
+    defaultArtifactTitleText(job, key) {
+        const plan = job?.plan || {};
+        if (key === 'finance_cover') {
+            return plan.finance_cover_subtitle || plan.title || '';
+        }
+        if (key === 'audio_background') {
+            return [plan.cover_title, plan.cover_subtitle].filter(Boolean).join('\n') || plan.title || '';
+        }
+        if (key === 'xiaojunjun_cover' || key === 'xiaojunjun_background') {
+            return plan.xiaojunjun_subtitle || plan.xiaojunjun_video_title || plan.title || '';
+        }
+        return '';
+    }
+
+    artifactTitlePlaceholder(key) {
+        if (key === 'audio_background') return '第一行主标题\n第二行主标题\n第三行副标题';
+        return '第一行标题\n第二行标题\n第三行标题';
+    }
+
+    artifactRegenerateHint(key) {
+        if (key === 'finance_cover') return '替换黄色大标题；栏目标题和日期沿用当前任务。';
+        if (key === 'audio_background') return '前两行作为竖屏主标题，第三行作为副标题。';
+        if (key === 'xiaojunjun_cover') return '替换小君君横屏封皮的黄色高亮条，日期保留。';
+        if (key === 'xiaojunjun_background') return '替换小君君横屏背景的黄色高亮条，不带日期。';
+        return '只重做当前这张图。';
     }
 
     renderVideos(job) {
@@ -1078,7 +1204,15 @@ class Mp3VideoWorkflowDetailPage {
     }
 
     async continueFullVideo(button) {
-        if (!window.confirm('确认关键帧效果可以，继续生成完整横屏和竖屏视频？已有 DS、封皮、背景和关键帧会复用。')) return;
+        let payload;
+        try {
+            payload = this.continueAudioRangePayload();
+        } catch (error) {
+            this.setNotice(error.message, 'error');
+            return;
+        }
+        const rangeLabel = `${this.formatDuration(payload.start_seconds)} - ${payload.end_seconds === null ? '自动' : this.formatDuration(payload.end_seconds)}`;
+        if (!window.confirm(`确认关键帧效果可以，继续生成完整横屏和竖屏视频？\n本次音频截取：${rangeLabel}\n已有 DS、封皮、背景和关键帧会复用。`)) return;
         const originalHtml = button?.innerHTML || '';
         try {
             if (button) {
@@ -1088,6 +1222,8 @@ class Mp3VideoWorkflowDetailPage {
             const result = await this.request(`/api/mp3-video-workflows/jobs/${encodeURIComponent(this.jobId)}/continue-full-video`, {
                 method: 'POST',
                 timeoutMs: 30000,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
             });
             this.job = result.data || result;
             this.render();
@@ -1101,6 +1237,55 @@ class Mp3VideoWorkflowDetailPage {
                 button.innerHTML = originalHtml;
             }
         }
+    }
+
+    continueAudioRangePayload() {
+        const planAudio = this.job?.plan?.audio || {};
+        const startInput = document.querySelector('[data-continue-start-seconds]');
+        const endInput = document.querySelector('[data-continue-end-seconds]');
+        const fallbackStart = Number(planAudio.start_seconds ?? 0);
+        const fallbackEnd = planAudio.end_seconds === undefined || planAudio.end_seconds === null
+            ? null
+            : Number(planAudio.end_seconds);
+        const parsedStart = this.parseDurationInput(startInput?.value, '起点');
+        const parsedEnd = this.parseDurationInput(endInput?.value, '终点');
+        const start = parsedStart ?? (Number.isFinite(fallbackStart) ? fallbackStart : 0);
+        const end = parsedEnd ?? (Number.isFinite(fallbackEnd) ? fallbackEnd : null);
+        if (!Number.isFinite(start) || start < 0) throw new Error('起点时间无效');
+        if (end !== null && (!Number.isFinite(end) || end <= start)) {
+            throw new Error('终点时间必须大于起点时间');
+        }
+        return {
+            start_seconds: Math.round(start * 1000) / 1000,
+            end_seconds: end === null ? null : Math.round(end * 1000) / 1000,
+        };
+    }
+
+    parseDurationInput(value, label = '时间') {
+        const text = String(value ?? '').trim();
+        if (!text) return null;
+        if (text.includes(':')) {
+            const parts = text.split(':').map((part) => part.trim());
+            if (![2, 3].includes(parts.length) || parts.some((part) => !part)) {
+                throw new Error(`${label}格式无效，请使用 MM:SS 或 HH:MM:SS`);
+            }
+            const numbers = parts.map((part) => Number(part));
+            if (numbers.some((item) => !Number.isFinite(item) || item < 0)) {
+                throw new Error(`${label}格式无效，请使用 MM:SS 或 HH:MM:SS`);
+            }
+            const secondsPart = numbers[numbers.length - 1];
+            const minuteOverflow = numbers.length === 3 && numbers[1] >= 60;
+            if (secondsPart >= 60 || minuteOverflow) {
+                throw new Error(`${label}格式无效，分秒不能超过 59`);
+            }
+            if (numbers.length === 2) return numbers[0] * 60 + numbers[1];
+            return numbers[0] * 3600 + numbers[1] * 60 + numbers[2];
+        }
+        const seconds = Number(text);
+        if (!Number.isFinite(seconds) || seconds < 0) {
+            throw new Error(`${label}格式无效，请使用秒数、MM:SS 或 HH:MM:SS`);
+        }
+        return seconds;
     }
 
     async regenerateVideos(button) {
@@ -1121,6 +1306,51 @@ class Mp3VideoWorkflowDetailPage {
             this.setNotice(result.message || '已重新投递完整视频生成任务。', 'success');
         } catch (error) {
             this.setNotice(`重新生成完整视频失败：${error.message}`, 'error');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.innerHTML = originalHtml;
+            }
+        }
+    }
+
+    async regenerateArtifact(form) {
+        const key = String(form?.dataset?.artifactKey || '').trim();
+        const textarea = form?.querySelector('textarea[name="title_text"]');
+        const titleText = String(textarea?.value || '').trim();
+        const lines = titleText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        if (!key) {
+            this.setNotice('缺少要重做的封皮 key。', 'error');
+            return;
+        }
+        if (!titleText || !lines.length) {
+            this.setNotice('请先输入标题文案。', 'warning');
+            textarea?.focus();
+            return;
+        }
+        if (lines.length > 3) {
+            this.setNotice('标题最多支持 3 行。', 'warning');
+            textarea?.focus();
+            return;
+        }
+        const button = form.querySelector('button[type="submit"]');
+        const originalHtml = button?.innerHTML || '';
+        try {
+            if (button) {
+                button.disabled = true;
+                button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>生成中...';
+            }
+            const result = await this.request(`/api/mp3-video-workflows/jobs/${encodeURIComponent(this.jobId)}/artifacts/${encodeURIComponent(key)}/regenerate`, {
+                method: 'POST',
+                timeoutMs: 60000,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title_text: lines.join('\n') }),
+            });
+            this.job = result.data || result;
+            this.render();
+            this.setNotice(result.message || '封皮已重做并替换。后续重新生成视频会使用新版图片。', 'success');
+        } catch (error) {
+            this.setNotice(`重做封皮失败：${error.message}`, 'error');
         } finally {
             if (button) {
                 button.disabled = false;

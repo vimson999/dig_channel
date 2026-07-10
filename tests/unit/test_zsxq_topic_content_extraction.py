@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -75,6 +76,118 @@ class ZsxqTopicContentExtractionTest(unittest.TestCase):
 
         self.assertEqual(payload["answer"]["images"], [image])
         self.assertNotIn("images", payload)
+
+    def test_public_cached_topic_exposes_projected_attachment_images_without_topic_raw_payload(self):
+        image = {
+            "image_id": "img-1",
+            "thumbnail": {"url": "https://example.com/thumb.jpg", "width": 320, "height": 180},
+            "large": {"url": "https://example.com/large.jpg", "width": 1280, "height": 720},
+        }
+        topic = SimpleNamespace(
+            topic_id="topic-1",
+            topic_uid="",
+            title="黄金 vs 半导体",
+            create_time="2026-07-05T13:37:00.000+0800",
+            raw_json_path=None,
+            tab_id="t1",
+            tab_label="调研纪要",
+            topic_type="question_answer",
+            author_name="洪灏",
+            content="提问：黄金怎么看？\n\n回答：看图。",
+            question_text="黄金怎么看？",
+            answer_text="看图。",
+            article_title=None,
+            article_excerpt=None,
+        )
+        attachment = SimpleNamespace(
+            raw_payload=image,
+            name="图片",
+            file_id="img-1",
+            download_count=None,
+            attachment_key="img-1",
+            attachment_type="image",
+        )
+
+        payload = zsxq_sync_service._public_cached_topic(topic, [attachment])
+
+        self.assertEqual(len(payload["answer"]["images"]), 1)
+        self.assertEqual(payload["answer"]["images"][0]["image_id"], "img-1")
+        self.assertEqual(payload["answer"]["images"][0]["thumbnail"]["url"], "https://example.com/thumb.jpg")
+        self.assertEqual(payload["answer"]["images"][0]["large"]["url"], "https://example.com/large.jpg")
+        self.assertNotIn("images", payload)
+
+    def test_projected_attachment_images_keep_answer_and_feed_context(self):
+        answer_image = {
+            "image_id": "answer-img",
+            "_zsxq_image_context": "answer",
+            "thumbnail": {"url": "https://example.com/answer-thumb.jpg"},
+        }
+        feed_image = {
+            "image_id": "feed-img",
+            "_zsxq_image_context": "talk",
+            "thumbnail": {"url": "https://example.com/feed-thumb.jpg"},
+        }
+        topic = SimpleNamespace(
+            topic_id="topic-1",
+            topic_uid="",
+            title="黄金 vs 半导体",
+            create_time="2026-07-05T13:37:00.000+0800",
+            raw_json_path=None,
+            tab_id="t1",
+            tab_label="调研纪要",
+            topic_type="question_answer",
+            author_name="洪灏",
+            content="提问：黄金怎么看？\n\n回答：看图。",
+            question_text="黄金怎么看？",
+            answer_text="看图。",
+            article_title=None,
+            article_excerpt=None,
+        )
+        attachments = [
+            SimpleNamespace(
+                raw_payload=answer_image,
+                name="回答图",
+                file_id="answer-img",
+                download_count=None,
+                attachment_key="answer-img",
+                attachment_type="image",
+            ),
+            SimpleNamespace(
+                raw_payload=feed_image,
+                name="正文图",
+                file_id="feed-img",
+                download_count=None,
+                attachment_key="feed-img",
+                attachment_type="image",
+            ),
+        ]
+
+        payload = zsxq_sync_service._public_cached_topic(topic, attachments)
+
+        self.assertEqual(payload["answer"]["images"][0]["image_id"], "answer-img")
+        self.assertNotIn("_zsxq_image_context", payload["answer"]["images"][0])
+        self.assertEqual(payload["images"][0]["image_id"], "feed-img")
+        self.assertNotIn("_zsxq_image_context", payload["images"][0])
+
+    def test_topic_images_project_source_context_for_ingest_projection(self):
+        topic = {
+            "talk": {
+                "images": [{"image_id": "talk-img"}],
+                "article": {"images": [{"image_id": "article-img"}]},
+            },
+            "answer": {"images": [{"image_id": "answer-img"}]},
+        }
+
+        items = zsxq_sync_service._topic_images_with_context(topic)
+
+        self.assertEqual(
+            [(context, payload["image_id"], payload["_zsxq_image_context"]) for context, payload in items],
+            [
+                ("talk", "talk-img", "talk"),
+                ("talk_article", "article-img", "talk_article"),
+                ("answer", "answer-img", "answer"),
+            ],
+        )
 
 
 class PublicationTaskProjectionTest(unittest.TestCase):

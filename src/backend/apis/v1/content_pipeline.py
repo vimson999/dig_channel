@@ -206,7 +206,7 @@ def list_content_pipeline_tasks(_current_user):
 @bp.route("/task/<task_id>", methods=["GET"])
 @require_login
 def get_content_pipeline_task(_current_user, task_id):
-    task = PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).get(task_id)
+    task = PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).filter(PublicationTask.id == str(task_id)).one_or_none()
     if not task or (task.feature or (task.params or {}).get("feature")) not in CONTENT_PIPELINE_FEATURES:
         return jsonify({"success": False, "message": "任务不存在"}), 404
     return jsonify({"success": True, "data": task.to_dict()})

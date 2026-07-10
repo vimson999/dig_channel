@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>知识星球实验台 - Shioa</title>
-    <link href="css/zsxq-lab.css?v=20260617-download-heat" rel="stylesheet">
+    <link href="css/zsxq-lab.css?v=20260709-lab-console-ux-pass" rel="stylesheet">
     <link href="css/three-workspaces.css?v=20260702-zsxq-map-polish" rel="stylesheet">
     <style>
         .line-clamp-2 {
@@ -17,7 +17,7 @@
 </head>
 <body class="min-h-screen bg-slate-50 text-slate-900 overflow-x-hidden">
     <main class="zsxq-page-shell max-w-[1440px] mx-auto px-4 sm:px-6 py-8 space-y-6">
-        <section class="zsxq-page-header flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
+        <section class="zsxq-page-header zsxq-lab-hero flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
             <div>
                 <h2 class="text-3xl font-black tracking-tight">知识星球实验台</h2>
                 <p class="text-sm text-slate-500 mt-1">低频验证移动端 API，可获取星球列表和主题内容；Cookie 从平台凭据数据库读取并加密保存。</p>
@@ -26,15 +26,36 @@
                 <i class="fas fa-triangle-exclamation"></i>
                 <span>仅用于个人授权账号验证，不做批量抓取。</span>
             </div>
+            <div class="zsxq-lab-command-strip" aria-label="实验台操作导览">
+                <a class="zsxq-lab-command-card" href="#lab-cookie-card">
+                    <span class="zsxq-lab-command-index">1</span>
+                    <span>
+                        <strong>先确认账号</strong>
+                        <em>DB Cookie、主题数量、附件范围</em>
+                    </span>
+                    <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
+                </a>
+                <a class="zsxq-lab-command-card" href="#lab-topics-card">
+                    <span class="zsxq-lab-command-index">2</span>
+                    <span>
+                        <strong>再选择星球</strong>
+                        <em>本地缓存优先，必要时远端刷新</em>
+                    </span>
+                    <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
+                </a>
+                <a class="zsxq-lab-command-card" href="#lab-insights-card">
+                    <span class="zsxq-lab-command-index">3</span>
+                    <span>
+                        <strong>最后看辅助</strong>
+                        <em>热度排行、系统任务、发布入口</em>
+                    </span>
+                    <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
+                </a>
+            </div>
         </section>
 
-        <section id="zsxq-knowledge-map" class="three-workspace-panel three-workspace-panel--knowledge">
-            <div class="three-workspace-scene" data-three-scene></div>
-            <aside class="three-workspace-side" data-three-side></aside>
-        </section>
-
-        <section class="zsxq-workbench grid grid-cols-1 gap-6 min-w-0">
-            <aside class="zsxq-left-panel bg-white border border-slate-200 rounded-lg shadow-sm p-5 space-y-5">
+        <section id="zsxq-lab-workbench" class="zsxq-workbench grid grid-cols-1 gap-6 min-w-0">
+            <aside id="lab-cookie-card" class="zsxq-left-panel bg-white border border-slate-200 rounded-lg shadow-sm p-5 space-y-5">
                 <div class="zsxq-panel-section">
                     <div class="zsxq-section-head flex items-center justify-between gap-3">
                         <label class="text-xs font-bold text-slate-600 uppercase tracking-wider">Cookie</label>
@@ -109,7 +130,7 @@
                 </div>
             </aside>
 
-            <section class="zsxq-main-panel bg-white border border-slate-200 rounded-lg shadow-sm min-h-[720px] flex flex-col min-w-0">
+            <section id="lab-topics-card" class="zsxq-main-panel bg-white border border-slate-200 rounded-lg shadow-sm min-h-[720px] flex flex-col min-w-0">
                 <div class="zsxq-topic-toolbar border-b border-slate-200 p-5 flex flex-col gap-3">
                     <div class="min-w-0">
                         <h3 id="topics-title" class="text-xl font-black">最新主题</h3>
@@ -166,7 +187,7 @@
                 </div>
             </section>
 
-            <aside class="zsxq-right-panel space-y-4">
+            <aside id="lab-insights-card" class="zsxq-right-panel space-y-4">
                 <div id="hot-rank-panel" class="bg-white border border-slate-200 rounded-lg shadow-sm px-5 py-4">
                     <div class="flex items-start justify-between gap-3">
                         <div>
@@ -240,6 +261,24 @@
                 </div>
             </aside>
         </section>
+
+        <section class="zsxq-lab-map-overview" aria-label="知识对象图谱">
+            <div class="zsxq-lab-map-head">
+                <div>
+                    <p class="zsxq-lab-eyebrow">Knowledge Graph</p>
+                    <h3>知识对象图谱</h3>
+                    <p>图谱用于理解星球、Tab、主题和附件关系；日常验证优先在上方工作台完成。</p>
+                </div>
+                <a href="#zsxq-lab-workbench" class="zsxq-lab-map-jump">
+                    回到实验台
+                    <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
+                </a>
+            </div>
+            <div id="zsxq-knowledge-map" class="three-workspace-panel three-workspace-panel--knowledge">
+                <div class="three-workspace-scene" data-three-scene></div>
+                <aside class="three-workspace-side" data-three-side></aside>
+            </div>
+        </section>
     </main>
 
     <script src="js/env.js"></script>
@@ -247,6 +286,6 @@
     <script src="js/shared-navigation.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
     <script src="js/three-workspace-graph.js?v=20260702-zsxq-map-polish"></script>
-    <script src="js/zsxq-lab.js?v=20260702-three-knowledge-map-polish"></script>
+    <script src="js/zsxq-lab.js?v=20260709-lab-console-ux-pass"></script>
 </body>
 </html>

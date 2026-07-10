@@ -68,6 +68,18 @@ def _script_chars_from_result(result):
         return 0
 
 
+def _gemini_response_chars_from_result(result):
+    response = result.get('final_response_text') or result.get('response_text')
+    return len("".join(str(response or "").split()))
+
+
+def _non_negative_int(value):
+    try:
+        return max(0, int(float(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
 class PublicationTask(db.Model):
     __tablename__ = 'publication_tasks'
 
@@ -103,6 +115,22 @@ class PublicationTask(db.Model):
     source_feature = db.Column(db.String(80), nullable=True)
     task_title = db.Column(db.String(500), nullable=True)
     task_video_path = db.Column(db.String(600), nullable=True)
+
+    # Publisher vertical-video and Doubao TTS child projections. These fields
+    # keep child polling, cache matching, and artifact lookup off params/result.
+    publisher_vertical_enabled = db.Column(db.Boolean, nullable=True)
+    publisher_landscape_enabled = db.Column(db.Boolean, nullable=True)
+    publisher_render_mode = db.Column(db.String(32), nullable=True)
+    publisher_vertical_scheme = db.Column(db.String(32), nullable=True)
+    publisher_preview_seconds = db.Column(db.Integer, nullable=False, default=0)
+    publisher_vertical_video_path = db.Column(db.String(600), nullable=True)
+    publisher_vertical_cover_path = db.Column(db.String(600), nullable=True)
+    publisher_podcast_cover_path = db.Column(db.String(600), nullable=True)
+    doubao_tts_text_hash = db.Column(db.String(64), nullable=True)
+    doubao_tts_chunk_index = db.Column(db.Integer, nullable=False, default=0)
+    doubao_tts_chunk_attempt = db.Column(db.Integer, nullable=False, default=0)
+    doubao_tts_wav_path = db.Column(db.String(600), nullable=True)
+    gemini_response_chars = db.Column(db.Integer, nullable=False, default=0)
 
     # report_pdf_audio_workflow 列表页投影列。
     report_audio_pdf_attachment_id = db.Column(db.String(36), nullable=True, index=True)
@@ -182,12 +210,17 @@ class PublicationTask(db.Model):
 
         if result_loaded:
             self.task_video_path = _compact_text(result.get('video_path'), 600)
+            self.gemini_response_chars = _gemini_response_chars_from_result(result)
 
         title = self._derive_task_title(params if params_loaded else {}, result if result_loaded else {})
         if title or (params_loaded and result_loaded):
             self.task_title = title
 
         self._sync_report_audio_projection(
+            params if params_loaded else None,
+            result if result_loaded else None,
+        )
+        self._sync_child_hot_projection(
             params if params_loaded else None,
             result if result_loaded else None,
         )
@@ -279,6 +312,62 @@ class PublicationTask(db.Model):
             self.report_audio_video_path = _compact_text(video.get('video_path'), 600)
             self.report_audio_cover_path = _compact_text(video.get('cover_path'), 600)
             self.final_script_chars = _script_chars_from_result(result)
+
+    def _sync_child_hot_projection(self, params=None, result=None):
+        params_loaded = params is not None
+        result_loaded = result is not None
+        params = params if isinstance(params, dict) else {}
+        result = result if isinstance(result, dict) else {}
+        is_publisher = _loaded_model_attr(self, 'feature') == 'publisher'
+
+        if params_loaded:
+            if is_publisher:
+                landscape = params.get('video') if isinstance(params.get('video'), dict) else {}
+                vertical = params.get('vertical_video') if isinstance(params.get('vertical_video'), dict) else {}
+                metadata = params.get('metadata') if isinstance(params.get('metadata'), dict) else {}
+                self.publisher_landscape_enabled = _boolish(landscape.get('enabled'))
+                self.publisher_render_mode = _compact_text(
+                    metadata.get('render_mode') or params.get('render_mode') or 'full_video',
+                    32,
+                )
+                self.publisher_vertical_enabled = _boolish(vertical.get('enabled'))
+                self.publisher_vertical_scheme = _compact_text(vertical.get('scheme'), 32)
+                self.publisher_preview_seconds = _non_negative_int(vertical.get('preview_seconds'))
+
+            doubao = params.get('doubao_browser_tts') if isinstance(params.get('doubao_browser_tts'), dict) else {}
+            doubao_metadata = doubao.get('metadata') if isinstance(doubao.get('metadata'), dict) else {}
+            self.doubao_tts_text_hash = _compact_text(doubao_metadata.get('text_hash'), 64)
+            self.doubao_tts_chunk_index = _non_negative_int(doubao_metadata.get('chunk_index'))
+            self.doubao_tts_chunk_attempt = _non_negative_int(doubao_metadata.get('chunk_attempt'))
+
+        if result_loaded:
+            metadata = result.get('metadata') if isinstance(result.get('metadata'), dict) else {}
+            audio = result.get('audio') if isinstance(result.get('audio'), dict) else {}
+            if is_publisher and (metadata.get('render_mode') or result.get('render_mode')):
+                self.publisher_render_mode = _compact_text(
+                    metadata.get('render_mode') or result.get('render_mode'),
+                    32,
+                )
+            vertical_enabled = _loaded_model_attr(self, 'publisher_vertical_enabled')
+            if metadata.get('vertical_video_scheme'):
+                self.publisher_vertical_scheme = _compact_text(metadata.get('vertical_video_scheme'), 32)
+            if metadata.get('preview_seconds') is not None:
+                self.publisher_preview_seconds = _non_negative_int(metadata.get('preview_seconds'))
+            self.publisher_vertical_video_path = _compact_text(
+                result.get('vertical_video_path')
+                or (result.get('video_path') if vertical_enabled else None),
+                600,
+            )
+            self.publisher_vertical_cover_path = _compact_text(result.get('vertical_cover_path'), 600)
+            self.publisher_podcast_cover_path = _compact_text(result.get('podcast_cover_path'), 600)
+
+            if metadata.get('text_hash'):
+                self.doubao_tts_text_hash = _compact_text(metadata.get('text_hash'), 64)
+            if metadata.get('chunk_index') is not None:
+                self.doubao_tts_chunk_index = _non_negative_int(metadata.get('chunk_index'))
+            if metadata.get('chunk_attempt') is not None:
+                self.doubao_tts_chunk_attempt = _non_negative_int(metadata.get('chunk_attempt'))
+            self.doubao_tts_wav_path = _compact_text(audio.get('wav_path') or result.get('wav_path'), 600)
 
     def _sync_workflow_state_projection(self, result):
         waiting_child = result.get('waiting_child') if isinstance(result.get('waiting_child'), dict) else {}

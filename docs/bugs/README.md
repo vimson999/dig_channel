@@ -2,12 +2,33 @@
 
 本目录记录项目中真实发生并已定位处理的 bug。每条记录必须说明现象、影响、根因、解决思路、实际方案、验证方式和复发预防。
 
-项目纪律见：[Bug 修复记录纪律](../rules/bugfix-record-discipline.md)。
+项目纪律见：[Bug 修复记录纪律](../rules/bugfix-record-discipline.md) 和 [Bug 定期回顾与复发升级纪律](../rules/bug-retrospective-discipline.md)。
+
+复发根因登记表：[`recurrence-registry.json`](recurrence-registry.json)。正式回顾归档在 [`reviews/`](reviews/)。
+
+执行完整性检查：
+
+```bash
+./venv/bin/python scripts/dev/review_bug_records.py --strict
+```
 
 ## 索引
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-07-10 | [研报音频方案二完整合成缺少 B站封皮](2026-07-10-report-audio-scheme2-bilibili-cover-missing.md) | report audio / publisher / 方案二视觉资产 | 已修复 |
+| 2026-07-10 | [Publisher 封面浏览器缺少进程级硬超时](2026-07-10-publisher-cover-browser-no-hard-timeout.md) | publisher / Playwright / render worker | 已修复待进程重载 |
+| 2026-07-10 | [研报音频 B站封皮未提升为正式资产](2026-07-10-report-audio-bilibili-cover-not-promoted.md) | report audio detail / B站上传 / artifact projection | 已修复 |
+| 2026-07-10 | [Celery 停止脚本误杀控制进程](2026-07-10-celery-stop-script-killed-controller.md) | Celery restart / report audio / Doubao TTS | 已修复 |
+| 2026-07-10 | [研报音频列表大载荷与父编排重复数据库往返](2026-07-10-report-audio-projection-and-parent-roundtrips.md) | report audio / Doubao / publisher / PostgreSQL | 已部署待验收 |
+| 2026-07-10 | [知识星球同步绑定已删除凭据后无法自动切换](2026-07-10-zsxq-sync-stale-credential-binding.md) | ZSXQ system sync / platform credential / scheduler preflight | 已修复 |
+| 2026-07-10 | [研报音频 Gemini 完成后快照被父任务提交过期](2026-07-10-report-audio-gemini-completed-snapshot-expired.md) | report audio workflow / Gemini child wait / SQLAlchemy session | 已修复 |
+| 2026-07-10 | [已完成研报任务的竖屏后补被自动收口](2026-07-10-report-audio-vertical-backfill-auto-canceled.md) | report audio / vertical backfill / publisher repair | 已修复 |
+| 2026-07-10 | [研报音频已完成父任务被延迟消息再次执行](2026-07-10-report-audio-completed-parent-redelivered.md) | report audio workflow / delayed retry / idempotency | 已修复 |
+| 2026-07-10 | [研报音频 TTS 缓存扫描 500 条完整大 JSON](2026-07-10-report-audio-tts-cache-full-json-scan.md) | report audio workflow / doubao cache / PostgreSQL | 已修复 |
+| 2026-07-10 | [研报音频 Gemini 等待续跑读取 detached 子任务 ID](2026-07-10-report-audio-gemini-defer-detached-id.md) | report audio workflow / Gemini wait / SQLAlchemy session | 已修复 |
+| 2026-07-09 | [Report Audio TTS 文案混入分段结构标签](2026-07-09-report-audio-tts-section-outline-labels.md) | report_audio_workflow / report_script_material_workflow / DeepSeek normalizer / 详情页 | 已修复 |
+| 2026-07-09 | [Report Script Material 结构化器超时且无重试](2026-07-09-report-script-material-normalizer-timeout-no-retry.md) | report_script_material_workflow / DeepSeek normalizer / Gemini 子任务续跑 | 已修复 |
 | 2026-07-07 | [MP3 封面后台渲染被外部 CDN 阻塞超时](2026-07-07-mp3-cover-render-cdn-timeout.md) | MP3 视频编排 / 四张封皮背景图生成 / Playwright 后台渲染 | 已修复 |
 | 2026-07-07 | [MP3 视频合成 1.2 倍速未真正生效](2026-07-07-mp3-video-audio-speed-not-applied.md) | MP3 视频编排 / publisher 音频预处理 / 横竖屏视频合成 | 已修复 |
 | 2026-07-07 | [平台上传 worker 重启导致 B站上传任务假运行](2026-07-07-platform-upload-worker-restart-orphan.md) | MP3 详情页 B站上传 / platform_upload / publisher queue repair | 已修复 |
@@ -63,6 +84,11 @@
 - 影响模块：
 - 首次发现：
 - 修复提交：
+- 根因分类：
+- 复发键：
+- 是否复发：首次 / 第 N 次
+- 关联记录：
+- 防线层级：local_patch / shared_guardrail / contract_test / observability
 
 ## 现象
 

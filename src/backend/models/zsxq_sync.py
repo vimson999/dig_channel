@@ -223,6 +223,8 @@ class ZsxqAttachment(db.Model):
         db.Index("ix_zsxq_attachments_group_topic_status", "group_id", "topic_id", "download_status"),
         db.Index("ix_zsxq_attachments_group_tab_status_file", "group_id", "tab_id", "download_status", "file_id"),
         db.Index("ix_zsxq_attachments_group_tab_status_key", "group_id", "tab_id", "download_status", "attachment_key"),
+        db.Index("ix_zsxq_attachments_group_topic_tab_created", "group_id", "topic_id", "tab_id", "created_at"),
+        db.Index("ix_zsxq_attachments_group_tab_topic_type", "group_id", "tab_id", "topic_id", "attachment_type"),
     )
 
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))

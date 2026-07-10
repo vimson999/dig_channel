@@ -1,4 +1,6 @@
 import asyncio
+import json
+import math
 import mimetypes
 import os
 import re
@@ -21,12 +23,15 @@ from services.mp3_video_workflow import (
     DEFAULT_GEMINI_URL,
     FEATURE_NAME,
     INFOGRAPHIC_PROMPT,
+    Mp3VideoWorkflowError,
     QUEUE_NAME,
+    VISUAL_ARTIFACT_KEYS,
     _db_retry,
     audio_meta_from_zsxq_attachment,
     initial_gemini_prompt,
     initial_transcript_prompt,
     list_audio_assets,
+    regenerate_visual_artifact,
     status_payload as workflow_status_payload,
 )
 from tasks.mp3_video_workflow import process_mp3_video_workflow_job
@@ -430,6 +435,25 @@ def get_job(current_user, job_id):
     return jsonify({"success": True, **payload, "data": payload})
 
 
+@mp3_video_workflow_bp.route("/jobs/<job_id>/bilibili-uploads", methods=["GET"])
+@require_login
+def get_bilibili_uploads(current_user, job_id):
+    task = _get_owned_task(
+        current_user,
+        job_id,
+        include_params=False,
+        include_result=False,
+    )
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    items = _bilibili_upload_children(task.id)
+    return jsonify({
+        "success": True,
+        "items": items,
+        "data": {"items": items},
+    })
+
+
 @mp3_video_workflow_bp.route("/jobs/<job_id>/bilibili-upload", methods=["POST"])
 @require_login
 def submit_bilibili_upload(current_user, job_id):
@@ -677,7 +701,7 @@ def continue_full_video(current_user, job_id):
         payload = _job_payload(task)
         return jsonify({"success": True, "message": "任务仍在运行中", **payload, "data": payload})
 
-    ok, message = _prepare_keyframe_job_for_full_video(task)
+    ok, message = _prepare_keyframe_job_for_full_video(task, _request_payload())
     if not ok:
         payload = _job_payload(task)
         return jsonify({"success": False, "message": message, **payload, "data": payload}), 400
@@ -727,6 +751,76 @@ def regenerate_videos(current_user, job_id):
     db.session.commit()
     payload = _job_payload(task)
     return jsonify({"success": True, "message": "已重新投递横屏和竖屏视频生成任务", **payload, "data": payload})
+
+
+@mp3_video_workflow_bp.route("/jobs/<job_id>/artifacts/<artifact_key>/regenerate", methods=["POST"])
+@require_login
+def regenerate_artifact(current_user, job_id, artifact_key):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    if task.status not in {"completed", "failed", "canceled"}:
+        payload = _job_payload(task)
+        return jsonify({"success": False, "message": "任务正在运行中，请等本轮结束后再重做封皮", **payload, "data": payload}), 409
+
+    key = str(artifact_key or "").strip()
+    if key not in VISUAL_ARTIFACT_KEYS:
+        return jsonify({"success": False, "message": "这个产物不支持重做封皮/背景图"}), 400
+
+    data = _request_payload()
+    title_text = data.get("title_text") or data.get("title") or data.get("text") or ""
+    result = dict(task.result or {})
+    plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
+    if not plan:
+        return jsonify({"success": False, "message": "当前任务缺少 DS/规划结果，不能重做封皮"}), 400
+
+    infographic = result.get("infographic") if isinstance(result.get("infographic"), dict) else {}
+    try:
+        new_artifact = regenerate_visual_artifact(
+            task.id,
+            key,
+            plan=plan,
+            title_text=title_text,
+            infographic_path=infographic.get("path"),
+            created_at=task.created_at,
+        )
+    except Mp3VideoWorkflowError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"success": False, "message": f"重做封皮失败: {exc}"}), 500
+
+    artifacts = dict(result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {})
+    old_artifact = artifacts.get(key) if isinstance(artifacts.get(key), dict) else {}
+    history = list(result.get("artifact_regeneration_history") or [])
+    now = datetime.utcnow().isoformat() + "Z"
+    if old_artifact:
+        history.append({
+            "artifact_key": key,
+            "replaced_at": now,
+            "old_artifact": old_artifact,
+            "new_artifact": new_artifact,
+            "title_text": new_artifact.get("manual_title_text") or title_text,
+        })
+    artifacts[key] = new_artifact
+    result["artifacts"] = artifacts
+    result["artifact_regeneration_history"] = history[-20:]
+    logs = list(result.get("logs") or [])
+    logs.append({
+        "step": "artifact_regenerated",
+        "message": f"用户手动重做封皮/背景图：{key}",
+        "progress": task.progress or 100,
+        "updated_at": now,
+    })
+    result["logs"] = logs[-160:]
+
+    task.result = result
+    flag_modified(task, "result")
+    db.session.commit()
+    _write_result_json_if_present(result)
+    _clear_download_result_cache(task.id)
+
+    payload = _job_payload(task, include_raw=True)
+    return jsonify({"success": True, "message": "封皮已重做并替换，重新生成视频时会使用新版图片", **payload, "data": payload})
 
 
 @mp3_video_workflow_bp.route("/jobs/<job_id>/download-result", methods=["GET"])
@@ -821,7 +915,7 @@ def _get_owned_task(current_user, job_id, *, include_params=True, include_result
             columns.append(PublicationTask.result)
         return PublicationTask.query.options(
             load_only(*columns)
-        ).get(job_id)
+        ).filter(PublicationTask.id == str(job_id)).first()
 
     task = _db_retry(load_task, f"mp3 video workflow get job {job_id}")
     if task and not include_params and (not task.feature or not task.user_id):
@@ -872,6 +966,21 @@ def _trim_download_result_cache(now=None):
         return
     for key, _value in sorted(_download_result_cache.items(), key=lambda item: item[1]["expires_at"])[:overflow]:
         _download_result_cache.pop(key, None)
+
+
+def _clear_download_result_cache(job_id):
+    with _download_result_cache_lock:
+        _download_result_cache.pop(str(job_id or "").strip(), None)
+
+
+def _write_result_json_if_present(result):
+    output_path = result.get("output_path") if isinstance(result, dict) else None
+    if not _path_exists(output_path):
+        return
+    try:
+        Path(output_path).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _empty_audio_asset_workflow_stats():
@@ -1101,7 +1210,9 @@ def _job_payload(task, include_raw=False):
     artifact_urls = {}
     for key, artifact in artifacts.items():
         if _path_exists((artifact or {}).get("path")):
-            artifact_urls[key] = f"/api/mp3-video-workflows/jobs/{task.id}/download-artifact/{key}"
+            cache_token = _artifact_cache_token(artifact)
+            suffix = f"?v={cache_token}" if cache_token else ""
+            artifact_urls[key] = f"/api/mp3-video-workflows/jobs/{task.id}/download-artifact/{key}{suffix}"
     payload["artifact_download_urls"] = artifact_urls
     payload["download_items"] = _download_items_for_payload(payload)
     if include_raw:
@@ -1110,7 +1221,124 @@ def _job_payload(task, include_raw=False):
     return payload
 
 
-def _prepare_keyframe_job_for_full_video(task):
+def _first_present(mapping, *keys):
+    if not isinstance(mapping, dict):
+        return None
+    for key in keys:
+        if key in mapping:
+            return mapping.get(key)
+    return None
+
+
+def _parse_audio_time_value(value, label):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if ":" in text:
+            parts = [part.strip() for part in text.split(":")]
+            if len(parts) not in {2, 3} or any(not part for part in parts):
+                raise ValueError(f"{label}格式无效，请使用 MM:SS 或 HH:MM:SS")
+            try:
+                numbers = [float(part) for part in parts]
+            except ValueError as exc:
+                raise ValueError(f"{label}格式无效，请使用 MM:SS 或 HH:MM:SS") from exc
+            if any(item < 0 for item in numbers):
+                raise ValueError(f"{label}不能为负数")
+            minute_overflow = len(numbers) == 3 and numbers[1] >= 60
+            if numbers[-1] >= 60 or minute_overflow:
+                raise ValueError(f"{label}格式无效，分秒不能超过 59")
+            if len(numbers) == 2:
+                seconds = numbers[0] * 60 + numbers[1]
+            else:
+                seconds = numbers[0] * 3600 + numbers[1] * 60 + numbers[2]
+        else:
+            try:
+                seconds = float(text)
+            except ValueError as exc:
+                raise ValueError(f"{label}格式无效，请使用秒数、MM:SS 或 HH:MM:SS") from exc
+    if not math.isfinite(seconds):
+        raise ValueError(f"{label}格式无效")
+    return seconds
+
+
+def _format_audio_time(seconds):
+    if seconds is None:
+        return "自动"
+    total = max(0, int(round(float(seconds))))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    remainder = total % 60
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{remainder:02d}"
+    return f"{minutes:02d}:{remainder:02d}"
+
+
+def _apply_continue_audio_range_override(result, workflow, payload):
+    if not isinstance(payload, dict):
+        payload = {}
+    has_override = any(key in payload for key in (
+        "start_seconds",
+        "end_seconds",
+        "start_time",
+        "end_time",
+        "start",
+        "end",
+    ))
+    if not has_override:
+        return True, "", None
+    plan = dict(result.get("plan") or {})
+    if not plan:
+        return False, "当前任务缺少 DS/规划结果，不能修改截取时间", None
+    plan_audio = dict(plan.get("audio") or {})
+    try:
+        start = _parse_audio_time_value(
+            _first_present(payload, "start_seconds", "start_time", "start"),
+            "起点",
+        )
+        end = _parse_audio_time_value(
+            _first_present(payload, "end_seconds", "end_time", "end"),
+            "终点",
+        )
+        if start is None:
+            start = _parse_audio_time_value(plan_audio.get("start_seconds"), "起点")
+        if end is None:
+            end = _parse_audio_time_value(plan_audio.get("end_seconds"), "终点")
+        duration = _parse_audio_time_value(
+            (result.get("audio") or {}).get("duration_seconds"),
+            "音频总时长",
+        )
+    except ValueError as exc:
+        return False, str(exc), None
+    start = 0 if start is None else start
+    if start < 0:
+        return False, "起点不能为负数", None
+    if end is not None and end <= start:
+        return False, "终点时间必须大于起点时间", None
+    if duration and duration > 0:
+        if start >= duration:
+            return False, "起点不能超过音频总时长", None
+        if end is not None and end > duration + 1:
+            return False, "终点不能超过音频总时长", None
+
+    audio_range = {
+        "start_seconds": round(float(start), 3),
+        "end_seconds": None if end is None else round(float(end), 3),
+    }
+    plan_audio["start_seconds"] = audio_range["start_seconds"]
+    plan_audio["end_seconds"] = audio_range["end_seconds"]
+    plan["audio"] = plan_audio
+    result["plan"] = plan
+    workflow["audio_range_override"] = audio_range
+    result["continue_full_video_audio_range"] = audio_range
+    return True, "", audio_range
+
+
+def _prepare_keyframe_job_for_full_video(task, payload=None):
     params = dict(task.params or {})
     workflow = dict(params.get(FEATURE_NAME) or {})
     result = dict(task.result or {})
@@ -1129,6 +1357,10 @@ def _prepare_keyframe_job_for_full_video(task):
     if _path_exists(_video_output_path(result.get("landscape_video"))) and _path_exists(_video_output_path(result.get("vertical_video"))):
         return False, "当前任务已经有完整横屏和竖屏视频，无需续跑"
 
+    ok, message, audio_range = _apply_continue_audio_range_override(result, workflow, payload)
+    if not ok:
+        return False, message
+
     requested_at = datetime.utcnow().isoformat() + "Z"
     workflow["render_mode"] = "full_video"
     params[FEATURE_NAME] = workflow
@@ -1142,9 +1374,12 @@ def _prepare_keyframe_job_for_full_video(task):
     result["landscape_video"] = _drop_keyframe_skip_video(result.get("landscape_video"))
     result["vertical_video"] = _drop_keyframe_skip_video(result.get("vertical_video"))
     logs = list(result.get("logs") or [])
+    range_text = ""
+    if audio_range:
+        range_text = f"（音频 {_format_audio_time(audio_range.get('start_seconds'))}-{_format_audio_time(audio_range.get('end_seconds'))}）"
     logs.append({
         "step": "continue_full_video_requested",
-        "message": "用户确认关键帧效果，继续生成完整横屏和竖屏视频",
+        "message": f"用户确认关键帧效果，继续生成完整横屏和竖屏视频{range_text}",
         "progress": max(int(task.progress or 0), 68),
         "updated_at": requested_at,
     })
@@ -1837,6 +2072,23 @@ def _download_items_for_payload(payload):
     add("vertical_video", "此刻此声竖屏视频", payload.get("download_vertical_video_url"), "video")
     add("result_json", "编排结果 JSON", payload.get("download_result_url"), "json")
     return items
+
+
+def _artifact_cache_token(artifact):
+    if not isinstance(artifact, dict):
+        return ""
+    for key in ("manual_regenerated_at", "updated_at", "generated_at"):
+        value = artifact.get(key)
+        if value:
+            return re.sub(r"[^0-9A-Za-z]+", "", str(value))[:32]
+    path = artifact.get("path")
+    if _path_exists(path):
+        try:
+            stat = os.stat(path)
+            return str(int(stat.st_mtime * 1000))
+        except OSError:
+            return ""
+    return ""
 
 
 def _path_exists(path):

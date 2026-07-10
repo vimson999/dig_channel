@@ -4,7 +4,13 @@
 
 echo "🔍 正在查找 doubao_browser_tts Celery Worker..."
 
-PIDS=$(ps aux | grep 'celery' | grep 'doubao_browser_tts' | grep -v grep | awk '{print $2}')
+find_worker_pids() {
+    ps -axo pid=,command= | awk '
+        /\/venv\/bin\/celery/ && / -Q doubao_browser_tts( |$)/ { print $1 }
+    '
+}
+
+PIDS=$(find_worker_pids)
 
 if [ -z "$PIDS" ]; then
     echo "✅ 没有发现正在运行的 doubao_browser_tts Worker。"
@@ -16,7 +22,7 @@ echo "🚀 正在停止..."
 echo $PIDS | xargs kill
 sleep 1
 
-LEFTOVER=$(ps aux | grep 'celery' | grep 'doubao_browser_tts' | grep -v grep | awk '{print $2}')
+LEFTOVER=$(find_worker_pids)
 if [ ! -z "$LEFTOVER" ]; then
     echo "⚠️ 仍有残留进程: $LEFTOVER，正在强制清理..."
     echo $LEFTOVER | xargs kill -9

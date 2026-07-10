@@ -437,6 +437,81 @@ body {
     letter-spacing: 0;
 }
 
+.zsxq-lab-hero {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start !important;
+    gap: 1rem;
+}
+
+.zsxq-lab-command-strip {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: .75rem;
+}
+
+.zsxq-lab-command-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: .7rem;
+    min-width: 0;
+    padding: .85rem .95rem;
+    border: 1px solid #dbeafe;
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, .045);
+    color: #0f172a;
+    transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+
+.zsxq-lab-command-card:hover {
+    border-color: #93c5fd;
+    box-shadow: 0 16px 32px rgba(15, 23, 42, .075);
+    transform: translateY(-1px);
+}
+
+.zsxq-lab-command-card strong,
+.zsxq-lab-command-card em {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.zsxq-lab-command-card strong {
+    color: #0f172a;
+    font-size: .86rem;
+    font-weight: 950;
+}
+
+.zsxq-lab-command-card em {
+    margin-top: .12rem;
+    color: #64748b;
+    font-size: .72rem;
+    font-style: normal;
+}
+
+.zsxq-lab-command-card i {
+    color: #94a3b8;
+    font-size: .78rem;
+}
+
+.zsxq-lab-command-index {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    background: #111827;
+    color: #fff;
+    font-size: .72rem;
+    font-weight: 950;
+}
+
 .zsxq-safety-note {
     border-radius: 999px;
     white-space: nowrap;
@@ -464,6 +539,76 @@ body {
 .zsxq-right-panel {
     position: sticky;
     top: 88px;
+}
+
+.zsxq-lab-map-overview {
+    padding: 1rem;
+    border: 1px solid var(--zsxq-line);
+    border-radius: 14px;
+    background: var(--zsxq-panel);
+    box-shadow: 0 16px 40px rgba(15, 23, 42, .055);
+}
+
+.zsxq-lab-map-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: .85rem;
+}
+
+.zsxq-lab-eyebrow {
+    margin: 0 0 .28rem;
+    color: #64748b;
+    font-size: .72rem;
+    font-weight: 900;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+}
+
+.zsxq-lab-map-head h3 {
+    margin: 0;
+    color: #0f172a;
+    font-size: 1.08rem;
+    font-weight: 950;
+    line-height: 1.2;
+}
+
+.zsxq-lab-map-head p:not(.zsxq-lab-eyebrow) {
+    margin: .25rem 0 0;
+    color: #64748b;
+    font-size: .78rem;
+    line-height: 1.6;
+}
+
+.zsxq-lab-map-jump {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: .45rem;
+    min-height: 36px;
+    padding: 0 .8rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    background: #f8fafc;
+    color: #334155;
+    font-size: .74rem;
+    font-weight: 900;
+    white-space: nowrap;
+}
+
+.zsxq-lab-map-overview .three-workspace-panel {
+    min-height: 260px;
+    margin: 0;
+    box-shadow: none;
+}
+
+.zsxq-lab-map-overview .three-workspace-scene {
+    min-height: 260px;
+}
+
+.zsxq-lab-map-overview .three-workspace-side {
+    padding: 18px;
 }
 
 .zsxq-panel-section + .zsxq-panel-section {
@@ -742,9 +887,99 @@ button {
     min-height: 2.75rem;
 }
 
+.zsxq-lab-runtime-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .5rem;
+}
+
+.zsxq-lab-runtime-item {
+    min-width: 0;
+    padding: .62rem .68rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 11px;
+    background: #fff;
+}
+
+.zsxq-lab-runtime-item--wide {
+    grid-column: span 2;
+}
+
+.zsxq-lab-runtime-item[data-tone="success"] {
+    border-color: #bbf7d0;
+    background: #f0fdf4;
+}
+
+.zsxq-lab-runtime-item[data-tone="warning"] {
+    border-color: #fde68a;
+    background: #fffbeb;
+}
+
+.zsxq-lab-runtime-item[data-tone="info"] {
+    border-color: #bfdbfe;
+    background: #eff6ff;
+}
+
+.zsxq-lab-runtime-label {
+    display: block;
+    color: #64748b;
+    font-size: .66rem;
+    font-weight: 900;
+    letter-spacing: .04em;
+    line-height: 1.2;
+}
+
+.zsxq-lab-runtime-value {
+    display: block;
+    margin-top: .26rem;
+    color: #0f172a;
+    font-size: .76rem;
+    font-weight: 950;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.zsxq-lab-runtime-item--wide .zsxq-lab-runtime-value {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.zsxq-lab-runtime-empty,
+.zsxq-lab-runtime-path {
+    margin-top: .6rem;
+    padding: .62rem .7rem;
+    border-radius: 11px;
+    font-size: .74rem;
+    line-height: 1.55;
+}
+
+.zsxq-lab-runtime-empty {
+    border: 1px solid #fde68a;
+    background: #fffbeb;
+    color: #92400e;
+    font-weight: 800;
+}
+
+.zsxq-lab-runtime-path {
+    border: 1px dashed #cbd5e1;
+    background: #f8fafc;
+    color: #64748b;
+}
+
+.zsxq-lab-runtime-path span {
+    display: -webkit-box;
+    overflow: hidden;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
 @media (min-width: 1280px) {
     .zsxq-workbench {
-        grid-template-columns: 340px minmax(0, 1fr) 330px;
+        grid-template-columns: 320px minmax(0, 1fr) 300px;
     }
 }
 
@@ -752,6 +987,19 @@ button {
     .zsxq-left-panel,
     .zsxq-right-panel {
         position: static;
+    }
+
+    .zsxq-lab-command-strip {
+        grid-template-columns: 1fr;
+    }
+
+    .zsxq-lab-map-overview .three-workspace-panel {
+        grid-template-columns: 1fr;
+    }
+
+    .zsxq-lab-map-overview .three-workspace-side {
+        border-top: 1px solid #e2e8f0;
+        border-left: 0;
     }
 }
 
@@ -763,11 +1011,28 @@ button {
     .zsxq-page-header,
     .zsxq-left-panel,
     .zsxq-main-panel,
-    #publish-panel:not(.hidden) {
+    #publish-panel:not(.hidden),
+    .zsxq-lab-map-overview {
         border-radius: 12px;
     }
 
+    .zsxq-lab-hero,
+    .zsxq-lab-map-head {
+        display: block !important;
+    }
+
+    .zsxq-lab-command-strip {
+        margin-top: 1rem;
+    }
+
+    .zsxq-lab-map-jump {
+        width: 100%;
+        margin-top: .75rem;
+    }
+
     .zsxq-safety-note {
+        display: flex;
+        margin-top: .85rem;
         white-space: normal;
         border-radius: 10px;
     }
@@ -778,5 +1043,13 @@ button {
 
     .zsxq-action-row button {
         flex: 1 1 auto;
+    }
+
+    .zsxq-lab-runtime-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .zsxq-lab-runtime-item--wide {
+        grid-column: auto;
     }
 }

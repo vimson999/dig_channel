@@ -626,7 +626,10 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
         if child.status in TERMINAL_STATUSES:
             final_child = _load_task(child_id, *TASK_CHILD_COLUMNS) or child
             _record_child(parent_id, label, final_child)
-            return final_child
+            refreshed_child = _load_task(child_id, *TASK_CHILD_COLUMNS)
+            if not refreshed_child:
+                raise RuntimeError(f"终态子任务重新加载失败: {child_id}")
+            return refreshed_child
         if time.monotonic() - started > timeout:
             raise RuntimeError(f"等待子任务超时: {child_id}")
         child_progress = int(child.progress or 0)
@@ -966,7 +969,7 @@ def _raise_if_canceled(parent_id: str) -> None:
 
 def _load_task(task_id: str, *columns) -> Optional[PublicationTask]:
     attrs = columns or TASK_PAYLOAD_COLUMNS
-    return PublicationTask.query.options(load_only(*attrs)).get(task_id)
+    return PublicationTask.query.options(load_only(*attrs)).filter(PublicationTask.id == str(task_id)).one_or_none()
 
 
 def _load_task_status(task_id: str):

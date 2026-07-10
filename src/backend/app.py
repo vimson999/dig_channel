@@ -36,6 +36,16 @@ request_logger = RequestLoggerMiddleware()
 database_logger = DatabaseLoggerMiddleware()
 performance_monitor = PerformanceMonitor()
 
+
+def _start_web_background_threads(app):
+    if app.config.get("TESTING"):
+        return False
+    role = str(os.environ.get("DB_PROCESS_ROLE") or os.environ.get("APP_PROCESS_ROLE") or "").strip().lower()
+    if role in {"worker", "workers", "celery", "scheduler", "schedulers", "watchdog"}:
+        return False
+    command = " ".join(str(item) for item in sys.argv).lower()
+    return not any(marker in command for marker in ("celery", "scheduler", "watchdog", "pytest", "unittest"))
+
 def create_app(config_class=Config):
     """应用工厂函数
     
@@ -76,7 +86,8 @@ def create_app(config_class=Config):
     # 初始化日志中间件
     request_logger.init_app(app)
     database_logger.init_app(app)
-    performance_monitor.init_app(app)
+    start_background_threads = _start_web_background_threads(app)
+    performance_monitor.init_app(app, start_system_monitor=start_background_threads)
     
     # 注册API蓝图
     from apis import register_all_apis
@@ -87,7 +98,8 @@ def create_app(config_class=Config):
     
     # 设置应用程序日志
     setup_application_logging(app.config)
-    schedule_log_maintenance()
+    if start_background_threads:
+        schedule_log_maintenance()
 
     # 本地后端启动时可自动恢复 Celery workers 和计划任务。
     from services.backend_process_bootstrap import start_backend_process_bootstrap

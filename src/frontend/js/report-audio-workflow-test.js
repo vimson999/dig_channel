@@ -47,9 +47,11 @@ class ReportAudioWorkflowPage {
             geminiUrlSelect: document.getElementById('gemini-url-select'),
             geminiUrlInput: document.getElementById('gemini-url-input'),
             geminiUrlCurrent: document.getElementById('gemini-url-current'),
+            manualGeminiResultInput: document.getElementById('manual-gemini-result-input'),
             landscapeVideoEnabled: document.getElementById('landscape-video-enabled'),
             verticalVideoEnabled: document.getElementById('vertical-video-enabled'),
             verticalVideoScheme: document.getElementById('vertical-video-scheme'),
+            videoRenderMode: document.getElementById('video-render-mode'),
             bilibiliEnabled: document.getElementById('bilibili-enabled'),
             videoTitleInput: document.getElementById('video-title-input'),
             videoSubtitleInput: document.getElementById('video-subtitle-input'),
@@ -257,6 +259,13 @@ class ReportAudioWorkflowPage {
 
     verticalSchemeLabel(value) {
         return this.normalizeVerticalScheme(value) === 'scheme2' ? '方案二' : '方案一';
+    }
+
+    normalizeVideoRenderMode(value) {
+        const text = String(value || '').trim().toLowerCase();
+        if (['keyframe', 'keyframes', 'frames', 'preview_keyframes'].includes(text)) return 'keyframes';
+        if (['preview', 'short', 'short_video', 'preview_10s', '10s', '10sec'].includes(text)) return 'preview_10s';
+        return 'full_video';
     }
 
     syncJobStatusFilter() {
@@ -704,10 +713,18 @@ class ReportAudioWorkflowPage {
                 pdf: pdfSummary,
                 prompt: this.els.promptInput.value.trim(),
                 review_prompt: this.els.reviewPromptInput.value.trim(),
+                video_render_mode: this.normalizeVideoRenderMode(this.els.videoRenderMode?.value),
             },
             logs: [],
             created_at: new Date().toISOString(),
         };
+        const manualGeminiResult = this.els.manualGeminiResultInput?.value.trim() || '';
+        if (manualGeminiResult) {
+            localJob.request.manual_gemini = {
+                provided: true,
+                chars: manualGeminiResult.length,
+            };
+        }
         this.jobs.unshift(localJob);
         this.render();
 
@@ -724,9 +741,12 @@ class ReportAudioWorkflowPage {
             form.append('review_prompt', this.els.reviewPromptInput.value.trim());
             const geminiUrl = this.selectedGeminiUrl();
             if (geminiUrl) form.append('gemini_url', geminiUrl);
+            if (manualGeminiResult) form.append('manual_gemini_result', manualGeminiResult);
             form.append('landscape_video_enabled', this.els.landscapeVideoEnabled.checked ? '1' : '0');
             form.append('vertical_video_enabled', this.els.verticalVideoEnabled.checked ? '1' : '0');
             form.append('vertical_video_scheme', this.normalizeVerticalScheme(this.els.verticalVideoScheme?.value));
+            form.append('video_render_mode', this.normalizeVideoRenderMode(this.els.videoRenderMode?.value));
+            form.append('preview_seconds', '10');
             form.append('bilibili_enabled', this.els.bilibiliEnabled.checked ? '1' : '0');
             form.append('video_title', this.els.videoTitleInput.value.trim());
             form.append('video_subtitle', this.els.videoSubtitleInput.value.trim());
@@ -1560,6 +1580,7 @@ class ReportAudioWorkflowPage {
         const podcastCoverUrl = job.download_podcast_cover_url
             ? `${this.apiRoot()}${job.download_podcast_cover_url}`
             : (video?.podcast_cover?.download_url ? `${this.apiRoot()}${video.podcast_cover.download_url}` : '');
+        const keyframeItems = this.videoKeyframeItems(video);
         const showLandscapeVideoUrl = Boolean(videoUrl && video?.landscape_enabled !== false);
         const coverUrl = job.download_cover_url ? `${this.apiRoot()}${job.download_cover_url}` : '';
         const coverRegenerating = this.coverRegeneratingIds.has(job.job_id);
@@ -1668,6 +1689,7 @@ class ReportAudioWorkflowPage {
                                 ${verticalPreviewVideoUrl ? `<a href="${verticalPreviewVideoUrl}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>10秒预览</a>` : ''}
                                 ${verticalCoverUrl ? `<a href="${verticalCoverUrl}" download class="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><i class="fas fa-image-portrait mr-1"></i>竖版封皮</a>` : ''}
                                 ${podcastCoverUrl ? `<a href="${podcastCoverUrl}" download class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50"><i class="fas fa-record-vinyl mr-1"></i>播客封皮</a>` : ''}
+                                ${keyframeItems.map((item) => `<a href="${this.escape(item.url)}" download class="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><i class="fas fa-images mr-1"></i>${this.escape(item.label)}</a>`).join('')}
                                 ${podcastCoverGenerating ? `<button type="button" disabled class="cursor-wait rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700"><i class="fas fa-spinner fa-spin mr-1"></i>封皮生成中</button>` : ''}
                                 ${canGeneratePodcastCover ? `<button type="button" data-job-action="generate-podcast-cover" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50"><i class="fas fa-record-vinyl mr-1"></i>补生成播客封皮</button>` : ''}
                                 ${canRequestVerticalVideo ? `
@@ -2357,6 +2379,10 @@ class ReportAudioWorkflowPage {
         if (video.enabled === false) return video.message || '视频已跳过';
 
         const parts = [];
+        const keyframeCount = Object.keys(video.keyframes || {}).length;
+        if (video.render_mode === 'keyframes' || video.status === 'keyframes_ready') {
+            parts.push(`关键帧 ${keyframeCount || 0} 张`);
+        }
         const onlyVertical = video.vertical_enabled && video.landscape_enabled === false;
         if (video.video?.bytes && !onlyVertical) {
             parts.push(`横屏 ${this.formatBytes(video.video.bytes)}`);
@@ -2375,6 +2401,16 @@ class ReportAudioWorkflowPage {
         if (video.publisher_task_id) return `视频任务 ${video.publisher_task_id}`;
         if (video.landscape_enabled || video.vertical_enabled) return '视频处理中';
         return '视频等待生成';
+    }
+
+    videoKeyframeItems(video) {
+        return Object.entries(video?.keyframes || {})
+            .filter(([, item]) => item?.download_url)
+            .map(([key, item]) => ({
+                key,
+                label: item.label || key,
+                url: `${this.apiRoot()}${item.download_url}`,
+            }));
     }
 
     escape(value) {

@@ -29,6 +29,30 @@
 
 ## P0：先降低运行风险
 
+### P0-A：重复 Bug 根因治理
+
+状态：已启动。首轮回顾见 `docs/bugs/reviews/2026-07-10-recurring-bug-review.md`。
+
+现状：
+
+- 2026-06-23 至 2026-07-10 共记录 50 条 Bug，已识别 6 个复发根因簇。
+- 父子任务状态机、DB Session 生命周期、热点 JSON 查询和产物语义校验已经多次换入口复发。
+- 现有规则和单模块测试不足以阻止复制式实现再次遗漏同类保护。
+
+建议：
+
+- 每 7 天或每新增 5 条 Bug 做正式回顾；同一复发键第二次出现时立即回顾。
+- 第二次复发必须做同类模块横向排查、共享防线和跨入口契约测试。
+- 第三次复发自动升为 P0 架构债，在共享防线完成前停止复制同类实现。
+- 用 `docs/bugs/recurrence-registry.json` 和 `scripts/dev/review_bug_records.py --strict` 保证所有记录均被归类。
+- 优先关闭 `ORCH-PARENT-CHILD-STATE`：子任务显式声明 `bound/post_completion/independent` 生命周期策略，repair 不再依赖 feature allowlist。
+
+验收：
+
+- 所有新增 Bug 都有复发键、关联记录和防线层级。
+- 已复发问题不能以单点补丁或新增 allowlist 作为系统性完成条件。
+- 复发根因簇连续两个回顾周期没有新增同类事故，且共享契约测试稳定通过。
+
 ### 0. 运行时事实对账和任务生命周期不变量
 
 状态：已启动，继续完善。
@@ -54,6 +78,7 @@
 - Celery Monitor 增加“运行时不一致”风险区：孤儿 pending、孤儿 processing、父终态子 active、deferred 丢消息。
 - watchdog 重启 worker 前必须同时满足进程/队列异常和业务任务无近期推进；业务任务仍在推进时只提示观察，不执行重启。
 - 人工 pause 必须约束所有自动动作：进程自愈、业务 repair、孤儿重投、processing 降级都不得绕过 pause。
+- 子任务必须声明生命周期策略：强绑定父任务、允许父完成后继续、或完全独立；cleanup/reconciler 根据策略和父状态决策，禁止继续扩展 feature allowlist。
 
 验收：
 

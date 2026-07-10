@@ -288,7 +288,7 @@ def retry_job(current_user, job_id):
 
 
 def _get_owned_task(current_user, job_id):
-    task = PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).get(job_id)
+    task = PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS)).filter(PublicationTask.id == str(job_id)).one_or_none()
     if not task or (task.feature or (task.params or {}).get("feature")) != FEATURE_NAME:
         return None
     if str(task.user_id or (task.params or {}).get("user_id")) != str(getattr(current_user, "id", None)):
@@ -361,53 +361,28 @@ def _text_hash(text):
 
 def _completed_task_for_text(text, *, current_user):
     expected_hash = _text_hash(text)
-    expected_text = _plain_text(text)
     user_id = str(getattr(current_user, "id", None))
-    scan_limit = _bounded_int(os.getenv("DOUBAO_BROWSER_TTS_CACHE_SCAN_LIMIT"), 500, 20, 2000)
-    candidates = (
-        PublicationTask.query.filter(
+    candidate = (
+        db.session.query(
+            PublicationTask.id,
+            PublicationTask.doubao_tts_wav_path,
+        )
+        .filter(
             PublicationTask.feature == FEATURE_NAME,
             PublicationTask.user_id == user_id,
             PublicationTask.status == "completed",
+            PublicationTask.doubao_tts_text_hash == expected_hash,
         )
-        .options(load_only(*TASK_PAYLOAD_COLUMNS))
         .order_by(PublicationTask.created_at.desc())
-        .limit(scan_limit)
-        .all()
+        .first()
     )
-    for candidate in candidates:
-        if _task_text_hash(candidate) and _task_text_hash(candidate) != expected_hash:
-            continue
-        if _plain_text(_task_text(candidate)) != expected_text:
-            continue
-        audio = (candidate.result or {}).get("audio") if isinstance(candidate.result, dict) else {}
-        wav_path = audio.get("wav_path") if isinstance(audio, dict) else ""
-        if wav_path and os.path.exists(wav_path):
-            return candidate
-    return None
-
-
-def _task_text_hash(task):
-    result = task.result if isinstance(task.result, dict) else {}
-    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    if not metadata:
-        payload = _task_request_payload(task)
-        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    return str(metadata.get("text_hash") or "").strip()
-
-
-def _task_text(task):
-    return str(_task_request_payload(task).get("text") or "")
-
-
-def _task_request_payload(task):
-    params = task.params if isinstance(task.params, dict) else {}
-    payload = params.get("doubao_browser_tts")
-    return payload if isinstance(payload, dict) else {}
-
-
-def _plain_text(text):
-    return "".join(str(text or "").split())
+    if not candidate or not candidate.doubao_tts_wav_path or not os.path.exists(candidate.doubao_tts_wav_path):
+        return None
+    return (
+        PublicationTask.query.options(load_only(*TASK_PAYLOAD_COLUMNS))
+        .filter(PublicationTask.id == candidate.id)
+        .one_or_none()
+    )
 
 
 def _truthy(value, default=False):

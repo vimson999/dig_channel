@@ -74,6 +74,55 @@ class ReportTop10WorkflowTaskTest(unittest.TestCase):
         self.assertEqual(events[:2], ["rollback", "remove"])
         mark_failed.assert_called_once_with(fake_task, "boom")
 
+    def test_wait_child_reloads_terminal_child_after_parent_summary_commit(self):
+        app = Flask(__name__)
+        app.config.update(
+            SQLALCHEMY_DATABASE_URI="sqlite:///:memory:",
+            SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        )
+        db.init_app(app)
+
+        with app.app_context():
+            db.metadata.create_all(bind=db.engine, tables=[PublicationTask.__table__])
+            parent = PublicationTask(
+                status="processing",
+                current_step="single_gemini_waiting",
+                progress=40,
+                params={"feature": "report_top10_workflow"},
+                result={},
+            )
+            child = PublicationTask(
+                status="completed",
+                current_step="done",
+                progress=100,
+                params={"feature": "report_pdf_gemini"},
+                result={"final_response_text": "Top10 Gemini 完整返回" * 20},
+                completed_at=report_top10_workflow.datetime.utcnow(),
+            )
+            db.session.add_all([parent, child])
+            db.session.commit()
+
+            returned = report_top10_workflow._wait_child(
+                parent.id,
+                child.id,
+                "single_gemini_01",
+                start_progress=5,
+                end_progress=20,
+            )
+
+            self.assertEqual(returned.id, child.id)
+            self.assertEqual(returned.status, "completed")
+            self.assertEqual(returned.current_step, "done")
+            self.assertIn("Top10", returned.result["final_response_text"])
+
+            db.session.expire_all()
+            refreshed_parent = PublicationTask.query.filter(PublicationTask.id == parent.id).one()
+            self.assertEqual(refreshed_parent.result["children"]["single_gemini_01"]["job_id"], child.id)
+            self.assertEqual(refreshed_parent.result["children"]["single_gemini_01"]["status"], "completed")
+
+            db.session.remove()
+            db.metadata.drop_all(bind=db.engine, tables=[PublicationTask.__table__])
+
     def test_reusable_single_report_reads_script_material_workflow_task(self):
         app = Flask(__name__)
         app.config.update(
