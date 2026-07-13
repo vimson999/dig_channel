@@ -35,6 +35,7 @@ from services.report_audio_workflow import (
     split_tts_text,
     storage_path_for_job,
     structured_result_quality_issue,
+    synthesize_doubao_api_chunks,
 )
 from services.thumbnail_service import thumbnail_service
 from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
@@ -712,7 +713,14 @@ def _process_job(task_id):
             logger.info("Report audio script material completed: %s", task_id)
             return True
 
-        reusable_audio = _reusable_audio_for_pdf(pdf, structured, exclude_task_id=workflow_task_id)
+        tts_provider = str(payload.get("tts_provider") or "doubao_browser").strip().lower()
+        reusable_audio = _reusable_audio_for_pdf(
+            pdf,
+            structured,
+            exclude_task_id=workflow_task_id,
+            tts_provider=tts_provider,
+            tts_voice=str(payload.get("tts_voice") or "zh_female_mizai_uranus_bigtts"),
+        )
         if reusable_audio:
             tts_task_ids = []
             audio = reusable_audio["audio"]
@@ -733,6 +741,21 @@ def _process_job(task_id):
                 "doubao_browser_tts": [],
             })
             _queue_notification(workflow_task_id, "report_audio_audio_reused", "已复用同 PDF 历史音频，直接进入视频合成")
+        elif tts_provider == "doubao_api":
+            tts_task_ids = []
+            _emit(workflow_task_id, "doubao_api_tts", 88, "使用豆包 API TTS 合成音频")
+            audio = synthesize_doubao_api_chunks(
+                chunks,
+                audio_path_for_job(workflow_task_id, workflow_created_at),
+                voice_type=str(payload.get("tts_voice") or "zh_female_mizai_uranus_bigtts"),
+            )
+            audio = doubao_service.validate_audio_duration_for_text(
+                audio,
+                structured.get("final_script_for_tts") or "",
+            )
+            audio["provider"] = "doubao_api"
+            _update_result(workflow_task_id, {"audio": audio, "doubao_browser_tts": []})
+            _queue_notification(workflow_task_id, "report_audio_doubao_api_completed", f"豆包 API TTS 完成，共生成 {len(chunks)} 段音频")
         else:
             doubao_retry_limit = max(0, min(_int_env("REPORT_AUDIO_DOUBAO_RETRY_LIMIT", 2), 5))
             tts_task_ids, wav_paths = _run_doubao_tts_chunks(
@@ -752,6 +775,7 @@ def _process_job(task_id):
                 audio,
                 structured.get("final_script_for_tts") or "",
             )
+            audio["provider"] = "doubao_browser"
             _update_result(workflow_task_id, {"audio": audio})
         publisher_task = None
         publisher_task_id = None
@@ -1196,7 +1220,14 @@ def _script_material_reuse_payload(reusable, pdf, structured):
     }
 
 
-def _reusable_audio_for_pdf(pdf, structured, *, exclude_task_id=None):
+def _reusable_audio_for_pdf(
+    pdf,
+    structured,
+    *,
+    exclude_task_id=None,
+    tts_provider="doubao_browser",
+    tts_voice=None,
+):
     asset_id = str((pdf or {}).get("attachment_id") or "").strip()
     expected_script = _plain_text((structured or {}).get("final_script_for_tts") or "")
     if not asset_id or not expected_script:
@@ -1240,7 +1271,12 @@ def _reusable_audio_for_pdf(pdf, structured, *, exclude_task_id=None):
         detail = details.get(candidate.id)
         if not detail:
             continue
-        audio = _valid_reusable_audio(detail, expected_script)
+        audio = _valid_reusable_audio(
+            detail,
+            expected_script,
+            tts_provider=tts_provider,
+            tts_voice=tts_voice,
+        )
         if audio:
             return {
                 "source_task_id": candidate.id,
@@ -1250,7 +1286,13 @@ def _reusable_audio_for_pdf(pdf, structured, *, exclude_task_id=None):
     return None
 
 
-def _valid_reusable_audio(candidate, expected_script):
+def _valid_reusable_audio(
+    candidate,
+    expected_script,
+    *,
+    tts_provider="doubao_browser",
+    tts_voice=None,
+):
     result = candidate.result if isinstance(candidate.result, dict) else {}
     structured = _valid_structured_result(result)
     if not structured:
@@ -1259,6 +1301,11 @@ def _valid_reusable_audio(candidate, expected_script):
     if _plain_text(script) != expected_script:
         return None
     audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
+    audio_provider = str(audio.get("provider") or "doubao_browser").strip().lower()
+    if audio_provider != str(tts_provider or "doubao_browser").strip().lower():
+        return None
+    if audio_provider == "doubao_api" and str(audio.get("voice_type") or "") != str(tts_voice or ""):
+        return None
     wav_path = str(audio.get("wav_path") or "").strip()
     if not wav_path or not os.path.exists(wav_path):
         return None
@@ -1909,8 +1956,10 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
     ).strip().lower()
     if vertical_scheme not in {"scheme1", "scheme2"}:
         vertical_scheme = "scheme1"
-    main_title = _publisher_main_title(structured, video_options)
-    sub_title = _publisher_sub_title(structured, video_options)
+    main_title = _publisher_main_title(structured, video_options, variant="landscape")
+    sub_title = _publisher_sub_title(structured, video_options, variant="landscape")
+    vertical_main_title = _publisher_main_title(structured, video_options, variant="vertical")
+    vertical_sub_title = _publisher_sub_title(structured, video_options, variant="vertical")
     date_text = (
         str(video_options.get("date_text") or "").strip()
         or _publisher_date_text(parent.created_at)
@@ -1983,8 +2032,8 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
         "vertical_thumbnail": {
             "enabled": _truthy(video_options.get("vertical_enabled", False)),
             "scheme": vertical_scheme,
-            "main_title": main_title,
-            "sub_title": sub_title,
+            "main_title": vertical_main_title,
+            "sub_title": vertical_sub_title,
             "date_text": date_text,
             "screenshot_path": screenshot_path,
             "institution": _publisher_workbench_institution(structured, pdf, video_options),
@@ -2001,8 +2050,8 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "enabled": _truthy(video_options.get("vertical_enabled", False)) and vertical_scheme == "scheme2",
             "scheme": vertical_scheme,
             "format": "wx_cover",
-            "main_title": main_title,
-            "sub_title": sub_title,
+            "main_title": vertical_main_title,
+            "sub_title": vertical_sub_title,
             "screenshot_path": screenshot_path,
             "institution": _publisher_workbench_institution(structured, pdf, video_options),
             "emotion": "bull",
@@ -2018,8 +2067,8 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "enabled": _truthy(video_options.get("vertical_enabled", False)) and vertical_scheme == "scheme2",
             "scheme": vertical_scheme,
             "format": "podcast",
-            "main_title": main_title,
-            "sub_title": sub_title,
+            "main_title": vertical_main_title,
+            "sub_title": vertical_sub_title,
             "screenshot_path": screenshot_path,
             "institution": _publisher_workbench_institution(structured, pdf, video_options),
             "emotion": "bull",
@@ -2035,8 +2084,8 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "enabled": _truthy(video_options.get("vertical_enabled", False)) and vertical_scheme == "scheme2",
             "scheme": vertical_scheme,
             "format": "bilibili_wx_cover",
-            "main_title": main_title,
-            "sub_title": sub_title,
+            "main_title": vertical_main_title,
+            "sub_title": vertical_sub_title,
             "screenshot_path": screenshot_path,
             "institution": _publisher_workbench_institution(structured, pdf, video_options),
             "emotion": "bull",
@@ -2739,8 +2788,10 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
         or video_options.get("vertical_scheme")
         or "scheme1"
     )
-    main_title = _publisher_main_title(structured, video_options)
-    sub_title = _publisher_sub_title(structured, video_options)
+    main_title = _publisher_main_title(structured, video_options, variant="landscape")
+    sub_title = _publisher_sub_title(structured, video_options, variant="landscape")
+    vertical_main_title = _publisher_main_title(structured, video_options, variant="vertical")
+    vertical_sub_title = _publisher_sub_title(structured, video_options, variant="vertical")
     date_text = str(video_options.get("date_text") or "").strip() or _publisher_date_text(created_at)
     tag_text = str(video_options.get("tag_text") or "").strip() or "研报播客"
     screenshot_path = pdf_screenshot.get("path") if isinstance(pdf_screenshot, dict) else None
@@ -2751,6 +2802,8 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
         **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
     }
     institution = _publisher_workbench_institution(structured, pdf, video_options)
+    main_title = _publisher_cover_title_with_institution(main_title, institution)
+    vertical_main_title = _publisher_cover_title_with_institution(vertical_main_title, institution)
     footer_text = str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本"
 
     keyframes = {}
@@ -2779,8 +2832,8 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
     if _truthy(video_options.get("vertical_enabled", False)):
         if scheme == "scheme2":
             vertical_background_path = thumbnail_service.generate_workbench_vertical_thumbnail(
-                main_title=main_title,
-                sub_title=sub_title,
+                main_title=vertical_main_title,
+                sub_title=vertical_sub_title,
                 screenshot_path=screenshot_path,
                 output_filename=f"report_audio_keyframe_vertical_bg_{parent_id[:8]}_{int(time.time())}.jpg",
                 institution=institution,
@@ -2789,8 +2842,8 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
                 image_transform=transform,
             )
             vertical_cover_path = thumbnail_service.generate_workbench_vertical_cover(
-                main_title=main_title,
-                sub_title=sub_title,
+                main_title=vertical_main_title,
+                sub_title=vertical_sub_title,
                 screenshot_path=screenshot_path,
                 output_filename=f"report_audio_keyframe_vertical_cover_{parent_id[:8]}_{int(time.time())}.jpg",
                 institution=institution,
@@ -2799,8 +2852,8 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
                 image_transform=transform,
             )
             podcast_cover_path = thumbnail_service.generate_workbench_podcast_cover(
-                main_title=main_title,
-                sub_title=sub_title,
+                main_title=vertical_main_title,
+                sub_title=vertical_sub_title,
                 screenshot_path=screenshot_path,
                 output_filename=f"report_audio_keyframe_podcast_cover_{parent_id[:8]}_{int(time.time())}.jpg",
                 institution=institution,
@@ -2810,8 +2863,8 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
             )
         else:
             vertical_background_path = thumbnail_service.generate_vertical_thumbnail(
-                main_title=main_title,
-                sub_title=sub_title,
+                main_title=vertical_main_title,
+                sub_title=vertical_sub_title,
                 date_text=date_text,
                 screenshot_path=screenshot_path,
                 output_filename=f"report_audio_keyframe_vertical_bg_{parent_id[:8]}_{int(time.time())}.jpg",
@@ -2831,8 +2884,8 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
         ),
     }
     bilibili_cover_path = thumbnail_service.generate_workbench_bilibili_cover(
-        main_title=main_title,
-        sub_title=sub_title,
+        main_title=vertical_main_title,
+        sub_title=vertical_sub_title,
         screenshot_path=screenshot_path,
         output_filename=f"report_audio_keyframe_bilibili_cover_{parent_id[:8]}_{int(time.time())}.jpg",
         institution=institution,
@@ -2852,6 +2905,10 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
         "vertical_enabled": _truthy(video_options.get("vertical_enabled", False)),
         "cover_title": main_title,
         "cover_subtitle": sub_title,
+        "landscape_title": main_title,
+        "landscape_subtitle": sub_title,
+        "vertical_title": vertical_main_title,
+        "vertical_subtitle": vertical_sub_title,
         "vertical_video_scheme": scheme,
         "cover_path": cover_path,
         "vertical_background_path": vertical_background_path,
@@ -2903,10 +2960,19 @@ def _is_generic_cover_title_override(value):
     return False
 
 
-def _publisher_main_title(structured, video_options):
-    override = str(video_options.get("title") or video_options.get("main_title") or "").strip()
+def _publisher_main_title(structured, video_options, *, variant="landscape"):
+    is_vertical = str(variant or "").lower() == "vertical"
+    override = str(
+        (video_options.get("vertical_title") if is_vertical else video_options.get("landscape_title"))
+        or video_options.get("title")
+        or video_options.get("main_title")
+        or ""
+    ).strip()
     if override and not _is_generic_cover_title_override(override):
         return _format_cover_title(override)
+    variant_title = str((structured or {}).get("vertical_title" if is_vertical else "landscape_title") or "").strip()
+    if variant_title:
+        return _format_cover_title(variant_title)
     cover_title = str((structured or {}).get("cover_title") or "").strip()
     if cover_title:
         return _format_cover_title(cover_title)
@@ -2923,10 +2989,19 @@ def _publisher_main_title(structured, video_options):
     return "研报核心观点解读"
 
 
-def _publisher_sub_title(structured, video_options):
-    override = str(video_options.get("subtitle") or video_options.get("sub_title") or "").strip()
+def _publisher_sub_title(structured, video_options, *, variant="landscape"):
+    is_vertical = str(variant or "").lower() == "vertical"
+    override = str(
+        (video_options.get("vertical_subtitle") if is_vertical else video_options.get("landscape_subtitle"))
+        or video_options.get("subtitle")
+        or video_options.get("sub_title")
+        or ""
+    ).strip()
     if override:
         return _format_cover_subtitle(override)
+    variant_subtitle = str((structured or {}).get("vertical_subtitle" if is_vertical else "landscape_subtitle") or "").strip()
+    if variant_subtitle:
+        return _format_cover_subtitle(variant_subtitle)
     cover_subtitle = str((structured or {}).get("cover_subtitle") or "").strip()
     if cover_subtitle:
         return _format_cover_subtitle(cover_subtitle)
@@ -3001,6 +3076,23 @@ def _publisher_workbench_institution(structured, pdf, video_options):
             if mapped:
                 return mapped
     return "深度研报"
+
+
+def _publisher_cover_title_with_institution(title, institution):
+    label = {
+        "Morgan Stanley": "大摩",
+        "J.P. Morgan": "摩根大通",
+        "Goldman Sachs": "高盛",
+        "UBS": "瑞银",
+        "Nomura": "野村",
+        "BofA": "美银",
+        "HSBC": "汇丰",
+        "深度研报": "机构",
+    }.get(str(institution or "").strip(), str(institution or "").strip() or "机构")
+    _bank, subject = _extract_bank_subject(_single_line(title))
+    subject = subject.strip(" |｜/：:") or "研报核心观点解读"
+    formatted = _format_cover_title(f"{label}：{subject}")
+    return re.sub(rf"^{re.escape(label)}:", f"{label}：", formatted, count=1)
 
 
 def _publisher_description(structured, pdf):

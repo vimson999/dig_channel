@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import redis
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -293,11 +293,21 @@ def repair_stale_publisher_pending_tasks_once(
         return {"enabled": False, "checked": 0, "requeued": 0, "items": []}
 
     scan_limit = limit or _int_env("PUBLISHER_PENDING_QUEUE_REPAIR_SCAN_LIMIT", 50, 1)
+    grace_seconds = _int_env(
+        "PUBLISHER_CHILD_ORPHAN_GRACE_SECONDS",
+        DEFAULT_ORPHAN_GRACE_SECONDS,
+        30,
+    )
+    stale_before = datetime.utcnow() - timedelta(seconds=grace_seconds)
     rows = (
         db.session.query(*PUBLISHER_REPAIR_CANDIDATE_COLUMNS)
         .filter(PublicationTask.feature == "publisher")
         .filter(PublicationTask.status == "pending")
         .filter(PublicationTask.current_step.in_(tuple(PUBLISHER_PENDING_REPAIR_STEPS)))
+        .filter(or_(
+            PublicationTask.updated_at <= stale_before,
+            and_(PublicationTask.updated_at.is_(None), PublicationTask.created_at <= stale_before),
+        ))
         .order_by(PublicationTask.updated_at.asc(), PublicationTask.created_at.asc())
         .limit(scan_limit)
         .all()

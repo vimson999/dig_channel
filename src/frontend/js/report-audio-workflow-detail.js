@@ -201,6 +201,9 @@ class ReportAudioWorkflowDetailPage {
         if (action === 'regenerate-cover') {
             this.regenerateCover(jobId);
         }
+        if (action === 'regenerate-cover-asset') {
+            this.regenerateCoverAsset(jobId, button.dataset.coverKey || '', button);
+        }
     }
 
     captureBilibiliPanelDraft(job) {
@@ -451,6 +454,52 @@ class ReportAudioWorkflowDetailPage {
         }
     }
 
+    async regenerateCoverAsset(jobId, coverKey, button) {
+        const typeMap = {
+            cover: 'landscape',
+            vertical_cover: 'vertical',
+            podcast_cover: 'podcast',
+            bilibili_cover: 'bilibili',
+        };
+        const coverType = typeMap[coverKey];
+        const requestKey = `${jobId}:${coverType || coverKey}`;
+        if (!jobId || !coverType || this.coverRegeneratingIds.has(requestKey)) return;
+        const editor = button?.closest('[data-cover-editor]');
+        const title = this.compactMultilineCoverText(editor?.querySelector('[data-cover-title]')?.value || '');
+        const subtitle = this.compactMultilineCoverText(editor?.querySelector('[data-cover-subtitle]')?.value || '');
+        if (!title) {
+            this.setNotice('请先填写封皮主标题。', 'warning');
+            editor?.querySelector('[data-cover-title]')?.focus();
+            return;
+        }
+
+        this.coverRegeneratingIds.add(requestKey);
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>生成中';
+        }
+        try {
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/regenerate-cover-asset`, {
+                method: 'POST',
+                timeoutMs: 45000,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cover_type: coverType, title, subtitle }),
+            });
+            this.mergeJobPayload(result.data || result);
+            this.render();
+            await this.load();
+            this.setNotice(`${this.coverAssetLabel(coverKey)}已重新生成。`, 'success');
+        } catch (error) {
+            this.setNotice(`${this.coverAssetLabel(coverKey)}生成失败：${error.message}`, 'error');
+        } finally {
+            this.coverRegeneratingIds.delete(requestKey);
+            if (button?.isConnected) {
+                button.disabled = false;
+                button.innerHTML = '<i class="fas fa-wand-magic-sparkles mr-1"></i>重新生成';
+            }
+        }
+    }
+
     mergeJobPayload(payload) {
         if (!payload || typeof payload !== 'object') return;
         this.job = { ...(this.job || {}), ...payload };
@@ -486,7 +535,7 @@ class ReportAudioWorkflowDetailPage {
                 ${audioUrl ? `
                     <div class="mb-4 rounded-md border border-blue-100 bg-blue-50 p-3">
                         <div class="mb-2 text-xs font-bold text-blue-800">音频</div>
-                        <audio controls src="${this.absoluteUrl(audioUrl)}" class="w-full"></audio>
+                        <audio controls src="${this.previewUrl(audioUrl)}" class="w-full"></audio>
                     </div>
                 ` : ''}
                 ${videoItems.length ? `
@@ -494,19 +543,37 @@ class ReportAudioWorkflowDetailPage {
                         ${videoItems.map((item) => `
                             <div class="rounded-md border border-slate-200 bg-slate-50 p-3">
                                 <div class="mb-2 text-xs font-bold text-slate-600">${this.escape(item.label)}</div>
-                                <video controls src="${this.absoluteUrl(item.url)}" class="max-h-[360px] w-full rounded bg-black"></video>
+                                <video controls preload="metadata" src="${this.previewUrl(item.url)}" class="max-h-[360px] w-full rounded bg-black"></video>
                             </div>
                         `).join('')}
                     </div>
                 ` : ''}
                 ${coverItems.length ? `
-                    <div class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                        ${coverItems.map((item) => `
-                            <a href="${this.absoluteUrl(item.url)}" target="_blank" rel="noopener noreferrer" class="block rounded-md border border-slate-200 bg-slate-50 p-2 hover:border-indigo-200">
-                                <img src="${this.absoluteUrl(item.url)}" alt="${this.escapeAttr(item.label)}" class="h-48 w-full rounded object-contain">
-                                <div class="mt-2 text-xs font-bold text-slate-600">${this.escape(item.label)}</div>
-                            </a>
-                        `).join('')}
+                    <div class="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+                        ${coverItems.map((item) => {
+                            const draft = this.coverAssetDraft(job, item.key);
+                            return `
+                            <div data-cover-editor="${this.escapeAttr(item.key)}" class="rounded-md border border-slate-200 bg-slate-50 p-3">
+                                <a href="${this.absoluteUrl(item.url)}" target="_blank" rel="noopener noreferrer" class="block hover:opacity-90">
+                                    <img src="${this.previewUrl(item.url, item.version)}" alt="${this.escapeAttr(item.label)}" class="h-56 w-full rounded bg-white object-contain">
+                                </a>
+                                <div class="mt-2 text-xs font-black text-slate-700">${this.escape(item.label)}</div>
+                                <div class="mt-3 grid gap-2">
+                                    <label class="text-[11px] font-bold text-slate-500">
+                                        主标题
+                                        <textarea data-cover-title rows="2" class="mt-1 w-full resize-y rounded border border-slate-300 bg-white px-2.5 py-2 text-sm font-semibold leading-5 text-slate-800 outline-none focus:border-indigo-400">${this.escape(draft.title)}</textarea>
+                                    </label>
+                                    <label class="text-[11px] font-bold text-slate-500">
+                                        副标题
+                                        <input data-cover-subtitle type="text" value="${this.escapeAttr(draft.subtitle)}" class="mt-1 w-full rounded border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-800 outline-none focus:border-indigo-400">
+                                    </label>
+                                    <button type="button" data-detail-action="regenerate-cover-asset" data-cover-key="${this.escapeAttr(item.key)}" data-job-id="${this.escapeAttr(job.job_id || job.id || this.jobId)}" class="justify-self-end rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-wait disabled:opacity-60">
+                                        <i class="fas fa-wand-magic-sparkles mr-1"></i>重新生成当前封皮
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+                        }).join('')}
                     </div>
                 ` : ''}
                 ${keyframeItems.length ? `
@@ -515,7 +582,7 @@ class ReportAudioWorkflowDetailPage {
                         <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                             ${keyframeItems.map((item) => `
                                 <a href="${this.absoluteUrl(item.url)}" target="_blank" rel="noopener noreferrer" class="block rounded-md border border-slate-200 bg-slate-50 p-2 hover:border-emerald-200">
-                                    <img src="${this.absoluteUrl(item.url)}" alt="${this.escapeAttr(item.label)}" class="h-48 w-full rounded object-contain">
+                                    <img src="${this.previewUrl(item.url)}" alt="${this.escapeAttr(item.label)}" class="h-48 w-full rounded object-contain">
                                     <div class="mt-2 text-xs font-bold text-slate-600">${this.escape(item.label)}</div>
                                 </a>
                             `).join('')}
@@ -683,23 +750,31 @@ class ReportAudioWorkflowDetailPage {
         const add = (key, label, url, defaultTitle) => {
             if (url) items.push({ key, label, url, defaultTitle });
         };
-        add('landscape', '横屏视频', job.download_video_url || job.video?.video?.download_url, this.defaultBiliTitle(job));
-        add('vertical', '竖屏视频', job.download_vertical_video_url || job.video?.vertical_video?.download_url, this.defaultBiliTitle(job));
+        add('landscape', '横屏视频', job.download_video_url || job.video?.video?.download_url, this.variantBiliTitle(job, 'landscape'));
+        add('vertical', '竖屏视频', job.download_vertical_video_url || job.video?.vertical_video?.download_url, this.variantBiliTitle(job, 'vertical'));
         return items;
     }
 
     biliCoverOptions(job, videoKey = '') {
         const entries = [];
-        const add = (key, label, url) => {
-            if (url) entries.push({ key, label, url });
+        const video = job?.video || {};
+        const versions = {
+            cover: video.cover_regenerated_at || '',
+            vertical_cover: video.vertical_cover_regenerated_at || '',
+            podcast_cover: video.podcast_cover_regenerated_at || '',
+            bilibili_cover: video.bilibili_cover_regenerated_at || '',
         };
-        add('bilibili_cover', 'B站封皮', this.bilibiliCoverUrl(job));
+        const add = (key, label, url) => {
+            if (url) entries.push({ key, label, url, version: versions[key] || '' });
+        };
         if (videoKey === 'vertical') {
+            add('bilibili_cover', 'B站封皮', this.bilibiliCoverUrl(job));
             add('vertical_cover', '竖版封皮', job.download_vertical_cover_url || job.video?.vertical_cover?.download_url);
             add('podcast_cover', '播客封皮', job.download_podcast_cover_url || job.video?.podcast_cover?.download_url);
             add('cover', '横屏封面', job.download_cover_url || job.video?.cover?.download_url);
         } else {
             add('cover', '横屏封面', job.download_cover_url || job.video?.cover?.download_url);
+            add('bilibili_cover', 'B站封皮', this.bilibiliCoverUrl(job));
             add('vertical_cover', '竖版封皮', job.download_vertical_cover_url || job.video?.vertical_cover?.download_url);
             add('podcast_cover', '播客封皮', job.download_podcast_cover_url || job.video?.podcast_cover?.download_url);
         }
@@ -732,6 +807,81 @@ class ReportAudioWorkflowDetailPage {
 
     defaultBiliTitle(job) {
         return this.compactTitle(this.displayTitle(job) || job.cover_title || job.pdf?.topic_title || job.pdf?.filename || '研报解读').slice(0, 120);
+    }
+
+    variantBiliTitle(job, videoKey) {
+        const structured = job?.structured_result || {};
+        const backendTitle = videoKey === 'vertical'
+            ? job?.bilibili_titles?.vertical
+            : job?.bilibili_titles?.landscape;
+        if (this.compactTitle(backendTitle)) return this.compactTitle(backendTitle).slice(0, 120);
+        const candidates = videoKey === 'vertical'
+            ? [structured.vertical_title, job?.video?.vertical_title, structured.cover_title]
+            : [structured.landscape_title, job?.video?.landscape_title, structured.cover_title];
+        const selected = candidates.map((value) => this.compactTitle(value)).find(Boolean);
+        const subtitleCandidates = videoKey === 'vertical'
+            ? [structured.vertical_subtitle, job?.video?.vertical_subtitle, structured.cover_subtitle]
+            : [structured.landscape_subtitle, job?.video?.landscape_subtitle, structured.cover_subtitle];
+        const subtitle = subtitleCandidates.map((value) => this.compactTitle(value)).find(Boolean) || '';
+        const separator = videoKey === 'vertical' ? ' | ' : ' / ';
+        const institution = this.reportInstitution(job, selected);
+        const mainParts = this.stripInstitution(selected || this.defaultBiliTitle(job), institution)
+            .split(/\s*\/\s*/)
+            .map((part) => part.trim())
+            .filter(Boolean);
+        return [institution, ...mainParts, subtitle, this.reportDate(job)]
+            .filter(Boolean)
+            .join(separator)
+            .slice(0, 120);
+    }
+
+    reportInstitution(job, title = '') {
+        const structured = job?.structured_result || {};
+        const source = [title, structured.cover_title, structured.title, job?.pdf?.filename, job?.request?.pdf?.filename]
+            .map((value) => String(value || ''))
+            .join(' ');
+        const aliases = [
+            ['摩根士丹利', '大摩'], ['大摩', '大摩'], ['摩根大通', '摩根大通'], ['小摩', '摩根大通'],
+            ['高盛', '高盛'], ['瑞银', '瑞银'], ['野村', '野村'], ['美国银行', '美银'], ['美银', '美银'], ['汇丰', '汇丰'],
+        ];
+        const match = aliases.find(([alias]) => source.includes(alias));
+        return match?.[1] || '机构研报';
+    }
+
+    stripInstitution(title, institution) {
+        let text = this.compactTitle(title);
+        const aliases = [institution, '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰'];
+        for (const alias of aliases.filter(Boolean).sort((a, b) => b.length - a.length)) {
+            const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            text = text.replace(new RegExp(`^\\s*${escaped}(?:证券)?\\s*[:：]\\s*`, 'i'), '');
+        }
+        return text.replace(/^[|｜/：:\s]+|[|｜/：:\s]+$/g, '');
+    }
+
+    coverTitleWithInstitution(job, title) {
+        const institution = this.reportInstitution(job, title);
+        let body = this.compactMultilineCoverText(title);
+        const aliases = [institution, '机构', '机构研报', '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰'];
+        for (const alias of aliases.filter(Boolean).sort((a, b) => b.length - a.length)) {
+            const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            body = body.replace(new RegExp(`^\\s*${escaped}(?:证券)?\\s*[:：]\\s*`, 'i'), '');
+        }
+        body = body.replace(/^[|｜/：:\s]+|[|｜/：:\s]+$/g, '');
+        return `${institution || '机构'}：${body || '研报核心观点解读'}`;
+    }
+
+    reportDate(job) {
+        const source = [job?.pdf?.filename, job?.request?.pdf?.filename, job?.pdf?.topic_title, job?.request?.pdf?.topic_title]
+            .map((value) => String(value || ''))
+            .join(' ');
+        const full = source.match(/\b(20\d{2})[./-]?(\d{2})[./-]?(\d{2})\b/);
+        if (full) return `${full[1]}-${full[2]}-${full[3]}`;
+        const short = source.match(/(?:^|\D)(\d{2})(\d{2})(\d{2})(?:\D|$)/);
+        if (short) return `20${short[1]}-${short[2]}-${short[3]}`;
+        const created = new Date(job?.created_at || Date.now());
+        if (Number.isNaN(created.getTime())) return '';
+        const pad = (value) => String(value).padStart(2, '0');
+        return `${created.getFullYear()}-${pad(created.getMonth() + 1)}-${pad(created.getDate())}`;
     }
 
     displayTitle(job) {
@@ -808,6 +958,37 @@ class ReportAudioWorkflowDetailPage {
         return '';
     }
 
+    coverAssetLabel(key) {
+        return {
+            cover: '横屏封面',
+            vertical_cover: '竖版封皮',
+            podcast_cover: '播客封皮',
+            bilibili_cover: 'B站封皮',
+        }[key] || '封皮';
+    }
+
+    coverAssetDraft(job, key) {
+        const video = job?.video || {};
+        const structured = job?.structured_result || {};
+        const titleCandidates = {
+            cover: [video.cover_title, structured.landscape_title, structured.cover_title],
+            vertical_cover: [video.vertical_cover_title, structured.vertical_title, structured.cover_title],
+            podcast_cover: [video.podcast_cover_title, structured.vertical_title, structured.cover_title],
+            bilibili_cover: [video.bilibili_cover_title, structured.vertical_title, structured.cover_title],
+        }[key] || [];
+        const subtitleCandidates = {
+            cover: [video.cover_subtitle, structured.landscape_subtitle, structured.cover_subtitle],
+            vertical_cover: [video.vertical_cover_subtitle, structured.vertical_subtitle, structured.cover_subtitle],
+            podcast_cover: [video.podcast_cover_subtitle, structured.vertical_subtitle, structured.cover_subtitle],
+            bilibili_cover: [video.bilibili_cover_subtitle, structured.vertical_subtitle, structured.cover_subtitle],
+        }[key] || [];
+        const selectedTitle = titleCandidates.map((value) => this.compactMultilineCoverText(value)).find(Boolean) || this.coverTitleForEdit(job);
+        return {
+            title: this.coverTitleWithInstitution(job, selectedTitle),
+            subtitle: subtitleCandidates.map((value) => this.compactMultilineCoverText(value)).find(Boolean) || this.coverSubtitleForEdit(job),
+        };
+    }
+
     compactMultilineCoverText(value) {
         return String(value || '')
             .split(/\r?\n/)
@@ -867,6 +1048,14 @@ class ReportAudioWorkflowDetailPage {
         if (!raw) return '#';
         if (/^https?:\/\//i.test(raw)) return raw;
         return `${this.apiRoot()}${raw}`;
+    }
+
+    previewUrl(path, version = '') {
+        const url = this.absoluteUrl(path);
+        if (url === '#') return url;
+        const params = ['inline=1'];
+        if (version) params.push(`v=${encodeURIComponent(String(version))}`);
+        return `${url}${url.includes('?') ? '&' : '?'}${params.join('&')}`;
     }
 
     formatDateTime(value) {

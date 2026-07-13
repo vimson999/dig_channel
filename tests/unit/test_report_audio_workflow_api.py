@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -67,6 +68,28 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertIn("第一部分", payload["audio_script"]["text"])
         self.assertIn("结构", payload["audio_script"]["quality_issue"])
 
+    def test_previewable_file_is_inline_only_for_preview_requests(self):
+        media_path = Path(self.tmpdir.name) / "cover.jpg"
+        media_path.write_bytes(b"jpeg-preview")
+
+        with self.app.test_request_context("/?inline=1"):
+            preview = report_audio_api._send_previewable_file(
+                str(media_path),
+                "image/jpeg",
+                "cover.jpg",
+            )
+        with self.app.test_request_context("/"):
+            download = report_audio_api._send_previewable_file(
+                str(media_path),
+                "image/jpeg",
+                "cover.jpg",
+            )
+
+        self.assertTrue(preview.headers["Content-Disposition"].startswith("inline;"))
+        self.assertTrue(preview.cache_control.no_store)
+        self.assertTrue(preview.cache_control.no_cache)
+        self.assertTrue(download.headers["Content-Disposition"].startswith("attachment;"))
+
     def test_bilibili_cover_is_promoted_and_accepted_by_upload_resolver(self):
         root = Path(self.tmpdir.name)
         bilibili_cover_path = root / "bilibili-cover.jpg"
@@ -113,6 +136,74 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(payload["video"]["bilibili_cover"]["ratio"], "1146:717")
         self.assertEqual(cover_path, str(bilibili_cover_path))
         self.assertEqual(cover_key, "bilibili_cover")
+
+    def test_bilibili_defaults_pair_video_with_variant_title_and_cover(self):
+        root = Path(self.tmpdir.name)
+        landscape_cover = root / "landscape.jpg"
+        bilibili_cover = root / "bilibili.jpg"
+        landscape_cover.write_bytes(b"landscape")
+        bilibili_cover.write_bytes(b"bilibili")
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": FEATURE_NAME, "report_audio_workflow": {"pdf": {"filename": "sample.pdf"}}},
+            result={
+                "structured_result": {
+                    "landscape_title": "横屏标题：稳健完整",
+                    "vertical_title": "竖屏标题：核心机会",
+                    "cover_title": "旧版兼容标题",
+                },
+                "video": {
+                    "cover_path": str(landscape_cover),
+                    "bilibili_cover_path": str(bilibili_cover),
+                },
+            },
+            created_at=datetime(2026, 7, 11, 12, 0, 0),
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        self.assertEqual(
+            report_audio_api._report_bilibili_default_title(parent, "landscape"),
+            "机构研报 / 横屏标题：稳健完整 / 2026-07-11",
+        )
+        self.assertEqual(
+            report_audio_api._report_bilibili_default_title(parent, "vertical"),
+            "机构研报 | 竖屏标题：核心机会 | 2026-07-11",
+        )
+        self.assertEqual(report_audio_api._report_bilibili_cover_path(parent, "landscape"), (str(landscape_cover), "cover"))
+        self.assertEqual(report_audio_api._report_bilibili_cover_path(parent, "vertical"), (str(bilibili_cover), "bilibili_cover"))
+
+    def test_bilibili_publish_title_extracts_bank_and_report_date(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "report_audio_workflow": {"pdf": {"filename": "野村-源杰科技首次覆盖-260708.pdf"}},
+            },
+            result={
+                "structured_result": {
+                    "landscape_title": "野村:源杰科技估值已透支\n目标价隐含下行空间",
+                    "landscape_subtitle": "盈利复合增速114%",
+                    "vertical_title": "光芯片盈利暴增114%\n源杰估值为何仍透支",
+                    "vertical_subtitle": "目标价隐含3.5%下行",
+                },
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        self.assertEqual(
+            report_audio_api._report_bilibili_default_title(parent, "landscape"),
+            "野村 / 源杰科技估值已透支 / 目标价隐含下行空间 / 盈利复合增速114% / 2026-07-08",
+        )
+        self.assertEqual(
+            report_audio_api._report_bilibili_default_title(parent, "vertical"),
+            "野村 | 光芯片盈利暴增114% | 源杰估值为何仍透支 | 目标价隐含3.5%下行 | 2026-07-08",
+        )
 
     def test_completed_scheme2_job_can_backfill_bilibili_cover_without_video_rerender(self):
         root = Path(self.tmpdir.name)
@@ -357,10 +448,80 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(parent.report_audio_cover_subtitle, "新副标题")
         self.assertEqual(parent.report_audio_cover_path, str(new_cover_path))
 
+    def test_regenerate_vertical_cover_uses_manual_copy_without_rerendering_video(self):
+        root = Path(self.tmpdir.name)
+        screenshot_path = root / "page.jpg"
+        vertical_cover_path = root / "vertical-cover.jpg"
+        screenshot_path.write_bytes(b"jpeg")
+        vertical_cover_path.write_bytes(b"vertical")
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"filename": "野村-航天-260710.pdf"},
+                    "video": {"vertical_video_scheme": "scheme2"},
+                },
+            },
+            result={
+                "structured_result": {"vertical_title": "旧标题"},
+                "pdf_first_page_image": {"path": str(screenshot_path), "bytes": 4},
+                "video": {"vertical_video_path": str(root / "vertical.mp4")},
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        with patch.object(
+            report_audio_api.thumbnail_service,
+            "generate_workbench_vertical_cover",
+            return_value=str(vertical_cover_path),
+        ) as generate_cover:
+            cover = report_audio_api._generate_vertical_cover_for_task(
+                parent,
+                title="火箭回收成本暴降",
+                subtitle="每公斤成本直逼 SpaceX",
+            )
+
+        self.assertEqual(generate_cover.call_args.kwargs["main_title"], "火箭回收成本暴降")
+        self.assertEqual(generate_cover.call_args.kwargs["sub_title"], "每公斤成本直逼 SpaceX")
+        self.assertEqual(cover["path"], str(vertical_cover_path))
+        db.session.refresh(parent)
+        self.assertEqual(parent.result["video"]["vertical_cover_path"], str(vertical_cover_path))
+        self.assertEqual(parent.result["video"]["vertical_cover_title"], "火箭回收成本暴降")
+        self.assertEqual(parent.result["video"]["vertical_cover_subtitle"], "每公斤成本直逼 SpaceX")
+
     def test_normalize_cover_text_preserves_manual_line_breaks(self):
         text = report_audio_api._normalize_cover_text("  第一行  标题 \r\n 第二行\t标题  \n\n第三行", 80)
 
         self.assertEqual(text, "第一行 标题\n第二行 标题\n第三行")
+
+    def test_manual_cover_title_normalizes_to_institution_colon_format(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "report_audio_workflow": {"pdf": {"filename": "野村证券-中国航天-260710.pdf"}},
+            },
+            result={"structured_result": {"title": "商业航天成本拐点"}},
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        title = report_audio_api._cover_title_with_institution(
+            parent,
+            "野村证券：中国火箭回收重复使用的原创路线\n决定商业航天生死的根本不是订单",
+        )
+
+        self.assertEqual(
+            title,
+            "野村：中国火箭回收重复使用的原创路线\n决定商业航天生死的根本不是订单",
+        )
 
     def test_job_summary_payload_includes_cover_subtitle_from_projection(self):
         row = SimpleNamespace(

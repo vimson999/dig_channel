@@ -169,6 +169,13 @@ TASK_PUBLIC_COLUMNS = (
     PublicationTask.params,
     PublicationTask.result,
 )
+TASK_PUBLISHER_MATCH_COLUMNS = (
+    *TASK_PUBLIC_STATUS_COLUMNS,
+    PublicationTask.publisher_child_role,
+    PublicationTask.publisher_aspect_ratio,
+    PublicationTask.publisher_generate_subtitles,
+    PublicationTask.publisher_audio_signature,
+)
 TASK_FAIL_COLUMNS = (
     PublicationTask.id,
     PublicationTask.status,
@@ -543,35 +550,36 @@ def process_job(task_id: str) -> bool:
     audio_path = _resolve_project_path(audio.get("path"))
     if not audio_path or not audio_path.exists():
         _mark_failed(task, f"音频文件不存在: {audio.get('path')}")
-        _queue_notification(task.id, "mp3_video_failed", f"音频文件不存在: {audio.get('path')}")
+        _queue_notification(task_key, "mp3_video_failed", f"音频文件不存在: {audio.get('path')}")
         return False
 
     user_id = task.user_id or (task.params or {}).get("user_id")
     created_at = task.created_at or datetime.utcnow()
+    task_key = task.id
     _start_task(task)
-    _update_result(task.id, {"generate_subtitles": generate_subtitles})
-    _queue_notification(task.id, "mp3_video_started", "MP3 视频编排已启动")
+    _update_result(task_key, {"generate_subtitles": generate_subtitles})
+    _queue_notification(task_key, "mp3_video_started", "MP3 视频编排已启动")
 
     try:
-        image_path = artifact_path_for_job(task.id, "gemini_infographic", "png", created_at)
-        gemini_result_path = artifact_path_for_job(task.id, "gemini_result", "json", created_at)
+        image_path = artifact_path_for_job(task_key, "gemini_infographic", "png", created_at)
+        gemini_result_path = artifact_path_for_job(task_key, "gemini_result", "json", created_at)
         if _workflow_uses_direct_ds_response(workflow):
-            image_path = artifact_path_for_job(task.id, "direct_ds_infographic", "png", created_at)
-            direct_result_path = artifact_path_for_job(task.id, "direct_ds_result", "json", created_at)
-            existing = _fresh_result(task.id)
+            image_path = artifact_path_for_job(task_key, "direct_ds_infographic", "png", created_at)
+            direct_result_path = artifact_path_for_job(task_key, "direct_ds_result", "json", created_at)
+            existing = _fresh_result(task_key)
             gemini_result, first_response, infographic = _reusable_text_source_result(existing, fallback_image_path=image_path)
             if gemini_result:
-                _emit(task.id, "direct_ds_reused", 54, "复用已粘贴的 DS 返回值")
-                _update_result(task.id, {
+                _emit(task_key, "direct_ds_reused", 54, "复用已粘贴的 DS 返回值")
+                _update_result(task_key, {
                     "input_source": "ds_response",
                     "source": _public_text_source_result(gemini_result),
                     "initial_response_text": first_response,
                     "infographic": _public_artifact(infographic, "DS 文本信息图"),
                 })
             else:
-                _emit(task.id, "direct_ds_response", 22, "读取手动粘贴的 DS 返回值")
+                _emit(task_key, "direct_ds_response", 22, "读取手动粘贴的 DS 返回值")
                 gemini_result = _generate_from_direct_ds_response(
-                    task_id=task.id,
+                    task_id=task_key,
                     workflow=workflow,
                     audio=audio,
                     output_path=direct_result_path,
@@ -580,31 +588,31 @@ def process_job(task_id: str) -> bool:
                 draw_transcript_infographic(image_path, first_response, audio=audio)
                 infographic = _artifact_meta(image_path, "DS 文本信息图", renderer="pil:direct-ds-infographic")
                 gemini_result["image"] = infographic
-                _update_result(task.id, {
+                _update_result(task_key, {
                     "input_source": "ds_response",
                     "source": _public_text_source_result(gemini_result),
                     "initial_response_text": first_response,
                     "infographic": _public_artifact(infographic, "DS 文本信息图"),
                 })
-            _queue_notification(task.id, "mp3_video_gemini_completed", "手动 DS 返回值已载入")
+            _queue_notification(task_key, "mp3_video_gemini_completed", "手动 DS 返回值已载入")
         elif _workflow_uses_transcript(workflow):
-            image_path = artifact_path_for_job(task.id, "transcript_infographic", "png", created_at)
-            transcript_result_path = artifact_path_for_job(task.id, "transcript_deepseek_result", "json", created_at)
-            existing = _fresh_result(task.id)
+            image_path = artifact_path_for_job(task_key, "transcript_infographic", "png", created_at)
+            transcript_result_path = artifact_path_for_job(task_key, "transcript_deepseek_result", "json", created_at)
+            existing = _fresh_result(task_key)
             gemini_result, first_response, infographic = _reusable_text_source_result(existing, fallback_image_path=image_path)
             if gemini_result:
-                _emit(task.id, "transcript_source_reused", 54, "复用已完成的 IMA 全文 DS 处理结果")
-                _update_result(task.id, {
+                _emit(task_key, "transcript_source_reused", 54, "复用已完成的 IMA 全文 DS 处理结果")
+                _update_result(task_key, {
                     "input_source": "ima_transcript",
                     "source": _public_text_source_result(gemini_result),
                     "initial_response_text": first_response,
                     "infographic": _public_artifact(infographic, "DS 文本信息图"),
                 })
             else:
-                _queue_notification(task.id, "mp3_video_gemini_started", "使用 IMA 全文调用 DS v4 pro")
-                _emit(task.id, "transcript_deepseek", 18, "使用 IMA 全文调用 DS v4 pro")
+                _queue_notification(task_key, "mp3_video_gemini_started", "使用 IMA 全文调用 DS v4 pro")
+                _emit(task_key, "transcript_deepseek", 18, "使用 IMA 全文调用 DS v4 pro")
                 gemini_result = _generate_from_transcript(
-                    task_id=task.id,
+                    task_id=task_key,
                     workflow=workflow,
                     audio=audio,
                     output_path=transcript_result_path,
@@ -613,28 +621,28 @@ def process_job(task_id: str) -> bool:
                 draw_transcript_infographic(image_path, first_response, audio=audio)
                 infographic = _artifact_meta(image_path, "DS 文本信息图", renderer="pil:transcript-infographic")
                 gemini_result["image"] = infographic
-                _update_result(task.id, {
+                _update_result(task_key, {
                     "input_source": "ima_transcript",
                     "source": _public_text_source_result(gemini_result),
                     "initial_response_text": first_response,
                     "infographic": _public_artifact(infographic, "DS 文本信息图"),
                 })
-            _queue_notification(task.id, "mp3_video_gemini_completed", "IMA 全文 DS 处理结果已生成")
+            _queue_notification(task_key, "mp3_video_gemini_completed", "IMA 全文 DS 处理结果已生成")
         else:
-            existing = _clear_invalid_gemini_shell_result(task.id, _fresh_result(task.id))
+            existing = _clear_invalid_gemini_shell_result(task_key, _fresh_result(task_key))
             gemini_result, first_response, infographic = _reusable_gemini_result(existing, fallback_image_path=image_path)
             if gemini_result:
-                _emit(task.id, "gemini_reused", 54, "复用已完成的 Gemini 第一轮返回和横向信息图")
-                _update_result(task.id, {
+                _emit(task_key, "gemini_reused", 54, "复用已完成的 Gemini 第一轮返回和横向信息图")
+                _update_result(task_key, {
                     "input_source": "gemini_audio",
                     "gemini": _public_gemini_result(gemini_result),
                     "initial_response_text": first_response,
                     "infographic": _public_artifact(infographic, "Gemini 横向信息图"),
                 })
             else:
-                _queue_notification(task.id, "mp3_video_gemini_started", "上传 MP3 到 Gemini Gem 并等待第一轮返回")
+                _queue_notification(task_key, "mp3_video_gemini_started", "上传 MP3 到 Gemini Gem 并等待第一轮返回")
                 gemini_result = _generate_gemini_with_retries(
-                    task_id=task.id,
+                    task_id=task_key,
                     audio_path=audio_path,
                     output_path=gemini_result_path,
                     workflow=workflow,
@@ -642,24 +650,24 @@ def process_job(task_id: str) -> bool:
                 )
                 first_response = gemini_result.get("initial_response_text") or gemini_result.get("response_text") or ""
                 infographic = gemini_result.get("image") or {"path": image_path}
-                _update_result(task.id, {
+                _update_result(task_key, {
                     "input_source": "gemini_audio",
                     "gemini": _public_gemini_result(gemini_result),
                     "initial_response_text": first_response,
                     "infographic": _public_artifact(infographic, "Gemini 横向信息图"),
                 })
-            _queue_notification(task.id, "mp3_video_gemini_completed", "Gemini 第一轮返回和横向信息图已生成")
+            _queue_notification(task_key, "mp3_video_gemini_completed", "Gemini 第一轮返回和横向信息图已生成")
 
-        existing = _fresh_result(task.id)
+        existing = _fresh_result(task_key)
         plan = _reusable_plan(existing)
         if plan:
             audio = existing.get("audio") if isinstance(existing.get("audio"), dict) else audio
-            _emit(task.id, "deepseek_plan_reused", 58, "复用已完成的 DS v4 pro 标题和音频时间戳规划")
+            _emit(task_key, "deepseek_plan_reused", 58, "复用已完成的 DS v4 pro 标题和音频时间戳规划")
         else:
             if _workflow_uses_direct_ds_response(workflow):
-                _emit(task.id, "direct_ds_plan", 58, "本地解析 DS 返回值中的标题和音频时间戳")
+                _emit(task_key, "direct_ds_plan", 58, "本地解析 DS 返回值中的标题和音频时间戳")
             else:
-                _emit(task.id, "deepseek_plan", 58, "DS v4 pro 选择标题和音频时间戳")
+                _emit(task_key, "deepseek_plan", 58, "DS v4 pro 选择标题和音频时间戳")
             duration = float(audio.get("duration_seconds") or 0) or probe_media_duration(str(audio_path))
             audio["duration_seconds"] = duration
             if _workflow_uses_direct_ds_response(workflow):
@@ -668,47 +676,47 @@ def process_job(task_id: str) -> bool:
                 if _workflow_uses_transcript(workflow):
                     _validate_ds_response_contract(first_response, source_label="IMA 全文 DS 返回值")
                 plan = plan_from_first_response(first_response, audio=audio)
-            _update_result(task.id, {"plan": plan, "audio": audio})
+            _update_result(task_key, {"plan": plan, "audio": audio})
         if _workflow_uses_direct_ds_response(workflow) or _workflow_uses_transcript(workflow):
             _validate_strict_ds_plan(
                 plan,
                 source_label="手动 DS 返回值" if _workflow_uses_direct_ds_response(workflow) else "IMA 全文 DS 返回值",
             )
         _queue_notification(
-            task.id,
+            task_key,
             "mp3_video_plan_completed",
             "已从手动 DS 返回值解析标题、封面文案和音频时间戳规划"
             if _workflow_uses_direct_ds_response(workflow)
             else "DS v4 pro 已完成标题、封面文案和音频时间戳规划",
         )
-        _raise_if_parent_canceled(task.id)
+        _raise_if_parent_canceled(task_key)
 
-        existing = _fresh_result(task.id)
+        existing = _fresh_result(task_key)
         artifacts = existing.get("artifacts") if isinstance(existing.get("artifacts"), dict) else {}
         if _visual_artifacts_ready(artifacts):
-            _emit(task.id, "generate_visual_assets_reused", 68, "复用已生成的四张封皮/背景图")
+            _emit(task_key, "generate_visual_assets_reused", 68, "复用已生成的四张封皮/背景图")
         else:
-            _emit(task.id, "generate_visual_assets", 68, "生成四张封皮/背景图")
+            _emit(task_key, "generate_visual_assets", 68, "生成四张封皮/背景图")
             artifacts = generate_visual_artifacts(
-                task.id,
+                task_key,
                 plan=plan,
                 infographic_path=infographic.get("path") or image_path,
                 created_at=created_at,
             )
-            _update_result(task.id, {"artifacts": artifacts})
-        _queue_notification(task.id, "mp3_video_visuals_completed", "四张封皮/背景图已生成")
-        _raise_if_parent_canceled(task.id)
+            _update_result(task_key, {"artifacts": artifacts})
+        _queue_notification(task_key, "mp3_video_visuals_completed", "四张封皮/背景图已生成")
+        _raise_if_parent_canceled(task_key)
 
         render_mode = _workflow_render_mode(workflow)
         if render_mode == "keyframes":
-            existing = _fresh_result(task.id)
+            existing = _fresh_result(task_key)
             keyframes = existing.get("keyframes") if isinstance(existing.get("keyframes"), dict) else {}
             if _keyframe_artifacts_ready(keyframes):
-                _emit(task.id, "video_keyframes_reused", 96, "复用已生成的视频关键帧预览")
+                _emit(task_key, "video_keyframes_reused", 96, "复用已生成的视频关键帧预览")
             else:
-                _emit(task.id, "generate_video_keyframes", 90, "生成横屏/竖屏视频关键帧预览")
+                _emit(task_key, "generate_video_keyframes", 90, "生成横屏/竖屏视频关键帧预览")
                 keyframes = generate_video_keyframes(
-                    task.id,
+                    task_key,
                     plan=plan,
                     artifacts=artifacts,
                     audio=audio,
@@ -716,7 +724,7 @@ def process_job(task_id: str) -> bool:
                     created_at=created_at,
                 )
             artifacts = {**artifacts, **keyframes}
-            _update_result(task.id, {
+            _update_result(task_key, {
                 "render_mode": render_mode,
                 "generate_subtitles": generate_subtitles,
                 "artifacts": artifacts,
@@ -724,9 +732,9 @@ def process_job(task_id: str) -> bool:
                 "landscape_video": {"status": "skipped", "reason": "keyframes_preview"},
                 "vertical_video": {"status": "skipped", "reason": "keyframes_preview"},
             })
-            _raise_if_parent_canceled(task.id)
-            output_path = storage_path_for_job(task.id, created_at)
-            fresh = _load_task(task.id, *TASK_RESULT_COLUMNS, PublicationTask.status)
+            _raise_if_parent_canceled(task_key)
+            output_path = storage_path_for_job(task_key, created_at)
+            fresh = _load_task(task_key, *TASK_RESULT_COLUMNS, PublicationTask.status)
             if not fresh or fresh.status == "canceled":
                 raise ParentTaskCanceled("父编排任务已取消")
             final_result = _without_waiting_state(fresh.result or {})
@@ -735,7 +743,7 @@ def process_job(task_id: str) -> bool:
                 "completed_at": datetime.utcnow().isoformat() + "Z",
             })
             Path(output_path).write_text(json.dumps({
-                "workflow_task_id": task.id,
+                "workflow_task_id": task_key,
                 "input_source": workflow.get("input_source") or ("ds_response" if _workflow_uses_direct_ds_response(workflow) else ("ima_transcript" if _workflow_uses_transcript(workflow) else "gemini_audio")),
                 "render_mode": render_mode,
                 "generate_subtitles": generate_subtitles,
@@ -756,11 +764,11 @@ def process_job(task_id: str) -> bool:
             fresh.result = final_result
             flag_modified(fresh, "result")
             db.session.commit()
-            _queue_notification(task.id, "mp3_video_completed", "MP3 视频关键帧预览已生成，未合成完整视频")
+            _queue_notification(task_key, "mp3_video_completed", "MP3 视频关键帧预览已生成，未合成完整视频")
             return True
 
-        _raise_if_parent_canceled(task.id)
-        existing = _fresh_result(task.id)
+        _raise_if_parent_canceled(task_key)
+        existing = _fresh_result(task_key)
         audio_segment = audio_segment_from_plan(audio, plan)
         audio_signature = _audio_segment_signature(audio_segment)
         force_video_regenerate = _workflow_force_video_regenerate(workflow, existing)
@@ -770,15 +778,15 @@ def process_job(task_id: str) -> bool:
             landscape_summary, landscape_task = _reusable_video_summary(
                 existing,
                 "landscape_video",
-                parent_id=task.id,
+                parent_id=task_key,
                 generate_subtitles=generate_subtitles,
                 audio_signature=audio_signature,
             )
         if landscape_summary:
-            _emit(task.id, "landscape_video_reused", 90, "复用已完成的小君君横屏视频")
+            _emit(task_key, "landscape_video_reused", 90, "复用已完成的小君君横屏视频")
             if landscape_task:
-                _record_child(task.id, "landscape_video", landscape_task)
-            _update_result(task.id, {"landscape_video": landscape_summary})
+                _record_child(task_key, "landscape_video", landscape_task)
+            _update_result(task_key, {"landscape_video": landscape_summary})
         else:
             landscape_task = _active_child_from_result(
                 existing,
@@ -787,14 +795,15 @@ def process_job(task_id: str) -> bool:
                 audio_signature=audio_signature,
             )
             if landscape_task:
-                _emit(task.id, "landscape_video_wait_existing", 80, "继续等待已提交的小君君横屏视频")
+                landscape_task_key = str(landscape_task.id)
+                _emit(task_key, "landscape_video_wait_existing", 80, "继续等待已提交的小君君横屏视频")
                 _sync_publisher_video_task_title(landscape_task, _publisher_video_title(plan, role="xiaojunjun_landscape"))
-                _record_child(task.id, "landscape_video", landscape_task)
+                _record_child(task_key, "landscape_video", landscape_task)
             else:
-                _raise_if_parent_canceled(task.id)
-                _emit(task.id, "submit_landscape_video", 78, "提交小君君横屏视频合成任务")
+                _raise_if_parent_canceled(task_key)
+                _emit(task_key, "submit_landscape_video", 78, "提交小君君横屏视频合成任务")
                 landscape_task = create_publisher_video_task(
-                    parent_id=task.id,
+                    parent_id=task_key,
                     user_id=user_id,
                     audio=audio,
                     plan=plan,
@@ -804,32 +813,33 @@ def process_job(task_id: str) -> bool:
                     generate_subtitles=generate_subtitles,
                     force_new=force_video_regenerate,
                 )
-                _record_child(task.id, "landscape_video", landscape_task)
-                _queue_notification(task.id, "mp3_video_landscape_submitted", "小君君横屏视频合成任务已提交")
-            landscape_task = _wait_child(task.id, landscape_task.id, "landscape_video", start_progress=80, end_progress=90)
+                landscape_task_key = str(landscape_task.id)
+                _record_child(task_key, "landscape_video", landscape_task)
+                _queue_notification(task_key, "mp3_video_landscape_submitted", "小君君横屏视频合成任务已提交")
+            landscape_task = _wait_child(task_key, landscape_task_key, "landscape_video", start_progress=80, end_progress=90)
             if landscape_task.status != "completed":
                 raise RuntimeError(f"横屏视频子任务失败: {landscape_task.error_message or (landscape_task.result or {}).get('error')}")
             landscape_summary = _publisher_result_summary(landscape_task)
-            _update_result(task.id, {"landscape_video": landscape_summary})
-        _queue_notification(task.id, "mp3_video_landscape_completed", "小君君横屏视频已完成")
+            _update_result(task_key, {"landscape_video": landscape_summary})
+        _queue_notification(task_key, "mp3_video_landscape_completed", "小君君横屏视频已完成")
 
-        _raise_if_parent_canceled(task.id)
-        existing = _fresh_result(task.id)
+        _raise_if_parent_canceled(task_key)
+        existing = _fresh_result(task_key)
         if force_video_regenerate:
             vertical_summary, vertical_task = None, None
         else:
             vertical_summary, vertical_task = _reusable_video_summary(
                 existing,
                 "vertical_video",
-                parent_id=task.id,
+                parent_id=task_key,
                 generate_subtitles=generate_subtitles,
                 audio_signature=audio_signature,
             )
         if vertical_summary:
-            _emit(task.id, "vertical_video_reused", 99, "复用已完成的此刻此声竖屏视频")
+            _emit(task_key, "vertical_video_reused", 99, "复用已完成的此刻此声竖屏视频")
             if vertical_task:
-                _record_child(task.id, "vertical_video", vertical_task)
-            _update_result(task.id, {"vertical_video": vertical_summary})
+                _record_child(task_key, "vertical_video", vertical_task)
+            _update_result(task_key, {"vertical_video": vertical_summary})
         else:
             vertical_task = _active_child_from_result(
                 existing,
@@ -838,14 +848,15 @@ def process_job(task_id: str) -> bool:
                 audio_signature=audio_signature,
             )
             if vertical_task:
-                _emit(task.id, "vertical_video_wait_existing", 92, "继续等待已提交的此刻此声竖屏视频")
+                vertical_task_key = str(vertical_task.id)
+                _emit(task_key, "vertical_video_wait_existing", 92, "继续等待已提交的此刻此声竖屏视频")
                 _sync_publisher_video_task_title(vertical_task, _publisher_video_title(plan, role="ciketc_vertical"))
-                _record_child(task.id, "vertical_video", vertical_task)
+                _record_child(task_key, "vertical_video", vertical_task)
             else:
-                _raise_if_parent_canceled(task.id)
-                _emit(task.id, "submit_vertical_video", 91, "提交此刻此声竖屏视频合成任务")
+                _raise_if_parent_canceled(task_key)
+                _emit(task_key, "submit_vertical_video", 91, "提交此刻此声竖屏视频合成任务")
                 vertical_task = create_publisher_video_task(
-                    parent_id=task.id,
+                    parent_id=task_key,
                     user_id=user_id,
                     audio=audio,
                     plan=plan,
@@ -855,18 +866,19 @@ def process_job(task_id: str) -> bool:
                     generate_subtitles=generate_subtitles,
                     force_new=force_video_regenerate,
                 )
-                _record_child(task.id, "vertical_video", vertical_task)
-                _queue_notification(task.id, "mp3_video_vertical_submitted", "此刻此声竖屏视频合成任务已提交")
-            vertical_task = _wait_child(task.id, vertical_task.id, "vertical_video", start_progress=92, end_progress=99)
+                vertical_task_key = str(vertical_task.id)
+                _record_child(task_key, "vertical_video", vertical_task)
+                _queue_notification(task_key, "mp3_video_vertical_submitted", "此刻此声竖屏视频合成任务已提交")
+            vertical_task = _wait_child(task_key, vertical_task_key, "vertical_video", start_progress=92, end_progress=99)
             if vertical_task.status != "completed":
                 raise RuntimeError(f"竖屏视频子任务失败: {vertical_task.error_message or (vertical_task.result or {}).get('error')}")
             vertical_summary = _publisher_result_summary(vertical_task)
-            _update_result(task.id, {"vertical_video": vertical_summary})
-        _queue_notification(task.id, "mp3_video_vertical_completed", "此刻此声竖屏视频已完成")
+            _update_result(task_key, {"vertical_video": vertical_summary})
+        _queue_notification(task_key, "mp3_video_vertical_completed", "此刻此声竖屏视频已完成")
 
-        _raise_if_parent_canceled(task.id)
-        output_path = storage_path_for_job(task.id, created_at)
-        fresh = _load_task(task.id, *TASK_RESULT_COLUMNS, PublicationTask.status)
+        _raise_if_parent_canceled(task_key)
+        output_path = storage_path_for_job(task_key, created_at)
+        fresh = _load_task(task_key, *TASK_RESULT_COLUMNS, PublicationTask.status)
         if not fresh or fresh.status == "canceled":
             raise ParentTaskCanceled("父编排任务已取消")
         final_result = _without_waiting_state(fresh.result or {})
@@ -875,7 +887,7 @@ def process_job(task_id: str) -> bool:
             "completed_at": datetime.utcnow().isoformat() + "Z",
         })
         Path(output_path).write_text(json.dumps({
-            "workflow_task_id": task.id,
+            "workflow_task_id": task_key,
             "input_source": workflow.get("input_source") or ("ds_response" if _workflow_uses_direct_ds_response(workflow) else ("ima_transcript" if _workflow_uses_transcript(workflow) else "gemini_audio")),
             "render_mode": _workflow_render_mode(workflow),
             "generate_subtitles": generate_subtitles,
@@ -897,7 +909,7 @@ def process_job(task_id: str) -> bool:
         fresh.result = final_result
         flag_modified(fresh, "result")
         db.session.commit()
-        _queue_notification(task.id, "mp3_video_completed", "MP3 视频编排完成，横屏和竖屏视频均已生成")
+        _queue_notification(task_key, "mp3_video_completed", "MP3 视频编排完成，横屏和竖屏视频均已生成")
         return True
     except ParentTaskCanceled:
         logger.info("MP3 video workflow stopped because parent task is canceled: %s", task_id)
@@ -2982,40 +2994,67 @@ def _find_existing_publisher_video_task(
     generate_subtitles: Optional[bool] = None,
     audio_signature: Optional[str] = None,
 ) -> Optional[PublicationTask]:
-    candidates = (
+    query = (
         PublicationTask.query
         .filter(PublicationTask.feature == "publisher")
-        .filter(or_(PublicationTask.source_task_id == parent_id, PublicationTask.parent_task_id == parent_id))
-        .options(load_only(*TASK_PUBLIC_COLUMNS))
+        .filter(PublicationTask.source_task_id == parent_id)
+        .filter(PublicationTask.publisher_child_role == role)
+        .filter(PublicationTask.publisher_aspect_ratio == aspect_ratio)
+        .options(load_only(*TASK_PUBLISHER_MATCH_COLUMNS))
         .order_by(PublicationTask.created_at.desc())
-        .limit(30)
-        .all()
     )
-    matching = [
-        task for task in candidates
-        if _publisher_child_role(task) == role and _publisher_child_aspect_ratio(task) == aspect_ratio
-        and _publisher_child_matches_generate_subtitles(task, generate_subtitles)
-        and _publisher_child_matches_audio_signature(task, audio_signature)
-    ]
+    if generate_subtitles is not None:
+        query = query.filter(PublicationTask.publisher_generate_subtitles.is_(bool(generate_subtitles)))
+    if audio_signature:
+        query = query.filter(PublicationTask.publisher_audio_signature == audio_signature)
+    matching = query.limit(30).all()
     if not matching:
         return None
 
-    matching = [_recover_completed_publisher_child_from_disk(task) for task in matching]
-
-    for task in matching:
-        if task.status == "completed" and _video_summary_ready(_publisher_result_summary(task)):
-            _cancel_duplicate_publisher_tasks(matching, keep_id=task.id)
-            return task
+    completed = next(
+        (task for task in matching if task.status == "completed" and _path_ready(task.task_video_path)),
+        None,
+    )
+    if completed:
+        selected = _load_task(completed.id, *TASK_PUBLIC_COLUMNS)
+        if not selected:
+            return None
+        _cancel_duplicate_publisher_tasks(
+            _publisher_payload_tasks(matching, exclude_id=completed.id),
+            keep_id=completed.id,
+        )
+        return selected
 
     active = [task for task in matching if task.status not in TERMINAL_STATUSES]
     if active:
-        keep = active[0]
-        _cancel_duplicate_publisher_tasks(active[1:], keep_id=keep.id)
+        keep = _load_task(active[0].id, *TASK_PUBLIC_COLUMNS)
+        if not keep:
+            return None
+        keep = _recover_completed_publisher_child_from_disk(keep)
+        _cancel_duplicate_publisher_tasks(
+            _publisher_payload_tasks(active[1:]),
+            keep_id=keep.id,
+        )
         return keep
     return None
 
 
+def _publisher_payload_tasks(tasks, *, exclude_id: Optional[str] = None) -> List[PublicationTask]:
+    loaded = []
+    for task in tasks:
+        if not task or task.id == exclude_id or task.status in TERMINAL_STATUSES:
+            continue
+        payload_task = _load_task(task.id, *TASK_PUBLIC_COLUMNS)
+        if payload_task:
+            loaded.append(payload_task)
+    return loaded
+
+
 def _publisher_child_role(task: PublicationTask) -> str:
+    if _model_attr_loaded(task, "publisher_child_role"):
+        projected = str(task.publisher_child_role or "").strip()
+        if projected or not _model_attr_loaded(task, "params"):
+            return projected
     params = task.params if isinstance(task.params, dict) else {}
     metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
     result = task.result if isinstance(task.result, dict) else {}
@@ -3024,11 +3063,19 @@ def _publisher_child_role(task: PublicationTask) -> str:
 
 
 def _publisher_child_aspect_ratio(task: PublicationTask) -> str:
+    if _model_attr_loaded(task, "publisher_aspect_ratio"):
+        projected = str(task.publisher_aspect_ratio or "").strip()
+        if projected or not _model_attr_loaded(task, "params"):
+            return projected
     params = task.params if isinstance(task.params, dict) else {}
     return str(params.get("aspect_ratio") or "").strip()
 
 
 def _publisher_child_generate_subtitles(task: PublicationTask, *, default: bool = True) -> bool:
+    if _model_attr_loaded(task, "publisher_generate_subtitles"):
+        projected = task.publisher_generate_subtitles
+        if projected is not None or not _model_attr_loaded(task, "params"):
+            return bool(default) if projected is None else bool(projected)
     params = task.params if isinstance(task.params, dict) else {}
     if "generate_subtitles" in params:
         return _truthy(params.get("generate_subtitles"), default=default)
@@ -3054,6 +3101,10 @@ def _publisher_child_matches_generate_subtitles(task: PublicationTask, expected:
 
 
 def _publisher_child_audio_signature(task: PublicationTask) -> Optional[str]:
+    if _model_attr_loaded(task, "publisher_audio_signature"):
+        projected = str(task.publisher_audio_signature or "").strip()
+        if projected or not _model_attr_loaded(task, "params"):
+            return projected or None
     params = task.params if isinstance(task.params, dict) else {}
     metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
     result = task.result if isinstance(task.result, dict) else {}

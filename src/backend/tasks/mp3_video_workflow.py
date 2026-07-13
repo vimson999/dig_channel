@@ -5,7 +5,12 @@ from sqlalchemy.exc import OperationalError
 from app import create_app
 from celery_config import celery_app
 from models import db
-from services.runtime_guard import guard_publication_task_start, retry_exception_types
+from services.runtime_guard import (
+    guard_publication_task_start,
+    is_retryable_db_error,
+    release_db_session_quietly,
+    retry_exception_types,
+)
 from services.mp3_video_workflow import mark_job_failed_if_unfinished, mark_job_failed_safely, process_job
 
 
@@ -38,6 +43,10 @@ def process_mp3_video_workflow_job(self, task_id):
         except retry_exception_types():
             raise
         except Exception as exc:
+            if is_retryable_db_error(exc):
+                logger.warning("MP3 video workflow database connection failed; retrying: %s", exc)
+                release_db_session_quietly()
+                raise self.retry(exc=exc, countdown=15, max_retries=3)
             logger.error("MP3 video workflow failed: %s", exc, exc_info=True)
             mark_job_failed_safely(task_id, str(exc), notify=True)
             return False

@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -216,6 +217,75 @@ def combine_wav_files(input_paths: List[str], output_path: str) -> Dict[str, Any
     }
 
 
+def synthesize_doubao_api_chunks(
+    chunks: List[str],
+    output_path: str,
+    *,
+    voice_type: str = "zh_female_mizai_uranus_bigtts",
+) -> Dict[str, Any]:
+    """使用豆包 WebSocket V3 API 合成分段音频，并统一转为工作流 WAV。"""
+    from services.doubao_tts_ws import DoubaoTTSWebSocketClient
+
+    texts = [str(item or "").strip() for item in chunks if str(item or "").strip()]
+    if not texts:
+        raise ReportAudioWorkflowError("豆包 API TTS 没有可合成的正文")
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    chunk_dir = output.parent / f"{output.stem}_doubao_api_chunks"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    client = DoubaoTTSWebSocketClient()
+    audio_paths = []
+    for index, text in enumerate(texts, start=1):
+        response = client.synthesize(
+            text=text,
+            speaker=voice_type,
+            model="seed-tts-2.0-standard",
+            audio_format="mp3",
+            sample_rate=24000,
+            bit_rate=128000,
+            enable_subtitle=False,
+            uid=f"report_audio_{output.stem}_{index}",
+        )
+        if not response.audio:
+            raise ReportAudioWorkflowError(f"豆包 API TTS 第 {index} 段未返回音频")
+        chunk_path = chunk_dir / f"{index:03d}.mp3"
+        chunk_path.write_bytes(response.audio)
+        audio_paths.append(chunk_path)
+
+    concat_file = chunk_dir / "concat.txt"
+    concat_file.write_text(
+        "\n".join(f"file '{str(path.resolve()).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'" for path in audio_paths),
+        encoding="utf-8",
+    )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file),
+                "-vn", "-acodec", "pcm_s16le", "-ar", "24000", "-ac", "1", str(output),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReportAudioWorkflowError(f"豆包 API TTS 音频合并失败: {exc}") from exc
+
+    with wave.open(str(output), "rb") as reader:
+        sample_rate = reader.getframerate()
+        seconds = reader.getnframes() / sample_rate if sample_rate else 0
+    return {
+        "wav_path": str(output),
+        "bytes": output.stat().st_size,
+        "sample_rate": sample_rate,
+        "seconds": seconds,
+        "chunks": len(audio_paths),
+        "provider": "doubao_api",
+        "voice_type": voice_type,
+    }
+
+
 def status_payload() -> Dict[str, Any]:
     deepseek_configured = bool(os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("REPORT_AUDIO_NORMALIZER_API_KEY"))
     fallback_allowed = _local_fallback_allowed()
@@ -256,8 +326,12 @@ def _deepseek_normalize(
         "- final_script_for_tts: 字符串，只包含要交给 TTS 朗读的最终口播正文，不包含修正清单、标题方案、参考来源说明、Markdown 标题",
         "- corrections: 数组，每项包含 issue、basis、action",
         "- titles: 对象，包含 standard 和 short 两个数组",
-        "- cover_title: 字符串，横屏封面主标题，最多两行，用 \\n 换行；第一行必须优先使用“投行简称:核心对象+结论/动作”的格式，例如“大摩:增持腾讯”；第二行只补充一个最关键变量或影响，禁止行首标点",
-        "- cover_subtitle: 字符串，横屏封面副标题，只能一行，控制在34个中文字符以内，补充数据、估值或行业范围，不要换行",
+        "- landscape_title: 字符串，横屏视频及横屏封面的主标题，最多两行，用 \\n 换行；第一行优先使用“投行简称:核心对象+结论/动作”，第二行补充关键变量",
+        "- landscape_subtitle: 字符串，横屏副标题，只能一行，控制在34个中文字符以内，补充数据、估值或行业范围",
+        "- vertical_title: 字符串，竖屏视频及 B站封皮主标题，最多两行，用 \\n 换行；从 Gemini 内容中选择更适合移动端点击、且投资者更关心的矛盾或机会，不能照抄横屏标题",
+        "- vertical_subtitle: 字符串，竖屏副标题，只能一行，控制在28个中文字符以内；补充一个最有信息差的数据、催化或结论，不能复述主标题",
+        "- cover_title: 字符串，与 landscape_title 相同，作为旧版兼容字段",
+        "- cover_subtitle: 字符串，与 landscape_subtitle 相同，作为旧版兼容字段",
         "- sources: 数组，引用来源说明",
         "- risk_notes: 数组，风险提示或合规提示",
         "- editor_notes: 字符串，简短说明整理策略",
@@ -267,10 +341,11 @@ def _deepseek_normalize(
         "",
         "标题选择规则：",
         "1. 先扫描 Gemini 审核后结果中的“标题方案、标准标题、短标题、封面标题、核心观点、段落标题”，从中选择最贴合研报结论的一条；只有没有可用标题时，才从正文抽取重写。",
-        "2. title 和 cover_title 必须忠于 Gemini 返回内容；涉及数字、订单、评级、目标价、市场规模、时间窗口时，必须在 Gemini 文本中明确出现。",
+        "2. title、landscape_title 和 vertical_title 必须忠于 Gemini 返回内容；涉及数字、订单、评级、目标价、市场规模、时间窗口时，必须在 Gemini 文本中明确出现。",
         "3. 禁止为了吸引点击新增或夸大事实，尤其不要凭空使用“引爆、颠覆、巨头转身、百亿/千亿/万亿、大单、暴涨、暴跌”等词。",
-        "4. cover_title 第一行控制在 18 个中文字符以内，第二行控制在 18 个中文字符以内；如果一行已经足够好，就不要硬凑第二行。",
-        "5. cover_subtitle 只保留一行事实补充，不要复述主标题，不要写成完整长句。",
+        "4. landscape_title 和 vertical_title 每行控制在 18 个中文字符以内；如果一行已经足够好，就不要硬凑第二行。",
+        "5. 两套副标题都只保留一行事实补充，不要复述主标题，不要写成完整长句。",
+        "6. 横屏和竖屏必须从 Gemini 返回中选择不同的信息角度；横屏偏完整、稳健，竖屏偏核心矛盾、信息差和点击吸引力，但都不得新增事实。",
         "",
         f"metadata={json.dumps(metadata, ensure_ascii=False)}",
         "",
@@ -347,11 +422,19 @@ def _validate_structured_result(payload: Dict[str, Any], raw_text: str) -> Dict[
     if quality_issue:
         raise ReportAudioWorkflowError(f"结构化结果不可用于朗读: {quality_issue}")
 
+    landscape_title = _clean_multiline_text(payload.get("landscape_title") or payload.get("cover_title") or "")[:160]
+    landscape_subtitle = _clean_text(payload.get("landscape_subtitle") or payload.get("cover_subtitle") or "")[:120]
+    vertical_title = _clean_multiline_text(payload.get("vertical_title") or "")[:160]
+    vertical_subtitle = _clean_text(payload.get("vertical_subtitle") or "")[:120]
     result = {
         "title": _clean_text(payload.get("title") or "")[:300],
         "summary": _clean_text(payload.get("summary") or "")[:1000],
-        "cover_title": _clean_multiline_text(payload.get("cover_title") or "")[:160],
-        "cover_subtitle": _clean_text(payload.get("cover_subtitle") or "")[:120],
+        "landscape_title": landscape_title,
+        "landscape_subtitle": landscape_subtitle,
+        "vertical_title": vertical_title or landscape_title,
+        "vertical_subtitle": vertical_subtitle or landscape_subtitle,
+        "cover_title": landscape_title,
+        "cover_subtitle": landscape_subtitle,
         "final_script_for_tts": script,
         "corrections": _safe_list(payload.get("corrections"), 50),
         "titles": payload.get("titles") if isinstance(payload.get("titles"), dict) else {"standard": [], "short": []},
@@ -367,11 +450,17 @@ def _validate_structured_result(payload: Dict[str, Any], raw_text: str) -> Dict[
 def _fallback_normalize(raw_text: str) -> Dict[str, Any]:
     title_pack = _extract_fallback_title_pack(raw_text)
     script = clean_final_script_for_tts(_extract_final_script(raw_text) or raw_text)
+    landscape_title = title_pack.get("cover_title") or ""
+    landscape_subtitle = title_pack.get("cover_subtitle") or ""
     return {
         "title": title_pack.get("title") or "",
         "summary": "",
-        "cover_title": title_pack.get("cover_title") or "",
-        "cover_subtitle": title_pack.get("cover_subtitle") or "",
+        "landscape_title": landscape_title,
+        "landscape_subtitle": landscape_subtitle,
+        "vertical_title": landscape_title,
+        "vertical_subtitle": landscape_subtitle,
+        "cover_title": landscape_title,
+        "cover_subtitle": landscape_subtitle,
         "final_script_for_tts": script,
         "corrections": [],
         "titles": title_pack.get("titles") or {"standard": [], "short": []},

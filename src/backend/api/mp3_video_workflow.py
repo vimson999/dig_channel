@@ -50,10 +50,6 @@ STATUS_MAP = {
 SYSTEM_USER_ID = "system"
 WORKFLOW_SOURCE_FEATURE = "zsxq_attachment"
 try:
-    WORKFLOW_STATS_JSON_FALLBACK_LIMIT = int(os.environ.get("MP3_VIDEO_WORKFLOW_STATS_JSON_FALLBACK_LIMIT", "300"))
-except (TypeError, ValueError):
-    WORKFLOW_STATS_JSON_FALLBACK_LIMIT = 300
-try:
     DOWNLOAD_RESULT_CACHE_TTL_SECONDS = int(os.environ.get("MP3_VIDEO_WORKFLOW_DOWNLOAD_RESULT_CACHE_TTL", "30"))
 except (TypeError, ValueError):
     DOWNLOAD_RESULT_CACHE_TTL_SECONDS = 30
@@ -73,7 +69,12 @@ JOB_LIST_COLUMNS = (
     PublicationTask.source_task_id,
     PublicationTask.source_feature,
     PublicationTask.task_title,
-    PublicationTask.params,
+    PublicationTask.mp3_audio_filename,
+    PublicationTask.mp3_audio_topic_title,
+    PublicationTask.mp3_audio_tab_label,
+    PublicationTask.mp3_audio_path,
+    PublicationTask.mp3_audio_download_count,
+    PublicationTask.mp3_audio_duration_seconds,
     PublicationTask.created_at,
     PublicationTask.updated_at,
     PublicationTask.completed_at,
@@ -1000,7 +1001,6 @@ def _audio_asset_workflow_stats(asset_ids, user_id=None):
         return {}
 
     stats = {asset_id: _empty_audio_asset_workflow_stats() for asset_id in ids}
-    seen_job_ids = set()
 
     def load_direct_rows():
         query = (
@@ -1024,42 +1024,8 @@ def _audio_asset_workflow_stats(asset_ids, user_id=None):
     rows = _db_retry(load_direct_rows, "mp3 video workflow audio asset stats by source_task_id")
     for row in rows:
         asset_id = str(row.source_task_id or "").strip()
-        if _append_workflow_stat(stats, asset_id, row):
-            seen_job_ids.add(row.id)
+        _append_workflow_stat(stats, asset_id, row)
 
-    fallback_limit = max(0, min(WORKFLOW_STATS_JSON_FALLBACK_LIMIT, 1000))
-    if fallback_limit <= 0:
-        return stats
-
-    def load_json_fallback_rows():
-        query = (
-            PublicationTask.query
-            .with_entities(
-                PublicationTask.id.label("id"),
-                PublicationTask.status.label("status"),
-                PublicationTask.current_step.label("current_step"),
-                PublicationTask.progress.label("progress"),
-                PublicationTask.created_at.label("created_at"),
-                PublicationTask.completed_at.label("completed_at"),
-                PublicationTask.params.label("params"),
-            )
-            .filter(PublicationTask.feature == FEATURE_NAME)
-            .filter(or_(PublicationTask.source_task_id.is_(None), PublicationTask.source_task_id == ""))
-        )
-        if user_id:
-            query = query.filter(PublicationTask.user_id.in_(_visible_user_ids(user_id)))
-        return query.order_by(PublicationTask.created_at.desc()).limit(fallback_limit).all()
-
-    rows = _db_retry(load_json_fallback_rows, "mp3 video workflow audio asset stats JSON fallback")
-    for row in rows:
-        if row.id in seen_job_ids:
-            continue
-        params = row.params if isinstance(row.params, dict) else {}
-        workflow = params.get(FEATURE_NAME) if isinstance(params.get(FEATURE_NAME), dict) else {}
-        audio = workflow.get("audio") if isinstance(workflow.get("audio"), dict) else {}
-        asset_id = str(workflow.get("audio_asset_id") or audio.get("attachment_id") or "").strip()
-        if _append_workflow_stat(stats, asset_id, row):
-            seen_job_ids.add(row.id)
     return stats
 
 
@@ -1122,35 +1088,23 @@ def _job_list_payload(task):
 
 
 def _audio_summary_from_task(task):
-    params = task.params if isinstance(task.params, dict) else {}
-    workflow = params.get(FEATURE_NAME) if isinstance(params.get(FEATURE_NAME), dict) else {}
-    audio = dict(workflow.get("audio") if isinstance(workflow.get("audio"), dict) else {})
-    attachment_id = (
-        task.source_task_id
-        or audio.get("attachment_id")
-        or audio.get("audio_asset_id")
-        or workflow.get("audio_asset_id")
-    )
-    if audio.get("path") and not audio.get("filename"):
-        audio["filename"] = Path(str(audio.get("path"))).name
-    if attachment_id and not audio.get("attachment_id"):
-        audio["attachment_id"] = attachment_id
-    if not audio and attachment_id:
-        audio = {
-            "attachment_id": attachment_id,
-            "topic_title": "",
-            "filename": f"音频 {attachment_id}",
-        }
-    if not audio:
+    attachment_id = str(task.source_task_id or "").strip() or None
+    path = str(task.mp3_audio_path or "").strip()
+    filename = str(task.mp3_audio_filename or "").strip()
+    if path and not filename:
+        filename = Path(path).name
+    if not filename and attachment_id:
+        filename = f"音频 {attachment_id}"
+    if not any((attachment_id, filename, path, task.mp3_audio_topic_title)):
         return None
     return {
-        "attachment_id": audio.get("attachment_id"),
-        "topic_title": audio.get("topic_title") or audio.get("title") or "",
-        "tab_label": audio.get("tab_label") or audio.get("tab") or "",
-        "filename": audio.get("filename") or audio.get("name") or "",
-        "download_count": audio.get("download_count"),
-        "duration_seconds": audio.get("duration_seconds"),
-        "path": audio.get("path"),
+        "attachment_id": attachment_id,
+        "topic_title": task.mp3_audio_topic_title or "",
+        "tab_label": task.mp3_audio_tab_label or "",
+        "filename": filename,
+        "download_count": task.mp3_audio_download_count,
+        "duration_seconds": task.mp3_audio_duration_seconds,
+        "path": path or None,
     }
 
 
@@ -1704,8 +1658,18 @@ def _bilibili_upload_season_id(data):
 
 
 def _bilibili_upload_children(parent_id):
-    rows = (
-        PublicationTask.query.options(load_only(
+    child_ids = (
+        db.session.query(PublicationTask.id)
+        .filter(PublicationTask.parent_feature == FEATURE_NAME)
+        .filter(PublicationTask.parent_task_id == parent_id)
+        .filter(PublicationTask.feature == "publisher")
+        .order_by(PublicationTask.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    items = []
+    for (child_id,) in child_ids:
+        row = PublicationTask.query.options(load_only(
             PublicationTask.id,
             PublicationTask.celery_task_id,
             PublicationTask.status,
@@ -1716,16 +1680,9 @@ def _bilibili_upload_children(parent_id):
             PublicationTask.result,
             PublicationTask.created_at,
             PublicationTask.completed_at,
-        ))
-        .filter(PublicationTask.parent_feature == FEATURE_NAME)
-        .filter(PublicationTask.parent_task_id == parent_id)
-        .filter(PublicationTask.feature == "publisher")
-        .order_by(PublicationTask.created_at.desc())
-        .limit(20)
-        .all()
-    )
-    items = []
-    for row in rows:
+        )).filter(PublicationTask.id == child_id).one_or_none()
+        if not row:
+            continue
         item = _bilibili_upload_child_payload(row)
         if item:
             items.append(item)

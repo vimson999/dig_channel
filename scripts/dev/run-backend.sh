@@ -57,4 +57,6 @@ if [[ "$LOCAL_PGBOUNCER_ENABLED" =~ ^(1|true|yes|on)$ ]]; then
 fi
 
 cd "$PROJECT_ROOT/src/backend"
-python app.py
+# Replace this launcher with Flask so runtime/backend.pid identifies the
+# process that actually owns the listening socket.
+exec python app.py

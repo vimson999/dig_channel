@@ -18,6 +18,7 @@ from models import db
 from models.task import PublicationTask
 from models.zsxq_sync import ZsxqAttachment, ZsxqTopic
 from services import doubao_browser_tts, gemini_browser
+from services.doubao_tts_ws import is_configured as is_doubao_api_configured
 from services.report_audio_workflow import (
     DEFAULT_INITIAL_PROMPT,
     DEFAULT_REVIEW_PROMPT,
@@ -98,6 +99,15 @@ MATERIAL_STATUS_FEATURES = (SCRIPT_MATERIAL_FEATURE_NAME, FEATURE_NAME, "report_
 VERTICAL_VIDEO_SCHEME_DEFAULT = "scheme1"
 VERTICAL_VIDEO_SCHEMES = {"scheme1", "scheme2"}
 VERTICAL_PREVIEW_SECONDS_DEFAULT = 10
+TTS_PROVIDER_DEFAULT = "doubao_browser"
+TTS_PROVIDERS = {"doubao_browser", "doubao_api"}
+TTS_VOICE_DEFAULT = "zh_female_mizai_uranus_bigtts"
+TTS_VOICES = {
+    "zh_female_mizai_uranus_bigtts",
+    "zh_female_qingchezizi_uranus_bigtts",
+    "zh_male_liufei_uranus_bigtts",
+    "zh_male_dayi_uranus_bigtts",
+}
 OWNED_TASK_REFERENCE_COLUMNS = (
     PublicationTask.id,
     PublicationTask.celery_task_id,
@@ -161,6 +171,10 @@ def service_status(_current_user):
             "report_pdf_gemini": gemini_browser.status_payload(),
             "gemini_browser": gemini_browser.status_payload(),
             "doubao_browser_tts": doubao_browser_tts.status_payload(),
+            "doubao_api_tts": {
+                "configured": is_doubao_api_configured(),
+                "provider": "doubao_ws_v3",
+            },
         },
     })
 
@@ -174,7 +188,7 @@ def list_pdf_assets(_current_user):
     group_id = (request.args.get("group_id") or "").strip()
     tab_id = (request.args.get("tab_id") or "").strip()
     scope = (request.args.get("scope") or "all").strip().lower()
-    hot_download_threshold = 30
+    hot_download_threshold = 40
 
     topic_join = (
         (ZsxqTopic.group_id == ZsxqAttachment.group_id)
@@ -334,6 +348,12 @@ def create_job(current_user):
     video_options = _parse_video_options(data)
     script_material_only = _parse_script_material_only(data)
     manual_gemini = _parse_manual_gemini_result(data)
+    tts_provider = str(data.get("tts_provider") or TTS_PROVIDER_DEFAULT).strip().lower()
+    if tts_provider not in TTS_PROVIDERS:
+        return jsonify({"success": False, "message": "tts_provider 仅支持 doubao_browser 或 doubao_api"}), 400
+    tts_voice = str(data.get("tts_voice") or TTS_VOICE_DEFAULT).strip()
+    if tts_provider == "doubao_api" and tts_voice not in TTS_VOICES:
+        return jsonify({"success": False, "message": "不支持所选豆包 API 音色"}), 400
     if script_material_only:
         video_options.update({
             "enabled": False,
@@ -348,8 +368,10 @@ def create_job(current_user):
     doubao_status = doubao_browser_tts.status_payload()
     if not manual_gemini and not gemini_status.get("configured"):
         return jsonify({"success": False, "message": "研报 PDF Gem 解析未配置", "data": {"report_pdf_gemini": gemini_status}}), 400
-    if not script_material_only and not doubao_status.get("configured"):
+    if not script_material_only and tts_provider == "doubao_browser" and not doubao_status.get("configured"):
         return jsonify({"success": False, "message": "豆包浏览器朗读未配置", "data": {"doubao_browser_tts": doubao_status}}), 400
+    if not script_material_only and tts_provider == "doubao_api" and not is_doubao_api_configured():
+        return jsonify({"success": False, "message": "豆包 API TTS 未配置，请设置 DOUBAO_TTS_API_KEY"}), 400
 
     initial_result = {
         "metadata": metadata,
@@ -378,6 +400,8 @@ def create_job(current_user):
                 "manual_gemini": manual_gemini,
                 "metadata": metadata,
                 "script_material_only": script_material_only,
+                "tts_provider": tts_provider,
+                "tts_voice": tts_voice if tts_provider == "doubao_api" else None,
                 "video": video_options,
                 "pdf": None,
                 "pdf_path": None,
@@ -618,6 +642,25 @@ def get_child_job(current_user, job_id, child_id):
     return jsonify({"success": True, **payload, "data": payload})
 
 
+def _send_previewable_file(path, mimetype, download_name):
+    inline = _truthy(request.args.get("inline"), False)
+    response = send_file(
+        path,
+        mimetype=mimetype,
+        as_attachment=not inline,
+        download_name=download_name,
+        conditional=True,
+        max_age=0 if inline else None,
+    )
+    if inline:
+        response.cache_control.no_store = True
+        response.cache_control.no_cache = True
+        response.cache_control.must_revalidate = True
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-audio", methods=["GET"])
 @require_login
 def download_audio(current_user, job_id):
@@ -627,7 +670,7 @@ def download_audio(current_user, job_id):
     wav_path = task.report_audio_wav_path
     if not wav_path or not os.path.exists(wav_path):
         return jsonify({"success": False, "message": "WAV 文件不存在"}), 404
-    return send_file(wav_path, mimetype="audio/wav", as_attachment=True, download_name=f"{task.id}.wav")
+    return _send_previewable_file(wav_path, "audio/wav", f"{task.id}.wav")
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-result", methods=["GET"])
@@ -651,7 +694,7 @@ def download_video(current_user, job_id):
     video_path = task.report_audio_video_path
     if not video_path or not os.path.exists(video_path):
         return jsonify({"success": False, "message": "视频文件不存在"}), 404
-    return send_file(video_path, mimetype="video/mp4", as_attachment=True, download_name=f"{task.id}.mp4")
+    return _send_previewable_file(video_path, "video/mp4", f"{task.id}.mp4")
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-vertical-video", methods=["GET"])
@@ -669,7 +712,7 @@ def download_vertical_video(current_user, job_id):
     if not video_path or not os.path.exists(video_path):
         return jsonify({"success": False, "message": "竖屏视频文件不存在"}), 404
     suffix = "vertical-preview" if preview else "vertical"
-    return send_file(video_path, mimetype="video/mp4", as_attachment=True, download_name=f"{task.id}-{suffix}.mp4")
+    return _send_previewable_file(video_path, "video/mp4", f"{task.id}-{suffix}.mp4")
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-vertical-cover", methods=["GET"])
@@ -681,7 +724,7 @@ def download_vertical_cover(current_user, job_id):
     cover_path = _vertical_cover_path_for_task(task)
     if not cover_path or not os.path.exists(cover_path):
         return jsonify({"success": False, "message": "竖版封皮文件不存在"}), 404
-    return send_file(cover_path, mimetype="image/jpeg", as_attachment=True, download_name=f"{task.id}-vertical-cover.jpg")
+    return _send_previewable_file(cover_path, "image/jpeg", f"{task.id}-vertical-cover.jpg")
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-podcast-cover", methods=["GET"])
@@ -693,7 +736,7 @@ def download_podcast_cover(current_user, job_id):
     cover_path = _podcast_cover_path_for_task(task)
     if not cover_path or not os.path.exists(cover_path):
         return jsonify({"success": False, "message": "播客封皮文件不存在"}), 404
-    return send_file(cover_path, mimetype="image/jpeg", as_attachment=True, download_name=f"{task.id}-podcast-cover.jpg")
+    return _send_previewable_file(cover_path, "image/jpeg", f"{task.id}-podcast-cover.jpg")
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-bilibili-cover", methods=["GET"])
@@ -705,7 +748,7 @@ def download_bilibili_cover(current_user, job_id):
     cover_path = _bilibili_cover_path_for_task(task)
     if not cover_path or not os.path.exists(cover_path):
         return jsonify({"success": False, "message": "B站封皮文件不存在"}), 404
-    return send_file(cover_path, mimetype="image/jpeg", as_attachment=True, download_name=f"{task.id}-bilibili-cover.jpg")
+    return _send_previewable_file(cover_path, "image/jpeg", f"{task.id}-bilibili-cover.jpg")
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-cover", methods=["GET"])
@@ -717,7 +760,7 @@ def download_cover(current_user, job_id):
     cover_path = task.report_audio_cover_path
     if not cover_path or not os.path.exists(cover_path):
         return jsonify({"success": False, "message": "封面文件不存在"}), 404
-    return send_file(cover_path, mimetype="image/jpeg", as_attachment=True, download_name=f"{task.id}.jpg")
+    return _send_previewable_file(cover_path, "image/jpeg", f"{task.id}.jpg")
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-keyframe/<key>", methods=["GET"])
@@ -733,7 +776,7 @@ def download_keyframe(current_user, job_id, key):
     path = artifact.get("path")
     if not path or not os.path.exists(path):
         return jsonify({"success": False, "message": "关键帧文件不存在"}), 404
-    return send_file(path, mimetype="image/jpeg", as_attachment=True, download_name=f"{task.id}-{safe_key}.jpg")
+    return _send_previewable_file(path, "image/jpeg", f"{task.id}-{safe_key}.jpg")
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/bilibili-upload", methods=["POST"])
@@ -831,6 +874,7 @@ def regenerate_cover(current_user, job_id):
     subtitle = _normalize_cover_text(data.get("subtitle") or data.get("sub_title"), 220)
     if not title:
         return jsonify({"success": False, "message": "请填写封皮标题"}), 400
+    title = _cover_title_with_institution(task, title)
 
     try:
         cover = _regenerate_cover_for_task(task, title=title, subtitle=subtitle)
@@ -845,6 +889,50 @@ def regenerate_cover(current_user, job_id):
     return jsonify({
         "success": True,
         "message": "封皮已重新生成",
+        "cover": cover,
+        **payload,
+        "data": payload,
+    })
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/regenerate-cover-asset", methods=["POST"])
+@require_login
+def regenerate_cover_asset(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    data = _request_payload()
+    cover_type = str(data.get("cover_type") or "").strip().lower()
+    title = _normalize_cover_text(data.get("title") or data.get("main_title"), 160)
+    subtitle = _normalize_cover_text(data.get("subtitle") or data.get("sub_title"), 220)
+    if cover_type not in {"landscape", "vertical", "podcast", "bilibili"}:
+        return jsonify({"success": False, "message": "不支持的封皮类型"}), 400
+    if not title:
+        return jsonify({"success": False, "message": "请填写封皮标题"}), 400
+    title = _cover_title_with_institution(task, title)
+
+    try:
+        if cover_type == "landscape":
+            cover = _regenerate_cover_for_task(task, title=title, subtitle=subtitle)
+        elif cover_type == "vertical":
+            cover = _generate_vertical_cover_for_task(task, title=title, subtitle=subtitle)
+        elif cover_type == "podcast":
+            cover = _generate_podcast_cover_for_task(task, title=title, subtitle=subtitle)
+        else:
+            cover = _generate_bilibili_cover_for_task(task, title=title, subtitle=subtitle)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"success": False, "message": f"封皮重生成失败: {exc}"}), 502
+
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
+    payload = _job_payload(task)
+    return jsonify({
+        "success": True,
+        "message": "当前封皮已重新生成",
+        "cover_type": cover_type,
         "cover": cover,
         **payload,
         "data": payload,
@@ -1318,7 +1406,74 @@ def _regenerate_cover_for_task(task, *, title, subtitle=""):
     }
 
 
-def _generate_podcast_cover_for_task(task, *, scheme=None):
+def _generate_vertical_cover_for_task(task, *, title, subtitle=""):
+    result = task.result if isinstance(task.result, dict) else {}
+    params = task.params if isinstance(task.params, dict) else {}
+    payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
+    video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+    structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
+    pdf = payload.get("pdf") if isinstance(payload.get("pdf"), dict) else {}
+    if not pdf:
+        pdf = result.get("pdf") if isinstance(result.get("pdf"), dict) else {}
+    pdf_screenshot = _ensure_pdf_first_page_image(task)
+    screenshot_path = pdf_screenshot.get("path") if isinstance(pdf_screenshot, dict) else None
+    if not screenshot_path or not os.path.exists(screenshot_path):
+        raise ValueError("PDF 首屏图不存在，无法生成竖版封皮")
+
+    transform = {
+        "anchor": "top-left",
+        "title_max_lines": 2,
+        "subtitle_max_lines": 1,
+        **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
+    }
+    filename = f"vertical_cover_{task.id[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.jpg"
+    cover_path = thumbnail_service.generate_workbench_vertical_cover(
+        main_title=title,
+        sub_title=subtitle,
+        screenshot_path=screenshot_path,
+        output_filename=filename,
+        institution=_workbench_institution(structured, pdf, video_options),
+        emotion="bull",
+        footer_text=str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
+        image_transform=transform,
+    )
+    if not cover_path or not os.path.exists(cover_path):
+        raise RuntimeError("竖版封皮文件未生成")
+
+    updated_result = dict(task.result or result)
+    video = dict(updated_result.get("video") or {}) if isinstance(updated_result.get("video"), dict) else {}
+    history = list(updated_result.get("vertical_cover_regenerations") or [])
+    if video.get("vertical_cover_path"):
+        history.append({
+            "vertical_cover_path": video.get("vertical_cover_path"),
+            "title": video.get("vertical_cover_title"),
+            "subtitle": video.get("vertical_cover_subtitle"),
+            "replaced_at": datetime.utcnow().isoformat() + "Z",
+        })
+    now = datetime.utcnow().isoformat() + "Z"
+    video.update({
+        "vertical_cover_path": cover_path,
+        "vertical_cover_title": title,
+        "vertical_cover_subtitle": subtitle,
+        "vertical_cover_regenerated_at": now,
+        "pdf_first_page_image": pdf_screenshot,
+    })
+    updated_result["video"] = video
+    updated_result["vertical_cover_regenerations"] = history[-20:]
+    task.result = updated_result
+    flag_modified(task, "result")
+    db.session.commit()
+    return {
+        "path": cover_path,
+        "bytes": os.path.getsize(cover_path),
+        "title": title,
+        "subtitle": subtitle,
+        "download_url": f"/api/report-audio-workflows/jobs/{task.id}/download-vertical-cover",
+        "updated_at": now,
+    }
+
+
+def _generate_podcast_cover_for_task(task, *, scheme=None, title=None, subtitle=None):
     result = task.result if isinstance(task.result, dict) else {}
     params = task.params if isinstance(task.params, dict) else {}
     payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
@@ -1333,8 +1488,9 @@ def _generate_podcast_cover_for_task(task, *, scheme=None):
     if not screenshot_path or not os.path.exists(screenshot_path):
         raise ValueError("PDF 首屏图不存在，无法生成播客封皮")
 
-    main_title = _publisher_main_title(structured, video_options)
-    sub_title = _publisher_sub_title(structured, video_options)
+    main_title = _normalize_cover_text(title, 160) or _publisher_main_title(structured, video_options, variant="vertical")
+    main_title = _cover_title_with_institution(task, main_title)
+    sub_title = _normalize_cover_text(subtitle, 220) if subtitle is not None else _publisher_sub_title(structured, video_options, variant="vertical")
     institution = _workbench_institution(structured, pdf, video_options)
     transform = {
         "anchor": "top-left",
@@ -1372,6 +1528,8 @@ def _generate_podcast_cover_for_task(task, *, scheme=None):
         "vertical_enabled": True if video.get("vertical_enabled") is None else video.get("vertical_enabled"),
         "vertical_video_scheme": scheme,
         "podcast_cover_path": cover_path,
+        "podcast_cover_title": main_title,
+        "podcast_cover_subtitle": sub_title,
         "podcast_cover_regenerated_at": now,
         "pdf_first_page_image": pdf_screenshot,
     })
@@ -1383,13 +1541,15 @@ def _generate_podcast_cover_for_task(task, *, scheme=None):
     return {
         "path": cover_path,
         "bytes": os.path.getsize(cover_path),
+        "title": main_title,
+        "subtitle": sub_title,
         "download_url": f"/api/report-audio-workflows/jobs/{task.id}/download-podcast-cover",
         "updated_at": now,
         "scheme": scheme,
     }
 
 
-def _generate_bilibili_cover_for_task(task):
+def _generate_bilibili_cover_for_task(task, *, title=None, subtitle=None):
     result = task.result if isinstance(task.result, dict) else {}
     params = task.params if isinstance(task.params, dict) else {}
     payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
@@ -1410,9 +1570,12 @@ def _generate_bilibili_cover_for_task(task):
         **(video_options.get("bilibili_cover_image_transform") if isinstance(video_options.get("bilibili_cover_image_transform"), dict) else {}),
     }
     filename = f"bilibili_cover_{task.id[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.jpg"
+    main_title = _normalize_cover_text(title, 160) or _publisher_main_title(structured, video_options, variant="vertical")
+    main_title = _cover_title_with_institution(task, main_title)
+    sub_title = _normalize_cover_text(subtitle, 220) if subtitle is not None else _publisher_sub_title(structured, video_options, variant="vertical")
     cover_path = thumbnail_service.generate_workbench_bilibili_cover(
-        main_title=_publisher_main_title(structured, video_options),
-        sub_title=_publisher_sub_title(structured, video_options),
+        main_title=main_title,
+        sub_title=sub_title,
         screenshot_path=screenshot_path,
         output_filename=filename,
         institution=_workbench_institution(structured, pdf, video_options),
@@ -1435,6 +1598,8 @@ def _generate_bilibili_cover_for_task(task):
     now = datetime.utcnow().isoformat() + "Z"
     video.update({
         "bilibili_cover_path": cover_path,
+        "bilibili_cover_title": main_title,
+        "bilibili_cover_subtitle": sub_title,
         "bilibili_cover_regenerated_at": now,
         "pdf_first_page_image": pdf_screenshot,
     })
@@ -1446,6 +1611,8 @@ def _generate_bilibili_cover_for_task(task):
     return {
         "path": cover_path,
         "bytes": os.path.getsize(cover_path),
+        "title": main_title,
+        "subtitle": sub_title,
         "download_url": f"/api/report-audio-workflows/jobs/{task.id}/download-bilibili-cover",
         "updated_at": now,
         "ratio": "1146:717",
@@ -1478,8 +1645,8 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
     except (TypeError, ValueError):
         audio_seconds = 0
     segment_end_offset = max(0.0, audio_seconds - preview_seconds) if preview_seconds > 0 and audio_seconds > preview_seconds else 0
-    main_title = _publisher_main_title(structured, video_options)
-    sub_title = _publisher_sub_title(structured, video_options)
+    main_title = _publisher_main_title(structured, video_options, variant="vertical")
+    sub_title = _publisher_sub_title(structured, video_options, variant="vertical")
     date_text = (
         str(video_options.get("date_text") or "").strip()
         or _publisher_date_text(parent.created_at)
@@ -1958,9 +2125,9 @@ def _report_bilibili_cover_path(task, video_key, requested_key=""):
         return (path, requested_key) if _path_exists(path) else (None, requested_key)
 
     candidates = (
-        ["vertical_cover", "podcast_cover", "cover"]
+        ["bilibili_cover", "vertical_cover", "podcast_cover", "cover"]
         if video_key == "vertical"
-        else ["cover", "vertical_cover", "podcast_cover"]
+        else ["cover", "bilibili_cover", "vertical_cover", "podcast_cover"]
     )
     for key in candidates:
         path = cover_map.get(key)
@@ -1980,8 +2147,9 @@ def _report_bilibili_default_title(task, video_key):
         public_pdf = result.get("pdf")
     structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
     video = result.get("video") if isinstance(result.get("video"), dict) else {}
-    title = _first_compact_title(
+    variant_title = _first_compact_title(
         request_video.get("bilibili_title_7") if video_key == "vertical" else request_video.get("bilibili_title_6"),
+        structured.get("vertical_title") if video_key == "vertical" else structured.get("landscape_title"),
         request_video.get("title"),
         video.get("cover_title"),
         _display_title_from_structured(structured),
@@ -1991,7 +2159,93 @@ def _report_bilibili_default_title(task, video_key):
         task.task_title,
         "研报解读",
     )
+    variant_subtitle = _first_compact_title(
+        structured.get("vertical_subtitle") if video_key == "vertical" else structured.get("landscape_subtitle"),
+        structured.get("cover_subtitle"),
+    )
+    institution = _report_publish_institution(variant_title, structured, public_pdf)
+    date_text = _report_publish_date(public_pdf, structured, task.created_at)
+    separator = " | " if video_key == "vertical" else " / "
+    main_text = _strip_publish_institution(variant_title, institution)
+    main_parts = [part.strip() for part in re.split(r"\s*/\s*", main_text) if part.strip()]
+    title_parts = [
+        institution,
+        *main_parts,
+        variant_subtitle,
+        date_text,
+    ]
+    title = separator.join(part for part in title_parts if part)
     return clean_bilibili_upload_text(title, max_length=120)
+
+
+def _report_publish_institution(title, structured, public_pdf):
+    candidates = [
+        title,
+        (structured or {}).get("cover_title"),
+        (structured or {}).get("title"),
+        (public_pdf or {}).get("topic_title"),
+        (public_pdf or {}).get("filename"),
+    ]
+    text = " ".join(str(item or "") for item in candidates)
+    for alias, label in BANK_ALIASES:
+        if re.search(re.escape(alias), text, flags=re.I):
+            return label
+    prefix = re.match(r"^\s*([^:：|｜/\n]{2,12}(?:证券|投行|研究所|研究院))\s*[:：]", str(title or ""))
+    return prefix.group(1).strip() if prefix else "机构研报"
+
+
+def _cover_title_with_institution(task, title):
+    result = task.result if isinstance(task.result, dict) else {}
+    params = task.params if isinstance(task.params, dict) else {}
+    request_payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
+    structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
+    pdf = request_payload.get("pdf") if isinstance(request_payload.get("pdf"), dict) else {}
+    if not pdf and isinstance(result.get("pdf"), dict):
+        pdf = result.get("pdf")
+    institution = _report_publish_institution(title, structured, pdf)
+    if institution == "机构研报":
+        institution = "机构"
+
+    normalized = _normalize_cover_text(title, 160)
+    prefixes = [institution, "机构", "机构研报"]
+    prefixes.extend(alias for alias, label in BANK_ALIASES if label == institution)
+    prefix_pattern = "|".join(re.escape(item) for item in sorted({item for item in prefixes if item}, key=len, reverse=True))
+    if prefix_pattern:
+        normalized = re.sub(
+            rf"^\s*(?:{prefix_pattern})(?:证券)?\s*[:：]\s*",
+            "",
+            normalized,
+            count=1,
+            flags=re.I,
+        )
+    normalized = normalized.strip(" \t\r\n|｜/：:")
+    return _normalize_cover_text(f"{institution}：{normalized}" if normalized else institution, 160)
+
+
+def _strip_publish_institution(title, institution):
+    text = " ".join(str(title or "").split()).strip()
+    if not text:
+        return ""
+    prefixes = [institution]
+    prefixes.extend(alias for alias, label in BANK_ALIASES if label == institution)
+    for prefix in sorted({item for item in prefixes if item}, key=len, reverse=True):
+        text = re.sub(rf"^\s*{re.escape(prefix)}\s*[:：]\s*", "", text, count=1, flags=re.I)
+    return text.strip(" |｜/：:")
+
+
+def _report_publish_date(public_pdf, structured, created_at):
+    text = " ".join([
+        str((public_pdf or {}).get("filename") or ""),
+        str((public_pdf or {}).get("topic_title") or ""),
+        str((structured or {}).get("title") or ""),
+    ])
+    full = re.search(r"\b(20\d{2})[./-]?(\d{2})[./-]?(\d{2})\b", text)
+    if full:
+        return f"{full.group(1)}-{full.group(2)}-{full.group(3)}"
+    short = re.search(r"(?<!\d)(\d{2})(\d{2})(\d{2})(?!\d)", text)
+    if short:
+        return f"20{short.group(1)}-{short.group(2)}-{short.group(3)}"
+    return (created_at or datetime.utcnow()).strftime("%Y-%m-%d")
 
 
 def _video_result_with_vertical_backfill(task):
@@ -2123,6 +2377,8 @@ def _job_payload(task, include_raw=False):
             "followups": request_payload.get("followups") or [],
             "gemini_url": request_payload.get("gemini_url"),
             "manual_gemini": _public_manual_gemini(request_payload.get("manual_gemini")),
+            "tts_provider": request_payload.get("tts_provider") or TTS_PROVIDER_DEFAULT,
+            "tts_voice": request_payload.get("tts_voice"),
             "video": request_payload.get("video") or {},
             "pdf": public_pdf,
             "metadata": request_metadata,
@@ -2138,6 +2394,10 @@ def _job_payload(task, include_raw=False):
         "title": detail_title,
         "cover_title": (structured_result or {}).get("cover_title") or "",
         "cover_subtitle": cover_subtitle,
+        "bilibili_titles": {
+            "landscape": _report_bilibili_default_title(task, "landscape"),
+            "vertical": _report_bilibili_default_title(task, "vertical"),
+        },
         "tts_text": result.get("tts_text"),
         "audio_script": audio_script,
         "audio": _public_audio(task.id, audio),
@@ -3307,6 +3567,15 @@ def _public_video(job_id, video):
         "cover_title": video.get("cover_title"),
         "cover_subtitle": video.get("cover_subtitle"),
         "cover_regenerated_at": video.get("cover_regenerated_at"),
+        "vertical_cover_title": video.get("vertical_cover_title"),
+        "vertical_cover_subtitle": video.get("vertical_cover_subtitle"),
+        "vertical_cover_regenerated_at": video.get("vertical_cover_regenerated_at"),
+        "podcast_cover_title": video.get("podcast_cover_title"),
+        "podcast_cover_subtitle": video.get("podcast_cover_subtitle"),
+        "podcast_cover_regenerated_at": video.get("podcast_cover_regenerated_at"),
+        "bilibili_cover_title": video.get("bilibili_cover_title"),
+        "bilibili_cover_subtitle": video.get("bilibili_cover_subtitle"),
+        "bilibili_cover_regenerated_at": video.get("bilibili_cover_regenerated_at"),
         "vertical_video_scheme": video.get("vertical_video_scheme"),
         "vertical_preview_scheme": video.get("vertical_preview_scheme"),
         "vertical_preview_seconds": video.get("vertical_preview_seconds"),

@@ -55,6 +55,15 @@ PASSIVE_RUNNING_STEPS = {
         "vertical_video_waiting",
     ),
 }
+PASSIVE_RUNNING_STEP_PREFIXES = {
+    # While a publisher child renders, the parent mirrors child steps as
+    # landscape_video_queued, landscape_video_synthesis, and so on. Every one
+    # of those states is passive and must not occupy workflow start capacity.
+    "mp3_video_workflow": (
+        "landscape_video_",
+        "vertical_video_",
+    ),
+}
 
 _DB_PRESSURE_CACHE = {
     "expires_at": 0.0,
@@ -324,6 +333,8 @@ def _publication_task_active_count(feature, *, task_id=None, mode="start"):
         passive_steps = _passive_running_steps(feature)
         if passive_steps:
             query = query.filter(~PublicationTask.current_step.in_(passive_steps))
+        for prefix in _passive_running_step_prefixes(feature):
+            query = query.filter(~PublicationTask.current_step.like(f"{prefix}%"))
     if task_id:
         query = query.filter(PublicationTask.id != str(task_id))
     return int(query.count() or 0)
@@ -333,6 +344,13 @@ def _passive_running_steps(feature):
     values = []
     for item in FEATURE_ALIASES.get(feature, (feature,)):
         values.extend(PASSIVE_RUNNING_STEPS.get(item, ()))
+    return tuple(dict.fromkeys(values))
+
+
+def _passive_running_step_prefixes(feature):
+    values = []
+    for item in FEATURE_ALIASES.get(feature, (feature,)):
+        values.extend(PASSIVE_RUNNING_STEP_PREFIXES.get(item, ()))
     return tuple(dict.fromkeys(values))
 
 

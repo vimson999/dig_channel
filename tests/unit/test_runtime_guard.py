@@ -94,7 +94,15 @@ class RuntimeGuardTest(unittest.TestCase):
         self.assertEqual(runtime_guard._feature_backlog_limit("report_script_material_workflow"), 50)
 
     def test_mp3_video_waiting_children_do_not_consume_start_capacity(self):
-        self._add_task("processing", feature="mp3_video_workflow", step="landscape_video_waiting")
+        passive_steps = (
+            "landscape_video_waiting",
+            "landscape_video_queued",
+            "landscape_video_synthesis",
+            "vertical_video_wait_existing",
+            "vertical_video_done",
+        )
+        for step in passive_steps:
+            self._add_task("processing", feature="mp3_video_workflow", step=step)
 
         start = runtime_guard.check_publication_task_admission(
             "mp3_video_workflow",

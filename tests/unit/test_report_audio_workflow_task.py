@@ -38,6 +38,9 @@ from tasks.report_audio_workflow import (  # noqa: E402
     _publisher_script_subtitles,
     _publisher_sub_burn_enabled,
     _publisher_result_summary,
+    _publisher_main_title,
+    _publisher_cover_title_with_institution,
+    _publisher_sub_title,
     _publisher_video_transform,
     _task_chunk_attempt,
     _tts_text_hash,
@@ -102,6 +105,15 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
 
         self.assertEqual(title, "大摩:增持腾讯\n微信原生AI将测")
 
+    def test_workbench_cover_title_always_uses_chinese_institution_prefix(self):
+        title = _publisher_cover_title_with_institution(
+            "决定商业航天生死的根本不是订单",
+            "Nomura",
+        )
+
+        self.assertTrue(title.startswith("野村："))
+        self.assertLessEqual(len(title.split("\n")), 2)
+
     def test_cover_subtitle_is_single_line_and_bounded(self):
         subtitle = _format_cover_subtitle(
             "本报告解读摩根大通对亚洲被动元件、PCB-CCL、基板及测试行业的研究观点，重点关注需求复苏。"
@@ -109,6 +121,28 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
 
         self.assertNotIn("\n", subtitle)
         self.assertLessEqual(len(subtitle), 34)
+
+    def test_publisher_title_helpers_select_landscape_and_vertical_variants(self):
+        structured = {
+            "landscape_title": "大摩:增持腾讯\n盈利预期上修",
+            "landscape_subtitle": "目标价上调至700港元",
+            "vertical_title": "腾讯盈利为何再超预期",
+            "vertical_subtitle": "AI广告进入兑现期",
+            "cover_title": "旧版兼容标题",
+        }
+
+        self.assertEqual(
+            _publisher_main_title(structured, {}, variant="landscape"),
+            "大摩:增持腾讯\n盈利预期上修",
+        )
+        self.assertEqual(
+            _publisher_main_title(structured, {}, variant="vertical"),
+            "腾讯盈利为何再超预期",
+        )
+        self.assertEqual(
+            _publisher_sub_title(structured, {}, variant="vertical"),
+            "AI广告进入兑现期",
+        )
 
     def test_default_video_transform_is_omitted_for_pdf_top_alignment(self):
         self.assertIsNone(_publisher_video_transform({}))
@@ -239,7 +273,7 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
 
         generate_bilibili.assert_called_once()
         self.assertFalse(generate_bilibili.call_args.kwargs["show_footer"])
-        self.assertEqual(generate_bilibili.call_args.kwargs["main_title"], "核心大牛\n集体出走")
+        self.assertEqual(generate_bilibili.call_args.kwargs["main_title"], "机构：核心大牛 集体出走")
         self.assertEqual(result["bilibili_cover_path"], str(bilibili_path))
         self.assertIn("bilibili_cover", result["keyframes"])
         self.assertEqual(result["keyframes"]["bilibili_cover"]["label"], "B站封皮关键帧")

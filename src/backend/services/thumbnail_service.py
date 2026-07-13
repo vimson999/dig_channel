@@ -607,7 +607,7 @@ class ThumbnailService:
                 img = Image.new('RGBA', (1920, 1080), (0, 21, 41, 255)) 
                 screenshot = Image.open(custom_bg_path).convert('RGBA')
                 
-                target_w, target_h = 1920, (486 if is_screenshot else 1080)
+                target_w, target_h = 1920, (605 if is_screenshot else 1080)
                 sw_orig, sh_orig = screenshot.size
                 r = sw_orig / sh_orig
                 cr = target_w / target_h
@@ -637,17 +637,17 @@ class ThumbnailService:
                 screenshot_resized = screenshot.resize((sw, sh), Image.Resampling.LANCZOS)
                 
                 if is_screenshot:
-                    # 截图模式：裁剪到顶部 45% 区域，底部为深蓝色
+                    # 截图模式：研报占 56%，标题区占 44%。
                     paste_layer = Image.new('RGBA', (1920, 1080), (0, 0, 0, 0))
                     paste_layer.paste(screenshot_resized, (final_x, final_y))
                     mask = Image.new('L', (1920, 1080), 0)
                     mask_draw = ImageDraw.Draw(mask)
-                    mask_draw.rectangle([0, 0, 1920, 486], fill=255)
+                    mask_draw.rectangle([0, 0, 1920, 605], fill=255)
                     img.paste(paste_layer, (0, 0), mask)
                     
                     # 底部背景深蓝色
                     draw_bg = ImageDraw.Draw(img)
-                    draw_bg.rectangle([0, 486, 1920, 1080], fill=(0, 21, 41, 255))
+                    draw_bg.rectangle([0, 605, 1920, 1080], fill=(0, 21, 41, 255))
                 else:
                     # 播客模式：全屏图片 + 遮罩
                     img.paste(screenshot_resized, (final_x, final_y))
@@ -696,8 +696,8 @@ class ThumbnailService:
 
             draw = ImageDraw.Draw(img)
             base_x = 120
-            # 垂直重心位置：截图模式 520, 播客模式 420, 预设模式 180
-            current_y = 520 if is_screenshot else (420 if is_podcast else 180)
+            # 截图模式标题紧随 56% 的研报区域，播客和预设模式保持原位。
+            current_y = 680 if is_screenshot else (420 if is_podcast else 180)
             
             try:
                 if not self.font_path:
@@ -771,7 +771,7 @@ class ThumbnailService:
                     current_y += int(56 * 1.25)
 
             # 落款回归左下角
-            if date_text:
+            if date_text and not is_screenshot:
                 date_y = 1080 - 100
                 f_color = (255, 255, 255, 204) if is_screenshot_style else theme['date']
                 

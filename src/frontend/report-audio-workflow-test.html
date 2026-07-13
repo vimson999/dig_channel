@@ -65,7 +65,7 @@
                         <div id="pdf-asset-panel" class="hidden">
                             <div id="pdf-asset-tabs" class="mb-2 grid grid-cols-2 gap-2 text-xs font-bold">
                                 <button type="button" data-pdf-asset-scope="all" class="rounded-md border px-3 py-2 transition">全部 PDF</button>
-                                <button type="button" data-pdf-asset-scope="hot" class="rounded-md border px-3 py-2 transition">热门 PDF（下载 ≥30）</button>
+                                <button type="button" data-pdf-asset-scope="hot" class="rounded-md border px-3 py-2 transition">热门 PDF（下载 ≥40）</button>
                             </div>
                             <div class="flex gap-2">
                                 <input id="pdf-asset-search" type="search" class="min-w-0 flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" placeholder="搜索已同步 PDF / 主题">
@@ -117,6 +117,23 @@
                             <label class="flex items-center gap-2 rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
                                 <input id="vertical-video-enabled" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-indigo-600">
                                 生成竖屏视频
+                            </label>
+                            <label class="block rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
+                                <span class="mb-1 block text-slate-500">TTS 方案</span>
+                                <select id="tts-provider" class="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 focus:border-slate-400 focus:outline-none">
+                                    <option value="doubao_browser">豆包浏览器 TTS（默认）</option>
+                                    <option value="doubao_api">豆包 API TTS（WebSocket V3）</option>
+                                </select>
+                            </label>
+                            <label id="tts-voice-panel" class="hidden block rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
+                                <span class="mb-1 block text-slate-500">豆包 API 音色</span>
+                                <select id="tts-voice" class="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 focus:border-slate-400 focus:outline-none">
+                                    <option value="zh_female_mizai_uranus_bigtts">黑猫</option>
+                                    <option value="zh_female_qingchezizi_uranus_bigtts">清澈</option>
+                                    <option value="zh_male_liufei_uranus_bigtts">刘飞</option>
+                                    <option value="zh_male_dayi_uranus_bigtts">大台</option>
+                                </select>
+                                <div id="tts-voice-id" class="mt-1 break-all text-[10px] font-medium text-slate-400">zh_female_mizai_uranus_bigtts</div>
                             </label>
                             <label class="block rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
                                 <span class="mb-1 block text-slate-500">竖屏视频方案</span>
@@ -204,6 +221,6 @@
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260614-report-audio-workflow"></script>
     <script src="js/download-count-highlight.js?v=20260702"></script>
-    <script src="js/report-audio-workflow-test.js?v=20260708-video-preview-modes"></script>
+    <script src="js/report-audio-workflow-test.js?v=20260713-tts-voice"></script>
 </body>
 </html>

@@ -62,6 +62,7 @@ class ReportScriptMaterialWorkflowPage {
             { value: '', label: '使用 .env 默认' },
             { value: 'https://gemini.google.com/gem/099a92ae7888', label: '文案编辑v4' },
             { value: 'https://gemini.google.com/gem/b71a9220571e', label: '文案编辑v5' },
+            { value: 'https://gemini.google.com/gem/980ba0a0ff22', label: '文案v6' },
             { value: 'https://gemini.google.com/gem/3d1eca63c142', label: '今日研报严选总编辑 Gem' },
             { value: 'https://gemini.google.com/gem/f9e84d5e215c', label: 'MP3 视频解析 Gem' },
             { value: '__custom__', label: '自定义 URL' },
@@ -71,11 +72,12 @@ class ReportScriptMaterialWorkflowPage {
     renderGeminiUrlOptions() {
         if (!this.els.geminiUrlSelect) return;
         const previousValue = this.els.geminiUrlSelect.value || '';
+        const defaultValue = 'https://gemini.google.com/gem/980ba0a0ff22';
         this.els.geminiUrlSelect.innerHTML = this.geminiUrlPresets.map((item) => (
             `<option value="${this.escape(item.value)}">${this.escape(item.label)}</option>`
         )).join('');
         if (this.geminiUrlPresets.some((item) => item.value === previousValue)) {
-            this.els.geminiUrlSelect.value = previousValue;
+            this.els.geminiUrlSelect.value = previousValue || defaultValue;
         }
         this.updateGeminiUrlUi();
     }

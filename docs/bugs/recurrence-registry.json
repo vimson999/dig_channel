@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "reviewed_through": "2026-07-10",
+  "reviewed_through": "2026-07-13",
   "max_days_between_reviews": 7,
   "clusters": [
     {
@@ -43,9 +43,11 @@
         "2026-07-07-mp3-bilibili-upload-canceled-and-dirty-title.md",
         "2026-07-07-mp3-detail-bilibili-upload-status-stale.md",
         "2026-07-07-mp3-video-publisher-file-done-parent-waiting.md",
+        "2026-07-11-mp3-parent-wait-state-capacity-deadlock.md",
         "2026-07-07-platform-upload-worker-restart-orphan.md",
         "2026-07-10-report-audio-completed-parent-redelivered.md",
-        "2026-07-10-report-audio-vertical-backfill-auto-canceled.md"
+        "2026-07-10-report-audio-vertical-backfill-auto-canceled.md",
+        "2026-07-13-mp3-publisher-child-key-undefined.md"
       ]
     },
     {
@@ -61,7 +63,8 @@
         "2026-06-24-workflow-retry-api-timeout-false-failure.md",
         "2026-07-10-report-audio-tts-cache-full-json-scan.md",
         "2026-07-10-report-audio-projection-and-parent-roundtrips.md",
-        "2026-07-10-zsxq-poll-overlap-and-duplicate-result-load.md"
+        "2026-07-10-zsxq-poll-overlap-and-duplicate-result-load.md",
+        "2026-07-13-mp3-hot-path-json-payload-regression.md"
       ]
     },
     {
@@ -78,7 +81,8 @@
         "2026-07-07-mp3-detail-ds-cleaning-false-missing-timestamp.md",
         "2026-07-07-mp3-invalid-ds-response-generated-garbage-assets.md",
         "2026-07-07-mp3-video-audio-speed-not-applied.md",
-        "2026-07-09-report-audio-tts-section-outline-labels.md"
+        "2026-07-09-report-audio-tts-section-outline-labels.md",
+        "2026-07-13-mp3-publisher-reuse-filter-after-limit.md"
       ]
     },
     {
@@ -93,7 +97,8 @@
         "2026-06-26-doubao-standalone-short-audio-no-auto-retry.md",
         "2026-07-07-mp3-cover-render-cdn-timeout.md",
         "2026-07-09-report-script-material-normalizer-timeout-no-retry.md",
-        "2026-07-10-publisher-cover-browser-no-hard-timeout.md"
+        "2026-07-10-publisher-cover-browser-no-hard-timeout.md",
+        "2026-07-13-mp3-db-disconnect-marked-parent-failed.md"
       ]
     },
     {
@@ -120,7 +125,9 @@
         "2026-07-02-content-retention-duplicate-scheduler-overwrote-result.md",
         "2026-07-07-platform-upload-used-render-queue.md",
         "2026-07-07-platform-upload-worker-restart-orphan.md",
-        "2026-07-10-celery-stop-script-killed-controller.md"
+        "2026-07-10-celery-stop-script-killed-controller.md",
+        "2026-07-11-backend-restart-accepted-stale-listener.md",
+        "2026-07-13-report-script-material-missing-gemini-threshold-helper.md"
       ]
     }
   ],

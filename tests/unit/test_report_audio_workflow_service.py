@@ -20,6 +20,31 @@ from services.report_audio_workflow import (  # noqa: E402
 
 
 class ReportAudioWorkflowServiceTest(unittest.TestCase):
+    def test_structured_result_preserves_separate_landscape_and_vertical_titles(self):
+        payload = report_audio_service._validate_structured_result({
+            "title": "列表标题",
+            "landscape_title": "大摩:增持腾讯\n盈利预期上修",
+            "landscape_subtitle": "目标价上调至700港元",
+            "vertical_title": "腾讯盈利为何再超预期",
+            "vertical_subtitle": "AI广告进入兑现期",
+            "final_script_for_tts": "这是用于直接朗读的完整研报正文，包含足够信息并且没有工作流结构标签。",
+        }, "Gemini 审核后的完整结果")
+
+        self.assertEqual(payload["landscape_title"], "大摩:增持腾讯\n盈利预期上修")
+        self.assertEqual(payload["vertical_title"], "腾讯盈利为何再超预期")
+        self.assertEqual(payload["cover_title"], payload["landscape_title"])
+        self.assertEqual(payload["cover_subtitle"], payload["landscape_subtitle"])
+
+    def test_legacy_cover_fields_backfill_both_title_variants(self):
+        payload = report_audio_service._validate_structured_result({
+            "cover_title": "高盛:首次覆盖智谱",
+            "cover_subtitle": "企业级编码模型进入兑现期",
+            "final_script_for_tts": "这是用于直接朗读的完整研报正文，包含足够信息并且没有工作流结构标签。",
+        }, "历史 Gemini 审核结果")
+
+        self.assertEqual(payload["landscape_title"], "高盛:首次覆盖智谱")
+        self.assertEqual(payload["vertical_title"], "高盛:首次覆盖智谱")
+
     def test_default_normalizer_model_is_deepseek_v4_pro(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(_normalizer_model(), "deepseek-v4-pro")

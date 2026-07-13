@@ -1,5 +1,6 @@
 
 const FONT_STACK = '"PingFang SC", "PingFang TC", "Source Han Sans SC", "Source Han Sans CN", "Microsoft YaHei", sans-serif';
+const SCREENSHOT_REPORT_RATIO = 0.56;
 
 /**
  * CanvasRenderer - 专门负责发布工作台的视觉渲染
@@ -37,7 +38,7 @@ const CanvasRenderer = {
         
         // 1. 背景渲染
         if (isScreenshot) {
-            const screenshotH = Math.round(h * 0.41);
+            const screenshotH = Math.round(h * SCREENSHOT_REPORT_RATIO);
             if (images.custom.src && images.custom.complete && images.custom.naturalWidth > 0) {
                 ctx.save();
                 ctx.beginPath(); ctx.rect(0, 0, w, screenshotH); ctx.clip();
@@ -263,7 +264,7 @@ const CanvasRenderer = {
     },
 
     _drawScreenshotCoverContent(ctx, w, h, config) {
-        const splitY = Math.round(h * 0.41);
+        const splitY = Math.round(h * SCREENSHOT_REPORT_RATIO);
         const left = 120;
         const right = 180;
         const maxTextW = w - left - right;
@@ -305,11 +306,6 @@ const CanvasRenderer = {
             });
         }
 
-        const footerY = h - 102;
-        ctx.fillStyle = 'rgba(255,255,255,0.82)';
-        ctx.fillRect(left, footerY - 44, 64, 2);
-        ctx.font = `550 34px ${FONT_STACK}`;
-        ctx.fillText(config.dateText || '研报播客', left, footerY - 30);
         ctx.restore();
     },
 

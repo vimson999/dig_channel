@@ -44,6 +44,7 @@
 - 新 Doubao worker PID 84384、84444 均连接 broker 并 ready。
 - report audio 受管 worker PID 87422 启动成功，队列由 1 清零，并继续处理任务 `d639ba5f-50c9-46e1-8790-7123d8afb6be`。
 - 运行时契约测试覆盖两个停止脚本的可执行文件和队列参数匹配。
+- 2026-07-11 全栈重启暴露通用 `stop-celery.sh` 仍使用 `ps | grep celery`，误杀控制脚本并产生 `Killed: 9`；已改为只匹配当前项目 `/venv/bin/celery` 且命令包含 `worker` 的真实进程，并纳入同一契约测试。
 
 ## 复发预防
 
@@ -53,4 +54,4 @@
 
 ## 后续事项
 
-- 横向收敛其他 Celery 停止脚本的 `ps | grep` 实现到统一进程管理 helper。
+- 继续横向收敛其他停止脚本的宽泛进程匹配到统一进程管理 helper。

@@ -5,6 +5,27 @@ from unittest.mock import MagicMock, patch
 
 
 class RuntimeInitializationIdempotencyTest(unittest.TestCase):
+    def test_backend_restart_requires_old_listener_to_stop_and_new_pid_to_own_port(self):
+        project_root = Path(__file__).resolve().parents[2]
+        restart = (project_root / "scripts" / "dev" / "restart-dev-stack.sh").read_text(
+            encoding="utf-8"
+        )
+        stop = (project_root / "scripts" / "dev" / "stop-backend.sh").read_text(
+            encoding="utf-8"
+        )
+        run = (project_root / "scripts" / "dev" / "run-backend.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('"$SCRIPT_DIR/stop-backend.sh"\n', restart)
+        self.assertNotIn('"$SCRIPT_DIR/stop-backend.sh" || true\n\n', restart)
+        self.assertIn('[ "$listener_pid" != "$backend_pid" ]', restart)
+        self.assertIn("拒绝继续启动", restart)
+        self.assertIn("descendant_pids", stop)
+        self.assertIn("BACKEND_STOP_TIMEOUT_SECONDS", stop)
+        self.assertIn("BACKEND_PID_FILE", stop)
+        self.assertIn("exec python app.py", run)
+
     def test_targeted_celery_stop_scripts_match_worker_command_not_controller_shell(self):
         project_root = Path(__file__).resolve().parents[2]
         expectations = {
@@ -16,6 +37,14 @@ class RuntimeInitializationIdempotencyTest(unittest.TestCase):
             self.assertIn("/\\/venv\\/bin\\/celery/", text)
             self.assertIn(queue_pattern, text)
             self.assertNotIn("grep 'celery'", text)
+
+        generic = (project_root / "scripts" / "dev" / "stop-celery.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('CELERY_BIN="$PROJECT_ROOT/venv/bin/celery"', generic)
+        self.assertIn('index($0, celery)', generic)
+        self.assertIn('/ worker( |$)/', generic)
+        self.assertNotIn("grep 'celery'", generic)
 
     def test_performance_monitor_starts_only_one_thread_per_process(self):
         from middleware.performance_monitor import PerformanceMonitor

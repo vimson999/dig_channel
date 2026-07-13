@@ -6,8 +6,37 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RUNTIME_DIR="$PROJECT_ROOT/runtime"
-PID_FILE="$RUNTIME_DIR/backend.pid"
+PID_FILE="${BACKEND_PID_FILE:-$RUNTIME_DIR/backend.pid}"
 PORT="${BACKEND_PORT:-5001}"
+STOP_TIMEOUT_SECONDS="${BACKEND_STOP_TIMEOUT_SECONDS:-10}"
+
+descendant_pids() {
+  local parent="$1"
+  local child
+  for child in $(pgrep -P "$parent" 2>/dev/null || true); do
+    descendant_pids "$child"
+    printf '%s\n' "$child"
+  done
+}
+
+wait_for_exit() {
+  local deadline=$((SECONDS + STOP_TIMEOUT_SECONDS))
+  local pids=("$@")
+  local pid
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    local alive=0
+    for pid in "${pids[@]}"; do
+      if ps -p "$pid" >/dev/null 2>&1; then
+        alive=1
+        break
+      fi
+    done
+    [ "$alive" -eq 0 ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
 
 stop_pid() {
   local pid="$1"
@@ -15,21 +44,21 @@ stop_pid() {
     return 0
   fi
 
-  local children
-  children="$(pgrep -P "$pid" 2>/dev/null || true)"
-  echo "⚠️ 停止后端进程 PID: ${pid}${children:+，子进程: $children}"
-  if [ -n "$children" ]; then
-    kill -TERM $children 2>/dev/null || true
-  fi
-  kill -TERM "$pid" 2>/dev/null || true
-  sleep 1
+  local descendants
+  descendants="$(descendant_pids "$pid")"
+  local targets=()
+  local child
+  while IFS= read -r child; do
+    [ -n "$child" ] && targets+=("$child")
+  done <<< "$descendants"
+  targets+=("$pid")
 
-  children="$(pgrep -P "$pid" 2>/dev/null || true)"
-  if [ -n "$children" ]; then
-    kill -KILL $children 2>/dev/null || true
-  fi
-  if ps -p "$pid" >/dev/null 2>&1; then
-    kill -KILL "$pid" 2>/dev/null || true
+  echo "⚠️ 停止后端进程 PID: ${pid}${descendants:+，后代进程: $descendants}"
+  kill -TERM "${targets[@]}" 2>/dev/null || true
+  if ! wait_for_exit "${targets[@]}"; then
+    echo "⚠️ 后端未在 ${STOP_TIMEOUT_SECONDS}s 内退出，强制终止: ${targets[*]}"
+    kill -KILL "${targets[@]}" 2>/dev/null || true
+    wait_for_exit "${targets[@]}" || true
   fi
 }
 
@@ -53,6 +82,6 @@ remaining="$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null || true)"
 if [ -z "$remaining" ]; then
   echo "✅ Flask 后端已停止。"
 else
-  echo "⚠️ 端口 $PORT 仍被占用: $remaining"
+  echo "❌ 端口 $PORT 仍被占用: $remaining"
   exit 1
 fi

@@ -6,7 +6,7 @@ Run them from the project root or by path, for example `./scripts/dev/run-backen
 
 Full local restart:
 
-- `./scripts/dev/restart-dev-stack.sh` 先停止 Flask 后端，再停止所有 Celery worker、Watchdog 和计划任务，最后以 detached 方式后台启动后端；后端启动后默认补齐所有 Celery worker、Watchdog，并按 `BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS` 启动托管计划任务（默认 `zsxq_auto,content_retention`）
+- `./scripts/dev/restart-dev-stack.sh` 先停止 Flask 后端，再停止所有 Celery worker、Watchdog 和计划任务，最后以 detached 方式后台启动后端；旧 `5001` 监听未释放会硬失败，启动成功前还会确认监听 PID 就是本次新进程。后端启动后默认补齐所有 Celery worker、Watchdog，并按 `BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS` 启动托管计划任务（默认 `zsxq_auto,content_retention`）
 - `./scripts/dev/stop-backend.sh` 只停止本地 Flask 后端，默认端口 `5001`
 - `./scripts/dev/stop-all-background-jobs.sh` 只停止 Celery worker、Watchdog 和计划任务，不停止 Flask 后端
 

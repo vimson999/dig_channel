@@ -107,6 +107,19 @@ class ReportScriptMaterialWorkflowTaskTest(unittest.TestCase):
             self.assertEqual(task.result["script_material"]["source_task_id"], existing.id)
             self.assertEqual(task.result["output_path"], output_path)
 
+    def test_gemini_cache_min_chars_uses_shared_report_audio_threshold(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(report_script_material_workflow._min_gemini_final_chars(), 120)
+
+        with patch.dict(os.environ, {
+            "REPORT_PDF_GEMINI_MIN_RESPONSE_CHARS": "240",
+            "REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "360",
+        }, clear=True):
+            self.assertEqual(report_script_material_workflow._min_gemini_final_chars(), 360)
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "-1"}, clear=True):
+            self.assertEqual(report_script_material_workflow._min_gemini_final_chars(), 0)
+
     def test_script_material_normalizer_uses_production_timeout_and_retry_budget(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(report_script_material_workflow._normalizer_timeout_seconds(), 90)

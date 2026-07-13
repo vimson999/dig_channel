@@ -50,6 +50,10 @@ class ReportAudioWorkflowPage {
             manualGeminiResultInput: document.getElementById('manual-gemini-result-input'),
             landscapeVideoEnabled: document.getElementById('landscape-video-enabled'),
             verticalVideoEnabled: document.getElementById('vertical-video-enabled'),
+            ttsProvider: document.getElementById('tts-provider'),
+            ttsVoicePanel: document.getElementById('tts-voice-panel'),
+            ttsVoice: document.getElementById('tts-voice'),
+            ttsVoiceId: document.getElementById('tts-voice-id'),
             verticalVideoScheme: document.getElementById('vertical-video-scheme'),
             videoRenderMode: document.getElementById('video-render-mode'),
             bilibiliEnabled: document.getElementById('bilibili-enabled'),
@@ -72,6 +76,7 @@ class ReportAudioWorkflowPage {
         this.syncJobStatusFilter();
         this.syncJobSearchInput();
         this.updatePdfSourceUi();
+        this.updateTtsProviderUi();
         this.refreshStatus();
         this.loadPdfAssets({ silent: true });
         this.loadHistory({ silent: true });
@@ -162,6 +167,7 @@ class ReportAudioWorkflowPage {
             { value: '', label: '使用 .env 默认' },
             { value: 'https://gemini.google.com/gem/099a92ae7888', label: '文案编辑v4' },
             { value: 'https://gemini.google.com/gem/b71a9220571e', label: '文案编辑v5' },
+            { value: 'https://gemini.google.com/gem/980ba0a0ff22', label: '文案v6' },
             { value: 'https://gemini.google.com/gem/3d1eca63c142', label: '今日研报严选总编辑 Gem' },
             { value: 'https://gemini.google.com/gem/f9e84d5e215c', label: 'MP3 视频解析 Gem' },
             { value: '__custom__', label: '自定义 URL' },
@@ -171,12 +177,13 @@ class ReportAudioWorkflowPage {
     renderGeminiUrlOptions() {
         if (!this.els.geminiUrlSelect) return;
         const previousValue = this.els.geminiUrlSelect.value || '';
+        const defaultValue = 'https://gemini.google.com/gem/980ba0a0ff22';
         const options = this.geminiUrlPresets.slice();
         this.els.geminiUrlSelect.innerHTML = options.map((item) => (
             `<option value="${this.escape(item.value)}">${this.escape(item.label)}</option>`
         )).join('');
         if (options.some((item) => item.value === previousValue)) {
-            this.els.geminiUrlSelect.value = previousValue;
+            this.els.geminiUrlSelect.value = previousValue || defaultValue;
         }
         this.updateGeminiUrlUi();
     }
@@ -207,6 +214,15 @@ class ReportAudioWorkflowPage {
         const selected = select?.value || '';
         if (selected === '__custom__') return input?.value.trim() || '';
         return selected.trim();
+    }
+
+    updateTtsProviderUi() {
+        const isApi = this.els.ttsProvider?.value === 'doubao_api';
+        this.els.ttsVoicePanel?.classList.toggle('hidden', !isApi);
+        if (this.els.ttsVoice) this.els.ttsVoice.disabled = !isApi;
+        if (this.els.ttsVoiceId) {
+            this.els.ttsVoiceId.textContent = this.els.ttsVoice?.value || '';
+        }
     }
 
     initialJobPage() {
@@ -304,6 +320,8 @@ class ReportAudioWorkflowPage {
         this.els.pdfAssetPagination.addEventListener('click', (event) => this.handlePdfAssetPageClick(event));
         this.els.pdfAssetPagination.addEventListener('submit', (event) => this.handlePdfAssetPageJump(event));
         this.els.geminiUrlSelect?.addEventListener('change', () => this.updateGeminiUrlUi());
+        this.els.ttsProvider?.addEventListener('change', () => this.updateTtsProviderUi());
+        this.els.ttsVoice?.addEventListener('change', () => this.updateTtsProviderUi());
         this.els.submitBtn.addEventListener('click', () => this.submit());
         this.els.loadHistoryBtn.addEventListener('click', () => this.loadHistory({ page: 1, force: true }));
         this.els.refreshJobsBtn.addEventListener('click', () => this.refreshJobs());
@@ -577,10 +595,10 @@ class ReportAudioWorkflowPage {
         const selectedId = this.selectedPdfAsset?.id || '';
         this.els.pdfAssetSummary.textContent = this.pdfAssets.length
             ? `${this.pdfAssetScopeLabel()}· 第 ${this.pdfAssetPage} 页 · 本页 ${this.pdfAssets.length} 个 PDF${this.selectedPdfAsset ? ` · 已选 ${this.selectedPdfAsset.filename}` : ''}`
-            : (this.pdfAssetScope === 'hot' ? '没有找到下载次数达到 30 次的热门 PDF。' : '没有找到已下载的同步 PDF。');
+            : (this.pdfAssetScope === 'hot' ? '没有找到下载次数达到 40 次的热门 PDF。' : '没有找到已下载的同步 PDF。');
         if (!this.pdfAssets.length) {
             const emptyText = this.pdfAssetScope === 'hot'
-                ? '暂无热门 PDF。当前筛选条件是下载次数 ≥ 30，且附件已下载到本地。'
+                ? '暂无热门 PDF。当前筛选条件是下载次数 ≥ 40，且附件已下载到本地。'
                 : '暂无可选 PDF。请先完成知识星球同步并下载附件。';
             this.els.pdfAssetList.innerHTML = `<div class="rounded-md border border-dashed border-slate-300 bg-white px-3 py-6 text-center text-xs text-slate-500">${this.escape(emptyText)}</div>`;
             this.renderPdfAssetPagination();
@@ -713,6 +731,8 @@ class ReportAudioWorkflowPage {
                 pdf: pdfSummary,
                 prompt: this.els.promptInput.value.trim(),
                 review_prompt: this.els.reviewPromptInput.value.trim(),
+                tts_provider: this.els.ttsProvider?.value || 'doubao_browser',
+                tts_voice: this.els.ttsProvider?.value === 'doubao_api' ? (this.els.ttsVoice?.value || '') : '',
                 video_render_mode: this.normalizeVideoRenderMode(this.els.videoRenderMode?.value),
             },
             logs: [],
@@ -742,6 +762,10 @@ class ReportAudioWorkflowPage {
             const geminiUrl = this.selectedGeminiUrl();
             if (geminiUrl) form.append('gemini_url', geminiUrl);
             if (manualGeminiResult) form.append('manual_gemini_result', manualGeminiResult);
+            form.append('tts_provider', this.els.ttsProvider?.value || 'doubao_browser');
+            if (this.els.ttsProvider?.value === 'doubao_api') {
+                form.append('tts_voice', this.els.ttsVoice?.value || 'zh_female_mizai_uranus_bigtts');
+            }
             form.append('landscape_video_enabled', this.els.landscapeVideoEnabled.checked ? '1' : '0');
             form.append('vertical_video_enabled', this.els.verticalVideoEnabled.checked ? '1' : '0');
             form.append('vertical_video_scheme', this.normalizeVerticalScheme(this.els.verticalVideoScheme?.value));

@@ -16,6 +16,13 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-07-13 | [MP3 publisher 子任务等待 ID 未定义](2026-07-13-mp3-publisher-child-key-undefined.md) | MP3 视频编排 / publisher 父子等待 | 已修复 |
+| 2026-07-13 | [MP3 publisher 复用查询在 limit 后追加 filter](2026-07-13-mp3-publisher-reuse-filter-after-limit.md) | MP3 视频编排 / publisher 资产复用 | 已修复 |
+| 2026-07-13 | [MP3 数据库瞬时断连被写成父任务永久失败](2026-07-13-mp3-db-disconnect-marked-parent-failed.md) | MP3 视频编排 / runtime guard / publisher | 已修复 |
+| 2026-07-13 | [MP3 热路径继续批量读取任务 JSON](2026-07-13-mp3-hot-path-json-payload-regression.md) | MP3 API/worker / publisher reuse / watchdog | 已修复待 SQL 与重启验收 |
+| 2026-07-13 | [基础文案任务缺少 Gemini 阈值函数导致批量失败](2026-07-13-report-script-material-missing-gemini-threshold-helper.md) | report script material / Gemini 缓存 | 已修复 |
+| 2026-07-11 | [后端重启误把旧监听进程判定为启动成功](2026-07-11-backend-restart-accepted-stale-listener.md) | Flask backend / restart scripts / Celery bootstrap | 已修复待真实重启验收 |
+| 2026-07-11 | [MP3 父任务等待状态误占容量导致死锁](2026-07-11-mp3-parent-wait-state-capacity-deadlock.md) | MP3 视频编排 / publisher / runtime guard | 已修复 |
 | 2026-07-10 | [研报音频方案二完整合成缺少 B站封皮](2026-07-10-report-audio-scheme2-bilibili-cover-missing.md) | report audio / publisher / 方案二视觉资产 | 已修复 |
 | 2026-07-10 | [Publisher 封面浏览器缺少进程级硬超时](2026-07-10-publisher-cover-browser-no-hard-timeout.md) | publisher / Playwright / render worker | 已修复待进程重载 |
 | 2026-07-10 | [研报音频 B站封皮未提升为正式资产](2026-07-10-report-audio-bilibili-cover-not-promoted.md) | report audio detail / B站上传 / artifact projection | 已修复 |

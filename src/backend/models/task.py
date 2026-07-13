@@ -126,11 +126,24 @@ class PublicationTask(db.Model):
     publisher_vertical_video_path = db.Column(db.String(600), nullable=True)
     publisher_vertical_cover_path = db.Column(db.String(600), nullable=True)
     publisher_podcast_cover_path = db.Column(db.String(600), nullable=True)
+    publisher_child_role = db.Column(db.String(80), nullable=True)
+    publisher_aspect_ratio = db.Column(db.String(16), nullable=True)
+    publisher_generate_subtitles = db.Column(db.Boolean, nullable=True)
+    publisher_audio_signature = db.Column(db.String(64), nullable=True)
     doubao_tts_text_hash = db.Column(db.String(64), nullable=True)
     doubao_tts_chunk_index = db.Column(db.Integer, nullable=False, default=0)
     doubao_tts_chunk_attempt = db.Column(db.Integer, nullable=False, default=0)
     doubao_tts_wav_path = db.Column(db.String(600), nullable=True)
     gemini_response_chars = db.Column(db.Integer, nullable=False, default=0)
+
+    # MP3 workflow list projection. Detail and audit payloads remain in JSON,
+    # while list pages can render the complete audio summary from normal columns.
+    mp3_audio_filename = db.Column(db.String(500), nullable=True)
+    mp3_audio_topic_title = db.Column(db.String(500), nullable=True)
+    mp3_audio_tab_label = db.Column(db.String(160), nullable=True)
+    mp3_audio_path = db.Column(db.String(600), nullable=True)
+    mp3_audio_download_count = db.Column(db.Integer, nullable=True)
+    mp3_audio_duration_seconds = db.Column(db.Float, nullable=True)
 
     # report_pdf_audio_workflow 列表页投影列。
     report_audio_pdf_attachment_id = db.Column(db.String(36), nullable=True, index=True)
@@ -198,9 +211,14 @@ class PublicationTask(db.Model):
             self.parent_feature = _compact_text(params.get('parent_feature'), 80)
 
             zsxq_publish = params.get('zsxq_publish') if isinstance(params.get('zsxq_publish'), dict) else {}
+            mp3_workflow = params.get('mp3_video_workflow') if isinstance(params.get('mp3_video_workflow'), dict) else {}
+            mp3_audio = mp3_workflow.get('audio') if isinstance(mp3_workflow.get('audio'), dict) else {}
             self.source_task_id = _compact_text(
                 params.get('source_task_id')
                 or zsxq_publish.get('source_task_id')
+                or mp3_workflow.get('audio_asset_id')
+                or mp3_audio.get('attachment_id')
+                or mp3_audio.get('audio_asset_id')
                 or (result.get('source_task_id') if result_loaded else None),
                 36,
             )
@@ -221,6 +239,10 @@ class PublicationTask(db.Model):
             result if result_loaded else None,
         )
         self._sync_child_hot_projection(
+            params if params_loaded else None,
+            result if result_loaded else None,
+        )
+        self._sync_mp3_hot_projection(
             params if params_loaded else None,
             result if result_loaded else None,
         )
@@ -333,6 +355,15 @@ class PublicationTask(db.Model):
                 self.publisher_vertical_enabled = _boolish(vertical.get('enabled'))
                 self.publisher_vertical_scheme = _compact_text(vertical.get('scheme'), 32)
                 self.publisher_preview_seconds = _non_negative_int(vertical.get('preview_seconds'))
+                self.publisher_child_role = _compact_text(metadata.get('role'), 80)
+                self.publisher_aspect_ratio = _compact_text(params.get('aspect_ratio'), 16)
+                generate_subtitles = params.get('generate_subtitles')
+                if generate_subtitles is None:
+                    generate_subtitles = metadata.get('generate_subtitles')
+                if generate_subtitles is None:
+                    generate_subtitles = landscape.get('sub_burn_enabled')
+                self.publisher_generate_subtitles = _boolish(generate_subtitles)
+                self.publisher_audio_signature = _compact_text(metadata.get('audio_signature'), 64)
 
             doubao = params.get('doubao_browser_tts') if isinstance(params.get('doubao_browser_tts'), dict) else {}
             doubao_metadata = doubao.get('metadata') if isinstance(doubao.get('metadata'), dict) else {}
@@ -348,6 +379,18 @@ class PublicationTask(db.Model):
                     metadata.get('render_mode') or result.get('render_mode'),
                     32,
                 )
+            if is_publisher:
+                if metadata.get('role'):
+                    self.publisher_child_role = _compact_text(metadata.get('role'), 80)
+                if result.get('aspect_ratio'):
+                    self.publisher_aspect_ratio = _compact_text(result.get('aspect_ratio'), 16)
+                if result.get('generate_subtitles') is not None:
+                    self.publisher_generate_subtitles = _boolish(result.get('generate_subtitles'))
+                if metadata.get('audio_signature') or result.get('audio_signature'):
+                    self.publisher_audio_signature = _compact_text(
+                        metadata.get('audio_signature') or result.get('audio_signature'),
+                        64,
+                    )
             vertical_enabled = _loaded_model_attr(self, 'publisher_vertical_enabled')
             if metadata.get('vertical_video_scheme'):
                 self.publisher_vertical_scheme = _compact_text(metadata.get('vertical_video_scheme'), 32)
@@ -368,6 +411,31 @@ class PublicationTask(db.Model):
             if metadata.get('chunk_attempt') is not None:
                 self.doubao_tts_chunk_attempt = _non_negative_int(metadata.get('chunk_attempt'))
             self.doubao_tts_wav_path = _compact_text(audio.get('wav_path') or result.get('wav_path'), 600)
+
+    def _sync_mp3_hot_projection(self, params=None, result=None):
+        params = params if isinstance(params, dict) else {}
+        result = result if isinstance(result, dict) else {}
+        if _loaded_model_attr(self, 'feature') != 'mp3_video_workflow':
+            return
+
+        workflow = params.get('mp3_video_workflow') if isinstance(params.get('mp3_video_workflow'), dict) else {}
+        request_audio = workflow.get('audio') if isinstance(workflow.get('audio'), dict) else {}
+        result_audio = result.get('audio') if isinstance(result.get('audio'), dict) else {}
+        audio = {**request_audio, **result_audio}
+        if not audio:
+            return
+
+        self.mp3_audio_filename = _compact_text(audio.get('filename') or audio.get('name'), 500)
+        self.mp3_audio_topic_title = _compact_text(audio.get('topic_title') or audio.get('title'), 500)
+        self.mp3_audio_tab_label = _compact_text(audio.get('tab_label') or audio.get('tab'), 160)
+        self.mp3_audio_path = _compact_text(audio.get('path'), 600)
+        download_count = audio.get('download_count')
+        self.mp3_audio_download_count = _non_negative_int(download_count) if download_count is not None else None
+        try:
+            duration = float(audio.get('duration_seconds')) if audio.get('duration_seconds') is not None else None
+        except (TypeError, ValueError):
+            duration = None
+        self.mp3_audio_duration_seconds = max(0.0, duration) if duration is not None else None
 
     def _sync_workflow_state_projection(self, result):
         waiting_child = result.get('waiting_child') if isinstance(result.get('waiting_child'), dict) else {}

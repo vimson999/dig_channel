@@ -9,7 +9,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LOG_DIR="$PROJECT_ROOT/logs"
 RUNTIME_DIR="$PROJECT_ROOT/runtime"
 BACKEND_LOG="$LOG_DIR/backend.log"
-BACKEND_PID="$RUNTIME_DIR/backend.pid"
+BACKEND_PID="${BACKEND_PID_FILE:-$RUNTIME_DIR/backend.pid}"
 PORT="${BACKEND_PORT:-5001}"
 
 mkdir -p "$LOG_DIR" "$RUNTIME_DIR"
@@ -18,7 +18,12 @@ echo "🔁 正在全面重启开发环境..."
 
 echo
 echo "1/3 停止 Flask 后端..."
-"$SCRIPT_DIR/stop-backend.sh" || true
+"$SCRIPT_DIR/stop-backend.sh"
+
+if old_listener="$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null)" && [ -n "$old_listener" ]; then
+  echo "❌ 拒绝继续启动：端口 $PORT 仍由旧进程监听: $old_listener"
+  exit 1
+fi
 
 echo
 echo "2/3 停止所有 Celery worker、Watchdog、计划任务..."
@@ -87,8 +92,15 @@ for _ in $(seq 1 30); do
     tail -80 "$BACKEND_LOG" 2>/dev/null || true
     exit 1
   fi
-  if lsof -ti "tcp:$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  listener_pid="$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null || true)"
+  if [ -n "$listener_pid" ]; then
+    if [ "$listener_pid" != "$backend_pid" ]; then
+      echo "❌ 启动验收失败：本次启动 PID 为 $backend_pid，但端口 $PORT 由 $listener_pid 监听。"
+      "$SCRIPT_DIR/stop-backend.sh" || true
+      exit 1
+    fi
     echo "✅ 后端已监听 http://localhost:$PORT"
+    echo "✅ 已确认监听 PID 为本次启动的新进程: $backend_pid"
     echo "✅ 后端 bootstrap 将按配置补齐托管进程。"
     echo
     echo "查看状态："

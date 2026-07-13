@@ -1,5 +1,6 @@
 import unittest
 import ast
+import re
 from pathlib import Path
 
 
@@ -247,6 +248,15 @@ class DbProjectionDisciplineTest(unittest.TestCase):
         )[0]
 
         self.assertIn('if column.key not in {"params", "result"}', candidate_columns)
+        pending_repair = text.split("def repair_stale_publisher_pending_tasks_once(", 1)[1].split(
+            "\ndef cleanup_publisher_children_of_terminal_parents_once", 1
+        )[0]
+        self.assertIn("stale_before = datetime.utcnow() - timedelta", pending_repair)
+        self.assertIn("PublicationTask.updated_at <= stale_before", pending_repair)
+        self.assertLess(
+            pending_repair.index("PublicationTask.updated_at <= stale_before"),
+            pending_repair.index("_load_repair_task(row.id"),
+        )
         for function_name, next_name in (
             ("repair_stale_publisher_pending_tasks_once", "cleanup_publisher_children_of_terminal_parents_once"),
             ("repair_stale_publisher_processing_tasks_once", "maybe_requeue_stale_publication_task"),
@@ -356,6 +366,66 @@ class DbProjectionDisciplineTest(unittest.TestCase):
 
         self.assertNotIn(".get(job_id)", owned_task_body)
         self.assertIn("PublicationTask.id == str(job_id)", owned_task_body)
+
+    def test_mp3_list_and_publisher_reuse_do_not_batch_json_payloads(self):
+        api_path = BACKEND_DIR / "api" / "mp3_video_workflow.py"
+        service_path = BACKEND_DIR / "services" / "mp3_video_workflow.py"
+        api_text = api_path.read_text(encoding="utf-8")
+        service_text = service_path.read_text(encoding="utf-8")
+
+        list_columns = api_text.split("JOB_LIST_COLUMNS = (", 1)[1].split(")", 1)[0]
+        self.assertIn("PublicationTask.mp3_audio_filename", list_columns)
+        self.assertIn("PublicationTask.mp3_audio_path", list_columns)
+        self.assertNotIn("PublicationTask.params", list_columns)
+        self.assertNotIn("PublicationTask.result", list_columns)
+
+        audio_summary = api_text.split("def _audio_summary_from_task(", 1)[1].split(
+            "\ndef _job_payload", 1
+        )[0]
+        self.assertIn("task.mp3_audio_filename", audio_summary)
+        self.assertNotIn("task.params", audio_summary)
+        self.assertNotIn("task.result", audio_summary)
+
+        match_columns = service_text.split("TASK_PUBLISHER_MATCH_COLUMNS = (", 1)[1].split(
+            ")", 1
+        )[0]
+        self.assertIn("PublicationTask.publisher_child_role", match_columns)
+        self.assertIn("PublicationTask.publisher_audio_signature", match_columns)
+        self.assertNotIn("PublicationTask.params", match_columns)
+        self.assertNotIn("PublicationTask.result", match_columns)
+
+        finder = service_text.split("def _find_existing_publisher_video_task(", 1)[1].split(
+            "\ndef _publisher_payload_tasks", 1
+        )[0]
+        self.assertIn("load_only(*TASK_PUBLISHER_MATCH_COLUMNS)", finder)
+        self.assertIn("PublicationTask.publisher_child_role == role", finder)
+        self.assertIn("PublicationTask.source_task_id == parent_id", finder)
+        self.assertNotIn("PublicationTask.parent_task_id == parent_id", finder)
+        self.assertNotIn("load_only(*TASK_PUBLIC_COLUMNS)", finder)
+
+        process_job = service_text.split("def process_job(task_id: str) -> bool:", 1)[1].split(
+            "\ndef _generate_gemini_with_retries", 1
+        )[0]
+        after_start = process_job.split("_start_task(task)", 1)[1]
+        self.assertIsNone(re.search(r"(?<![A-Za-z0-9_])task\.id\b", after_start))
+
+        self.assertNotIn("load_json_fallback_rows", api_text)
+        bilibili_children = api_text.split("def _bilibili_upload_children(", 1)[1].split(
+            "\ndef _bilibili_upload_child_payload", 1
+        )[0]
+        candidate_query = bilibili_children.split("for (child_id,) in child_ids:", 1)[0]
+        self.assertIn("db.session.query(PublicationTask.id)", candidate_query)
+        self.assertNotIn("PublicationTask.params", candidate_query)
+        self.assertNotIn("PublicationTask.result", candidate_query)
+
+    def test_material_child_wait_throttles_parent_status_polling(self):
+        path = BACKEND_DIR / "tasks" / "report_script_material_workflow.py"
+        text = path.read_text(encoding="utf-8")
+        wait_body = text.split("def _wait_child(", 1)[1].split("\ndef _complete_material_task", 1)[0]
+
+        self.assertIn("REPORT_SCRIPT_MATERIAL_PARENT_POLL_SECONDS", wait_body)
+        self.assertIn("if now >= next_parent_check:", wait_body)
+        self.assertIn("next_parent_check = now + parent_poll_seconds", wait_body)
 
     def test_mp3_bilibili_poll_does_not_load_parent_json(self):
         api_path = BACKEND_DIR / "api" / "mp3_video_workflow.py"

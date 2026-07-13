@@ -161,6 +161,52 @@ class TaskProjectionModelTest(unittest.TestCase):
         self.assertEqual(task.doubao_tts_chunk_index, 2)
         self.assertIsNone(task.publisher_render_mode)
 
+    def test_mp3_audio_summary_projection_preserves_list_fields(self):
+        task = PublicationTask(
+            params={
+                "feature": "mp3_video_workflow",
+                "source_task_id": "audio-1",
+                "mp3_video_workflow": {
+                    "audio": {
+                        "filename": "memo.mp3",
+                        "topic_title": "调研纪要",
+                        "tab_label": "调研纪要 MP3",
+                        "path": "/tmp/memo.mp3",
+                        "download_count": "23",
+                        "duration_seconds": "125.5",
+                    },
+                },
+            },
+            result={},
+        )
+
+        self.assertEqual(task.mp3_audio_filename, "memo.mp3")
+        self.assertEqual(task.mp3_audio_topic_title, "调研纪要")
+        self.assertEqual(task.mp3_audio_tab_label, "调研纪要 MP3")
+        self.assertEqual(task.mp3_audio_path, "/tmp/memo.mp3")
+        self.assertEqual(task.mp3_audio_download_count, 23)
+        self.assertEqual(task.mp3_audio_duration_seconds, 125.5)
+
+    def test_publisher_mp3_match_projection_preserves_reuse_contract(self):
+        task = PublicationTask(
+            params={
+                "feature": "publisher",
+                "aspect_ratio": "9:16",
+                "generate_subtitles": False,
+                "metadata": {
+                    "role": "ciketc_vertical",
+                    "audio_signature": "sig-1",
+                },
+                "video": {"enabled": True},
+            },
+            result={},
+        )
+
+        self.assertEqual(task.publisher_child_role, "ciketc_vertical")
+        self.assertEqual(task.publisher_aspect_ratio, "9:16")
+        self.assertFalse(task.publisher_generate_subtitles)
+        self.assertEqual(task.publisher_audio_signature, "sig-1")
+
     def test_zsxq_attachment_file_ext_projection(self):
         attachment = ZsxqAttachment(
             group_id="g",

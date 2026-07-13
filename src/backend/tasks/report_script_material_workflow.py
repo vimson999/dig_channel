@@ -527,12 +527,17 @@ def _active_gemini_task(parent_id: str, result: Dict[str, Any]) -> Optional[Publ
 def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: int, end_progress: int):
     timeout = _child_inline_wait_seconds()
     poll_seconds = max(1, _int_env("REPORT_SCRIPT_MATERIAL_CHILD_POLL_SECONDS", 3))
+    parent_poll_seconds = max(3, _int_env("REPORT_SCRIPT_MATERIAL_PARENT_POLL_SECONDS", 15))
     deadline = time.monotonic() + timeout
+    next_parent_check = 0.0
     last_step = None
     while True:
-        parent = _load_task(parent_id, PublicationTask.status)
-        if not parent or parent.status == "canceled":
-            raise RuntimeError("父编排任务已取消")
+        now = time.monotonic()
+        if now >= next_parent_check:
+            parent = _load_task(parent_id, PublicationTask.status)
+            if not parent or parent.status == "canceled":
+                raise RuntimeError("父编排任务已取消")
+            next_parent_check = now + parent_poll_seconds
         child = _task_snapshot(_load_task(child_id, *TASK_CHILD_POLL_COLUMNS), include_payload=False)
         if not child:
             raise RuntimeError(f"子任务不存在: {child_id}")
@@ -1146,6 +1151,14 @@ def _is_retryable_normalizer_error(message: str) -> bool:
 
 def _plain_text(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or ""))
+
+
+def _min_gemini_final_chars() -> int:
+    """Keep Gemini cache eligibility aligned with report-audio workflow."""
+    return max(0, _int_env(
+        "REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS",
+        _int_env("REPORT_PDF_GEMINI_MIN_RESPONSE_CHARS", 120),
+    ))
 
 
 def _min_final_chars() -> int:
