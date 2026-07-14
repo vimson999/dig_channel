@@ -29,6 +29,30 @@ class FakeCeleryTask:
 
 
 class ZsxqSyncTaskRetryTest(unittest.TestCase):
+    def test_terminal_duplicate_delivery_is_ignored(self):
+        persisted_run = SimpleNamespace(status="completed")
+
+        with patch.object(zsxq_sync.db.session, "get", return_value=persisted_run):
+            result = zsxq_sync._terminal_delivery_result("run-1", task_id="task-1")
+
+        self.assertEqual(
+            result,
+            {
+                "skipped": True,
+                "reason": "duplicate_terminal_delivery",
+                "run_id": "run-1",
+                "status": "completed",
+            },
+        )
+
+    def test_non_terminal_delivery_continues(self):
+        persisted_run = SimpleNamespace(status="running")
+
+        with patch.object(zsxq_sync.db.session, "get", return_value=persisted_run):
+            result = zsxq_sync._terminal_delivery_result("run-1", task_id="task-1")
+
+        self.assertIsNone(result)
+
     def test_server_closed_connection_is_retryable(self):
         exc = Exception("server closed the connection unexpectedly before or while processing the request")
 

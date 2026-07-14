@@ -32,6 +32,10 @@ def run_zsxq_sync(self, run_id, payload):
 
     app = create_app()
     with app.app_context():
+        terminal_delivery = _terminal_delivery_result(run_id, task_id=self.request.id)
+        if terminal_delivery:
+            return terminal_delivery
+
         workflow_run_id = payload.get("workflow_run_id")
         credential_id = payload.get("credential_id") or payload.get("platform_credential_id")
         logger.info("[ZSXQ_SYNC_TASK] start | run_id=%s", run_id)
@@ -193,6 +197,26 @@ def run_zsxq_sync(self, run_id, payload):
 
 def _is_retryable_db_error(exc):
     return is_retryable_db_error(exc)
+
+
+def _terminal_delivery_result(run_id, task_id=None):
+    from models.zsxq_sync import ZsxqSyncRun
+
+    persisted_run = db.session.get(ZsxqSyncRun, run_id)
+    if not persisted_run or persisted_run.status not in {"completed", "failed"}:
+        return None
+    logger.warning(
+        "[ZSXQ_SYNC_TASK] duplicate terminal delivery ignored | run_id=%s status=%s task_id=%s",
+        run_id,
+        persisted_run.status,
+        task_id,
+    )
+    return {
+        "skipped": True,
+        "reason": "duplicate_terminal_delivery",
+        "run_id": run_id,
+        "status": persisted_run.status,
+    }
 
 
 def _is_retryable_upstream_error(exc):
