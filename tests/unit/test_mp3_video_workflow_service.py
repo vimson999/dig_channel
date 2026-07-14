@@ -514,6 +514,15 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
 
         self.assertEqual(extract_audio_range(response), (156.52, 2201.04))
 
+    def test_audio_range_extracts_bracketed_inline_timestamp_range(self):
+        response = """
+        4. 音频最精华片段
+        精华片段时间戳： [00:00:10] 到 [00:25:06.500]
+        该片段是整场电话会的核心部分。
+        """
+
+        self.assertEqual(extract_audio_range(response), (10.0, 1506.5))
+
     def test_fallback_plan_extracts_flattened_gemini_version_titles(self):
         response = (
             "1. 长标题（投资者视角，高信息密度） "

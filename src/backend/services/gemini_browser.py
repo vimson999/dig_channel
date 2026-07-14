@@ -21,7 +21,7 @@ FEATURE_NAME = "report_pdf_gemini"
 QUEUE_NAME = "report_pdf_gemini"
 LEGACY_FEATURE_NAME = "gemini_browser"
 LEGACY_QUEUE_NAME = "gemini_browser"
-DEFAULT_GEMINI_URL = "https://gemini.google.com/gem/099a92ae7888"
+DEFAULT_GEMINI_URL = "https://gemini.google.com/gem/980ba0a0ff22"
 _ACTIVE_PROFILE_LOCKS: Dict[str, Dict[str, Any]] = {}
 
 

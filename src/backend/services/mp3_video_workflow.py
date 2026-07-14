@@ -3616,7 +3616,8 @@ def extract_audio_range(text: str) -> Optional[Tuple[float, float]]:
     normalized = str(text or "").replace("：", ":").replace("–", "-").replace("—", "-")
     token = r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
     range_re = re.compile(
-        rf"(?P<start>{token})\s*(?:-|~|～|至|到)\s*(?P<end>{token})"
+        rf"[\[【(（]?\s*(?P<start>{token})\s*[\]】)）]?\s*"
+        rf"(?:-|~|～|至|到)\s*[\[【(（]?\s*(?P<end>{token})\s*[\]】)）]?"
     )
     for match in range_re.finditer(normalized):
         context = normalized[max(0, match.start() - 80): min(len(normalized), match.end() + 80)]

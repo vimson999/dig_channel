@@ -59,7 +59,7 @@ if [ -z "$CHROME_PATH" ]; then
 fi
 
 if [ -z "$GEMINI_URL" ]; then
-    GEMINI_URL="https://gemini.google.com/gem/099a92ae7888"
+    GEMINI_URL="https://gemini.google.com/gem/980ba0a0ff22"
 fi
 
 if [ ! -x "$CHROME_PATH" ]; then

@@ -20,7 +20,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 
-DEFAULT_URL = "https://gemini.google.com/gem/099a92ae7888"
+DEFAULT_URL = "https://gemini.google.com/gem/980ba0a0ff22"
 
 
 def project_root() -> Path:
