@@ -794,6 +794,8 @@ def _pending_system_sync_work(group_id):
         )
         pending_workflow = None
 
+    _recover_stale_sync_runs(group_id)
+
     try:
         pending_run = (
             ZsxqSyncRun.query
@@ -822,6 +824,18 @@ def _pending_system_sync_work(group_id):
         "run_status": pending_run.status if pending_run else None,
         "run_updated_at": pending_run.updated_at.isoformat() if pending_run and pending_run.updated_at else None,
     }
+
+
+def _recover_stale_sync_runs(group_id):
+    try:
+        zsxq_sync_service._mark_stale_runs_failed(group_id=group_id)
+    except Exception as exc:
+        _reset_db_session("stale_sync_run_recovery")
+        logger.warning(
+            "[ZSXQ_SYSTEM_SYNC_TEST] stale sync run recovery failed, session reset | group_id=%s error=%s",
+            group_id,
+            exc,
+        )
 
 
 def _resolve_valid_sync_cookie(config, *, group_id, max_retries, delay_seconds):
