@@ -9,6 +9,8 @@ import datetime
 import subprocess
 import copy
 import re
+import shlex
+import imageio_ffmpeg
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,11 @@ class VideoEditorService:
         
         os.makedirs(self.upload_folder, exist_ok=True)
         os.makedirs(self.output_folder, exist_ok=True)
+
+    def _ffmpeg_executable(self):
+        """Use MoviePy's bundled FFmpeg, which includes the ASS subtitle filter."""
+        configured = str(os.environ.get('VIDEO_EDITOR_FFMPEG_BINARY') or '').strip()
+        return configured or imageio_ffmpeg.get_ffmpeg_exe()
 
     def _find_font_path(self):
         candidates = [
@@ -486,7 +493,8 @@ class VideoEditorService:
                 cta_idx = len(inputs) - 1
                 vf_chain += f" [bg]; [{cta_idx}:v] format=rgba [cta]; [bg][cta] overlay={cta_pos[0]}:{cta_pos[1]}"
 
-            cmd = f"ffmpeg -y " + " ".join(inputs) + f" -filter_complex \"{vf_chain}\" -aspect {aspect_ratio} {res_flag} -c:v {self.video_codec} -b:v {v_bitrate} -c:a aac -shortest \"{output_path}\""
+            ffmpeg_executable = shlex.quote(self._ffmpeg_executable())
+            cmd = f"{ffmpeg_executable} -y " + " ".join(inputs) + f" -filter_complex \"{vf_chain}\" -aspect {aspect_ratio} {res_flag} -c:v {self.video_codec} -b:v {v_bitrate} -c:a aac -shortest \"{output_path}\""
             
             logger.info(f"🎬 [FFMPEG_EXEC] Mode: {'Vertical' if is_vertical else 'Horizontal'} | Aspect: {aspect_ratio} | Res: {target_w}x{target_h}")
             logger.info(f"🎬 [FFMPEG_EXEC] Command: {cmd}")
@@ -506,9 +514,12 @@ class VideoEditorService:
 
         except Exception as e:
             logger.error(f"❌ [FFMPEG_DIRECT] Synthesis failed: {e}")
+            detail = ""
             if hasattr(e, 'stderr') and e.stderr:
-                logger.error(f"FFmpeg Stderr: {e.stderr.decode()}")
-            return None
+                detail = e.stderr.decode(errors='ignore').strip()
+                logger.error(f"FFmpeg Stderr: {detail}")
+            summary = detail.splitlines()[-1] if detail else str(e)
+            raise RuntimeError(f"FFmpeg 视频合成失败: {summary}") from e
         finally:
             if sub_path and os.path.exists(sub_path): os.remove(sub_path)
 

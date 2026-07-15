@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from PIL import Image
@@ -15,6 +16,19 @@ from services.video_editor import VideoEditorService  # noqa: E402
 
 
 class VerticalVideoLayoutTest(unittest.TestCase):
+    def test_video_editor_uses_bundled_ffmpeg_with_ass_filter(self):
+        service = VideoEditorService()
+
+        executable = service._ffmpeg_executable()
+
+        self.assertIn("imageio_ffmpeg", executable)
+
+    def test_video_editor_ffmpeg_override_takes_precedence(self):
+        service = VideoEditorService()
+
+        with patch.dict("os.environ", {"VIDEO_EDITOR_FFMPEG_BINARY": "/custom/ffmpeg"}):
+            self.assertEqual(service._ffmpeg_executable(), "/custom/ffmpeg")
+
     def test_vertical_subtitle_default_uses_lower_safe_area(self):
         service = VideoEditorService()
 
