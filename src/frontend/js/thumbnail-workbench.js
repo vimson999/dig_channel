@@ -917,7 +917,7 @@ function initThumbnailWorkbench() {
             ctx.fillText(instText + " · 研报解构", margin + labelGap, labelY + Math.round(labelBarH * 0.8));
             ctx.fillStyle = colors.main;
             ctx.shadowColor = colors.glow; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
-            const titleResult = drawFittedWrappedText(ctx, mainText, margin, isBiliWxCover ? Math.round(h * 0.65) : 870, maxW, {
+            const titleResult = drawFittedWrappedText(ctx, mainText, margin, isBiliWxCover ? Math.round(h * 0.67) : 870, maxW, {
                 maxLines: Number(workflowRenderOptions.titleMaxLines || 2),
                 startSize: Number(workflowRenderOptions.titleStartSize || (isBiliWxCover ? 68 : 110)),
                 minSize: Number(workflowRenderOptions.titleMinSize || (isBiliWxCover ? 44 : 72)),
