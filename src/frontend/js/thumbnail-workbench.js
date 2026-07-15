@@ -597,7 +597,7 @@ function initThumbnailWorkbench() {
                     drawY = (anchorTopLeft ? 0 : 0 - (sDh - targetHeight) / 2) + imgOffsetY;
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 }
-                const mask = ctx.createLinearGradient(0, Math.round(targetHeight * (isBiliWxCover ? 0.40 : 0.33)), 0, targetHeight);
+                const mask = ctx.createLinearGradient(0, Math.round(targetHeight * (isBiliWxCover ? 0.46 : 0.33)), 0, targetHeight);
                 mask.addColorStop(0, 'rgba(10, 17, 40, 0)');
                 mask.addColorStop(0.7, 'rgba(10, 17, 40, 0.9)');
                 mask.addColorStop(1, '#0a1128');
