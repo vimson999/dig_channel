@@ -20,6 +20,7 @@ from services.content_pipeline.auto_publish_handoff import (
 from services.workflow_notification_service import workflow_notification_service
 from services.runtime_guard import is_retryable_db_error, release_db_session_quietly
 from services.zsxq_sync_service import zsxq_sync_service
+from services.zsxq_system_sync_test import SYSTEM_SYNC_GROUP_ID, SYSTEM_SYNC_GROUP_NAME
 
 
 logger = logging.getLogger(__name__)
@@ -1027,6 +1028,11 @@ class ZsxqWorkflowService:
         group_id = str(config.get("group_id") or "").strip()
         if not group_id:
             raise ValueError("group_id 不能为空")
+        if group_id != SYSTEM_SYNC_GROUP_ID:
+            raise ValueError(
+                f"人工计划仅支持“{SYSTEM_SYNC_GROUP_NAME}”"
+                f"（Group ID: {SYSTEM_SYNC_GROUP_ID}）"
+            )
         credential_id = config.get("credential_id") or config.get("_credential_id") or None
 
         raw_items = config.get("attachments") or config.get("items") or []

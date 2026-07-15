@@ -68,14 +68,14 @@ TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
 HOT_AUDIO_DOWNLOAD_THRESHOLD = 20
-PLANNER_VERSION = "mp3_video_planner_20260706_v10"
+PLANNER_VERSION = "mp3_video_planner_20260715_v11"
 VISUAL_ARTIFACT_KEYS = (
     "finance_cover",
     "audio_background",
     "xiaojunjun_cover",
     "xiaojunjun_background",
 )
-VISUAL_ARTIFACT_VERSION = "mp3_video_visuals_20260708_v10"
+VISUAL_ARTIFACT_VERSION = "mp3_video_visuals_20260715_v11"
 KEYFRAME_ARTIFACT_VERSION = "mp3_video_keyframes_20260706_v6"
 TRANSCRIPT_DEEPSEEK_CACHE_VERSION = "mp3_transcript_deepseek_cache_20260706_v1"
 VISUAL_ARTIFACT_EXPECTED_SIZES = {
@@ -585,9 +585,7 @@ def process_job(task_id: str) -> bool:
                     output_path=direct_result_path,
                 )
                 first_response = gemini_result.get("initial_response_text") or gemini_result.get("response_text") or ""
-                draw_transcript_infographic(image_path, first_response, audio=audio)
-                infographic = _artifact_meta(image_path, "DS 文本信息图", renderer="pil:direct-ds-infographic")
-                gemini_result["image"] = infographic
+                infographic = {"path": image_path, "label": "DS 文本信息图"}
                 _update_result(task_key, {
                     "input_source": "ds_response",
                     "source": _public_text_source_result(gemini_result),
@@ -609,8 +607,8 @@ def process_job(task_id: str) -> bool:
                     "infographic": _public_artifact(infographic, "DS 文本信息图"),
                 })
             else:
-                _queue_notification(task_key, "mp3_video_gemini_started", "使用 IMA 全文调用 DS v4 pro")
-                _emit(task_key, "transcript_deepseek", 18, "使用 IMA 全文调用 DS v4 pro")
+                _queue_notification(task_key, "mp3_video_gemini_started", "使用 IMA 全文调用 DS v4 flash")
+                _emit(task_key, "transcript_deepseek", 18, "使用 IMA 全文调用 DS v4 flash")
                 gemini_result = _generate_from_transcript(
                     task_id=task_key,
                     workflow=workflow,
@@ -618,9 +616,7 @@ def process_job(task_id: str) -> bool:
                     output_path=transcript_result_path,
                 )
                 first_response = gemini_result.get("initial_response_text") or gemini_result.get("response_text") or ""
-                draw_transcript_infographic(image_path, first_response, audio=audio)
-                infographic = _artifact_meta(image_path, "DS 文本信息图", renderer="pil:transcript-infographic")
-                gemini_result["image"] = infographic
+                infographic = {"path": image_path, "label": "DS 文本信息图"}
                 _update_result(task_key, {
                     "input_source": "ima_transcript",
                     "source": _public_text_source_result(gemini_result),
@@ -662,12 +658,12 @@ def process_job(task_id: str) -> bool:
         plan = _reusable_plan(existing)
         if plan:
             audio = existing.get("audio") if isinstance(existing.get("audio"), dict) else audio
-            _emit(task_key, "deepseek_plan_reused", 58, "复用已完成的 DS v4 pro 标题和音频时间戳规划")
+            _emit(task_key, "deepseek_plan_reused", 58, "复用已完成的 DS v4 flash 标题和音频时间戳规划")
         else:
             if _workflow_uses_direct_ds_response(workflow):
                 _emit(task_key, "direct_ds_plan", 58, "本地解析 DS 返回值中的标题和音频时间戳")
             else:
-                _emit(task_key, "deepseek_plan", 58, "DS v4 pro 选择标题和音频时间戳")
+                _emit(task_key, "deepseek_plan", 58, "DS v4 flash 选择标题和音频时间戳")
             duration = float(audio.get("duration_seconds") or 0) or probe_media_duration(str(audio_path))
             audio["duration_seconds"] = duration
             if _workflow_uses_direct_ds_response(workflow):
@@ -682,12 +678,25 @@ def process_job(task_id: str) -> bool:
                 plan,
                 source_label="手动 DS 返回值" if _workflow_uses_direct_ds_response(workflow) else "IMA 全文 DS 返回值",
             )
+            draw_transcript_infographic(image_path, first_response, audio=audio, plan=plan)
+            infographic = _artifact_meta(
+                image_path,
+                "DS 金句观点信息图",
+                renderer=(
+                    "pil:direct-ds-structured-infographic"
+                    if _workflow_uses_direct_ds_response(workflow)
+                    else "pil:transcript-structured-infographic"
+                ),
+            )
+            _update_result(task_key, {
+                "infographic": _public_artifact(infographic, "DS 金句观点信息图"),
+            })
         _queue_notification(
             task_key,
             "mp3_video_plan_completed",
             "已从手动 DS 返回值解析标题、封面文案和音频时间戳规划"
             if _workflow_uses_direct_ds_response(workflow)
-            else "DS v4 pro 已完成标题、封面文案和音频时间戳规划",
+            else "DS v4 flash 已完成标题、封面文案和音频时间戳规划",
         )
         _raise_if_parent_canceled(task_key)
 
@@ -1123,14 +1132,14 @@ def _generate_from_transcript(
             _write_transcript_deepseek_cache(cache_key, cache_meta, response_text, source="previous_task")
             _emit(task_id, "transcript_deepseek_cache_seeded", 54, "复用近期同音频 IMA 全文 DS 结果，跳过重复调用")
         else:
-            _emit(task_id, "transcript_deepseek_request", 26, "DS v4 pro 正在处理 IMA 转录全文")
+            _emit(task_id, "transcript_deepseek_request", 26, "DS v4 flash 正在处理 IMA 转录全文")
             response_text = deepseek_transcript_response(transcript_text, prompt=prompt, audio=audio)
             _write_transcript_deepseek_cache(cache_key, cache_meta, response_text, source="deepseek")
     else:
-        _emit(task_id, "transcript_deepseek_request", 26, "DS v4 pro 正在处理 IMA 转录全文")
+        _emit(task_id, "transcript_deepseek_request", 26, "DS v4 flash 正在处理 IMA 转录全文")
         response_text = deepseek_transcript_response(transcript_text, prompt=prompt, audio=audio)
     if not response_text:
-        raise Mp3VideoWorkflowError("DS v4 pro 未返回可用文本")
+        raise Mp3VideoWorkflowError("DS v4 flash 未返回可用文本")
 
     result = {
         "provider": "deepseek",
@@ -1811,12 +1820,15 @@ def deepseek_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
         "- xiaojunjun_subtitle: 小君君横屏封皮/背景黄色高亮条文案，2-3 行，每行不超过 18 个中文字符，只基于原文事实",
         "- xiaojunjun_video_title: 小君君横屏视频合成传入标题，必须优先使用原文第 6 条斜杠版完整标题，保留“内资闭门会 / ... / 日期”的完整格式，不要裁剪",
         "- ciketc_video_title: 此刻此声视频合成传入标题，必须优先使用原文第 7 条竖线版完整标题，保留“内资闭门会 | ... | 日期”的完整格式，不要裁剪",
+        "- infographic_title: 信息墙主题标题，8-18 字，必须是具体投资主题或判断，不能是流程说明",
+        "- infographic_subtitle: 信息墙核心结论，16-36 字，优先选择最有信息差的观点",
+        "- infographic_points: 严格包含 3 个字符串的数组；优先使用原文第 5 条金句，其次使用第 4 条核心逻辑；每条必须是可独立阅读的金句、事实或投资判断，不能出现寒暄、角色介绍、任务说明、栏目标题或时间戳",
         "小君君文案规则：xiaojunjun_subtitle 必须是小君君横屏版本，不能照抄 cover_title、cover_subtitle 或 finance_cover_subtitle；"
         "它应该更完整地保留闭门会标题的信息密度和投资逻辑，而不是此刻此声竖屏那种短促标题。",
         "- date_text: 日期，格式 YYYY.M.D",
         "- emotion: pro/macro/bull/bear 之一",
         "- audio: 对象，包含 start_seconds、end_seconds、speed。speed 必须是 1.2；start/end 要按第一轮返回中最适合成片的内容段落判断，如果没有明确范围则 start_seconds=0、end_seconds=null。",
-        "禁止把 DS v4 pro、IMA、Gemini、转录全文、Generated from transcript、推荐截取、源文件、最精华音频片段等流程说明写入任何封面字段。",
+        "禁止把 DS v4 flash、IMA、Gemini、转录全文、Generated from transcript、推荐截取、源文件、最精华音频片段等流程说明写入任何封面字段。",
         "",
         f"音频文件名：{audio.get('filename') or audio.get('name') or ''}",
         f"音频总时长秒：{duration:.3f}" if duration else "音频总时长秒：未知",
@@ -1859,6 +1871,11 @@ def fallback_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
     role_video_titles = extract_closed_door_video_titles(first_response)
     duration = float(audio.get("duration_seconds") or 0)
     audio_range = extract_audio_range(first_response)
+    infographic_copy = _infographic_copy_from_source(
+        first_response,
+        fallback_title=title,
+        fallback_subtitle=subtitle,
+    )
     audio_plan = {"start_seconds": 0, "end_seconds": None if duration else None, "speed": DEFAULT_SPEED}
     if audio_range:
         audio_plan["start_seconds"] = round(audio_range[0], 3)
@@ -1875,6 +1892,7 @@ def fallback_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
         "xiaojunjun_subtitle": _xiaojunjun_cover_subtitle(title, fallback=subtitle),
         "xiaojunjun_video_title": role_video_titles.get("xiaojunjun_video_title") or _format_closed_door_video_title(title, separator="/"),
         "ciketc_video_title": role_video_titles.get("ciketc_video_title") or _format_closed_door_video_title(title, separator="|"),
+        **infographic_copy,
         "date_text": datetime.now().strftime("%Y.%m.%d"),
         "emotion": "bull",
         "audio": audio_plan,
@@ -1938,9 +1956,9 @@ def validate_plan(payload: Dict[str, Any], *, fallback: Dict[str, Any], audio: D
         or _format_closed_door_video_title(title, separator="|", date_text=payload.get("date_text") or fallback.get("date_text"))
     )
     finance_cover_subtitle = (
-        _closed_door_visual_lines(ciketc_video_title, max_units=14, max_lines=3)
-        or _format_planner_finance_cover_subtitle(payload.get("finance_cover_subtitle"))
+        _format_planner_finance_cover_subtitle(payload.get("finance_cover_subtitle"))
         or _format_planner_finance_cover_subtitle(fallback.get("finance_cover_subtitle"))
+        or _closed_door_visual_lines(ciketc_video_title, max_units=14, max_lines=3)
         or _finance_cover_title(finance_title)
     )
     xiaojunjun_disallowed = [planner_cover_title, planner_cover_subtitle, finance_cover_subtitle]
@@ -1949,6 +1967,24 @@ def validate_plan(payload: Dict[str, Any], *, fallback: Dict[str, Any], audio: D
         or _format_planner_xiaojunjun_subtitle(payload.get("xiaojunjun_subtitle"), disallow=xiaojunjun_disallowed)
         or _format_planner_xiaojunjun_subtitle(fallback.get("xiaojunjun_subtitle"), disallow=xiaojunjun_disallowed)
         or _xiaojunjun_cover_subtitle(finance_title or title, fallback=subtitle)
+    )
+    infographic_title = _clean_infographic_copy(
+        payload.get("infographic_title") or fallback.get("infographic_title"),
+        max_chars=36,
+    ) or _clean_infographic_copy(title, max_chars=36)
+    infographic_subtitle = _clean_infographic_copy(
+        payload.get("infographic_subtitle") or fallback.get("infographic_subtitle"),
+        max_chars=68,
+    ) or _clean_infographic_copy(subtitle, max_chars=68)
+    infographic_points = _normalize_infographic_points(payload.get("infographic_points"))
+    if len(infographic_points) < 3:
+        infographic_points = _merge_infographic_points(
+            infographic_points,
+            _normalize_infographic_points(fallback.get("infographic_points")),
+        )
+    infographic_points = _exclude_infographic_copy(
+        infographic_points,
+        [infographic_title, infographic_subtitle],
     )
     return {
         "title": title,
@@ -1962,6 +1998,9 @@ def validate_plan(payload: Dict[str, Any], *, fallback: Dict[str, Any], audio: D
         "xiaojunjun_subtitle": xiaojunjun_subtitle,
         "xiaojunjun_video_title": _clip_text(xiaojunjun_video_title, 180),
         "ciketc_video_title": _clip_text(ciketc_video_title, 180),
+        "infographic_title": infographic_title,
+        "infographic_subtitle": infographic_subtitle,
+        "infographic_points": infographic_points[:3],
         "date_text": _clip_text(payload.get("date_text") or fallback.get("date_text"), 20),
         "emotion": payload.get("emotion") if payload.get("emotion") in {"pro", "macro", "bull", "bear"} else fallback.get("emotion", "bull"),
         "audio": {"start_seconds": round(start, 3), "end_seconds": round(end, 3) if end is not None else None, "speed": DEFAULT_SPEED},
@@ -2051,6 +2090,8 @@ def regenerate_visual_artifact(
     plan: Dict[str, Any],
     title_text: Any,
     infographic_path: Optional[str] = None,
+    source_text: str = "",
+    audio: Optional[Dict[str, Any]] = None,
     created_at: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Regenerate one visual artifact with manually supplied title copy."""
@@ -2063,6 +2104,26 @@ def regenerate_visual_artifact(
         raise Mp3VideoWorkflowError("请输入 1-3 行标题文案")
 
     render_plan = _visual_artifact_plan_with_manual_title(plan, key, lines)
+    structured_infographic = None
+    if key == "audio_background" and _clean_line(source_text):
+        structured_infographic_path = artifact_path_for_job(
+            job_id,
+            f"structured_infographic_manual_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
+            "png",
+            created_at,
+        )
+        draw_transcript_infographic(
+            structured_infographic_path,
+            source_text,
+            audio=audio if isinstance(audio, dict) else {},
+            plan=plan,
+        )
+        structured_infographic = _artifact_meta(
+            structured_infographic_path,
+            "DS 金句观点信息图",
+            renderer="pil:manual-structured-infographic",
+        )
+        infographic_path = structured_infographic_path
     output_path = artifact_path_for_job(
         job_id,
         f"{key}_manual_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
@@ -2103,6 +2164,8 @@ def regenerate_visual_artifact(
             )
 
     artifact = _artifact_meta(output_path, VISUAL_ARTIFACT_LABELS[key], renderer=VISUAL_ARTIFACT_RENDERERS[key])
+    if structured_infographic:
+        artifact["source_infographic"] = structured_infographic
     artifact["manual_regenerated_at"] = datetime.utcnow().isoformat() + "Z"
     artifact["manual_title_text"] = "\n".join(lines)
     artifact["manual_title_lines"] = lines
@@ -2474,10 +2537,13 @@ def _finance_cover_highlight_text(plan: Dict[str, Any]) -> str:
     manual = plan.get("manual_finance_cover_subtitle")
     if manual:
         return _finance_cover_copy_lines(manual)
+    value = plan.get("finance_cover_subtitle")
+    if value:
+        return _finance_cover_copy_lines(value)
     closed_visual = _closed_door_visual_lines(plan.get("ciketc_video_title"), max_units=14, max_lines=3)
     if closed_visual:
         return closed_visual
-    value = plan.get("finance_cover_subtitle") or plan.get("cover_subtitle") or plan.get("subtitle") or plan.get("title")
+    value = plan.get("cover_subtitle") or plan.get("subtitle") or plan.get("title")
     return _finance_cover_copy_lines(value)
 
 
@@ -3280,7 +3346,13 @@ def draw_audio_background(output_path: str, plan: Dict[str, Any], infographic_pa
     return output_path
 
 
-def draw_transcript_infographic(output_path: str, source_text: str, *, audio: Dict[str, Any]) -> str:
+def draw_transcript_infographic(
+    output_path: str,
+    source_text: str,
+    *,
+    audio: Dict[str, Any],
+    plan: Optional[Dict[str, Any]] = None,
+) -> str:
     w, h = 1280, 720
     img = Image.new("RGB", (w, h), "#f8fafc")
     draw = ImageDraw.Draw(img)
@@ -3296,16 +3368,29 @@ def draw_transcript_infographic(output_path: str, source_text: str, *, audio: Di
     draw.rounded_rectangle([margin, 54, w - margin, h - 54], radius=28, fill=(255, 255, 255), outline=(203, 213, 225), width=2)
     draw.rectangle([margin, 54, margin + 12, h - 54], fill=accent)
 
-    title = extract_title_candidates(source_text)
-    title_text = title[0] if title else _clip_text(_clean_line(source_text), 44) or (audio.get("filename") or "音频编排结果")
+    plan = plan if isinstance(plan, dict) else {}
+    fallback_copy = _infographic_copy_from_source(
+        source_text,
+        fallback_title=(audio.get("filename") or "音频编排结果"),
+    )
+    title_text = (
+        _clean_infographic_copy(plan.get("infographic_title"), max_chars=44)
+        or fallback_copy.get("infographic_title")
+        or "核心投资观点"
+    )
     _draw_wrapped_text(draw, title_text, margin + 40, 100, w - margin * 2 - 96, title_font, fill=(15, 23, 42), line_height=62, max_lines=2)
 
-    subtitle = extract_subtitle(source_text)
+    subtitle = (
+        _clean_infographic_copy(plan.get("infographic_subtitle"), max_chars=72)
+        or fallback_copy.get("infographic_subtitle")
+    )
     y = 250
     if subtitle:
         y = _draw_wrapped_text(draw, subtitle, margin + 40, y, w - margin * 2 - 96, body_font, fill=(51, 65, 85), line_height=42, max_lines=2) + 24
 
-    bullets = _infographic_bullets(source_text)
+    bullets = _normalize_infographic_points(plan.get("infographic_points"))
+    if len(bullets) < 3:
+        bullets = _merge_infographic_points(bullets, fallback_copy.get("infographic_points") or [])
     for index, bullet in enumerate(bullets[:3], start=1):
         top = y + (index - 1) * 76
         draw.rounded_rectangle([margin + 40, top + 5, margin + 78, top + 43], radius=19, fill=(220, 252, 231))
@@ -3370,7 +3455,7 @@ def draw_closed_door_cover(output_path: str, plan: Dict[str, Any], *, include_da
 
 
 def planner_model() -> str:
-    return os.environ.get("MP3_VIDEO_PLANNER_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "deepseek-v4-pro"
+    return os.environ.get("MP3_VIDEO_PLANNER_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "deepseek-v4-flash"
 
 
 def transcript_model() -> str:
@@ -3805,11 +3890,11 @@ def _reusable_text_source_result(result: Dict[str, Any], *, fallback_image_path:
     infographic = result.get("infographic") if isinstance(result.get("infographic"), dict) else {}
     source_image = source.get("image") if isinstance(source.get("image"), dict) else {}
     image_path = infographic.get("path") or source_image.get("path") or fallback_image_path
-    if not first_response or not _path_ready(image_path):
+    if not first_response:
         return None, "", {}
 
     if not infographic:
-        infographic = _public_artifact(image_path, "DS 文本信息图")
+        infographic = {"path": image_path, "label": "DS 文本信息图"}
     reusable = {
         **source,
         "initial_response_text": first_response,
@@ -4147,10 +4232,15 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
         time.sleep(poll_seconds)
         db.session.expire_all()
     child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
-    if child and child.status not in TERMINAL_STATUSES:
-        _record_child(parent_id, label, child)
-        raise ChildTaskStillRunning(label, child.id, child.status or "", child.current_step or "")
-    raise RuntimeError(f"等待子任务超时: {label} {child_id}")
+    if not child:
+        raise RuntimeError(f"子任务不存在: {child_id}")
+    # The child can reach a terminal state between the final loop poll and this
+    # deadline read. Treat that as a normal terminal result, not as a timeout.
+    if child.status in TERMINAL_STATUSES:
+        _clear_waiting_child(parent_id, label)
+        return child
+    _record_child(parent_id, label, child)
+    raise ChildTaskStillRunning(label, child.id, child.status or "", child.current_step or "")
 
 
 def _raise_if_parent_canceled(parent_id: str) -> None:
@@ -4612,12 +4702,12 @@ def _notification_stages(
     elif source.get("input_source") == "ima_transcript":
         source_name = "IMA 全文 DS 处理/信息图"
         source_step = "transcript_deepseek"
-        plan_name = "DS v4 pro 标题与时间戳规划"
+        plan_name = "DS v4 flash 标题与时间戳规划"
         plan_step = "deepseek_plan"
     else:
         source_name = "Gemini Gem 解析/信息图"
         source_step = "gemini"
-        plan_name = "DS v4 pro 标题与时间戳规划"
+        plan_name = "DS v4 flash 标题与时间戳规划"
         plan_step = "deepseek_plan"
     return [
         {
@@ -5296,24 +5386,105 @@ def _draw_date_pill(draw: ImageDraw.ImageDraw, center_x: int, y: int, text: str,
 
 
 def _infographic_bullets(text: str) -> List[str]:
+    sections = _direct_ds_numbered_sections(text)
+    preferred_sections = [sections.get("5", ""), sections.get("4", "")]
     candidates: List[str] = []
-    for raw in str(text or "").replace("\r", "\n").split("\n"):
-        clean = _clean_line(raw).strip("#*-•·、 ")
-        clean = re.sub(r"^\d+\s*[.、)]\s*", "", clean).strip()
-        if not clean or len(clean) < 8:
+    sources = [item for item in preferred_sections if _clean_line(item)] or [str(text or "")]
+    for source in sources:
+        for raw in str(source or "").replace("\r", "\n").split("\n"):
+            clean = _clean_infographic_copy(raw, max_chars=96)
+            if not clean:
+                continue
+            candidates.append(clean)
+        if len(candidates) >= 3:
+            break
+    if len(candidates) < 3 and sections:
+        for raw in str(text or "").replace("\r", "\n").split("\n"):
+            clean = _clean_infographic_copy(raw, max_chars=96)
+            if clean:
+                candidates.append(clean)
+    return _merge_infographic_points([], candidates)[:4]
+
+
+def _clean_infographic_copy(value: Any, *, max_chars: int = 96) -> str:
+    clean = _clean_line(value).strip("#*-•·、 ：:，,。")
+    clean = re.sub(r"^\d+\s*[.、)]\s*", "", clean).strip()
+    clean = re.sub(r"^(?:要点|核心观点|观点|金句|推荐理由)\s*[:：]\s*", "", clean).strip()
+    clean = re.sub(r"[（(]\s*(?:约)?\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:附近)?\s*[)）]$", "", clean).strip()
+    if not clean or len(clean) < 8 or _is_cover_process_text(clean):
+        return ""
+    if re.search(
+        r"作为(?:您的|一个)?(?:投研|投资|财经)?助手|根据您提供|我已为您|为您整理|"
+        r"以下是(?:针对|关于)|\d+个问题|具体回答|(?:第一|本)轮返回|输出如下|"
+        r"投资者视角标题|高信息密度.*标题|精简短标题|优化标题|闭门会格式",
+        clean,
+        flags=re.I,
+    ):
+        return ""
+    return _clip_text(clean, max_chars)
+
+
+def _normalize_infographic_points(value: Any) -> List[str]:
+    values = value if isinstance(value, list) else []
+    return _merge_infographic_points([], values)
+
+
+def _merge_infographic_points(primary: List[Any], secondary: List[Any]) -> List[str]:
+    merged: List[str] = []
+    seen = set()
+    for value in [*primary, *secondary]:
+        clean = _clean_infographic_copy(value, max_chars=68)
+        key = _cover_compare_key(clean)
+        if not clean or not key or key in seen:
             continue
-        if _is_cover_process_text(clean):
+        if any(min(len(key), len(existing)) >= 18 and (key in existing or existing in key) for existing in seen):
             continue
-        if re.search(r"标题|时间戳|推荐截取|音频文件名|精华音频|音频片段|片段说明|约\d+分钟|Generated from transcript|Gemini upload", clean, flags=re.I):
+        seen.add(key)
+        merged.append(clean)
+    return merged
+
+
+def _exclude_infographic_copy(points: List[Any], excluded: List[Any]) -> List[str]:
+    excluded_keys = [_cover_compare_key(value) for value in excluded if _cover_compare_key(value)]
+    kept = []
+    for point in _normalize_infographic_points(points):
+        key = _cover_compare_key(point)
+        if any(
+            key == excluded_key
+            or (min(len(key), len(excluded_key)) >= 18 and (key in excluded_key or excluded_key in key))
+            for excluded_key in excluded_keys
+        ):
             continue
-        if len(clean) > 68:
-            clean = clean[:68]
-        candidates.append(clean)
-    if not candidates:
-        compact = _clean_line(text)
-        parts = [piece.strip() for piece in re.split(r"[。！？!?；;]", compact) if len(piece.strip()) >= 8]
-        candidates.extend(parts[:4])
-    return candidates[:4] or ["已根据 IMA 转录全文生成后续视频编排输入"]
+        kept.append(point)
+    return kept
+
+
+def _infographic_copy_from_source(
+    source_text: str,
+    *,
+    fallback_title: Any = "",
+    fallback_subtitle: Any = "",
+) -> Dict[str, Any]:
+    sections = _direct_ds_numbered_sections(source_text)
+    short_title = _direct_ds_title_value(sections.get("3", "")) if sections else ""
+    title_candidates = extract_title_candidates(source_text)
+    title = (
+        _clean_infographic_copy(short_title, max_chars=36)
+        or _clean_infographic_copy(fallback_title, max_chars=36)
+        or (_clean_infographic_copy(title_candidates[0], max_chars=36) if title_candidates else "")
+        or "核心投资观点"
+    )
+    points = _infographic_bullets(source_text)
+    subtitle = (
+        _clean_infographic_copy(fallback_subtitle, max_chars=68)
+        or (points[0] if points else "")
+    )
+    display_points = _exclude_infographic_copy(points, [title, subtitle])
+    return {
+        "infographic_title": title,
+        "infographic_subtitle": subtitle,
+        "infographic_points": display_points[:3],
+    }
 
 
 def _preview_caption_candidates(source_text: str, plan: Dict[str, Any]) -> List[str]:

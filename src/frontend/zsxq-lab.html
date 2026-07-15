@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>知识星球实验台 - Shioa</title>
-    <link href="css/zsxq-lab.css?v=20260709-lab-console-ux-pass" rel="stylesheet">
+    <link href="css/zsxq-lab.css?v=20260714-local-filter-row" rel="stylesheet">
     <link href="css/three-workspaces.css?v=20260702-zsxq-map-polish" rel="stylesheet">
     <style>
         .line-clamp-2 {
@@ -135,6 +135,22 @@
                     <div class="min-w-0">
                         <h3 id="topics-title" class="text-xl font-black">最新主题</h3>
                         <p id="topics-subtitle" class="text-sm text-slate-500 mt-1">选择一个星球后查看主题内容。</p>
+                    </div>
+                    <div id="local-topic-filter-control" class="local-topic-filter-control hidden" role="search" aria-label="本地主题筛选">
+                        <label class="local-topic-filter-field local-topic-filter-field--date">
+                            <span class="local-topic-filter-label">发布日期</span>
+                            <input id="local-topic-date-input" type="date" class="local-topic-filter-input" title="发布日期，清空后查询全部日期">
+                        </label>
+                        <label class="local-topic-filter-field local-topic-filter-field--keyword">
+                            <span class="local-topic-filter-label">关键词</span>
+                            <span class="local-topic-keyword-box">
+                                <i class="fas fa-magnifying-glass" aria-hidden="true"></i>
+                                <input id="local-topic-keyword-input" type="search" maxlength="200" autocomplete="off" class="local-topic-filter-input" placeholder="匹配标题、作者或正文">
+                            </span>
+                        </label>
+                        <button id="local-topic-search-btn" type="button" class="local-topic-search-button" title="搜索本地主题">
+                            <i class="fas fa-magnifying-glass mr-2" aria-hidden="true"></i>搜索
+                        </button>
                     </div>
                     <div class="zsxq-action-row flex flex-wrap items-center gap-2">
                         <label id="attachment-view-filter-control" class="hidden inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-600">
@@ -286,6 +302,6 @@
     <script src="js/shared-navigation.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
     <script src="js/three-workspace-graph.js?v=20260702-zsxq-map-polish"></script>
-    <script src="js/zsxq-lab.js?v=20260709-lab-console-ux-pass"></script>
+    <script src="js/zsxq-lab.js?v=20260714-external-document-cards"></script>
 </body>
 </html>

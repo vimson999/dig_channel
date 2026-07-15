@@ -16,6 +16,9 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-07-15 | [MP3 竖屏信息墙误用 AI 寒暄与任务说明](2026-07-15-mp3-infographic-used-ai-preamble.md) | MP3 视频编排 / DS 规划 / 竖屏信息图 | 已修复 |
+| 2026-07-14 | [ZSXQ Lab 专属组操作区泄漏到普通组](2026-07-14-zsxq-lab-special-group-controls-leaked.md) | ZSXQ Lab / 人工下载计划 / 分组切换 | 已修复 |
+| 2026-07-14 | [MP3 子任务在等待终点完成却被判超时](2026-07-14-mp3-child-completed-at-wait-deadline.md) | MP3 视频编排 / publisher 父子等待 / render | 已修复，现场任务已完成收口 |
 | 2026-07-13 | [MP3 publisher 子任务等待 ID 未定义](2026-07-13-mp3-publisher-child-key-undefined.md) | MP3 视频编排 / publisher 父子等待 | 已修复 |
 | 2026-07-13 | [MP3 publisher 复用查询在 limit 后追加 filter](2026-07-13-mp3-publisher-reuse-filter-after-limit.md) | MP3 视频编排 / publisher 资产复用 | 已修复 |
 | 2026-07-13 | [MP3 数据库瞬时断连被写成父任务永久失败](2026-07-13-mp3-db-disconnect-marked-parent-failed.md) | MP3 视频编排 / runtime guard / publisher | 已修复 |

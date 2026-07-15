@@ -199,6 +199,8 @@ def local_topics():
             count=data.get("count", 20),
             end_time=data.get("end_time"),
             publish_filter=data.get("publish_filter"),
+            publish_date=data.get("publish_date"),
+            keyword=data.get("keyword"),
             include_raw_payload=bool(data.get("include_raw_payload")),
         )
         return jsonify({"success": True, "data": result})

@@ -51,6 +51,7 @@ from tasks.report_audio_workflow import (
     process_report_audio_workflow_job,
 )
 from utils.auth_utils import require_login
+from utils.date_filters import submission_date_utc_range as _submission_date_utc_range
 
 
 report_audio_workflow_bp = Blueprint("report_audio_workflow", __name__, url_prefix="/api/report-audio-workflows")
@@ -216,7 +217,7 @@ def list_pdf_assets(_current_user):
         .outerjoin(ZsxqTopic, topic_join)
         .filter(ZsxqAttachment.download_status == "downloaded")
         .filter(ZsxqAttachment.local_path.isnot(None))
-        .filter(or_(ZsxqAttachment.name.ilike("%.pdf"), ZsxqAttachment.local_path.ilike("%.pdf")))
+        .filter(ZsxqAttachment.file_ext == "pdf")
     )
     if scope in {"hot", "popular"}:
         query = query.filter(ZsxqAttachment.download_count >= hot_download_threshold)
@@ -470,11 +471,15 @@ def list_jobs(current_user):
     search = _normalize_search_query(
         request.args.get("q") or request.args.get("search") or request.args.get("job_search")
     )
+    submitted_on = str(request.args.get("submitted_on") or request.args.get("job_date") or "").strip()
+    submitted_range = _submission_date_utc_range(submitted_on)
+    if not submitted_range:
+        submitted_on = ""
     include_detail = str(request.args.get("detail") or "").lower() in {"1", "true", "yes"}
     user_id = str(getattr(current_user, "id", None))
 
     visible_user_ids = _visible_user_ids(current_user)
-    cache_key = ("+".join(sorted(visible_user_ids)), page, per_page, status, search)
+    cache_key = ("+".join(sorted(visible_user_ids)), page, per_page, status, search, submitted_on)
     if not include_detail and REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS > 0:
         with _REPORT_AUDIO_JOBS_CACHE_LOCK:
             cached = _REPORT_AUDIO_JOBS_CACHE.get(cache_key)
@@ -488,6 +493,12 @@ def list_jobs(current_user):
     if status:
         reverse_status = {value: key for key, value in STATUS_MAP.items()}
         query = query.filter(PublicationTask.status == reverse_status.get(status, status))
+    if submitted_range:
+        submitted_start, submitted_end = submitted_range
+        query = query.filter(
+            PublicationTask.created_at >= submitted_start,
+            PublicationTask.created_at < submitted_end,
+        )
     if search:
         pattern = f"%{_escape_like(search)}%"
         query = query.filter(or_(
@@ -569,6 +580,7 @@ def list_jobs(current_user):
                 "total": total,
                 "pages": pages,
                 "q": search,
+                "submitted_on": submitted_on,
             },
         },
         "items": items,
@@ -606,6 +618,16 @@ def get_job(current_user, job_id):
             "version": version,
             "payload": deepcopy(payload),
         }
+    return jsonify({"success": True, **payload, "data": payload})
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/status", methods=["GET"])
+@require_login
+def get_job_status(current_user, job_id):
+    task = _get_owned_task_reference(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    payload = _job_status_payload(task)
     return jsonify({"success": True, **payload, "data": payload})
 
 
@@ -1275,7 +1297,7 @@ def _workbench_institution(structured, pdf, video_options):
         or (video_options or {}).get("vertical_institution")
         or ""
     ).strip()
-    allowed = {"J.P. Morgan", "Goldman Sachs", "Morgan Stanley", "UBS", "Nomura", "BofA", "HSBC", "深度研报"}
+    allowed = {"J.P. Morgan", "Goldman Sachs", "Morgan Stanley", "UBS", "Nomura", "BofA", "HSBC", "Jefferies", "Bernstein", "深度研报"}
     if explicit in allowed:
         return explicit
 
@@ -1299,6 +1321,9 @@ def _workbench_institution(structured, pdf, video_options):
         ("小摩", "J.P. Morgan"),
         ("Goldman Sachs", "Goldman Sachs"),
         ("高盛", "Goldman Sachs"),
+        ("Bernstein", "Bernstein"),
+        ("伯恩斯坦", "Bernstein"),
+        ("盛博", "Bernstein"),
         ("UBS", "UBS"),
         ("瑞银", "UBS"),
         ("Nomura", "Nomura"),
@@ -1309,6 +1334,8 @@ def _workbench_institution(structured, pdf, video_options):
         ("美银", "BofA"),
         ("HSBC", "HSBC"),
         ("汇丰", "HSBC"),
+        ("Jefferies", "Jefferies"),
+        ("杰富瑞", "Jefferies"),
     ]
     for alias, option in institution_aliases:
         if re.search(re.escape(alias), haystack, flags=re.I):
@@ -1322,6 +1349,8 @@ def _workbench_institution(structured, pdf, video_options):
                 "瑞银": "UBS",
                 "野村": "Nomura",
                 "美银": "BofA",
+                "杰富瑞": "Jefferies",
+                "伯恩斯坦": "Bernstein",
             }.get(label)
             if mapped:
                 return mapped
@@ -1419,6 +1448,9 @@ def _generate_vertical_cover_for_task(task, *, title, subtitle=""):
     screenshot_path = pdf_screenshot.get("path") if isinstance(pdf_screenshot, dict) else None
     if not screenshot_path or not os.path.exists(screenshot_path):
         raise ValueError("PDF 首屏图不存在，无法生成竖版封皮")
+
+    title = _cover_title_with_institution(task, _normalize_cover_text(title, 160))
+    subtitle = _normalize_cover_text(subtitle, 220)
 
     transform = {
         "anchor": "top-left",
@@ -1638,6 +1670,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
         raise ValueError("PDF 首屏图不存在，无法后补竖屏 MP4")
 
     video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+    existing_video = result.get("video") if isinstance(result.get("video"), dict) else {}
     scheme = _normalize_vertical_video_scheme(scheme or video_options.get("vertical_video_scheme") or video_options.get("vertical_scheme"))
     preview_seconds = _bounded_int(preview_seconds, 0, 0, 600)
     try:
@@ -1652,6 +1685,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
         or _publisher_date_text(parent.created_at)
     )
     institution = _workbench_institution(structured, pdf, video_options)
+    main_title = _cover_title_with_institution(parent, main_title)
     vertical_subtitle_position = (
         video_options.get("vertical_subtitle_position")
         if isinstance(video_options.get("vertical_subtitle_position"), dict)
@@ -1742,7 +1776,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
             },
         },
         "vertical_cover": {
-            "enabled": scheme == "scheme2",
+            "enabled": scheme == "scheme2" and not _path_exists(existing_video.get("vertical_cover_path")),
             "scheme": scheme,
             "format": "wx_cover",
             "main_title": main_title,
@@ -1759,7 +1793,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
             },
         },
         "podcast_cover": {
-            "enabled": scheme == "scheme2",
+            "enabled": scheme == "scheme2" and not _path_exists(existing_video.get("podcast_cover_path")),
             "scheme": scheme,
             "format": "podcast",
             "main_title": main_title,
@@ -1776,7 +1810,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
             },
         },
         "bilibili_cover": {
-            "enabled": scheme == "scheme2",
+            "enabled": scheme == "scheme2" and not _path_exists(existing_video.get("bilibili_cover_path")),
             "scheme": scheme,
             "format": "bilibili_wx_cover",
             "main_title": main_title,
@@ -2043,15 +2077,15 @@ def _task_mapping_attr(task, name):
 
 
 def _vertical_video_path_for_task(task):
-    result = _task_mapping_attr(task, "result")
-    video = result.get("video") if isinstance(result.get("video"), dict) else {}
-    if _path_exists(video.get("vertical_video_path")):
-        return video.get("vertical_video_path")
     child = _latest_vertical_video_child(task.id, preview=False)
     if child and child.status == "completed":
         path = _vertical_video_path_from_child(child)
         if _path_exists(path):
             return path
+    result = _task_mapping_attr(task, "result")
+    video = result.get("video") if isinstance(result.get("video"), dict) else {}
+    if _path_exists(video.get("vertical_video_path")):
+        return video.get("vertical_video_path")
     return None
 
 
@@ -2211,13 +2245,12 @@ def _cover_title_with_institution(task, title):
     prefixes.extend(alias for alias, label in BANK_ALIASES if label == institution)
     prefix_pattern = "|".join(re.escape(item) for item in sorted({item for item in prefixes if item}, key=len, reverse=True))
     if prefix_pattern:
-        normalized = re.sub(
+        prefix_re = re.compile(
             rf"^\s*(?:{prefix_pattern})(?:证券)?\s*[:：]\s*",
-            "",
-            normalized,
-            count=1,
             flags=re.I,
         )
+        while prefix_re.search(normalized):
+            normalized = prefix_re.sub("", normalized, count=1)
     normalized = normalized.strip(" \t\r\n|｜/：:")
     return _normalize_cover_text(f"{institution}：{normalized}" if normalized else institution, 160)
 
@@ -2426,6 +2459,48 @@ def _job_payload(task, include_raw=False):
     if include_raw:
         payload["raw_params"] = params
         payload["raw_result"] = result
+    return payload
+
+
+def _job_status_payload(task):
+    status = STATUS_MAP.get(task.status, task.status or "queued")
+    live_children = _live_child_tasks(task.id)
+    children = {}
+    doubao_items = []
+    for child in live_children:
+        if child.feature == doubao_browser_tts.FEATURE_NAME:
+            doubao_items.append(_child_task_summary_row(child))
+            continue
+        summary = _child_task_summary_row(child)
+        if child.feature in {gemini_browser.FEATURE_NAME, gemini_browser.LEGACY_FEATURE_NAME}:
+            children["gemini"] = summary
+        elif child.feature == "publisher" and "publisher_video" not in children:
+            children["publisher_video"] = summary
+
+    vertical_child = _latest_vertical_video_child(task.id, preview=False)
+    vertical_preview_child = _latest_vertical_video_child(task.id, preview=True)
+    if vertical_child:
+        children["publisher_vertical_video"] = _vertical_child_summary(vertical_child, task.id, lightweight=True)
+    if vertical_preview_child:
+        children["publisher_vertical_preview_video"] = _vertical_child_summary(vertical_preview_child, task.id, lightweight=True)
+
+    payload = {
+        "job_id": task.id,
+        "status": status,
+        "step": task.current_step,
+        "progress": task.progress or 0,
+        "error": task.error_message,
+        "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
+        "updated_at": task.updated_at.isoformat() + "Z" if task.updated_at else None,
+        "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else None,
+        "children": children,
+        "doubao_browser_tts": doubao_items,
+        "bilibili_uploads": bilibili_upload_children(
+            task.id,
+            parent_feature=FEATURE_NAME,
+            source_label=BILIBILI_UPLOAD_SOURCE,
+        ),
+    }
     return payload
 
 

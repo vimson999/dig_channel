@@ -706,7 +706,7 @@ def _local_fallback_allowed(value: Optional[bool] = None) -> bool:
 
 
 def _normalizer_model() -> str:
-    return os.environ.get("REPORT_AUDIO_NORMALIZER_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "deepseek-v4-pro"
+    return os.environ.get("REPORT_AUDIO_NORMALIZER_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "deepseek-v4-flash"
 
 
 def _project_root() -> str:

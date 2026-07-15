@@ -45,9 +45,9 @@ class ReportAudioWorkflowServiceTest(unittest.TestCase):
         self.assertEqual(payload["landscape_title"], "高盛:首次覆盖智谱")
         self.assertEqual(payload["vertical_title"], "高盛:首次覆盖智谱")
 
-    def test_default_normalizer_model_is_deepseek_v4_pro(self):
+    def test_default_normalizer_model_is_deepseek_v4_flash(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(_normalizer_model(), "deepseek-v4-pro")
+            self.assertEqual(_normalizer_model(), "deepseek-v4-flash")
 
     def test_status_marks_normalizer_unavailable_without_deepseek_or_fallback(self):
         with patch.dict(os.environ, {}, clear=True):

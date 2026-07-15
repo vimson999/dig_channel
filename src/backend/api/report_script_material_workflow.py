@@ -25,6 +25,7 @@ from services.report_audio_workflow import clean_final_script_for_tts
 from services.runtime_guard import maybe_guarded_apply_async
 from tasks.report_script_material_workflow import process_report_script_material_workflow_job
 from utils.auth_utils import require_login
+from utils.date_filters import submission_date_utc_range
 
 
 report_script_material_workflow_bp = Blueprint(
@@ -294,6 +295,10 @@ def list_jobs(current_user):
     per_page = _bounded_int(request.args.get("per_page"), 20, 1, 100)
     status = str(request.args.get("status") or "").strip()
     search = _normalize_search_query(request.args.get("q") or request.args.get("search") or request.args.get("job_search"))
+    submitted_on = str(request.args.get("submitted_on") or request.args.get("job_date") or "").strip()
+    submitted_range = submission_date_utc_range(submitted_on)
+    if not submitted_range:
+        submitted_on = ""
     query = PublicationTask.query.options(load_only(*TASK_LIST_COLUMNS)).filter(
         PublicationTask.feature == FEATURE_NAME,
         PublicationTask.user_id.in_(_visible_user_ids(current_user)),
@@ -301,6 +306,12 @@ def list_jobs(current_user):
     if status:
         reverse = {value: key for key, value in STATUS_MAP.items()}
         query = query.filter(PublicationTask.status == reverse.get(status, status))
+    if submitted_range:
+        submitted_start, submitted_end = submitted_range
+        query = query.filter(
+            PublicationTask.created_at >= submitted_start,
+            PublicationTask.created_at < submitted_end,
+        )
     if search:
         pattern = f"%{_escape_like(search)}%"
         query = query.filter(or_(
@@ -326,6 +337,7 @@ def list_jobs(current_user):
                 "total": pagination.total,
                 "pages": pagination.pages,
                 "q": search,
+                "submitted_on": submitted_on,
             },
         },
         "items": items,

@@ -40,6 +40,7 @@ from tasks.report_audio_workflow import (  # noqa: E402
     _publisher_result_summary,
     _publisher_main_title,
     _publisher_cover_title_with_institution,
+    _publisher_workbench_institution,
     _publisher_sub_title,
     _publisher_video_transform,
     _task_chunk_attempt,
@@ -113,6 +114,41 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
 
         self.assertTrue(title.startswith("野村："))
         self.assertLessEqual(len(title.split("\n")), 2)
+
+    def test_jefferies_cover_title_replaces_generic_prefix_once(self):
+        title = _publisher_cover_title_with_institution(
+            "机构：杰富瑞：周期逻辑失效，买错PCB暴跌461%",
+            "Jefferies",
+        )
+
+        self.assertTrue(title.startswith("杰富瑞："))
+        self.assertEqual(title.count("杰富瑞"), 1)
+        self.assertNotIn("机构：", title)
+
+    def test_jefferies_is_detected_from_pdf_filename(self):
+        institution = _publisher_workbench_institution(
+            {"title": "周期逻辑失效"},
+            {"filename": "杰富瑞-中国科技行业-PCB更新报告.pdf"},
+            {},
+        )
+
+        self.assertEqual(institution, "Jefferies")
+
+    def test_bernstein_is_detected_and_replaces_legacy_shengbo_prefix(self):
+        institution = _publisher_workbench_institution(
+            {"cover_title": "盛博:存储见顶设备必跌？研报打破常识"},
+            {"filename": "伯恩斯坦-全球半导体及设备-260713.pdf"},
+            {},
+        )
+        title = _publisher_cover_title_with_institution(
+            "机构研报：盛博:存储见顶设备必跌？研报打破常识",
+            institution,
+        )
+
+        self.assertEqual(institution, "Bernstein")
+        self.assertTrue(title.startswith("伯恩斯坦："))
+        self.assertNotIn("机构", title)
+        self.assertNotIn("盛博", title)
 
     def test_cover_subtitle_is_single_line_and_bounded(self):
         subtitle = _format_cover_subtitle(
@@ -213,6 +249,15 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertTrue(child.params["podcast_cover"]["enabled"])
         self.assertTrue(child.params["bilibili_cover"]["enabled"])
         self.assertFalse(child.params["bilibili_cover"]["show_footer"])
+        for asset_key in (
+            "thumbnail",
+            "vertical_thumbnail",
+            "vertical_cover",
+            "podcast_cover",
+            "bilibili_cover",
+        ):
+            with self.subTest(asset_key=asset_key):
+                self.assertTrue(child.params[asset_key]["main_title"].startswith("机构："))
 
     def test_scheme2_publisher_generates_bilibili_cover_without_footer(self):
         with patch.object(

@@ -38,6 +38,13 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.ctx.pop()
         self.tmpdir.cleanup()
 
+    def test_submission_date_range_uses_shanghai_calendar_day(self):
+        start, end = report_audio_api._submission_date_utc_range("2026-07-14")
+
+        self.assertEqual(start, datetime(2026, 7, 13, 16, 0, 0))
+        self.assertEqual(end, datetime(2026, 7, 14, 16, 0, 0))
+        self.assertIsNone(report_audio_api._submission_date_utc_range("2026-02-30"))
+
     def test_job_payload_exposes_audio_script_quality_issue(self):
         parent = PublicationTask(
             status="completed",
@@ -67,6 +74,36 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(payload["audio_script"]["chunks"], 1)
         self.assertIn("第一部分", payload["audio_script"]["text"])
         self.assertIn("结构", payload["audio_script"]["quality_issue"])
+
+    def test_job_status_payload_omits_raw_json_payloads(self):
+        parent = PublicationTask(
+            status="processing",
+            current_step="tts",
+            progress=48,
+            error_message=None,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {"prompt": "large prompt"},
+            },
+            result={
+                "logs": [{"step": "tts", "message": "running"}],
+                "structured_result": {"final_script_for_tts": "large script"},
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        payload = report_audio_api._job_status_payload(parent)
+
+        self.assertEqual(payload["job_id"], parent.id)
+        self.assertEqual(payload["status"], "running")
+        self.assertEqual(payload["step"], "tts")
+        self.assertEqual(payload["progress"], 48)
+        self.assertNotIn("raw_params", payload)
+        self.assertNotIn("raw_result", payload)
+        self.assertNotIn("logs", payload)
+        self.assertNotIn("structured_result", payload)
 
     def test_previewable_file_is_inline_only_for_preview_requests(self):
         media_path = Path(self.tmpdir.name) / "cover.jpg"
@@ -251,8 +288,14 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         root = Path(self.tmpdir.name)
         audio_path = root / "audio.wav"
         screenshot_path = root / "page.jpg"
+        existing_vertical_cover = root / "vertical-cover.jpg"
+        existing_podcast_cover = root / "podcast-cover.jpg"
+        existing_bilibili_cover = root / "bilibili-cover.jpg"
         audio_path.write_bytes(b"RIFF----WAVE")
         screenshot_path.write_bytes(b"jpeg")
+        existing_vertical_cover.write_bytes(b"vertical-cover")
+        existing_podcast_cover.write_bytes(b"podcast-cover")
+        existing_bilibili_cover.write_bytes(b"bilibili-cover")
 
         parent = PublicationTask(
             status="completed",
@@ -279,7 +322,12 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
                     "cover_subtitle": "AI机柜电容产值飙升182%",
                 },
                 "pdf_first_page_image": {"path": str(screenshot_path), "bytes": 4},
-                "video": {"video_path": str(root / "landscape.mp4")},
+                "video": {
+                    "video_path": str(root / "landscape.mp4"),
+                    "vertical_cover_path": str(existing_vertical_cover),
+                    "podcast_cover_path": str(existing_podcast_cover),
+                    "bilibili_cover_path": str(existing_bilibili_cover),
+                },
             },
         )
         db.session.add(parent)
@@ -301,8 +349,13 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertTrue(child.params["vertical_video"]["enabled"])
         self.assertEqual(child.params["vertical_video"]["image_path"], str(screenshot_path))
         self.assertTrue(child.params["vertical_thumbnail"]["enabled"])
-        self.assertTrue(child.params["bilibili_cover"]["enabled"])
+        self.assertFalse(child.params["vertical_cover"]["enabled"])
+        self.assertFalse(child.params["podcast_cover"]["enabled"])
+        self.assertFalse(child.params["bilibili_cover"]["enabled"])
         self.assertFalse(child.params["bilibili_cover"]["show_footer"])
+        for asset_key in ("vertical_thumbnail", "vertical_cover", "podcast_cover", "bilibili_cover"):
+            with self.subTest(asset_key=asset_key):
+                self.assertTrue(child.params[asset_key]["main_title"].startswith("大摩："))
         self.assertFalse(child.params["bilibili"]["enabled"])
         self.assertNotIn("thumbnail", child.params)
         self.assertEqual(child.result["metadata"]["source"], report_audio_api.VERTICAL_BACKFILL_SOURCE)
@@ -310,9 +363,11 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
     def test_main_publisher_vertical_output_is_reused_as_downloadable_video(self):
         root = Path(self.tmpdir.name)
         landscape_path = root / "landscape.mp4"
+        old_vertical_path = root / "old-vertical.mp4"
         vertical_path = root / "vertical.mp4"
         screenshot_path = root / "page.jpg"
         landscape_path.write_bytes(b"landscape")
+        old_vertical_path.write_bytes(b"old-vertical")
         vertical_path.write_bytes(b"vertical")
         screenshot_path.write_bytes(b"jpeg")
 
@@ -334,6 +389,7 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
                     "status": "completed",
                     "video_path": str(landscape_path),
                     "vertical_enabled": True,
+                    "vertical_video_path": str(old_vertical_path),
                 },
             },
         )
@@ -486,12 +542,12 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
                 subtitle="每公斤成本直逼 SpaceX",
             )
 
-        self.assertEqual(generate_cover.call_args.kwargs["main_title"], "火箭回收成本暴降")
+        self.assertEqual(generate_cover.call_args.kwargs["main_title"], "野村：火箭回收成本暴降")
         self.assertEqual(generate_cover.call_args.kwargs["sub_title"], "每公斤成本直逼 SpaceX")
         self.assertEqual(cover["path"], str(vertical_cover_path))
         db.session.refresh(parent)
         self.assertEqual(parent.result["video"]["vertical_cover_path"], str(vertical_cover_path))
-        self.assertEqual(parent.result["video"]["vertical_cover_title"], "火箭回收成本暴降")
+        self.assertEqual(parent.result["video"]["vertical_cover_title"], "野村：火箭回收成本暴降")
         self.assertEqual(parent.result["video"]["vertical_cover_subtitle"], "每公斤成本直逼 SpaceX")
 
     def test_normalize_cover_text_preserves_manual_line_breaks(self):
@@ -522,6 +578,52 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             title,
             "野村：中国火箭回收重复使用的原创路线\n决定商业航天生死的根本不是订单",
         )
+
+    def test_jefferies_cover_title_removes_legacy_generic_prefix(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "report_audio_workflow": {
+                    "pdf": {"filename": "杰富瑞-中国科技行业-PCB更新报告.pdf"},
+                },
+            },
+            result={"structured_result": {"title": "周期逻辑失效"}},
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        title = report_audio_api._cover_title_with_institution(
+            parent,
+            "机构：杰富瑞：周期逻辑失效，买错PCB暴跌461%",
+        )
+
+        self.assertEqual(title, "杰富瑞：周期逻辑失效，买错PCB暴跌461%")
+
+    def test_bernstein_cover_title_replaces_legacy_shengbo_prefix(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "report_audio_workflow": {
+                    "pdf": {"filename": "伯恩斯坦-全球半导体及设备-260713.pdf"},
+                },
+            },
+            result={"structured_result": {"cover_title": "盛博:存储见顶设备必跌？研报打破常识"}},
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        title = report_audio_api._cover_title_with_institution(
+            parent,
+            "机构研报：盛博:存储见顶设备必跌？研报打破常识",
+        )
+
+        self.assertEqual(title, "伯恩斯坦：存储见顶设备必跌？研报打破常识")
 
     def test_job_summary_payload_includes_cover_subtitle_from_projection(self):
         row = SimpleNamespace(

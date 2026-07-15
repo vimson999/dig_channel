@@ -92,7 +92,7 @@ class ReportVisualPlanTestPage {
             const provider = result.data?.provider || {};
             const ok = Boolean(provider.configured);
             this.els.providerStatus.className = `rounded-lg border px-3 py-2 text-xs font-bold ${ok ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`;
-            this.els.providerStatus.textContent = ok ? `DS 已配置 · ${provider.model || 'deepseek-v4-pro'}` : 'DS 未配置 · 本地兜底';
+            this.els.providerStatus.textContent = ok ? `DS 已配置 · ${provider.model || 'deepseek-v4-flash'}` : 'DS 未配置 · 本地兜底';
         } catch (error) {
             this.els.providerStatus.className = 'rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-700';
             this.els.providerStatus.textContent = `状态失败：${error.message}`;

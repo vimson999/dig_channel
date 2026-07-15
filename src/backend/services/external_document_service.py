@@ -147,6 +147,32 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(_normalize_text(text).encode("utf-8")).hexdigest()
 
 
+def _validate_feishu_document_response(*, title: str, content_text: str) -> None:
+    """Reject Feishu application shells that return HTTP 200 without a document."""
+    normalized_title = _normalize_text(title).lower()
+    normalized_content = _normalize_text(content_text)
+    shell_markers = (
+        "模板推荐",
+        "Recommended templates",
+        "Bitable_VibeView_Onboard_",
+        "✨ 明星企业案例",
+        "暂无最近动态",
+    )
+    marker_count = sum(marker in normalized_content for marker in shell_markers)
+    # A resolved Feishu document carries its own document title. The generic
+    # product shell keeps the application title "Docs" while its homepage
+    # recommendations vary over time, so the title itself is the stable guard.
+    looks_like_docs_home = normalized_title in {"docs", "飞书", "lark"}
+    if looks_like_docs_home or marker_count >= 4:
+        raise ExternalDocumentError(
+            "飞书返回了 Docs 首页/模板中心，而不是目标文档正文。"
+            "当前 Cookie 可能已失效、无权访问该文档，或不适用于此飞书域名；请更新凭据后重试。"
+        )
+
+    if not normalized_content:
+        raise ExternalDocumentError("飞书页面返回成功，但没有抽取到目标文档正文。")
+
+
 class ExternalDocumentService:
     def scan_topic_record(self, topic: ZsxqTopic, *, commit: bool = False) -> List[ZsxqTopicExternalDocument]:
         links = extract_external_links_from_topic(topic)
@@ -636,6 +662,7 @@ class ExternalDocumentService:
         html = response.text[:MAX_FETCH_CHARS]
         title = _extract_html_title(html) or document.title
         content_text = _extract_readable_text(html)
+        _validate_feishu_document_response(title=title or "", content_text=content_text)
         return {
             "title": title,
             "content_text": content_text,

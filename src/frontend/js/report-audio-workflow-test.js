@@ -13,6 +13,7 @@ class ReportAudioWorkflowPage {
         this.jobPage = this.initialJobPage();
         this.jobStatus = this.initialJobStatus();
         this.jobSearch = this.initialJobSearch();
+        this.jobDate = this.initialJobDate();
         this.jobSearchTimer = null;
         this.jobPerPage = 10;
         this.jobPagination = { page: 1, per_page: 10, total: 0, pages: 0 };
@@ -65,6 +66,7 @@ class ReportAudioWorkflowPage {
             pollDelay: document.getElementById('poll-delay'),
             summaryText: document.getElementById('summary-text'),
             jobNameSearch: document.getElementById('job-name-search'),
+            jobDateFilter: document.getElementById('job-date-filter'),
             jobStatusFilter: document.getElementById('job-status-filter'),
             jobList: document.getElementById('job-list'),
             jobPagination: document.getElementById('job-pagination'),
@@ -75,6 +77,7 @@ class ReportAudioWorkflowPage {
         this.bind();
         this.syncJobStatusFilter();
         this.syncJobSearchInput();
+        this.syncJobDateInput();
         this.updatePdfSourceUi();
         this.updateTtsProviderUi();
         this.refreshStatus();
@@ -240,6 +243,23 @@ class ReportAudioWorkflowPage {
         return this.normalizeJobSearch(params.get('q') || params.get('search') || params.get('job_search') || '');
     }
 
+    initialJobDate() {
+        const params = new URLSearchParams(window.location.search);
+        const explicit = this.normalizeJobDate(params.get('submitted_on') || params.get('job_date') || '');
+        return explicit || this.todayInShanghai();
+    }
+
+    todayInShanghai() {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+        }).formatToParts(new Date());
+        const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+        return `${values.year}-${values.month}-${values.day}`;
+    }
+
     jobStatusOptions() {
         return [
             { value: '', label: '全部' },
@@ -263,6 +283,11 @@ class ReportAudioWorkflowPage {
 
     normalizeJobSearch(value) {
         return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    }
+
+    normalizeJobDate(value) {
+        const text = String(value || '').trim();
+        return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
     }
 
     normalizeVerticalScheme(value) {
@@ -300,6 +325,14 @@ class ReportAudioWorkflowPage {
         }
     }
 
+    syncJobDateInput() {
+        if (!this.els.jobDateFilter) return;
+        const nextValue = this.normalizeJobDate(this.jobDate);
+        if (this.els.jobDateFilter.value !== nextValue) {
+            this.els.jobDateFilter.value = nextValue;
+        }
+    }
+
     bind() {
         this.els.refreshStatusBtn.addEventListener('click', () => this.refreshStatus());
         this.els.restartWorkerBtn.addEventListener('click', () => this.restartWorker());
@@ -327,6 +360,7 @@ class ReportAudioWorkflowPage {
         this.els.refreshJobsBtn.addEventListener('click', () => this.refreshJobs());
         this.els.pollDelay.addEventListener('change', () => this.resetPollTimer());
         this.els.jobStatusFilter?.addEventListener('change', () => this.handleJobStatusFilterChange());
+        this.els.jobDateFilter?.addEventListener('change', () => this.handleJobDateFilterChange());
         this.els.jobNameSearch?.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') {
                 event.preventDefault();
@@ -423,7 +457,7 @@ class ReportAudioWorkflowPage {
             this.updateGeminiUrlUi();
             if (provider.configured && gemini.configured && doubao.configured) {
                 const normalizer = provider.deepseek_configured
-                    ? `DS: ${provider.normalizer_model || 'deepseek-v4-pro'}`
+                    ? `DS: ${provider.normalizer_model || 'deepseek-v4-flash'}`
                     : '本地兜底';
                 this.setBadge(this.els.providerStatus, `配置正常 · ${normalizer}`, 'success');
             } else {
@@ -814,8 +848,10 @@ class ReportAudioWorkflowPage {
         this.jobPage = page;
         this.jobStatus = this.normalizeJobFilterStatus(this.jobStatus);
         this.jobSearch = this.normalizeJobSearch(this.jobSearch);
+        this.jobDate = this.normalizeJobDate(this.jobDate);
         this.syncJobStatusFilter();
         this.syncJobSearchInput();
+        this.syncJobDateInput();
         this.historyLoading = true;
         if (showLoading) {
             this.els.loadHistoryBtn.disabled = true;
@@ -828,6 +864,7 @@ class ReportAudioWorkflowPage {
             });
             if (this.jobStatus) query.set('status', this.jobStatus);
             if (this.jobSearch) query.set('q', this.jobSearch);
+            if (this.jobDate) query.set('submitted_on', this.jobDate);
             const result = await this.request(`/api/report-audio-workflows/jobs?${query.toString()}`, { timeoutMs: 15000 });
             if (requestSeq !== this.historyRequestSeq) return;
             const items = result.data?.items || result.items || [];
@@ -862,6 +899,15 @@ class ReportAudioWorkflowPage {
         const nextStatus = this.normalizeJobFilterStatus(this.els.jobStatusFilter?.value || '');
         if (nextStatus === this.jobStatus) return;
         this.jobStatus = nextStatus;
+        this.jobPage = 1;
+        this.updateJobPageUrl(1);
+        this.loadHistory({ page: 1, force: true });
+    }
+
+    handleJobDateFilterChange() {
+        const nextDate = this.normalizeJobDate(this.els.jobDateFilter?.value || '');
+        if (nextDate === this.jobDate) return;
+        this.jobDate = nextDate;
         this.jobPage = 1;
         this.updateJobPageUrl(1);
         this.loadHistory({ page: 1, force: true });
@@ -1000,13 +1046,26 @@ class ReportAudioWorkflowPage {
         const job = this.jobs.find((item) => item.job_id === jobId);
         if (!job) return;
         try {
-            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}`, { timeoutMs: 10000 });
-            Object.assign(job, result.data || result);
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/status`, { timeoutMs: 10000 });
+            this.mergeJobStatus(job, result.data || result);
             job.poll_error = null;
         } catch (error) {
             job.poll_error = error.message;
         }
         this.render();
+    }
+
+    mergeJobStatus(job, status) {
+        const payload = status || {};
+        const previousChildren = job.children || {};
+        Object.assign(job, payload);
+        job.children = {
+            ...previousChildren,
+            ...(payload.children || {}),
+        };
+        if (payload.doubao_browser_tts) job.doubao_browser_tts = payload.doubao_browser_tts;
+        if (payload.bilibili_uploads) job.bilibili_uploads = payload.bilibili_uploads;
+        return job;
     }
 
     handleJobAction(event) {
@@ -1362,6 +1421,7 @@ class ReportAudioWorkflowPage {
     render() {
         this.syncJobStatusFilter();
         this.syncJobSearchInput();
+        this.syncJobDateInput();
         const total = this.jobs.length;
         const running = this.jobs.filter((job) => ['queued', 'running', 'submitting'].includes(job.status)).length;
         const succeeded = this.jobs.filter((job) => job.status === 'succeeded').length;
@@ -1370,7 +1430,9 @@ class ReportAudioWorkflowPage {
         const pageCount = Number(this.jobPagination?.pages || 0);
         const statusLabel = this.jobStatusLabel(this.jobStatus);
         const searchText = this.normalizeJobSearch(this.jobSearch);
+        const submittedOn = this.normalizeJobDate(this.jobDate);
         const scopeLabel = [
+            submittedOn ? `投递 ${submittedOn}` : '',
             searchText ? `搜索“${searchText}”` : '',
             this.jobStatus ? statusLabel : '',
         ].filter(Boolean).join(' · ');
@@ -1569,6 +1631,13 @@ class ReportAudioWorkflowPage {
         }
         url.searchParams.delete('search');
         url.searchParams.delete('job_search');
+        const submittedOn = this.normalizeJobDate(this.jobDate);
+        if (submittedOn) {
+            url.searchParams.set('submitted_on', submittedOn);
+        } else {
+            url.searchParams.delete('submitted_on');
+        }
+        url.searchParams.delete('job_date');
     }
 
     jobSequenceNumber(index) {

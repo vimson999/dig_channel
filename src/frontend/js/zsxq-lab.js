@@ -74,6 +74,10 @@ const els = {
     groupsList: document.getElementById('groups-list'),
     topicsTitle: document.getElementById('topics-title'),
     topicsSubtitle: document.getElementById('topics-subtitle'),
+    localTopicFilterControl: document.getElementById('local-topic-filter-control'),
+    localTopicDateInput: document.getElementById('local-topic-date-input'),
+    localTopicKeywordInput: document.getElementById('local-topic-keyword-input'),
+    localTopicSearchBtn: document.getElementById('local-topic-search-btn'),
     refreshTopicsBtn: document.getElementById('refresh-topics-btn'),
     selectAllTopicsBtn: document.getElementById('select-all-topics-btn'),
     batchDownloadBtn: document.getElementById('batch-download-btn'),
@@ -122,6 +126,9 @@ const els = {
 let zsxqKnowledgeGraph = null;
 
 document.addEventListener('DOMContentLoaded', () => {
+    if (els.localTopicDateInput && !els.localTopicDateInput.value) {
+        els.localTopicDateInput.value = localDateInputValue(new Date());
+    }
     initZsxqKnowledgeGraph();
     renderCookieProfiles();
     updateCookieSummary('正在读取平台凭据...', 'muted');
@@ -386,6 +393,15 @@ function setSystemSyncControlsVisible(visible) {
     }
 }
 
+function hideManualDownloadControls() {
+    els.attachmentViewFilterControl?.classList.add('hidden');
+    els.attachmentTypeControl?.classList.add('hidden');
+    els.selectAllTopicsBtn?.classList.add('hidden');
+    els.batchDownloadBtn?.classList.add('hidden');
+    els.manualPlanLimitControl?.classList.add('hidden');
+    els.manualPlanPublishControl?.classList.add('hidden');
+}
+
 function bindEvents() {
     els.cookieInput.addEventListener('input', () => {
         state.cookie = els.cookieInput.value.trim();
@@ -406,6 +422,13 @@ function bindEvents() {
     els.loadRemoteGroupsBtn?.addEventListener('click', () => loadGroups({ source: 'remote' }));
     els.refreshTopicsBtn.addEventListener('click', () => {
         if (state.selectedGroup) loadActiveTabPage({ reset: true });
+    });
+    els.localTopicDateInput?.addEventListener('change', applyLocalTopicFilters);
+    els.localTopicSearchBtn?.addEventListener('click', applyLocalTopicFilters);
+    els.localTopicKeywordInput?.addEventListener('keydown', event => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        applyLocalTopicFilters();
     });
     els.scopeSelect.addEventListener('change', () => {
         const tab = getTabDefinitions().find(item => !item.hashtagId && item.scope === els.scopeSelect.value);
@@ -710,6 +733,7 @@ function resetZsxqWorkspace() {
     els.topicsTitle.textContent = '最新主题';
     els.topicsSubtitle.textContent = '选择一个星球后查看主题内容。';
     els.refreshTopicsBtn.classList.add('hidden');
+    els.localTopicFilterControl?.classList.add('hidden');
     els.publishPanel.classList.add('hidden');
     els.selectAllTopicsBtn.classList.add('hidden');
     els.batchDownloadBtn.classList.add('hidden');
@@ -913,9 +937,15 @@ async function loadTopics(group, options = {}) {
     }
     renderGroups(state.groups);
     els.refreshTopicsBtn.classList.remove('hidden');
+    els.localTopicFilterControl?.classList.remove('hidden');
     els.publishPanel.classList.remove('hidden');
     els.syncCurrentTabBtn?.classList.remove('hidden');
     els.syncAllTabsBtn?.classList.remove('hidden');
+    if (!systemSyncEnabledForGroup) {
+        state.selectedTopicKeys.clear();
+        state.selectedAttachmentKeys.clear();
+        hideManualDownloadControls();
+    }
     setSystemSyncControlsVisible(systemSyncEnabledForGroup);
     els.copyTopicsJsonBtn?.classList.add('hidden');
     els.topicsTitle.textContent = group.name || `星球 ${group.group_id}`;
@@ -2225,7 +2255,25 @@ function buildLocalTopicsRequest(tab, tabState) {
         end_time: tabState.endTime || null,
         hashtag_id: tab.hashtagId || '',
         publish_filter: publishFilter,
+        publish_date: els.localTopicDateInput?.value || '',
+        keyword: els.localTopicKeywordInput?.value.trim() || '',
     };
+}
+
+function localDateInputValue(date) {
+    const value = date instanceof Date ? date : new Date(date);
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const day = String(value.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+async function applyLocalTopicFilters() {
+    if (!state.selectedGroup || state.isLoadingMore) return;
+    state.tabStates.clear();
+    state.selectedTopicKeys.clear();
+    state.selectedAttachmentKeys.clear();
+    await loadActiveTabPage({ reset: true });
 }
 
 function withoutSensitiveCookie(payload) {
@@ -2632,6 +2680,7 @@ function renderGroups(groups) {
 }
 
 function renderTopics(topics, tabState = null) {
+    const manualDownloadEnabled = isSelectedSystemSyncGroup();
     const viewFilter = currentAttachmentViewFilter();
     const visibleTopics = filterTopicsByAttachmentView(topics, viewFilter);
     if (!visibleTopics.length) {
@@ -2673,7 +2722,7 @@ function renderTopics(topics, tabState = null) {
             <article class="rounded-lg border border-slate-200 p-4 hover:border-blue-200 hover:shadow-sm transition-all min-w-0" data-topic-key="${escapeHtml(topicKey)}">
                 <div class="flex items-start justify-between gap-4 min-w-0">
                     <div class="flex items-start gap-3 min-w-0 flex-1">
-                        <input type="checkbox" class="topic-select-checkbox mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 shrink-0" data-topic-key="${escapeHtml(topicKey)}" ${topicSelection.total ? '' : 'disabled'} ${topicSelection.allSelected ? 'checked' : ''} title="${topicSelection.total ? '勾选该主题下当前类型的全部附件' : '该主题没有匹配附件'}">
+                        ${manualDownloadEnabled ? `<input type="checkbox" class="topic-select-checkbox mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 shrink-0" data-topic-key="${escapeHtml(topicKey)}" ${topicSelection.total ? '' : 'disabled'} ${topicSelection.allSelected ? 'checked' : ''} title="${topicSelection.total ? '勾选该主题下当前类型的全部附件' : '该主题没有匹配附件'}">` : ''}
                         <div class="min-w-0 flex-1">
                         <h4 class="font-black text-slate-900 leading-snug line-clamp-2 break-words">${escapeHtml(title)}</h4>
                         <div class="mt-1 text-xs text-slate-400">${escapeHtml(author)} ${createdText ? `· ${escapeHtml(createdText)}` : ''}</div>
@@ -2790,10 +2839,33 @@ function renderTopicArticleLink(topic, content = '') {
 function renderExternalDocuments(topic) {
     const links = Array.isArray(topic?.external_documents) ? topic.external_documents : [];
     if (!links.length) return '';
+    const uniqueLinks = [];
+    const seen = new Set();
+    links.forEach((link, index) => {
+        const document = link?.document || {};
+        const key = String(
+            document.id
+            || link.external_document_id
+            || document.canonical_url
+            || link.canonical_url
+            || document.source_url
+            || link.source_url
+            || `external-${index}`
+        );
+        if (seen.has(key)) return;
+        seen.add(key);
+        uniqueLinks.push(link);
+    });
     return `
-        <div class="mt-3 space-y-2">
-            ${links.map(renderExternalDocumentItem).join('')}
-        </div>
+        <section class="external-documents-block" aria-label="外链文档">
+            <div class="external-documents-heading">
+                <span><i class="fas fa-link" aria-hidden="true"></i>外链文档</span>
+                <span class="external-documents-count">${escapeHtml(String(uniqueLinks.length))}</span>
+            </div>
+            <div class="external-documents-list">
+                ${uniqueLinks.map(renderExternalDocumentItem).join('')}
+            </div>
+        </section>
     `;
 }
 
@@ -2813,63 +2885,68 @@ function renderExternalDocumentItem(link) {
     const canSummarize = document.fetch_status === 'fetched';
     const canTts = document.fetch_status === 'fetched' || Boolean(summary);
     const audioHref = documentId ? `${apiBaseUrl()}/external-documents/${encodeURIComponent(documentId)}/tts/audio` : '';
+    const primaryAction = document.fetch_status !== 'fetched'
+        ? 'external-fetch'
+        : (!['completed', 'summarized'].includes(document.summary_status) ? 'external-summarize' : 'external-tts');
 
     return `
-        <div class="rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition hover:border-sky-200 hover:shadow-md min-w-0" data-external-doc-id="${escapeHtml(documentId)}">
-            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div class="flex min-w-0 items-start gap-3">
-                    <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-sky-100 bg-sky-50 text-sky-700">
-                        <i class="fas fa-file-lines text-sm"></i>
+        <article class="external-document-card" data-external-doc-id="${escapeHtml(documentId)}">
+            <div class="external-document-main">
+                <div class="external-document-identity">
+                    <div class="external-document-icon" aria-hidden="true">
+                        <i class="fas fa-file-lines"></i>
                     </div>
-                    <div class="min-w-0 flex-1">
-                        <div class="flex flex-wrap items-center gap-2">
-                            <span class="inline-flex items-center rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-black text-slate-700">${escapeHtml(providerLabel)}</span>
-                            ${document.content_chars ? `<span class="text-[11px] font-bold text-slate-400">${escapeHtml(String(document.content_chars))} 字</span>` : ''}
+                    <div class="external-document-copy">
+                        <div class="external-document-meta">
+                            <span class="external-document-provider">${escapeHtml(providerLabel)}</span>
+                            ${document.content_chars ? `<span>${escapeHtml(String(document.content_chars))} 字</span>` : ''}
                         </div>
                         ${url ? `
-                            <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="mt-1.5 flex max-w-full items-center gap-1.5 text-sm font-black text-slate-900 hover:text-blue-700">
-                                <span class="min-w-0 truncate">${escapeHtml(title)}</span>
-                                <i class="fas fa-arrow-up-right-from-square shrink-0 text-[10px] text-slate-300"></i>
+                            <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="external-document-title">
+                                <span>${escapeHtml(title)}</span>
+                                <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
                             </a>
-                        ` : `<div class="mt-1.5 text-sm font-black text-slate-900 break-words">${escapeHtml(title)}</div>`}
-                        <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                        ` : `<div class="external-document-title"><span>${escapeHtml(title)}</span></div>`}
+                        <div class="external-document-progress" aria-label="处理进度">
                             ${renderExternalDocumentStatusBadge('抓取', fetchMeta)}
+                            <i class="fas fa-chevron-right" aria-hidden="true"></i>
                             ${renderExternalDocumentStatusBadge('总结', summaryMeta)}
+                            <i class="fas fa-chevron-right" aria-hidden="true"></i>
                             ${renderExternalDocumentStatusBadge('语音', ttsMeta)}
                         </div>
                     </div>
                 </div>
-                <div class="flex shrink-0 flex-wrap items-center gap-1.5 md:justify-end">
-                    ${renderExternalDocumentButton('external-detail', documentId, 'fas fa-eye', '详情')}
-                    ${renderExternalDocumentButton('external-fetch', documentId, 'fas fa-cloud-arrow-down', '抓取', document.fetch_status === 'fetching')}
-                    ${renderExternalDocumentButton('external-summarize', documentId, 'fas fa-wand-magic-sparkles', '总结', document.summary_status === 'summarizing' || !canSummarize)}
-                    ${renderExternalDocumentButton('external-tts', documentId, 'fas fa-volume-high', 'TTS', ['queued', 'running'].includes(document.tts_status) || !canTts)}
+                <div class="external-document-actions">
+                    ${renderExternalDocumentButton('external-detail', documentId, 'fas fa-eye', '查看详情', false, false, true)}
+                    ${renderExternalDocumentButton('external-fetch', documentId, 'fas fa-cloud-arrow-down', '抓取', document.fetch_status === 'fetching', primaryAction === 'external-fetch')}
+                    ${renderExternalDocumentButton('external-summarize', documentId, 'fas fa-wand-magic-sparkles', '总结', document.summary_status === 'summarizing' || !canSummarize, primaryAction === 'external-summarize')}
+                    ${renderExternalDocumentButton('external-tts', documentId, 'fas fa-volume-high', '语音', ['queued', 'running'].includes(document.tts_status) || !canTts, primaryAction === 'external-tts')}
                     ${document.tts_status === 'completed' && audioHref ? `
-                        <a href="${escapeHtml(audioHref)}" target="_blank" rel="noopener noreferrer" class="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 text-xs font-black text-emerald-700 transition hover:bg-emerald-100" title="下载音频">
-                            <i class="fas fa-download mr-1"></i>音频
+                        <a href="${escapeHtml(audioHref)}" target="_blank" rel="noopener noreferrer" class="external-document-action external-document-action--download" title="下载音频">
+                            <i class="fas fa-download"></i><span>下载</span>
                         </a>
                     ` : ''}
                 </div>
             </div>
-            ${summary ? `<div class="mt-2 rounded-md border border-sky-100 bg-white px-3 py-2 text-xs leading-5 text-slate-600 break-words">${renderExternalTextPreview(summary, 500)}</div>` : ''}
-            ${fetchError}${summaryError}${ttsError}
-            <div class="external-document-detail mt-3 hidden rounded-md border border-slate-200 bg-white p-3 text-sm" data-external-detail="${escapeHtml(documentId)}"></div>
-        </div>
+            ${summary ? `<div class="external-document-summary">${renderExternalTextPreview(summary, 500)}</div>` : ''}
+            ${fetchError || summaryError || ttsError ? `<div class="external-document-errors">${fetchError}${summaryError}${ttsError}</div>` : ''}
+            <div class="external-document-detail hidden" data-external-detail="${escapeHtml(documentId)}"></div>
+        </article>
     `;
 }
 
-function renderExternalDocumentButton(action, documentId, iconClass, label, disabled = false) {
+function renderExternalDocumentButton(action, documentId, iconClass, label, disabled = false, primary = false, iconOnly = false) {
     const isDisabled = disabled || !documentId;
     return `
         <button type="button" data-external-action="${escapeHtml(action)}" data-document-id="${escapeHtml(documentId)}"
-            class="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-black text-slate-600 transition hover:border-slate-300 hover:bg-white disabled:cursor-not-allowed disabled:opacity-45" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}" ${isDisabled ? 'disabled' : ''}>
-            <i class="${escapeHtml(iconClass)} text-[11px]"></i><span>${escapeHtml(label)}</span>
+            class="external-document-action${primary ? ' external-document-action--primary' : ''}${iconOnly ? ' external-document-action--icon' : ''}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}" ${isDisabled ? 'disabled' : ''}>
+            <i class="${escapeHtml(iconClass)}"></i>${iconOnly ? '' : `<span>${escapeHtml(label)}</span>`}
         </button>
     `;
 }
 
 function renderExternalDocumentStatusBadge(label, meta) {
-    return `<span class="inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-black leading-5 ${meta.className}">${escapeHtml(label)} · ${escapeHtml(meta.text)}</span>`;
+    return `<span class="external-document-status ${meta.className}"><span class="external-document-status-dot"></span>${escapeHtml(label)} ${escapeHtml(meta.text)}</span>`;
 }
 
 function externalDocumentStatusMeta(kind, status) {
@@ -3172,6 +3249,7 @@ function extractHashtags(topic) {
 
 function renderFiles(files, topicId, topicKey) {
     const activeTab = getActiveTabConfig();
+    const manualDownloadEnabled = isSelectedSystemSyncGroup();
     return `
         <div class="mt-3 space-y-2">
             ${files.map((file, index) => {
@@ -3190,7 +3268,7 @@ function renderFiles(files, topicId, topicKey) {
                 return `
                     <div class="zsxq-file-row ${heatClass} flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 min-w-0" data-file-id="${escapeHtml(id)}">
                         <div class="min-w-0 flex items-start gap-2 flex-1">
-                            <input type="checkbox" class="file-select-checkbox mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 shrink-0" data-file-id="${escapeHtml(id)}" ${selected ? 'checked' : ''} title="选择这个附件加入下载计划">
+                            ${manualDownloadEnabled ? `<input type="checkbox" class="file-select-checkbox mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 shrink-0" data-file-id="${escapeHtml(id)}" ${selected ? 'checked' : ''} title="选择这个附件加入下载计划">` : ''}
                             <div class="min-w-0 flex flex-col gap-1">
                                 <div class="min-w-0 flex items-center gap-2 text-sm text-slate-700">
                                 <span class="shrink-0 text-[10px] font-black ${fileIcon}">${escapeHtml(fileTypeLabel)}</span>
@@ -3952,6 +4030,12 @@ function setPublishStatus(message, type = 'muted') {
 }
 
 function updateBatchDownloadButton() {
+    if (!isSelectedSystemSyncGroup()) {
+        state.selectedTopicKeys.clear();
+        state.selectedAttachmentKeys.clear();
+        hideManualDownloadControls();
+        return;
+    }
     const selectedEntries = getSelectedFileEntries();
     const manualPlanLimit = readManualPlanLimit();
     const limitExceeded = selectedEntries.length > manualPlanLimit;
@@ -4022,6 +4106,10 @@ function getSelectedFileEntries() {
 }
 
 function updateSelectAllButton() {
+    if (!isSelectedSystemSyncGroup()) {
+        els.selectAllTopicsBtn.classList.add('hidden');
+        return;
+    }
     const selectable = getSelectableFileEntries();
     if (!selectable.length) {
         els.selectAllTopicsBtn.classList.add('hidden');
@@ -4084,6 +4172,14 @@ function sleep(ms) {
 }
 
 async function createManualDownloadWorkflow() {
+    if (!isSelectedSystemSyncGroup()) {
+        renderSyncStatus({
+            type: 'error',
+            message: `人工计划仅支持“前沿信息收录”（Group ID: ${SYSTEM_SYNC_GROUP_ID}）。`,
+        });
+        hideManualDownloadControls();
+        return;
+    }
     if (!hasRequestCredential()) {
         renderSyncStatus({ type: 'error', message: '请先选择 DB Cookie，或新增保存 Cookie。' });
         return;

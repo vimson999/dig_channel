@@ -372,6 +372,7 @@ BANK_ALIASES = [
     ("高盛", "高盛"),
     ("Bernstein", "伯恩斯坦"),
     ("伯恩斯坦", "伯恩斯坦"),
+    ("盛博", "伯恩斯坦"),
     ("UBS", "瑞银"),
     ("瑞银", "瑞银"),
     ("Citi", "花旗"),
@@ -382,6 +383,8 @@ BANK_ALIASES = [
     ("美国银行", "美银"),
     ("Nomura", "野村"),
     ("野村", "野村"),
+    ("Jefferies", "杰富瑞"),
+    ("杰富瑞", "杰富瑞"),
 ]
 
 STEP_CODE_ALIASES = {
@@ -1960,6 +1963,9 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
     sub_title = _publisher_sub_title(structured, video_options, variant="landscape")
     vertical_main_title = _publisher_main_title(structured, video_options, variant="vertical")
     vertical_sub_title = _publisher_sub_title(structured, video_options, variant="vertical")
+    institution = _publisher_workbench_institution(structured, pdf, video_options)
+    main_title = _publisher_cover_title_with_institution(main_title, institution)
+    vertical_main_title = _publisher_cover_title_with_institution(vertical_main_title, institution)
     date_text = (
         str(video_options.get("date_text") or "").strip()
         or _publisher_date_text(parent.created_at)
@@ -2036,7 +2042,7 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "sub_title": vertical_sub_title,
             "date_text": date_text,
             "screenshot_path": screenshot_path,
-            "institution": _publisher_workbench_institution(structured, pdf, video_options),
+            "institution": institution,
             "emotion": "bull",
             "footer_text": str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
             "image_transform": {
@@ -2053,7 +2059,7 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "main_title": vertical_main_title,
             "sub_title": vertical_sub_title,
             "screenshot_path": screenshot_path,
-            "institution": _publisher_workbench_institution(structured, pdf, video_options),
+            "institution": institution,
             "emotion": "bull",
             "footer_text": str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
             "image_transform": {
@@ -2070,7 +2076,7 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "main_title": vertical_main_title,
             "sub_title": vertical_sub_title,
             "screenshot_path": screenshot_path,
-            "institution": _publisher_workbench_institution(structured, pdf, video_options),
+            "institution": institution,
             "emotion": "bull",
             "footer_text": str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
             "image_transform": {
@@ -2087,7 +2093,7 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "main_title": vertical_main_title,
             "sub_title": vertical_sub_title,
             "screenshot_path": screenshot_path,
-            "institution": _publisher_workbench_institution(structured, pdf, video_options),
+            "institution": institution,
             "emotion": "bull",
             "footer_text": str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
             "show_footer": False,
@@ -3025,7 +3031,7 @@ def _publisher_workbench_institution(structured, pdf, video_options):
         or (video_options or {}).get("vertical_institution")
         or ""
     ).strip()
-    allowed = {"J.P. Morgan", "Goldman Sachs", "Morgan Stanley", "UBS", "Nomura", "BofA", "HSBC", "深度研报"}
+    allowed = {"J.P. Morgan", "Goldman Sachs", "Morgan Stanley", "UBS", "Nomura", "BofA", "HSBC", "Jefferies", "Bernstein", "深度研报"}
     if explicit in allowed:
         return explicit
 
@@ -3049,6 +3055,9 @@ def _publisher_workbench_institution(structured, pdf, video_options):
         ("小摩", "J.P. Morgan"),
         ("Goldman Sachs", "Goldman Sachs"),
         ("高盛", "Goldman Sachs"),
+        ("Bernstein", "Bernstein"),
+        ("伯恩斯坦", "Bernstein"),
+        ("盛博", "Bernstein"),
         ("UBS", "UBS"),
         ("瑞银", "UBS"),
         ("Nomura", "Nomura"),
@@ -3059,6 +3068,8 @@ def _publisher_workbench_institution(structured, pdf, video_options):
         ("美银", "BofA"),
         ("HSBC", "HSBC"),
         ("汇丰", "HSBC"),
+        ("Jefferies", "Jefferies"),
+        ("杰富瑞", "Jefferies"),
     ]
     for alias, option in institution_aliases:
         if re.search(re.escape(alias), haystack, flags=re.I):
@@ -3072,6 +3083,8 @@ def _publisher_workbench_institution(structured, pdf, video_options):
                 "瑞银": "UBS",
                 "野村": "Nomura",
                 "美银": "BofA",
+                "杰富瑞": "Jefferies",
+                "伯恩斯坦": "Bernstein",
             }.get(label)
             if mapped:
                 return mapped
@@ -3087,9 +3100,17 @@ def _publisher_cover_title_with_institution(title, institution):
         "Nomura": "野村",
         "BofA": "美银",
         "HSBC": "汇丰",
+        "Jefferies": "杰富瑞",
+        "Bernstein": "伯恩斯坦",
         "深度研报": "机构",
     }.get(str(institution or "").strip(), str(institution or "").strip() or "机构")
-    _bank, subject = _extract_bank_subject(_single_line(title))
+    raw_title = re.sub(
+        r"^\s*(?:(?:机构研报|机构|深度研报)\s*[:：]\s*)+",
+        "",
+        _single_line(title),
+        flags=re.I,
+    )
+    _bank, subject = _extract_bank_subject(raw_title)
     subject = subject.strip(" |｜/：:") or "研报核心观点解读"
     formatted = _format_cover_title(f"{label}：{subject}")
     return re.sub(rf"^{re.escape(label)}:", f"{label}：", formatted, count=1)

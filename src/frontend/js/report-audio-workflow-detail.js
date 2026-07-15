@@ -95,8 +95,15 @@ class ReportAudioWorkflowDetailPage {
             this.els.root.innerHTML = '<div class="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-500">加载详情中...</div>';
         }
         try {
-            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}`, { timeoutMs: 30000 });
-            this.job = result.data || result;
+            const useLightweightStatus = Boolean(this.job) && !options.manual;
+            const path = useLightweightStatus
+                ? `/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}/status`
+                : `/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}`;
+            const result = await this.request(path, { timeoutMs: useLightweightStatus ? 10000 : 30000 });
+            const payload = result.data || result;
+            this.job = useLightweightStatus
+                ? this.mergeJobStatus(this.job, payload)
+                : payload;
             this.render();
             this.scheduleAutoRefresh();
             this.setNotice('', 'info', true);
@@ -140,8 +147,8 @@ class ReportAudioWorkflowDetailPage {
     async refreshBilibiliUploads() {
         if (!this.jobId) return;
         try {
-            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}`, { timeoutMs: 30000 });
-            this.job = result.data || result;
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}/status`, { timeoutMs: 10000 });
+            this.job = this.mergeJobStatus(this.job || {}, result.data || result);
             this.biliPanel?.updateJobData?.(this.job);
             this.scheduleAutoRefresh();
         } catch (error) {
@@ -154,6 +161,19 @@ class ReportAudioWorkflowDetailPage {
         this.els.title.textContent = '缺少任务 ID';
         this.els.subtitle.textContent = '请从研报转语音编排台点击“详情新页”打开。';
         this.els.root.innerHTML = '<div class="rounded-lg border border-amber-200 bg-amber-50 p-6 text-sm font-bold text-amber-800">URL 中没有 job_id。</div>';
+    }
+
+    mergeJobStatus(job, status) {
+        const next = { ...(job || {}) };
+        const payload = status || {};
+        Object.assign(next, payload);
+        next.children = {
+            ...((job && job.children) || {}),
+            ...(payload.children || {}),
+        };
+        if (payload.doubao_browser_tts) next.doubao_browser_tts = payload.doubao_browser_tts;
+        if (payload.bilibili_uploads) next.bilibili_uploads = payload.bilibili_uploads;
+        return next;
     }
 
     render() {
@@ -843,6 +863,8 @@ class ReportAudioWorkflowDetailPage {
         const aliases = [
             ['摩根士丹利', '大摩'], ['大摩', '大摩'], ['摩根大通', '摩根大通'], ['小摩', '摩根大通'],
             ['高盛', '高盛'], ['瑞银', '瑞银'], ['野村', '野村'], ['美国银行', '美银'], ['美银', '美银'], ['汇丰', '汇丰'],
+            ['Jefferies', '杰富瑞'], ['杰富瑞', '杰富瑞'],
+            ['Bernstein', '伯恩斯坦'], ['伯恩斯坦', '伯恩斯坦'], ['盛博', '伯恩斯坦'],
         ];
         const match = aliases.find(([alias]) => source.includes(alias));
         return match?.[1] || '机构研报';
@@ -850,7 +872,7 @@ class ReportAudioWorkflowDetailPage {
 
     stripInstitution(title, institution) {
         let text = this.compactTitle(title);
-        const aliases = [institution, '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰'];
+        const aliases = [institution, '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰', 'Jefferies', '杰富瑞', 'Bernstein', '伯恩斯坦', '盛博'];
         for (const alias of aliases.filter(Boolean).sort((a, b) => b.length - a.length)) {
             const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             text = text.replace(new RegExp(`^\\s*${escaped}(?:证券)?\\s*[:：]\\s*`, 'i'), '');
@@ -861,10 +883,14 @@ class ReportAudioWorkflowDetailPage {
     coverTitleWithInstitution(job, title) {
         const institution = this.reportInstitution(job, title);
         let body = this.compactMultilineCoverText(title);
-        const aliases = [institution, '机构', '机构研报', '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰'];
-        for (const alias of aliases.filter(Boolean).sort((a, b) => b.length - a.length)) {
-            const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            body = body.replace(new RegExp(`^\\s*${escaped}(?:证券)?\\s*[:：]\\s*`, 'i'), '');
+        const aliases = [institution, '机构', '机构研报', '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰', 'Jefferies', '杰富瑞', 'Bernstein', '伯恩斯坦', '盛博'];
+        let previousBody = '';
+        while (body !== previousBody) {
+            previousBody = body;
+            for (const alias of aliases.filter(Boolean).sort((a, b) => b.length - a.length)) {
+                const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                body = body.replace(new RegExp(`^\\s*${escaped}(?:证券)?\\s*[:：]\\s*`, 'i'), '');
+            }
         }
         body = body.replace(/^[|｜/：:\s]+|[|｜/：:\s]+$/g, '');
         return `${institution || '机构'}：${body || '研报核心观点解读'}`;

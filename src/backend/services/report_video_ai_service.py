@@ -248,7 +248,7 @@ def _deepseek_json(system_prompt, user_prompt, *, temperature=0.2, timeout=90):
         return None
 
     base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
     response = requests.post(
         f"{base_url.rstrip('/')}/v1/chat/completions",
         headers={

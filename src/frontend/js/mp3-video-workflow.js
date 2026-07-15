@@ -13,6 +13,7 @@ class Mp3VideoWorkflowPage {
         this.jobPage = this.initialJobPage();
         this.jobStatus = this.initialJobStatus();
         this.jobSearch = this.initialJobSearch();
+        this.jobDate = this.initialJobDate();
         this.jobSearchTimer = null;
         this.jobPerPage = 10;
         this.jobPagination = { page: 1, per_page: 10, total: 0, pages: 0 };
@@ -52,6 +53,7 @@ class Mp3VideoWorkflowPage {
             pollDelay: document.getElementById('poll-delay'),
             summaryText: document.getElementById('summary-text'),
             jobNameSearch: document.getElementById('job-name-search'),
+            jobDateFilter: document.getElementById('job-date-filter'),
             jobStatusFilter: document.getElementById('job-status-filter'),
             jobList: document.getElementById('job-list'),
             jobPagination: document.getElementById('job-pagination'),
@@ -61,6 +63,7 @@ class Mp3VideoWorkflowPage {
         this.bind();
         this.syncJobStatusFilter();
         this.syncJobSearchInput();
+        this.syncJobDateInput();
         this.refreshStatus();
         this.loadAudioAssets({ silent: true });
         this.loadHistory({ silent: true });
@@ -125,6 +128,19 @@ class Mp3VideoWorkflowPage {
         return this.normalizeJobSearch(params.get('q') || params.get('search') || params.get('job_search') || '');
     }
 
+    initialJobDate() {
+        const params = new URLSearchParams(window.location.search);
+        return this.normalizeJobDate(params.get('submitted_on') || params.get('job_date') || '') || this.todayInShanghai();
+    }
+
+    todayInShanghai() {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+        }).formatToParts(new Date());
+        const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+        return `${values.year}-${values.month}-${values.day}`;
+    }
+
     jobStatusOptions() {
         return [
             { value: '', label: '全部' },
@@ -152,6 +168,11 @@ class Mp3VideoWorkflowPage {
         return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 80);
     }
 
+    normalizeJobDate(value) {
+        const text = String(value || '').trim();
+        return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
+    }
+
     syncJobStatusFilter() {
         if (!this.els.jobStatusFilter) return;
         const status = this.normalizeJobStatus(this.jobStatus);
@@ -166,6 +187,12 @@ class Mp3VideoWorkflowPage {
         if (this.els.jobNameSearch.value !== search) {
             this.els.jobNameSearch.value = search;
         }
+    }
+
+    syncJobDateInput() {
+        if (!this.els.jobDateFilter) return;
+        const date = this.normalizeJobDate(this.jobDate);
+        if (this.els.jobDateFilter.value !== date) this.els.jobDateFilter.value = date;
     }
 
     bind() {
@@ -190,6 +217,7 @@ class Mp3VideoWorkflowPage {
         this.els.refreshJobsBtn.addEventListener('click', () => this.refreshJobs());
         this.els.pollDelay.addEventListener('change', () => this.resetPollTimer());
         this.els.jobStatusFilter?.addEventListener('change', () => this.handleJobStatusFilterChange());
+        this.els.jobDateFilter?.addEventListener('change', () => this.handleJobDateFilterChange());
         this.els.jobNameSearch?.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') {
                 event.preventDefault();
@@ -257,8 +285,8 @@ class Mp3VideoWorkflowPage {
             const result = await this.request('/api/mp3-video-workflows/status', { timeoutMs: 10000 });
             const provider = result.data?.provider || {};
             const dsParts = [
-                provider.planner_deepseek_configured ? `规划: ${provider.planner_model || 'deepseek-v4-pro'}` : '',
-                provider.transcript_deepseek_configured ? `IMA+DS: ${provider.transcript_model || provider.planner_model || 'deepseek-v4-pro'}` : '',
+                provider.planner_deepseek_configured ? `规划: ${provider.planner_model || 'deepseek-v4-flash'}` : '',
+                provider.transcript_deepseek_configured ? `IMA+DS: ${provider.transcript_model || provider.planner_model || 'deepseek-v4-flash'}` : '',
             ].filter(Boolean);
             const ds = dsParts.length ? dsParts.join(' / ') : 'DS 未配，使用兜底';
             const gemini = provider.gemini_configured ? 'Gemini 可用' : 'Gemini 未配';
@@ -511,13 +539,16 @@ class Mp3VideoWorkflowPage {
         const seq = ++this.historyRequestSeq;
         this.jobStatus = this.normalizeJobStatus(this.jobStatus);
         this.jobSearch = this.normalizeJobSearch(this.jobSearch);
+        this.jobDate = this.normalizeJobDate(this.jobDate);
         this.syncJobStatusFilter();
         this.syncJobSearchInput();
+        this.syncJobDateInput();
         if (!silent) this.els.summaryText.textContent = '加载任务中...';
         try {
             const params = new URLSearchParams({ page: String(page), per_page: String(this.jobPerPage) });
             if (this.jobStatus) params.set('status', this.jobStatus);
             if (this.jobSearch) params.set('q', this.jobSearch);
+            if (this.jobDate) params.set('submitted_on', this.jobDate);
             const result = await this.request(`/api/mp3-video-workflows/jobs?${params.toString()}`, { timeoutMs: 20000 });
             if (seq !== this.historyRequestSeq) return;
             this.jobs = result.data?.items || result.items || [];
@@ -536,6 +567,15 @@ class Mp3VideoWorkflowPage {
         const nextStatus = this.normalizeJobStatus(this.els.jobStatusFilter?.value || '');
         if (nextStatus === this.jobStatus) return;
         this.jobStatus = nextStatus;
+        this.jobPage = 1;
+        this.updateJobPageUrl(1);
+        this.loadHistory({ page: 1, force: true });
+    }
+
+    handleJobDateFilterChange() {
+        const nextDate = this.normalizeJobDate(this.els.jobDateFilter?.value || '');
+        if (nextDate === this.jobDate) return;
+        this.jobDate = nextDate;
         this.jobPage = 1;
         this.updateJobPageUrl(1);
         this.loadHistory({ page: 1, force: true });
@@ -843,7 +883,9 @@ class Mp3VideoWorkflowPage {
         const total = this.jobPagination.total || this.jobs.length;
         const statusLabel = this.jobStatusFilterLabel(this.jobStatus);
         const searchText = this.normalizeJobSearch(this.jobSearch);
+        const submittedOn = this.normalizeJobDate(this.jobDate);
         const scopeLabel = [
+            submittedOn ? `投递 ${submittedOn}` : '',
             searchText ? `搜索“${searchText}”` : '',
             this.jobStatus ? statusLabel : '',
         ].filter(Boolean).join(' · ');
@@ -852,6 +894,7 @@ class Mp3VideoWorkflowPage {
         const failed = this.jobs.filter((job) => job.status === 'failed').length;
         this.syncJobStatusFilter();
         this.syncJobSearchInput();
+        this.syncJobDateInput();
         this.els.summaryText.textContent = total
             ? `${scopeLabel || '全部'} ${total} 个 MP3 视频编排任务 · 本页 ${this.jobs.length} 个，运行中 ${running}，成功 ${succeeded}，失败 ${failed}。`
             : (scopeLabel ? `暂无${scopeLabel}的 MP3 视频编排任务。` : '还没有任务。');
@@ -1119,6 +1162,13 @@ class Mp3VideoWorkflowPage {
         }
         url.searchParams.delete('search');
         url.searchParams.delete('job_search');
+        const submittedOn = this.normalizeJobDate(this.jobDate);
+        if (submittedOn) {
+            url.searchParams.set('submitted_on', submittedOn);
+        } else {
+            url.searchParams.delete('submitted_on');
+        }
+        url.searchParams.delete('job_date');
     }
 
     setBadge(el, text, type) {

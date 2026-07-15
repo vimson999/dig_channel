@@ -7,10 +7,11 @@ class ReportScriptMaterialWorkflowPage {
         this.assetPerPage = 10;
         this.assetScope = 'all';
         this.assetPagination = { page: 1, per_page: 10, has_more: false };
-        this.jobPage = 1;
+        this.jobPage = this.initialJobPage();
         this.jobPerPage = 10;
-        this.jobStatus = '';
-        this.jobSearch = '';
+        this.jobStatus = this.initialJobStatus();
+        this.jobSearch = this.initialJobSearch();
+        this.jobDate = this.initialJobDate();
         this.jobPagination = { page: 1, pages: 0, total: 0 };
         this.selectedJobId = '';
         this.selectedJobDetail = null;
@@ -42,6 +43,7 @@ class ReportScriptMaterialWorkflowPage {
             submitBtn: document.getElementById('submit-btn'),
             summaryText: document.getElementById('summary-text'),
             jobSearch: document.getElementById('job-search'),
+            jobDateFilter: document.getElementById('job-date-filter'),
             jobStatusFilter: document.getElementById('job-status-filter'),
             loadHistoryBtn: document.getElementById('load-history-btn'),
             jobList: document.getElementById('job-list'),
@@ -50,6 +52,7 @@ class ReportScriptMaterialWorkflowPage {
         };
         this.renderGeminiUrlOptions();
         this.bind();
+        this.syncJobFilters();
         this.refreshStatus();
         this.loadAssets({ silent: true });
         this.loadHistory({ silent: true });
@@ -108,6 +111,59 @@ class ReportScriptMaterialWorkflowPage {
         const selected = select?.value || '';
         if (selected === '__custom__') return input?.value.trim() || '';
         return selected.trim();
+    }
+
+    initialJobPage() {
+        const value = Number(new URLSearchParams(window.location.search).get('job_page') || 1);
+        return Number.isFinite(value) && value > 0 ? Math.floor(value) : 1;
+    }
+
+    initialJobStatus() {
+        return this.normalizeJobStatus(new URLSearchParams(window.location.search).get('job_status') || '');
+    }
+
+    initialJobSearch() {
+        const params = new URLSearchParams(window.location.search);
+        return this.normalizeJobSearch(params.get('q') || params.get('search') || params.get('job_search') || '');
+    }
+
+    initialJobDate() {
+        const params = new URLSearchParams(window.location.search);
+        return this.normalizeJobDate(params.get('submitted_on') || params.get('job_date') || '') || this.todayInShanghai();
+    }
+
+    todayInShanghai() {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+        }).formatToParts(new Date());
+        const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+        return `${values.year}-${values.month}-${values.day}`;
+    }
+
+    normalizeJobStatus(value) {
+        const status = String(value || '').trim();
+        return ['', 'queued', 'running', 'succeeded', 'failed', 'canceled', 'deferred'].includes(status) ? status : '';
+    }
+
+    normalizeJobSearch(value) {
+        return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    }
+
+    normalizeJobDate(value) {
+        const text = String(value || '').trim();
+        return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
+    }
+
+    syncJobFilters() {
+        if (this.els.jobStatusFilter && this.els.jobStatusFilter.value !== this.jobStatus) {
+            this.els.jobStatusFilter.value = this.jobStatus;
+        }
+        if (this.els.jobSearch && this.els.jobSearch.value !== this.jobSearch) {
+            this.els.jobSearch.value = this.jobSearch;
+        }
+        if (this.els.jobDateFilter && this.els.jobDateFilter.value !== this.jobDate) {
+            this.els.jobDateFilter.value = this.jobDate;
+        }
     }
 
     apiRoot() {
@@ -174,7 +230,15 @@ class ReportScriptMaterialWorkflowPage {
         this.els.submitBtn.addEventListener('click', () => this.submit());
         this.els.loadHistoryBtn.addEventListener('click', () => this.loadHistory({ page: 1, force: true }));
         this.els.jobStatusFilter.addEventListener('change', () => {
-            this.jobStatus = this.els.jobStatusFilter.value;
+            this.jobStatus = this.normalizeJobStatus(this.els.jobStatusFilter.value);
+            this.jobPage = 1;
+            this.updateJobUrl();
+            this.loadHistory({ page: 1, force: true });
+        });
+        this.els.jobDateFilter?.addEventListener('change', () => {
+            this.jobDate = this.normalizeJobDate(this.els.jobDateFilter.value);
+            this.jobPage = 1;
+            this.updateJobUrl();
             this.loadHistory({ page: 1, force: true });
         });
         this.els.jobSearch.addEventListener('input', () => this.scheduleJobSearch());
@@ -259,7 +323,9 @@ class ReportScriptMaterialWorkflowPage {
     }
 
     applyJobSearch() {
-        this.jobSearch = this.els.jobSearch.value.trim();
+        this.jobSearch = this.normalizeJobSearch(this.els.jobSearch.value);
+        this.jobPage = 1;
+        this.updateJobUrl();
         this.loadHistory({ page: 1, silent: true });
     }
 
@@ -291,6 +357,10 @@ class ReportScriptMaterialWorkflowPage {
     async loadHistory(options = {}) {
         const page = Math.max(1, Number(options.page || this.jobPage || 1));
         this.jobPage = page;
+        this.jobStatus = this.normalizeJobStatus(this.jobStatus);
+        this.jobSearch = this.normalizeJobSearch(this.jobSearch);
+        this.jobDate = this.normalizeJobDate(this.jobDate);
+        this.syncJobFilters();
         try {
             const query = new URLSearchParams({
                 page: String(page),
@@ -298,9 +368,12 @@ class ReportScriptMaterialWorkflowPage {
             });
             if (this.jobStatus) query.set('status', this.jobStatus);
             if (this.jobSearch) query.set('q', this.jobSearch);
+            if (this.jobDate) query.set('submitted_on', this.jobDate);
             const result = await this.request(`/api/report-script-material-workflows/jobs?${query.toString()}`, { timeoutMs: 15000 });
             this.jobs = result.data?.items || result.items || [];
             this.jobPagination = result.data?.pagination || { page, pages: 0, total: 0 };
+            this.jobPage = Number(this.jobPagination.page || page);
+            this.updateJobUrl();
             this.renderJobs();
             if (this.selectedJobId && this.jobs.some((job) => job.job_id === this.selectedJobId)) {
                 this.loadJobDetail(this.selectedJobId, { silent: true });
@@ -749,10 +822,34 @@ class ReportScriptMaterialWorkflowPage {
 
     renderJobs() {
         const total = Number(this.jobPagination.total || 0);
-        this.els.summaryText.textContent = `共 ${total} 个基础文案物料任务`;
+        const scope = [
+            this.jobDate ? `投递 ${this.jobDate}` : '',
+            this.jobSearch ? `搜索“${this.jobSearch}”` : '',
+            this.jobStatus ? this.statusLabel(this.jobStatus) : '',
+        ].filter(Boolean).join(' · ');
+        this.syncJobFilters();
+        this.els.summaryText.textContent = total
+            ? `${scope || '全部'} · 共 ${total} 个基础文案物料任务`
+            : (scope ? `暂无${scope}的基础文案物料任务` : '还没有基础文案物料任务');
         this.els.jobList.innerHTML = this.jobs.map((job, index) => this.renderJob(job, index)).join('')
             || '<div class="rounded-lg border border-dashed border-slate-200 p-8 text-center text-sm text-slate-500">暂无任务。</div>';
         this.els.jobPagination.innerHTML = this.renderJobPager();
+    }
+
+    updateJobUrl() {
+        const url = new URL(window.location.href);
+        if (this.jobPage > 1) url.searchParams.set('job_page', String(this.jobPage));
+        else url.searchParams.delete('job_page');
+        if (this.jobStatus) url.searchParams.set('job_status', this.jobStatus);
+        else url.searchParams.delete('job_status');
+        if (this.jobSearch) url.searchParams.set('q', this.jobSearch);
+        else url.searchParams.delete('q');
+        url.searchParams.delete('search');
+        url.searchParams.delete('job_search');
+        if (this.jobDate) url.searchParams.set('submitted_on', this.jobDate);
+        else url.searchParams.delete('submitted_on');
+        url.searchParams.delete('job_date');
+        window.history.replaceState({}, '', url);
     }
 
     renderJob(job, index) {

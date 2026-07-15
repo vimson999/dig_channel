@@ -60,6 +60,7 @@ from services.mp3_video_workflow import (
     _reusable_video_summary,
     _video_summary_ready,
     _visual_artifacts_ready,
+    _wait_child,
     _without_waiting_state,
     _workflow_result_scope,
     _write_data_url,
@@ -87,6 +88,31 @@ from services.mp3_video_workflow import (
 
 
 class Mp3VideoWorkflowServiceTest(unittest.TestCase):
+    def test_wait_child_accepts_completion_at_inline_deadline(self):
+        child = PublicationTask(
+            id="child-at-deadline",
+            status="completed",
+            current_step="done",
+            progress=100,
+        )
+
+        with (
+            patch("services.mp3_video_workflow._child_inline_wait_seconds", return_value=1),
+            patch("services.mp3_video_workflow.time.monotonic", side_effect=[0, 2]),
+            patch("services.mp3_video_workflow._load_task", return_value=child),
+            patch("services.mp3_video_workflow._clear_waiting_child") as clear_waiting,
+        ):
+            result = _wait_child(
+                "parent-1",
+                child.id,
+                "landscape_video",
+                start_progress=80,
+                end_progress=90,
+            )
+
+        self.assertIs(result, child)
+        clear_waiting.assert_called_once_with("parent-1", "landscape_video")
+
     def test_workflow_result_scope_reuses_loaded_state_without_db_read(self):
         @_workflow_result_scope
         def exercise(task_id):
@@ -957,6 +983,30 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertNotIn("推荐截取", joined)
         self.assertNotIn("xxxx", joined)
         self.assertNotIn("收到您的指令", joined)
+
+    def test_transcript_infographic_prefers_ds_gold_quotes_over_ai_preamble(self):
+        source = (
+            "好的，作为您的投研助手，根据您提供的音频文档内容，我已为您整理了投资者视角的信息摘要。\n"
+            "以下是针对您7个问题的具体回答：\n"
+            "1. 投资者视角标题（版本一）\n"
+            "AI连接器格局已变，国产算力七月底定份额。\n"
+            "4. 最精华片段识别（时间戳）\n"
+            "开始时间戳：00:05:03.840\n结束时间戳：00:19:35.685\n"
+            "5. 音频金句\n"
+            "“全球的连接器格局已经发生了50年以来的巨变”（约00:04:15）\n"
+            "要点：AI对连接器行业的影响并非短期炒作。\n"
+            "“今天这波调整与基本面有比较大的背离”（约00:19:40）\n"
+            "要点：当前下跌反而提供了逆向投资机会。\n"
+            "6. 优化标题\n内资闭门会 / AI连接器 / 七月底定份额 / 450亿空间 / 2026-07-15\n"
+        )
+
+        bullets = _infographic_bullets(source)
+
+        self.assertGreaterEqual(len(bullets), 3)
+        self.assertIn("全球的连接器格局", bullets[0])
+        self.assertTrue(any("基本面" in item for item in bullets))
+        self.assertNotIn("投研助手", "\n".join(bullets))
+        self.assertNotIn("具体回答", "\n".join(bullets))
 
     def test_transcript_model_uses_specific_override(self):
         with patch.dict(os.environ, {"MP3_VIDEO_TRANSCRIPT_MODEL": "deepseek-transcript", "MP3_VIDEO_PLANNER_MODEL": "deepseek-planner"}, clear=False):

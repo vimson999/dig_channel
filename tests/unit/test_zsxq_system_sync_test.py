@@ -16,6 +16,18 @@ from services.zsxq_workflow_service import ZsxqWorkflowService  # noqa: E402
 
 
 class ZsxqSystemSyncTest(unittest.TestCase):
+    def test_manual_download_workflow_rejects_non_system_sync_group(self):
+        service = ZsxqWorkflowService()
+
+        with self.assertRaisesRegex(ValueError, "仅支持.*前沿信息收录"):
+            service._build_manual_download_snapshot(
+                config={
+                    "group_id": "88885882121542",
+                    "attachments": [{"id": "attachment-1"}],
+                },
+                trigger="zsxq_lab_manual_download_plan",
+            )
+
     def test_topic_pages_for_count_matches_observed_zsxq_page_size(self):
         self.assertEqual(system_sync_test._topic_pages_for_count(12), 1)
         self.assertEqual(system_sync_test._topic_pages_for_count(40), 2)

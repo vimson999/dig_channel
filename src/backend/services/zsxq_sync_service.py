@@ -2520,6 +2520,8 @@ class ZsxqSyncService:
         count=20,
         end_time=None,
         publish_filter=None,
+        publish_date=None,
+        keyword=None,
         include_raw_payload=False,
     ):
         if not self._sync_tables_ready():
@@ -2558,7 +2560,29 @@ class ZsxqSyncService:
         base_query = ZsxqTopic.query.filter(ZsxqTopic.group_id == group_id)
         if tab_id:
             base_query = base_query.filter(ZsxqTopic.tab_id == tab_id)
-        if str(publish_filter or "").strip().lower() == "attention":
+        publish_date = str(publish_date or "").strip()
+        if publish_date:
+            try:
+                datetime.strptime(publish_date, "%Y-%m-%d")
+            except ValueError as exc:
+                raise ValueError("publish_date 必须是 YYYY-MM-DD 格式") from exc
+            base_query = base_query.filter(ZsxqTopic.create_time.like(f"{publish_date}%"))
+
+        keyword = str(keyword or "").strip()[:200]
+        if keyword:
+            escaped_keyword = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped_keyword}%"
+            base_query = base_query.filter(or_(
+                ZsxqTopic.title.ilike(pattern, escape="\\"),
+                ZsxqTopic.author_name.ilike(pattern, escape="\\"),
+                ZsxqTopic.content.ilike(pattern, escape="\\"),
+                ZsxqTopic.question_text.ilike(pattern, escape="\\"),
+                ZsxqTopic.answer_text.ilike(pattern, escape="\\"),
+                ZsxqTopic.article_title.ilike(pattern, escape="\\"),
+                ZsxqTopic.article_excerpt.ilike(pattern, escape="\\"),
+            ))
+        attention_filter = str(publish_filter or "").strip().lower() == "attention"
+        if attention_filter:
             attachment_query = db.session.query(ZsxqAttachment.topic_id).filter(
                 ZsxqAttachment.group_id == group_id,
                 ZsxqAttachment.download_status == "downloaded",
@@ -2581,9 +2605,10 @@ class ZsxqSyncService:
         if end_time:
             page_query = page_query.filter(ZsxqTopic.create_time < str(end_time))
 
+        filters_applied = attention_filter or bool(publish_date) or bool(keyword)
         total = (
             base_query.with_entities(db.func.count(ZsxqTopic.id)).scalar()
-            if str(publish_filter or "").strip().lower() == "attention"
+            if filters_applied
             else self._cached_topic_total(group_id, tab_id)
         )
         rows = page_query.options(
@@ -2638,7 +2663,9 @@ class ZsxqSyncService:
             payloads.append(payload)
         next_end_time = self._oldest_cached_topic_time(topics) if has_more else None
         message = ""
-        if not payloads and not end_time and not self._has_cached_topics(group_id, tab_id):
+        if not payloads and not end_time and filters_applied:
+            message = "当前日期和关键词条件下没有匹配主题。"
+        elif not payloads and not end_time and not self._has_cached_topics(group_id, tab_id):
             message = "本地库暂无该 Tab 的主题。请先点击“同步当前 Tab”拉取元数据。"
         elif not payloads and end_time:
             message = "本地库已加载到底。"

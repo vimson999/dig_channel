@@ -36,6 +36,7 @@ from services.mp3_video_workflow import (
 )
 from tasks.mp3_video_workflow import process_mp3_video_workflow_job
 from utils.auth_utils import require_login
+from utils.date_filters import submission_date_utc_range
 
 
 mp3_video_workflow_bp = Blueprint("mp3_video_workflow", __name__, url_prefix="/api/mp3-video-workflows")
@@ -301,7 +302,7 @@ def create_job(current_user):
         if len(transcript_text) < 20:
             return jsonify({"success": False, "message": "请粘贴 IMA 复制全文后再投递"}), 400
         if not provider.get("transcript_deepseek_configured"):
-            return jsonify({"success": False, "message": "DS v4 pro 未配置，无法处理 IMA 转录全文", "data": {"provider": provider}}), 400
+            return jsonify({"success": False, "message": "DS v4 flash 未配置，无法处理 IMA 转录全文", "data": {"provider": provider}}), 400
     elif source_mode == "ds_response":
         if len(ds_response_text) < 20:
             return jsonify({"success": False, "message": "请粘贴 DS 返回值后再投递"}), 400
@@ -386,6 +387,10 @@ def list_jobs(current_user):
     search = _normalize_search_query(
         request.args.get("q") or request.args.get("search") or request.args.get("job_search")
     )
+    submitted_on = str(request.args.get("submitted_on") or request.args.get("job_date") or "").strip()
+    submitted_range = submission_date_utc_range(submitted_on)
+    if not submitted_range:
+        submitted_on = ""
 
     def load_page():
         query = PublicationTask.query.options(load_only(*JOB_LIST_COLUMNS)).filter(
@@ -395,6 +400,12 @@ def list_jobs(current_user):
         if status:
             reverse_status = {value: key for key, value in STATUS_MAP.items()}
             query = query.filter(PublicationTask.status == reverse_status.get(status, status))
+        if submitted_range:
+            submitted_start, submitted_end = submitted_range
+            query = query.filter(
+                PublicationTask.created_at >= submitted_start,
+                PublicationTask.created_at < submitted_end,
+            )
         if search:
             pattern = f"%{_escape_like(search)}%"
             query = query.filter(or_(
@@ -420,6 +431,7 @@ def list_jobs(current_user):
                 "total": pagination.total,
                 "pages": pagination.pages,
                 "q": search,
+                "submitted_on": submitted_on,
             },
         },
         "items": items,
@@ -783,6 +795,14 @@ def regenerate_artifact(current_user, job_id, artifact_key):
             plan=plan,
             title_text=title_text,
             infographic_path=infographic.get("path"),
+            source_text=(
+                result.get("initial_response_text")
+                or result.get("source_response_text")
+                or (result.get("source") or {}).get("initial_response_text")
+                or (result.get("source") or {}).get("response_text")
+                or ""
+            ),
+            audio=result.get("audio") if isinstance(result.get("audio"), dict) else {},
             created_at=task.created_at,
         )
     except Mp3VideoWorkflowError as exc:
@@ -804,6 +824,8 @@ def regenerate_artifact(current_user, job_id, artifact_key):
         })
     artifacts[key] = new_artifact
     result["artifacts"] = artifacts
+    if key == "audio_background" and isinstance(new_artifact.get("source_infographic"), dict):
+        result["infographic"] = new_artifact.get("source_infographic")
     result["artifact_regeneration_history"] = history[-20:]
     logs = list(result.get("logs") or [])
     logs.append({

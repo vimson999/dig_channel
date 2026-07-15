@@ -47,7 +47,8 @@
         "2026-07-07-platform-upload-worker-restart-orphan.md",
         "2026-07-10-report-audio-completed-parent-redelivered.md",
         "2026-07-10-report-audio-vertical-backfill-auto-canceled.md",
-        "2026-07-13-mp3-publisher-child-key-undefined.md"
+        "2026-07-13-mp3-publisher-child-key-undefined.md",
+        "2026-07-14-mp3-child-completed-at-wait-deadline.md"
       ]
     },
     {
@@ -110,7 +111,8 @@
       "records": [
         "2026-06-26-report-audio-vertical-video-download-missing.md",
         "2026-07-10-report-audio-bilibili-cover-not-promoted.md",
-        "2026-07-10-report-audio-scheme2-bilibili-cover-missing.md"
+        "2026-07-10-report-audio-scheme2-bilibili-cover-missing.md",
+        "2026-07-14-report-audio-institution-prefix-missing-from-render-assets.md"
       ]
     },
     {
@@ -147,6 +149,18 @@
     {
       "record": "2026-07-10-zsxq-sync-stale-credential-binding.md",
       "watch_for": "运行配置保存的凭据 ID 失效后再次阻塞动态凭据发现，或凭据错误再次被归类为资源无效"
+    },
+    {
+      "record": "2026-07-14-zsxq-lab-special-group-controls-leaked.md",
+      "watch_for": "普通知识星球组再次显示或可调用前沿信息收录专属的批量下载、清洗或发布操作"
+    },
+    {
+      "record": "2026-07-14-feishu-docs-home-misclassified-as-document.md",
+      "watch_for": "飞书或其他外部页面再次仅凭 HTTP 200 被认定为抓取成功，导致登录页、首页或应用壳层污染正文"
+    },
+    {
+      "record": "2026-07-15-mp3-infographic-used-ai-preamble.md",
+      "watch_for": "任何封面、背景图或信息墙再次从 AI 完整回复机械截取前几行，导致寒暄、角色说明或任务描述进入视觉资产"
     }
   ]
 }

@@ -723,7 +723,7 @@ def _base_url() -> str:
 
 
 def _model_name() -> str:
-    return os.getenv("REPORT_VISUAL_PLAN_MODEL") or os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-pro"
+    return os.getenv("REPORT_VISUAL_PLAN_MODEL") or os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-flash"
 
 
 def _json_from_text(value: str) -> Dict[str, Any]:
