@@ -581,7 +581,7 @@ function initThumbnailWorkbench() {
                 ctx.fillStyle = mask; ctx.fillRect(0, 0, w, h);
             } else if (format === 'wx_cover' || format === 'bilibili_wx_cover') {
                 const isBiliWxCover = format === 'bilibili_wx_cover';
-                targetWidth = w; targetHeight = isBiliWxCover ? Math.round(h * 0.625) : 900;
+                targetWidth = w; targetHeight = isBiliWxCover ? Math.round(h * 0.67) : 900;
                 const targetRatio = targetWidth / targetHeight;
                 const anchorTopLeft = workflowRenderOptions.imageAnchor === 'top-left';
                 if (imgRatio > targetRatio) {
@@ -597,7 +597,7 @@ function initThumbnailWorkbench() {
                     drawY = (anchorTopLeft ? 0 : 0 - (sDh - targetHeight) / 2) + imgOffsetY;
                     ctx.drawImage(reportImg, drawX, drawY, sDw, sDh);
                 }
-                const mask = ctx.createLinearGradient(0, Math.round(targetHeight * 0.33), 0, targetHeight);
+                const mask = ctx.createLinearGradient(0, Math.round(targetHeight * (isBiliWxCover ? 0.40 : 0.33)), 0, targetHeight);
                 mask.addColorStop(0, 'rgba(10, 17, 40, 0)');
                 mask.addColorStop(0.7, 'rgba(10, 17, 40, 0.9)');
                 mask.addColorStop(1, '#0a1128');
@@ -907,7 +907,7 @@ function initThumbnailWorkbench() {
             const isBiliWxCover = format === 'bilibili_wx_cover';
             const margin = isBiliWxCover ? 64 : 80;
             const maxW = w - margin * 2;
-            const labelY = isBiliWxCover ? Math.round(h * 0.42) : 700;
+            const labelY = isBiliWxCover ? Math.round(h * 0.47) : 700;
             const labelFont = isBiliWxCover ? 24 : 36;
             const labelBarW = isBiliWxCover ? 7 : 10;
             const labelBarH = isBiliWxCover ? 30 : 40;
@@ -917,7 +917,7 @@ function initThumbnailWorkbench() {
             ctx.fillText(instText + " · 研报解构", margin + labelGap, labelY + Math.round(labelBarH * 0.8));
             ctx.fillStyle = colors.main;
             ctx.shadowColor = colors.glow; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
-            const titleResult = drawFittedWrappedText(ctx, mainText, margin, isBiliWxCover ? Math.round(h * 0.60) : 870, maxW, {
+            const titleResult = drawFittedWrappedText(ctx, mainText, margin, isBiliWxCover ? Math.round(h * 0.65) : 870, maxW, {
                 maxLines: Number(workflowRenderOptions.titleMaxLines || 2),
                 startSize: Number(workflowRenderOptions.titleStartSize || (isBiliWxCover ? 68 : 110)),
                 minSize: Number(workflowRenderOptions.titleMinSize || (isBiliWxCover ? 44 : 72)),
@@ -929,7 +929,7 @@ function initThumbnailWorkbench() {
             if (subText) {
                 ctx.fillStyle = '#ffffff';
                 ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 5;
-                drawFittedWrappedText(ctx, subText, margin, nextY + (isBiliWxCover ? 24 : 50), maxW, {
+                drawFittedWrappedText(ctx, subText, margin, nextY + (isBiliWxCover ? 20 : 50), maxW, {
                     maxLines: Number(workflowRenderOptions.subtitleMaxLines || 1),
                     startSize: Number(workflowRenderOptions.subtitleStartSize || (isBiliWxCover ? 34 : 56)),
                     minSize: Number(workflowRenderOptions.subtitleMinSize || (isBiliWxCover ? 26 : 40)),
