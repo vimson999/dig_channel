@@ -431,6 +431,8 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(video["video_path"], str(landscape_path))
         self.assertEqual(video["vertical_video_path"], str(vertical_path))
         self.assertEqual(report_audio_api._landscape_video_path_for_task(parent), str(landscape_path))
+        self.assertEqual(report_audio_api._report_bilibili_video_path(parent, "landscape"), str(landscape_path))
+        self.assertEqual(report_audio_api._report_bilibili_video_path(parent, "vertical"), str(vertical_path))
 
     def test_main_publisher_vertical_output_is_reused_as_downloadable_video(self):
         root = Path(self.tmpdir.name)

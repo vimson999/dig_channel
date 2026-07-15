@@ -22,6 +22,7 @@ class BilibiliPublishPanel {
         this.seasonsLoading = '';
         this.lastUpload = null;
         this.formDraft = null;
+        this.localNotice = null;
         this.instanceId = `bili-${Math.random().toString(36).slice(2, 9)}`;
         this.bind();
     }
@@ -131,7 +132,20 @@ class BilibiliPublishPanel {
     }
 
     notify(message, type = 'info') {
+        this.localNotice = { message: String(message || ''), type };
+        const notice = this.container?.querySelector('[data-bili-shared-notice]');
+        if (notice) {
+            notice.textContent = this.localNotice.message;
+            notice.className = `mb-3 rounded-md border px-3 py-2 text-xs font-bold ${this.noticeClass(type)}`;
+        }
         if (this.options.onNotice) this.options.onNotice(message, type);
+    }
+
+    noticeClass(type) {
+        if (type === 'error') return 'border-red-200 bg-red-50 text-red-700';
+        if (type === 'warning') return 'border-amber-200 bg-amber-50 text-amber-800';
+        if (type === 'success') return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+        return 'border-sky-200 bg-sky-50 text-sky-700';
     }
 
     async loadCredentials() {
@@ -253,6 +267,7 @@ class BilibiliPublishPanel {
                         <i class="fas fa-user-gear mr-1"></i>账号管理
                     </a>
                 </div>
+                <div data-bili-shared-notice class="mb-3 rounded-md border px-3 py-2 text-xs font-bold ${this.localNotice ? this.noticeClass(this.localNotice.type) : 'hidden'}">${this.escape(this.localNotice?.message || '')}</div>
                 ${this.credentialsError ? `<div class="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">B站账号读取失败：${this.escape(this.credentialsError)}</div>` : ''}
                 ${this.credentialsLoading ? '<div class="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-500"><i class="fas fa-spinner fa-spin mr-1.5"></i>正在读取 B站账号...</div>' : ''}
                 ${unavailableMessages.map((message) => `<div class="mb-3 rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-500">${this.escape(message)}</div>`).join('')}

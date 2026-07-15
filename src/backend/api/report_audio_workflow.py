@@ -1899,7 +1899,12 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
 
 def _latest_landscape_video_child(parent_id):
     candidates = (
-        PublicationTask.query
+        PublicationTask.query.with_entities(
+            PublicationTask.id.label("id"),
+            PublicationTask.status.label("status"),
+            PublicationTask.task_video_path.label("task_video_path"),
+            PublicationTask.created_at.label("created_at"),
+        )
         .filter(PublicationTask.feature == "publisher")
         .filter(PublicationTask.source_task_id == parent_id)
         .filter(PublicationTask.publisher_landscape_enabled.is_(True))
@@ -1908,10 +1913,20 @@ def _latest_landscape_video_child(parent_id):
         .all()
     )
     for child in candidates:
-        path = child.task_video_path or (child.result or {}).get("video_path")
+        path = _landscape_video_path_from_child(child)
         if child.status == "completed" and _path_exists(path):
             return child
     return candidates[0] if candidates else None
+
+
+def _landscape_video_path_from_child(child):
+    if not child:
+        return None
+    projected = getattr(child, "task_video_path", None)
+    if projected:
+        return projected
+    result = _task_mapping_attr(child, "result")
+    return result.get("video_path")
 
 
 def _landscape_video_path_for_task(task):
@@ -1925,7 +1940,7 @@ def _landscape_video_path_for_task(task):
     child = _latest_landscape_video_child(task.id)
     if not child or child.status != "completed":
         return None
-    return child.task_video_path or (child.result or {}).get("video_path")
+    return _landscape_video_path_from_child(child)
 
 
 def _ensure_pdf_first_page_image(task):
@@ -2201,11 +2216,9 @@ def _bilibili_cover_path_for_task(task):
 
 
 def _report_bilibili_video_path(task, video_key):
-    result = task.result if isinstance(task.result, dict) else {}
-    video = result.get("video") if isinstance(result.get("video"), dict) else {}
     if video_key == "vertical":
         return _vertical_video_path_for_task(task)
-    return video.get("video_path")
+    return _landscape_video_path_for_task(task)
 
 
 def _report_bilibili_cover_path(task, video_key, requested_key=""):
@@ -2358,7 +2371,7 @@ def _video_result_with_vertical_backfill(task):
 
     landscape_path = None
     if landscape_child and landscape_child.status == "completed":
-        landscape_path = landscape_child.task_video_path or (landscape_child.result or {}).get("video_path")
+        landscape_path = _landscape_video_path_from_child(landscape_child)
     if _path_exists(landscape_path):
         video["enabled"] = True
         video["status"] = "completed"
