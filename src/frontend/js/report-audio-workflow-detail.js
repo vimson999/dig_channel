@@ -8,6 +8,8 @@ class ReportAudioWorkflowDetailPage {
         this.biliPanelDraft = null;
         this.biliPanelDraftJobId = '';
         this.verticalVideoRequestIds = new Set();
+        this.finalVideoRequestIds = new Set();
+        this.selectedVerticalScheme = null;
         this.podcastCoverRequestIds = new Set();
         this.coverRegeneratingIds = new Set();
         this.els = {
@@ -37,6 +39,11 @@ class ReportAudioWorkflowDetailPage {
             const button = event.target.closest('[data-copy-text]');
             if (!button) return;
             this.copyText(button.dataset.copyText || '');
+        });
+        this.els.root?.addEventListener('change', (event) => {
+            if (!event.target.matches('[data-detail-vertical-scheme]')) return;
+            this.selectedVerticalScheme = this.normalizeVerticalScheme(event.target.value);
+            this.render();
         });
     }
 
@@ -96,6 +103,7 @@ class ReportAudioWorkflowDetailPage {
         }
         try {
             const useLightweightStatus = Boolean(this.job) && !options.manual;
+            const hadActiveVideo = this.hasActiveVideoChild(this.job);
             const path = useLightweightStatus
                 ? `/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}/status`
                 : `/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}`;
@@ -104,6 +112,10 @@ class ReportAudioWorkflowDetailPage {
             this.job = useLightweightStatus
                 ? this.mergeJobStatus(this.job, payload)
                 : payload;
+            if (useLightweightStatus && hadActiveVideo && !this.hasActiveVideoChild(this.job)) {
+                const detailResult = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}`, { timeoutMs: 30000 });
+                this.job = detailResult.data || detailResult;
+            }
             this.render();
             this.scheduleAutoRefresh();
             this.setNotice('', 'info', true);
@@ -133,10 +145,11 @@ class ReportAudioWorkflowDetailPage {
         const activeUpload = uploadItems.some((item) => (
             ['queued', 'pending', 'running', 'processing', 'submitting'].includes(String(item?.status || '').toLowerCase())
         ));
-        if (!activeJob && !activeUpload) return;
+        const activeVideo = this.hasActiveVideoChild(this.job);
+        if (!activeJob && !activeUpload && !activeVideo) return;
         this.refreshTimer = setTimeout(() => {
             this.refreshTimer = null;
-            if (activeJob) {
+            if (activeJob || activeVideo) {
                 this.load();
             } else {
                 this.refreshBilibiliUploads();
@@ -171,9 +184,24 @@ class ReportAudioWorkflowDetailPage {
             ...((job && job.children) || {}),
             ...(payload.children || {}),
         };
+        for (const key of ['publisher_video', 'publisher_vertical_video', 'publisher_vertical_preview_video']) {
+            if (next.children[key]) next[key] = next.children[key];
+        }
         if (payload.doubao_browser_tts) next.doubao_browser_tts = payload.doubao_browser_tts;
         if (payload.bilibili_uploads) next.bilibili_uploads = payload.bilibili_uploads;
         return next;
+    }
+
+    hasActiveVideoChild(job) {
+        const children = job?.children || {};
+        return [
+            children.publisher_video,
+            children.publisher_vertical_video,
+            children.publisher_vertical_preview_video,
+            job?.publisher_video,
+            job?.publisher_vertical_video,
+            job?.publisher_vertical_preview_video,
+        ].some((item) => this.isActiveStatus(item?.status));
     }
 
     render() {
@@ -214,6 +242,9 @@ class ReportAudioWorkflowDetailPage {
                 previewSeconds: 0,
                 force: true,
             });
+        }
+        if (action === 'confirm-keyframes-generate-final') {
+            this.generateFinalVideos(jobId);
         }
         if (action === 'generate-podcast-cover') {
             this.generatePodcastCover(jobId, { force: false });
@@ -315,16 +346,20 @@ class ReportAudioWorkflowDetailPage {
         const verticalChild = job.publisher_vertical_video || job.children?.publisher_vertical_video;
         const previewChild = job.publisher_vertical_preview_video || job.children?.publisher_vertical_preview_video;
         const verticalActive = this.isActiveStatus(verticalChild?.status) || this.isActiveStatus(previewChild?.status) || this.verticalVideoRequestIds.has(jobId);
+        const finalVideoActive = this.finalVideoRequestIds.has(jobId)
+            || (this.isActiveStatus(verticalChild?.status) && Boolean(verticalChild?.metadata?.include_landscape));
         const podcastGenerating = this.podcastCoverRequestIds.has(jobId);
         const coverRegenerating = this.coverRegeneratingIds.has(jobId);
         const scheme = this.normalizeVerticalScheme(
-            job.request?.video?.vertical_video_scheme
+            this.selectedVerticalScheme
+            || job.request?.video?.vertical_video_scheme
             || job.request?.video?.vertical_scheme
             || video.vertical_video_scheme
             || video.vertical_preview_scheme
             || 'scheme1'
         );
         const canRequestVertical = Boolean(audioUrl || videoUrl);
+        const keyframeMode = String(video.render_mode || job.request?.video?.render_mode || '').toLowerCase() === 'keyframes';
         return `
             <section class="rounded-lg border border-indigo-100 bg-indigo-50/60 p-4 shadow-sm">
                 <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -334,6 +369,15 @@ class ReportAudioWorkflowDetailPage {
                     </div>
                     ${!canRequestVertical ? `<span class="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-700">需要先有音频或视频文件</span>` : ''}
                 </div>
+                ${keyframeMode && !videoUrl ? `
+                    <div class="mb-3 rounded-lg border border-indigo-200 bg-white p-3">
+                        <div class="text-xs font-black text-indigo-950">关键帧确认完成后</div>
+                        <div class="mt-1 text-xs leading-5 text-slate-600">当前选择会同时生成横屏成片和${this.escape(this.verticalSchemeLabel(scheme))}竖屏成片，直接复用现有音频、文案和截图。</div>
+                        <button type="button" data-detail-action="confirm-keyframes-generate-final" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive || finalVideoActive ? 'disabled' : ''} class="mt-2 rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-wait disabled:opacity-60">
+                            <i class="fas ${finalVideoActive ? 'fa-spinner fa-spin' : 'fa-circle-check'} mr-1"></i>${finalVideoActive ? '横竖屏生成中' : `确认关键帧，生成横屏 + ${this.escape(this.verticalSchemeLabel(scheme))}竖屏`}
+                        </button>
+                    </div>
+                ` : ''}
                 <div class="flex flex-wrap items-center gap-2">
                     ${coverUrl ? `<a href="${this.absoluteUrl(coverUrl)}" download class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50"><i class="fas fa-image mr-1"></i>封面</a>` : ''}
                     <button type="button" data-detail-action="regenerate-cover" data-job-id="${this.escapeAttr(jobId)}" ${coverRegenerating ? 'disabled' : ''} class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60">
@@ -423,6 +467,7 @@ class ReportAudioWorkflowDetailPage {
                     scheme,
                     preview_seconds: previewSeconds,
                     force: options.force !== false,
+                    include_landscape: options.includeLandscape === true,
                 }),
             });
             this.mergeJobPayload(result.data || result);
@@ -443,6 +488,24 @@ class ReportAudioWorkflowDetailPage {
             this.render();
         } finally {
             this.verticalVideoRequestIds.delete(jobId);
+            this.render();
+        }
+    }
+
+    async generateFinalVideos(jobId) {
+        if (!jobId || this.finalVideoRequestIds.has(jobId)) return;
+        const scheme = this.currentDetailVerticalScheme();
+        this.finalVideoRequestIds.add(jobId);
+        this.render();
+        try {
+            await this.generateVerticalVideo(jobId, {
+                scheme,
+                previewSeconds: 0,
+                force: true,
+                includeLandscape: true,
+            });
+        } finally {
+            this.finalVideoRequestIds.delete(jobId);
             this.render();
         }
     }

@@ -713,7 +713,7 @@ def download_video(current_user, job_id):
     task = _get_owned_task_reference(current_user, job_id)
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    video_path = task.report_audio_video_path
+    video_path = _landscape_video_path_for_task(task)
     if not video_path or not os.path.exists(video_path):
         return jsonify({"success": False, "message": "视频文件不存在"}), 404
     return _send_previewable_file(video_path, "video/mp4", f"{task.id}.mp4")
@@ -1061,7 +1061,7 @@ def generate_vertical_video(current_user, job_id):
     data = _request_payload()
     has_explicit_options = any(
         key in data
-        for key in ("scheme", "vertical_scheme", "vertical_video_scheme", "preview_seconds", "duration_seconds", "force")
+        for key in ("scheme", "vertical_scheme", "vertical_video_scheme", "preview_seconds", "duration_seconds", "force", "include_landscape")
     )
     scheme = _normalize_vertical_video_scheme(
         data.get("scheme") or data.get("vertical_scheme") or data.get("vertical_video_scheme") or _task_vertical_video_scheme(task)
@@ -1073,13 +1073,20 @@ def generate_vertical_video(current_user, job_id):
         600,
     )
     force = _truthy(data.get("force"), False)
+    include_landscape = _truthy(data.get("include_landscape"), False)
+    if include_landscape and preview_seconds > 0:
+        return jsonify({"success": False, "message": "横屏成片不能使用竖屏预览时长"}), 400
 
     existing_path = _vertical_video_path_for_task(task)
     if existing_path and not has_explicit_options:
         payload = _job_payload(task)
         return jsonify({"success": True, "message": "竖屏 MP4 已存在", **payload, "data": payload})
 
-    existing_child = _latest_matching_vertical_video_child(task.id, scheme=scheme, preview_seconds=preview_seconds)
+    existing_child = (
+        _latest_matching_final_video_child(task.id, scheme=scheme)
+        if include_landscape
+        else _latest_matching_vertical_video_child(task.id, scheme=scheme, preview_seconds=preview_seconds)
+    )
     if existing_child and existing_child.status not in TERMINAL_STATUSES:
         payload = _job_payload(task)
         return jsonify({"success": True, "message": "竖屏 MP4 已在生成队列中", **payload, "data": payload})
@@ -1088,7 +1095,12 @@ def generate_vertical_video(current_user, job_id):
         return jsonify({"success": True, "message": "同方案竖屏 MP4 已存在", **payload, "data": payload})
 
     try:
-        child = _create_vertical_video_backfill_task(task, scheme=scheme, preview_seconds=preview_seconds)
+        child = _create_vertical_video_backfill_task(
+            task,
+            scheme=scheme,
+            preview_seconds=preview_seconds,
+            include_landscape=include_landscape,
+        )
     except ValueError as exc:
         return jsonify({"success": False, "message": str(exc)}), 400
     except Exception as exc:
@@ -1098,9 +1110,10 @@ def generate_vertical_video(current_user, job_id):
     _clear_jobs_summary_cache(getattr(current_user, "id", None))
     payload = _job_payload(task)
     preview_label = f"{preview_seconds}s 预览" if preview_seconds > 0 else "完整视频"
+    output_label = "横屏 + 竖屏 MP4" if include_landscape else "竖屏 MP4"
     return jsonify({
         "success": True,
-        "message": f"竖屏 MP4 已提交生成（{_vertical_video_scheme_label(scheme)} · {preview_label}）",
+        "message": f"{output_label} 已提交生成（{_vertical_video_scheme_label(scheme)} · {preview_label}）",
         "vertical_video_task": _child_task_summary(child),
         **payload,
         "data": payload,
@@ -1651,7 +1664,7 @@ def _generate_bilibili_cover_for_task(task, *, title=None, subtitle=None):
     }
 
 
-def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds=0):
+def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds=0, include_landscape=False):
     result = parent.result if isinstance(parent.result, dict) else {}
     params = parent.params if isinstance(parent.params, dict) else {}
     payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
@@ -1672,6 +1685,12 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
     video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
     existing_video = result.get("video") if isinstance(result.get("video"), dict) else {}
     scheme = _normalize_vertical_video_scheme(scheme or video_options.get("vertical_video_scheme") or video_options.get("vertical_scheme"))
+    existing_vertical_scheme = _normalize_vertical_video_scheme(existing_video.get("vertical_video_scheme"))
+    existing_vertical_background = (
+        existing_video.get("vertical_background_path")
+        if existing_vertical_scheme == scheme and _path_exists(existing_video.get("vertical_background_path"))
+        else None
+    )
     preview_seconds = _bounded_int(preview_seconds, 0, 0, 600)
     try:
         audio_seconds = float(audio.get("seconds") or 0)
@@ -1720,6 +1739,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
         "vertical_video_scheme_label": _vertical_video_scheme_label(scheme),
         "preview_seconds": preview_seconds,
         "is_preview": preview_seconds > 0,
+        "include_landscape": bool(include_landscape),
     }
     task_params = {
         "feature": "publisher",
@@ -1735,7 +1755,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
             }
         ],
         "video": {
-            "enabled": False,
+            "enabled": bool(include_landscape),
             "sub_burn_enabled": _publisher_sub_burn_enabled(video_options),
             "asr_model": str(video_options.get("asr_model") or "base"),
             "video_path": "",
@@ -1750,7 +1770,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
             "enabled": True,
             "asr_model": str(video_options.get("asr_model") or "base"),
             "audio_path": audio_path,
-            "image_path": screenshot_path,
+            "image_path": existing_vertical_background or screenshot_path,
             "subtitles": [],
             "scheme": scheme,
             "preview_seconds": preview_seconds,
@@ -1759,7 +1779,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
         },
         "vertical_video_2": {"enabled": False, "image_path": ""},
         "vertical_thumbnail": {
-            "enabled": True,
+            "enabled": not bool(existing_vertical_background),
             "scheme": scheme,
             "main_title": main_title,
             "sub_title": sub_title,
@@ -1877,6 +1897,37 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
     return child
 
 
+def _latest_landscape_video_child(parent_id):
+    candidates = (
+        PublicationTask.query
+        .filter(PublicationTask.feature == "publisher")
+        .filter(PublicationTask.source_task_id == parent_id)
+        .filter(PublicationTask.publisher_landscape_enabled.is_(True))
+        .order_by(PublicationTask.created_at.desc())
+        .limit(30)
+        .all()
+    )
+    for child in candidates:
+        path = child.task_video_path or (child.result or {}).get("video_path")
+        if child.status == "completed" and _path_exists(path):
+            return child
+    return candidates[0] if candidates else None
+
+
+def _landscape_video_path_for_task(task):
+    parent_path = getattr(task, "report_audio_video_path", None)
+    if not parent_path:
+        result = task.result if isinstance(getattr(task, "result", None), dict) else {}
+        video = result.get("video") if isinstance(result.get("video"), dict) else {}
+        parent_path = video.get("video_path")
+    if _path_exists(parent_path):
+        return parent_path
+    child = _latest_landscape_video_child(task.id)
+    if not child or child.status != "completed":
+        return None
+    return child.task_video_path or (child.result or {}).get("video_path")
+
+
 def _ensure_pdf_first_page_image(task):
     result = task.result if isinstance(task.result, dict) else {}
     video = result.get("video") if isinstance(result.get("video"), dict) else {}
@@ -1943,6 +1994,21 @@ def _latest_matching_vertical_video_child(parent_id, *, scheme, preview_seconds)
         .all()
     )
     return max(candidates, key=_vertical_child_priority) if candidates else None
+
+
+def _latest_matching_final_video_child(parent_id, *, scheme):
+    scheme = _normalize_vertical_video_scheme(scheme)
+    return (
+        PublicationTask.query
+        .filter(PublicationTask.feature == "publisher")
+        .filter(PublicationTask.source_task_id == parent_id)
+        .filter(PublicationTask.publisher_landscape_enabled.is_(True))
+        .filter(PublicationTask.publisher_vertical_enabled.is_(True))
+        .filter(PublicationTask.publisher_vertical_scheme == scheme)
+        .filter(PublicationTask.publisher_preview_seconds == 0)
+        .order_by(PublicationTask.created_at.desc())
+        .first()
+    )
 
 
 def _is_vertical_backfill_child(task):
@@ -2286,8 +2352,19 @@ def _video_result_with_vertical_backfill(task):
     video = dict(result.get("video") or {}) if isinstance(result.get("video"), dict) else {}
     child = _latest_vertical_video_child(task.id, preview=False)
     preview_child = _latest_vertical_video_child(task.id, preview=True)
+    landscape_child = _latest_landscape_video_child(task.id)
     if not child:
         child = None
+
+    landscape_path = None
+    if landscape_child and landscape_child.status == "completed":
+        landscape_path = landscape_child.task_video_path or (landscape_child.result or {}).get("video_path")
+    if _path_exists(landscape_path):
+        video["enabled"] = True
+        video["status"] = "completed"
+        video["landscape_enabled"] = True
+        video["video_path"] = landscape_path
+        video["publisher_task_id"] = landscape_child.id
 
     child_path = _vertical_video_path_from_child(child) if child else None
     if child and child.status == "completed" and _path_exists(child_path):
@@ -2446,7 +2523,7 @@ def _job_payload(task, include_raw=False):
         "pdf_first_page_image": _public_image(task.id, result.get("pdf_first_page_image")),
         "download_audio_url": f"/api/report-audio-workflows/jobs/{task.id}/download-audio" if audio and audio.get("wav_path") else None,
         "download_result_url": f"/api/report-audio-workflows/jobs/{task.id}/download-result" if result.get("output_path") else None,
-        "download_video_url": f"/api/report-audio-workflows/jobs/{task.id}/download-video" if _path_exists((result.get("video") or {}).get("video_path")) else None,
+        "download_video_url": f"/api/report-audio-workflows/jobs/{task.id}/download-video" if _path_exists(video_result.get("video_path")) else None,
         "download_vertical_video_url": f"/api/report-audio-workflows/jobs/{task.id}/download-vertical-video" if _path_exists(video_result.get("vertical_video_path")) else None,
         "download_vertical_cover_url": f"/api/report-audio-workflows/jobs/{task.id}/download-vertical-cover" if _path_exists(video_result.get("vertical_cover_path")) else None,
         "download_podcast_cover_url": f"/api/report-audio-workflows/jobs/{task.id}/download-podcast-cover" if _path_exists(video_result.get("podcast_cover_path")) else None,

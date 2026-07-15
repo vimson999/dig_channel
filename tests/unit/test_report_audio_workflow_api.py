@@ -360,6 +360,78 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertNotIn("thumbnail", child.params)
         self.assertEqual(child.result["metadata"]["source"], report_audio_api.VERTICAL_BACKFILL_SOURCE)
 
+    def test_keyframe_confirmation_creates_landscape_and_scheme2_vertical_task(self):
+        root = Path(self.tmpdir.name)
+        audio_path = root / "audio.wav"
+        screenshot_path = root / "page.jpg"
+        scheme1_background = root / "scheme1-background.jpg"
+        audio_path.write_bytes(b"RIFF----WAVE")
+        screenshot_path.write_bytes(b"jpeg")
+        scheme1_background.write_bytes(b"scheme1")
+
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"filename": "sample.pdf", "path": str(root / "sample.pdf")},
+                    "video": {"enabled": True, "vertical_enabled": True, "vertical_video_scheme": "scheme1"},
+                },
+            },
+            result={
+                "audio": {"wav_path": str(audio_path), "seconds": 12.0},
+                "structured_result": {"final_script_for_tts": "测试口播稿。", "cover_title": "测试标题"},
+                "pdf_first_page_image": {"path": str(screenshot_path), "bytes": 4},
+                "video": {
+                    "render_mode": "keyframes",
+                    "vertical_video_scheme": "scheme1",
+                    "vertical_background_path": str(scheme1_background),
+                },
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        with patch.object(
+            report_audio_api.run_publication_pipeline,
+            "apply_async",
+            return_value=SimpleNamespace(id="celery-final-videos"),
+        ):
+            child = report_audio_api._create_vertical_video_backfill_task(
+                parent,
+                scheme="scheme2",
+                include_landscape=True,
+            )
+
+        self.assertTrue(child.params["video"]["enabled"])
+        self.assertTrue(child.params["vertical_video"]["enabled"])
+        self.assertEqual(child.params["vertical_video"]["scheme"], "scheme2")
+        self.assertEqual(child.params["vertical_video"]["image_path"], str(screenshot_path))
+        self.assertTrue(child.params["vertical_thumbnail"]["enabled"])
+        self.assertTrue(child.result["metadata"]["include_landscape"])
+
+        landscape_path = root / "landscape.mp4"
+        vertical_path = root / "vertical.mp4"
+        landscape_path.write_bytes(b"landscape")
+        vertical_path.write_bytes(b"vertical")
+        child.status = "completed"
+        child.current_step = "done"
+        child.progress = 100
+        child.result = {
+            **child.result,
+            "video_path": str(landscape_path),
+            "vertical_video_path": str(vertical_path),
+        }
+        db.session.commit()
+
+        video = report_audio_api._video_result_with_vertical_backfill(parent)
+        self.assertEqual(video["video_path"], str(landscape_path))
+        self.assertEqual(video["vertical_video_path"], str(vertical_path))
+        self.assertEqual(report_audio_api._landscape_video_path_for_task(parent), str(landscape_path))
+
     def test_main_publisher_vertical_output_is_reused_as_downloadable_video(self):
         root = Path(self.tmpdir.name)
         landscape_path = root / "landscape.mp4"
