@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>生财情报台 - Shioa</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    <link rel="stylesheet" href="css/zsxq-lab.css?v=20260715-insights">
+    <link rel="stylesheet" href="css/zsxq-insights.css?v=20260715-v1">
+</head>
+<body class="zsxq-insights-page min-h-screen bg-slate-50 text-slate-900 overflow-x-hidden">
+    <main class="insights-page">
+        <section class="insights-toolbar" aria-labelledby="page-title">
+            <div class="insights-title-block">
+                <h2 id="page-title">生财情报台</h2>
+                <p id="page-context">需求与结果验证同时较强，近 30 天保持活跃</p>
+            </div>
+            <label class="global-search">
+                <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
+                <input id="global-search" type="search" autocomplete="off" placeholder="搜索主题、关键词、作者或原文">
+                <kbd>/</kbd>
+            </label>
+            <div class="toolbar-controls">
+                <label class="select-control">
+                    <i class="fa-regular fa-star" aria-hidden="true"></i>
+                    <select id="group-select" aria-label="选择星球">
+                        <option value="1824528822">生财有术</option>
+                    </select>
+                </label>
+                <label class="select-control">
+                    <i class="fa-regular fa-calendar" aria-hidden="true"></i>
+                    <select id="range-select" aria-label="选择时间范围">
+                        <option value="30">近30天</option>
+                        <option value="90" selected>近90天</option>
+                        <option value="180">近180天</option>
+                        <option value="365">近1年</option>
+                    </select>
+                </label>
+                <span class="freshness"><i class="fa-regular fa-clock"></i><span id="updated-at">读取中</span></span>
+                <button id="refresh-btn" class="icon-button" type="button" title="刷新情报数据" aria-label="刷新情报数据">
+                    <i class="fa-solid fa-rotate"></i>
+                </button>
+            </div>
+        </section>
+
+        <nav class="insights-view-tabs" aria-label="情报视图">
+            <button type="button" data-view="overview"><i class="fa-regular fa-rectangle-list"></i>全景</button>
+            <button type="button" data-view="trend"><i class="fa-solid fa-arrow-trend-up"></i>趋势</button>
+            <button type="button" data-view="opportunity"><i class="fa-solid fa-bullseye"></i>机会</button>
+            <button type="button" class="is-active" data-view="library"><i class="fa-solid fa-table-cells-large"></i>主题库</button>
+        </nav>
+
+        <section class="research-workspace" aria-label="生财主题研究工作台">
+            <aside class="theme-panel">
+                <div class="panel-heading">
+                    <h3>主题导航</h3>
+                    <button class="help-button" type="button" title="主题允许多标签重叠，数量不会相加为总数"><i class="fa-regular fa-circle-question"></i></button>
+                </div>
+                <label class="panel-search">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <input id="theme-search" type="search" placeholder="搜索主题">
+                </label>
+                <div id="theme-navigation" class="theme-navigation" aria-live="polite"></div>
+                <div class="momentum-key">
+                    <span>动量：</span>
+                    <span class="trend-up"><i class="fa-solid fa-arrow-up"></i>上升</span>
+                    <span><i class="fa-solid fa-minus"></i>持平</span>
+                    <span class="trend-down"><i class="fa-solid fa-arrow-down"></i>下降</span>
+                </div>
+            </aside>
+
+            <section class="evidence-panel">
+                <div class="topic-header">
+                    <div>
+                        <div class="topic-title-row">
+                            <h3 id="selected-theme-title">AI + 销售私域</h3>
+                            <span id="selected-theme-trend" class="growth-indicator"><i class="fa-solid fa-arrow-trend-up"></i></span>
+                        </div>
+                        <p id="selected-theme-summary">正在读取主题情报...</p>
+                    </div>
+                    <div class="topic-actions">
+                        <button id="follow-theme-btn" class="secondary-button" type="button" aria-pressed="false"><i class="fa-regular fa-star"></i><span>关注主题</span></button>
+                        <button id="topic-menu-btn" class="icon-button" type="button" title="更多操作"><i class="fa-solid fa-ellipsis"></i></button>
+                    </div>
+                </div>
+
+                <div id="metric-strip" class="metric-strip" aria-label="主题关键指标"></div>
+
+                <section class="trend-section">
+                    <div class="section-title-row">
+                        <h4>主题量与结果信号趋势（周）</h4>
+                        <div class="chart-legend" aria-hidden="true">
+                            <span><i class="legend-line legend-line-blue"></i>主题量</span>
+                            <span><i class="legend-line legend-line-green"></i>结果信号</span>
+                        </div>
+                    </div>
+                    <div class="trend-chart-wrap">
+                        <canvas id="theme-trend-chart" role="img" aria-label="所选主题按周趋势图"></canvas>
+                    </div>
+                </section>
+
+                <section class="subtopic-section">
+                    <h4>子主题分布（按主题量占比）</h4>
+                    <div id="subtopic-bar" class="subtopic-bar" aria-label="子主题占比"></div>
+                    <div id="subtopic-labels" class="subtopic-labels"></div>
+                </section>
+
+                <section class="topic-feed-section">
+                    <div class="feed-heading">
+                        <div><h4>代表主题</h4><span id="topic-match-count">0 条</span></div>
+                        <div class="feed-controls">
+                            <button id="clear-week-filter" type="button" class="text-button is-hidden">清除周筛选</button>
+                            <label class="compact-select"><span>排序</span><select id="topic-sort"><option value="newest">最新发布</option><option value="signal">信号优先</option></select></label>
+                        </div>
+                    </div>
+                    <div id="topic-feed" class="topic-feed" aria-live="polite"></div>
+                    <button id="show-more-btn" class="show-more-button" type="button">查看更多主题<i class="fa-solid fa-chevron-down"></i></button>
+                </section>
+            </section>
+
+            <aside class="interpretation-panel">
+                <section class="interpretation-section">
+                    <h3>主题解读</h3>
+                    <p id="interpretation-summary">正在分析本地主题...</p>
+                    <button id="show-method-btn" class="analysis-basis-button" type="button"><i class="fa-solid fa-chart-simple"></i>查看分析依据</button>
+                </section>
+                <section class="interpretation-section">
+                    <div class="aside-title-row"><h4>高频问题</h4><button type="button" data-scroll-target="topic-feed">查看原文<i class="fa-solid fa-chevron-right"></i></button></div>
+                    <ol id="question-list" class="ranked-list"></ol>
+                </section>
+                <section class="interpretation-section">
+                    <div class="aside-title-row"><h4>常见打法</h4><span>主题占比</span></div>
+                    <div id="tactic-list" class="tactic-list"></div>
+                </section>
+                <section class="interpretation-section">
+                    <h4>相关平台</h4>
+                    <div id="platform-list" class="platform-list"></div>
+                </section>
+                <section class="interpretation-section author-section">
+                    <div class="aside-title-row"><h4>活跃作者</h4><span>主题 / 结果</span></div>
+                    <div id="author-list" class="author-list"></div>
+                </section>
+            </aside>
+        </section>
+    </main>
+
+    <div id="loading-layer" class="loading-layer" role="status">
+        <div class="loading-content"><i class="fa-solid fa-circle-notch fa-spin"></i><span>正在整理生财情报...</span></div>
+    </div>
+
+    <dialog id="topic-dialog" class="topic-dialog">
+        <div class="dialog-header">
+            <div><span id="dialog-signal" class="signal-chip"></span><h3 id="dialog-title"></h3></div>
+            <button id="close-dialog-btn" class="icon-button" type="button" aria-label="关闭详情"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div id="dialog-meta" class="dialog-meta"></div>
+        <article id="dialog-content" class="dialog-content"></article>
+    </dialog>
+
+    <div id="insights-toast" class="insights-toast" role="status" aria-live="polite"></div>
+
+    <script src="js/env.js"></script>
+    <script src="js/config.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script src="js/shared-navigation.js?v=20260715-insights"></script>
+    <script src="js/zsxq-insights.js?v=20260715-v1"></script>
+</body>
+</html>

@@ -13,6 +13,8 @@ const SYSTEM_SYNC_MAX_ROUNDS = 3;
 const SYSTEM_SYNC_STATUS_POLL_MS = 15000;
 const SYSTEM_SYNC_LOG_LINES = 120;
 const SYSTEM_SYNC_GROUP_ID = '28888112822211';
+const PUBLISH_GROUP_ID = '15554855514112';
+const FAVORITES_GROUP_ID = '1824528822';
 
 const state = {
     cookie: '',
@@ -51,6 +53,8 @@ const state = {
     attachmentStatusCache: new Map(),
     attachmentType: 'pdf',
     attachmentViewFilter: 'all',
+    favoriteTotal: 0,
+    favoriteOnly: false,
     lastTopicRequestAt: 0,
     topicCooldownUntil: 0,
 };
@@ -75,7 +79,8 @@ const els = {
     topicsTitle: document.getElementById('topics-title'),
     topicsSubtitle: document.getElementById('topics-subtitle'),
     localTopicFilterControl: document.getElementById('local-topic-filter-control'),
-    localTopicDateInput: document.getElementById('local-topic-date-input'),
+    localTopicDateStartInput: document.getElementById('local-topic-date-start-input'),
+    localTopicDateEndInput: document.getElementById('local-topic-date-end-input'),
     localTopicKeywordInput: document.getElementById('local-topic-keyword-input'),
     localTopicSearchBtn: document.getElementById('local-topic-search-btn'),
     refreshTopicsBtn: document.getElementById('refresh-topics-btn'),
@@ -85,6 +90,8 @@ const els = {
     manualPlanLimitInput: document.getElementById('manual-plan-limit-input'),
     manualPlanPublishControl: document.getElementById('manual-plan-publish-control'),
     manualPlanAutoPublishCheckbox: document.getElementById('manual-plan-auto-publish-checkbox'),
+    favoriteTopicsFilterBtn: document.getElementById('favorite-topics-filter-btn'),
+    favoriteTopicsCount: document.getElementById('favorite-topics-count'),
     attachmentViewFilterControl: document.getElementById('attachment-view-filter-control'),
     attachmentViewFilterSelect: document.getElementById('attachment-view-filter-select'),
     attachmentTypeControl: document.getElementById('attachment-type-control'),
@@ -126,9 +133,7 @@ const els = {
 let zsxqKnowledgeGraph = null;
 
 document.addEventListener('DOMContentLoaded', () => {
-    if (els.localTopicDateInput && !els.localTopicDateInput.value) {
-        els.localTopicDateInput.value = localDateInputValue(new Date());
-    }
+    initializeLocalTopicDateRange();
     initZsxqKnowledgeGraph();
     renderCookieProfiles();
     updateCookieSummary('正在读取平台凭据...', 'muted');
@@ -372,6 +377,26 @@ function isSelectedSystemSyncGroup() {
     return Boolean(state.selectedGroup && isSystemSyncGroupId(state.selectedGroup.group_id));
 }
 
+function isPublishGroupId(groupId) {
+    return String(groupId || '').trim() === PUBLISH_GROUP_ID;
+}
+
+function isSelectedPublishGroup() {
+    return Boolean(state.selectedGroup && isPublishGroupId(state.selectedGroup.group_id));
+}
+
+function renderPublishPanelVisibility() {
+    const visible = isSelectedPublishGroup();
+    els.publishPanel?.classList.toggle('hidden', !visible);
+    if (!visible) {
+        setPublishStatus('');
+    }
+}
+
+function renderHotRankPanelVisibility() {
+    els.hotRankPanel?.classList.toggle('hidden', !isSelectedSystemSyncGroup());
+}
+
 function getSystemSyncTargetGroupId() {
     if (state.selectedGroup) {
         return isSelectedSystemSyncGroup() ? String(state.selectedGroup.group_id) : '';
@@ -423,7 +448,14 @@ function bindEvents() {
     els.refreshTopicsBtn.addEventListener('click', () => {
         if (state.selectedGroup) loadActiveTabPage({ reset: true });
     });
-    els.localTopicDateInput?.addEventListener('change', applyLocalTopicFilters);
+    els.localTopicDateStartInput?.addEventListener('change', () => {
+        normalizeLocalTopicDateRange('start');
+        applyLocalTopicFilters();
+    });
+    els.localTopicDateEndInput?.addEventListener('change', () => {
+        normalizeLocalTopicDateRange('end');
+        applyLocalTopicFilters();
+    });
     els.localTopicSearchBtn?.addEventListener('click', applyLocalTopicFilters);
     els.localTopicKeywordInput?.addEventListener('keydown', event => {
         if (event.key !== 'Enter') return;
@@ -466,6 +498,11 @@ function bindEvents() {
             renderTopics(state.currentTopics, activeTabState());
         }
         renderSyncIntro();
+    });
+    els.favoriteTopicsFilterBtn?.addEventListener('click', () => {
+        state.favoriteOnly = !state.favoriteOnly;
+        renderFavoriteFilterControl();
+        if (state.selectedGroup) loadActiveTabPage({ reset: true });
     });
     els.copyTopicsJsonBtn?.addEventListener('click', copyLastTopicsJson);
     els.syncCurrentTabBtn?.addEventListener('click', () => syncTabs('current'));
@@ -930,7 +967,11 @@ async function loadRemoteGroups() {
 
 async function loadTopics(group, options = {}) {
     const requestedActiveTab = state.activeTab;
+    const previousGroupId = String(state.selectedGroup?.group_id || '');
     state.selectedGroup = group;
+    if (previousGroupId !== String(group.group_id || '')) {
+        state.favoriteOnly = false;
+    }
     const systemSyncEnabledForGroup = isSystemSyncGroupId(group.group_id);
     if (options.resetTabs !== false) {
         state.tabStates.clear();
@@ -938,7 +979,9 @@ async function loadTopics(group, options = {}) {
     renderGroups(state.groups);
     els.refreshTopicsBtn.classList.remove('hidden');
     els.localTopicFilterControl?.classList.remove('hidden');
-    els.publishPanel.classList.remove('hidden');
+    renderPublishPanelVisibility();
+    renderHotRankPanelVisibility();
+    renderFavoriteFilterControl();
     els.syncCurrentTabBtn?.classList.remove('hidden');
     els.syncAllTabsBtn?.classList.remove('hidden');
     if (!systemSyncEnabledForGroup) {
@@ -1057,6 +1100,7 @@ async function loadActiveTabPage(options = {}) {
             state.lastTopicsRequest = withoutSensitiveCookie(requestPayload);
             state.lastTopicsResponse = result;
             state.lastTopicsScope = requestPayload.scope || 'local';
+            state.favoriteTotal = Number(result?.resp_data?.favorite_total || 0);
             els.copyTopicsJsonBtn?.classList.remove('hidden');
 
             const pageTopics = extractTopicsFromResponse(result);
@@ -1974,10 +2018,13 @@ function renderSyncRuns() {
     const latest = state.syncRuns[0];
     if (!latest) return;
     const summary = latest.result?.partial || latest.result || {};
+    const queueMessage = renderSyncQueueMessage(latest);
+    const retryMessage = renderSyncRetryMessage(latest);
+    const timingMessage = renderSyncTimingMessage(latest);
     renderSyncStatus({
-        type: latest.status === 'failed' ? 'error' : 'muted',
+        type: latest.status === 'failed' ? 'error' : latest.status === 'running' ? 'loading' : 'muted',
         title: '同步日志',
-        message: `最近一次：${formatZsxqTime(latest.completed_at || latest.created_at)} · ${syncStatusLabel(latest.status)} · 新增 ${summary.topics_new || 0} · 附件下载 ${summary.attachments_downloaded || 0}`,
+        message: `最近活动：${formatZsxqTime(syncRunActivityTime(latest))} · ${syncStatusLabel(latest.status)}${queueMessage ? ` · ${queueMessage}` : ''}${retryMessage ? ` · ${retryMessage}` : ''}${timingMessage ? ` · ${timingMessage}` : ''} · 新增 ${summary.topics_new || 0} · 附件下载 ${summary.attachments_downloaded || 0}`,
         details: renderSyncRunsList(state.syncRuns.slice(0, 10)),
     });
     renderSystemSyncBatches();
@@ -2014,16 +2061,22 @@ function renderSyncRunsList(runs) {
                 const label = run.tab_label || (run.requested_tabs?.length ? `${run.requested_tabs.length} 个 tab` : '未知范围');
                 const statusClass = run.status === 'failed' ? 'text-red-600' : run.status === 'completed' ? 'text-emerald-700' : 'text-blue-600';
                 const limitReached = Boolean(runSummary.download_limit_reached);
+                const queueMessage = renderSyncQueueMessage(run);
+                const retryMessage = renderSyncRetryMessage(run);
+                const timingMessage = renderSyncTimingMessage(run);
                 return `
                     <div role="listitem" class="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
                         <div class="flex flex-wrap items-center justify-between gap-2">
-                            <span class="font-bold">${escapeHtml(formatZsxqTime(run.completed_at || run.created_at))}</span>
+                            <span class="font-bold">${escapeHtml(formatZsxqTime(syncRunActivityTime(run)))}</span>
                             <span class="${statusClass} font-bold">${escapeHtml(syncStatusLabel(run.status))}</span>
                         </div>
                         <div class="mt-1 flex flex-wrap items-center justify-between gap-2">
                             <span>${escapeHtml(label)}</span>
                             <span>新增 ${escapeHtml(String(runSummary.topics_new || 0))} · 更新 ${escapeHtml(String(runSummary.topics_updated || 0))} · 已存在 ${escapeHtml(String(runSummary.topics_existing || 0))} · 附件下载 ${escapeHtml(String(runSummary.attachments_downloaded || 0))} · 失败 ${escapeHtml(String(runSummary.attachments_failed || 0))}</span>
                         </div>
+                        ${queueMessage ? `<div class="mt-1 font-semibold text-amber-700">${escapeHtml(queueMessage)}</div>` : ''}
+                        ${retryMessage ? `<div class="mt-1 font-semibold text-amber-700">${escapeHtml(retryMessage)}</div>` : ''}
+                        ${timingMessage ? `<div class="mt-1 text-slate-500">${escapeHtml(timingMessage)}</div>` : ''}
                         ${limitReached ? '<div class="mt-1 text-amber-600">有内容达到单条附件上限。</div>' : ''}
                         ${run.error_message ? `<div class="mt-1 text-red-600">${escapeHtml(run.error_message)}</div>` : ''}
                     </div>
@@ -2031,6 +2084,58 @@ function renderSyncRunsList(runs) {
             }).join('')}
         </div>
     `;
+}
+
+function syncRunActivityTime(run) {
+    if (run?.status === 'completed' || run?.status === 'failed') {
+        return run.completed_at || run.updated_at || run.created_at;
+    }
+    return run?.updated_at || run?.started_at || run?.created_at;
+}
+
+function renderSyncQueueMessage(run) {
+    if (run?.status !== 'queued') return '';
+    const ahead = Number(run.queue_ahead || 0);
+    const blocker = String(run.blocking_run?.group_name || '').trim();
+    if (blocker && ahead > 0) return `等待“${blocker}”同步完成，前方 ${ahead} 项`;
+    if (ahead > 0) return `同步队列忙，前方 ${ahead} 项`;
+    return '等待同步 worker 领取';
+}
+
+function renderSyncRetryMessage(run) {
+    if (run?.status !== 'retrying') return '';
+    const retry = run.result?.retry_state?.upstream || {};
+    const nextRetryAt = retry.next_retry_at ? formatZsxqTime(retry.next_retry_at) : '';
+    const count = Number(retry.retry_number || 0);
+    const limit = Number(retry.retry_limit || 0);
+    const countText = count && limit ? `第 ${count}/${limit} 次` : '';
+    return `${countText}${countText && nextRetryAt ? '，' : ''}${nextRetryAt ? `${nextRetryAt} 重试` : '等待重试'}`;
+}
+
+function renderSyncTimingMessage(run) {
+    const createdAt = Date.parse(run?.created_at || '');
+    const startedAt = Date.parse(run?.started_at || '');
+    const endedAt = Date.parse(run?.completed_at || run?.updated_at || '');
+    if (!Number.isFinite(createdAt) || !Number.isFinite(startedAt)) return '';
+    const waitSeconds = Math.max(0, Math.round((startedAt - createdAt) / 1000));
+    const parts = [];
+    if (waitSeconds >= 2) parts.push(`排队 ${formatSyncDuration(waitSeconds)}`);
+    if (run?.status !== 'queued' && Number.isFinite(endedAt)) {
+        const runSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
+        parts.push(`${run?.status === 'completed' || run?.status === 'failed' ? '执行' : '已执行'} ${formatSyncDuration(runSeconds)}`);
+    }
+    return parts.join(' · ');
+}
+
+function formatSyncDuration(seconds) {
+    const value = Math.max(0, Number(seconds || 0));
+    if (value < 60) return `${Math.round(value)} 秒`;
+    const minutes = Math.floor(value / 60);
+    const remainingSeconds = Math.round(value % 60);
+    if (minutes < 60) return remainingSeconds ? `${minutes} 分 ${remainingSeconds} 秒` : `${minutes} 分`;
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return remainingMinutes ? `${hours} 小时 ${remainingMinutes} 分` : `${hours} 小时`;
 }
 
 function renderSystemSyncBatches() {
@@ -2202,6 +2307,7 @@ function syncStatusLabel(status) {
         completed: '成功',
         failed: '失败',
         running: '进行中',
+        retrying: '重试等待',
     };
     return map[status] || status || '未知';
 }
@@ -2255,8 +2361,10 @@ function buildLocalTopicsRequest(tab, tabState) {
         end_time: tabState.endTime || null,
         hashtag_id: tab.hashtagId || '',
         publish_filter: publishFilter,
-        publish_date: els.localTopicDateInput?.value || '',
+        publish_date_start: els.localTopicDateStartInput?.value || '',
+        publish_date_end: els.localTopicDateEndInput?.value || '',
         keyword: els.localTopicKeywordInput?.value.trim() || '',
+        favorite_only: state.favoriteOnly && isSelectedFavoritesGroup(),
     };
 }
 
@@ -2266,6 +2374,37 @@ function localDateInputValue(date) {
     const month = String(value.getMonth() + 1).padStart(2, '0');
     const day = String(value.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
+}
+
+function initializeLocalTopicDateRange() {
+    if (!els.localTopicDateStartInput || !els.localTopicDateEndInput) return;
+    const endDate = new Date();
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 2);
+    if (!els.localTopicDateStartInput.value) {
+        els.localTopicDateStartInput.value = localDateInputValue(startDate);
+    }
+    if (!els.localTopicDateEndInput.value) {
+        els.localTopicDateEndInput.value = localDateInputValue(endDate);
+    }
+    normalizeLocalTopicDateRange();
+}
+
+function normalizeLocalTopicDateRange(changedBoundary = '') {
+    const startInput = els.localTopicDateStartInput;
+    const endInput = els.localTopicDateEndInput;
+    if (!startInput || !endInput) return;
+    const start = startInput.value;
+    const end = endInput.value;
+    if (start && end && start > end) {
+        if (changedBoundary === 'end') {
+            startInput.value = end;
+        } else {
+            endInput.value = start;
+        }
+    }
+    startInput.max = endInput.value || '';
+    endInput.min = startInput.value || '';
 }
 
 async function applyLocalTopicFilters() {
@@ -2351,6 +2490,7 @@ function renderActiveTab() {
     }
 
     renderTopicTabs();
+    renderFavoriteFilterControl();
     updatePublishTabState();
     if (tabState.error && !tabState.topics.length) {
         els.topicsList.innerHTML = emptyCard(tabState.error, 'error');
@@ -2686,7 +2826,9 @@ function renderTopics(topics, tabState = null) {
     if (!visibleTopics.length) {
         const message = tabState?.loading
             ? '正在加载...'
-            : (tabState?.emptyMessage || (tabState?.hasMore ? '当前页还没有匹配内容，继续下滑会尝试加载更多。' : attachmentViewEmptyText(viewFilter)));
+            : (state.favoriteOnly && isSelectedFavoritesGroup()
+                ? '当前已加载范围内还没有收藏内容。'
+                : (tabState?.emptyMessage || (tabState?.hasMore ? '当前页还没有匹配内容，继续下滑会尝试加载更多。' : attachmentViewEmptyText(viewFilter))));
         els.topicsList.innerHTML = emptyCard(message, tabState?.loading ? 'muted' : 'warning') + renderLoadMoreFooter(tabState);
         state.fileMap.clear();
         state.topicMap.clear();
@@ -2717,6 +2859,7 @@ function renderTopics(topics, tabState = null) {
         const articleLink = renderTopicArticleLink(topic, content);
         const externalDocuments = renderExternalDocuments(topic);
         const hashtags = extractHashtags(topic);
+        const favoriteButton = isSelectedFavoritesGroup() ? renderFavoriteTopicButton(topic, topicKey) : '';
 
         return `
             <article class="rounded-lg border border-slate-200 p-4 hover:border-blue-200 hover:shadow-sm transition-all min-w-0" data-topic-key="${escapeHtml(topicKey)}">
@@ -2729,6 +2872,7 @@ function renderTopics(topics, tabState = null) {
                         </div>
                     </div>
                     <div class="shrink-0 flex flex-wrap justify-end items-center gap-2 max-w-[240px]">
+                        ${favoriteButton}
                         <button class="copy-topic-json-btn rounded-md border border-slate-300 px-2 py-1 text-xs font-bold text-slate-500 hover:bg-slate-50" data-topic-key="${escapeHtml(topicKey)}">详情 JSON</button>
                         <span class="text-xs text-slate-400">#${escapeHtml(String(topic.topic_id || ''))}</span>
                     </div>
@@ -2776,6 +2920,52 @@ function renderLoadMoreFooter(tabState) {
 
 function topicKeyForRender(topic) {
     return String(topic.topic_id || topic.topic_uid || `${topic.create_time || ''}-${topic.title || ''}`);
+}
+
+function isSelectedFavoritesGroup() {
+    return String(state.selectedGroup?.group_id || '') === FAVORITES_GROUP_ID;
+}
+
+function isTopicFavorite(topic) {
+    return Boolean(topic?.is_favorite);
+}
+
+function renderFavoriteFilterControl() {
+    if (!els.favoriteTopicsFilterBtn) return;
+    const visible = isSelectedFavoritesGroup();
+    els.favoriteTopicsFilterBtn.classList.toggle('hidden', !visible);
+    if (!visible) return;
+
+    const count = Number(state.favoriteTotal || 0);
+    if (els.favoriteTopicsCount) els.favoriteTopicsCount.textContent = String(count);
+    els.favoriteTopicsFilterBtn.setAttribute('aria-pressed', String(state.favoriteOnly));
+    els.favoriteTopicsFilterBtn.classList.toggle('bg-amber-100', state.favoriteOnly);
+    els.favoriteTopicsFilterBtn.classList.toggle('ring-2', state.favoriteOnly);
+    els.favoriteTopicsFilterBtn.classList.toggle('ring-amber-200', state.favoriteOnly);
+    const icon = els.favoriteTopicsFilterBtn.querySelector('i');
+    icon?.classList.toggle('fa-regular', !state.favoriteOnly);
+    icon?.classList.toggle('fa-solid', state.favoriteOnly);
+}
+
+function renderFavoriteTopicButton(topic, topicKey) {
+    const saved = isTopicFavorite(topic);
+    const style = saved
+        ? 'border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100'
+        : 'border-slate-300 bg-white text-slate-500 hover:bg-slate-50';
+    return `<button type="button" class="favorite-topic-btn rounded-md border px-2 py-1 text-xs font-bold transition-colors ${style}" data-topic-key="${escapeHtml(topicKey)}" aria-pressed="${String(saved)}" title="${saved ? '取消本地收藏' : '保存到本地收藏'}"><i class="${saved ? 'fa-solid' : 'fa-regular'} fa-bookmark mr-1" aria-hidden="true"></i>${saved ? '已收藏' : '收藏'}</button>`;
+}
+
+async function toggleTopicFavorite(topic) {
+    const result = await apiPost('/zsxq/topics/local/favorite', {
+        group_id: state.selectedGroup?.group_id,
+        topic_id: topic.topic_id,
+        favorite: !isTopicFavorite(topic),
+    });
+    const topicId = String(topic.topic_id || '');
+    state.currentTopics.forEach(item => {
+        if (String(item.topic_id || '') === topicId) item.is_favorite = Boolean(result.is_favorite);
+    });
+    state.favoriteTotal = Number(result.favorite_total || 0);
 }
 
 function topicKey(topic) {
@@ -2857,10 +3047,11 @@ function renderExternalDocuments(topic) {
         uniqueLinks.push(link);
     });
     return `
-        <section class="external-documents-block" aria-label="外链文档">
+        <section class="external-documents-block" aria-label="关联内容">
             <div class="external-documents-heading">
-                <span><i class="fas fa-link" aria-hidden="true"></i>外链文档</span>
+                <span><i class="fas fa-link" aria-hidden="true"></i>关联内容</span>
                 <span class="external-documents-count">${escapeHtml(String(uniqueLinks.length))}</span>
+                <a href="linked-content-detail.html" class="ml-auto text-xs font-bold text-blue-600 hover:underline">内容中心</a>
             </div>
             <div class="external-documents-list">
                 ${uniqueLinks.map(renderExternalDocumentItem).join('')}
@@ -2878,6 +3069,7 @@ function renderExternalDocumentItem(link) {
     const fetchMeta = externalDocumentStatusMeta('fetch', document.fetch_status);
     const summaryMeta = externalDocumentStatusMeta('summary', document.summary_status);
     const ttsMeta = externalDocumentStatusMeta('tts', document.tts_status);
+    const isGenericWeb = (document.provider || link.provider) === 'generic_web';
     const summary = String(document.summary_text || '').trim();
     const fetchError = document.fetch_error ? `<div class="mt-2 text-xs text-rose-600 break-words">${escapeHtml(truncate(document.fetch_error, 240))}</div>` : '';
     const summaryError = document.summary_error ? `<div class="mt-2 text-xs text-amber-700 break-words">${escapeHtml(truncate(document.summary_error, 240))}</div>` : '';
@@ -2917,8 +3109,8 @@ function renderExternalDocumentItem(link) {
                     </div>
                 </div>
                 <div class="external-document-actions">
-                    ${renderExternalDocumentButton('external-detail', documentId, 'fas fa-eye', '查看详情', false, false, true)}
-                    ${renderExternalDocumentButton('external-fetch', documentId, 'fas fa-cloud-arrow-down', '抓取', document.fetch_status === 'fetching', primaryAction === 'external-fetch')}
+                    <a href="linked-content-detail.html?id=${encodeURIComponent(documentId)}" class="external-document-action" title="查看更多"><i class="fas fa-eye"></i><span>查看更多</span></a>
+                    ${renderExternalDocumentButton('external-fetch', documentId, 'fas fa-cloud-arrow-down', '抓取', isGenericWeb || document.fetch_status === 'fetching', primaryAction === 'external-fetch' && !isGenericWeb)}
                     ${renderExternalDocumentButton('external-summarize', documentId, 'fas fa-wand-magic-sparkles', '总结', document.summary_status === 'summarizing' || !canSummarize, primaryAction === 'external-summarize')}
                     ${renderExternalDocumentButton('external-tts', documentId, 'fas fa-volume-high', '语音', ['queued', 'running'].includes(document.tts_status) || !canTts, primaryAction === 'external-tts')}
                     ${document.tts_status === 'completed' && audioHref ? `
@@ -2953,6 +3145,7 @@ function externalDocumentStatusMeta(kind, status) {
     const value = status || (kind === 'tts' ? 'not_submitted' : 'pending');
     const maps = {
         fetch: {
+            registered: { text: '仅登记', className: 'border-slate-200 bg-slate-50 text-slate-500' },
             pending: { text: '待抓取', className: 'border-slate-200 bg-white text-slate-500' },
             fetching: { text: '抓取中', className: 'border-blue-200 bg-blue-50 text-blue-700' },
             fetched: { text: '已抓取', className: 'border-emerald-200 bg-emerald-50 text-emerald-700' },
@@ -2984,6 +3177,9 @@ function externalDocumentStatusMeta(kind, status) {
 function externalProviderLabel(provider) {
     const labels = {
         feishu: '飞书',
+        zsxq: '知识星球 item',
+        wechat: '微信文章',
+        generic_web: '普通网页',
     };
     return labels[provider] || provider || '外链';
 }
@@ -3298,6 +3494,8 @@ function renderFiles(files, topicId, topicKey) {
 
 function renderHotRankList() {
     if (!els.hotRankList) return;
+    renderHotRankPanelVisibility();
+    if (!isSelectedSystemSyncGroup()) return;
     const entries = buildHotRankEntries();
     const filter = currentAttachmentViewFilter();
     const filterLabel = filter === 'all' ? '全部附件' : attachmentTypeText(filter);
@@ -3770,6 +3968,30 @@ function bindFileActions() {
 }
 
 function bindTopicActions() {
+    els.topicsList.querySelectorAll('.favorite-topic-btn').forEach(button => {
+        button.addEventListener('click', async () => {
+            const topic = state.topicMap.get(button.dataset.topicKey);
+            if (!topic) return;
+            const originalHTML = button.innerHTML;
+            setLoading(button, true, '<i class="fas fa-circle-notch fa-spin mr-1"></i>保存中');
+            try {
+                await toggleTopicFavorite(topic);
+                renderFavoriteFilterControl();
+                if (state.favoriteOnly) {
+                    await loadActiveTabPage({ reset: true });
+                } else {
+                    renderTopics(state.currentTopics, activeTabState());
+                }
+            } catch (error) {
+                setLoading(button, false, '<i class="fas fa-triangle-exclamation mr-1"></i>收藏失败');
+                button.title = `收藏失败：${error.message}`;
+                setTimeout(() => {
+                    if (button.isConnected) button.innerHTML = originalHTML;
+                }, 1800);
+            }
+        });
+    });
+
     els.topicsList.querySelectorAll('.copy-topic-json-btn').forEach(button => {
         button.addEventListener('click', async () => {
             const topic = state.topicMap.get(button.dataset.topicKey);
@@ -3962,6 +4184,10 @@ function clearAll() {
 }
 
 async function publishTopic() {
+    if (!isSelectedPublishGroup()) {
+        renderPublishPanelVisibility();
+        return;
+    }
     if (!hasRequestCredential()) {
         setPublishStatus('请先选择 DB Cookie，或新增保存 Cookie。', 'error');
         return;

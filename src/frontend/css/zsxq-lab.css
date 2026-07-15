@@ -985,7 +985,7 @@ button {
 
 .local-topic-filter-control {
     display: grid;
-    grid-template-columns: minmax(190px, .36fr) minmax(320px, 1fr) 86px;
+    grid-template-columns: minmax(320px, .72fr) minmax(280px, 1fr) 86px;
     align-items: end;
     gap: .65rem;
 }
@@ -998,6 +998,25 @@ button {
     display: grid;
     min-width: 0;
     gap: .28rem;
+}
+
+fieldset.local-topic-filter-field {
+    margin: 0;
+    border: 0;
+    padding: 0;
+}
+
+.local-topic-date-range {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    gap: .42rem;
+}
+
+.local-topic-date-separator {
+    color: #94a3b8;
+    font-size: .72rem;
+    font-weight: 700;
 }
 
 .local-topic-filter-label {

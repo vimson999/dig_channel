@@ -18,7 +18,7 @@ from sqlalchemy.orm import load_only
 
 from models import db
 from models.task import PublicationTask
-from models.zsxq_sync import ZsxqAttachment, ZsxqSyncCursor, ZsxqSyncRun, ZsxqTopic
+from models.zsxq_sync import ZsxqAttachment, ZsxqSyncCursor, ZsxqSyncRun, ZsxqTopic, ZsxqTopicFavorite
 from services.runtime_guard import maybe_guarded_apply_async
 from services.zsxq_service import zsxq_service
 
@@ -296,12 +296,18 @@ class ZsxqSyncService:
 
         if run_id:
             run = (
-                ZsxqSyncRun.query.options(load_only(ZsxqSyncRun.id))
+                ZsxqSyncRun.query.options(load_only(
+                    ZsxqSyncRun.id,
+                    ZsxqSyncRun.status,
+                    ZsxqSyncRun.started_at,
+                ))
                 .filter(ZsxqSyncRun.id == str(run_id))
                 .one_or_none()
             )
             if not run:
                 raise ValueError(f"同步任务不存在: {run_id}")
+            if run.status == "queued":
+                run.started_at = datetime.utcnow()
             run.status = "running"
             run.error_message = None
             run.result = running_result
@@ -525,7 +531,47 @@ class ZsxqSyncService:
             group_id=group_id,
             limit=min(max(int(limit or 20), 1), 100),
         )
-        return [self._sync_run_summary_payload_from_row(row) for row in rows]
+        payloads = [self._sync_run_summary_payload_from_row(row) for row in rows]
+        self._attach_sync_queue_context(payloads)
+        return payloads
+
+    def _attach_sync_queue_context(self, payloads):
+        queued_ids = {str(item.get("id")) for item in payloads if item.get("status") == "queued"}
+        if not queued_ids:
+            return
+
+        pending = (
+            db.session.query(
+                ZsxqSyncRun.id,
+                ZsxqSyncRun.group_id,
+                ZsxqSyncRun.group_name,
+                ZsxqSyncRun.status,
+                ZsxqSyncRun.created_at,
+                ZsxqSyncRun.updated_at,
+            )
+            .filter(ZsxqSyncRun.status.in_(("running", "queued")))
+            .order_by(ZsxqSyncRun.created_at.asc())
+            .all()
+        )
+        running = [row for row in pending if row.status == "running"]
+        queued = [row for row in pending if row.status == "queued"]
+        queued_index = {str(row.id): index for index, row in enumerate(queued)}
+        blocker = running[0] if running else None
+
+        for payload in payloads:
+            run_id = str(payload.get("id") or "")
+            if run_id not in queued_ids or run_id not in queued_index:
+                continue
+            payload["queue_position"] = queued_index[run_id] + 1
+            payload["queue_ahead"] = len(running) + queued_index[run_id]
+            if blocker:
+                payload["blocking_run"] = {
+                    "id": blocker.id,
+                    "group_id": blocker.group_id,
+                    "group_name": blocker.group_name,
+                    "status": blocker.status,
+                    "updated_at": blocker.updated_at.isoformat() if blocker.updated_at else None,
+                }
 
     def _sync_run_summary_rows(self, group_id=None, limit=20):
         query = db.session.query(
@@ -2521,7 +2567,10 @@ class ZsxqSyncService:
         end_time=None,
         publish_filter=None,
         publish_date=None,
+        publish_date_start=None,
+        publish_date_end=None,
         keyword=None,
+        favorite_only=False,
         include_raw_payload=False,
     ):
         if not self._sync_tables_ready():
@@ -2560,13 +2609,33 @@ class ZsxqSyncService:
         base_query = ZsxqTopic.query.filter(ZsxqTopic.group_id == group_id)
         if tab_id:
             base_query = base_query.filter(ZsxqTopic.tab_id == tab_id)
+        favorite_only = bool(favorite_only)
+        if favorite_only:
+            favorite_topic_ids = db.session.query(ZsxqTopicFavorite.topic_id).filter(
+                ZsxqTopicFavorite.group_id == group_id,
+            )
+            base_query = base_query.filter(ZsxqTopic.topic_id.in_(favorite_topic_ids))
         publish_date = str(publish_date or "").strip()
-        if publish_date:
+        publish_date_start = str(publish_date_start or publish_date or "").strip()
+        publish_date_end = str(publish_date_end or publish_date or "").strip()
+        parsed_publish_dates = {}
+        for field_name, field_value in (
+            ("publish_date_start", publish_date_start),
+            ("publish_date_end", publish_date_end),
+        ):
+            if not field_value:
+                continue
             try:
-                datetime.strptime(publish_date, "%Y-%m-%d")
+                parsed_publish_dates[field_name] = datetime.strptime(field_value, "%Y-%m-%d")
             except ValueError as exc:
-                raise ValueError("publish_date 必须是 YYYY-MM-DD 格式") from exc
-            base_query = base_query.filter(ZsxqTopic.create_time.like(f"{publish_date}%"))
+                raise ValueError(f"{field_name} 必须是 YYYY-MM-DD 格式") from exc
+        if publish_date_start and publish_date_end and publish_date_start > publish_date_end:
+            raise ValueError("publish_date_start 不能晚于 publish_date_end")
+        if publish_date_start:
+            base_query = base_query.filter(ZsxqTopic.create_time >= publish_date_start)
+        if publish_date_end:
+            exclusive_end = parsed_publish_dates["publish_date_end"] + timedelta(days=1)
+            base_query = base_query.filter(ZsxqTopic.create_time < exclusive_end.strftime("%Y-%m-%d"))
 
         keyword = str(keyword or "").strip()[:200]
         if keyword:
@@ -2605,7 +2674,7 @@ class ZsxqSyncService:
         if end_time:
             page_query = page_query.filter(ZsxqTopic.create_time < str(end_time))
 
-        filters_applied = attention_filter or bool(publish_date) or bool(keyword)
+        filters_applied = favorite_only or attention_filter or bool(publish_date_start) or bool(publish_date_end) or bool(keyword)
         total = (
             base_query.with_entities(db.func.count(ZsxqTopic.id)).scalar()
             if filters_applied
@@ -2654,9 +2723,17 @@ class ZsxqSyncService:
             include_raw_payload=True,
         )
         external_links = self._external_links_for_cached_topics(group_id, topics)
+        favorite_ids = {
+            str(row[0])
+            for row in db.session.query(ZsxqTopicFavorite.topic_id).filter(
+                ZsxqTopicFavorite.group_id == group_id,
+                ZsxqTopicFavorite.topic_id.in_([topic.topic_id for topic in topics]),
+            ).all()
+        } if topics else set()
         payloads = []
         for topic in topics:
             payload = self._public_cached_topic(topic, attachments.get((topic.tab_id, topic.topic_id), []))
+            payload["is_favorite"] = str(topic.topic_id) in favorite_ids
             links = external_links.get((str(topic.tab_id), str(topic.topic_id))) or []
             if links:
                 payload["external_documents"] = links
@@ -2680,8 +2757,38 @@ class ZsxqSyncService:
                 "total": total,
                 "next_end_time": next_end_time,
                 "has_more": has_more,
+                "favorite_total": db.session.query(db.func.count(ZsxqTopicFavorite.id)).filter(
+                    ZsxqTopicFavorite.group_id == group_id,
+                ).scalar() or 0,
                 "message": message,
             },
+        }
+
+    def set_topic_favorite(self, group_id, topic_id, favorite=True):
+        group_id = str(group_id or "").strip()
+        topic_id = str(topic_id or "").strip()
+        if not group_id or not topic_id:
+            raise ValueError("group_id 和 topic_id 不能为空")
+        topic_exists = ZsxqTopic.query.filter_by(group_id=group_id, topic_id=topic_id).first() is not None
+        if not topic_exists:
+            raise ValueError("本地库中未找到该主题")
+
+        record = ZsxqTopicFavorite.query.filter_by(group_id=group_id, topic_id=topic_id).first()
+        if favorite and not record:
+            record = ZsxqTopicFavorite(group_id=group_id, topic_id=topic_id)
+            db.session.add(record)
+        elif not favorite and record:
+            db.session.delete(record)
+            record = None
+        db.session.commit()
+        total = db.session.query(db.func.count(ZsxqTopicFavorite.id)).filter(
+            ZsxqTopicFavorite.group_id == group_id,
+        ).scalar() or 0
+        return {
+            "group_id": group_id,
+            "topic_id": topic_id,
+            "is_favorite": bool(favorite),
+            "favorite_total": int(total),
         }
 
     def _cached_topic_total(self, group_id, tab_id=None):
@@ -4554,7 +4661,7 @@ class ZsxqSyncService:
     def _mark_stale_runs_failed(self, group_id=None, stale_minutes=120):
         cutoff = datetime.utcnow() - timedelta(minutes=stale_minutes)
         query = ZsxqSyncRun.query.filter(
-            ZsxqSyncRun.status == "running",
+            ZsxqSyncRun.status.in_(("running", "retrying")),
             ZsxqSyncRun.updated_at < cutoff,
         )
         if group_id:

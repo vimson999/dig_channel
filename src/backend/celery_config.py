@@ -67,6 +67,7 @@ def make_celery(app_name=__name__):
             'tasks.zsxq_publish',
             'tasks.report_video',
             'tasks.content_pipeline',
+            'tasks.external_documents',
         ] # Auto-discover tasks
     )
     
@@ -152,6 +153,7 @@ def make_celery(app_name=__name__):
             'tasks.report_video.scan_zsxq_report_assets_task': {'queue': 'report_video'},
             'tasks.content_pipeline.run_pdf_clean_task': {'queue': 'content_pipeline'},
             'tasks.content_pipeline.run_audio_clean_task': {'queue': 'content_pipeline'},
+            'tasks.external_documents.run_backfill': {'queue': 'content_pipeline'},
             'tasks.publisher.run_publication_pipeline': {'queue': 'render'},
             'tasks.publisher.run_youtube_upload_only': {'queue': 'platform_upload'},
             'tasks.publisher.run_bilibili_upload_only': {'queue': 'platform_upload'},

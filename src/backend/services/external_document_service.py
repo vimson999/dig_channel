@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from html import unescape
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
@@ -25,6 +26,12 @@ from services import platform_credential_service as credential_service
 logger = logging.getLogger(__name__)
 
 FEISHU_HOST_HINTS = ("feishu.cn", "larksuite.com")
+ZSXQ_HOST_HINTS = ("zsxq.com",)
+WECHAT_HOSTS = {"mp.weixin.qq.com"}
+GENERIC_WEB_IGNORED_SUFFIXES = (
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico",
+    ".css", ".js", ".woff", ".woff2", ".ttf",
+)
 URL_RE = re.compile(r"https?://[^\s<>'\"，。；;、）)】\]}]+", re.I)
 MAX_FETCH_CHARS = 350_000
 MAX_SUMMARY_INPUT_CHARS = 28_000
@@ -68,16 +75,18 @@ def _credential_error(message: str) -> Exception:
 
 
 def extract_external_links_from_topic(topic: Any) -> List[Dict[str, str]]:
-    """Extract supported external links from a ZSXQ topic record or payload."""
+    """Extract user-visible linked content without scanning platform metadata URLs."""
     chunks = []
     if isinstance(topic, ZsxqTopic):
         chunks.extend([
             ("title", topic.title or ""),
             ("content", topic.content or ""),
-            ("raw_payload", _json_text(topic.raw_payload)),
         ])
+        chunks.extend(_explicit_topic_link_chunks(topic.raw_payload))
     elif isinstance(topic, dict):
-        chunks.append(("payload", _json_text(topic)))
+        chunks.extend(_explicit_topic_link_chunks(topic))
+        if not chunks:
+            chunks.append(("payload", _json_text(topic)))
     else:
         chunks.append(("text", str(topic or "")))
 
@@ -105,13 +114,30 @@ def extract_external_links_from_topic(topic: Any) -> List[Dict[str, str]]:
 
 
 def provider_for_url(url: str) -> Optional[str]:
-    host = urlsplit(str(url or "").strip()).netloc.lower()
+    parts = urlsplit(str(url or "").strip())
+    host = (parts.hostname or "").lower()
+    path = (parts.path or "").lower()
+    if not host or host in {"localhost", "127.0.0.1", "::1"}:
+        return None
     if any(hint in host for hint in FEISHU_HOST_HINTS):
         return "feishu"
-    return None
+    if host in WECHAT_HOSTS:
+        return "wechat"
+    if any(host == hint or host.endswith("." + hint) for hint in ZSXQ_HOST_HINTS):
+        return "zsxq" if topic_id_for_zsxq_url(url) else None
+    if path.endswith(GENERIC_WEB_IGNORED_SUFFIXES):
+        return None
+    return "generic_web"
 
 
 def document_type_for_url(url: str) -> Optional[str]:
+    provider = provider_for_url(url)
+    if provider == "zsxq":
+        return "topic"
+    if provider == "wechat":
+        return "article"
+    if provider == "generic_web":
+        return "web"
     path = urlsplit(str(url or "")).path.strip("/")
     if not path:
         return None
@@ -119,6 +145,22 @@ def document_type_for_url(url: str) -> Optional[str]:
     if head in {"docx", "docs", "doc", "wiki", "sheets", "base", "mindnotes", "file"}:
         return head
     return head[:40]
+
+
+def topic_id_for_zsxq_url(url: str) -> str:
+    parts = urlsplit(str(url or "").strip())
+    path = unquote(parts.path or "")
+    patterns = (
+        r"/topic_detail/([0-9]{6,})",
+        r"/topics?/([0-9]{6,})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, path, re.I)
+        if match:
+            return match.group(1)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    value = str(query.get("topic_id") or query.get("topicId") or "").strip()
+    return value if re.fullmatch(r"[0-9]{6,}", value) else ""
 
 
 def canonicalize_url(url: str) -> str:
@@ -149,6 +191,18 @@ def content_hash(text: str) -> str:
 
 def _validate_feishu_document_response(*, title: str, content_text: str) -> None:
     """Reject Feishu application shells that return HTTP 200 without a document."""
+    normalized_content = _normalize_text(content_text)
+    if _looks_like_feishu_application_shell(title=title, content_text=normalized_content):
+        raise ExternalDocumentError(
+            "飞书返回了 Docs 首页/模板中心，而不是目标文档正文。"
+            "当前 Cookie 可能已失效、无权访问该文档，或不适用于此飞书域名；请更新凭据后重试。"
+        )
+
+    if not normalized_content:
+        raise ExternalDocumentError("飞书页面返回成功，但没有抽取到目标文档正文。")
+
+
+def _looks_like_feishu_application_shell(*, title: str, content_text: str) -> bool:
     normalized_title = _normalize_text(title).lower()
     normalized_content = _normalize_text(content_text)
     shell_markers = (
@@ -159,18 +213,7 @@ def _validate_feishu_document_response(*, title: str, content_text: str) -> None
         "暂无最近动态",
     )
     marker_count = sum(marker in normalized_content for marker in shell_markers)
-    # A resolved Feishu document carries its own document title. The generic
-    # product shell keeps the application title "Docs" while its homepage
-    # recommendations vary over time, so the title itself is the stable guard.
-    looks_like_docs_home = normalized_title in {"docs", "飞书", "lark"}
-    if looks_like_docs_home or marker_count >= 4:
-        raise ExternalDocumentError(
-            "飞书返回了 Docs 首页/模板中心，而不是目标文档正文。"
-            "当前 Cookie 可能已失效、无权访问该文档，或不适用于此飞书域名；请更新凭据后重试。"
-        )
-
-    if not normalized_content:
-        raise ExternalDocumentError("飞书页面返回成功，但没有抽取到目标文档正文。")
+    return normalized_title in {"docs", "飞书", "lark"} or marker_count >= 4
 
 
 class ExternalDocumentService:
@@ -228,15 +271,12 @@ class ExternalDocumentService:
         group_id: Optional[str] = None,
         topic_id: Optional[str] = None,
         limit: Optional[int] = None,
-        commit_every: int = 200,
+        commit_every: int = 500,
     ) -> Dict[str, Any]:
-        candidate_filter = or_(
-            ZsxqTopic.content.ilike("%feishu.cn%"),
-            ZsxqTopic.content.ilike("%larksuite.com%"),
-            ZsxqTopic.title.ilike("%feishu.cn%"),
-            ZsxqTopic.title.ilike("%larksuite.com%"),
-        )
-        id_query = ZsxqTopic.query.with_entities(ZsxqTopic.id).filter(candidate_filter).order_by(ZsxqTopic.id.asc())
+        # Scan projected content plus a small explicit subset of raw payload
+        # fields. Do not filter on the whole raw JSON: platform metadata places
+        # zsxq.com URLs in almost every record and creates thousands of false positives.
+        id_query = ZsxqTopic.query.with_entities(ZsxqTopic.id).order_by(ZsxqTopic.id.asc())
         query = ZsxqTopic.query.options(
             load_only(
                 ZsxqTopic.id,
@@ -247,7 +287,10 @@ class ExternalDocumentService:
                 ZsxqTopic.topic_id,
                 ZsxqTopic.title,
                 ZsxqTopic.content,
-                ZsxqTopic.raw_payload,
+                ZsxqTopic.question_text,
+                ZsxqTopic.answer_text,
+                ZsxqTopic.article_title,
+                ZsxqTopic.article_excerpt,
             )
         ).order_by(ZsxqTopic.id.asc())
         if group_id:
@@ -270,13 +313,11 @@ class ExternalDocumentService:
             batch = query.filter(ZsxqTopic.id.in_(ids)).all()
             if not batch:
                 continue
-            for topic in batch:
-                scanned += 1
-                linked = self.scan_topic_record(topic, commit=False)
-                if linked:
-                    topics_with_links += 1
-                    relations += len(linked)
-                    documents.update(item.url_hash for item in linked)
+            batch_result = self._scan_topic_batch(batch)
+            scanned += len(batch)
+            topics_with_links += batch_result["topics_with_links"]
+            relations += batch_result["relations"]
+            documents.update(batch_result["document_hashes"])
             db.session.commit()
             db.session.expunge_all()
         return {
@@ -284,6 +325,102 @@ class ExternalDocumentService:
             "topics_with_links": topics_with_links,
             "relations": relations,
             "documents": len(documents),
+        }
+
+    def _scan_topic_batch(self, topics: Iterable[ZsxqTopic]) -> Dict[str, Any]:
+        """Upsert one scan batch with bounded queries instead of one query per URL."""
+        topic_links = []
+        for topic in topics:
+            # Historical backfill reads compact projection columns. Loading the
+            # full raw payload is several orders of magnitude heavier and mostly
+            # contains attachments/platform metadata rather than user links.
+            links = extract_external_links_from_topic({
+                "title": topic.title,
+                "content": topic.content,
+                "question_text": topic.question_text,
+                "answer_text": topic.answer_text,
+                "article_title": topic.article_title,
+                "article_excerpt": topic.article_excerpt,
+            })
+            if links:
+                topic_links.append((topic, links))
+        if not topic_links:
+            return {"topics_with_links": 0, "relations": 0, "document_hashes": set()}
+
+        hashes = {link["url_hash"] for _, links in topic_links for link in links}
+        documents = {
+            row.url_hash: row
+            for row in ExternalDocument.query.options(load_only(
+                ExternalDocument.id,
+                ExternalDocument.url_hash,
+            )).filter(ExternalDocument.url_hash.in_(hashes)).all()
+        }
+        for _, links in topic_links:
+            for link in links:
+                document = documents.get(link["url_hash"])
+                if document:
+                    continue
+                initial_payload = {}
+                if link["provider"] == "zsxq":
+                    initial_payload["target_topic_id"] = topic_id_for_zsxq_url(link["canonical_url"])
+                document = ExternalDocument(
+                    provider=link["provider"],
+                    document_type=link.get("document_type"),
+                    source_url=link["source_url"],
+                    canonical_url=link["canonical_url"],
+                    url_hash=link["url_hash"],
+                    fetch_status="registered" if link["provider"] == "generic_web" else "pending",
+                    summary_status="pending",
+                    tts_status="not_submitted",
+                    raw_payload=initial_payload,
+                )
+                db.session.add(document)
+                documents[link["url_hash"]] = document
+        db.session.flush()
+
+        topic_ids = {str(topic.topic_id) for topic, _ in topic_links}
+        existing_relations = {
+            (str(row.group_id), str(row.tab_id), str(row.topic_id), row.url_hash): row
+            for row in ZsxqTopicExternalDocument.query.filter(
+                ZsxqTopicExternalDocument.topic_id.in_(topic_ids),
+                ZsxqTopicExternalDocument.url_hash.in_(hashes),
+            ).options(load_only(
+                ZsxqTopicExternalDocument.id,
+                ZsxqTopicExternalDocument.group_id,
+                ZsxqTopicExternalDocument.tab_id,
+                ZsxqTopicExternalDocument.topic_id,
+                ZsxqTopicExternalDocument.url_hash,
+            )).all()
+        }
+        relation_count = 0
+        for topic, links in topic_links:
+            for link in links:
+                key = (str(topic.group_id), str(topic.tab_id), str(topic.topic_id), link["url_hash"])
+                relation = existing_relations.get(key)
+                document = documents[link["url_hash"]]
+                if not relation:
+                    relation = ZsxqTopicExternalDocument(
+                        group_id=topic.group_id,
+                        group_name=topic.group_name,
+                        tab_id=topic.tab_id,
+                        tab_label=topic.tab_label,
+                        topic_id=topic.topic_id,
+                        topic_title=topic.title,
+                        provider=link["provider"],
+                        external_document_id=document.id,
+                        source_url=link["source_url"],
+                        canonical_url=link["canonical_url"],
+                        url_hash=link["url_hash"],
+                        link_text=link.get("link_text") or None,
+                        link_source=link.get("link_source") or None,
+                    )
+                    db.session.add(relation)
+                    existing_relations[key] = relation
+                relation_count += 1
+        return {
+            "topics_with_links": len(topic_links),
+            "relations": relation_count,
+            "document_hashes": hashes,
         }
 
     def links_for_topics(self, group_id: str, topics: Iterable[ZsxqTopic]) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
@@ -338,6 +475,66 @@ class ExternalDocumentService:
         self._sync_tts_projection_for_documents([document], commit=True)
         return document
 
+    def document_references(self, document_id: str, *, limit: int = 100) -> List[Dict[str, Any]]:
+        rows = (
+            ZsxqTopicExternalDocument.query.filter(
+                ZsxqTopicExternalDocument.external_document_id == str(document_id)
+            )
+            .order_by(ZsxqTopicExternalDocument.updated_at.desc())
+            .limit(max(min(int(limit or 100), 500), 1))
+            .all()
+        )
+        return [row.to_dict(include_document=False) for row in rows]
+
+    def list_documents(
+        self,
+        *,
+        provider: Optional[str] = None,
+        status: Optional[str] = None,
+        keyword: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 30,
+    ) -> Dict[str, Any]:
+        page = max(int(page or 1), 1)
+        per_page = max(min(int(per_page or 30), 100), 1)
+        query = ExternalDocument.query
+        if provider:
+            query = query.filter(ExternalDocument.provider == str(provider).strip().lower())
+        if status:
+            query = query.filter(ExternalDocument.fetch_status == str(status).strip().lower())
+        if keyword:
+            like = f"%{str(keyword).strip()}%"
+            query = query.filter(or_(
+                ExternalDocument.title.ilike(like),
+                ExternalDocument.canonical_url.ilike(like),
+            ))
+        total = query.count()
+        rows = (
+            query.order_by(ExternalDocument.updated_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+            .all()
+        )
+        counts = dict(
+            db.session.query(ExternalDocument.fetch_status, db.func.count(ExternalDocument.id))
+            .group_by(ExternalDocument.fetch_status)
+            .all()
+        )
+        provider_counts = dict(
+            db.session.query(ExternalDocument.provider, db.func.count(ExternalDocument.id))
+            .group_by(ExternalDocument.provider)
+            .all()
+        )
+        return {
+            "items": [row.compact_dict() for row in rows],
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "pages": (total + per_page - 1) // per_page,
+            "status_counts": counts,
+            "provider_counts": provider_counts,
+        }
+
     def fetch_document(
         self,
         document_id: str,
@@ -348,7 +545,9 @@ class ExternalDocumentService:
         document = self.get_document(document_id)
         if document.fetch_status == "fetched" and document.content_text and not force:
             return document
-        if document.provider != "feishu":
+        if document.provider == "generic_web":
+            raise ExternalDocumentError("普通网页当前只登记原始地址，不自动抓取")
+        if document.provider not in {"feishu", "zsxq", "wechat"}:
             raise ExternalDocumentError(f"暂不支持抓取 {document.provider}")
 
         document.fetch_status = "fetching"
@@ -357,8 +556,14 @@ class ExternalDocumentService:
 
         credential = {}
         try:
-            credential = _resolve_feishu_cookie(account_id=credential_id, required=True)
-            fetched = self._fetch_feishu_document(document, credential["cookie"])
+            if document.provider == "feishu":
+                credential = _resolve_feishu_cookie(account_id=credential_id, required=True)
+                fetched = self._fetch_feishu_document(document, credential["cookie"])
+            elif document.provider == "zsxq":
+                fetched = self._fetch_zsxq_document(document, credential_id=credential_id)
+                credential = fetched.pop("credential", {})
+            else:
+                fetched = self._fetch_wechat_document(document)
             now = datetime.utcnow()
             document.title = fetched.get("title") or document.title
             document.author_name = fetched.get("author_name") or document.author_name
@@ -367,14 +572,15 @@ class ExternalDocumentService:
             document.content_chars = len(document.content_text or "")
             document.content_hash = content_hash(document.content_text or "")
             document.fetch_status = "fetched" if document.content_text else "empty"
-            document.fetch_error = None if document.content_text else "飞书页面返回成功，但没有抽取到正文。"
+            document.fetch_error = None if document.content_text else "页面返回成功，但没有抽取到正文。"
             document.fetched_at = now
             document.fetch_credential_id = credential.get("credential_id")
             document.raw_payload = fetched.get("raw_payload") or {}
             if document.summary_status in {"completed", "failed"} and _document_summary_stale(document):
                 document.summary_status = "pending"
                 document.summary_error = None
-            _mark_credential_success(credential.get("credential_id"))
+            if credential.get("credential_id"):
+                _mark_credential_success(credential.get("credential_id"))
             db.session.commit()
             return document
         except Exception as exc:
@@ -393,7 +599,7 @@ class ExternalDocumentService:
         if document.summary_status == "completed" and document.summary_text and not force and not _document_summary_stale(document):
             return document
         if not document.content_text:
-            raise ExternalDocumentError("飞书正文尚未抓取，无法总结")
+            raise ExternalDocumentError("关联内容正文尚未抓取，无法总结")
 
         document.summary_status = "summarizing"
         document.summary_error = None
@@ -501,6 +707,7 @@ class ExternalDocumentService:
         summarize: bool = False,
         document_limit: Optional[int] = None,
         credential_id: Optional[str] = None,
+        providers: Optional[Iterable[str]] = None,
     ) -> Dict[str, Any]:
         result = {}
         if scan:
@@ -508,7 +715,14 @@ class ExternalDocumentService:
         if not (fetch or summarize):
             return result
 
-        query = ExternalDocument.query.filter(ExternalDocument.provider == "feishu").order_by(
+        if isinstance(providers, str):
+            providers = [providers]
+        selected_providers = {
+            str(item).strip().lower()
+            for item in (providers or ("feishu", "zsxq", "wechat"))
+            if str(item).strip().lower() in {"feishu", "zsxq", "wechat"}
+        }
+        query = ExternalDocument.query.filter(ExternalDocument.provider.in_(selected_providers)).order_by(
             ExternalDocument.updated_at.asc()
         )
         if fetch:
@@ -526,7 +740,10 @@ class ExternalDocumentService:
             item = {"id": document.id, "url": document.canonical_url}
             try:
                 if fetch:
-                    document = self.fetch_document(document.id, credential_id=credential_id)
+                    document = self.fetch_document(
+                        document.id,
+                        credential_id=credential_id if document.provider == "feishu" else None,
+                    )
                     item["fetch_status"] = document.fetch_status
                 if summarize and document.fetch_status == "fetched":
                     document = self.summarize_document(document.id)
@@ -543,16 +760,19 @@ class ExternalDocumentService:
     def _upsert_document_shell(self, link: Dict[str, str]) -> ExternalDocument:
         document = ExternalDocument.query.filter_by(url_hash=link["url_hash"]).first()
         if not document:
+            initial_payload = {}
+            if link["provider"] == "zsxq":
+                initial_payload["target_topic_id"] = topic_id_for_zsxq_url(link["canonical_url"])
             document = ExternalDocument(
                 provider=link["provider"],
                 document_type=link.get("document_type"),
                 source_url=link["source_url"],
                 canonical_url=link["canonical_url"],
                 url_hash=link["url_hash"],
-                fetch_status="pending",
+                fetch_status="registered" if link["provider"] == "generic_web" else "pending",
                 summary_status="pending",
                 tts_status="not_submitted",
-                raw_payload={},
+                raw_payload=initial_payload,
             )
             db.session.add(document)
             db.session.flush()
@@ -636,6 +856,99 @@ class ExternalDocumentService:
         if changed and commit:
             db.session.commit()
 
+    def _fetch_zsxq_document(
+        self,
+        document: ExternalDocument,
+        cookie: Optional[str] = None,
+        credential_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        target_topic_id = topic_id_for_zsxq_url(document.canonical_url)
+        if not target_topic_id:
+            raise ExternalDocumentError("知识星球链接中没有可识别的 topic_id")
+
+        cached = (
+            ZsxqTopic.query.filter(ZsxqTopic.topic_id == target_topic_id)
+            .order_by(ZsxqTopic.last_synced_at.desc())
+            .first()
+        )
+        if cached and cached.content:
+            return {
+                "title": cached.title or cached.article_title or f"知识星球 item {target_topic_id}",
+                "author_name": cached.author_name,
+                "content_text": cached.content,
+                "content_html": None,
+                "raw_payload": {
+                    "extractor": "zsxq_local_topic_v1",
+                    "target_topic_id": target_topic_id,
+                    "target_group_id": cached.group_id,
+                    "target_tab_id": cached.tab_id,
+                    "fetched_at": datetime.utcnow().isoformat() + "Z",
+                },
+            }
+
+        from services.zsxq_service import zsxq_service
+
+        credential = {}
+        if not cookie:
+            credential = credential_service.resolve_zsxq_cookie(account_id=credential_id, required=True)
+            cookie = credential["cookie"]
+        response = zsxq_service.get_topic(cookie, target_topic_id)
+        topic_payload = _zsxq_topic_payload(response)
+        if not topic_payload:
+            raise ExternalDocumentError("知识星球 topic detail 返回成功，但没有找到 item 数据")
+        snapshot = ZsxqTopic(raw_payload=topic_payload)
+        content_text = _normalize_text(snapshot.content or "")
+        if not content_text:
+            raise ExternalDocumentError("知识星球 item 没有可展示正文")
+        return {
+            "title": snapshot.title or snapshot.article_title or f"知识星球 item {target_topic_id}",
+            "author_name": snapshot.author_name,
+            "content_text": content_text,
+            "content_html": None,
+            "raw_payload": {
+                "extractor": "zsxq_topic_api_v1",
+                "target_topic_id": target_topic_id,
+                "fetched_at": datetime.utcnow().isoformat() + "Z",
+            },
+            "credential": credential,
+        }
+
+    def _fetch_wechat_document(self, document: ExternalDocument) -> Dict[str, Any]:
+        response = requests.get(
+            document.canonical_url,
+            headers={
+                "User-Agent": os.environ.get(
+                    "WECHAT_FETCH_USER_AGENT",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                ),
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            },
+            timeout=_int_env("WECHAT_FETCH_TIMEOUT", 30),
+            allow_redirects=True,
+        )
+        if response.status_code >= 400:
+            raise ExternalDocumentError(f"微信文章抓取失败 HTTP {response.status_code}")
+        response.encoding = response.encoding or "utf-8"
+        # WeChat pages can place the article after 500 KB+ of styles/scripts.
+        # Parse the complete response and clip only the extracted readable text.
+        title, author_name, content_text = _extract_wechat_article(response.text)
+        if not content_text:
+            raise ExternalDocumentError("微信文章没有抽取到正文，可能已删除或需要验证")
+        return {
+            "title": title or document.title or "微信文章",
+            "author_name": author_name,
+            "content_text": content_text,
+            "content_html": None,
+            "raw_payload": {
+                "status_code": response.status_code,
+                "final_url": response.url,
+                "content_type": response.headers.get("content-type"),
+                "fetched_at": datetime.utcnow().isoformat() + "Z",
+                "extractor": "wechat_html_v1",
+            },
+        }
+
     def _fetch_feishu_document(self, document: ExternalDocument, cookie: str) -> Dict[str, Any]:
         session = requests.Session()
         headers = {
@@ -662,6 +975,18 @@ class ExternalDocumentService:
         html = response.text[:MAX_FETCH_CHARS]
         title = _extract_html_title(html) or document.title
         content_text = _extract_readable_text(html)
+        if _looks_like_feishu_application_shell(title=title or "", content_text=content_text):
+            rendered = _fetch_feishu_document_with_browser(document.canonical_url, cookie)
+            _validate_feishu_document_response(
+                title=rendered.get("title") or "",
+                content_text=rendered.get("content_text") or "",
+            )
+            rendered["raw_payload"] = {
+                **(rendered.get("raw_payload") or {}),
+                "initial_status_code": response.status_code,
+                "initial_title": title,
+            }
+            return rendered
         _validate_feishu_document_response(title=title or "", content_text=content_text)
         return {
             "title": title,
@@ -684,11 +1009,11 @@ class ExternalDocumentService:
         model = _summary_model()
         timeout = _int_env("EXTERNAL_DOCUMENT_SUMMARY_TIMEOUT", 120)
         system_prompt = (
-            "你是知识星球外链文档整理助手。你只能基于用户提供的飞书文档正文总结，"
+            "你是知识星球关联内容整理助手。你只能基于用户提供的正文总结，"
             "不得新增正文没有出现的事实。输出中文 Markdown，不要使用代码块。"
         )
         user_prompt = "\n".join([
-            f"标题：{document.title or '未命名飞书文档'}",
+            f"标题：{document.title or '未命名关联内容'}",
             f"来源 URL：{document.canonical_url}",
             "",
             "请输出：",
@@ -697,7 +1022,7 @@ class ExternalDocumentService:
             "3. 值得追踪的数字、时间、实体",
             "4. 适合详情页展示的一段 120 字以内摘要",
             "",
-            "【飞书正文】",
+            "【正文】",
             _clip(document.content_text or "", MAX_SUMMARY_INPUT_CHARS),
         ])
         response = requests.post(
@@ -735,6 +1060,232 @@ def _iter_candidate_texts(text: str) -> Iterable[str]:
     except Exception:
         pass
     return variants
+
+
+def _explicit_topic_link_chunks(payload: Any) -> List[Tuple[str, str]]:
+    if not isinstance(payload, dict):
+        return []
+    allowed_text_keys = {
+        "text", "content", "question_text", "answer_text", "article_content",
+        "article_title", "article_excerpt", "description", "title",
+        "article_url", "inline_article_url", "url", "link", "href",
+    }
+    allowed_container_keys = {"talk", "question", "answer", "article", "links", "link", "references"}
+    chunks: List[Tuple[str, str]] = []
+
+    def visit(value: Any, path: str, depth: int) -> None:
+        if depth > 5:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key)
+                next_path = f"{path}.{key_text}" if path else key_text
+                if key_text in allowed_text_keys and isinstance(item, (str, int, float)):
+                    chunks.append((next_path, str(item)))
+                elif key_text in allowed_container_keys and isinstance(item, (dict, list)):
+                    visit(item, next_path, depth + 1)
+        elif isinstance(value, list):
+            for index, item in enumerate(value[:100]):
+                if isinstance(item, (dict, list)):
+                    visit(item, f"{path}[{index}]", depth + 1)
+
+    visit(payload, "payload", 0)
+    return chunks
+
+
+def _fetch_feishu_document_with_browser(url: str, cookie: str) -> Dict[str, Any]:
+    """Render a Feishu SPA with the selected credential and collect virtualized document blocks."""
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise ExternalDocumentError("飞书正文需要浏览器渲染，但当前环境缺少 Playwright 依赖。") from exc
+
+    cookie_pairs = _cookie_pairs_from_header(cookie)
+    if not cookie_pairs:
+        raise _credential_error("飞书凭据里没有可注入浏览器的 Cookie")
+
+    timeout_ms = _int_env("FEISHU_BROWSER_FETCH_TIMEOUT_MS", 45_000)
+    started_at = time.monotonic()
+    with sync_playwright() as playwright:
+        browser = _launch_feishu_fetch_browser(playwright)
+        context = None
+        try:
+            context = browser.new_context(
+                locale="zh-CN",
+                user_agent=os.environ.get(
+                    "FEISHU_FETCH_USER_AGENT",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                ),
+            )
+            cookie_domain = _feishu_cookie_domain(url)
+            context.add_cookies([
+                {
+                    "name": key,
+                    "value": value,
+                    "domain": cookie_domain,
+                    "path": "/",
+                    "secure": True,
+                }
+                for key, value in cookie_pairs.items()
+                if key and value is not None
+            ])
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            try:
+                page.wait_for_function(
+                    """() => Boolean(
+                        document.querySelector('h1')
+                        && document.querySelector('.block[data-record-id] .ace-line')
+                    )""",
+                    timeout=timeout_ms,
+                )
+            except PlaywrightTimeoutError as exc:
+                sample = _normalize_text(page.locator("body").inner_text(timeout=5_000))[:500]
+                if any(marker in sample.lower() for marker in ("登录", "sign in", "log in", "扫码登录")):
+                    raise _credential_error("飞书浏览器未登录或登录态已失效") from exc
+                raise ExternalDocumentError(
+                    "飞书返回了动态页面，但浏览器等待正文渲染超时；请检查页面权限或浏览器运行环境。"
+                ) from exc
+
+            title, content_text, block_count = _collect_feishu_rendered_document(page, started_at)
+            return {
+                "title": title,
+                "content_text": content_text,
+                "content_html": None,
+                "raw_payload": {
+                    "final_url": page.url,
+                    "fetched_at": datetime.utcnow().isoformat() + "Z",
+                    "extractor": "browser_dom_v1",
+                    "rendered_blocks": block_count,
+                },
+            }
+        finally:
+            if context is not None:
+                context.close()
+            browser.close()
+
+
+def _collect_feishu_rendered_document(page: Any, started_at: float) -> Tuple[str, str, int]:
+    timeout_seconds = max(_int_env("FEISHU_BROWSER_TOTAL_TIMEOUT_SECONDS", 90), 10)
+    pause_ms = max(_int_env("FEISHU_BROWSER_SCROLL_PAUSE_MS", 180), 20)
+    max_steps = max(_int_env("FEISHU_BROWSER_MAX_SCROLL_STEPS", 240), 1)
+    seen_ids = set()
+    blocks: List[str] = []
+    position = 0
+    stable_bottom_rounds = 0
+
+    title = _clean_feishu_dom_text(page.locator("h1").inner_text(timeout=5_000))[:500]
+    for _ in range(max_steps):
+        if time.monotonic() - started_at > timeout_seconds:
+            raise ExternalDocumentError("飞书浏览器正文抽取超过总时限")
+        metrics = page.evaluate(
+            """() => {
+                const container = document.querySelector('.bear-web-x-container');
+                if (!container) return null;
+                return {
+                    scrollHeight: container.scrollHeight,
+                    clientHeight: container.clientHeight,
+                    scrollTop: container.scrollTop,
+                };
+            }"""
+        )
+        if not metrics:
+            raise ExternalDocumentError("飞书文档已渲染，但未找到正文滚动容器")
+
+        page.evaluate(
+            """(top) => {
+                const container = document.querySelector('.bear-web-x-container');
+                if (container) container.scrollTop = top;
+            }""",
+            position,
+        )
+        page.wait_for_timeout(pause_ms)
+        visible_blocks = page.evaluate(
+            """() => Array.from(document.querySelectorAll('.block[data-record-id]')).map(block => ({
+                id: block.getAttribute('data-record-id') || '',
+                text: block.innerText || '',
+            }))"""
+        )
+        for block in visible_blocks or []:
+            record_id = str(block.get("id") or "")
+            text = _clean_feishu_dom_text(block.get("text") or "")
+            if not record_id or record_id in seen_ids:
+                continue
+            seen_ids.add(record_id)
+            if text:
+                blocks.append(text)
+
+        scroll_height = int(metrics.get("scrollHeight") or 0)
+        client_height = max(int(metrics.get("clientHeight") or 0), 1)
+        bottom = max(scroll_height - client_height, 0)
+        if position >= bottom:
+            stable_bottom_rounds += 1
+            if stable_bottom_rounds >= 2:
+                break
+        else:
+            stable_bottom_rounds = 0
+        position = min(position + max(int(client_height * 0.75), 320), bottom)
+
+    content_text = _normalize_text("\n\n".join(blocks))
+    if title and not content_text.startswith(title):
+        content_text = _normalize_text(f"{title}\n\n{content_text}")
+    return title, _clip(content_text, MAX_FETCH_CHARS), len(seen_ids)
+
+
+def _launch_feishu_fetch_browser(playwright: Any) -> Any:
+    chrome_path = (os.environ.get("FEISHU_FETCH_CHROME_PATH") or _default_chrome_path()).strip()
+    kwargs: Dict[str, Any] = {"headless": True}
+    if chrome_path:
+        kwargs.update({
+            "executable_path": chrome_path,
+            "headless": False,
+            "args": ["--headless=new", "--disable-gpu", "--hide-scrollbars", "--mute-audio"],
+        })
+    channel = (os.environ.get("FEISHU_FETCH_CHROME_CHANNEL") or "").strip()
+    if channel and not chrome_path:
+        kwargs["channel"] = channel
+    return playwright.chromium.launch(**kwargs)
+
+
+def _default_chrome_path() -> str:
+    for candidate in (
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+    ):
+        if Path(candidate).exists():
+            return candidate
+    return ""
+
+
+def _feishu_cookie_domain(url: str) -> str:
+    host = (urlsplit(url).hostname or "").lower()
+    if host == "feishu.cn" or host.endswith(".feishu.cn"):
+        return ".feishu.cn"
+    if host == "larksuite.com" or host.endswith(".larksuite.com"):
+        return ".larksuite.com"
+    return host
+
+
+def _cookie_pairs_from_header(cookie: str) -> Dict[str, str]:
+    pairs: Dict[str, str] = {}
+    for part in str(cookie or "").split(";"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip()
+        if key and not re.search(r"\s", key):
+            pairs[key] = value.strip()
+    return pairs
+
+
+def _clean_feishu_dom_text(value: str) -> str:
+    text = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]", "", str(value or ""))
+    return _normalize_text(text)
 
 
 def _json_text(value: Any) -> str:
@@ -827,6 +1378,61 @@ class _ReadableHTMLParser(HTMLParser):
         return _normalize_text(" ".join(self.parts))
 
 
+class _WechatArticleParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.parts: List[str] = []
+        self.capture_depth = 0
+        self.skip_depth = 0
+        self.capture_stack: List[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs_map = dict(attrs)
+        if attrs_map.get("id") == "js_content":
+            self.capture_stack = [tag]
+            self.capture_depth = len(self.capture_stack)
+            return
+        if not self.capture_depth:
+            return
+        if tag in {"br", "img", "input", "meta", "link", "hr"}:
+            if tag in {"br", "hr"}:
+                self.parts.append("\n")
+            return
+        self.capture_stack.append(tag)
+        self.capture_depth = len(self.capture_stack)
+        if tag in {"script", "style", "svg", "canvas", "noscript"}:
+            self.skip_depth += 1
+        if tag in {"p", "div", "section", "article", "li", "h1", "h2", "h3", "blockquote"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if not self.capture_depth or tag not in self.capture_stack:
+            return
+        while self.capture_stack:
+            opened = self.capture_stack.pop()
+            if opened in {"script", "style", "svg", "canvas", "noscript"} and self.skip_depth:
+                self.skip_depth -= 1
+            if opened == tag:
+                break
+        self.capture_depth = len(self.capture_stack)
+        if tag in {"p", "div", "section", "article", "li", "h1", "h2", "h3", "blockquote"}:
+            self.parts.append("\n")
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in {"br", "img", "input", "meta", "link", "hr"}:
+            self.handle_endtag(tag)
+
+    def handle_data(self, data):
+        if self.capture_depth and not self.skip_depth:
+            value = str(data or "").strip()
+            if value:
+                self.parts.append(value)
+
+    def text(self) -> str:
+        return _normalize_text(" ".join(self.parts))
+
+
 def _extract_readable_text(html: str) -> str:
     parser = _ReadableHTMLParser()
     try:
@@ -839,6 +1445,45 @@ def _extract_readable_text(html: str) -> str:
     combined = "\n".join(item for item in [body_text, script_text] if item)
     combined = _remove_feishu_boilerplate(_normalize_text(combined))
     return _clip(combined, MAX_FETCH_CHARS)
+
+
+def _extract_wechat_article(html: str) -> Tuple[str, str, str]:
+    title = _extract_html_title(html)
+    author = ""
+    for pattern in (
+        r'<meta[^>]+name=["\']author["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+property=["\']og:article:author["\'][^>]+content=["\']([^"\']+)',
+        r'<span[^>]+class=["\'][^"\']*rich_media_meta_nickname[^"\']*["\'][^>]*>(.*?)</span>',
+    ):
+        match = re.search(pattern, html or "", re.I | re.S)
+        if match:
+            author = _normalize_text(re.sub(r"<[^>]+>", " ", match.group(1)))[:255]
+            if author:
+                break
+    parser = _WechatArticleParser()
+    try:
+        parser.feed(html or "")
+        content_text = parser.text()
+    except Exception:
+        content_text = ""
+    return title, author, _clip(content_text, MAX_FETCH_CHARS)
+
+
+def _zsxq_topic_payload(response: Any) -> Dict[str, Any]:
+    if not isinstance(response, dict):
+        return {}
+    candidates = [response]
+    for key in ("resp_data", "data"):
+        value = response.get(key)
+        if isinstance(value, dict):
+            candidates.append(value)
+    for candidate in candidates:
+        topic = candidate.get("topic") if isinstance(candidate, dict) else None
+        if isinstance(topic, dict):
+            return topic
+        if any(key in candidate for key in ("talk", "question", "answer", "article")):
+            return candidate
+    return {}
 
 
 def _extract_script_strings(html: str) -> str:

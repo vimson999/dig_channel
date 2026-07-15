@@ -216,6 +216,29 @@ class ZsxqTopic(db.Model):
         }
 
 
+class ZsxqTopicFavorite(db.Model):
+    __tablename__ = "zsxq_topic_favorites"
+    __table_args__ = (
+        db.UniqueConstraint("group_id", "topic_id", name="uq_zsxq_topic_favorites_group_topic"),
+        db.Index("ix_zsxq_topic_favorites_group_created", "group_id", db.text("created_at DESC")),
+    )
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    group_id = db.Column(db.String(32), nullable=False, index=True)
+    topic_id = db.Column(db.String(64), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "group_id": self.group_id,
+            "topic_id": self.topic_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class ZsxqAttachment(db.Model):
     __tablename__ = "zsxq_attachments"
     __table_args__ = (

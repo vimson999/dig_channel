@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>关联内容中心 - Shioa</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/linked-content-detail.css?v=20260715-1">
+</head>
+<body>
+    <main class="linked-shell">
+        <header class="linked-header">
+            <div>
+                <a class="back-link" href="zsxq-lab.html"><i class="fas fa-arrow-left"></i> 返回知识星球实验台</a>
+                <p class="eyebrow">Linked Content</p>
+                <h1 id="page-title">关联内容中心</h1>
+                <p id="page-subtitle">统一查看飞书、知识星球 item、微信文章及已登记网页。</p>
+            </div>
+            <div id="header-actions" class="header-actions">
+                <button id="backfill-btn" class="button button-primary"><i class="fas fa-cloud-arrow-down"></i> 补抓现有内容</button>
+                <button id="refresh-btn" class="button"><i class="fas fa-rotate"></i> 刷新</button>
+            </div>
+        </header>
+
+        <section id="task-panel" class="task-panel hidden" aria-live="polite"></section>
+
+        <section id="list-view">
+            <div id="stats" class="stats"></div>
+            <div class="filter-bar">
+                <select id="provider-filter" aria-label="来源筛选">
+                    <option value="">全部来源</option>
+                    <option value="feishu">飞书</option>
+                    <option value="zsxq">知识星球</option>
+                    <option value="wechat">微信文章</option>
+                    <option value="generic_web">普通网页</option>
+                </select>
+                <select id="status-filter" aria-label="状态筛选">
+                    <option value="">全部状态</option>
+                    <option value="fetched">已抓取</option>
+                    <option value="pending">待抓取</option>
+                    <option value="failed">失败</option>
+                    <option value="registered">仅登记</option>
+                </select>
+                <input id="keyword-input" type="search" placeholder="搜索标题或链接">
+                <button id="search-btn" class="button">搜索</button>
+            </div>
+            <div id="document-list" class="document-list"><div class="empty">正在读取关联内容…</div></div>
+            <div id="pagination" class="pagination"></div>
+        </section>
+
+        <section id="detail-view" class="hidden">
+            <article id="detail-card" class="detail-card"></article>
+        </section>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/config.js"></script>
+    <script src="js/shared-navigation.js"></script>
+    <script src="js/linked-content-detail.js?v=20260715-1"></script>
+</body>
+</html>

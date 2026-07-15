@@ -44,12 +44,35 @@ stop_by_pattern() {
   fi
 }
 
+kill_project_processes() {
+  local label="$1"
+  local awk_filter="$2"
+  local pids
+
+  pids="$(ps -axo pid=,command= | awk -v project="$PROJECT_ROOT" "$awk_filter")"
+  if [ -z "$pids" ]; then
+    echo "✅ 未发现 ${label}。"
+    return 0
+  fi
+
+  echo "⚠️ 发现 ${label}: $pids"
+  echo "$pids" | xargs kill -TERM 2>/dev/null || true
+  sleep 1
+
+  local pending
+  pending="$(ps -axo pid=,command= | awk -v project="$PROJECT_ROOT" "$awk_filter")"
+  if [ -n "$pending" ]; then
+    echo "⚠️ ${label} 未及时退出，强制清理: $pending"
+    echo "$pending" | xargs kill -KILL 2>/dev/null || true
+  fi
+}
+
 echo
-echo "1/4 停止 Celery Watchdog，避免 worker 被自动拉起..."
+echo "1/5 停止 Celery Watchdog，避免 worker 被自动拉起..."
 run_if_exists "$SCRIPT_DIR/stop-celery-watchdog.sh"
 
 echo
-echo "2/4 停止计划任务..."
+echo "2/5 停止计划任务..."
 run_if_exists "$SCRIPT_DIR/stop-zsxq-auto-scheduler.sh"
 run_if_exists "$SCRIPT_DIR/stop-zsxq-auto-publish-scheduler.sh"
 run_if_exists "$SCRIPT_DIR/stop-report-video-asset-scheduler.sh"
@@ -58,7 +81,7 @@ stop_by_pattern "内容保留清理调度器" "run_content_retention_cleanup_sch
 stop_by_pattern "通用任务调度器" "src/backend/run_scheduler.py|run_scheduler.py"
 
 echo
-echo "3/4 停止各队列 Celery worker..."
+echo "3/5 停止各队列 Celery worker..."
 run_if_exists "$SCRIPT_DIR/stop-celery-report-audio-workflow.sh"
 run_if_exists "$SCRIPT_DIR/stop-celery-report-pdf-gemini.sh"
 run_if_exists "$SCRIPT_DIR/stop-celery-doubao-browser-tts.sh"
@@ -73,17 +96,38 @@ run_if_exists "$SCRIPT_DIR/stop-celery-tts.sh"
 run_if_exists "$SCRIPT_DIR/stop-celery-platform-upload.sh"
 
 echo
-echo "4/4 最后做一次 Celery 残留清理..."
+echo "4/5 最后做一次 Celery 残留清理..."
 run_if_exists "$SCRIPT_DIR/stop-celery.sh"
 
 echo
+echo "5/5 项目范围兜底清理，避免旧 worker/调度器残留..."
+kill_project_processes "本项目 Celery worker 残留进程" '
+  index($0, project "/venv/bin/celery") && $0 ~ / worker( |$)/ { print $1 }
+'
+kill_project_processes "本项目 Celery 启动包装脚本残留进程" '
+  index($0, project "/scripts/dev/run-celery-") { print $1 }
+'
+kill_project_processes "本项目 Watchdog/调度器残留进程" '
+  index($0, project) && ($0 ~ /celery_watchdog_loop/ || $0 ~ /run_.*scheduler/ || $0 ~ /run_scheduler\.py/) { print $1 }
+'
+
+echo
 echo "🔍 剩余后台进程检查："
-remaining="$(pgrep -af 'celery|celery_watchdog_loop|run_.*scheduler|run_scheduler.py' 2>/dev/null || true)"
+remaining="$(ps -axo pid=,command= | awk -v project="$PROJECT_ROOT" '
+  index($0, project) && (
+    $0 ~ /\/venv\/bin\/celery/ ||
+    $0 ~ /\/scripts\/dev\/run-celery-/ ||
+    $0 ~ /celery_watchdog_loop/ ||
+    $0 ~ /run_.*scheduler/ ||
+    $0 ~ /run_scheduler\.py/
+  ) { print }
+')"
 if [ -z "$remaining" ]; then
   echo "✅ 已停干净。"
 else
   echo "$remaining"
-  echo "⚠️ 上面这些进程仍存在，可能需要手工确认是否属于本项目。"
+  echo "❌ 上面这些本项目后台进程仍存在；请先处理残留，再启动新服务。"
+  exit 1
 fi
 
 echo

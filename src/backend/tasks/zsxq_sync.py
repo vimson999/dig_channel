@@ -298,7 +298,7 @@ def _mark_sync_run_upstream_retrying(run_id, exc, celery_task, *, countdown, ret
             "last_error": str(exc),
             "retry_state": retry_state,
         })
-        run.status = "queued"
+        run.status = "retrying"
         run.completed_at = None
         run.error_message = None
         run.result = result

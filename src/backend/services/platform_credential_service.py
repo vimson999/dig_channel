@@ -311,7 +311,7 @@ def _normalize_status(raw: str, default: str = "active") -> str:
 def list_credentials(filters: Dict[str, Any]) -> Tuple[List[PlatformCredentialAccount], int]:
     page = max(int(filters.get("page") or 1), 1)
     per_page = min(max(int(filters.get("per_page") or 20), 1), 100)
-    query = PlatformCredentialAccount.query.options(load_only(*LIST_CREDENTIAL_COLUMNS))
+    query = PlatformCredentialAccount.query
 
     platform = (filters.get("platform") or "").strip().lower()
     if platform:
@@ -343,13 +343,34 @@ def list_credentials(filters: Dict[str, Any]) -> Tuple[List[PlatformCredentialAc
         PlatformCredentialAccount.updated_at.desc(),
     )
     if purpose:
-        matched = _filter_accounts_by_purpose(ordered_query.all(), purpose)
-        total = len(matched)
+        purpose_candidates = ordered_query.options(load_only(
+            PlatformCredentialAccount.id,
+            PlatformCredentialAccount.purposes,
+        )).all()
+        matched_ids = [
+            account.id
+            for account in purpose_candidates
+            if _credential_has_purpose(account, purpose)
+        ]
+        total = len(matched_ids)
         start = (page - 1) * per_page
-        return matched[start:start + per_page], total
+        selected_ids = matched_ids[start:start + per_page]
+        if not selected_ids:
+            return [], total
+        items = query.options(load_only(*LIST_CREDENTIAL_COLUMNS)).filter(
+            PlatformCredentialAccount.id.in_(selected_ids)
+        ).all()
+        items_by_id = {item.id: item for item in items}
+        return [items_by_id[item_id] for item_id in selected_ids if item_id in items_by_id], total
 
     total = ordered_query.count()
-    items = ordered_query.offset((page - 1) * per_page).limit(per_page).all()
+    items = (
+        ordered_query
+        .options(load_only(*LIST_CREDENTIAL_COLUMNS))
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
     return items, total
 
 
@@ -492,20 +513,37 @@ def resolve_credential_record(
     platform: Optional[str] = None,
     purpose: Optional[str] = None,
 ) -> Tuple[PlatformCredentialAccount, str]:
-    query = _runtime_credential_query().filter(PlatformCredentialAccount.status == "active")
+    base_query = PlatformCredentialAccount.query.filter(PlatformCredentialAccount.status == "active")
     if account_id:
-        query = query.filter(PlatformCredentialAccount.id == account_id)
+        base_query = base_query.filter(PlatformCredentialAccount.id == account_id)
     if platform:
-        query = query.filter(PlatformCredentialAccount.platform == platform)
-    ordered_query = query.order_by(
+        base_query = base_query.filter(PlatformCredentialAccount.platform == platform)
+
+    ordered_query = base_query.order_by(
         PlatformCredentialAccount.priority.asc(),
         PlatformCredentialAccount.updated_at.desc(),
     )
-    if purpose:
-        accounts = _filter_accounts_by_purpose(ordered_query.all(), purpose)
-        account = accounts[0] if accounts else None
+    if account_id:
+        account = base_query.options(load_only(*RUNTIME_CREDENTIAL_COLUMNS)).first()
+        if account and not _credential_has_purpose(account, purpose):
+            account = None
+    elif purpose:
+        purpose_candidates = ordered_query.options(load_only(
+            PlatformCredentialAccount.id,
+            PlatformCredentialAccount.purposes,
+        )).all()
+        matched_id = next(
+            (candidate.id for candidate in purpose_candidates if _credential_has_purpose(candidate, purpose)),
+            None,
+        )
+        account = (
+            base_query.options(load_only(*RUNTIME_CREDENTIAL_COLUMNS))
+            .filter(PlatformCredentialAccount.id == matched_id)
+            .first()
+            if matched_id else None
+        )
     else:
-        account = ordered_query.first()
+        account = ordered_query.options(load_only(*RUNTIME_CREDENTIAL_COLUMNS)).first()
     if not account:
         raise CredentialError("没有可用的平台凭据")
     if _mark_credential_used_if_due(account):

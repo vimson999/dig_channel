@@ -15,7 +15,7 @@ from .system_config import SystemConfig
 from .platform_credential import PlatformCredentialAccount, PlatformCredentialBinding
 from .external_document import ExternalDocument, ZsxqTopicExternalDocument
 from .tts import TTSArticle, TTSSegment
-from .zsxq_sync import ZsxqSyncRun, ZsxqTopic, ZsxqAttachment, ZsxqSyncCursor
+from .zsxq_sync import ZsxqSyncRun, ZsxqTopic, ZsxqTopicFavorite, ZsxqAttachment, ZsxqSyncCursor
 from .zsxq_workflow import ZsxqWorkflowRun
 from .report_video import (
     ReportVideoTask,
@@ -47,6 +47,7 @@ __all__ = [
     'TTSSegment',
     'ZsxqSyncRun',
     'ZsxqTopic',
+    'ZsxqTopicFavorite',
     'ZsxqAttachment',
     'ZsxqSyncCursor',
     'ZsxqWorkflowRun',

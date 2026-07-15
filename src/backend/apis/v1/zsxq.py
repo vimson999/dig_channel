@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
+from models import db
 from services.zsxq_service import zsxq_service
 from services.zsxq_auto_publish_service import (
     config_status as auto_publish_config_status,
@@ -200,11 +201,32 @@ def local_topics():
             end_time=data.get("end_time"),
             publish_filter=data.get("publish_filter"),
             publish_date=data.get("publish_date"),
+            publish_date_start=data.get("publish_date_start"),
+            publish_date_end=data.get("publish_date_end"),
             keyword=data.get("keyword"),
+            favorite_only=bool(data.get("favorite_only")),
             include_raw_payload=bool(data.get("include_raw_payload")),
         )
         return jsonify({"success": True, "data": result})
     except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/topics/local/favorite", methods=["POST"])
+def local_topic_favorite():
+    """Create or remove a database-backed topic favorite."""
+    try:
+        data = request.get_json(silent=True) or {}
+        result = zsxq_sync_service.set_topic_favorite(
+            group_id=data.get("group_id"),
+            topic_id=data.get("topic_id"),
+            favorite=data.get("favorite") is not False,
+        )
+        return jsonify({"success": True, "data": result})
+    except ValueError as e:
+        return handle_api_error(400, str(e))
+    except Exception as e:
+        db.session.rollback()
         return handle_api_error(502, _safe_error(e))
 
 

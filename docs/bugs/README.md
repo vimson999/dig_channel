@@ -16,6 +16,11 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-07-15 | [微信大页面正文被提前截断](2026-07-15-wechat-large-html-body-truncated.md) | 关联内容中心 / 微信文章抓取 | 已修复待 worker 回放 |
+| 2026-07-15 | [飞书动态文档壳层被误报为 Cookie 失效](2026-07-15-feishu-dynamic-docs-shell-misclassified-cookie-expired.md) | ZSXQ Lab / 外链文档 / 飞书抓取 | 已修复，真实 item 已回放 |
+| 2026-07-15 | [ZSXQ Lab 热度排行泄漏到非前沿信息收录组](2026-07-15-zsxq-lab-hot-rank-group-scope-leak.md) | ZSXQ Lab / 热度排行 / 分组切换 | 已修复 |
+| 2026-07-15 | [ZSXQ Lab 发布入口泄漏到非君君播客组](2026-07-15-zsxq-lab-publish-panel-group-scope-leak.md) | ZSXQ Lab / 发布入口 / 分组切换 | 已修复 |
+| 2026-07-15 | [ZSXQ 手动同步排队状态缺少上下文](2026-07-15-zsxq-manual-sync-queue-wait-opaque.md) | ZSXQ Lab / 同步日志 / zsxq_sync 队列 | 已修复待页面验收 |
 | 2026-07-15 | [MP3 竖屏信息墙误用 AI 寒暄与任务说明](2026-07-15-mp3-infographic-used-ai-preamble.md) | MP3 视频编排 / DS 规划 / 竖屏信息图 | 已修复 |
 | 2026-07-14 | [ZSXQ Lab 专属组操作区泄漏到普通组](2026-07-14-zsxq-lab-special-group-controls-leaked.md) | ZSXQ Lab / 人工下载计划 / 分组切换 | 已修复 |
 | 2026-07-14 | [MP3 子任务在等待终点完成却被判超时](2026-07-14-mp3-child-completed-at-wait-deadline.md) | MP3 视频编排 / publisher 父子等待 / render | 已修复，现场任务已完成收口 |

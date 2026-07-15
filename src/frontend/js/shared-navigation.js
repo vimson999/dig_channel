@@ -30,6 +30,8 @@ class SharedNavigation {
             return 'trending';
         } else if (filename === 'zsxq-lab.html') {
             return 'zsxq-lab';
+        } else if (filename === 'zsxq-insights.html') {
+            return 'zsxq-insights';
         } else if (filename === 'zsxq-auto-publish.html') {
             return 'zsxq-system-sync';
         } else if (filename === 'document-converter.html') {
@@ -112,6 +114,7 @@ class SharedNavigation {
             'trending-radar': '趋势雷达监控',
             'trending': '爆款视频搜索',
             'zsxq-lab': '知识星球实验台',
+            'zsxq-insights': '生财情报台',
             'zsxq-auto-publish': '知识星球任务策略',
             'document-converter': '文档转换工具',
             'word-long-image': 'Word 转长图',
@@ -324,6 +327,12 @@ class SharedNavigation {
                         name: '商机发现',
                         icon: 'fas fa-compass',
                         href: 'indie-navigator.html'
+                    },
+                    {
+                        id: 'zsxq-insights',
+                        name: '生财情报台',
+                        icon: 'fas fa-chart-simple',
+                        href: 'zsxq-insights.html'
                     },
                     {
                         id: 'zsxq-lab',

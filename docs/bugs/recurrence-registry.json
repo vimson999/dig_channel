@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "reviewed_through": "2026-07-13",
+  "reviewed_through": "2026-07-15",
   "max_days_between_reviews": 7,
   "clusters": [
     {
@@ -131,6 +131,17 @@
         "2026-07-11-backend-restart-accepted-stale-listener.md",
         "2026-07-13-report-script-material-missing-gemini-threshold-helper.md"
       ]
+    },
+    {
+      "key": "FEISHU-DYNAMIC-DOCUMENT-EXTRACTION",
+      "title": "飞书动态页面壳层识别与正文抽取",
+      "priority": "P1",
+      "status": "in_progress",
+      "systemic_guardrail": "静态壳层检测后统一进入浏览器渲染回退，区分认证失败、渲染失败和正文真实性，并以跨路径契约测试和 extractor 元数据验收",
+      "records": [
+        "2026-07-14-feishu-docs-home-misclassified-as-document.md",
+        "2026-07-15-feishu-dynamic-docs-shell-misclassified-cookie-expired.md"
+      ]
     }
   ],
   "standalone_records": [
@@ -155,12 +166,24 @@
       "watch_for": "普通知识星球组再次显示或可调用前沿信息收录专属的批量下载、清洗或发布操作"
     },
     {
-      "record": "2026-07-14-feishu-docs-home-misclassified-as-document.md",
-      "watch_for": "飞书或其他外部页面再次仅凭 HTTP 200 被认定为抓取成功，导致登录页、首页或应用壳层污染正文"
-    },
-    {
       "record": "2026-07-15-mp3-infographic-used-ai-preamble.md",
       "watch_for": "任何封面、背景图或信息墙再次从 AI 完整回复机械截取前几行，导致寒暄、角色说明或任务描述进入视觉资产"
+    },
+    {
+      "record": "2026-07-15-zsxq-manual-sync-queue-wait-opaque.md",
+      "watch_for": "共享串行队列再次只显示排队中，却不展示当前占用任务、前方任务数或最近活动时间"
+    },
+    {
+      "record": "2026-07-15-zsxq-lab-publish-panel-group-scope-leak.md",
+      "watch_for": "发布或其他具有外部副作用的 Group 专属入口再次在非目标组显示或可被直接调用"
+    },
+    {
+      "record": "2026-07-15-zsxq-lab-hot-rank-group-scope-leak.md",
+      "watch_for": "热度排行或其他 Group 专属只读组件再次在非目标组显示，或被异步重绘恢复"
+    },
+    {
+      "record": "2026-07-15-wechat-large-html-body-truncated.md",
+      "watch_for": "外部 HTML 再次在 DOM 解析前按保存长度上限机械截断，导致靠后正文被误报为空"
     }
   ]
 }
