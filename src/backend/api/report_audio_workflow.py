@@ -808,6 +808,7 @@ def submit_bilibili_upload(current_user, job_id):
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
 
+    current_user_id = getattr(current_user, "id", None)
     data = _request_payload()
     video_key = str(data.get("video_key") or data.get("video") or "landscape").strip().lower()
     if video_key not in {"landscape", "vertical"}:
@@ -839,6 +840,7 @@ def submit_bilibili_upload(current_user, job_id):
             default_tags=["财经", "音频", "研报解读"],
             metadata_extra={"title_source": "manual" if manual_title else "report_audio_default"},
         )
+        child_id = child.id
         enqueue_bilibili_upload_task(child)
     except ValueError as exc:
         return jsonify({"success": False, "message": str(exc)}), 400
@@ -846,8 +848,20 @@ def submit_bilibili_upload(current_user, job_id):
         db.session.rollback()
         return jsonify({"success": False, "message": f"B站上传投递失败: {exc}"}), 502
 
-    _clear_jobs_summary_cache(getattr(current_user, "id", None))
-    item = bilibili_upload_child_payload(child, source_label=BILIBILI_UPLOAD_SOURCE)
+    _clear_jobs_summary_cache(current_user_id)
+    item = getattr(child, "_bilibili_enqueue_response_payload", None)
+    if item and item.get("metadata_source") not in {None, BILIBILI_UPLOAD_SOURCE}:
+        item = None
+    if item is None:
+        item = {
+            "task_id": child_id,
+            "status": "queued",
+            "step": "queued",
+            "progress": 0,
+            "title": title,
+            "video_key": video_key,
+            "cover_key": resolved_cover_key,
+        }
     return jsonify({
         "success": True,
         "message": "已投递 B站上传任务",
@@ -885,6 +899,33 @@ def cancel_bilibili_upload(current_user, job_id, upload_task_id):
     }), (200 if ok else 409)
 
 
+def _merge_cover_response_payload(payload, cover_type, cover):
+    """Merge a committed cover result without touching an expired ORM object."""
+    merged = dict(payload or {})
+    video = dict(merged.get("video") or {})
+    cover_payload = {
+        "path": cover.get("path"),
+        "bytes": cover.get("bytes"),
+        "title": cover.get("title"),
+        "subtitle": cover.get("subtitle"),
+        "download_url": cover.get("download_url"),
+    }
+    field_map = {
+        "landscape": ("cover", "download_cover_url"),
+        "vertical": ("vertical_cover", "download_vertical_cover_url"),
+        "podcast": ("podcast_cover", "download_podcast_cover_url"),
+        "bilibili": ("bilibili_cover", "download_bilibili_cover_url"),
+    }
+    video_key, download_key = field_map[cover_type]
+    video[video_key] = cover_payload
+    merged["video"] = video
+    merged[download_key] = cover.get("download_url")
+    if cover_type == "landscape":
+        merged["cover_title"] = cover.get("title") or merged.get("cover_title")
+        merged["cover_subtitle"] = cover.get("subtitle") or ""
+    return merged
+
+
 @report_audio_workflow_bp.route("/jobs/<job_id>/regenerate-cover", methods=["POST"])
 @require_login
 def regenerate_cover(current_user, job_id):
@@ -897,6 +938,7 @@ def regenerate_cover(current_user, job_id):
     if not title:
         return jsonify({"success": False, "message": "请填写封皮标题"}), 400
     title = _cover_title_with_institution(task, title)
+    payload = _job_payload(task)
 
     try:
         cover = _regenerate_cover_for_task(task, title=title, subtitle=subtitle)
@@ -907,7 +949,7 @@ def regenerate_cover(current_user, job_id):
         return jsonify({"success": False, "message": f"封皮重生成失败: {exc}"}), 502
 
     _clear_jobs_summary_cache(getattr(current_user, "id", None))
-    payload = _job_payload(task)
+    payload = _merge_cover_response_payload(payload, "landscape", cover)
     return jsonify({
         "success": True,
         "message": "封皮已重新生成",
@@ -933,6 +975,7 @@ def regenerate_cover_asset(current_user, job_id):
     if not title:
         return jsonify({"success": False, "message": "请填写封皮标题"}), 400
     title = _cover_title_with_institution(task, title)
+    payload = _job_payload(task)
 
     try:
         if cover_type == "landscape":
@@ -950,7 +993,7 @@ def regenerate_cover_asset(current_user, job_id):
         return jsonify({"success": False, "message": f"封皮重生成失败: {exc}"}), 502
 
     _clear_jobs_summary_cache(getattr(current_user, "id", None))
-    payload = _job_payload(task)
+    payload = _merge_cover_response_payload(payload, cover_type, cover)
     return jsonify({
         "success": True,
         "message": "当前封皮已重新生成",
@@ -978,6 +1021,7 @@ def generate_podcast_cover(current_user, job_id):
         payload = _job_payload(task)
         return jsonify({"success": True, "message": "播客封皮已存在", **payload, "data": payload})
 
+    payload = _job_payload(task)
     try:
         cover = _generate_podcast_cover_for_task(task, scheme=scheme)
     except ValueError as exc:
@@ -987,7 +1031,7 @@ def generate_podcast_cover(current_user, job_id):
         return jsonify({"success": False, "message": f"播客封皮生成失败: {exc}"}), 502
 
     _clear_jobs_summary_cache(getattr(current_user, "id", None))
-    payload = _job_payload(task)
+    payload = _merge_cover_response_payload(payload, "podcast", cover)
     return jsonify({
         "success": True,
         "message": "播客封皮已生成",
@@ -1011,6 +1055,7 @@ def generate_bilibili_cover(current_user, job_id):
         payload = _job_payload(task)
         return jsonify({"success": True, "message": "B站封皮已存在", **payload, "data": payload})
 
+    payload = _job_payload(task)
     try:
         cover = _generate_bilibili_cover_for_task(task)
     except ValueError as exc:
@@ -1020,7 +1065,7 @@ def generate_bilibili_cover(current_user, job_id):
         return jsonify({"success": False, "message": f"B站封皮生成失败: {exc}"}), 502
 
     _clear_jobs_summary_cache(getattr(current_user, "id", None))
-    payload = _job_payload(task)
+    payload = _merge_cover_response_payload(payload, "bilibili", cover)
     return jsonify({
         "success": True,
         "message": "B站封皮已生成",
@@ -1094,6 +1139,12 @@ def generate_vertical_video(current_user, job_id):
         payload = _job_payload(task)
         return jsonify({"success": True, "message": "同方案竖屏 MP4 已存在", **payload, "data": payload})
 
+    # _create_vertical_video_backfill_task commits twice.  SQLAlchemy expires the
+    # parent/child ORM objects after those commits, so serializing either object
+    # afterwards performs another database query.  A transient failure in that
+    # response-only query used to turn an already queued task into a false 500.
+    # Snapshot the parent response before the durable enqueue operation instead.
+    payload = _job_payload(task)
     try:
         child = _create_vertical_video_backfill_task(
             task,
@@ -1108,13 +1159,28 @@ def generate_vertical_video(current_user, job_id):
         return jsonify({"success": False, "message": f"竖屏 MP4 入队失败: {exc}"}), 502
 
     _clear_jobs_summary_cache(getattr(current_user, "id", None))
-    payload = _job_payload(task)
+    child_summary = getattr(child, "_enqueue_response_summary", None) or {
+        "job_id": getattr(child, "id", None),
+        "status": "pending",
+        "step": "queued",
+        "progress": 0,
+        "vertical_video_scheme": scheme,
+        "vertical_video_scheme_label": _vertical_video_scheme_label(scheme),
+        "preview_seconds": preview_seconds,
+        "is_preview": preview_seconds > 0,
+    }
+    child_key = "publisher_vertical_preview_video" if preview_seconds > 0 else "publisher_vertical_video"
+    payload = {
+        **payload,
+        child_key: child_summary,
+        "children": {**(payload.get("children") or {}), child_key: child_summary},
+    }
     preview_label = f"{preview_seconds}s 预览" if preview_seconds > 0 else "完整视频"
     output_label = "横屏 + 竖屏 MP4" if include_landscape else "竖屏 MP4"
     return jsonify({
         "success": True,
         "message": f"{output_label} 已提交生成（{_vertical_video_scheme_label(scheme)} · {preview_label}）",
-        "vertical_video_task": _child_task_summary(child),
+        "vertical_video_task": child_summary,
         **payload,
         "data": payload,
     })
@@ -1371,6 +1437,7 @@ def _workbench_institution(structured, pdf, video_options):
 
 
 def _regenerate_cover_for_task(task, *, title, subtitle=""):
+    task_id = task.id
     result = task.result if isinstance(task.result, dict) else {}
     params = task.params if isinstance(task.params, dict) else {}
     payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
@@ -1386,7 +1453,7 @@ def _regenerate_cover_for_task(task, *, title, subtitle=""):
         overlay_opacity = float(video_options.get("overlay_opacity") or 0.5)
     except (TypeError, ValueError):
         overlay_opacity = 0.5
-    filename = f"report_audio_cover_{task.id[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.jpg"
+    filename = f"report_audio_cover_{task_id[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.jpg"
     cover_path = thumbnail_service.generate_thumbnail(
         main_title=title,
         sub_title=subtitle,
@@ -1443,12 +1510,13 @@ def _regenerate_cover_for_task(task, *, title, subtitle=""):
         "bytes": os.path.getsize(cover_path),
         "title": title,
         "subtitle": subtitle,
-        "download_url": f"/api/report-audio-workflows/jobs/{task.id}/download-cover",
+        "download_url": f"/api/report-audio-workflows/jobs/{task_id}/download-cover",
         "updated_at": now,
     }
 
 
 def _generate_vertical_cover_for_task(task, *, title, subtitle=""):
+    task_id = task.id
     result = task.result if isinstance(task.result, dict) else {}
     params = task.params if isinstance(task.params, dict) else {}
     payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
@@ -1471,7 +1539,7 @@ def _generate_vertical_cover_for_task(task, *, title, subtitle=""):
         "subtitle_max_lines": 1,
         **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
     }
-    filename = f"vertical_cover_{task.id[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.jpg"
+    filename = f"vertical_cover_{task_id[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.jpg"
     cover_path = thumbnail_service.generate_workbench_vertical_cover(
         main_title=title,
         sub_title=subtitle,
@@ -1513,12 +1581,13 @@ def _generate_vertical_cover_for_task(task, *, title, subtitle=""):
         "bytes": os.path.getsize(cover_path),
         "title": title,
         "subtitle": subtitle,
-        "download_url": f"/api/report-audio-workflows/jobs/{task.id}/download-vertical-cover",
+        "download_url": f"/api/report-audio-workflows/jobs/{task_id}/download-vertical-cover",
         "updated_at": now,
     }
 
 
 def _generate_podcast_cover_for_task(task, *, scheme=None, title=None, subtitle=None):
+    task_id = task.id
     result = task.result if isinstance(task.result, dict) else {}
     params = task.params if isinstance(task.params, dict) else {}
     payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
@@ -1543,7 +1612,7 @@ def _generate_podcast_cover_for_task(task, *, scheme=None, title=None, subtitle=
         "subtitle_max_lines": 1,
         **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
     }
-    filename = f"podcast_cover_{task.id[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.jpg"
+    filename = f"podcast_cover_{task_id[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.jpg"
     cover_path = thumbnail_service.generate_workbench_podcast_cover(
         main_title=main_title,
         sub_title=sub_title,
@@ -1588,13 +1657,14 @@ def _generate_podcast_cover_for_task(task, *, scheme=None, title=None, subtitle=
         "bytes": os.path.getsize(cover_path),
         "title": main_title,
         "subtitle": sub_title,
-        "download_url": f"/api/report-audio-workflows/jobs/{task.id}/download-podcast-cover",
+        "download_url": f"/api/report-audio-workflows/jobs/{task_id}/download-podcast-cover",
         "updated_at": now,
         "scheme": scheme,
     }
 
 
 def _generate_bilibili_cover_for_task(task, *, title=None, subtitle=None):
+    task_id = task.id
     result = task.result if isinstance(task.result, dict) else {}
     params = task.params if isinstance(task.params, dict) else {}
     payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
@@ -1614,7 +1684,7 @@ def _generate_bilibili_cover_for_task(task, *, title=None, subtitle=None):
         "subtitle_max_lines": 1,
         **(video_options.get("bilibili_cover_image_transform") if isinstance(video_options.get("bilibili_cover_image_transform"), dict) else {}),
     }
-    filename = f"bilibili_cover_{task.id[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.jpg"
+    filename = f"bilibili_cover_{task_id[:8]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.jpg"
     main_title = _normalize_cover_text(title, 160) or _publisher_main_title(structured, video_options, variant="vertical")
     main_title = _cover_title_with_institution(task, main_title)
     sub_title = _normalize_cover_text(subtitle, 220) if subtitle is not None else _publisher_sub_title(structured, video_options, variant="vertical")
@@ -1658,7 +1728,7 @@ def _generate_bilibili_cover_for_task(task, *, title=None, subtitle=None):
         "bytes": os.path.getsize(cover_path),
         "title": main_title,
         "subtitle": sub_title,
-        "download_url": f"/api/report-audio-workflows/jobs/{task.id}/download-bilibili-cover",
+        "download_url": f"/api/report-audio-workflows/jobs/{task_id}/download-bilibili-cover",
         "updated_at": now,
         "ratio": "1146:717",
     }
@@ -1893,7 +1963,18 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
 
     child = db.session.get(PublicationTask, child_id)
     child.celery_task_id = async_result.id
+    db.session.flush()
+    enqueue_response_summary = _child_task_summary(child)
+    enqueue_response_summary.update({
+        "vertical_video_scheme": scheme,
+        "vertical_video_scheme_label": _vertical_video_scheme_label(scheme),
+        "preview_seconds": preview_seconds,
+        "is_preview": preview_seconds > 0,
+    })
     db.session.commit()
+    # Keep a non-ORM snapshot available after commit; reading mapped attributes
+    # here would otherwise issue a response-only SELECT on the expired instance.
+    child._enqueue_response_summary = enqueue_response_summary
     return child
 
 

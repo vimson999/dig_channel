@@ -150,7 +150,12 @@ PB从0.4到0.8，年底前看到修复</textarea>
             referenceBgImage = referenceBg;
             draw();
         };
-        referenceBg.src = 'assets/cover/default/closed-door-reference-bg.png';
+        // file:// 页面绘制相邻图片后会永久污染 Canvas，即使之后 clearRect
+        // 并改画 data URL，toDataURL 仍会抛出 SecurityError。文件协议只使用
+        // 工作流传入的 backgroundDataUrl；HTTP 页面继续使用默认预览背景。
+        if (window.location.protocol !== 'file:') {
+            referenceBg.src = 'assets/cover/default/closed-door-reference-bg.png';
+        }
 
         bgUpload.addEventListener('change', (e) => {
             const file = e.target.files[0];

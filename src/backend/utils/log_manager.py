@@ -25,6 +25,10 @@ class LogManager:
     def __init__(self, log_dir=None):
         self.log_dir = Path(log_dir) if log_dir else Path(BaseConfig.LOG_DIR)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.log_dir.chmod(0o750)
+        except OSError:
+            pass
         
         # 日志保留策略
         self.retention_days = int(os.environ.get('LOG_RETENTION_DAYS', '30'))
@@ -54,6 +58,10 @@ class LogManager:
             backupCount=self.max_backup_count,
             encoding='utf-8'
         )
+        try:
+            log_file.chmod(0o640)
+        except OSError:
+            pass
         
         # 设置日志格式
         formatter = logging.Formatter(
@@ -82,6 +90,10 @@ class LogManager:
             backupCount=self.retention_days,
             encoding='utf-8'
         )
+        try:
+            log_file.chmod(0o640)
+        except OSError:
+            pass
         
         # 设置日志格式
         formatter = logging.Formatter(
@@ -108,6 +120,7 @@ class LogManager:
                     with open(log_file, 'rb') as f_in:
                         with gzip.open(compressed_path, 'wb') as f_out:
                             shutil.copyfileobj(f_in, f_out)
+                    compressed_path.chmod(0o640)
                     
                     # 删除原文件
                     log_file.unlink()
@@ -155,6 +168,7 @@ class LogManager:
                         shutil.copyfileobj(f_in, f_out)
 
                 tmp_path.replace(archive_path)
+                archive_path.chmod(0o640)
 
                 with log_file.open('r+b') as f_out:
                     f_out.truncate(0)

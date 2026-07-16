@@ -77,6 +77,11 @@ celerybeat-schedule
 
 # Environments
 .env
+.env.*
+!.env.example
+!.env.production.example
+.env.bak
+.secrets/
 .venv
 env/
 venv/

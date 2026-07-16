@@ -7,6 +7,8 @@
 
 import os
 import time
+import ipaddress
+import logging
 from functools import wraps
 from threading import Lock
 
@@ -32,6 +34,8 @@ LIGHT_USER_COLUMNS = (
     User.updated_at,
     User.last_login_at,
 )
+
+logger = logging.getLogger('security')
 
 
 def _float_env(name, default):
@@ -61,6 +65,7 @@ class DevFallbackUser:
         self.created_at = user.created_at
         self.updated_at = user.updated_at
         self.last_login_at = user.last_login_at
+        self.auth_version = auth_version_for_user(user)
 
     def to_dict(self, include_sensitive=False):
         return {
@@ -77,6 +82,7 @@ class DevFallbackUser:
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'last_login_at': self.last_login_at.isoformat() if self.last_login_at else None,
+            'auth_version': self.auth_version if include_sensitive else None,
         }
 
     def to_safe_dict(self):
@@ -87,7 +93,16 @@ class DevFallbackUser:
 
 
 def _light_user_query():
-    return User.query.options(load_only(*LIGHT_USER_COLUMNS))
+    columns = LIGHT_USER_COLUMNS
+    if current_app.config.get('AUTH_VERSION_ENABLED', True):
+        columns = (*columns, User.auth_version)
+    return User.query.options(load_only(*columns))
+
+
+def auth_version_for_user(user):
+    if not current_app.config.get('AUTH_VERSION_ENABLED', True):
+        return 1
+    return int(user.auth_version or 1)
 
 
 def _get_light_user_by_id(user_id):
@@ -113,6 +128,36 @@ def _get_cached_dev_fallback_user():
     return None
 
 
+def _is_direct_loopback_request():
+    """Local bypass is valid only for a direct loopback connection."""
+    if request.headers.get('X-Forwarded-For') or request.headers.get('X-Real-IP'):
+        return False
+    try:
+        return ipaddress.ip_address(request.remote_addr or '').is_loopback
+    except ValueError:
+        return False
+
+
+def _get_local_bypass_user():
+    if not current_app.config.get('LOCAL_AUTH_BYPASS', False):
+        return None
+    if str(current_app.config.get('AUTH_MODE') or '').lower() != 'local':
+        return None
+    if not _is_direct_loopback_request():
+        logger.warning('local_auth_bypass_denied remote_addr=%s', request.remote_addr)
+        return None
+
+    cached_user = _get_cached_dev_fallback_user()
+    if cached_user:
+        return cached_user
+
+    admin_user = _light_user_query().filter_by(is_admin=True, is_active=True).order_by(User.id.asc()).first()
+    if not admin_user:
+        logger.error('local_auth_bypass_unavailable reason=no_active_admin')
+        return None
+    return _cache_dev_fallback_user(admin_user)
+
+
 def get_current_user():
     """获取当前登录用户
     
@@ -125,7 +170,11 @@ def get_current_user():
         return user
     
     # 尝试从session获取用户
-    return get_user_from_session()
+    user = get_user_from_session()
+    if user:
+        return user
+
+    return _get_local_bypass_user()
 
 def get_user_from_token():
     """从JWT token获取用户
@@ -148,10 +197,11 @@ def get_user_from_token():
     
     try:
         # 解码token
-        data = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
+        data = jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
         user = _get_light_user_by_id(data['user_id'])
         
-        if user and user.is_active:
+        token_version = int(data.get('auth_version') or 1)
+        if user and user.is_active and auth_version_for_user(user) == token_version:
             return user
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
         pass
@@ -169,7 +219,8 @@ def get_user_from_session():
         return None
     
     user = _get_light_user_by_id(user_id)
-    if user and user.is_active:
+    session_version = int(session.get('auth_version') or 1)
+    if user and user.is_active and auth_version_for_user(user) == session_version:
         return user
     
     # 清除无效session
@@ -184,55 +235,6 @@ def require_login(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         current_user = get_current_user()
-        
-        # 开发环境：如果没有用户，使用admin用户或创建默认用户
-        if not current_user and current_app.config.get('DEBUG', False):
-            cached_user = _get_cached_dev_fallback_user()
-            if cached_user:
-                current_user = cached_user
-
-        if not current_user and current_app.config.get('DEBUG', False):
-            try:
-                # 优先使用已有的admin用户(通常有数据)
-                admin_user = _light_user_query().filter_by(username='admin').first()
-                if admin_user and admin_user.is_active:
-                    print(f"🔧 [开发模式] 使用admin用户: {admin_user.username} (ID: {admin_user.id})")
-                    current_user = _cache_dev_fallback_user(admin_user)
-                else:
-                    # 如果没有admin用户，则查找或创建test_user
-                    test_user = _light_user_query().filter_by(username='test_user').first()
-                    if not test_user:
-                        from models import db
-                        test_user = User(
-                            username='test_user',
-                            email='test@example.com',
-                            display_name='测试用户',
-                            is_admin=True
-                        )
-                        db.session.add(test_user)
-                        try:
-                            db.session.commit()
-                            print(f"🔧 [开发模式] 创建默认测试用户: {test_user.username}")
-                        except Exception as e:
-                            db.session.rollback()
-                            print(f"❌ 创建测试用户失败: {e}")
-                            # 尝试再次查找
-                            test_user = _light_user_query().filter_by(username='test_user').first()
-                    
-                    if test_user:
-                        print(f"🔧 [开发模式] 使用测试用户: {test_user.username} (ID: {test_user.id})")
-                        current_user = _cache_dev_fallback_user(test_user)
-            except Exception as db_error:
-                print(f"🔧 [开发模式] 数据库连接失败，创建临时用户对象: {db_error}")
-                # 数据库连接失败时，创建一个临时用户对象
-                class TempUser:
-                    def __init__(self):
-                        self.id = 1
-                        self.username = 'temp_user'
-                        self.email = 'temp@example.com'
-                        self.display_name = '临时用户'
-                        self.is_admin = True
-                current_user = TempUser()
         
         if not current_user:
             return handle_api_error(401, "请先登录")
@@ -324,12 +326,15 @@ def generate_token(user_id, expires_in=24*60*60):
     """
     import datetime
     
+    user = _get_light_user_by_id(user_id)
+    auth_version = auth_version_for_user(user) if user else 1
     payload = {
         'user_id': user_id,
+        'auth_version': auth_version,
         'exp': datetime.datetime.utcnow() + datetime.timedelta(seconds=expires_in),
         'iat': datetime.datetime.utcnow()
     }
-    return jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
+    return jwt.encode(payload, current_app.config['JWT_SECRET_KEY'], algorithm='HS256')
 
 def is_authenticated():
     """检查用户是否已认证
@@ -354,8 +359,8 @@ def login_user(user, remember_me=False):
     token = generate_token(user.id, expires_in)
     
     # 保存到session
-    session['access_token'] = token
     session['user_id'] = user.id
+    session['auth_version'] = auth_version_for_user(user)
     session.permanent = remember_me
     
     # 更新最后登录时间

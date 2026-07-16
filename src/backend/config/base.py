@@ -26,6 +26,18 @@ def _int_env(name, default, minimum=0):
     return _coerce_int(os.environ.get(name, default), default, minimum)
 
 
+def _bool_env(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return bool(default)
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _csv_env(name, default=''):
+    value = os.environ.get(name, default)
+    return [item.strip() for item in str(value or '').split(',') if item.strip()]
+
+
 def _db_process_role():
     raw = (os.environ.get('DB_PROCESS_ROLE') or os.environ.get('APP_PROCESS_ROLE') or '').strip().lower()
     aliases = {
@@ -143,6 +155,14 @@ class BaseConfig:
     
     # 应用基本配置
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
+    AUTH_MODE = os.environ.get('AUTH_MODE', 'production').strip().lower()
+    LOCAL_AUTH_BYPASS = _bool_env('LOCAL_AUTH_BYPASS', False)
+    AUTH_REQUIRE_ADMIN = _bool_env('AUTH_REQUIRE_ADMIN', True)
+    AUTH_VERSION_ENABLED = _bool_env('AUTH_VERSION_ENABLED', True)
+    PUBLIC_REGISTRATION_ENABLED = _bool_env('PUBLIC_REGISTRATION_ENABLED', False)
+    LOGIN_PORTAL_TOKEN = os.environ.get('LOGIN_PORTAL_TOKEN', '').strip()
+    LOGIN_PORTAL_TTL_SECONDS = _int_env('LOGIN_PORTAL_TTL_SECONDS', 600, 60)
+    PASSWORD_MIN_LENGTH = _int_env('PASSWORD_MIN_LENGTH', 14, 12)
     
     # 数据库配置
     basedir = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))  # 回到项目根目录
@@ -186,12 +206,17 @@ class BaseConfig:
     
     # JWT配置
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or SECRET_KEY
-    JWT_ACCESS_TOKEN_EXPIRES = 3600  # 1小时
+    JWT_ACCESS_TOKEN_EXPIRES = _int_env('JWT_ACCESS_TOKEN_EXPIRES', 900, 300)
     
     # Session配置
     SESSION_TYPE = 'filesystem'
     SESSION_PERMANENT = False
-    PERMANENT_SESSION_LIFETIME = 7 * 24 * 3600  # 7天
+    PERMANENT_SESSION_LIFETIME = _int_env('PERMANENT_SESSION_LIFETIME', 8 * 3600, 900)
+    SESSION_COOKIE_NAME = os.environ.get('SESSION_COOKIE_NAME', '__Host-shioa-session')
+    SESSION_COOKIE_SECURE = _bool_env('SESSION_COOKIE_SECURE', True)
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = os.environ.get('SESSION_COOKIE_SAMESITE', 'Strict')
+    SESSION_COOKIE_PATH = '/'
     
     # 日志配置
     LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
@@ -206,8 +231,19 @@ class BaseConfig:
     ENABLE_MHTML_API = os.environ.get('ENABLE_MHTML_API', 'false').lower() in _truthy
     
     # API限流配置
-    RATELIMIT_STORAGE_URL = REDIS_URL
-    RATELIMIT_DEFAULT = "200 per day;50 per hour"
+    RATELIMIT_STORAGE_URL = (
+        os.environ.get('RATELIMIT_STORAGE_URL')
+        or os.environ.get('REDIS_URL')
+        or REDIS_URL
+    )
+    RATELIMIT_STORAGE_URI = RATELIMIT_STORAGE_URL
+    RATELIMIT_DEFAULT = os.environ.get('RATELIMIT_DEFAULT', '2000 per hour')
+    LOGIN_IP_RATE_LIMIT = os.environ.get('LOGIN_IP_RATE_LIMIT', '30 per minute;300 per day')
+    LOGIN_ACCOUNT_RATE_LIMIT = os.environ.get('LOGIN_ACCOUNT_RATE_LIMIT', '5 per 15 minutes')
+
+    # 生产只允许显式同源列表。开发配置会覆盖为本机来源。
+    CORS_ORIGINS = _csv_env('CORS_ORIGINS', '')
+    TRUST_PROXY_HOPS = _int_env('TRUST_PROXY_HOPS', 1, 0)
     
     # 调试配置
     DEBUG = False

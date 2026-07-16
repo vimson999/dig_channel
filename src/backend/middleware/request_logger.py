@@ -8,6 +8,7 @@ import uuid
 from flask import request, g
 from functools import wraps
 from utils.colored_logger import setup_colored_logger, log_api_request
+from utils.security_logging import redacted_request_path
 
 logger = setup_colored_logger(__name__)
 
@@ -30,21 +31,21 @@ class RequestLoggerMiddleware:
         g.start_time = time.time()
         
         # 获取客户端信息
-        client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
-        user_agent = request.headers.get('User-Agent', 'Unknown')
+        client_ip = request.remote_addr
         
         # 记录请求开始
-        logger.info(f"🌐 [{g.request_id}] {request.method} {request.path} - IP: {client_ip}")
+        logger.info(f"🌐 [{g.request_id}] {request.method} {redacted_request_path()} - IP: {client_ip}")
         
         # 记录请求参数（排除敏感信息）
-        if request.args:
+        sensitive_path = request.path.startswith('/api/v1/auth/') or 'credentials' in request.path
+        if request.args and not sensitive_path:
             safe_args = self._filter_sensitive_data(dict(request.args))
             logger.debug(f"📝 [{g.request_id}] Query params: {safe_args}")
         
         # 记录请求体（POST/PUT/PATCH）
-        if request.method in ['POST', 'PUT', 'PATCH'] and request.is_json:
+        if request.method in ['POST', 'PUT', 'PATCH'] and request.is_json and not sensitive_path:
             try:
-                safe_data = self._filter_sensitive_data(request.get_json())
+                safe_data = self._filter_sensitive_data(request.get_json(silent=True))
                 logger.debug(f"📄 [{g.request_id}] Request body: {json.dumps(safe_data, ensure_ascii=False)}")
             except Exception as e:
                 logger.warning(f"⚠️ [{g.request_id}] 无法解析请求体: {e}")
@@ -73,7 +74,7 @@ class RequestLoggerMiddleware:
             # 记录响应体（仅在调试模式下）
             if logger.isEnabledFor(10):  # DEBUG level
                 try:
-                    if response.is_json:
+                    if response.is_json and not request.path.startswith('/api/v1/auth/'):
                         response_data = response.get_json()
                         safe_response = self._filter_sensitive_data(response_data)
                         logger.debug(f"📤 [{g.request_id}] Response: {json.dumps(safe_response, ensure_ascii=False)}")
@@ -81,7 +82,7 @@ class RequestLoggerMiddleware:
                     logger.debug(f"📤 [{g.request_id}] Response size: {len(response.data)} bytes")
             
             # 使用现有的API日志记录函数
-            log_api_request(request.method, request.path, status_code, duration)
+            log_api_request(request.method, redacted_request_path(), status_code, duration)
         
         return response
     
@@ -89,23 +90,32 @@ class RequestLoggerMiddleware:
         """请求结束时清理"""
         if error:
             request_id = getattr(g, 'request_id', 'unknown')
-            logger.error(f"💥 [{request_id}] 请求异常: {error}")
+            logger.error(f"💥 [{request_id}] 请求异常类型: {type(error).__name__}")
     
     def _filter_sensitive_data(self, data):
         """过滤敏感数据"""
+        if isinstance(data, list):
+            return [self._filter_sensitive_data(item) for item in data]
         if not isinstance(data, dict):
             return data
         
         sensitive_keys = {
             'password', 'passwd', 'pwd', 'secret', 'token', 'key', 'api_key',
-            'access_token', 'refresh_token', 'auth_token', 'session_id'
+            'access_token', 'refresh_token', 'auth_token', 'session_id',
+            'authorization', 'cookie', 'client_secret', 'sessdata', 'database_url',
+            'bili_jct', 'csrf_token'
         }
         
         filtered = {}
         for key, value in data.items():
-            if key.lower() in sensitive_keys:
+            normalized_key = key.lower()
+            if normalized_key in sensitive_keys or any(
+                marker in normalized_key for marker in ('password', 'secret', 'token', 'credential')
+            ):
                 filtered[key] = '*' * 8
             elif isinstance(value, dict):
+                filtered[key] = self._filter_sensitive_data(value)
+            elif isinstance(value, list):
                 filtered[key] = self._filter_sensitive_data(value)
             else:
                 filtered[key] = value

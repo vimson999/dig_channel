@@ -2,6 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -76,6 +77,50 @@ class ZsxqTopicContentExtractionTest(unittest.TestCase):
 
         self.assertEqual(payload["answer"]["images"], [image])
         self.assertNotIn("images", payload)
+
+    def test_public_cached_topic_exposes_comments(self):
+        comment = {
+            "comment_id": "comment-1",
+            "text": "感谢分享",
+            "owner": {"name": "读者"},
+            "create_time": "2026-07-16T10:00:00.000+0800",
+        }
+        topic = ZsxqTopic(
+            group_id="g1",
+            tab_id="t1",
+            topic_id="topic-1",
+            raw_payload={"comments_count": 1, "show_comments": [comment]},
+        )
+
+        payload = zsxq_sync_service._public_cached_topic(topic, [])
+
+        self.assertEqual(payload["comments_count"], 1)
+        self.assertEqual(payload["show_comments"], [comment])
+
+    @patch("services.zsxq_sync_service.zsxq_service.get_comment")
+    @patch("services.zsxq_sync_service.zsxq_service.get_topic_comments")
+    def test_truncated_comments_are_completed_with_replies(self, get_topic_comments, get_comment):
+        get_topic_comments.return_value = {
+            "resp_data": {
+                "comments": [{"comment_id": "parent", "text": "主评论", "replies_count": 1}],
+                "index": "",
+            }
+        }
+        get_comment.return_value = {
+            "resp_data": {
+                "comment": {
+                    "comment_id": "parent",
+                    "replied_comments": [{"comment_id": "reply", "text": "回复"}],
+                }
+            }
+        }
+        topic = {"topic_id": "topic-1", "comments_count": 2, "show_comments": []}
+
+        zsxq_sync_service._hydrate_truncated_topic_comments("cookie", topic)
+
+        self.assertEqual([item["comment_id"] for item in topic["show_comments"]], ["parent", "reply"])
+        self.assertEqual(topic["show_comments"][1]["parent_comment_id"], "parent")
+        self.assertFalse(topic["comments_truncated"])
 
     def test_public_cached_topic_exposes_projected_attachment_images_without_topic_raw_payload(self):
         image = {

@@ -3,6 +3,7 @@ from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 from . import db
 import secrets
+from flask import current_app, has_app_context
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -18,6 +19,7 @@ class User(db.Model):
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     is_verified = db.Column(db.Boolean, nullable=False, default=False)
     is_admin = db.Column(db.Boolean, nullable=False, default=False)
+    auth_version = db.Column(db.Integer, nullable=False, default=1)
     
     # 用户偏好设置
     timezone = db.Column(db.String(50), nullable=False, default='UTC')
@@ -95,15 +97,31 @@ class User(db.Model):
     def authenticate(cls, username_or_email, password):
         """用户认证"""
         # 支持用户名或邮箱登录
-        user = cls.query.filter(
+        query = cls.query
+        if has_app_context() and not current_app.config.get('AUTH_VERSION_ENABLED', True):
+            from sqlalchemy.orm import load_only
+            query = query.options(load_only(
+                cls.id, cls.username, cls.email, cls.password_hash, cls.display_name,
+                cls.avatar_url, cls.is_active, cls.is_verified, cls.is_admin, cls.timezone,
+                cls.language, cls.created_at, cls.updated_at, cls.last_login_at,
+            ))
+        user = query.filter(
             (cls.username == username_or_email) | 
             (cls.email == username_or_email)
         ).first()
         
         if user and user.check_password(password) and user.is_active:
+            user_id = user.id
             user.update_last_login()
-            return user
+            # commit expires ORM attributes; reload through the schema-compatible query.
+            return query.execution_options(populate_existing=True).filter(cls.id == user_id).first()
         return None
+
+    def revoke_sessions(self):
+        """Invalidate JWTs and sessions issued before the next authentication."""
+        if has_app_context() and not current_app.config.get('AUTH_VERSION_ENABLED', True):
+            return
+        self.auth_version = int(self.auth_version or 1) + 1
     
     def has_permission(self, permission):
         """检查用户权限"""

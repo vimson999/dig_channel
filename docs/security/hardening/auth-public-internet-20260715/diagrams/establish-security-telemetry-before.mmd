@@ -1,0 +1,7 @@
+flowchart LR
+    Nginx[Nginx access log] --> Local[Local log files]
+    Flask[Request logger] --> Local
+    Auth[auth logger] -. not wired to security file .-> Console[Console]
+    Security[security.log] --> Empty[Little/no auth evidence]
+    Local --> Rotation[Rotation and deletion]
+    Attacker[Caller-controlled X-Forwarded-For] --> Flask

@@ -12,6 +12,7 @@
 
 import sys
 import os
+import secrets
 from datetime import datetime
 
 # 添加项目路径
@@ -151,7 +152,7 @@ def create_default_user():
         # 创建默认用户
         from werkzeug.security import generate_password_hash
         
-        password_hash = generate_password_hash('admin123')
+        password_hash = generate_password_hash(secrets.token_urlsafe(32))
         
         insert_user_sql = """
         INSERT INTO users (username, email, password_hash, display_name, is_admin, is_active, is_verified)
@@ -173,7 +174,7 @@ def create_default_user():
         user_id = db.session.execute(text("SELECT id FROM users WHERE username = 'admin'")).scalar()
         
         logger.info(f"默认管理员用户创建成功 (ID: {user_id})")
-        logger.info("默认登录信息: 用户名=admin, 密码=admin123")
+        logger.info("本地迁移管理员已创建；未生成可登录的默认密码")
         
         return user_id
         
@@ -414,10 +415,7 @@ def main():
             if verify_migration():
                 logger.info("🎉 数据库迁移完成！")
                 logger.info("=" * 50)
-                logger.info("默认管理员账户信息:")
-                logger.info("用户名: admin")
-                logger.info("密码: admin123")
-                logger.info("请登录后立即修改密码！")
+                logger.info("本地迁移管理员已创建；生产前请用安全重置脚本设置凭据")
                 
                 if backup_path:
                     logger.info(f"数据库备份位置: {backup_path}")

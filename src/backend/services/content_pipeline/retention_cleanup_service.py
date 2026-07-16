@@ -18,7 +18,14 @@ except Exception:  # pragma: no cover - keeps this utility importable during par
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_PYTEST_DIR = PROJECT_ROOT.parents[1] / "pytest"
+
+
+def _default_pytest_dir(project_root: Path) -> Path:
+    base_dir = project_root.parents[1] if len(project_root.parents) > 1 else project_root
+    return base_dir / "pytest"
+
+
+DEFAULT_PYTEST_DIR = _default_pytest_dir(PROJECT_ROOT)
 LARGE_ATTACHMENT_SUFFIXES = {
     ".pdf",
     ".mp3",

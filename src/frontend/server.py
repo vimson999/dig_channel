@@ -29,7 +29,7 @@ if __name__ == "__main__":
     os.chdir(frontend_dir)
     
     # 启动服务器
-    with ReusableThreadingTCPServer(("", PORT), MyHTTPRequestHandler) as httpd:
+    with ReusableThreadingTCPServer(("127.0.0.1", PORT), MyHTTPRequestHandler) as httpd:
         print(f"🌐 前端服务器启动在: http://localhost:{PORT}")
         print(f"📁 服务目录: {frontend_dir}")
         print(f"🔗 可以打开浏览器访问 http://localhost:{PORT}")

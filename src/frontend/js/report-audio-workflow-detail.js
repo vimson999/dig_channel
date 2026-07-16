@@ -476,6 +476,20 @@ class ReportAudioWorkflowDetailPage {
             this.setNotice(result.message || `竖屏 MP4 已提交生成（${this.verticalSchemeLabel(scheme)}${isPreview ? ` · ${previewSeconds}s预览` : ''}）。`, 'success');
         } catch (error) {
             const key = isPreview ? 'publisher_vertical_preview_video' : 'publisher_vertical_video';
+            // The enqueue endpoint is durable before it builds the response. If
+            // that final response is interrupted, reload once and trust the
+            // persisted child instead of showing a false submission failure.
+            try {
+                await this.load({ manual: true });
+                const persistedChild = this.job?.children?.[key] || this.job?.[key];
+                if (persistedChild && !['failed', 'cancelled', 'canceled'].includes(String(persistedChild.status || '').toLowerCase())) {
+                    this.setNotice(`竖屏 MP4 已提交生成（${this.verticalSchemeLabel(scheme)}${isPreview ? ` · ${previewSeconds}s预览` : ''}），提交响应曾中断，已从任务记录确认。`, 'success');
+                    return;
+                }
+            } catch (_) {
+                // Fall through to the original error when status verification
+                // is unavailable as well.
+            }
             if (this.job) {
                 this.job[key] = {
                     ...(this.job[key] || {}),

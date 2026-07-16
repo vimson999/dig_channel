@@ -6,74 +6,46 @@
 """
 
 from flask import Blueprint, request, jsonify, session
-from flask_cors import cross_origin
 from models import db, User
 from utils.api_utils import handle_api_error
-from functools import wraps
+from utils.auth_utils import (
+    auth_version_for_user,
+    generate_token,
+    get_current_user as resolve_current_user,
+    require_login as require_auth,
+)
+from utils.security_logging import account_fingerprint, log_security_event
+from extensions import limiter
 import jwt
 import datetime
-import logging
+import time
 from flask import current_app
-
-# 设置认证日志记录器
-auth_logger = logging.getLogger('auth')
-auth_logger.setLevel(logging.INFO)
 
 # 创建蓝图
 bp = Blueprint('auth', __name__, url_prefix='/api/v1/auth')
 
-def require_auth(f):
-    """认证装饰器"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        token = None
-        
-        # 从请求头获取token
-        if 'Authorization' in request.headers:
-            auth_header = request.headers['Authorization']
-            try:
-                token = auth_header.split(" ")[1]  # Bearer <token>
-            except IndexError:
-                return handle_api_error(401, "无效的认证头格式")
-        
-        # 从session获取token（备选方案）
-        if not token and 'access_token' in session:
-            token = session['access_token']
-        
-        if not token:
-            return handle_api_error(401, "缺少认证令牌")
-        
-        try:
-            # 解码token
-            data = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
-            current_user = User.query.get(data['user_id'])
-            
-            if not current_user or not current_user.is_active:
-                return handle_api_error(401, "用户不存在或已被禁用")
-            
-            # 将当前用户信息传递给视图函数
-            return f(current_user, *args, **kwargs)
-            
-        except jwt.ExpiredSignatureError:
-            return handle_api_error(401, "令牌已过期")
-        except jwt.InvalidTokenError:
-            return handle_api_error(401, "无效的令牌")
-        except Exception as e:
-            return handle_api_error(401, f"认证失败: {str(e)}")
-    
-    return decorated_function
 
-def generate_token(user_id, expires_in=24*60*60):
-    """生成JWT令牌"""
-    payload = {
-        'user_id': user_id,
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(seconds=expires_in),
-        'iat': datetime.datetime.utcnow()
-    }
-    return jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
+def _login_account_identifier():
+    data = request.get_json(silent=True) or {}
+    account = data.get('username_or_email') or data.get('username') or ''
+    return f"account:{account_fingerprint(account)}"
+
+
+def _count_auth_failure(response):
+    return response.status_code == 401
+
+
+def _portal_access_is_valid():
+    if str(current_app.config.get('AUTH_MODE') or '').lower() == 'local':
+        return True
+    verified_at = session.get('login_portal_verified_at')
+    try:
+        age = time.time() - float(verified_at)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age <= int(current_app.config.get('LOGIN_PORTAL_TTL_SECONDS', 600))
 
 @bp.route('/register', methods=['POST'])
-@cross_origin()
 def register():
     """用户注册
     
@@ -86,6 +58,10 @@ def register():
     Returns:
         JSON: 注册结果
     """
+    if not current_app.config.get('PUBLIC_REGISTRATION_ENABLED', False):
+        log_security_event('account.register', 'denied', reason='registration_disabled')
+        return handle_api_error(404, "接口不存在")
+
     try:
         data = request.get_json()
         
@@ -107,8 +83,9 @@ def register():
         if len(username) < 3 or len(username) > 20:
             return handle_api_error(400, "用户名长度必须在3-20字符之间")
         
-        if len(password) < 6:
-            return handle_api_error(400, "密码长度至少6位")
+        minimum = int(current_app.config.get('PASSWORD_MIN_LENGTH', 14))
+        if len(password) < minimum:
+            return handle_api_error(400, f"密码长度至少{minimum}位")
         
         # 简单的邮箱格式验证
         if '@' not in email or '.' not in email:
@@ -127,8 +104,9 @@ def register():
             token = generate_token(user.id)
             
             # 保存到session（可选）
-            session['access_token'] = token
             session['user_id'] = user.id
+            session['auth_version'] = auth_version_for_user(user)
+            log_security_event('account.register', 'success', user=user)
             
             return jsonify({
                 'success': True,
@@ -144,10 +122,18 @@ def register():
             return handle_api_error(400, str(e))
         
     except Exception as e:
-        return handle_api_error(500, f"注册失败: {str(e)}")
+        log_security_event('account.register', 'error', reason=type(e).__name__)
+        return handle_api_error(500, "注册失败，请稍后重试")
 
 @bp.route('/login', methods=['POST'])
-@cross_origin()
+@limiter.limit(
+    lambda: current_app.config.get('LOGIN_IP_RATE_LIMIT', '30 per minute;300 per day')
+)
+@limiter.limit(
+    lambda: current_app.config.get('LOGIN_ACCOUNT_RATE_LIMIT', '5 per 15 minutes'),
+    key_func=_login_account_identifier,
+    deduct_when=_count_auth_failure,
+)
 def login():
     """用户登录
     
@@ -159,8 +145,10 @@ def login():
     Returns:
         JSON: 登录结果
     """
-    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.environ.get('REMOTE_ADDR', 'unknown'))
-    auth_logger.info(f"[🔑登录请求] IP: {client_ip}, Method: {request.method}")
+    if not _portal_access_is_valid():
+        log_security_event('auth.login', 'denied', reason='portal_required')
+        return handle_api_error(404, "接口不存在")
+
     try:
         data = request.get_json()
         
@@ -174,20 +162,25 @@ def login():
         
         if not username_or_email or not password:
             return handle_api_error(400, "用户名/邮箱和密码不能为空")
+        if len(username_or_email) > 254 or len(password) > 1024:
+            log_security_event('auth.login', 'failure', account=username_or_email, reason='input_too_long')
+            return handle_api_error(400, "登录信息格式不正确")
         
         # 用户认证
         user = User.authenticate(username_or_email, password)
         
         if not user:
+            log_security_event('auth.login', 'failure', account=username_or_email, reason='invalid_credentials')
             return handle_api_error(401, "用户名/邮箱或密码错误")
         
         # 生成令牌
-        expires_in = 7*24*60*60 if remember_me else 24*60*60  # 记住登录7天，否则1天
+        expires_in = int(current_app.config.get('JWT_ACCESS_TOKEN_EXPIRES', 900))
         token = generate_token(user.id, expires_in)
         
-        # 保存到session
-        session['access_token'] = token
+        # 清除预认证状态并建立新的已认证会话，降低会话固定风险。
+        session.clear()
         session['user_id'] = user.id
+        session['auth_version'] = auth_version_for_user(user)
         session.permanent = remember_me
         
         response_data = {
@@ -199,13 +192,24 @@ def login():
             'user': user.to_safe_dict()
         }
         
-        auth_logger.info(f"[✅登录成功] 用户: {user.username} (ID: {user.id}), Token长度: {len(token)}, 响应键: {list(response_data.keys())}")
+        log_security_event('auth.login', 'success', user=user)
         
         return jsonify(response_data)
         
     except Exception as e:
-        auth_logger.error(f"[❌登录异常] IP: {client_ip}, 错误: {str(e)}")
-        return handle_api_error(500, f"登录失败: {str(e)}")
+        log_security_event('auth.login', 'error', reason=type(e).__name__)
+        return handle_api_error(500, "登录失败，请稍后重试")
+
+
+@bp.route('/session-check', methods=['GET'])
+def session_check():
+    """Minimal endpoint used by Nginx auth_request."""
+    current_user = resolve_current_user()
+    if not current_user:
+        return '', 401
+    if current_app.config.get('AUTH_REQUIRE_ADMIN', True) and not current_user.is_admin:
+        return '', 403
+    return '', 204
 
 @bp.route('/logout', methods=['POST'])
 @require_auth
@@ -217,6 +221,7 @@ def logout(current_user):
     """
     try:
         # 清除session
+        log_security_event('auth.logout', 'success', user=current_user)
         session.clear()
         
         return jsonify({
@@ -225,7 +230,8 @@ def logout(current_user):
         })
         
     except Exception as e:
-        return handle_api_error(500, f"登出失败: {str(e)}")
+        log_security_event('auth.logout', 'error', reason=type(e).__name__)
+        return handle_api_error(500, "登出失败，请稍后重试")
 
 @bp.route('/me', methods=['GET'])
 @require_auth
@@ -244,7 +250,7 @@ def get_current_user(current_user):
         })
         
     except Exception as e:
-        return handle_api_error(500, f"获取用户信息失败: {str(e)}")
+        return handle_api_error(500, "获取用户信息失败")
 
 @bp.route('/me', methods=['PUT'])
 @require_auth
@@ -276,19 +282,20 @@ def update_current_user(current_user):
             current_user.language = data['language']
         
         current_user.updated_at = datetime.datetime.utcnow()
+        response_user = current_user.to_safe_dict()
         db.session.commit()
         
         return jsonify({
             'success': True,
             'message': '用户信息更新成功',
             'data': {
-                'user': current_user.to_safe_dict()
+                'user': response_user
             }
         })
         
     except Exception as e:
         db.session.rollback()
-        return handle_api_error(500, f"更新用户信息失败: {str(e)}")
+        return handle_api_error(500, "更新用户信息失败")
 
 @bp.route('/change-password', methods=['POST'])
 @require_auth
@@ -314,17 +321,26 @@ def change_password(current_user):
         if not old_password or not new_password:
             return handle_api_error(400, "原密码和新密码不能为空")
         
-        if len(new_password) < 6:
-            return handle_api_error(400, "新密码长度至少6位")
+        minimum = int(current_app.config.get('PASSWORD_MIN_LENGTH', 14))
+        if len(new_password) < minimum:
+            return handle_api_error(400, f"新密码长度至少{minimum}位")
         
         # 验证原密码
         if not current_user.check_password(old_password):
             return handle_api_error(400, "原密码错误")
         
         # 设置新密码
+        user_id = current_user.id
         current_user.set_password(new_password)
+        current_user.revoke_sessions()
+        new_auth_version = auth_version_for_user(current_user)
         current_user.updated_at = datetime.datetime.utcnow()
+        db.session.flush()
+        log_security_event('auth.password_change', 'success', user=current_user)
         db.session.commit()
+        session['user_id'] = user_id
+        session['auth_version'] = new_auth_version
+        session.pop('access_token', None)
         
         return jsonify({
             'success': True,
@@ -333,10 +349,10 @@ def change_password(current_user):
         
     except Exception as e:
         db.session.rollback()
-        return handle_api_error(500, f"修改密码失败: {str(e)}")
+        log_security_event('auth.password_change', 'error', reason=type(e).__name__)
+        return handle_api_error(500, "修改密码失败")
 
 @bp.route('/verify', methods=['GET', 'POST'])
-@cross_origin()
 @require_auth
 def verify(current_user):
     """验证当前令牌
@@ -347,9 +363,6 @@ def verify(current_user):
     Returns:
         JSON: 验证结果
     """
-    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.environ.get('REMOTE_ADDR', 'unknown'))
-    auth_logger.info(f"[🔐Token验证] IP: {client_ip}, 用户: {current_user.username} (ID: {current_user.id})")
-    
     try:
         response_data = {
             'success': True,
@@ -359,11 +372,10 @@ def verify(current_user):
             }
         }
         
-        auth_logger.info(f"[✅验证成功] 用户: {current_user.username} (ID: {current_user.id})")
         return jsonify(response_data)
     except Exception as e:
-        auth_logger.error(f"[❌验证异常] IP: {client_ip}, 用户: {current_user.username}, 错误: {str(e)}")
-        return handle_api_error(500, f"验证失败: {str(e)}")
+        log_security_event('auth.verify', 'error', user=current_user, reason=type(e).__name__)
+        return handle_api_error(500, "验证失败")
 
 @bp.route('/verify-token', methods=['POST'])
 def verify_token():
@@ -384,10 +396,19 @@ def verify_token():
         
         try:
             # 解码token
-            payload = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
-            user = User.query.get(payload['user_id'])
+            payload = jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
+            if current_app.config.get('AUTH_VERSION_ENABLED', True):
+                user = User.query.get(payload['user_id'])
+            else:
+                from sqlalchemy.orm import load_only
+                user = User.query.options(load_only(
+                    User.id, User.username, User.email, User.display_name, User.avatar_url,
+                    User.is_active, User.is_verified, User.is_admin, User.timezone, User.language,
+                    User.created_at, User.updated_at, User.last_login_at,
+                )).filter(User.id == payload['user_id']).first()
             
-            if not user or not user.is_active:
+            token_version = int(payload.get('auth_version') or 1)
+            if not user or not user.is_active or auth_version_for_user(user) != token_version:
                 return handle_api_error(401, "用户不存在或已被禁用")
             
             return jsonify({
@@ -405,7 +426,8 @@ def verify_token():
             return handle_api_error(401, "无效的令牌")
         
     except Exception as e:
-        return handle_api_error(500, f"验证令牌失败: {str(e)}")
+        log_security_event('auth.verify_token', 'error', reason=type(e).__name__)
+        return handle_api_error(500, "验证令牌失败")
 
 # 错误处理
 @bp.errorhandler(404)

@@ -239,6 +239,53 @@ class ZsxqTopicFavorite(db.Model):
         }
 
 
+class ZsxqTopicComment(db.Model):
+    __tablename__ = "zsxq_topic_comments"
+    __table_args__ = (
+        db.UniqueConstraint("group_id", "topic_id", "comment_id", name="uq_zsxq_topic_comments_group_topic_comment"),
+        db.Index("ix_zsxq_topic_comments_group_topic_created", "group_id", "topic_id", "create_time"),
+        db.Index("ix_zsxq_topic_comments_owner_created", "owner_name", db.text("create_time DESC")),
+    )
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    group_id = db.Column(db.String(32), nullable=False, index=True)
+    tab_id = db.Column(db.String(128), nullable=True, index=True)
+    topic_id = db.Column(db.String(64), nullable=False, index=True)
+    comment_id = db.Column(db.String(64), nullable=False, index=True)
+    parent_comment_id = db.Column(db.String(64), nullable=True, index=True)
+    owner_user_id = db.Column(db.String(64), nullable=True, index=True)
+    owner_name = db.Column(db.String(255), nullable=True, index=True)
+    text = db.Column(db.Text, nullable=True)
+    create_time = db.Column(db.String(64), nullable=True, index=True)
+    likes_count = db.Column(db.Integer, nullable=False, default=0)
+    replies_count = db.Column(db.Integer, nullable=False, default=0)
+    rewards_count = db.Column(db.Integer, nullable=False, default=0)
+    sticky = db.Column(db.Boolean, nullable=False, default=False)
+    raw_payload = db.Column(db.JSON, nullable=False, default=dict)
+    first_synced_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    last_synced_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "group_id": self.group_id,
+            "tab_id": self.tab_id,
+            "topic_id": self.topic_id,
+            "comment_id": self.comment_id,
+            "parent_comment_id": self.parent_comment_id,
+            "owner_user_id": self.owner_user_id,
+            "owner_name": self.owner_name,
+            "text": self.text,
+            "create_time": self.create_time,
+            "likes_count": self.likes_count or 0,
+            "replies_count": self.replies_count or 0,
+            "rewards_count": self.rewards_count or 0,
+            "sticky": bool(self.sticky),
+            "first_synced_at": self.first_synced_at.isoformat() if self.first_synced_at else None,
+            "last_synced_at": self.last_synced_at.isoformat() if self.last_synced_at else None,
+        }
+
+
 class ZsxqAttachment(db.Model):
     __tablename__ = "zsxq_attachments"
     __table_args__ = (

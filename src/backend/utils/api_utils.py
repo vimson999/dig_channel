@@ -5,7 +5,8 @@ API相关的工具函数
 提供错误处理、响应格式化、验证等功能
 """
 
-from flask import jsonify, request
+from flask import current_app, jsonify, request
+from utils.security_logging import redacted_request_path
 from functools import wraps
 import traceback
 from datetime import datetime
@@ -35,9 +36,8 @@ def handle_api_error(status_code, message, details=None):
         error_response['error']['details'] = details
     
     # 在开发环境下添加更多调试信息
-    import os
-    if os.environ.get('FLASK_ENV') == 'development':
-        error_response['error']['request_url'] = request.url
+    if current_app.debug:
+        error_response['error']['request_path'] = redacted_request_path()
         error_response['error']['request_method'] = request.method
         
         # 添加堆栈跟踪（仅500错误）
@@ -275,8 +275,12 @@ def log_api_request():
 
 def cors_headers():
     """CORS响应头"""
+    origin = request.headers.get('Origin')
+    if not origin or origin not in current_app.config.get('CORS_ORIGINS', []):
+        return {}
     return {
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': origin,
+        'Vary': 'Origin',
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Access-Control-Max-Age': '3600'

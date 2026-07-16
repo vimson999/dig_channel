@@ -6,13 +6,13 @@
 """
 
 import logging
-import traceback
 from typing import Dict, Any, Optional
 from datetime import datetime
 from flask import request, jsonify
 from werkzeug.exceptions import HTTPException
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from utils.api_utils import handle_api_error
+from utils.security_logging import redacted_request_path
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -39,11 +39,13 @@ class ErrorHandler:
         error_id = self._generate_error_id()
         
         # 记录详细错误信息
-        logger.error(f"[{error_id}] 未处理的异常: {str(error)}")
-        logger.error(f"[{error_id}] 请求路径: {request.path}")
-        logger.error(f"[{error_id}] 请求方法: {request.method}")
-        logger.error(f"[{error_id}] 请求参数: {request.args.to_dict()}")
-        logger.error(f"[{error_id}] 堆栈跟踪: {traceback.format_exc()}")
+        logger.error(
+            "[%s] 未处理异常 type=%s method=%s path=%s",
+            error_id,
+            type(error).__name__,
+            request.method,
+            redacted_request_path(),
+        )
         
         # 根据错误类型返回不同消息
         user_message = self._get_user_friendly_message(error)
@@ -91,8 +93,7 @@ class ErrorHandler:
         """处理数据库异常"""
         error_id = self._generate_error_id()
         
-        logger.error(f"[{error_id}] 数据库错误: {str(error)}")
-        logger.error(f"[{error_id}] 堆栈跟踪: {traceback.format_exc()}")
+        logger.error("[%s] 数据库错误 type=%s", error_id, type(error).__name__)
         
         # 根据数据库错误类型返回不同消息
         if isinstance(error, IntegrityError):
@@ -121,7 +122,7 @@ class ErrorHandler:
         """处理404错误"""
         error_id = self._generate_error_id()
         
-        logger.warning(f"[{error_id}] 404错误: {request.path}")
+        logger.warning(f"[{error_id}] 404错误: {redacted_request_path()}")
         
         # 根据路径提供更具体的消息
         if request.path.startswith('/api/'):
@@ -134,7 +135,7 @@ class ErrorHandler:
             user_message,
             {
                 'error_id': error_id,
-                'requested_path': request.path,
+                'requested_path': redacted_request_path(),
                 'timestamp': datetime.now().isoformat()
             }
         )
@@ -143,7 +144,7 @@ class ErrorHandler:
         """处理405错误"""
         error_id = self._generate_error_id()
         
-        logger.warning(f"[{error_id}] 405错误: {request.method} {request.path}")
+        logger.warning(f"[{error_id}] 405错误: {request.method} {redacted_request_path()}")
         
         return handle_api_error(
             405,
@@ -159,7 +160,7 @@ class ErrorHandler:
         """处理500错误"""
         error_id = self._generate_error_id()
         
-        logger.error(f"[{error_id}] 500错误: {str(error)}")
+        logger.error("[%s] 500错误 type=%s", error_id, type(error).__name__)
         
         return handle_api_error(
             500,

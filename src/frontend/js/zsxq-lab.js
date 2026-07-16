@@ -2859,6 +2859,7 @@ function renderTopics(topics, tabState = null) {
         const articleLink = renderTopicArticleLink(topic, content);
         const externalDocuments = renderExternalDocuments(topic);
         const hashtags = extractHashtags(topic);
+        const comments = renderTopicComments(topic);
         const favoriteButton = isSelectedFavoritesGroup() ? renderFavoriteTopicButton(topic, topicKey) : '';
 
         return `
@@ -2883,6 +2884,7 @@ function renderTopics(topics, tabState = null) {
                 ${renderTopicHashtags(hashtags)}
                 ${images.length ? renderImages(images) : ''}
                 ${files.length ? renderFiles(files, topic.topic_id, topicKey) : ''}
+                ${comments}
             </article>
         `;
     }).join('') + renderLoadMoreFooter(tabState);
@@ -2896,6 +2898,30 @@ function renderTopics(topics, tabState = null) {
     renderHotRankList();
     refreshAttachmentStatusBadges();
     updateZsxqKnowledgeGraph();
+}
+
+function renderTopicComments(topic) {
+    const items = Array.isArray(topic?.show_comments) ? topic.show_comments : [];
+    const total = Math.max(Number(topic?.comments_count || 0), items.length);
+    if (!total && !items.length) return '';
+    const rows = items.map(comment => {
+        const owner = comment?.owner?.name || '未知用户';
+        const created = formatZsxqTime(comment?.create_time || '');
+        const isReply = Boolean(comment?.parent_comment_id);
+        return `
+            <div class="${isReply ? 'ml-5 border-l-2 border-slate-200 pl-3' : ''}">
+                <div class="text-xs font-bold text-slate-600">${escapeHtml(owner)}${created ? `<span class="ml-2 font-normal text-slate-400">${escapeHtml(created)}</span>` : ''}</div>
+                <div class="mt-1 text-sm leading-5 text-slate-600 whitespace-pre-wrap break-words">${renderTopicText(comment?.text || '')}</div>
+            </div>
+        `;
+    }).join('');
+    const truncated = Boolean(topic?.comments_truncated) || items.length < total;
+    return `
+        <details class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <summary class="cursor-pointer text-xs font-bold text-slate-600">评论 ${total} 条${truncated ? ' · 当前为已抓取部分' : ''}</summary>
+            <div class="mt-3 space-y-3">${rows || '<div class="text-xs text-slate-400">评论内容尚未抓取</div>'}</div>
+        </details>
+    `;
 }
 
 function activeTabState() {

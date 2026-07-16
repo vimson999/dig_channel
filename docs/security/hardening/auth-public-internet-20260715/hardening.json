@@ -1,0 +1,247 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "hardening_20260715_public_auth",
+  "sourceEvidence": {
+    "kind": "source_and_runtime_collection",
+    "label": "Public authentication, deployment, credentials, and logging review",
+    "collectionSha256": "3403f761f04590b61797223ef199bade75084740541dd8ed14f79e9545e6bde9",
+    "artifactCount": 17,
+    "targetRevision": "d7de7a023f7572e499d1996abe1b0323db598c5a",
+    "sourceDrift": "present"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "Public launch is blocked by disclosed credentials, client/dispersed authorization, and ineffective security telemetry."
+  },
+  "constraints": {
+    "profile": "balanced",
+    "changeHorizons": ["immediate_containment", "incremental", "medium_term"],
+    "nonNegotiables": [
+      "Every business page and API is default-deny.",
+      "Known tracked credentials are rotated before public launch.",
+      "Replacement secrets are never written to source, logs, command arguments, or chat.",
+      "Local file rendering cannot create a remote HTTP bypass."
+    ],
+    "assumptions": [
+      "Public Internet reachability remains required.",
+      "No measured latency, memory, or retention budget was supplied."
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "contain-exposed-secrets",
+      "title": "Contain exposed credentials and bootstrap authority",
+      "summary": "Rotate disclosed values, remove Git as a secret transport, and replace predictable administrator bootstrap.",
+      "diagnosis": "Secret lifecycle ownership is dispersed across tracked files and scripts, leaving historical disclosure and predictable administrator authority.",
+      "evidence": [
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E001", "path": ".env.bak", "claim": "Tracked files and history contain non-placeholder provider, database, and signing credentials."},
+        {"claimType": "observed", "sourceKind": "experiment", "evidenceId": "E002", "path": "src/backend/init_db.py", "claim": "A read-only database check confirmed the active administrator still matched the known source default password."},
+        {"claimType": "inferred", "sourceKind": "source", "evidenceId": "E001", "path": "scripts/deployment/production.env", "claim": "Editing current files alone cannot revoke copies already distributed through Git history."}
+      ],
+      "desiredInvariants": [
+        "No deployable credential exists in distributed Git history after cleanup.",
+        "Every disclosed value is revoked at its authority provider.",
+        "Administrator bootstrap is one-time, interactive, non-default, and session-revoking."
+      ],
+      "proposalPath": "proposals/contain-exposed-secrets.md",
+      "options": [
+        {
+          "optionId": "rotate-and-remove",
+          "title": "Rotate and remove current files",
+          "kind": "baseline",
+          "summary": "Rotate known values, reset the administrator, sanitize HEAD, and expand ignore rules.",
+          "diagramPaths": {"before": "diagrams/contain-exposed-secrets-before.mmd", "after": "diagrams/contain-exposed-secrets-rotate-and-remove-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "E001", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Rotation invalidates inventoried values, but old history and recurrence controls remain."},
+            {"evidenceId": "E002", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Interactive reset removes the known administrator password."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Stops reuse of every value covered by the rotation inventory but leaves historical copies and recurrence risk.", "validationPlan": "Verify former values fail at each provider and scan current refs."},
+            {"dimension": "performance", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "No request-path control is added.", "validationPlan": "Confirm startup and request baselines are unchanged."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "No retained runtime structure is added.", "validationPlan": "No dedicated benchmark beyond startup RSS comparison."},
+            {"dimension": "reliability", "direction": "neutral", "confidence": "medium", "basis": "hypothetical", "assessment": "Manual rotation can cause temporary provider outages if rollout order is wrong.", "validationPlan": "Use dual-key overlap where supported and provider health checks."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Provider-by-provider manual inventory and delivery are required.", "validationPlan": "Require an owner and revocation receipt for each item."},
+            {"dimension": "migration", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Small current-tree change, but no history migration.", "validationPlan": "Deploy from a sanitized checkout with replacement values."}
+          ],
+          "residualRisks": ["Old commits and clones retain disclosed values.", "Replacement secrets can be recommitted."],
+          "implementationReadiness": {"affectedComponents": ["src/backend/init_db.py", "scripts/reset_admin_password.py", ".gitignore", "deployment configuration"], "workPackages": ["Rotate inventoried values.", "Replace administrator credential.", "Sanitize current tracked files."], "acceptanceCriteria": ["All former values fail and no known default account password remains."], "migrationNotes": ["Never restore revoked values during rollback."], "rollback": "Restore deployment topology only with newly generated values."}
+        },
+        {
+          "optionId": "managed-secrets",
+          "title": "Managed secret lifecycle and history cleanup",
+          "kind": "structural",
+          "summary": "Add protected runtime injection, history rewrite, interactive bootstrap, and automated secret scanning.",
+          "diagramPaths": {"before": "diagrams/contain-exposed-secrets-before.mmd", "after": "diagrams/contain-exposed-secrets-managed-secrets-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "E001", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Managed injection and history cleanup remove normal Git access while provider rotation remains mandatory."},
+            {"evidenceId": "E002", "effect": "addresses", "tacticalFixRequired": true, "rationale": "One-time non-default bootstrap owns administrator creation and revocation."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Removes Git authority, reduces historical exposure, and prevents predictable bootstrap recurrence.", "validationPlan": "Scan all refs, verify provider revocation, and test CI blocking."},
+            {"dimension": "performance", "direction": "neutral", "confidence": "medium", "basis": "source-derived", "assessment": "Secret retrieval occurs at deploy/start, outside normal requests.", "validationPlan": "Measure service startup with the secret store."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "medium", "basis": "hypothetical", "assessment": "Only a small secret-manager client and transient values are added.", "validationPlan": "Compare startup RSS and ensure values are not retained unnecessarily."},
+            {"dimension": "reliability", "direction": "unknown", "confidence": "medium", "basis": "hypothetical", "assessment": "A secret-store dependency improves consistency but may block startup during outage.", "validationPlan": "Test fail-closed startup and recovery without a restart storm."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Requires secret-store ownership, rotation workflow, scanner triage, and clone coordination.", "validationPlan": "Run a full rotation and history-rewrite rehearsal."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "History rewrite disrupts clones and open branches.", "validationPlan": "Use a maintenance window and require fresh-clone verification."}
+          ],
+          "residualRisks": ["Uncontrolled clones, backups, and caches may retain old values.", "Secret-manager administrator compromise remains high impact."],
+          "implementationReadiness": {"affectedComponents": ["deployment secrets", "Git history", "src/backend/init_db.py", "scripts/reset_admin_password.py", "CI"], "workPackages": ["Emergency rotation.", "Managed injection.", "History rewrite.", "Secret scanning."], "acceptanceCriteria": ["Old values fail, all refs scan clean, and clean deployment uses only managed injection."], "migrationNotes": ["Coordinate forced history replacement with every collaborator."], "rollback": "Retain sanitized Git and use fresh local protected values if the manager must be rolled back."}
+        }
+      ],
+      "recommendedOptionId": "managed-secrets",
+      "recommendation": "Use managed secrets, with immediate provider rotation as the first work package."
+    },
+    {
+      "opportunityId": "centralize-authentication-enforcement",
+      "title": "Centralize public authentication enforcement",
+      "summary": "Make pages and APIs default-deny, use revocable sessions, constrain login abuse, and close direct origins.",
+      "diagnosis": "Authorization is split between browser JavaScript and route opt-in decorators, while DEBUG and deployment paths create bypasses.",
+      "evidence": [
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E003", "path": "src/frontend/js/shared-navigation.js", "claim": "Page access is enforced by browser JavaScript after static HTML delivery."},
+        {"claimType": "observed", "sourceKind": "experiment", "evidenceId": "E004", "path": "src/backend/apis", "claim": "Static route inventory found 225 of 371 handlers without a known authentication decorator."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E005", "path": "src/backend/utils/auth_utils.py", "claim": "DEBUG mode substitutes administrator authority for anonymous requests."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E006", "path": "src/backend/apis/v1/auth.py", "claim": "Login/register lack active abuse controls and public registration is enabled."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E007", "path": "src/frontend/login.html", "claim": "Browser bearer tokens are stored in localStorage and are weakly revocable."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E008", "path": "scripts/deployment/docker/docker-compose.yml", "claim": "Backend and Redis host ports are published."},
+        {"claimType": "inferred", "sourceKind": "source", "evidenceId": "E010", "path": "src/backend/app.py", "claim": "Wildcard credentialed CORS and raw forwarded headers make origin and identity assumptions drift."}
+      ],
+      "desiredInvariants": [
+        "All business pages and APIs are denied outside a minimal allowlist without a valid revocable session.",
+        "Dangerous operations require an explicit administrator role.",
+        "Production cannot start with DEBUG, development config, weak signing keys, or public internal services.",
+        "Login abuse is limited independently by trusted IP, account, and global state with MFA."
+      ],
+      "proposalPath": "proposals/centralize-authentication-enforcement.md",
+      "options": [
+        {
+          "optionId": "app-gate",
+          "title": "Application and Nginx session gate",
+          "kind": "structural",
+          "summary": "Use Flask default-deny, Nginx auth_request, Redis sessions and rate limits, secure cookies, CSRF, and private internal ports.",
+          "diagramPaths": {"before": "diagrams/centralize-authentication-enforcement-before.mmd", "after": "diagrams/centralize-authentication-enforcement-app-gate-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "E003", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Nginx validates a server session before serving HTML."},
+            {"evidenceId": "E004", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Application policy becomes default-deny and privileged routes are classified."},
+            {"evidenceId": "E005", "effect": "addresses", "tacticalFixRequired": true, "rationale": "DEBUG fallback is removed and production startup rejects unsafe config."},
+            {"evidenceId": "E006", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Registration closes and shared IP/account/global limits plus MFA protect login."},
+            {"evidenceId": "E007", "effect": "addresses", "tacticalFixRequired": true, "rationale": "HttpOnly server sessions replace browser bearer storage and support revocation."},
+            {"evidenceId": "E008", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Internal services stop publishing public host ports."},
+            {"evidenceId": "E010", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Same-origin CORS and trusted-proxy handling become explicit."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Eliminates known client, decorator, DEBUG, token-storage, and direct-port bypass classes.", "validationPlan": "Run anonymous/role route contracts, direct-port probes, CSRF, XSS-token, and revocation tests."},
+            {"dimension": "performance", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Adds Redis session lookup and an auth subrequest for protected HTML.", "validationPlan": "Compare p50/p95 login, page, and API latency with realistic concurrency."},
+            {"dimension": "memory", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "Redis retains bounded session and rate-limit state.", "validationPlan": "Measure bytes per session and abuse-key cardinality at expected and attack loads."},
+            {"dimension": "reliability", "direction": "unknown", "confidence": "medium", "basis": "hypothetical", "assessment": "Fail-closed Redis/session dependency can reduce availability while removing unsafe bypass behavior.", "validationPlan": "Test Redis outage, restart, expiration, and recovery behavior."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Adds session, CSRF, rate-limit, portal, Nginx auth, and role-policy ownership.", "validationPlan": "Exercise deployment, lockout recovery, and break-glass runbooks."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Frontend bearer calls and automation clients need staged migration.", "validationPlan": "Use dual-read compatibility, inventory clients, then prove old JWTs are rejected."}
+          ],
+          "residualRisks": ["Origin remains directly exposed to Internet abuse at Nginx.", "Valid-user application vulnerabilities and authorization mistakes remain."],
+          "implementationReadiness": {"affectedComponents": ["src/backend/app.py", "auth utilities", "all API policy", "frontend API client", "Nginx", "Compose", "Redis"], "workPackages": ["Fail-closed config.", "Default-deny gate.", "Session/CSRF migration.", "Login abuse controls.", "Nginx and network closure."], "acceptanceCriteria": ["Every non-allowlisted anonymous route is denied and every admin route rejects normal users."], "migrationNotes": ["Preserve explicit service-token paths for non-browser clients."], "rollback": "Retain default-deny/private ports and temporarily restore short-lived bearer compatibility if needed."}
+        },
+        {
+          "optionId": "edge-and-app-gate",
+          "title": "Identity-aware edge plus application gate",
+          "kind": "isolation",
+          "summary": "Add MFA edge identity, WAF/bot controls, and origin allowlisting to the full application gate.",
+          "diagramPaths": {"before": "diagrams/centralize-authentication-enforcement-before.mmd", "after": "diagrams/centralize-authentication-enforcement-edge-and-app-gate-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "E003", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Edge and Nginx both deny anonymous HTML."},
+            {"evidenceId": "E004", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Application default-deny remains authoritative for routes and roles."},
+            {"evidenceId": "E005", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Unsafe application fallback is removed rather than hidden behind the edge."},
+            {"evidenceId": "E006", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Edge MFA and bot policy supplement origin account/IP/global limits."},
+            {"evidenceId": "E007", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Revocable server sessions remain the browser credential."},
+            {"evidenceId": "E008", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Origin and internal services accept only trusted network paths."},
+            {"evidenceId": "E010", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Signed edge assertions and origin isolation establish a trustworthy proxy boundary."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "analogous", "assessment": "MFA, bot controls, and origin isolation reduce password and direct-origin attacks before application processing.", "validationPlan": "Test edge bypass, assertion forgery, origin firewall, and MFA recovery."},
+            {"dimension": "performance", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "Adds an edge network and identity decision hop, partly offset by static caching.", "validationPlan": "Measure regional p50/p95 edge-to-origin latency and login flow duration."},
+            {"dimension": "memory", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "Origin memory matches app-gate; edge state is provider-owned.", "validationPlan": "Measure origin Redis/session state as for app-gate."},
+            {"dimension": "reliability", "direction": "unknown", "confidence": "medium", "basis": "analogous", "assessment": "Improves attack isolation but adds edge/identity-provider failure modes.", "validationPlan": "Run edge outage and policy-lockout drills with a private break-glass path."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Adds provider policy, enrollment, DNS/tunnel, assertion validation, and break-glass ownership.", "validationPlan": "Complete operator enrollment, access review, and recovery runbooks."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Includes app migration plus edge/network cutover.", "validationPlan": "Roll out edge observe mode, MFA enrollment, then origin allowlisting."}
+          ],
+          "residualRisks": ["Edge administrator or identity-provider compromise.", "Authenticated application vulnerabilities and insider misuse."],
+          "implementationReadiness": {"affectedComponents": ["all app-gate components", "DNS/edge identity", "origin firewall", "operator identity"], "workPackages": ["Implement app-gate.", "Configure edge MFA.", "Validate signed identity.", "Restrict origin.", "Test break-glass."], "acceptanceCriteria": ["Direct origin traffic fails and only enrolled MFA identities reach protected routes."], "migrationNotes": ["Do not restrict origin until health, edge, and recovery paths are validated."], "rollback": "Remove edge routing only after enabling a reviewed direct TLS path; keep application gate and private services."}
+        }
+      ],
+      "recommendedOptionId": "edge-and-app-gate",
+      "recommendation": "Use an identity-aware MFA edge plus a complete application default-deny/session boundary."
+    },
+    {
+      "opportunityId": "establish-security-telemetry",
+      "title": "Establish actionable security telemetry",
+      "summary": "Emit complete redacted security events and preserve them in an alerting integrity boundary.",
+      "diagnosis": "Current logs are diagnostic streams without complete authentication events, trustworthy caller identity, or off-host integrity.",
+      "evidence": [
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E009", "path": "src/backend/apis/v1/auth.py", "claim": "Invalid credentials return without a dedicated security event and auth uses a logger not wired to security.log."},
+        {"claimType": "observed", "sourceKind": "experiment", "evidenceId": "E009", "path": "logs/security.log", "claim": "The inspected local security stream was empty and had broad read permissions."},
+        {"claimType": "inferred", "sourceKind": "source", "evidenceId": "E010", "path": "src/backend/middleware/request_logger.py", "claim": "Raw forwarding identity and partial redaction can corrupt audit attribution or leak credentials."}
+      ],
+      "desiredInvariants": [
+        "All security-relevant identity and administrator decisions emit structured correlated events.",
+        "No credential or session material reaches any logging sink.",
+        "Client identity is derived only from a trusted proxy boundary.",
+        "Security evidence is retained off-host with append-only access and collection-health alerts."
+      ],
+      "proposalPath": "proposals/establish-security-telemetry.md",
+      "options": [
+        {
+          "optionId": "structured-local-audit",
+          "title": "Structured local security audit",
+          "kind": "incremental",
+          "summary": "Create a JSON event schema, trusted identity, central redaction, restricted files, and local alerts.",
+          "diagramPaths": {"before": "diagrams/establish-security-telemetry-before.mmd", "after": "diagrams/establish-security-telemetry-structured-local-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "E009", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Auth and privileged events enter one reviewed stream."},
+            {"evidenceId": "E010", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Trusted proxy identity and central redaction correct attribution and leakage."},
+            {"evidenceId": "E004", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Privileged actions become visible but still require authorization fixes."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Provides missing detection evidence but a host compromise can still erase it.", "validationPlan": "Exercise every event and redaction fixture, then simulate local deletion."},
+            {"dimension": "performance", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "JSON serialization, redaction, and local I/O add bounded CPU/I/O.", "validationPlan": "Benchmark throughput and p95 latency with logging on/off."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "medium", "basis": "hypothetical", "assessment": "Synchronous local handlers need little retained memory.", "validationPlan": "Measure RSS during authentication bursts."},
+            {"dimension": "reliability", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "Rotation and disk alerts reduce silent disk exhaustion; file I/O remains a local failure mode.", "validationPlan": "Fill disk threshold and force rotation errors in staging."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Requires schema, permissions, rotation, alert, and weekly review ownership.", "validationPlan": "Run one complete weekly review and alert response drill."},
+            {"dimension": "migration", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "Can be introduced alongside existing logs and consumers.", "validationPlan": "Compare old/new event counts before retiring legacy auth messages."}
+          ],
+          "residualRisks": ["Application-host compromise can alter local evidence.", "Exception text may contain unforeseen secrets."],
+          "implementationReadiness": {"affectedComponents": ["auth logging", "request/error logging", "Nginx", "log permissions/rotation"], "workPackages": ["Schema/redactor.", "Trusted proxy and request ID.", "Event instrumentation.", "Local alerts."], "acceptanceCriteria": ["All required auth/admin events are emitted and credential canaries never reach logs."], "migrationNotes": ["Keep legacy logs until event-count parity is validated."], "rollback": "Disable noisy alert rules while keeping structured events and redaction."}
+        },
+        {
+          "optionId": "centralized-audit",
+          "title": "Centralized append-only monitoring",
+          "kind": "isolation",
+          "summary": "Forward structured events over authenticated TLS to restricted append-only storage with correlation and alerts.",
+          "diagramPaths": {"before": "diagrams/establish-security-telemetry-before.mmd", "after": "diagrams/establish-security-telemetry-centralized-audit-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "E009", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Complete source events gain off-host integrity and real-time detection."},
+            {"evidenceId": "E010", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Trusted attribution and redaction precede transport."},
+            {"evidenceId": "E004", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Privileged action anomalies can be correlated, while authorization still must be fixed."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "analogous", "assessment": "Off-host append-only copies resist application-host evidence deletion and support cross-layer detection.", "validationPlan": "Compromise-simulation test local deletion while verifying central retention and alerting."},
+            {"dimension": "performance", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "Asynchronous serialization and transport add bounded overhead; remote writes must never block requests.", "validationPlan": "Measure throughput, CPU, queue lag, and p95 latency under normal and attack bursts."},
+            {"dimension": "memory", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "A bounded queue/spool retains events during collector delay.", "validationPlan": "Size queue memory/disk at peak event rate and verify drop policy."},
+            {"dimension": "reliability", "direction": "unknown", "confidence": "medium", "basis": "hypothetical", "assessment": "Improves evidence durability but adds collector and transport failure modes.", "validationPlan": "Stop collector, exhaust bounded queue, recover, and verify telemetry-loss alerts without request hangs."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Requires TLS identity, storage, retention, query access, rule tuning, and on-call ownership.", "validationPlan": "Complete alert, retention, access-review, and incident-response drills."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Local schema can roll out first, then forwarding and dashboards in parallel.", "validationPlan": "Validate count and field parity before central monitoring becomes authoritative."}
+          ],
+          "residualRisks": ["Collector administrator compromise and alert fatigue.", "Missing source instrumentation remains invisible centrally."],
+          "implementationReadiness": {"affectedComponents": ["all structured-local components", "collector", "central store", "alerting/on-call"], "workPackages": ["Implement local event quality.", "Deploy TLS collector.", "Configure append-only storage.", "Add detection and runbooks."], "acceptanceCriteria": ["Security events survive host-local deletion and collection silence creates an alert."], "migrationNotes": ["Forward asynchronously with bounded buffering and explicit drop metrics."], "rollback": "Retain local structured audit and disable forwarding without removing source events."}
+        }
+      ],
+      "recommendedOptionId": "centralized-audit",
+      "recommendation": "Build correct local events first, then forward them to an append-only monitored store."
+    }
+  ],
+  "openQuestions": [
+    "Which identity-aware edge and MFA method will be operated?",
+    "Which secret manager or protected deployment store will be authoritative?",
+    "Which non-admin accounts should remain active?",
+    "Which central security log store, retention, and on-call destination will be used?",
+    "Which non-browser clients need service-token compatibility?"
+  ]
+}

@@ -1,0 +1,10 @@
+flowchart LR
+    Internet[Internet attacker / user] --> Nginx[Nginx static + API proxy]
+    Nginx --> HTML[Public business HTML]
+    HTML --> Guard[Client JavaScript guard]
+    Nginx --> Flask[Flask API]
+    Flask --> Decorated[Some decorated routes]
+    Flask --> Open[Many undecorated privileged routes]
+    Decorated --> Debug[DEBUG admin fallback]
+    Direct[Direct host ports] --> Flask
+    Direct --> Redis[Unauthenticated Redis]

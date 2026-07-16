@@ -237,22 +237,12 @@ def cors_enabled():
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
-            # 处理预检请求
+            # Flask-CORS applies the configured explicit origin allowlist globally.
             if request.method == 'OPTIONS':
-                response = jsonify({'message': 'CORS preflight'})
-                response.headers.add('Access-Control-Allow-Origin', '*')
-                response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-                response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-                return response
+                return jsonify({'message': 'CORS preflight'})
             
             # 执行原函数
             response = f(*args, **kwargs)
-            
-            # 添加CORS头
-            if hasattr(response, 'headers'):
-                response.headers.add('Access-Control-Allow-Origin', '*')
-                response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-                response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
             
             return response
         return decorated_function

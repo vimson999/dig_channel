@@ -14,11 +14,15 @@ if str(BACKEND_DIR) not in sys.path:
 from services.content_pipeline.retention_cleanup_service import (  # noqa: E402
     ContentPipelineRetentionCleanupService,
     ContentRetentionPolicy,
+    _default_pytest_dir,
     _record_is_within_protection_window,
 )
 
 
 class ContentRetentionCleanupServiceTest(unittest.TestCase):
+    def test_default_pytest_dir_supports_shallow_container_root(self):
+        self.assertEqual(_default_pytest_dir(Path("/app")), Path("/app/pytest"))
+
     def test_preview_collects_old_content_pipeline_large_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

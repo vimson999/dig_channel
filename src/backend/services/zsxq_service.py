@@ -462,6 +462,20 @@ class ZsxqService:
     def get_topic(self, cookie, topic_id):
         return self.request(cookie, f"/v2/topics/{topic_id}", {})
 
+    def get_topic_comments(self, cookie, topic_id, count=30, index=None):
+        """Fetch one page of top-level comments for a topic."""
+        params = {
+            "count": min(max(int(count or 30), 1), 30),
+            "sort": "asc",
+        }
+        if index not in (None, ""):
+            params["index"] = index
+        return self.request(cookie, f"/v2/topics/{topic_id}/comments", params)
+
+    def get_comment(self, cookie, comment_id):
+        """Fetch comment detail, including its replied_comments payload."""
+        return self.request(cookie, f"/v2/comments/{comment_id}", {})
+
     def create_upload(self, cookie, upload_type, filename, size, file_hash):
         payload = {
             "req_data": {

@@ -110,10 +110,7 @@ def view_resource():
     directory = os.path.dirname(abs_path)
     filename = os.path.basename(abs_path)
     
-    response = make_response(send_from_directory(directory, filename))
-    # 核心：允许 Canvas 跨域加载预览
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    return response
+    return make_response(send_from_directory(directory, filename))
 
 @bp.route('/transcribe', methods=['GET', 'POST'])
 def transcribe_audio_api():

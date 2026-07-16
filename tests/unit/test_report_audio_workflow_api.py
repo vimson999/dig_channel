@@ -16,6 +16,7 @@ if str(BACKEND_DIR) not in sys.path:
 from api import report_audio_workflow as report_audio_api  # noqa: E402
 from models import db  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
+from services.bilibili_publish import create_bilibili_upload_task, enqueue_bilibili_upload_task  # noqa: E402
 from services.report_audio_workflow import FEATURE_NAME  # noqa: E402
 
 
@@ -44,6 +45,38 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(start, datetime(2026, 7, 13, 16, 0, 0))
         self.assertEqual(end, datetime(2026, 7, 14, 16, 0, 0))
         self.assertIsNone(report_audio_api._submission_date_utc_range("2026-02-30"))
+
+    def test_bilibili_enqueue_preserves_response_after_commit(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.commit()
+        child = create_bilibili_upload_task(
+            parent,
+            parent_feature=FEATURE_NAME,
+            source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+            video_path="/tmp/report.mp4",
+            video_key="landscape",
+            title="测试投稿",
+            data={},
+        )
+
+        with patch(
+            "tasks.publisher.run_bilibili_upload_only.apply_async",
+            return_value=SimpleNamespace(id="celery-upload"),
+        ):
+            enqueue_bilibili_upload_task(child)
+
+        response = child._bilibili_enqueue_response_payload
+        self.assertEqual(response["task_id"], child.id)
+        self.assertEqual(response["celery_id"], "celery-upload")
+        self.assertEqual(response["status"], "queued")
+        self.assertEqual(response["title"], "测试投稿")
 
     def test_job_payload_exposes_audio_script_quality_issue(self):
         parent = PublicationTask(

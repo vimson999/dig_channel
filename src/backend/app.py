@@ -10,6 +10,8 @@ YouTube频道数据追踪工具 - Flask应用主文件
 
 import os
 import sys
+import hmac
+import time
 from dotenv import load_dotenv
 
 # Ensure the backend directory is in sys.path
@@ -20,15 +22,19 @@ if backend_dir not in sys.path:
 # Load environment variables from .env file
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env'))
 
-from flask import Flask
+from flask import Flask, abort, current_app, jsonify, make_response, request, send_from_directory, session
 from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix
 from config import Config
+from extensions import limiter
 from middleware.error_handler import error_handler
 from middleware.request_logger import RequestLoggerMiddleware
 from middleware.database_logger import DatabaseLoggerMiddleware
 from middleware.performance_monitor import PerformanceMonitor
 from utils.colored_logger import log_startup_banner, setup_colored_logger
 from utils.log_manager import setup_application_logging, schedule_log_maintenance
+from utils.security_config import validate_security_config
+from utils.security_logging import log_security_event
 
 # 初始化扩展
 cors = CORS()
@@ -67,21 +73,48 @@ def create_app(config_class=Config):
                 static_url_path='',
                 instance_path=instance_path)
     app.config.from_object(config_class)
+    validate_security_config(app.config)
+
+    if str(app.config.get('AUTH_MODE') or '').lower() == 'production':
+        proxy_hops = int(app.config.get('TRUST_PROXY_HOPS', 1))
+        app.wsgi_app = ProxyFix(
+            app.wsgi_app,
+            x_for=proxy_hops,
+            x_proto=proxy_hops,
+            x_host=proxy_hops,
+        )
     
     # 初始化数据库
     from models import db
     db.init_app(app)
+
+    command = f" {' '.join(sys.argv).lower()} "
+    if (
+        str(app.config.get('AUTH_MODE') or '').lower() == 'production'
+        and not app.config.get('TESTING')
+        and ' db ' not in command
+    ):
+        from sqlalchemy import inspect
+        from utils.security_config import SecurityConfigurationError
+        with app.app_context():
+            columns = {column['name'] for column in inspect(db.engine).get_columns('users')}
+        if 'auth_version' not in columns:
+            raise SecurityConfigurationError(
+                'Production database is missing users.auth_version; apply migrations as the table owner'
+            )
     
     # 初始化迁移工具
     from flask_migrate import Migrate
     migrate = Migrate(app, db)
     
     # 初始化CORS
-    cors.init_app(app, 
-                 origins=["*"], 
+    cors.init_app(app,
+                 origins=app.config.get('CORS_ORIGINS', []),
                  allow_headers=["Content-Type", "Authorization"], 
                  methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
                  supports_credentials=True)
+
+    limiter.init_app(app)
     
     # 初始化日志中间件
     request_logger.init_app(app)
@@ -95,6 +128,16 @@ def create_app(config_class=Config):
     
     # 初始化错误处理器
     error_handler.init_app(app)
+
+    @app.errorhandler(429)
+    def handle_rate_limit(error):
+        log_security_event('request.rate_limited', 'denied', reason='rate_limit_exceeded')
+        response = getattr(error, 'get_response', lambda: None)()
+        retry_after = response.headers.get('Retry-After') if response else None
+        result = jsonify({'success': False, 'error': {'message': '请求过于频繁，请稍后重试'}})
+        if retry_after:
+            result.headers['Retry-After'] = retry_after
+        return result, 429
     
     # 设置应用程序日志
     setup_application_logging(app.config)
@@ -113,6 +156,21 @@ def create_app(config_class=Config):
     @app.route('/health')
     def health():
         return {'status': 'healthy', 'version': '1.0.0'}
+
+    @app.route('/access/<portal_token>')
+    def login_portal(portal_token):
+        """Private, unindexed entry point for the production login page."""
+        production = str(current_app.config.get('AUTH_MODE') or '').lower() == 'production'
+        expected = str(current_app.config.get('LOGIN_PORTAL_TOKEN') or '')
+        if production and not hmac.compare_digest(str(portal_token), expected):
+            abort(404)
+
+        session['login_portal_verified_at'] = time.time()
+        response = make_response(send_from_directory(app.static_folder, 'login.html'))
+        response.headers['Cache-Control'] = 'no-store, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['X-Robots-Tag'] = 'noindex, nofollow, noarchive'
+        return response
     
     # 静态页面路由
     @app.route('/tasks.html')
@@ -125,18 +183,50 @@ def create_app(config_class=Config):
         from flask import redirect
         return redirect('/tasks.html')
     
-    # 处理所有OPTIONS请求
+    # 默认拒绝：所有业务页面和 API 都必须是已登录管理员。
     @app.before_request
-    def handle_options():
-        from flask import request
+    def enforce_project_authentication():
         if request.method == 'OPTIONS':
-            from flask import make_response
-            response = make_response()
-            response.headers['Access-Control-Allow-Origin'] = '*'
-            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-            response.headers['Access-Control-Max-Age'] = '86400'
-            return response
+            return None
+
+        path = request.path
+        production = str(current_app.config.get('AUTH_MODE') or '').lower() == 'production'
+        public_paths = {
+            '/health',
+            '/api/v1/auth/login',
+            '/api/v1/auth/register',
+            '/api/v1/auth/session-check',
+            '/js/config.js',
+            '/js/api.js',
+            '/js/utils.js',
+            '/js/env.js',
+            '/assets/images/favicon.ico',
+        }
+        if path in public_paths or path.startswith('/access/'):
+            return None
+
+        if not production and path in {'/login.html', '/login_enhanced.html'}:
+            return None
+
+        if production and path in {'/login.html', '/login_enhanced.html', '/register.html'}:
+            abort(404)
+
+        from flask import g
+        from utils.auth_utils import get_current_user
+        current_user = get_current_user()
+        if not current_user:
+            log_security_event('request.authorization', 'denied', reason='authentication_required')
+            if path.startswith('/api/'):
+                return jsonify({'success': False, 'error': {'message': '请先登录'}}), 401
+            abort(404 if production else 401)
+
+        if current_app.config.get('AUTH_REQUIRE_ADMIN', True) and not current_user.is_admin:
+            log_security_event('request.authorization', 'denied', user=current_user, reason='admin_required')
+            if path.startswith('/api/'):
+                return jsonify({'success': False, 'error': {'message': '访问被拒绝'}}), 403
+            abort(404 if production else 403)
+
+        g.current_user = current_user
     
     return app
 
@@ -191,6 +281,7 @@ if __name__ == '__main__':
     logger.info("访问地址: http://localhost:5001")
     logger.info("按 Ctrl+C 停止服务器")
     
-    debug_enabled = os.environ.get("FLASK_DEBUG", "1").lower() in {"1", "true", "yes", "on"}
+    debug_enabled = os.environ.get("FLASK_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
     use_reloader = os.environ.get("FLASK_USE_RELOADER", "0").lower() in {"1", "true", "yes", "on"}
-    app.run(debug=debug_enabled, host='0.0.0.0', port=5001, use_reloader=use_reloader, reloader_type='stat')
+    bind_host = os.environ.get('FLASK_BIND_HOST', '127.0.0.1')
+    app.run(debug=debug_enabled, host=bind_host, port=5001, use_reloader=use_reloader, reloader_type='stat')

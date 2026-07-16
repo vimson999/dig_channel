@@ -370,8 +370,9 @@ def create_bilibili_upload_task(
 def enqueue_bilibili_upload_task(child):
     from tasks.publisher import PLATFORM_UPLOAD_QUEUE, run_bilibili_upload_only
 
+    child_id = child.id
     try:
-        celery_task = run_bilibili_upload_only.apply_async(args=[child.id], queue=PLATFORM_UPLOAD_QUEUE, retry=False)
+        celery_task = run_bilibili_upload_only.apply_async(args=[child_id], queue=PLATFORM_UPLOAD_QUEUE, retry=False)
     except Exception as exc:
         child.status = "failed"
         child.current_step = "failed"
@@ -381,7 +382,13 @@ def enqueue_bilibili_upload_task(child):
         db.session.commit()
         raise
     child.celery_task_id = celery_task.id
+    db.session.flush()
+    # The commit below expires ORM attributes. Preserve the response while the
+    # child is still loaded so an already queued upload cannot be reported as a
+    # database failure merely while serializing the HTTP response.
+    response_payload = bilibili_upload_child_payload(child)
     db.session.commit()
+    child._bilibili_enqueue_response_payload = response_payload
     return child
 
 

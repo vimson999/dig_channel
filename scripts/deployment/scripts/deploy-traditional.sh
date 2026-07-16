@@ -1,24 +1,19 @@
 #!/bin/bash
 
 # YouTube Analytics 传统部署脚本
-set -e
+set -euo pipefail
 
 echo "🚀 开始传统方式部署 YouTube Analytics..."
 
-# 检查必要的环境变量
-if [ -z "$YOUTUBE_API_KEY" ]; then
-    echo "❌ 错误: 请设置 YOUTUBE_API_KEY 环境变量"
-    exit 1
-fi
-
-if [ -z "$SECRET_KEY" ]; then
-    echo "❌ 错误: 请设置 SECRET_KEY 环境变量"
-    exit 1
-fi
-
 # 进入项目根目录
-PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+ENV_FILE="$PROJECT_ROOT/.env.production"
 cd "$PROJECT_ROOT"
+
+if [ ! -f "$ENV_FILE" ]; then
+    echo "❌ 缺少 $ENV_FILE，请复制 .env.production.example 并在服务器填写"
+    exit 1
+fi
 
 echo "📂 项目目录: $PROJECT_ROOT"
 
@@ -49,47 +44,17 @@ echo "📚 安装Python依赖..."
 pip install --upgrade pip
 pip install -r requirements/production.txt
 
-# 创建生产环境配置
-echo "⚙️ 创建生产环境配置..."
-cat > .env << EOF
-# 生产环境配置
-FLASK_ENV=production
-FLASK_DEBUG=False
-
-# 数据库配置
-DATABASE_URL=sqlite:///instance/youtube_tracker.db
-
-# YouTube API配置
-YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
-
-# 安全配置
-SECRET_KEY=${SECRET_KEY}
-JWT_SECRET_KEY=${JWT_SECRET_KEY:-${SECRET_KEY}}
-
-# 服务器配置
-HOST=127.0.0.1
-PORT=5000
-
-# 日志配置
-LOG_LEVEL=INFO
-
-# CORS配置
-CORS_ORIGINS=${CORS_ORIGINS:-*}
-
-# 限流配置 (如果有Redis)
-RATELIMIT_STORAGE_URL=${REDIS_URL:-memory://}
-EOF
-
 # 创建必要目录
 echo "📁 创建必要目录..."
 mkdir -p logs
 mkdir -p instance
 mkdir -p static/uploads
 
-# 初始化数据库
-echo "🗄️ 初始化数据库..."
+# 迁移数据库；生产环境不会创建默认账户或示例数据。
+echo "🗄️ 迁移数据库..."
 cd src/backend
-python init_db.py
+"$PROJECT_ROOT/venv/bin/dotenv" -f "$ENV_FILE" run -- \
+    "$PROJECT_ROOT/venv/bin/flask" --app app:create_app db upgrade
 
 # 回到项目根目录
 cd "$PROJECT_ROOT"
@@ -107,7 +72,7 @@ User=$USER
 Group=$USER
 WorkingDirectory=$PROJECT_ROOT
 Environment=PATH=$PROJECT_ROOT/venv/bin
-EnvironmentFile=$PROJECT_ROOT/.env
+EnvironmentFile=$ENV_FILE
 ExecStart=$PROJECT_ROOT/venv/bin/gunicorn --bind 127.0.0.1:5000 --workers 4 --timeout 120 --chdir $PROJECT_ROOT/src/backend app:create_app()
 ExecReload=/bin/kill -s HUP \$MAINPID
 Restart=always

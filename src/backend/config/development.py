@@ -7,7 +7,7 @@
 
 import os
 
-from .base import BaseConfig, _db_int_env, _db_process_role, _db_text_env, _postgres_engine_options
+from .base import BaseConfig, _bool_env, _db_int_env, _db_process_role, _db_text_env, _postgres_engine_options
 
 
 def _development_pool_size_default():
@@ -26,10 +26,25 @@ class DevelopmentConfig(BaseConfig):
     """开发环境配置"""
     
     DEBUG = True
+    AUTH_MODE = 'local'
+    LOCAL_AUTH_BYPASS = _bool_env('LOCAL_AUTH_BYPASS', True)
+    AUTH_REQUIRE_ADMIN = True
+    AUTH_VERSION_ENABLED = _bool_env('AUTH_VERSION_ENABLED', False)
+    PUBLIC_REGISTRATION_ENABLED = _bool_env('PUBLIC_REGISTRATION_ENABLED', False)
+    SESSION_COOKIE_NAME = 'shioa-local-session'
+    SESSION_COOKIE_SECURE = False
+    SESSION_COOKIE_SAMESITE = 'Lax'
     SQLALCHEMY_ECHO = os.environ.get('SQLALCHEMY_ECHO', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
     
     # 开发环境下放宽CORS限制
-    CORS_ORIGINS = ["*"]
+    CORS_ORIGINS = [
+        'http://localhost:8888',
+        'http://127.0.0.1:8888',
+        'http://localhost:8080',
+        'http://127.0.0.1:8080',
+        'http://localhost:5001',
+        'http://127.0.0.1:5001',
+    ]
     
     # 开发环境下的特殊设置
     TESTING = False

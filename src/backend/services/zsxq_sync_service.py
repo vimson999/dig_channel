@@ -18,7 +18,14 @@ from sqlalchemy.orm import load_only
 
 from models import db
 from models.task import PublicationTask
-from models.zsxq_sync import ZsxqAttachment, ZsxqSyncCursor, ZsxqSyncRun, ZsxqTopic, ZsxqTopicFavorite
+from models.zsxq_sync import (
+    ZsxqAttachment,
+    ZsxqSyncCursor,
+    ZsxqSyncRun,
+    ZsxqTopic,
+    ZsxqTopicComment,
+    ZsxqTopicFavorite,
+)
 from services.runtime_guard import maybe_guarded_apply_async
 from services.zsxq_service import zsxq_service
 
@@ -37,6 +44,8 @@ DEFAULT_THRESHOLD_ATTACHMENT_DOWNLOAD_LIMIT = 40
 DEFAULT_MANUAL_ATTACHMENT_PLAN_LIMIT = 20
 DEFAULT_MANUAL_ATTACHMENT_PLAN_HARD_LIMIT = 50
 TOPIC_PAGE_SIZE_HINT = 20
+MAX_COMMENTS_PER_TOPIC_ENV = "ZSXQ_SYNC_MAX_COMMENTS_PER_TOPIC"
+DEFAULT_MAX_COMMENTS_PER_TOPIC = 200
 ATTACHMENT_STATUS_CACHE_TTL_SECONDS = 20
 PUBLISH_STATUS_CONTEXT_CACHE_TTL_SECONDS = 60
 MAX_ATTACHMENT_STATUS_CACHE_ENTRIES = 128
@@ -156,6 +165,7 @@ class ZsxqSyncService:
         required_tables = {
             "zsxq_sync_runs",
             "zsxq_topics",
+            "zsxq_topic_comments",
             "zsxq_attachments",
             "zsxq_sync_cursors",
         }
@@ -2714,9 +2724,10 @@ class ZsxqSyncService:
         if include_raw_payload:
             self._hydrate_topic_raw_payloads(topics)
         else:
-            image_topics = [topic for topic in topics if (topic.images_count or 0) > 0]
-            if image_topics:
-                self._hydrate_topic_raw_payloads(image_topics, allow_db_fallback=False)
+            # Raw topic JSON is already stored on local disk. Reading the page
+            # files exposes comments and images without triggering one deferred
+            # JSON-column query per topic.
+            self._hydrate_topic_raw_payloads(topics, allow_db_fallback=False)
         attachments = self._attachments_by_topic(
             group_id,
             topics,
@@ -2840,6 +2851,19 @@ class ZsxqSyncService:
             payload.setdefault("topic_type", topic.topic_type)
         if raw_payload.get("annotation"):
             payload.setdefault("annotation", raw_payload.get("annotation"))
+        comments = [
+            deepcopy(item)
+            for item in (raw_payload.get("show_comments") or [])
+            if isinstance(item, dict)
+        ]
+        try:
+            comments_count = max(int(raw_payload.get("comments_count") or 0), len(comments))
+        except (TypeError, ValueError):
+            comments_count = len(comments)
+        payload["comments_count"] = comments_count
+        payload["show_comments"] = comments
+        if raw_payload.get("comments_truncated"):
+            payload["comments_truncated"] = True
         if topic.author_name:
             payload.setdefault("owner", {"name": topic.author_name})
 
@@ -4013,6 +4037,7 @@ class ZsxqSyncService:
         required_tables = {
             "zsxq_sync_runs",
             "zsxq_topics",
+            "zsxq_topic_comments",
             "zsxq_attachments",
             "zsxq_sync_cursors",
         }
@@ -4447,6 +4472,9 @@ class ZsxqSyncService:
                 if newest_topic is None:
                     newest_topic = topic
 
+                self._hydrate_truncated_topic_comments(cookie, topic)
+                self._upsert_topic_comments(group_id, tab, topic)
+
                 existing = ZsxqTopic.query.filter_by(group_id=group_id, tab_id=tab_id, topic_id=topic_id).options(
                     load_only(
                         ZsxqTopic.id,
@@ -4536,6 +4564,183 @@ class ZsxqSyncService:
         self._upsert_cursor(group_id, tab, newest_topic, tab_result)
         db.session.commit()
         return tab_result
+
+    def _hydrate_truncated_topic_comments(self, cookie, topic):
+        """Complete comments only when the topic-list preview was truncated."""
+        if not isinstance(topic, dict):
+            return topic
+        try:
+            expected = max(int(topic.get("comments_count") or 0), 0)
+        except (TypeError, ValueError):
+            expected = 0
+        existing = [item for item in (topic.get("show_comments") or []) if isinstance(item, dict)]
+        if expected <= len(existing):
+            return topic
+
+        try:
+            limit = max(int(os.environ.get(MAX_COMMENTS_PER_TOPIC_ENV, DEFAULT_MAX_COMMENTS_PER_TOPIC)), 1)
+        except (TypeError, ValueError):
+            limit = DEFAULT_MAX_COMMENTS_PER_TOPIC
+        limit = min(limit, 1000)
+        topic_id = self._topic_id(topic)
+        if not topic_id:
+            return topic
+
+        merged = {}
+
+        def remember(comment, parent_comment_id=None):
+            if not isinstance(comment, dict):
+                return
+            item = deepcopy(comment)
+            comment_id = str(item.get("comment_id") or "").strip()
+            if not comment_id:
+                return
+            if parent_comment_id and not item.get("parent_comment_id"):
+                item["parent_comment_id"] = parent_comment_id
+            merged[comment_id] = item
+
+        for item in existing:
+            remember(item)
+
+        index = None
+        try:
+            while len(merged) < min(expected, limit):
+                response = zsxq_service.get_topic_comments(
+                    cookie,
+                    topic_id,
+                    count=min(30, limit - len(merged)),
+                    index=index,
+                )
+                resp_data = response.get("resp_data") if isinstance(response, dict) else {}
+                resp_data = resp_data if isinstance(resp_data, dict) else {}
+                page = [item for item in (resp_data.get("comments") or []) if isinstance(item, dict)]
+                if not page:
+                    break
+                before = len(merged)
+                for comment in page:
+                    remember(comment)
+                    replies_count = int(comment.get("replies_count") or 0)
+                    replied_comments = [
+                        item for item in (comment.get("replied_comments") or []) if isinstance(item, dict)
+                    ]
+                    if replies_count > len(replied_comments) and len(merged) < limit:
+                        detail = zsxq_service.get_comment(cookie, comment.get("comment_id"))
+                        detailed = ((detail.get("resp_data") or {}).get("comment") or {}) if isinstance(detail, dict) else {}
+                        replied_comments = [
+                            item for item in (detailed.get("replied_comments") or []) if isinstance(item, dict)
+                        ]
+                    for reply in replied_comments:
+                        if len(merged) >= limit:
+                            break
+                        remember(reply, parent_comment_id=comment.get("comment_id"))
+                next_index = resp_data.get("index")
+                if len(merged) == before or next_index in (None, "") or next_index == index:
+                    break
+                index = next_index
+        except Exception as exc:
+            logger.warning(
+                "[ZSXQ_COMMENTS] fallback fetch failed | topic_id=%s expected=%s collected=%s error=%s",
+                topic_id,
+                expected,
+                len(merged),
+                exc,
+            )
+
+        comments = list(merged.values())[:limit]
+        comments.sort(key=lambda item: str(item.get("create_time") or ""))
+        topic["show_comments"] = comments
+        topic["comments_count"] = max(expected, len(comments))
+        topic["comments_truncated"] = len(comments) < expected
+        return topic
+
+    def _topic_comments(self, topic):
+        if not isinstance(topic, dict):
+            return []
+        output = []
+        seen = set()
+
+        def visit(comment, parent_comment_id=None):
+            if not isinstance(comment, dict):
+                return
+            item = deepcopy(comment)
+            comment_id = str(item.get("comment_id") or "").strip()
+            if not comment_id or comment_id in seen:
+                return
+            if parent_comment_id and not item.get("parent_comment_id"):
+                item["parent_comment_id"] = parent_comment_id
+            seen.add(comment_id)
+            output.append(item)
+            for reply in item.get("replied_comments") or []:
+                visit(reply, comment_id)
+
+        for comment in topic.get("show_comments") or []:
+            visit(comment)
+        return output
+
+    def _upsert_topic_comments(self, group_id, tab, topic):
+        comments = self._topic_comments(topic)
+        if not comments:
+            return {"comments_seen": 0, "comments_new": 0, "comments_updated": 0, "favorite_added": False}
+        topic_id = self._topic_id(topic)
+        comment_ids = [str(item.get("comment_id")) for item in comments]
+        existing = ZsxqTopicComment.query.filter(
+            ZsxqTopicComment.group_id == str(group_id),
+            ZsxqTopicComment.topic_id == str(topic_id),
+            ZsxqTopicComment.comment_id.in_(comment_ids),
+        ).all()
+        by_comment_id = {str(item.comment_id): item for item in existing}
+        stats = {"comments_seen": len(comments), "comments_new": 0, "comments_updated": 0, "favorite_added": False}
+        now = datetime.utcnow()
+        for payload in comments:
+            comment_id = str(payload.get("comment_id") or "").strip()
+            owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
+            values = {
+                "tab_id": str(tab.get("id") or "") or None,
+                "parent_comment_id": self._text_or_none(payload.get("parent_comment_id"), 64),
+                "owner_user_id": self._text_or_none(owner.get("user_id"), 64),
+                "owner_name": self._text_or_none(owner.get("name") or owner.get("alias"), 255),
+                "text": str(payload.get("text") or "") or None,
+                "create_time": self._text_or_none(payload.get("create_time"), 64),
+                "likes_count": self._int_or_zero(payload.get("likes_count")),
+                "replies_count": self._int_or_zero(payload.get("replies_count")),
+                "rewards_count": self._int_or_zero(payload.get("rewards_count")),
+                "sticky": self._truthy_text(payload.get("sticky")),
+                "raw_payload": payload,
+                "last_synced_at": now,
+            }
+            record = by_comment_id.get(comment_id)
+            if record is None:
+                record = ZsxqTopicComment(
+                    group_id=str(group_id),
+                    topic_id=str(topic_id),
+                    comment_id=comment_id,
+                    **values,
+                )
+                db.session.add(record)
+                by_comment_id[comment_id] = record
+                stats["comments_new"] += 1
+                continue
+            changed = False
+            for key, value in values.items():
+                if key == "last_synced_at" or getattr(record, key) != value:
+                    setattr(record, key, value)
+                    changed = True
+            if changed:
+                stats["comments_updated"] += 1
+        yiren_replied = any(
+            str((item.get("owner") or {}).get("name") or "").strip() == "亦仁"
+            for item in comments
+            if isinstance(item.get("owner"), dict)
+        )
+        if yiren_replied:
+            favorite = ZsxqTopicFavorite.query.filter_by(
+                group_id=str(group_id),
+                topic_id=str(topic_id),
+            ).first()
+            if favorite is None:
+                db.session.add(ZsxqTopicFavorite(group_id=str(group_id), topic_id=str(topic_id)))
+                stats["favorite_added"] = True
+        return stats
 
     def _find_existing_downloaded_attachment(self, record):
         conditions = []

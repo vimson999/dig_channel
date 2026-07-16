@@ -1,0 +1,11 @@
+flowchart LR
+    Edge[Edge identity/WAF events] --> Collector[TLS authenticated collector]
+    Nginx[Nginx request ID + rate result] --> Collector
+    Proxy[Trusted proxy identity] --> Flask[Flask structured security events]
+    Flask --> Redact[Central redaction filter]
+    Redact --> Collector
+    Collector --> Store[Append-only restricted log store]
+    Store --> Detect[Correlation + real-time alerts]
+    Store --> Reports[Daily/weekly review reports]
+    Detect --> OnCall[Operator / incident response]
+    Health[Collector heartbeat] --> Detect

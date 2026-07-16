@@ -1,5 +1,7 @@
 # YouTube Analytics 生产环境部署文档
 
+> **公网发布前必须先完成：** [`docs/security/上线前必须完成.md`](../../docs/security/上线前必须完成.md)。数据库迁移、历史密钥轮换/Git 历史清理、真实域名/TLS/CORS/Nginx 三项门禁未全部验收时，不得切换公网流量。
+
 > 当前业务工作流依赖 PostgreSQL、Redis、Celery worker 与浏览器自动化。数据库和任务队列的生产加固要求见
 > [`docs/production-hardening.md`](../../docs/production-hardening.md)。旧版 SQLite 部署只适合轻量演示，不适合自动同步、清洗、发布流水线。
 

@@ -672,6 +672,9 @@ class BilibiliPublishPanel {
                 upower_mode: 0,
             };
         }
+        const uploadIdsBeforeSubmit = new Set(
+            this.uploads().map((item) => String(item?.task_id || '')).filter(Boolean),
+        );
         try {
             if (button) {
                 button.disabled = true;
@@ -691,6 +694,26 @@ class BilibiliPublishPanel {
             if (this.options.onAfterSubmit) await this.options.onAfterSubmit(result);
             this.notify(`已投递 B站上传任务：${this.lastUpload?.task_id || ''}`, 'success');
         } catch (error) {
+            // Upload creation and queueing are durable before the endpoint
+            // serializes its response. If only that response fails, reload the
+            // history and confirm the new child instead of inviting a duplicate
+            // submission.
+            try {
+                if (this.options.onAfterSubmit) await this.options.onAfterSubmit(null);
+                const persistedUpload = this.uploads().find((item) => {
+                    const id = String(item?.task_id || '');
+                    return id && !uploadIdsBeforeSubmit.has(id);
+                });
+                if (persistedUpload) {
+                    this.lastUpload = persistedUpload;
+                    this.refreshHistory();
+                    this.notify(`B站上传任务已投递：${persistedUpload.task_id}。提交响应曾中断，已从任务记录确认。`, 'success');
+                    return;
+                }
+            } catch (_) {
+                // Preserve the original error if history verification also
+                // fails.
+            }
             this.notify(`B站上传投递失败：${error.message}`, 'error');
         } finally {
             if (button) {

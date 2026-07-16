@@ -1,0 +1,11 @@
+flowchart LR
+    Internet[Internet] --> Nginx[Nginx TLS + rate limits]
+    Portal[Secret portal + pre-auth cookie] --> Nginx
+    Nginx --> AuthRequest[auth_request session check]
+    AuthRequest --> Session[Flask server-side session]
+    Session --> HTML[Protected business HTML]
+    Nginx --> Flask[Flask default-deny API gate]
+    Flask --> User[Authenticated user routes]
+    Flask --> Admin[Explicit admin routes]
+    Flask --> Allow[Small public allowlist]
+    Flask --> Redis[Private Redis: sessions + limits]

@@ -151,6 +151,15 @@ SERVICES = {
         "log_file": "zsxq_workflow.log",
         "description": "同步、清洗、发布三阶段状态机与下一步调度队列",
     },
+    "workflow_notify": {
+        "label": "工作流通知",
+        "queue": "workflow_notify",
+        "hostname_prefix": "workflow_notify@",
+        "run_script": "scripts/dev/run-celery-workflow-notify.sh",
+        "log_file": "workflow_notify.log",
+        "description": "邮件等工作流通知与失败重试，独立于知识星球业务编排队列",
+        "auto_heal": False,
+    },
     "zsxq_publish": {
         "label": "知识星球发布",
         "queue": "zsxq_publish",
@@ -785,7 +794,11 @@ def _watchdog_services():
             service_ids = [item.strip() for item in raw.split(",") if item.strip()]
     else:
         service_ids = list(DEFAULT_WATCHDOG_SERVICES)
-    return [service_id for service_id in service_ids if service_id in SERVICES]
+    return [
+        service_id
+        for service_id in service_ids
+        if service_id in SERVICES and SERVICES[service_id].get("auto_heal", True)
+    ]
 
 
 def _watchdog_config():

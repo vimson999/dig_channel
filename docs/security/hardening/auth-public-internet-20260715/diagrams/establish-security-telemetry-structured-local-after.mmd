@@ -1,0 +1,9 @@
+flowchart LR
+    Proxy[Trusted proxy identity] --> Flask[Flask security events]
+    Nginx[Nginx request ID + rate result] --> Audit[Structured local audit]
+    Flask --> Redact[Central redaction filter]
+    Redact --> Audit
+    Audit --> Rotate[Restricted rotation + retention]
+    Audit --> Alerts[Local alerts / fail2ban]
+    Operator[Operator] --> Review[Weekly review]
+    Alerts --> Operator

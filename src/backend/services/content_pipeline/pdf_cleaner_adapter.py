@@ -13,6 +13,11 @@ import requests
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
+def _default_pytest_dir(project_root: Path) -> Path:
+    base_dir = project_root.parents[1] if len(project_root.parents) > 1 else project_root
+    return base_dir / "pytest"
+
+
 class PdfCleanerError(RuntimeError):
     """Raised when the local PDF cleaner service cannot complete a batch."""
 
@@ -47,7 +52,7 @@ class PdfCleanerAdapter:
         self.cleaner_project_dir = Path(
             cleaner_project_dir
             or os.getenv("PDF_CLEANER_PROJECT_DIR")
-            or (PROJECT_ROOT.parents[1] / "pytest")
+            or _default_pytest_dir(PROJECT_ROOT)
         ).expanduser().resolve()
         self.cleaner_batch_root = (cleaner_batch_root or os.getenv("PDF_CLEANER_BATCH_ROOT") or "runtime/batches").strip("/")
         self.output_root = Path(

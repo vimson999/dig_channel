@@ -10,6 +10,7 @@ YouTube频道数据追踪工具 - 数据库初始化
 """
 
 import os
+import secrets
 import sys
 from datetime import datetime, date, timedelta
 
@@ -110,21 +111,24 @@ def create_database_views(app):
             db.session.rollback()
 
 def create_default_user(app):
-    """创建默认用户"""
+    """Create a local-only bootstrap admin without a published password."""
     with app.app_context():
         # 检查是否已有用户
         if User.query.first():
             print("用户已存在，跳过用户创建")
             return User.query.first()
         
-        # 创建默认管理员用户
+        if str(app.config.get('AUTH_MODE') or '').lower() != 'local':
+            print("生产环境不会创建默认管理员，请运行 scripts/reset_admin_password.py")
+            return None
+
         from werkzeug.security import generate_password_hash
         
         try:
             default_user = User(
                 username='admin',
                 email='admin@example.com',
-                password_hash=generate_password_hash('admin123'),
+                password_hash=generate_password_hash(secrets.token_urlsafe(32)),
                 display_name='系统管理员',
                 is_admin=True,
                 is_active=True,
@@ -262,10 +266,9 @@ def main():
             print("=" * 50)
             print("🎉 多用户数据库初始化完成！")
             print("=" * 50)
-            print("默认管理员账户信息:")
+            print("本地管理员账户信息:")
             print(f"用户名: {default_user.username}")
-            print("密码: admin123")
-            print("请登录后立即修改密码！")
+            print("本地 loopback 自动登录已启用；未生成或输出默认密码。")
             print("=" * 50)
             
         except Exception as e:

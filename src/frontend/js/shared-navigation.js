@@ -1,6 +1,73 @@
 // 统一导航组件 - 真正的复用组件
 // 一处修改，各处生效
 
+// 所有使用统一导航的业务页面都先经过同一套登录校验。
+// 登录页和注册页保持公开，避免每个页面重复维护一份认证逻辑。
+const pageAccessGuard = (() => {
+    const pathname = window.location.pathname;
+    const filename = pathname.split('/').pop().toLowerCase();
+    const publicPages = new Set(['login.html', 'login_enhanced.html', 'register.html']);
+
+    // 后端的封面/视频渲染器会直接加载本地 HTML；它不属于对外页面访问。
+    if (window.location.protocol === 'file:' || publicPages.has(filename)) {
+        return Promise.resolve(true);
+    }
+
+    const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+    const buildLoginUrl = (reason = '') => {
+        const loginUrl = new URL('/login.html', window.location.origin);
+        const returnPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+        loginUrl.searchParams.set('next', returnPath || '/');
+        if (reason) {
+            loginUrl.searchParams.set('reason', reason);
+        }
+        return loginUrl.toString();
+    };
+
+    const redirectToLogin = (reason = '') => {
+        if (isLocal) {
+            window.location.replace(buildLoginUrl(reason));
+        } else {
+            document.documentElement.innerHTML = '<head><title>会话已失效</title></head><body style="font-family:system-ui;padding:3rem"><h1>会话已失效</h1><p>请使用管理员保存的私有登录入口重新登录。</p></body>';
+        }
+        return false;
+    };
+
+    const token = localStorage.getItem('access_token');
+
+    // 校验完成前不初始化导航，避免失效 token 看到用户态页面。
+    const apiBaseUrl = (window.API_BASE_URL || (
+        ['localhost', '127.0.0.1'].includes(window.location.hostname)
+            ? 'http://localhost:5001/api/v1'
+            : '/api/v1'
+    )).replace(/\/$/, '');
+
+    return fetch(`${apiBaseUrl}/auth/verify`, {
+        method: 'GET',
+        credentials: 'include',
+        headers: Object.assign(
+            {'Accept': 'application/json'},
+            token ? {'Authorization': `Bearer ${token}`} : {}
+        )
+    }).then(async response => {
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload?.success || !payload?.data?.user) {
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('user_info');
+            return redirectToLogin('session_expired');
+        }
+
+        localStorage.setItem('user_info', JSON.stringify(payload.data.user));
+        return true;
+    }).catch(error => {
+        console.error('🔐 [SHARED_NAV] 登录状态校验失败:', error);
+        // 网络异常时保留 token，待服务恢复后仍可继续使用，但页面访问按未验证处理。
+        return redirectToLogin('verification_failed');
+    });
+})();
+
+window.pageAccessGuard = pageAccessGuard;
+
 class SharedNavigation {
     constructor() {
         this.currentPage = this.getCurrentPageName();
@@ -786,7 +853,12 @@ window.logout = function() {
 };
 
 // 自动初始化
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    const canAccessPage = await pageAccessGuard;
+    if (!canAccessPage) {
+        return;
+    }
+
     // 只有在页面没有导航的情况下才创建
     if (!document.querySelector('header')) {
         window.sharedNavigation = new SharedNavigation();

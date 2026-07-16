@@ -21,6 +21,12 @@ const isDevelopment = window.location.hostname === 'localhost' ||
 const currentEnv = isDevelopment ? 'development' : 'production';
 const API_BASE_URL = ENV_CONFIG[currentEnv].API_BASE_URL;
 
+// 本地直连后端时使用无秘密占位符，兼容仍检查 localStorage 的旧页面脚本。
+// 服务端只会对“直接来自 loopback”的请求启用本地绕过，线上不会接受此值。
+if (isDevelopment && !localStorage.getItem('access_token')) {
+    localStorage.setItem('access_token', 'local-loopback-bypass');
+}
+
 // 显式挂载到 window 对象，供其他脚本使用
 window.API_BASE_URL = API_BASE_URL;
 window.CONFIG = {

@@ -16,6 +16,10 @@ depends_on = None
 
 
 def upgrade():
+    op.execute(
+        "ALTER TABLE public.alembic_version "
+        "ALTER COLUMN version_num TYPE varchar(128)"
+    )
     _create_index_if_allowed(
         "ix_zsxq_attachments_group_topic_status",
         "zsxq_attachments",

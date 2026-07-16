@@ -44,7 +44,8 @@ class APIClient {
                     ...this.defaultHeaders,
                     ...this.getAuthHeaders()
                 },
-                mode: 'cors'
+                mode: 'cors',
+                credentials: 'include'
             };
 
             // 添加请求体
@@ -495,32 +496,17 @@ api.initAuth = async function() {
     console.log('🔍 [Auth] 开始认证检查');
     const token = this.getAuthToken();
     console.log('🔍 [Auth] Token存在:', !!token, token ? `${token.substring(0, 20)}...` : 'null');
-    
-    if (token) {
-        try {
-            console.log('🔍 [Auth] 开始验证Token...');
-            const result = await this.verifyToken();
-            console.log('✅ [Auth] Token验证成功:', result);
-            
-            // 检查响应格式 - 修复：验证data.user存在
-            if (result && result.success && result.data && result.data.user) {
-                console.log('✅ [Auth] 验证响应格式正确，用户:', result.data.user.username);
-                // 更新本地用户信息
-                localStorage.setItem('user_info', JSON.stringify(result.data.user));
-                return true;
-            } else {
-                console.error('❌ [Auth] 验证响应格式错误:', result);
-                this.clearAuth();
-                return false;
-            }
-        } catch (error) {
-            console.error('❌ [Auth] Token验证失败:', error.message, error);
-            console.error('❌ [Auth] 错误详情:', error);
-            this.clearAuth();
-            return false;
+    try {
+        console.log('🔍 [Auth] 开始验证会话...');
+        const result = await this.verifyToken();
+        if (result && result.success && result.data && result.data.user) {
+            localStorage.setItem('user_info', JSON.stringify(result.data.user));
+            return true;
         }
+    } catch (error) {
+        console.error('❌ [Auth] 会话验证失败:', error.message);
     }
-    console.log('❌ [Auth] 没有Token');
+    this.clearAuth();
     return false;
 };
 
@@ -533,12 +519,6 @@ api.isAuthenticated = function() {
 api.checkPageAccess = function() {
     const isAuthPage = window.location.pathname.includes('login.html') || 
                       window.location.pathname.includes('register.html');
-    
-    if (!isAuthPage && !this.isAuthenticated()) {
-        console.log('未登录用户访问受保护页面，重定向到登录页');
-        window.location.href = 'login.html';
-        return false;
-    }
     
     if (isAuthPage && this.isAuthenticated()) {
         console.log('已登录用户访问认证页面，重定向到主页');

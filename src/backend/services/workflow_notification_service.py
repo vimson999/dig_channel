@@ -91,7 +91,7 @@ class WorkflowNotificationService:
             }
             result = send_workflow_notification.apply_async(
                 args=[payload],
-                queue="zsxq_workflow",
+                queue="workflow_notify",
                 retry=False,
             )
             return {"queued": True, "celery_task_id": result.id}

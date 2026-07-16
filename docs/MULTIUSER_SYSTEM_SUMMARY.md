@@ -163,7 +163,7 @@ Werkzeug>=2.0.0
    - 前端主页: http://localhost:8000
    - 后端API: http://localhost:5000
    - 自动重定向到登录页面
-   - 默认管理员账户: admin / admin123
+   - 本地仅允许 loopback 自动登录；生产环境通过安全脚本生成独立管理员凭据
 
 ### 🔒 安全特性
 
