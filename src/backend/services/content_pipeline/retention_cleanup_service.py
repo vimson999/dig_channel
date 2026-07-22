@@ -340,14 +340,12 @@ class ContentPipelineRetentionCleanupService:
 
         cutoff = datetime.utcfromtimestamp(now - policy.unfinished_reference_protect_days * 86400)
         task_rows = (
-            PublicationTask.query.with_entities(PublicationTask.params, PublicationTask.result)
-            .filter(PublicationTask.status.in_(["pending", "processing", "failed"]))
-            .filter(
-                or_(
-                    PublicationTask.feature.in_(RETENTION_PROTECTED_TASK_FEATURES),
-                    PublicationTask.params["feature"].as_string().in_(RETENTION_PROTECTED_TASK_FEATURES),
-                )
+            PublicationTask.query.with_entities(
+                PublicationTask.id,
+                PublicationTask.content_clean_output_dir,
             )
+            .filter(PublicationTask.status.in_(["pending", "processing", "failed"]))
+            .filter(PublicationTask.feature.in_(RETENTION_PROTECTED_TASK_FEATURES))
             .filter(
                 or_(
                     PublicationTask.updated_at.is_(None),
@@ -357,7 +355,17 @@ class ContentPipelineRetentionCleanupService:
             )
             .all()
         )
-        for params, result in task_rows:
+        for row in task_rows:
+            if row.content_clean_output_dir:
+                protected.add(Path(str(row.content_clean_output_dir)).expanduser())
+            payload = (
+                PublicationTask.query.with_entities(PublicationTask.params, PublicationTask.result)
+                .filter(PublicationTask.id == row.id)
+                .one_or_none()
+            )
+            if not payload:
+                continue
+            params, result = payload
             protected.update(_paths_from_nested(result))
             protected.update(_paths_from_nested(params))
         if ZsxqSyncRun is not None:

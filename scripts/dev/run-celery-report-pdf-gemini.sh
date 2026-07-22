@@ -19,7 +19,7 @@ fi
 
 if [ "$WORKER_ID" != "default" ] && [ ! -d "${REPORT_PDF_GEMINI_USER_DATA_DIR:-}" ]; then
     echo "❌ worker profile 不存在: ${REPORT_PDF_GEMINI_USER_DATA_DIR:-}"
-    echo "   请先运行: REPORT_PDF_GEMINI_PROFILE_COUNT=2 ./scripts/dev/prepare-report-pdf-gemini-profile-pool.sh"
+    echo "   请先运行: REPORT_PDF_GEMINI_PROFILE_COUNT=3 ./scripts/dev/prepare-report-pdf-gemini-profile-pool.sh"
     exit 1
 fi
 

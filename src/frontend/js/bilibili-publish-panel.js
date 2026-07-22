@@ -627,6 +627,7 @@ class BilibiliPublishPanel {
         const payload = {
             credential_id: data.get('credential_id') || '',
             video_key: videoKey,
+            visual_workflow_id: selectedVideo?.visualWorkflowId || '',
             cover_key: data.get('cover_key') || '',
             title: this.firstNonBlank(data.get('title'), this.defaultTitle(selectedVideo)),
             desc: data.get('desc') || '',

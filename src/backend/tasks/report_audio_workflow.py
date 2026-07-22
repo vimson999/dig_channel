@@ -9,6 +9,7 @@ from collections import OrderedDict
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import wraps
+from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
 
@@ -28,6 +29,7 @@ from services.report_audio_workflow import (
     DEFAULT_REVIEW_PROMPT,
     FEATURE_NAME,
     audio_path_for_job,
+    clean_final_script_for_tts,
     combine_wav_files,
     normalize_for_tts,
     pdf_first_page_image_path_for_job,
@@ -220,6 +222,21 @@ def _load_task(task_id, *columns):
     return task
 
 
+def _persist_child_celery_task_id(child_id, celery_task_id):
+    (
+        PublicationTask.query
+        .filter(PublicationTask.id == child_id)
+        .update(
+            {
+                "celery_task_id": celery_task_id,
+                "updated_at": datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+    )
+    db.session.commit()
+
+
 def _workflow_result_scope(operation):
     @wraps(operation)
     def wrapped(task_id, *args, **kwargs):
@@ -319,6 +336,33 @@ def _execute_parent_update(statement, params, description):
 
 def _persist_parent_result_fallback(parent_id, result, **fields):
     values = {PublicationTask.result: result, PublicationTask.updated_at: datetime.utcnow()}
+    projected = PublicationTask(result=copy.deepcopy(result))
+    for name in (
+        "report_audio_result_pdf_filename",
+        "report_audio_result_pdf_bytes",
+        "report_audio_result_pdf_topic_title",
+        "report_audio_cover_title",
+        "report_audio_cover_subtitle",
+        "report_audio_structured_title",
+        "report_audio_started_at",
+        "report_audio_completed_at",
+        "report_audio_error",
+        "report_audio_output_path",
+        "report_audio_wav_path",
+        "report_audio_seconds",
+        "report_audio_audio_bytes",
+        "report_audio_video_enabled",
+        "report_audio_video_status",
+        "report_audio_video_publisher_task_id",
+        "report_audio_video_message",
+        "report_audio_video_path",
+        "report_audio_cover_path",
+        "report_audio_vertical_cover_path",
+        "report_audio_podcast_cover_path",
+        "report_audio_bilibili_cover_path",
+        "final_script_chars",
+    ):
+        values[getattr(PublicationTask, name)] = getattr(projected, name)
     for name, value in fields.items():
         values[getattr(PublicationTask, name)] = value
     updated = (
@@ -381,6 +425,9 @@ BANK_ALIASES = [
     ("BofA", "美银"),
     ("Bank of America", "美银"),
     ("美国银行", "美银"),
+    ("美银", "美银"),
+    ("HSBC", "汇丰"),
+    ("汇丰", "汇丰"),
     ("Nomura", "野村"),
     ("野村", "野村"),
     ("Jefferies", "杰富瑞"),
@@ -673,6 +720,12 @@ def _process_job(task_id):
                             "pdf_filename": pdf.get("filename"),
                         },
                     )
+        # Always sanitize at the final TTS boundary as well. This also repairs
+        # reusable/cached structured material created before a cleaner existed.
+        structured = dict(structured or {})
+        structured["final_script_for_tts"] = clean_final_script_for_tts(
+            structured.get("final_script_for_tts") or ""
+        )
         chunks = split_tts_text(structured.get("final_script_for_tts") or "")
         if not chunks:
             raise RuntimeError("结构化结果没有可朗读正文")
@@ -1080,12 +1133,13 @@ def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload, *, at
     db.session.add(child)
     db.session.flush()
     child_id = child.id
+    child_snapshot = SimpleNamespace(**_task_state_snapshot(child))
     db.session.commit()
     async_result = process_report_pdf_gemini_job.apply_async(args=[child_id], queue=gemini_service.QUEUE_NAME, retry=False)
-    child = _load_task(child_id, *TASK_CHILD_COLUMNS)
-    child.celery_task_id = async_result.id
-    db.session.commit()
-    return _load_task(child_id, *TASK_CHILD_COLUMNS)
+    _persist_child_celery_task_id(child_id, async_result.id)
+    child_snapshot.celery_task_id = async_result.id
+    child_snapshot.celery_id = async_result.id
+    return child_snapshot
 
 
 def _manual_gemini_payload(payload):
@@ -1599,7 +1653,12 @@ def _run_doubao_tts_chunks(parent, parent_id, chunks, payload, *, retry_requeste
                 end_progress=_doubao_progress_end(index, total),
             )
         except ChildTaskStillRunning:
-            _record_child(parent_id, label, _task_state_snapshot(_load_task(active_task_id, *TASK_CHILD_COLUMNS)) or active_task)
+            _record_child(
+                parent_id,
+                label,
+                _task_state_snapshot(_load_task(active_task_id, *TASK_TTS_MATCH_COLUMNS))
+                or active_task,
+            )
             raise
 
         tts_summary = _task_state_snapshot(tts_task)
@@ -1612,7 +1671,10 @@ def _run_doubao_tts_chunks(parent, parent_id, chunks, payload, *, retry_requeste
                 continue
             message = "豆包浏览器朗读子任务完成但没有返回可用 WAV 路径"
             _mark_child_failed(tts_task, message)
-            failed_summary = _task_state_snapshot(_load_task(tts_task_id, *TASK_CHILD_COLUMNS)) or dict(tts_summary, error=message)
+            failed_summary = (
+                _task_state_snapshot(_load_task(tts_task_id, *TASK_TTS_MATCH_COLUMNS))
+                or dict(tts_summary, error=message)
+            )
             _record_child_attempt(parent_id, label, failed_summary, _task_chunk_attempt(failed_summary) or 1, max_attempts, "failed", error=message)
             continue
 
@@ -1755,19 +1817,32 @@ def _is_stale_doubao_child(child):
         return False
     if updated_at.tzinfo:
         updated_at = updated_at.astimezone(timezone.utc).replace(tzinfo=None)
-    return (datetime.utcnow() - updated_at).total_seconds() >= _doubao_child_stale_seconds()
+    return (datetime.utcnow() - updated_at).total_seconds() >= _doubao_child_stale_seconds(child)
 
 
 def _doubao_stale_child_message(child):
-    stale_seconds = _doubao_child_stale_seconds()
+    stale_seconds = _doubao_child_stale_seconds(child)
     updated_at = _safe_task_attr(child, "updated_at")
     updated_text = updated_at.isoformat() if updated_at else "-"
     return f"豆包浏览器朗读子任务超过 {stale_seconds}s 未更新，判定为 stale 并释放重试；last_updated={updated_text}"
 
 
-def _doubao_child_stale_seconds():
+def _doubao_child_stale_seconds(child=None):
     default_seconds = _int_env("DOUBAO_BROWSER_TTS_TOTAL_TIMEOUT", 300) + 180
-    return max(60, _int_env("REPORT_AUDIO_DOUBAO_STALE_SECONDS", default_seconds))
+    processing_seconds = max(60, _int_env("REPORT_AUDIO_DOUBAO_STALE_SECONDS", default_seconds))
+    status = str(_safe_task_attr(child, "status") or "").strip().lower()
+    step = str(_safe_task_attr(child, "current_step") or "").strip().lower()
+    if status in {"pending", "queued", "scheduled", "retry"} or step in {"queued", "auto_retry"}:
+        # A queued child does not emit heartbeats until a browser worker claims it.
+        # Keep queue backlog separate from a worker that has actually stopped making
+        # progress, otherwise a healthy but busy queue is incorrectly failed after
+        # the normal browser execution timeout.
+        queue_default = max(processing_seconds, 1800)
+        return max(
+            processing_seconds,
+            _int_env("REPORT_AUDIO_DOUBAO_QUEUE_STALE_SECONDS", queue_default),
+        )
+    return processing_seconds
 
 
 def _failed_tts_tasks_for_chunk(parent_id, chunk_index, expected_text, *, since=None):
@@ -1927,12 +2002,13 @@ def _create_doubao_tts_task(parent, text, index, total, payload, *, attempt=1):
     db.session.add(child)
     db.session.flush()
     child_id = child.id
+    child_snapshot = SimpleNamespace(**_task_state_snapshot(child))
     db.session.commit()
     async_result = process_doubao_browser_tts_job.apply_async(args=[child_id], queue=_doubao_queue_name(), retry=False)
-    child = _load_task(child_id, *TASK_CHILD_COLUMNS)
-    child.celery_task_id = async_result.id
-    db.session.commit()
-    return _load_task(child_id, *TASK_CHILD_COLUMNS)
+    _persist_child_celery_task_id(child_id, async_result.id)
+    child_snapshot.celery_task_id = async_result.id
+    child_snapshot.celery_id = async_result.id
+    return child_snapshot
 
 
 def _doubao_queue_name():
@@ -1943,7 +2019,19 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
     video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
     render_mode = _video_render_mode(payload)
     preview_seconds = _video_preview_seconds(video_options) if render_mode == "preview_10s" else 0
-    existing = _find_existing_publisher_video_task(parent.id, pdf_screenshot, render_mode=render_mode, preview_seconds=preview_seconds)
+    vertical_schemes = _normalize_vertical_schemes(
+        video_options.get("vertical_video_schemes"),
+        video_options.get("vertical_video_scheme") or video_options.get("vertical_scheme") or "scheme1",
+    )
+    vertical_scheme = _primary_vertical_scheme(vertical_schemes)
+    secondary_vertical_scheme = next((item for item in vertical_schemes if item != vertical_scheme), None)
+    existing = _find_existing_publisher_video_task(
+        parent.id,
+        pdf_screenshot,
+        render_mode=render_mode,
+        preview_seconds=preview_seconds,
+        vertical_schemes=vertical_schemes,
+    )
     if existing:
         return existing
 
@@ -1952,13 +2040,6 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
     except (TypeError, ValueError):
         audio_seconds = 0
     preview_end_offset = max(0.0, audio_seconds - preview_seconds) if preview_seconds > 0 and audio_seconds > preview_seconds else 0.0
-    vertical_scheme = str(
-        video_options.get("vertical_video_scheme")
-        or video_options.get("vertical_scheme")
-        or "scheme1"
-    ).strip().lower()
-    if vertical_scheme not in {"scheme1", "scheme2"}:
-        vertical_scheme = "scheme1"
     main_title = _publisher_main_title(structured, video_options, variant="landscape")
     sub_title = _publisher_sub_title(structured, video_options, variant="landscape")
     vertical_main_title = _publisher_main_title(structured, video_options, variant="vertical")
@@ -2034,7 +2115,26 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             **({"subtitle_position": vertical_subtitle_position} if vertical_subtitle_position else {}),
             **({"subtitle_style": vertical_subtitle_style} if vertical_subtitle_style else {}),
         },
-        "vertical_video_2": {"enabled": False, "image_path": ""},
+        "vertical_video_2": {
+            "enabled": _truthy(video_options.get("vertical_enabled", False)) and bool(secondary_vertical_scheme),
+            "scheme": secondary_vertical_scheme,
+            "asr_model": str(video_options.get("asr_model") or "base"),
+            "image_path": screenshot_path,
+            "screenshot_path": screenshot_path,
+            "main_title": vertical_main_title,
+            "sub_title": vertical_sub_title,
+            "date_text": date_text,
+            "institution": institution,
+            "emotion": "bull",
+            "footer_text": str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
+            "image_transform": {
+                "anchor": "top-left",
+                "title_max_lines": 2,
+                "subtitle_max_lines": 1,
+                **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
+            },
+            **({"preview_seconds": preview_seconds} if preview_seconds > 0 else {}),
+        },
         "vertical_thumbnail": {
             "enabled": _truthy(video_options.get("vertical_enabled", False)),
             "scheme": vertical_scheme,
@@ -2136,6 +2236,8 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "pdf": pdf,
             "render_mode": render_mode,
             "preview_seconds": preview_seconds,
+            "vertical_video_scheme": vertical_scheme,
+            "vertical_video_schemes": vertical_schemes,
         },
     }
 
@@ -2153,20 +2255,30 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "bilibili_cover_path": None,
             "render_mode": render_mode,
             "preview_seconds": preview_seconds,
+            "vertical_video_scheme": vertical_scheme,
+            "vertical_video_schemes": vertical_schemes,
         },
     )
     db.session.add(child)
     db.session.flush()
     child_id = child.id
+    child_snapshot = SimpleNamespace(**_task_state_snapshot(child))
     db.session.commit()
     async_result = run_publication_pipeline.apply_async(args=[child_id], queue="render", retry=False)
-    child = _load_task(child_id, *TASK_CHILD_COLUMNS)
-    child.celery_task_id = async_result.id
-    db.session.commit()
-    return _load_task(child_id, *TASK_CHILD_COLUMNS)
+    _persist_child_celery_task_id(child_id, async_result.id)
+    child_snapshot.celery_task_id = async_result.id
+    child_snapshot.celery_id = async_result.id
+    return child_snapshot
 
 
-def _find_existing_publisher_video_task(parent_id, pdf_screenshot, *, render_mode="full_video", preview_seconds=0):
+def _find_existing_publisher_video_task(
+    parent_id,
+    pdf_screenshot,
+    *,
+    render_mode="full_video",
+    preview_seconds=0,
+    vertical_schemes=None,
+):
     candidates = (
         PublicationTask.query
         .filter(PublicationTask.feature == "publisher")
@@ -2183,6 +2295,10 @@ def _find_existing_publisher_video_task(parent_id, pdf_screenshot, *, render_mod
         task for task in candidates
         if _publisher_child_render_mode(task) == render_mode
         and _publisher_child_preview_seconds(task) == int(preview_seconds or 0)
+        and (
+            vertical_schemes is None
+            or _publisher_child_vertical_schemes(task) == _normalize_vertical_schemes(vertical_schemes, "scheme1")
+        )
     ]
     if not matching:
         return None
@@ -2230,6 +2346,19 @@ def _publisher_child_preview_seconds(task):
         return 0
 
 
+def _publisher_child_vertical_schemes(task):
+    result = _copy_dict(_safe_task_attr(task, "result"))
+    params = _copy_dict(_safe_task_attr(task, "params"))
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if not metadata:
+        metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    vertical = params.get("vertical_video") if isinstance(params.get("vertical_video"), dict) else {}
+    return _normalize_vertical_schemes(
+        metadata.get("vertical_video_schemes") or result.get("vertical_video_schemes"),
+        metadata.get("vertical_video_scheme") or vertical.get("scheme") or result.get("vertical_video_scheme") or "scheme1",
+    )
+
+
 def _publisher_video_output_ready(task, pdf_screenshot):
     summary = _publisher_result_summary(task, pdf_screenshot)
     path = (
@@ -2238,7 +2367,18 @@ def _publisher_video_output_ready(task, pdf_screenshot):
         or summary.get("vertical_video_path")
         or summary.get("vertical_preview_video_path")
     )
-    return bool(path and os.path.exists(path))
+    if not (path and os.path.exists(path)):
+        return False
+    vertical_schemes = summary.get("vertical_video_schemes") or []
+    vertical_paths = (
+        summary.get("vertical_preview_video_paths")
+        if summary.get("render_mode") == "preview_10s"
+        else summary.get("vertical_video_paths")
+    ) or {}
+    return not summary.get("vertical_enabled") or not vertical_schemes or all(
+        vertical_paths.get(scheme) and os.path.exists(vertical_paths[scheme])
+        for scheme in vertical_schemes
+    )
 
 
 def _cancel_duplicate_publisher_tasks(tasks, *, keep_id):
@@ -2284,24 +2424,32 @@ def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
             _emit(parent_id, f"{label}_{child_step}", mapped, f"{label}: {child_step}")
             _record_child(parent_id, label, child_snapshot)
         if child_status in TERMINAL_STATUSES:
-            completed_child = _load_task(child_id, *TASK_CHILD_COLUMNS) or child
+            terminal_columns = (
+                TASK_TTS_MATCH_COLUMNS
+                if _is_doubao_child_label(label)
+                else TASK_CHILD_COLUMNS
+            )
+            completed_child = _load_task(child_id, *terminal_columns) or child
             completed_snapshot = _task_state_snapshot(completed_child)
             _record_child(parent_id, label, completed_snapshot)
             _clear_waiting_child(parent_id, label)
-            return _load_task(child_id, *TASK_CHILD_COLUMNS) or completed_snapshot
+            return _load_task(child_id, *terminal_columns) or completed_snapshot
         celery_failure = _celery_child_failure_message(child_snapshot)
         if celery_failure:
             failed_child = _load_task(child_id, *TASK_STATE_COLUMNS) or child
             _mark_child_failed(failed_child, celery_failure)
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
-            return _load_task(child_id, *TASK_CHILD_COLUMNS)
+            return _load_task(
+                child_id,
+                *(TASK_TTS_MATCH_COLUMNS if _is_doubao_child_label(label) else TASK_CHILD_COLUMNS),
+            )
         if _is_doubao_child_label(label) and _is_stale_doubao_child(child_snapshot):
             stale_child = _load_task(child_id, *TASK_STATE_COLUMNS) or child
             _mark_stale_doubao_child_if_needed(stale_child)
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
-            return _load_task(child_id, *TASK_CHILD_COLUMNS)
+            return _load_task(child_id, *TASK_TTS_MATCH_COLUMNS)
         if label == "publisher_video":
             child = _load_task(child_id, *TASK_CHILD_POLL_COLUMNS) or child
             child, requeued = maybe_requeue_stale_publisher_child(child, log=logger)
@@ -2586,10 +2734,96 @@ def _update_result(parent_id, values):
     if _is_postgresql_session():
         _execute_parent_update(
             """
-            UPDATE public.publication_tasks
-            SET result = COALESCE(result, '{}'::jsonb) || CAST(:patch AS jsonb),
+            WITH merged AS (
+                SELECT
+                    id,
+                    COALESCE(result, '{}'::jsonb) || CAST(:patch AS jsonb) AS payload
+                FROM public.publication_tasks
+                WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+                FOR UPDATE
+            )
+            UPDATE public.publication_tasks AS task
+            SET
+                result = merged.payload,
+                report_audio_result_pdf_filename = LEFT(NULLIF(
+                    merged.payload #>> '{pdf,filename}', ''
+                ), 500),
+                report_audio_result_pdf_bytes = LEFT(NULLIF(
+                    merged.payload #>> '{pdf,bytes}', ''
+                ), 40),
+                report_audio_result_pdf_topic_title = LEFT(NULLIF(
+                    merged.payload #>> '{pdf,topic_title}', ''
+                ), 500),
+                report_audio_cover_title = LEFT(NULLIF(
+                    merged.payload #>> '{structured_result,cover_title}', ''
+                ), 500),
+                report_audio_cover_subtitle = LEFT(COALESCE(
+                    NULLIF(merged.payload #>> '{structured_result,cover_subtitle}', ''),
+                    NULLIF(merged.payload #>> '{video,cover_subtitle}', '')
+                ), 220),
+                report_audio_structured_title = LEFT(NULLIF(
+                    merged.payload #>> '{structured_result,title}', ''
+                ), 500),
+                report_audio_started_at = LEFT(NULLIF(merged.payload ->> 'started_at', ''), 64),
+                report_audio_completed_at = LEFT(NULLIF(merged.payload ->> 'completed_at', ''), 64),
+                report_audio_error = NULLIF(merged.payload ->> 'error', ''),
+                report_audio_output_path = LEFT(NULLIF(merged.payload ->> 'output_path', ''), 600),
+                report_audio_wav_path = LEFT(NULLIF(
+                    merged.payload #>> '{audio,wav_path}', ''
+                ), 600),
+                report_audio_seconds = LEFT(NULLIF(
+                    merged.payload #>> '{audio,seconds}', ''
+                ), 40),
+                report_audio_audio_bytes = LEFT(NULLIF(
+                    merged.payload #>> '{audio,bytes}', ''
+                ), 40),
+                report_audio_video_enabled = CASE
+                    WHEN LOWER(merged.payload #>> '{video,enabled}') IN ('1', 'true', 'yes', 'on') THEN TRUE
+                    WHEN LOWER(merged.payload #>> '{video,enabled}') IN ('0', 'false', 'no', 'off') THEN FALSE
+                    ELSE NULL
+                END,
+                report_audio_video_status = LEFT(NULLIF(
+                    merged.payload #>> '{video,status}', ''
+                ), 80),
+                report_audio_video_publisher_task_id = LEFT(NULLIF(
+                    merged.payload #>> '{video,publisher_task_id}', ''
+                ), 36),
+                report_audio_video_message = NULLIF(merged.payload #>> '{video,message}', ''),
+                report_audio_video_path = LEFT(NULLIF(
+                    merged.payload #>> '{video,video_path}', ''
+                ), 600),
+                report_audio_cover_path = LEFT(NULLIF(
+                    merged.payload #>> '{video,cover_path}', ''
+                ), 600),
+                report_audio_vertical_cover_path = LEFT(COALESCE(
+                    NULLIF(merged.payload #>> '{video,vertical_cover_path}', ''),
+                    NULLIF(merged.payload #>> '{video,keyframes,vertical_cover,path}', '')
+                ), 600),
+                report_audio_podcast_cover_path = LEFT(COALESCE(
+                    NULLIF(merged.payload #>> '{video,podcast_cover_path}', ''),
+                    NULLIF(merged.payload #>> '{video,keyframes,podcast_cover,path}', '')
+                ), 600),
+                report_audio_bilibili_cover_path = LEFT(COALESCE(
+                    NULLIF(merged.payload #>> '{video,bilibili_cover_path}', ''),
+                    NULLIF(merged.payload #>> '{video,keyframes,bilibili_cover,path}', '')
+                ), 600),
+                final_script_chars = CASE
+                    WHEN COALESCE(
+                        NULLIF(merged.payload #>> '{structured_result,final_script_for_tts}', ''),
+                        NULLIF(merged.payload ->> 'final_script_for_tts', ''),
+                        NULLIF(merged.payload #>> '{script_material,final_script_for_tts}', '')
+                    ) IS NOT NULL THEN CHAR_LENGTH(BTRIM(COALESCE(
+                        NULLIF(merged.payload #>> '{structured_result,final_script_for_tts}', ''),
+                        NULLIF(merged.payload ->> 'final_script_for_tts', ''),
+                        NULLIF(merged.payload #>> '{script_material,final_script_for_tts}', '')
+                    )))
+                    WHEN COALESCE(merged.payload #>> '{script_material,chars}', '') ~ '^[0-9]+$'
+                        THEN (merged.payload #>> '{script_material,chars}')::integer
+                    ELSE 0
+                END,
                 updated_at = NOW()
-            WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+            FROM merged
+            WHERE task.id = merged.id
             """,
             {
                 "task_id": str(parent_id),
@@ -2789,11 +3023,11 @@ def _video_preview_seconds(video_options):
 
 def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, audio, pdf_screenshot, payload):
     video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
-    scheme = _normalize_vertical_scheme(
-        video_options.get("vertical_video_scheme")
-        or video_options.get("vertical_scheme")
-        or "scheme1"
+    vertical_schemes = _normalize_vertical_schemes(
+        video_options.get("vertical_video_schemes"),
+        video_options.get("vertical_video_scheme") or video_options.get("vertical_scheme") or "scheme1",
     )
+    scheme = _primary_vertical_scheme(vertical_schemes)
     main_title = _publisher_main_title(structured, video_options, variant="landscape")
     sub_title = _publisher_sub_title(structured, video_options, variant="landscape")
     vertical_main_title = _publisher_main_title(structured, video_options, variant="vertical")
@@ -2815,67 +3049,86 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
     keyframes = {}
     cover_path = None
     vertical_background_path = None
+    vertical_background_paths = {}
     vertical_cover_path = None
     podcast_cover_path = None
     bilibili_cover_path = None
 
     if _truthy(video_options.get("enabled", False)):
-        cover_path = thumbnail_service.generate_thumbnail(
-            main_title=main_title,
-            sub_title=sub_title,
-            date_text=date_text,
-            tag_text=tag_text,
-            bg_preset_index=int(video_options.get("bg_index") or 0),
-            layout="left",
-            output_filename=f"report_audio_keyframe_landscape_{parent_id[:8]}_{int(time.time())}.jpg",
-            custom_bg_path=screenshot_path,
-            overlay_opacity=float(video_options.get("overlay_opacity") or 0.5),
-            transform=video_options.get("cover_transform") or {"x": 0, "y": 0, "scale": 1},
-            mode="screenshot",
-        )
+        cover_path = _latest_report_audio_keyframe(parent_id, "landscape", (1920, 1080))
+        if not cover_path:
+            cover_path = thumbnail_service.generate_thumbnail(
+                main_title=main_title,
+                sub_title=sub_title,
+                date_text=date_text,
+                tag_text=tag_text,
+                bg_preset_index=int(video_options.get("bg_index") or 0),
+                layout="left",
+                output_filename=f"report_audio_keyframe_landscape_{parent_id[:8]}_{int(time.time())}.jpg",
+                custom_bg_path=screenshot_path,
+                overlay_opacity=float(video_options.get("overlay_opacity") or 0.5),
+                transform=video_options.get("cover_transform") or {"x": 0, "y": 0, "scale": 1},
+                mode="screenshot",
+            )
         keyframes["landscape_cover"] = _keyframe_artifact(cover_path, "横屏封面关键帧", "16:9")
 
     if _truthy(video_options.get("vertical_enabled", False)):
-        if scheme == "scheme2":
-            vertical_background_path = thumbnail_service.generate_workbench_vertical_thumbnail(
-                main_title=vertical_main_title,
-                sub_title=vertical_sub_title,
-                screenshot_path=screenshot_path,
-                output_filename=f"report_audio_keyframe_vertical_bg_{parent_id[:8]}_{int(time.time())}.jpg",
-                institution=institution,
-                emotion="bull",
-                footer_text=footer_text,
-                image_transform=transform,
+        for selected_scheme in vertical_schemes:
+            asset_name = f"vertical_bg_{selected_scheme}"
+            selected_background_path = _latest_report_audio_keyframe(parent_id, asset_name, (1080, 1920))
+            if not selected_background_path and selected_scheme == "scheme2":
+                selected_background_path = thumbnail_service.generate_workbench_vertical_thumbnail(
+                    main_title=vertical_main_title,
+                    sub_title=vertical_sub_title,
+                    screenshot_path=screenshot_path,
+                    output_filename=f"report_audio_keyframe_{asset_name}_{parent_id[:8]}_{int(time.time())}.jpg",
+                    institution=institution,
+                    emotion="bull",
+                    footer_text=footer_text,
+                    image_transform=transform,
+                )
+            elif not selected_background_path:
+                selected_background_path = thumbnail_service.generate_vertical_thumbnail(
+                    main_title=vertical_main_title,
+                    sub_title=vertical_sub_title,
+                    date_text=date_text,
+                    screenshot_path=screenshot_path,
+                    output_filename=f"report_audio_keyframe_{asset_name}_{parent_id[:8]}_{int(time.time())}.jpg",
+                )
+            vertical_background_paths[selected_scheme] = selected_background_path
+            key = "vertical_background" if selected_scheme == scheme else f"vertical_background_{selected_scheme}"
+            keyframes[key] = _keyframe_artifact(
+                selected_background_path,
+                f"{('方案二' if selected_scheme == 'scheme2' else '方案一')}竖屏背景关键帧",
+                "9:16",
             )
-            vertical_cover_path = thumbnail_service.generate_workbench_vertical_cover(
-                main_title=vertical_main_title,
-                sub_title=vertical_sub_title,
-                screenshot_path=screenshot_path,
-                output_filename=f"report_audio_keyframe_vertical_cover_{parent_id[:8]}_{int(time.time())}.jpg",
-                institution=institution,
-                emotion="bull",
-                footer_text=footer_text,
-                image_transform=transform,
-            )
-            podcast_cover_path = thumbnail_service.generate_workbench_podcast_cover(
-                main_title=vertical_main_title,
-                sub_title=vertical_sub_title,
-                screenshot_path=screenshot_path,
-                output_filename=f"report_audio_keyframe_podcast_cover_{parent_id[:8]}_{int(time.time())}.jpg",
-                institution=institution,
-                emotion="bull",
-                footer_text=footer_text,
-                image_transform=transform,
-            )
-        else:
-            vertical_background_path = thumbnail_service.generate_vertical_thumbnail(
-                main_title=vertical_main_title,
-                sub_title=vertical_sub_title,
-                date_text=date_text,
-                screenshot_path=screenshot_path,
-                output_filename=f"report_audio_keyframe_vertical_bg_{parent_id[:8]}_{int(time.time())}.jpg",
-            )
-        keyframes["vertical_background"] = _keyframe_artifact(vertical_background_path, "竖屏背景关键帧", "9:16")
+
+        vertical_background_path = vertical_background_paths.get(scheme)
+        if "scheme2" in vertical_schemes:
+            vertical_cover_path = _latest_report_audio_keyframe(parent_id, "vertical_cover", (1080, 1440))
+            if not vertical_cover_path:
+                vertical_cover_path = thumbnail_service.generate_workbench_vertical_cover(
+                    main_title=vertical_main_title,
+                    sub_title=vertical_sub_title,
+                    screenshot_path=screenshot_path,
+                    output_filename=f"report_audio_keyframe_vertical_cover_{parent_id[:8]}_{int(time.time())}.jpg",
+                    institution=institution,
+                    emotion="bull",
+                    footer_text=footer_text,
+                    image_transform=transform,
+                )
+            podcast_cover_path = _latest_report_audio_keyframe(parent_id, "podcast_cover", (1400, 1400))
+            if not podcast_cover_path:
+                podcast_cover_path = thumbnail_service.generate_workbench_podcast_cover(
+                    main_title=vertical_main_title,
+                    sub_title=vertical_sub_title,
+                    screenshot_path=screenshot_path,
+                    output_filename=f"report_audio_keyframe_podcast_cover_{parent_id[:8]}_{int(time.time())}.jpg",
+                    institution=institution,
+                    emotion="bull",
+                    footer_text=footer_text,
+                    image_transform=transform,
+                )
         if vertical_cover_path:
             keyframes["vertical_cover"] = _keyframe_artifact(vertical_cover_path, "竖版封皮关键帧", "3:4")
         if podcast_cover_path:
@@ -2889,17 +3142,19 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
             else {}
         ),
     }
-    bilibili_cover_path = thumbnail_service.generate_workbench_bilibili_cover(
-        main_title=vertical_main_title,
-        sub_title=vertical_sub_title,
-        screenshot_path=screenshot_path,
-        output_filename=f"report_audio_keyframe_bilibili_cover_{parent_id[:8]}_{int(time.time())}.jpg",
-        institution=institution,
-        emotion="bull",
-        footer_text=footer_text,
-        image_transform=bilibili_transform,
-        show_footer=False,
-    )
+    bilibili_cover_path = _latest_report_audio_keyframe(parent_id, "bilibili_cover", (1146, 717))
+    if not bilibili_cover_path:
+        bilibili_cover_path = thumbnail_service.generate_workbench_bilibili_cover(
+            main_title=vertical_main_title,
+            sub_title=vertical_sub_title,
+            screenshot_path=screenshot_path,
+            output_filename=f"report_audio_keyframe_bilibili_cover_{parent_id[:8]}_{int(time.time())}.jpg",
+            institution=institution,
+            emotion="bull",
+            footer_text=footer_text,
+            image_transform=bilibili_transform,
+            show_footer=False,
+        )
     keyframes["bilibili_cover"] = _keyframe_artifact(bilibili_cover_path, "B站封皮关键帧", "1146:717")
 
     return {
@@ -2916,8 +3171,10 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
         "vertical_title": vertical_main_title,
         "vertical_subtitle": vertical_sub_title,
         "vertical_video_scheme": scheme,
+        "vertical_video_schemes": vertical_schemes,
         "cover_path": cover_path,
         "vertical_background_path": vertical_background_path,
+        "vertical_background_paths": vertical_background_paths,
         "vertical_cover_path": vertical_cover_path,
         "podcast_cover_path": podcast_cover_path,
         "bilibili_cover_path": bilibili_cover_path,
@@ -2947,11 +3204,67 @@ def _keyframe_artifact(path, label, ratio):
     return artifact
 
 
+def _latest_report_audio_keyframe(parent_id, asset_name, expected_size):
+    """Reuse a valid artifact after a partial keyframe-stage failure."""
+    output_dir = getattr(thumbnail_service, "output_dir", None)
+    if not output_dir:
+        return None
+    prefix = f"report_audio_keyframe_{asset_name}_{str(parent_id)[:8]}_"
+    candidates = sorted(
+        Path(output_dir).glob(f"{prefix}*.jpg"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            from PIL import Image
+
+            with Image.open(path) as image:
+                if image.size == tuple(expected_size):
+                    image.verify()
+                    return str(path)
+        except Exception:
+            continue
+    return None
+
+
 def _normalize_vertical_scheme(value):
     text = str(value or "").strip().lower()
     if text in {"scheme2", "2", "方案二", "workbench", "thumbnail_workbench", "thumbnail-workbench"}:
         return "scheme2"
     return "scheme1"
+
+
+def _normalize_vertical_schemes(value, fallback=None):
+    items = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            items = []
+        else:
+            try:
+                parsed = json.loads(text)
+                items = parsed if isinstance(parsed, list) else [text]
+            except Exception:
+                items = re.split(r"[,;，；\s]+", text)
+    elif not isinstance(value, (list, tuple, set)):
+        items = [] if value is None else [value]
+
+    schemes = []
+    for item in items:
+        normalized = _normalize_vertical_scheme(item)
+        if normalized not in schemes:
+            schemes.append(normalized)
+    if not schemes and fallback is not None:
+        schemes = [_normalize_vertical_scheme(fallback)]
+    return schemes
+
+
+def _primary_vertical_scheme(schemes):
+    normalized = _normalize_vertical_schemes(schemes, "scheme1")
+    if "scheme1" in normalized and "scheme2" in normalized:
+        return "scheme2"
+    return normalized[0]
 
 
 def _is_generic_cover_title_override(value):
@@ -3301,6 +3614,14 @@ def _publisher_result_summary(publisher_task, pdf_screenshot):
         publisher_task,
         "publisher_vertical_video_path",
     )
+    vertical_schemes = _publisher_child_vertical_schemes(publisher_task)
+    primary_vertical_scheme = _primary_vertical_scheme(vertical_schemes)
+    secondary_vertical_scheme = next((item for item in vertical_schemes if item != primary_vertical_scheme), None)
+    vertical_paths = dict(result.get("vertical_video_paths") or {})
+    if vertical_path:
+        vertical_paths.setdefault(primary_vertical_scheme, vertical_path)
+    if secondary_vertical_scheme and result.get("vertical_video_2_path"):
+        vertical_paths.setdefault(secondary_vertical_scheme, result.get("vertical_video_2_path"))
     video_path = landscape_path or vertical_path
     summary = {
         "enabled": True,
@@ -3313,7 +3634,13 @@ def _publisher_result_summary(publisher_task, pdf_screenshot):
         "video_path": video_path,
         "landscape_video_path": landscape_path,
         "vertical_video_path": vertical_path,
+        "vertical_video_2_path": result.get("vertical_video_2_path"),
+        "vertical_video_scheme": primary_vertical_scheme,
+        "vertical_video_schemes": vertical_schemes,
+        "vertical_video_paths": vertical_paths,
+        "vertical_background_paths": result.get("vertical_background_paths") or {},
         "vertical_preview_video_path": vertical_path if preview_seconds > 0 else result.get("vertical_preview_video_path"),
+        "vertical_preview_video_paths": vertical_paths if preview_seconds > 0 else (result.get("vertical_preview_video_paths") or {}),
         "vertical_preview_seconds": preview_seconds or result.get("vertical_preview_seconds"),
         "vertical_preview_scheme": _safe_task_attr(publisher_task, "publisher_vertical_scheme") or vertical_options.get("scheme") or result.get("vertical_video_scheme"),
         "vertical_cover_path": result.get("vertical_cover_path") or _safe_task_attr(publisher_task, "publisher_vertical_cover_path"),
@@ -3327,6 +3654,8 @@ def _publisher_result_summary(publisher_task, pdf_screenshot):
     if preview_seconds > 0:
         summary["message"] = f"{preview_seconds} 秒短视频预览已生成，未生成完整视频"
         summary["vertical_video_path"] = None
+        summary["vertical_video_2_path"] = None
+        summary["vertical_video_paths"] = {}
         summary["video_path"] = None
         summary["landscape_video_path"] = None
     return summary

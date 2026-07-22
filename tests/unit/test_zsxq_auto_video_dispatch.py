@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from flask import Flask
+from sqlalchemy import event
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -225,22 +226,39 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                     "pdf_min_download_count": 40,
                     "wait_for_completion": False,
                 }
+                statements = []
 
-                with patch(
-                    "tasks.report_script_material_workflow.process_report_script_material_workflow_job.apply_async",
-                    return_value=SimpleNamespace(id="celery-script-material"),
-                ) as report_apply:
-                    summary = ZsxqSyncService()._submit_auto_script_material_dispatch_for_run(
-                        run=run,
-                        sync_result=sync_result,
-                        config=config,
-                        workflow_run_id="workflow-1",
-                    )
+                def capture_sql(_conn, _cursor, statement, _parameters, _context, _executemany):
+                    statements.append(statement)
+
+                event.listen(db.engine, "before_cursor_execute", capture_sql)
+                try:
+                    with patch(
+                        "tasks.report_script_material_workflow.process_report_script_material_workflow_job.apply_async",
+                        return_value=SimpleNamespace(id="celery-script-material"),
+                    ) as report_apply:
+                        summary = ZsxqSyncService()._submit_auto_script_material_dispatch_for_run(
+                            run=run,
+                            sync_result=sync_result,
+                            config=config,
+                            workflow_run_id="workflow-1",
+                        )
+                finally:
+                    event.remove(db.engine, "before_cursor_execute", capture_sql)
 
                 self.assertEqual(summary["status"], "completed")
                 self.assertEqual(summary["pdf"]["queued"], 1)
                 self.assertEqual(summary["queued_count"], 1)
                 report_apply.assert_called_once()
+                full_payload_refreshes = [
+                    statement
+                    for statement in statements
+                    if statement.lstrip().lower().startswith("select")
+                    and "from publication_tasks" in statement.lower()
+                    and "publication_tasks.params" in statement.lower()
+                    and "publication_tasks.result" in statement.lower()
+                ]
+                self.assertEqual(full_payload_refreshes, [])
 
                 task = PublicationTask.query.one()
                 self.assertEqual(task.feature, "report_script_material_workflow")

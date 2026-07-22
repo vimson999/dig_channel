@@ -34,6 +34,18 @@ class BugReviewDisciplineTest(unittest.TestCase):
             self.assertIn(cluster["priority"], {"P0", "P1", "P2"})
             self.assertTrue(cluster["systemic_guardrail"].strip(), cluster["key"])
 
+    def test_db_sql_clusters_cannot_hide_unfinished_acceptance(self):
+        registry = self.review.load_registry()
+        clusters = {cluster["key"]: cluster for cluster in registry["clusters"]}
+
+        for key in self.review.DB_SQL_CLUSTERS:
+            cluster = clusters[key]
+            self.assertIn(cluster["acceptance_stage"], self.review.ACCEPTANCE_STAGES)
+            blockers = set(cluster["blocking_records"])
+            self.assertTrue(blockers, key)
+            self.assertTrue(blockers <= set(cluster["records"]), key)
+            self.assertNotEqual(cluster["acceptance_stage"], "accepted", key)
+
 
 if __name__ == "__main__":
     unittest.main()

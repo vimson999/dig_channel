@@ -31,7 +31,7 @@ from services.zsxq_system_sync_test import (
     _scheduler_interval_minutes,
 )
 
-DEFAULT_PROJECT_ROOT = BACKEND_DIR.parents[3]
+DEFAULT_PROJECT_ROOT = BACKEND_DIR.parents[1]
 PROJECT_ROOT = Path(os.environ.get("ZSXQ_PROJECT_ROOT", str(DEFAULT_PROJECT_ROOT))).resolve()
 if not PROJECT_ROOT.exists():
     PROJECT_ROOT = DEFAULT_PROJECT_ROOT
@@ -56,15 +56,29 @@ def _resolve_log_path() -> Tuple[Path, Path]:
 LOG_PATH = _resolve_log_path()[0]
 PID_PATH = PROJECT_ROOT / "runtime" / "zsxq_auto_scheduler.pid"
 
+
+def _env_truthy(name):
+    return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _stdout_is_redirected_to_log():
+    return _env_truthy("SCHEDULER_STDOUT_REDIRECTED_TO_LOG")
+
+
+logging_handlers = [logging.FileHandler(LOG_PATH)]
+if not _stdout_is_redirected_to_log():
+    logging_handlers.append(logging.StreamHandler())
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_PATH),
-        logging.StreamHandler(),
-    ],
+    handlers=logging_handlers,
 )
 logger = logging.getLogger("zsxq_auto_scheduler")
+
+
+def _skip_startup_trigger():
+    return _env_truthy("ZSXQ_AUTO_SCHEDULER_SKIP_STARTUP_TRIGGER")
 
 
 def _write_runtime_pid_file(cookie_source=None):
@@ -392,18 +406,24 @@ class ZsxqAutoScheduler:
         self.refresh_schedule()
         self._scheduled_interval = self.interval_minutes
         logger.info("ZSXQ 自动同步调度器启动")
-        try:
-            immediate_result = self.queue_once(trigger="scheduler_start")
+        if _skip_startup_trigger():
             logger.info(
-                "[ZSXQ_AUTO_SYNC] startup_trigger | queued=%s skipped=%s reason=%s round=%s/%s",
-                bool(immediate_result.get("queued")),
-                bool(immediate_result.get("skipped")),
-                immediate_result.get("reason") or "queued",
-                immediate_result.get("round") or "-",
-                immediate_result.get("max_rounds") or "-",
+                "[ZSXQ_AUTO_SYNC] startup_trigger | queued=False skipped=True "
+                "reason=maintenance_reload"
             )
-        except Exception as exc:
-            logger.exception("[ZSXQ_AUTO_SYNC] startup_trigger_failed | error=%s", exc)
+        else:
+            try:
+                immediate_result = self.queue_once(trigger="scheduler_start")
+                logger.info(
+                    "[ZSXQ_AUTO_SYNC] startup_trigger | queued=%s skipped=%s reason=%s round=%s/%s",
+                    bool(immediate_result.get("queued")),
+                    bool(immediate_result.get("skipped")),
+                    immediate_result.get("reason") or "queued",
+                    immediate_result.get("round") or "-",
+                    immediate_result.get("max_rounds") or "-",
+                )
+            except Exception as exc:
+                logger.exception("[ZSXQ_AUTO_SYNC] startup_trigger_failed | error=%s", exc)
 
         while self.running:
             self.interval_minutes = self._interval_minutes()

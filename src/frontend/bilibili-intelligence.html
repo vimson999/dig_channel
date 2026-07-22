@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>B站情报台 - Shioa</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    <link rel="stylesheet" href="css/zsxq-lab.css?v=20260715-date-range">
+    <link rel="stylesheet" href="css/bilibili-intelligence.css?v=20260720-channel-filter">
+</head>
+<body>
+    <main class="intel-page">
+        <section class="hero-card">
+            <div>
+                <span class="eyebrow"><i class="fa-solid fa-satellite-dish"></i> COMPETITOR INTELLIGENCE</span>
+                <h1>B站内容情报台</h1>
+                <p>追踪对标 UP 主的新投稿，匹配本地 PDF / MP3，并核验是否已经进入编排。</p>
+            </div>
+            <div class="hero-actions">
+                <button id="add-competitor-btn" class="button button-secondary" type="button"><i class="fa-solid fa-plus"></i>添加对手</button>
+                <button id="match-pending-btn" class="button button-dark" type="button"><i class="fa-solid fa-wand-magic-sparkles"></i>AI 匹配待处理</button>
+                <button id="sync-all-btn" class="button button-primary" type="button"><i class="fa-solid fa-arrows-rotate"></i>同步全部</button>
+            </div>
+        </section>
+
+        <section id="metric-grid" class="metric-grid" aria-label="情报概览"></section>
+
+        <section class="workspace">
+            <aside class="source-panel">
+                <div class="panel-heading">
+                    <div><span class="panel-kicker">MONITORS</span><h2>监控源</h2></div>
+                    <span id="latest-sync" class="muted">尚未同步</span>
+                </div>
+                <div id="competitor-list" class="competitor-list"></div>
+                <div class="source-note">
+                    <i class="fa-solid fa-shield-halved"></i>
+                    <p>账号 UID 是稳定追踪键。网页地址只用于人工回看，不参与常规采集。</p>
+                </div>
+            </aside>
+
+            <section class="feed-panel">
+                <div class="filter-bar">
+                    <label class="search-box"><i class="fa-solid fa-magnifying-glass"></i><input id="query-input" type="search" placeholder="搜索对手标题或本地素材"></label>
+                    <select id="competitor-filter" aria-label="频道筛选"><option value="">全部频道</option></select>
+                    <select id="content-type-filter" aria-label="内容类型"><option value="">全部类型</option><option value="report">研报转视频</option><option value="audio">MP3 转视频</option></select>
+                    <select id="match-status-filter" aria-label="匹配状态">
+                        <option value="">全部匹配状态</option>
+                        <option value="pending">待匹配</option>
+                        <option value="matched">已找到对应素材</option>
+                        <option value="possible">疑似对应</option>
+                        <option value="related">仅同主题</option>
+                        <option value="not_found">本地未发现</option>
+                        <option value="insufficient_evidence">证据不足</option>
+                        <option value="failed">匹配失败</option>
+                    </select>
+                    <select id="range-filter" aria-label="时间范围"><option value="7">近 7 天</option><option value="30" selected>近 30 天</option><option value="90">近 90 天</option><option value="365">近 1 年</option></select>
+                    <button id="refresh-btn" class="icon-button" type="button" title="刷新列表"><i class="fa-solid fa-rotate"></i></button>
+                </div>
+
+                <div class="feed-heading">
+                    <div><h2>最新投稿</h2><p id="feed-summary">正在读取情报...</p></div>
+                    <div class="batch-actions"><span id="selected-count">已选 0 条</span><button id="match-selected-btn" type="button" disabled>匹配所选</button></div>
+                </div>
+
+                <div id="video-feed" class="video-feed" aria-live="polite"></div>
+                <div id="empty-state" class="empty-state hidden"><i class="fa-regular fa-folder-open"></i><h3>当前没有投稿</h3><p>先同步监控源，或调整筛选条件。</p></div>
+                <div class="pagination"><button id="prev-page" type="button"><i class="fa-solid fa-chevron-left"></i></button><span id="page-label">第 1 页</span><button id="next-page" type="button"><i class="fa-solid fa-chevron-right"></i></button></div>
+            </section>
+        </section>
+    </main>
+
+    <dialog id="competitor-dialog" class="intel-dialog">
+        <form id="competitor-form" method="dialog">
+            <div class="dialog-heading"><div><span class="panel-kicker">NEW MONITOR</span><h2>添加竞争对手</h2></div><button class="dialog-close" type="button" data-close-dialog><i class="fa-solid fa-xmark"></i></button></div>
+            <label><span>UP 主名称</span><input name="name" required maxlength="255" placeholder="例如：小白投资笔记"></label>
+            <label><span>B站 UID</span><input name="uid" required inputmode="numeric" pattern="[0-9]+" placeholder="空间地址中的数字 UID"></label>
+            <label><span>内容类型</span><select name="content_type"><option value="report">研报转视频</option><option value="audio">MP3 转视频</option></select></label>
+            <label><span>空间地址（可选）</span><input name="source_url" type="url" placeholder="https://space.bilibili.com/.../video"></label>
+            <div class="dialog-actions"><button class="button button-secondary" type="button" data-close-dialog>取消</button><button class="button button-primary" type="submit">保存监控源</button></div>
+        </form>
+    </dialog>
+
+    <dialog id="detail-dialog" class="intel-dialog detail-dialog">
+        <div class="dialog-heading"><div><span class="panel-kicker">MATCH AUDIT</span><h2>匹配详情</h2></div><button class="dialog-close" type="button" data-close-detail><i class="fa-solid fa-xmark"></i></button></div>
+        <div id="detail-content"></div>
+    </dialog>
+
+    <div id="loading-layer" class="loading-layer hidden"><div><i class="fa-solid fa-circle-notch fa-spin"></i><strong id="loading-title">正在处理</strong><span id="loading-message">请稍候...</span></div></div>
+    <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20260718-bili-intelligence"></script>
+    <script src="js/bilibili-intelligence.js?v=20260720-channel-filter"></script>
+</body>
+</html>

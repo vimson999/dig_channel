@@ -144,6 +144,25 @@ class ReportAudioWorkflowServiceTest(unittest.TestCase):
         self.assertNotIn("开场与变量切换", script)
         self.assertNotIn("产业背景与实地调研印证", script)
 
+    def test_normalizer_strips_citation_markers_from_tts_script(self):
+        payload = {
+            "final_script_for_tts": (
+                "固定资产投资增速转负[cite: 1]。"
+                "政策节奏仍需观察【cite：2】，市场关注财政发力(cite: 3-4)。"
+                "最后是裸露标记 cite:5 也不能进入语音。"
+            ),
+        }
+
+        with patch.object(report_audio_service, "_deepseek_normalize", return_value=payload):
+            normalized = normalize_for_tts("原始 Gemini 文本")
+
+        script = normalized["final_script_for_tts"]
+        self.assertEqual(
+            script,
+            "固定资产投资增速转负。政策节奏仍需观察，市场关注财政发力。最后是裸露标记 也不能进入语音。",
+        )
+        self.assertNotRegex(script.lower(), r"cite\s*[:：]")
+
     def test_structured_result_quality_detects_section_outline_labels(self):
         issue = structured_result_quality_issue({
             "final_script_for_tts": "第一部分：开场与变量切换 这里才是正文。",

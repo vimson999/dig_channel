@@ -141,6 +141,36 @@ class ZsxqAutoPublishServiceTest(unittest.TestCase):
         self.assertEqual(result["cookie_attempts"][0]["auth_hint"], "认证失效")
         self.assertEqual(result["cookie_attempts"][1]["status"], "success")
 
+    def test_db_credentials_do_not_fall_back_to_legacy_pool_when_unavailable(self):
+        config = {
+            "group_id": "group-1",
+            "cookie_accounts": [
+                {"id": "legacy", "name": "旧账号", "cookie": "expired", "enabled": True},
+            ],
+        }
+
+        with patch.object(auto_publish, "has_app_context", return_value=True):
+            with patch.object(
+                auto_publish,
+                "_db_publish_cookie_accounts",
+                side_effect=ValueError("没有可用于当前星球的知识星球发帖凭据"),
+            ):
+                with self.assertRaisesRegex(ValueError, "没有可用于当前星球"):
+                    auto_publish._resolve_runtime_cookie_accounts(config, required=True)
+
+    def test_legacy_pool_is_disabled_even_when_db_has_no_accounts(self):
+        config = {
+            "group_id": "group-1",
+            "cookie_accounts": [
+                {"id": "legacy", "name": "旧账号", "cookie": "cookie", "enabled": True},
+            ],
+        }
+
+        with patch.object(auto_publish, "has_app_context", return_value=True):
+            with patch.object(auto_publish, "_db_publish_cookie_accounts", return_value=[]):
+                with self.assertRaisesRegex(ValueError, "数据库中没有可用于当前星球"):
+                    auto_publish._resolve_runtime_cookie_accounts(config, required=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,12 +10,27 @@ PID_FILE="${BACKEND_PID_FILE:-$RUNTIME_DIR/backend.pid}"
 PORT="${BACKEND_PORT:-5001}"
 STOP_TIMEOUT_SECONDS="${BACKEND_STOP_TIMEOUT_SECONDS:-10}"
 
-descendant_pids() {
+process_group_id() {
+  local value
+  # Managed services use start_new_session=True, which also creates a distinct
+  # process group. pgid is portable across Darwin and procps; Darwin's "sess"
+  # field is an audit-session value and cannot identify this boundary.
+  value="$(ps -o pgid= -p "$1" 2>/dev/null | awk 'NR == 1 { gsub(/[[:space:]]/, ""); print; exit }')"
+  case "$value" in
+    ''|*[!0-9]*) return 1 ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+same_process_group_descendant_pids() {
   local parent="$1"
+  local root_group="$2"
   local child
   for child in $(pgrep -P "$parent" 2>/dev/null || true); do
-    descendant_pids "$child"
-    printf '%s\n' "$child"
+    if [ "$(process_group_id "$child")" = "$root_group" ]; then
+      same_process_group_descendant_pids "$child" "$root_group"
+      printf '%s\n' "$child"
+    fi
   done
 }
 
@@ -44,8 +59,15 @@ stop_pid() {
     return 0
   fi
 
+  local root_group
+  root_group="$(process_group_id "$pid")"
+  if [ -z "$root_group" ]; then
+    echo "❌ 无法确认后端进程 $pid 的 process group，拒绝扩大停止范围。"
+    return 1
+  fi
+
   local descendants
-  descendants="$(descendant_pids "$pid")"
+  descendants="$(same_process_group_descendant_pids "$pid" "$root_group")"
   local targets=()
   local child
   while IFS= read -r child; do

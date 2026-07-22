@@ -12,6 +12,25 @@ from models.zsxq_sync import ZsxqAttachment, ZsxqSyncRun  # noqa: E402
 
 
 class TaskProjectionModelTest(unittest.TestCase):
+    def test_publication_task_projects_content_clean_terminal_result(self):
+        task = PublicationTask(
+            params={"feature": "content_pdf_clean"},
+            result={
+                "local_output_dir": "/tmp/cleaned",
+                "files_count": 4,
+                "success_count": 3,
+                "failed_count": 1,
+                "message": "清洗完成",
+                "cleaned_files": [{"path": f"/tmp/{index}.pdf"} for index in range(3)],
+            },
+        )
+
+        self.assertEqual(task.content_clean_output_dir, "/tmp/cleaned")
+        self.assertEqual(task.content_clean_files_count, 4)
+        self.assertEqual(task.content_clean_success_count, 3)
+        self.assertEqual(task.content_clean_failed_count, 1)
+        self.assertEqual(task.content_clean_message, "清洗完成")
+
     def test_publication_task_projection_from_report_audio_payload(self):
         task = PublicationTask(
             params={
@@ -44,6 +63,11 @@ class TaskProjectionModelTest(unittest.TestCase):
                     "message": "ok",
                     "video_path": "/tmp/video.mp4",
                     "cover_path": "/tmp/cover.png",
+                    "vertical_cover_path": "/tmp/vertical-cover.jpg",
+                    "keyframes": {
+                        "podcast_cover": {"path": "/tmp/podcast-cover.jpg"},
+                        "bilibili_cover": {"path": "/tmp/bilibili-cover.jpg"},
+                    },
                 },
                 "output_path": "/tmp/result.json",
             },
@@ -59,6 +83,9 @@ class TaskProjectionModelTest(unittest.TestCase):
         self.assertEqual(task.report_audio_wav_path, "/tmp/audio.wav")
         self.assertTrue(task.report_audio_video_enabled)
         self.assertEqual(task.report_audio_video_path, "/tmp/video.mp4")
+        self.assertEqual(task.report_audio_vertical_cover_path, "/tmp/vertical-cover.jpg")
+        self.assertEqual(task.report_audio_podcast_cover_path, "/tmp/podcast-cover.jpg")
+        self.assertEqual(task.report_audio_bilibili_cover_path, "/tmp/bilibili-cover.jpg")
         self.assertEqual(task.task_title, "元数据标题")
 
     def test_publication_task_projection_prefers_filename_over_generic_topic_title(self):
@@ -199,13 +226,14 @@ class TaskProjectionModelTest(unittest.TestCase):
                 },
                 "video": {"enabled": True},
             },
-            result={},
+            result={"bilibili_cover_path": "/tmp/publisher-bilibili-cover.jpg"},
         )
 
         self.assertEqual(task.publisher_child_role, "ciketc_vertical")
         self.assertEqual(task.publisher_aspect_ratio, "9:16")
         self.assertFalse(task.publisher_generate_subtitles)
         self.assertEqual(task.publisher_audio_signature, "sig-1")
+        self.assertEqual(task.publisher_bilibili_cover_path, "/tmp/publisher-bilibili-cover.jpg")
 
     def test_zsxq_attachment_file_ext_projection(self):
         attachment = ZsxqAttachment(

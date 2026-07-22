@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, patch
 
+from sqlalchemy.exc import PendingRollbackError
+
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(BACKEND_DIR) not in sys.path:
@@ -27,6 +29,13 @@ class FakeCeleryTask:
 
 
 class ZsxqWorkflowFailureGuardTest(unittest.TestCase):
+    def test_pending_rollback_error_is_retryable(self):
+        self.assertTrue(
+            zsxq_workflow._is_retryable_db_error(
+                PendingRollbackError("Can't reconnect until invalid transaction is rolled back")
+            )
+        )
+
     def test_retryable_db_error_retries_before_failure_email(self):
         celery_task = FakeCeleryTask(retries=0)
 

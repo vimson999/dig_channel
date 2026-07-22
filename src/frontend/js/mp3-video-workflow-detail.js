@@ -16,8 +16,17 @@ class Mp3VideoWorkflowDetailPage {
         this.biliPanelDraft = null;
         this.biliPanelDraftJobId = '';
         this.lastBiliUpload = null;
+        this.douyinPanel = null;
+        this.douyinPanelDraft = null;
+        this.douyinPanelDraftJobId = '';
+        this.wechatChannelsPanel = null;
+        this.wechatChannelsPanelDraft = null;
+        this.wechatChannelsPanelDraftJobId = '';
+        this.activePublishPlatform = 'bilibili';
+        this.publishTabs = null;
         this.refreshTimer = null;
         this.autoRefreshMs = 5000;
+        this.quickNavObserver = null;
         this.els = {
             jobIdLabel: document.getElementById('job-id-label'),
             title: document.getElementById('detail-title'),
@@ -26,6 +35,7 @@ class Mp3VideoWorkflowDetailPage {
             openApiJson: document.getElementById('open-api-json'),
             notice: document.getElementById('notice'),
             root: document.getElementById('detail-root'),
+            quickNav: document.getElementById('quick-nav'),
         };
         this.bind();
         this.load();
@@ -33,7 +43,19 @@ class Mp3VideoWorkflowDetailPage {
 
     bind() {
         this.els.refreshBtn?.addEventListener('click', () => this.load({ manual: true }));
-        window.addEventListener('beforeunload', () => this.clearAutoRefresh());
+        window.addEventListener('beforeunload', () => { this.clearAutoRefresh(); this.quickNavObserver?.disconnect(); this.douyinPanel?.destroy?.(); this.wechatChannelsPanel?.destroy?.(); });
+        this.els.quickNav?.addEventListener('click', (event) => {
+            const item = event.target.closest('[data-quick-nav]');
+            if (item && !item.disabled) {
+                const target = document.getElementById(item.dataset.quickNav || '');
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    this.setActiveQuickNav(target.id);
+                }
+                return;
+            }
+            if (event.target.closest('[data-scroll-top]')) window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
         this.els.root?.addEventListener('click', (event) => {
             const continueFullVideoButton = event.target.closest('[data-continue-full-video]');
             if (continueFullVideoButton) {
@@ -275,6 +297,9 @@ class Mp3VideoWorkflowDetailPage {
         const job = this.job || {};
         const title = job.plan?.title || job.request?.audio?.topic_title || job.request?.audio?.filename || job.job_id || 'MP3 视频编排详情';
         const biliPanelDraft = this.captureBilibiliPanelDraft(job);
+        const douyinPanelDraft = this.captureDouyinPanelDraft(job);
+        const wechatChannelsPanelDraft = this.captureWechatChannelsPanelDraft(job);
+        this.publishTabs?.destroy?.();
         this.els.title.textContent = title;
         this.els.subtitle.textContent = [
             job.request?.audio?.filename || '',
@@ -282,22 +307,89 @@ class Mp3VideoWorkflowDetailPage {
             job.completed_at ? `完成 ${this.formatDateTime(job.completed_at)}` : '',
         ].filter(Boolean).join(' · ');
         this.els.root.innerHTML = [
-            this.renderSummary(job),
-            this.renderDsExtract(job),
-            this.renderDownloads(job),
-            this.renderArtifacts(job),
-            this.renderVideos(job),
-            this.renderBilibiliPublisher(job),
-            this.renderLogs(job),
+            this.navSection('task-overview', this.renderSummary(job)),
+            this.navSection('content-extract', this.renderDsExtract(job)),
+            this.navSection('downloads', this.renderDownloads(job)),
+            this.navSection('visual-assets', this.renderArtifacts(job)),
+            this.navSection('video-files', this.renderVideos(job)),
+            this.navSection('publish-center', this.renderPublishCenter()),
+            this.navSection('run-logs', this.renderLogs(job)),
             this.renderRaw(job),
         ].join('');
         this.mountBilibiliPanel(job, biliPanelDraft);
+        this.mountDouyinPanel(job, douyinPanelDraft);
+        this.mountWechatChannelsPanel(job, wechatChannelsPanelDraft);
+        this.mountPublishTabs();
         this.refreshBiliScheduleInput();
         const credentialId = document.getElementById('bili-credential-id')?.value || '';
         if (credentialId) {
             this.applyBiliSeasonOptions(credentialId);
             this.loadBiliSeasons(credentialId);
         }
+        this.setupQuickNavigation();
+    }
+
+    navSection(id, html) {
+        const content = String(html || '').trim();
+        if (!content) return '';
+        return `<div id="${id}" data-nav-section class="scroll-mt-24 space-y-4">${content}</div>`;
+    }
+
+    setupQuickNavigation() {
+        if (!this.els.quickNav) return;
+        this.quickNavObserver?.disconnect();
+        const buttons = Array.from(this.els.quickNav.querySelectorAll('[data-quick-nav]'));
+        const sections = [];
+        buttons.forEach((button) => {
+            const section = document.getElementById(button.dataset.quickNav || '');
+            button.disabled = !section;
+            button.classList.toggle('opacity-40', !section);
+            button.classList.toggle('cursor-not-allowed', !section);
+            if (section) sections.push(section);
+        });
+        if (!sections.length) return;
+        this.setActiveQuickNav(sections[0].id);
+        this.quickNavObserver = new IntersectionObserver(() => {
+            const passed = sections.filter((section) => section.getBoundingClientRect().top <= 112);
+            this.setActiveQuickNav((passed[passed.length - 1] || sections[0]).id);
+        }, { rootMargin: '-96px 0px -62% 0px', threshold: [0, 0.05, 0.2] });
+        sections.forEach((section) => this.quickNavObserver.observe(section));
+    }
+
+    setActiveQuickNav(id) {
+        this.els.quickNav?.querySelectorAll('[data-quick-nav]').forEach((button) => {
+            const active = button.dataset.quickNav === id;
+            button.classList.toggle('bg-indigo-50', active);
+            button.classList.toggle('text-indigo-700', active);
+            button.classList.toggle('text-slate-600', !active);
+            if (active) button.setAttribute('aria-current', 'location');
+            else button.removeAttribute('aria-current');
+        });
+    }
+
+    renderPublishCenter() {
+        if (!window.renderPlatformPublishTabs) {
+            return `${this.renderBilibiliPublisher(this.job)}<div id="mp3-douyin-publish-panel"></div><div id="mp3-wechat-channels-publish-panel"></div>`;
+        }
+        return window.renderPlatformPublishTabs({
+            prefix: 'mp3',
+            activeKey: this.activePublishPlatform,
+            panelIds: {
+                bilibili: 'mp3-bilibili-publish-panel',
+                douyin: 'mp3-douyin-publish-panel',
+                wechat_channels: 'mp3-wechat-channels-publish-panel',
+            },
+        });
+    }
+
+    mountPublishTabs() {
+        const container = this.els.root?.querySelector('[data-platform-publish-tabs="mp3"]');
+        if (!container || !window.PlatformPublishTabs) return;
+        this.publishTabs = new window.PlatformPublishTabs({
+            container,
+            activeKey: this.activePublishPlatform,
+            onChange: (key) => { this.activePublishPlatform = key; },
+        });
     }
 
     captureBilibiliPanelDraft(job) {
@@ -340,6 +432,72 @@ class Mp3VideoWorkflowDetailPage {
         this.biliPanel.setJob(job, { formDraft });
         this.biliPanelDraft = this.biliPanel.readFormDraft?.() || formDraft || null;
         this.biliPanelDraftJobId = String(job?.job_id || job?.id || this.jobId || '');
+    }
+
+    captureDouyinPanelDraft(job) {
+        const nextJobId = String(job?.job_id || job?.id || this.jobId || '');
+        const currentJobId = String(this.douyinPanel?.job?.job_id || this.douyinPanel?.job?.id || this.douyinPanelDraftJobId || '');
+        if ((!currentJobId || !nextJobId || currentJobId === nextJobId) && this.douyinPanel?.readFormDraft) {
+            this.douyinPanelDraft = this.douyinPanel.readFormDraft() || this.douyinPanelDraft;
+        }
+        if (this.douyinPanelDraftJobId && nextJobId && this.douyinPanelDraftJobId !== nextJobId) this.douyinPanelDraft = null;
+        this.douyinPanelDraftJobId = nextJobId;
+        return this.douyinPanelDraft ? { ...this.douyinPanelDraft } : null;
+    }
+
+    mountDouyinPanel(job, formDraft = null) {
+        const container = document.getElementById('mp3-douyin-publish-panel');
+        if (!container || !window.DouyinPublishPanel) return;
+        if (!this.douyinPanel || this.douyinPanel.container !== container) {
+            this.douyinPanel?.destroy?.();
+            this.douyinPanel = new window.DouyinPublishPanel({
+                container,
+                apiRoot: () => this.apiRoot(),
+                request: (path, options) => this.request(path, options),
+                onNotice: (message, type) => this.setNotice(message, type),
+                listPath: (jobId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/douyin-uploads`,
+                uploadPath: (jobId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/douyin-upload`,
+                cancelPath: (jobId, taskId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/douyin-upload/${encodeURIComponent(taskId)}/cancel`,
+                videoOptions: (payload) => this.biliVideoOptions(payload),
+                defaultTitle: (payload, videoKey) => this.defaultBiliTitle(payload, videoKey),
+                defaultTags: '财经,音频,内资闭门会',
+                emptyDescription: '当前任务还没有完整视频文件。请先生成横屏或竖屏视频。',
+            });
+        }
+        this.douyinPanel.setJob(job, { formDraft });
+    }
+
+    captureWechatChannelsPanelDraft(job) {
+        const nextJobId = String(job?.job_id || job?.id || this.jobId || '');
+        const currentJobId = String(this.wechatChannelsPanel?.job?.job_id || this.wechatChannelsPanel?.job?.id || this.wechatChannelsPanelDraftJobId || '');
+        if ((!currentJobId || !nextJobId || currentJobId === nextJobId) && this.wechatChannelsPanel?.readFormDraft) {
+            this.wechatChannelsPanelDraft = this.wechatChannelsPanel.readFormDraft() || this.wechatChannelsPanelDraft;
+        }
+        if (this.wechatChannelsPanelDraftJobId && nextJobId && this.wechatChannelsPanelDraftJobId !== nextJobId) this.wechatChannelsPanelDraft = null;
+        this.wechatChannelsPanelDraftJobId = nextJobId;
+        return this.wechatChannelsPanelDraft ? { ...this.wechatChannelsPanelDraft } : null;
+    }
+
+    mountWechatChannelsPanel(job, formDraft = null) {
+        const container = document.getElementById('mp3-wechat-channels-publish-panel');
+        if (!container || !window.WechatChannelsPublishPanel) return;
+        if (!this.wechatChannelsPanel || this.wechatChannelsPanel.container !== container) {
+            this.wechatChannelsPanel?.destroy?.();
+            this.wechatChannelsPanel = new window.WechatChannelsPublishPanel({
+                container,
+                apiRoot: () => this.apiRoot(),
+                request: (path, options) => this.request(path, options),
+                onNotice: (message, type) => this.setNotice(message, type),
+                listPath: (jobId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/wechat-channels-uploads`,
+                uploadPath: (jobId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/wechat-channels-upload`,
+                cancelPath: (jobId, taskId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/wechat-channels-upload/${encodeURIComponent(taskId)}/cancel`,
+                videoOptions: (payload) => this.biliVideoOptions(payload),
+                defaultTitle: (payload, videoKey) => this.defaultBiliTitle(payload, videoKey),
+                defaultTags: '财经,音频,内资闭门会',
+                emptyDescription: '当前任务还没有完整视频文件。请先生成横屏或竖屏视频。',
+            });
+        }
+        this.wechatChannelsPanel.setJob(job, { formDraft });
     }
 
     sourceLabel(job) {

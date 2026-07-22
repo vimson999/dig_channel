@@ -7,6 +7,14 @@ import requests
 import json
 from datetime import date
 
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_LIVE_API_TESTS") != "1",
+    reason="真实 HTTP 联调测试；设置 RUN_LIVE_API_TESTS=1 后显式执行。",
+)
+
 # 添加项目根目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -16,7 +24,7 @@ def test_api():
     print("=" * 50)
     
     # API基础URL
-    base_url = "http://localhost:5000"
+    base_url = os.environ.get("LIVE_API_BASE_URL", "http://localhost:5001").rstrip("/")
     
     # 1. 测试基础接口
     print("\n1. 测试基础接口...")
@@ -195,7 +203,7 @@ def test_specific_endpoints():
     print("\n" + "=" * 50)
     print("🔍 详细端点测试")
     
-    base_url = "http://localhost:5000"
+    base_url = os.environ.get("LIVE_API_BASE_URL", "http://localhost:5001").rstrip("/")
     
     # 测试分页
     print("\n测试分页功能...")

@@ -372,11 +372,43 @@ class VideoEditorService:
             logger.warning(f"⚠️ [FFPROBE] 无法读取媒体时长: {media_path} | {exc}")
             return 0
 
+    def _assert_playable_video(self, media_path):
+        """Reject partial MP4 files before they can be published or recovered."""
+        try:
+            result = subprocess.run(
+                [
+                    'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                    '-show_entries', 'stream=codec_type,width,height:format=duration',
+                    '-of', 'json', media_path,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            payload = json.loads(result.stdout or '{}')
+            streams = payload.get('streams') if isinstance(payload, dict) else []
+            duration = float(((payload.get('format') or {}).get('duration')) or 0)
+            valid_stream = any(
+                isinstance(stream, dict)
+                and stream.get('codec_type') == 'video'
+                and int(stream.get('width') or 0) > 0
+                and int(stream.get('height') or 0) > 0
+                for stream in (streams or [])
+            )
+            if duration <= 0.1 or not valid_stream:
+                raise ValueError('missing video stream or duration')
+        except Exception as exc:
+            raise RuntimeError(f'视频文件完整性校验失败: {media_path}: {exc}') from exc
+        return media_path
+
     def _synthesize_ffmpeg_direct(self, image_file, audio_file, output_path, subtitles=None, cta_image_path=None, cta_pos=(0,0), is_vertical=False, audio_start=0, audio_duration=None, transform=None, margin_v_override=None, subtitle_position=None, subtitle_size='normal', subtitle_style=None, export_params=None):
         """High-performance synthesis using direct FFmpeg command with customizable export parameters."""
         import time
         s_t = time.time()
         sub_path = None
+        output_root, _output_ext = os.path.splitext(output_path)
+        working_output_path = f"{output_root}.part-{uuid.uuid4().hex[:8]}.mp4"
 
         try:
             # 1. 解析导出参数
@@ -494,7 +526,7 @@ class VideoEditorService:
                 vf_chain += f" [bg]; [{cta_idx}:v] format=rgba [cta]; [bg][cta] overlay={cta_pos[0]}:{cta_pos[1]}"
 
             ffmpeg_executable = shlex.quote(self._ffmpeg_executable())
-            cmd = f"{ffmpeg_executable} -y " + " ".join(inputs) + f" -filter_complex \"{vf_chain}\" -aspect {aspect_ratio} {res_flag} -c:v {self.video_codec} -b:v {v_bitrate} -c:a aac -shortest \"{output_path}\""
+            cmd = f"{ffmpeg_executable} -y " + " ".join(inputs) + f" -filter_complex \"{vf_chain}\" -aspect {aspect_ratio} {res_flag} -c:v {self.video_codec} -b:v {v_bitrate} -c:a aac -shortest \"{working_output_path}\""
             
             logger.info(f"🎬 [FFMPEG_EXEC] Mode: {'Vertical' if is_vertical else 'Horizontal'} | Aspect: {aspect_ratio} | Res: {target_w}x{target_h}")
             logger.info(f"🎬 [FFMPEG_EXEC] Command: {cmd}")
@@ -509,6 +541,8 @@ class VideoEditorService:
                     subprocess.run(fallback_cmd, shell=True, check=True, capture_output=True)
                 else:
                     raise
+            self._assert_playable_video(working_output_path)
+            os.replace(working_output_path, output_path)
             logger.info(f"✅ [FFMPEG_EXEC] Success: {os.path.basename(output_path)}")
             return output_path
 
@@ -522,6 +556,9 @@ class VideoEditorService:
             raise RuntimeError(f"FFmpeg 视频合成失败: {summary}") from e
         finally:
             if sub_path and os.path.exists(sub_path): os.remove(sub_path)
+            if os.path.exists(working_output_path):
+                try: os.remove(working_output_path)
+                except OSError: pass
 
     def process_vertical_video(self, image_file, audio_files, subtitles=None, output_filename=None, transform=None, margin_v_override=None, subtitle_position=None, subtitle_size='normal', subtitle_style=None, export_params=None, duration_limit=None):
         """Synthesize a 9:16 vertical video with correct sequential subtitles."""
@@ -585,6 +622,7 @@ class VideoEditorService:
         temp_audio = os.path.join(self.upload_folder, f"temp_h_a_{uuid.uuid4().hex[:6]}.mp3")
         temp_body = os.path.join(self.upload_folder, f"temp_h_body_{uuid.uuid4().hex[:6]}.mp4")
         cta_img = None
+        working_final_path = None
         
         try:
             audio_list = audio_file if isinstance(audio_file, list) else [audio_file]
@@ -638,25 +676,34 @@ class VideoEditorService:
                 final_clips.append(v_out.resize(newsize=(target_w, target_h)) if v_out.w != target_w else v_out)
 
             final_path = os.path.join(self.output_folder, output_filename or f"video_{uuid.uuid4().hex[:8]}.mp4")
+            final_root, _final_ext = os.path.splitext(final_path)
+            working_final_path = f"{final_root}.part-{uuid.uuid4().hex[:8]}.mp4"
             
             if len(final_clips) > 0:
+                if len(final_clips) == 1:
+                    # The body already contains the final audio/video streams.
+                    # Re-encoding it through MoviePy doubles runtime and leaves
+                    # a much larger interruption window for long audio jobs.
+                    final_clips[0].close()
+                    self._assert_playable_video(temp_body)
+                    os.replace(temp_body, final_path)
+                    return final_path
                 concat = concatenate_videoclips(final_clips) if len(final_clips) > 1 else final_clips[0]
                 # 这里也应用码率和帧率控制
                 fps = int(export_params.get('fps', 30)) if export_params else 30
                 bitrate_map = {'low': '1500k', 'medium': '4000k', 'high': '8000k'}
                 v_bitrate = bitrate_map.get(export_params.get('bitrate', 'medium').lower(), '4000k') if export_params else '4000k'
                 
-                concat.write_videofile(final_path, codec=self.video_codec, audio_codec='aac', fps=fps, bitrate=v_bitrate, logger=None)
+                concat.write_videofile(working_final_path, codec=self.video_codec, audio_codec='aac', fps=fps, bitrate=v_bitrate, logger=None)
+                self._assert_playable_video(working_final_path)
                 
-                if len(final_clips) > 1:
-                    for c in final_clips: c.close()
-                else:
-                    final_clips[0].close()
+                for c in final_clips: c.close()
+                os.replace(working_final_path, final_path)
             
             return final_path
 
         finally:
-            for f in [temp_audio, temp_body, cta_img]:
+            for f in [temp_audio, temp_body, cta_img, working_final_path]:
                 if f and os.path.exists(f): 
                     try: os.remove(f)
                     except: pass

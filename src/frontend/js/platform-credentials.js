@@ -230,7 +230,7 @@ function renderList() {
                 </dl>
                 <div class="mt-4 flex flex-wrap gap-2">
                     <button data-action="validate" class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-700 hover:bg-emerald-100">
-                        <i class="fas fa-shield-halved mr-1"></i>结构校验
+                        <i class="fas fa-shield-halved mr-1"></i>${['douyin', 'wechat_channels'].includes(item.platform) ? '登录校验' : '结构校验'}
                     </button>
                     <button data-action="disable" class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-700 hover:bg-amber-100">
                         <i class="fas fa-ban mr-1"></i>${item.status === 'disabled' ? '启用' : '禁用'}
@@ -384,7 +384,10 @@ async function handleListClick(event) {
             return;
         }
         if (action === 'validate') {
-            const data = await requestJson(`/platform-credentials/${encodeURIComponent(item.id)}/validate`, { method: 'POST' });
+            const data = await requestJson(`/platform-credentials/${encodeURIComponent(item.id)}/validate`, {
+                method: 'POST',
+                body: JSON.stringify({ live: ['douyin', 'wechat_channels'].includes(item.platform) }),
+            });
             showMessage(data.message || data.data?.message || '校验完成。', data.valid === false ? 'warning' : 'success');
             await loadCredentials();
             return;

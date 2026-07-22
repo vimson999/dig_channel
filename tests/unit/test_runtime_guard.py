@@ -2,9 +2,11 @@ import os
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from flask import Flask
+from sqlalchemy import event
+from sqlalchemy.exc import OperationalError
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -122,6 +124,55 @@ class RuntimeGuardTest(unittest.TestCase):
         self.assertFalse(blocked["allowed"])
         self.assertEqual(blocked["reason"], "feature_capacity")
         self.assertEqual(blocked["active_count"], 1)
+
+    def test_active_count_uses_direct_scalar_count_without_wide_subquery(self):
+        self._add_task("processing", feature="mp3_video_workflow", step="generate_visual_assets")
+        statements = []
+
+        def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(" ".join(statement.lower().split()))
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            count = runtime_guard._publication_task_active_count(
+                "mp3_video_workflow",
+                mode="start",
+            )
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        self.assertEqual(count, 1)
+        count_sql = next(statement for statement in statements if "count(" in statement)
+        self.assertIn("count(publication_tasks.id)", count_sql)
+        self.assertNotIn("from (select", count_sql)
+        self.assertNotIn("publication_tasks.params", count_sql)
+        self.assertNotIn("publication_tasks.result", count_sql)
+
+    def test_active_count_replaces_invalid_session_and_retries_once(self):
+        query = MagicMock()
+        query.filter.return_value = query
+        query.scalar.side_effect = [
+            OperationalError(
+                "SELECT count(*)",
+                {},
+                RuntimeError("server closed the connection unexpectedly"),
+            ),
+            2,
+        ]
+
+        with patch.object(db.session, "query", return_value=query), patch.object(
+            runtime_guard,
+            "release_db_session_quietly",
+        ) as release:
+            count = runtime_guard._publication_task_active_count(
+                "report_pdf_audio_workflow",
+                task_id="current-task",
+                mode="submit",
+            )
+
+        self.assertEqual(count, 2)
+        release.assert_called_once_with()
+        self.assertEqual(query.scalar.call_count, 2)
 
     def test_admission_retry_budget_does_not_fall_back_to_celery_default_three(self):
         with patch.dict(os.environ, {}, clear=False):

@@ -1,14 +1,20 @@
 import base64
+import copy
 import hashlib
 import json
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from cryptography.fernet import Fernet, InvalidToken
 from flask import current_app
+from sqlalchemy import case
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import load_only
 
 from models import db
@@ -19,7 +25,8 @@ PLATFORM_DEFINITIONS = [
     {"id": "zsxq", "name": "知识星球", "credential_types": ["cookie_header", "cookie_json"]},
     {"id": "feishu", "name": "飞书", "credential_types": ["cookie_header", "cookie_json"]},
     {"id": "bilibili", "name": "B站", "credential_types": ["bilibili_auth", "cookie_header", "cookie_json"]},
-    {"id": "douyin", "name": "抖音", "credential_types": ["cookie_header", "token_json"]},
+    {"id": "douyin", "name": "抖音", "credential_types": ["cookie_json", "cookie_header", "token_json"]},
+    {"id": "wechat_channels", "name": "微信视频号", "credential_types": ["cookie_json", "cookie_header"]},
     {"id": "wechat", "name": "微信", "credential_types": ["cookie_header", "token_json"]},
     {"id": "other", "name": "其他平台", "credential_types": ["cookie_header", "token_json", "api_key"]},
 ]
@@ -33,6 +40,7 @@ PURPOSE_DEFINITIONS = [
     {"id": "bilibili.upload", "name": "B站视频上传", "platform": "bilibili"},
     {"id": "bilibili.browser", "name": "B站浏览器自动化", "platform": "bilibili"},
     {"id": "douyin.publish", "name": "抖音发布", "platform": "douyin"},
+    {"id": "wechat_channels.publish", "name": "视频号发布", "platform": "wechat_channels"},
     {"id": "wechat.publish", "name": "微信发布", "platform": "wechat"},
     {"id": "other.browser", "name": "其他浏览器自动化", "platform": "other"},
     {"id": "other.api", "name": "其他 API 调用", "platform": "other"},
@@ -44,6 +52,12 @@ VALID_PURPOSE_IDS = {item["id"] for item in PURPOSE_DEFINITIONS}
 CREDENTIAL_LAST_USED_TOUCH_INTERVAL_SECONDS = int(
     os.environ.get("PLATFORM_CREDENTIAL_LAST_USED_TOUCH_INTERVAL_SECONDS", "300") or 300
 )
+CREDENTIAL_RESOLUTION_CACHE_TTL_SECONDS = max(
+    0.0,
+    float(os.environ.get("PLATFORM_CREDENTIAL_RESOLUTION_CACHE_TTL_SECONDS", "10") or 10),
+)
+_CREDENTIAL_RESOLUTION_CACHE = {}
+_CREDENTIAL_RESOLUTION_CACHE_LOCK = RLock()
 RUNTIME_CREDENTIAL_COLUMNS = (
     PlatformCredentialAccount.id,
     PlatformCredentialAccount.platform,
@@ -59,6 +73,7 @@ RUNTIME_CREDENTIAL_COLUMNS = (
     PlatformCredentialAccount.extra,
     PlatformCredentialAccount.updated_at,
 )
+RUNTIME_CREDENTIAL_FIELD_NAMES = tuple(column.key for column in RUNTIME_CREDENTIAL_COLUMNS)
 LIST_CREDENTIAL_COLUMNS = (
     PlatformCredentialAccount.id,
     PlatformCredentialAccount.platform,
@@ -115,6 +130,22 @@ def decrypt_payload(encrypted_payload: str) -> str:
 
 def _runtime_credential_query():
     return PlatformCredentialAccount.query.options(load_only(*RUNTIME_CREDENTIAL_COLUMNS))
+
+
+def _invalidate_credential_resolution_cache(account_id: Optional[str] = None) -> None:
+    with _CREDENTIAL_RESOLUTION_CACHE_LOCK:
+        if account_id is None:
+            _CREDENTIAL_RESOLUTION_CACHE.clear()
+            return
+        account_id = str(account_id)
+        stale_keys = [key for key in _CREDENTIAL_RESOLUTION_CACHE if key[0] == account_id]
+        for key in stale_keys:
+            _CREDENTIAL_RESOLUTION_CACHE.pop(key, None)
+
+
+def _clone_credential_resolution(value):
+    account, payload = value
+    return copy.deepcopy(account), payload
 
 
 def _credential_has_purpose(account: PlatformCredentialAccount, purpose: Optional[str]) -> bool:
@@ -376,6 +407,10 @@ def list_credentials(filters: Dict[str, Any]) -> Tuple[List[PlatformCredentialAc
 
 def save_credential(data: Dict[str, Any], account_id: Optional[str] = None) -> PlatformCredentialAccount:
     platform = _normalize_platform(data.get("platform"))
+    credential_type = (data.get("credential_type") or "cookie_header").strip()
+    platform_definition = next(item for item in PLATFORM_DEFINITIONS if item["id"] == platform)
+    if credential_type not in platform_definition["credential_types"]:
+        raise CredentialError(f"{platform_definition['name']} 不支持凭据类型 {credential_type}")
     purposes = _normalize_purposes(platform, data.get("purposes") or [])
     status = _normalize_status(data.get("status"), "active")
     name = (data.get("name") or "").strip()
@@ -410,7 +445,7 @@ def save_credential(data: Dict[str, Any], account_id: Optional[str] = None) -> P
 
     account.platform = platform
     account.name = name
-    account.credential_type = (data.get("credential_type") or "cookie_header").strip()
+    account.credential_type = credential_type
     account.purposes = purposes
     account.status = status
     account.priority = int(data.get("priority") if data.get("priority") is not None else account.priority or 100)
@@ -421,7 +456,10 @@ def save_credential(data: Dict[str, Any], account_id: Optional[str] = None) -> P
     account.notes = (data.get("notes") or "").strip() or None
     account.extra = data.get("extra") if isinstance(data.get("extra"), dict) else (account.extra or {})
     account.updated_at = datetime.utcnow()
+    db.session.flush()
+    saved_account_id = str(account.id)
     db.session.commit()
+    _invalidate_credential_resolution_cache(saved_account_id)
     return account
 
 
@@ -431,24 +469,76 @@ def soft_delete_credential(account_id: str) -> PlatformCredentialAccount:
         raise CredentialError("凭据不存在")
     account.status = "deleted"
     account.updated_at = datetime.utcnow()
+    deleted_account_id = str(account.id)
     db.session.commit()
+    _invalidate_credential_resolution_cache(deleted_account_id)
     return account
 
 
-def validate_credential(account_id: str) -> Dict[str, Any]:
+def validate_credential(account_id: str, *, live: bool = False) -> Dict[str, Any]:
     account = PlatformCredentialAccount.query.get(account_id)
     if not account:
         raise CredentialError("凭据不存在")
     payload = decrypt_payload(account.encrypted_payload)
     ok, message = validate_payload_structure(account.platform, account.credential_type, payload)
+    platform = account.platform
+
+    if ok and live and platform in {"douyin", "wechat_channels"}:
+        # Browser validation is a remote wait. Never hold a DB session (or an
+        # ORM instance) while creator.douyin.com is loading.
+        account_id = account.id
+        db.session.remove()
+        if platform == "douyin":
+            from services.douyin_publish import DouyinBrowserError as BrowserError
+            from services.douyin_publish import check_douyin_session as check_session
+        else:
+            from services.wechat_channels_publish import WechatChannelsBrowserError as BrowserError
+            from services.wechat_channels_publish import check_wechat_channels_session as check_session
+
+        try:
+            check = check_session(payload)
+        except BrowserError as exc:
+            check = {"status": "unknown", "message": str(exc)}
+        ok = check["status"] == "valid"
+        message = check["message"]
+        now = datetime.utcnow()
+        values = {
+            PlatformCredentialAccount.last_validated_at: now,
+            PlatformCredentialAccount.last_error: None if ok else message,
+            PlatformCredentialAccount.updated_at: now,
+        }
+        if ok:
+            values[PlatformCredentialAccount.status] = "active"
+        elif check["status"] == "auth_required":
+            values[PlatformCredentialAccount.status] = "expired"
+        _update_credential_state(account_id, values)
+        refreshed = PlatformCredentialAccount.query.options(
+            load_only(*LIST_CREDENTIAL_COLUMNS)
+        ).filter(PlatformCredentialAccount.id == account_id).first()
+        return {
+            "valid": ok,
+            "validation": "live",
+            "status": check["status"],
+            "message": message,
+            "account": refreshed.to_dict(),
+        }
+
     account.last_validated_at = datetime.utcnow()
     account.last_error = None if ok else message
     if ok and account.status in {"expired", "disabled"}:
         account.status = "active"
     if not ok and account.status == "active":
         account.status = "expired"
+    validated_account_id = str(account.id)
     db.session.commit()
-    return {"valid": ok, "message": message, "account": account.to_dict()}
+    _invalidate_credential_resolution_cache(validated_account_id)
+    return {
+        "valid": ok,
+        "validation": "structure",
+        "status": "valid" if ok else "invalid",
+        "message": message,
+        "account": account.to_dict(),
+    }
 
 
 def validate_payload_structure(platform: str, credential_type: str, payload: str) -> Tuple[bool, str]:
@@ -465,6 +555,20 @@ def validate_payload_structure(platform: str, credential_type: str, payload: str
         if missing:
             return False, "缺少 B站必要字段: " + ", ".join(missing)
         return True, "结构校验通过：检测到 SESSDATA 和 bili_jct"
+
+    if platform == "douyin":
+        if not pairs:
+            return False, "未检测到抖音 Cookie 字段"
+        session_keys = {"sessionid", "sessionid_ss", "sid_guard", "sid_tt"}
+        detected = sorted(key for key in pairs if key.lower() in session_keys)
+        if not detected:
+            return False, "未检测到抖音登录态字段 sessionid/sessionid_ss"
+        return True, "结构校验通过：检测到抖音登录态字段 " + ", ".join(detected[:2])
+
+    if platform == "wechat_channels":
+        if not pairs:
+            return False, "未检测到视频号 Cookie 字段"
+        return True, f"结构校验通过：检测到 {len(pairs)} 个视频号 Cookie 字段，建议继续执行登录校验"
 
     if platform == "feishu":
         common_keys = {"session", "passport_web_did", "MONITOR_WEB_ID", "tenant_key", "locale"}
@@ -512,7 +616,45 @@ def resolve_credential_record(
     account_id: Optional[str] = None,
     platform: Optional[str] = None,
     purpose: Optional[str] = None,
-) -> Tuple[PlatformCredentialAccount, str]:
+) -> Tuple[SimpleNamespace, str]:
+    if not account_id or CREDENTIAL_RESOLUTION_CACHE_TTL_SECONDS <= 0:
+        return _resolve_credential_record_uncached(
+            account_id=account_id,
+            platform=platform,
+            purpose=purpose,
+        )
+
+    cache_key = (
+        str(account_id),
+        str(platform or "").strip().lower(),
+        str(purpose or "").strip(),
+    )
+    with _CREDENTIAL_RESOLUTION_CACHE_LOCK:
+        now = time.monotonic()
+        cached = _CREDENTIAL_RESOLUTION_CACHE.get(cache_key)
+        if cached and cached[0] > now:
+            return _clone_credential_resolution(cached[1])
+        if cached:
+            _CREDENTIAL_RESOLUTION_CACHE.pop(cache_key, None)
+
+        resolved = _resolve_credential_record_uncached(
+            account_id=account_id,
+            platform=platform,
+            purpose=purpose,
+        )
+        _CREDENTIAL_RESOLUTION_CACHE[cache_key] = (
+            time.monotonic() + CREDENTIAL_RESOLUTION_CACHE_TTL_SECONDS,
+            _clone_credential_resolution(resolved),
+        )
+        return _clone_credential_resolution(resolved)
+
+
+def _resolve_credential_record_uncached(
+    *,
+    account_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    purpose: Optional[str] = None,
+) -> Tuple[SimpleNamespace, str]:
     base_query = PlatformCredentialAccount.query.filter(PlatformCredentialAccount.status == "active")
     if account_id:
         base_query = base_query.filter(PlatformCredentialAccount.id == account_id)
@@ -546,9 +688,13 @@ def resolve_credential_record(
         account = ordered_query.options(load_only(*RUNTIME_CREDENTIAL_COLUMNS)).first()
     if not account:
         raise CredentialError("没有可用的平台凭据")
+    account_snapshot = SimpleNamespace(**{
+        field: getattr(account, field)
+        for field in RUNTIME_CREDENTIAL_FIELD_NAMES
+    })
     if _mark_credential_used_if_due(account):
         db.session.commit()
-    return account, decrypt_payload(account.encrypted_payload)
+    return account_snapshot, decrypt_payload(account_snapshot.encrypted_payload)
 
 
 def resolve_credential_records(
@@ -580,36 +726,55 @@ def resolve_credential_records(
     return [(account, decrypt_payload(account.encrypted_payload)) for account in accounts]
 
 
+def _update_credential_state(account_id: str, values: Dict[Any, Any]) -> None:
+    """Persist one idempotent marker, retrying a dead checked-out connection once."""
+    for attempt in range(2):
+        try:
+            PlatformCredentialAccount.query.filter(
+                PlatformCredentialAccount.id == str(account_id)
+            ).update(values, synchronize_session=False)
+            db.session.commit()
+            _invalidate_credential_resolution_cache(account_id)
+            return
+        except DBAPIError as exc:
+            db.session.rollback()
+            if attempt == 0 and exc.connection_invalidated:
+                continue
+            raise
+
+
 def mark_credential_success(account_id: Optional[str]) -> None:
     if not account_id:
         return
-    account = PlatformCredentialAccount.query.get(account_id)
-    if not account:
-        return
     now = datetime.utcnow()
-    account.last_used_at = now
-    account.last_validated_at = now
-    account.last_error = None
-    if account.status == "expired":
-        account.status = "active"
-    account.updated_at = now
-    db.session.commit()
+    _update_credential_state(
+        str(account_id),
+        {
+            PlatformCredentialAccount.last_used_at: now,
+            PlatformCredentialAccount.last_validated_at: now,
+            PlatformCredentialAccount.last_error: None,
+            PlatformCredentialAccount.status: case(
+                (PlatformCredentialAccount.status == "expired", "active"),
+                else_=PlatformCredentialAccount.status,
+            ),
+            PlatformCredentialAccount.updated_at: now,
+        },
+    )
 
 
 def mark_credential_error(account_id: Optional[str], error: Any, *, expired: bool = False) -> None:
     if not account_id:
         return
-    account = PlatformCredentialAccount.query.get(account_id)
-    if not account:
-        return
     now = datetime.utcnow()
-    account.last_used_at = now
-    account.last_error = str(error or "")[:1000]
+    values = {
+        PlatformCredentialAccount.last_used_at: now,
+        PlatformCredentialAccount.last_error: str(error or "")[:1000],
+        PlatformCredentialAccount.updated_at: now,
+    }
     if expired:
-        account.status = "expired"
-        account.last_validated_at = now
-    account.updated_at = now
-    db.session.commit()
+        values[PlatformCredentialAccount.status] = "expired"
+        values[PlatformCredentialAccount.last_validated_at] = now
+    _update_credential_state(str(account_id), values)
 
 
 def is_auth_error(error: Any) -> bool:
@@ -743,6 +908,64 @@ def resolve_bilibili_auth(
     if required and (not auth["sessdata"] or not auth["bili_jct"]):
         raise CredentialError("B站凭据缺少 SESSDATA 或 bili_jct")
     return auth
+
+
+def resolve_douyin_cookies(
+    *,
+    account_id: Optional[str] = None,
+    required: bool = True,
+) -> Dict[str, Any]:
+    try:
+        account, payload = resolve_credential_record(
+            account_id=account_id,
+            platform="douyin",
+            purpose="douyin.publish",
+        )
+    except CredentialError:
+        if required:
+            raise
+        return {}
+
+    from services.douyin_publish import playwright_cookies_from_payload
+
+    cookies = playwright_cookies_from_payload(payload)
+    if required and not cookies:
+        raise CredentialError("抖音凭据里没有可用 Cookie")
+    return {
+        "cookies": cookies,
+        "credential_id": account.id,
+        "credential_name": account.name,
+        "credential_source": "db",
+    }
+
+
+def resolve_wechat_channels_cookies(
+    *,
+    account_id: Optional[str] = None,
+    required: bool = True,
+) -> Dict[str, Any]:
+    try:
+        account, payload = resolve_credential_record(
+            account_id=account_id,
+            platform="wechat_channels",
+            purpose="wechat_channels.publish",
+        )
+    except CredentialError:
+        if required:
+            raise
+        return {}
+
+    from services.wechat_channels_publish import playwright_cookies_from_payload
+
+    cookies = playwright_cookies_from_payload(payload)
+    if required and not cookies:
+        raise CredentialError("视频号凭据里没有可用 Cookie")
+    return {
+        "cookies": cookies,
+        "credential_id": account.id,
+        "credential_name": account.name,
+        "credential_source": "db",
+    }
 
 
 def resolve_feishu_cookie(

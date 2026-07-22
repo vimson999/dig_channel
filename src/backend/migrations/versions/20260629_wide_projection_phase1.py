@@ -140,23 +140,23 @@ def _backfill():
                 WHEN NULLIF(raw_payload #>> '{question,text}', '') IS NOT NULL
                   OR NULLIF(raw_payload #>> '{answer,text}', '') IS NOT NULL
                     THEN 'question_answer'
-                WHEN json_typeof(raw_payload #> '{talk,article}') = 'object'
-                  OR json_typeof(raw_payload -> 'article') = 'object'
+                WHEN jsonb_typeof(raw_payload #> '{talk,article}') = 'object'
+                  OR jsonb_typeof(raw_payload -> 'article') = 'object'
                     THEN 'article'
                 ELSE 'talk'
             END,
             files_count =
-                CASE WHEN json_typeof(raw_payload -> 'files') = 'array' THEN json_array_length(raw_payload -> 'files') ELSE 0 END
-              + CASE WHEN json_typeof(raw_payload #> '{talk,files}') = 'array' THEN json_array_length(raw_payload #> '{talk,files}') ELSE 0 END
-              + CASE WHEN json_typeof(raw_payload #> '{article,files}') = 'array' THEN json_array_length(raw_payload #> '{article,files}') ELSE 0 END
-              + CASE WHEN json_typeof(raw_payload #> '{talk,article,files}') = 'array' THEN json_array_length(raw_payload #> '{talk,article,files}') ELSE 0 END,
+                CASE WHEN jsonb_typeof(raw_payload -> 'files') = 'array' THEN jsonb_array_length(raw_payload -> 'files') ELSE 0 END
+              + CASE WHEN jsonb_typeof(raw_payload #> '{talk,files}') = 'array' THEN jsonb_array_length(raw_payload #> '{talk,files}') ELSE 0 END
+              + CASE WHEN jsonb_typeof(raw_payload #> '{article,files}') = 'array' THEN jsonb_array_length(raw_payload #> '{article,files}') ELSE 0 END
+              + CASE WHEN jsonb_typeof(raw_payload #> '{talk,article,files}') = 'array' THEN jsonb_array_length(raw_payload #> '{talk,article,files}') ELSE 0 END,
             images_count =
-                CASE WHEN json_typeof(raw_payload -> 'images') = 'array' THEN json_array_length(raw_payload -> 'images') ELSE 0 END
-              + CASE WHEN json_typeof(raw_payload #> '{talk,images}') = 'array' THEN json_array_length(raw_payload #> '{talk,images}') ELSE 0 END
-              + CASE WHEN json_typeof(raw_payload #> '{article,images}') = 'array' THEN json_array_length(raw_payload #> '{article,images}') ELSE 0 END
-              + CASE WHEN json_typeof(raw_payload #> '{talk,article,images}') = 'array' THEN json_array_length(raw_payload #> '{talk,article,images}') ELSE 0 END
-              + CASE WHEN json_typeof(raw_payload #> '{question,images}') = 'array' THEN json_array_length(raw_payload #> '{question,images}') ELSE 0 END
-              + CASE WHEN json_typeof(raw_payload #> '{answer,images}') = 'array' THEN json_array_length(raw_payload #> '{answer,images}') ELSE 0 END,
+                CASE WHEN jsonb_typeof(raw_payload -> 'images') = 'array' THEN jsonb_array_length(raw_payload -> 'images') ELSE 0 END
+              + CASE WHEN jsonb_typeof(raw_payload #> '{talk,images}') = 'array' THEN jsonb_array_length(raw_payload #> '{talk,images}') ELSE 0 END
+              + CASE WHEN jsonb_typeof(raw_payload #> '{article,images}') = 'array' THEN jsonb_array_length(raw_payload #> '{article,images}') ELSE 0 END
+              + CASE WHEN jsonb_typeof(raw_payload #> '{talk,article,images}') = 'array' THEN jsonb_array_length(raw_payload #> '{talk,article,images}') ELSE 0 END
+              + CASE WHEN jsonb_typeof(raw_payload #> '{question,images}') = 'array' THEN jsonb_array_length(raw_payload #> '{question,images}') ELSE 0 END
+              + CASE WHEN jsonb_typeof(raw_payload #> '{answer,images}') = 'array' THEN jsonb_array_length(raw_payload #> '{answer,images}') ELSE 0 END,
             content = COALESCE(
                 NULLIF(
                     CONCAT_WS(E'\\n\\n',

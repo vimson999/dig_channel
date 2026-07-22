@@ -14,6 +14,40 @@ const pageAccessGuard = (() => {
     }
 
     const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+    const showLocalBackendOfflineNotice = () => {
+        window.localBackendUnavailable = true;
+
+        const renderNotice = () => {
+            if (document.getElementById('local-backend-offline-notice')) return;
+
+            const notice = document.createElement('div');
+            notice.id = 'local-backend-offline-notice';
+            notice.setAttribute('role', 'status');
+            notice.style.cssText = [
+                'position:fixed',
+                'left:50%',
+                'bottom:24px',
+                'transform:translateX(-50%)',
+                'z-index:10000',
+                'max-width:calc(100vw - 32px)',
+                'padding:10px 16px',
+                'border:1px solid #f59e0b',
+                'border-radius:10px',
+                'background:#fffbeb',
+                'color:#92400e',
+                'font:14px/1.5 system-ui,sans-serif',
+                'box-shadow:0 8px 24px rgba(15,23,42,.14)'
+            ].join(';');
+            notice.textContent = '本地后端暂时无法连接，页面已继续打开；恢复后刷新即可。';
+            document.body.appendChild(notice);
+        };
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', renderNotice, {once: true});
+        } else {
+            renderNotice();
+        }
+    };
     const buildLoginUrl = (reason = '') => {
         const loginUrl = new URL('/login.html', window.location.origin);
         const returnPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
@@ -61,7 +95,11 @@ const pageAccessGuard = (() => {
         return true;
     }).catch(error => {
         console.error('🔐 [SHARED_NAV] 登录状态校验失败:', error);
-        // 网络异常时保留 token，待服务恢复后仍可继续使用，但页面访问按未验证处理。
+        // 网络异常时保留 token：本地免登录环境继续打开页面，线上仍按未验证处理。
+        if (isLocal) {
+            showLocalBackendOfflineNotice();
+            return true;
+        }
         return redirectToLogin('verification_failed');
     });
 })();
@@ -77,6 +115,7 @@ class SharedNavigation {
     
     init() {
         this.renderNavigation();
+        this.renderFooter();
         this.setupEventListeners();
         this.loadUserInfo();
     }
@@ -99,6 +138,8 @@ class SharedNavigation {
             return 'zsxq-lab';
         } else if (filename === 'zsxq-insights.html') {
             return 'zsxq-insights';
+        } else if (filename === 'bilibili-intelligence.html') {
+            return 'bilibili-intelligence';
         } else if (filename === 'zsxq-auto-publish.html') {
             return 'zsxq-system-sync';
         } else if (filename === 'document-converter.html') {
@@ -111,6 +152,10 @@ class SharedNavigation {
             return 'tts';
         } else if (filename === 'doubao-browser-tts-test.html') {
             return 'doubao-browser-tts-test';
+        } else if (filename === 'douyin-publish-test.html') {
+            return 'douyin-publish-test';
+        } else if (filename === 'wechat-channels-publish-test.html') {
+            return 'wechat-channels-publish-test';
         } else if (filename === 'mhtml-pdf.html') {
             return 'mhtml-pdf';
         } else if (filename === 'pdf-tools.html') {
@@ -135,6 +180,8 @@ class SharedNavigation {
             return 'report-audio-workflow-test';
         } else if (filename === 'report-script-material-workflow-test.html') {
             return 'report-script-material-workflow-test';
+        } else if (filename === 'report-stick-figure-video-workflow.html' || filename === 'report-stick-figure-video-workflow-detail.html') {
+            return 'report-stick-figure-video-workflow';
         } else if (filename === 'report-visual-plan-test.html') {
             return 'report-visual-plan-test';
         } else if (filename === 'report-top10-workflow-test.html') {
@@ -182,12 +229,15 @@ class SharedNavigation {
             'trending': '爆款视频搜索',
             'zsxq-lab': '知识星球实验台',
             'zsxq-insights': '生财情报台',
+            'bilibili-intelligence': 'B站内容情报台',
             'zsxq-auto-publish': '知识星球任务策略',
             'document-converter': '文档转换工具',
             'word-long-image': 'Word 转长图',
             'pdf-scroll-video': 'PDF 滚动视频',
             'tts': '豆包语音 V3',
             'doubao-browser-tts-test': '豆包网页朗读测试台',
+            'douyin-publish-test': '抖音上传测试台',
+            'wechat-channels-publish-test': '视频号投递测试台',
             'mhtml-pdf': 'MHTML转PDF工具',
             'pdf-tools': 'PDF 工具平台',
             'report-video-factory': '研报导图视频工厂',
@@ -200,6 +250,7 @@ class SharedNavigation {
             'gemini-browser-test': '研报 PDF Gem 测试台',
             'report-audio-workflow-test': '研报转语音编排台',
             'report-script-material-workflow-test': '研报基础文案物料台',
+            'report-stick-figure-video-workflow': '研报 PDF 转火柴人视频',
             'report-visual-plan-test': '研报视觉编排测试台',
             'report-top10-workflow-test': '今日研报 Top10 编排台',
             'mp3-video-workflow': 'MP3 视频编排台',
@@ -402,6 +453,12 @@ class SharedNavigation {
                         href: 'zsxq-insights.html'
                     },
                     {
+                        id: 'bilibili-intelligence',
+                        name: 'B站情报台',
+                        icon: 'fas fa-satellite-dish',
+                        href: 'bilibili-intelligence.html'
+                    },
+                    {
                         id: 'zsxq-lab',
                         name: '知识星球实验台',
                         icon: 'fas fa-circle-nodes',
@@ -497,6 +554,12 @@ class SharedNavigation {
                         href: 'report-script-material-workflow-test.html'
                     },
                     {
+                        id: 'report-stick-figure-video-workflow',
+                        name: '研报转火柴人视频',
+                        icon: 'fas fa-person-running',
+                        href: 'report-stick-figure-video-workflow.html'
+                    },
+                    {
                         id: 'report-visual-plan-test',
                         name: '研报视觉编排',
                         icon: 'fas fa-wand-magic-sparkles',
@@ -575,6 +638,18 @@ class SharedNavigation {
                         name: '平台凭据',
                         icon: 'fas fa-key',
                         href: 'platform-credentials.html'
+                    },
+                    {
+                        id: 'douyin-publish-test',
+                        name: '抖音上传测试',
+                        icon: 'fab fa-tiktok',
+                        href: 'douyin-publish-test.html'
+                    },
+                    {
+                        id: 'wechat-channels-publish-test',
+                        name: '视频号投递测试',
+                        icon: 'fab fa-weixin',
+                        href: 'wechat-channels-publish-test.html'
                     },
                     {
                         id: 'document-converter',
@@ -754,6 +829,28 @@ class SharedNavigation {
         document.body.insertAdjacentHTML('afterbegin', this.getNavigationHTML());
         console.log('✅ [SHARED_NAV] 统一导航组件已渲染');
     }
+
+    getFooterHTML() {
+        return `
+        <footer class="mt-12 border-t border-gray-200 bg-white" role="contentinfo">
+            <div class="mx-auto flex max-w-[1440px] flex-col gap-2 px-6 py-6 text-xs text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+                <span>© ${new Date().getFullYear()} Shioa 内容生产平台</span>
+                <span>任务可追踪 · 凭据加密存储 · 发布状态如实记录</span>
+            </div>
+        </footer>`;
+    }
+
+    renderFooter() {
+        let container = document.getElementById('footer-container');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'footer-container';
+            document.body.appendChild(container);
+        }
+        if (container.dataset.sharedFooterMounted === '1') return;
+        container.dataset.sharedFooterMounted = '1';
+        container.innerHTML = this.getFooterHTML();
+    }
     
     setupEventListeners() {
         // 移动端菜单切换
@@ -859,8 +956,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
     }
 
-    // 只有在页面没有导航的情况下才创建
-    if (!document.querySelector('header')) {
+    // 只把真正的站点 banner 当作已挂载导航；业务卡片和弹窗也会使用 header 标签。
+    if (!document.querySelector('header[role="banner"]')) {
         window.sharedNavigation = new SharedNavigation();
     }
 });

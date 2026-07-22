@@ -83,6 +83,14 @@ REPORT_VIDEO_REPORT_BASE_COLUMNS = (
     ReportVideoReport.updated_at,
 )
 REPORT_VIDEO_REPORT_RAW_COLUMNS = REPORT_VIDEO_REPORT_BASE_COLUMNS + (ReportVideoReport.raw_meta,)
+REPORT_VIDEO_REPORT_PARSE_COLUMNS = (
+    ReportVideoReport.id,
+    ReportVideoReport.task_id,
+    ReportVideoReport.report_code,
+    ReportVideoReport.file_name,
+    ReportVideoReport.file_path,
+    ReportVideoReport.raw_meta,
+)
 
 
 def _load_report_video_task(
@@ -331,22 +339,38 @@ def _mark_report_video_failure_safely(task_name, *, args=None, kwargs=None, exc=
 def _mark_report_failed(report_id, message, *, parent_status):
     if not report_id:
         return {"entity_type": "report", "entity_id": None}
-    report = ReportVideoReport.query.get(str(report_id))
-    if not report:
+    report_key = str(report_id)
+    task_id_row = (
+        db.session.query(ReportVideoReport.task_id)
+        .filter(ReportVideoReport.id == report_key)
+        .one_or_none()
+    )
+    if not task_id_row:
         return {"entity_type": "report", "entity_id": str(report_id)}
 
-    report.error_message = message
-    report.updated_at = datetime.utcnow()
-    report.parse_status = "parse_failed"
-    report.ai_status = "ai_blocked"
-    if report.task:
-        report.task.status = parent_status
-        report.task.error_message = message
-        report.task.updated_at = datetime.utcnow()
+    task_id = str(task_id_row[0])
+    now = datetime.utcnow()
+    ReportVideoReport.query.filter(ReportVideoReport.id == report_key).update(
+        {
+            ReportVideoReport.error_message: message,
+            ReportVideoReport.updated_at: now,
+            ReportVideoReport.parse_status: "parse_failed",
+            ReportVideoReport.ai_status: "ai_blocked",
+        },
+        synchronize_session=False,
+    )
+    ReportVideoTask.query.filter(ReportVideoTask.id == task_id).update(
+        {
+            ReportVideoTask.status: parent_status,
+            ReportVideoTask.error_message: message,
+            ReportVideoTask.updated_at: now,
+        },
+        synchronize_session=False,
+    )
     return {
         "entity_type": "report",
-        "entity_id": report.id,
-        "parent_task_id": report.task_id,
+        "entity_id": report_key,
+        "parent_task_id": task_id,
     }
 
 
@@ -454,6 +478,35 @@ def _refresh_task_parse_status(task):
         task.status = "uploaded"
 
 
+def _refresh_task_parse_status_by_id(task_id):
+    statuses = [
+        str(row[0] or "")
+        for row in (
+            db.session.query(ReportVideoReport.parse_status)
+            .filter(ReportVideoReport.task_id == str(task_id))
+            .all()
+        )
+    ]
+    if not statuses:
+        status = "created"
+    elif "parsing" in statuses:
+        status = "parsing"
+    elif all(item == "parsed" for item in statuses):
+        status = "parsed"
+    elif "parsed" in statuses:
+        status = "parsed"
+    else:
+        status = "uploaded"
+    ReportVideoTask.query.filter(ReportVideoTask.id == str(task_id)).update(
+        {
+            ReportVideoTask.status: status,
+            ReportVideoTask.updated_at: datetime.utcnow(),
+        },
+        synchronize_session=False,
+    )
+    return status
+
+
 def _topic_planning_result(task):
     result = dict(task.result or {})
     planning = dict(result.get("topic_planning") or {})
@@ -488,35 +541,45 @@ def parse_report_pdf_task(self, report_id):
 
     app = create_app()
     with app.app_context():
-        report = ReportVideoReport.query.get(report_id)
+        report = (
+            ReportVideoReport.query
+            .options(load_only(*REPORT_VIDEO_REPORT_PARSE_COLUMNS))
+            .filter(ReportVideoReport.id == str(report_id))
+            .one_or_none()
+        )
         if not report:
             logger.error("[REPORT_VIDEO_PARSE] report not found: %s", report_id)
             return {"status": "missing", "report_id": report_id}
 
+        report_key = str(report.id)
+        task_key = str(report.task_id)
+        report_code = str(report.report_code)
+        file_name = str(report.file_name)
+        file_path = str(report.file_path)
+        raw_meta_snapshot = dict(report.raw_meta or {})
+
         try:
-            logger.info("[REPORT_VIDEO_PARSE] start | report_id=%s file=%s", report.id, report.file_name)
-            report.parse_status = "parsing"
-            report.error_message = None
-            report.updated_at = datetime.utcnow()
+            logger.info("[REPORT_VIDEO_PARSE] start | report_id=%s file=%s", report_key, file_name)
+            ReportVideoReport.query.filter(ReportVideoReport.id == report_key).update(
+                {
+                    ReportVideoReport.parse_status: "parsing",
+                    ReportVideoReport.error_message: None,
+                    ReportVideoReport.updated_at: datetime.utcnow(),
+                },
+                synchronize_session=False,
+            )
             db.session.commit()
+            db.session.remove()
 
             parsed = parse_pdf_file(
-                PROJECT_ROOT / report.file_path,
-                report_dir(report.task_id, report.report_code),
-                cache_name=report.file_name,
+                PROJECT_ROOT / file_path,
+                report_dir(task_key, report_code),
+                cache_name=file_name,
             )
             parse_status, error_message = _parse_result_status(parsed)
 
-            report.page_count = parsed["page_count"]
-            report.raw_text_path = parsed["raw_text_path"]
-            report.cleaned_text_path = parsed["cleaned_text_path"]
-            report.raw_text_chars = parsed["raw_text_chars"]
-            report.cleaned_text_chars = parsed["cleaned_text_chars"]
-            report.is_scanned = parsed["is_scanned"]
-            report.parse_status = parse_status
-            report.ai_status = "ai_pending" if parse_status == "parsed" else "ai_blocked"
-            report.error_message = error_message
-            raw_meta = dict(report.raw_meta or {})
+            _reset_db_session("report_pdf_parse_before_persist")
+            raw_meta = dict(raw_meta_snapshot)
             raw_meta.update({
                 "scan_stats": parsed.get("stats") or {},
                 "extraction_method": parsed.get("extraction_method") or "pdf_text",
@@ -524,25 +587,35 @@ def parse_report_pdf_task(self, report_id):
                 "parsed_at": datetime.utcnow().isoformat(),
                 "async": True,
             })
-            report.raw_meta = raw_meta
-            report.updated_at = datetime.utcnow()
-            _refresh_task_parse_status(report.task)
-            report.task.updated_at = datetime.utcnow()
+            ReportVideoReport.query.filter(ReportVideoReport.id == report_key).update(
+                {
+                    ReportVideoReport.page_count: parsed["page_count"],
+                    ReportVideoReport.raw_text_path: parsed["raw_text_path"],
+                    ReportVideoReport.cleaned_text_path: parsed["cleaned_text_path"],
+                    ReportVideoReport.raw_text_chars: parsed["raw_text_chars"],
+                    ReportVideoReport.cleaned_text_chars: parsed["cleaned_text_chars"],
+                    ReportVideoReport.is_scanned: parsed["is_scanned"],
+                    ReportVideoReport.parse_status: parse_status,
+                    ReportVideoReport.ai_status: "ai_pending" if parse_status == "parsed" else "ai_blocked",
+                    ReportVideoReport.error_message: error_message,
+                    ReportVideoReport.raw_meta: raw_meta,
+                    ReportVideoReport.updated_at: datetime.utcnow(),
+                },
+                synchronize_session=False,
+            )
+            _refresh_task_parse_status_by_id(task_key)
             db.session.commit()
-            logger.info("[REPORT_VIDEO_PARSE] complete | report_id=%s status=%s", report.id, parse_status)
-            return {"status": parse_status, "report_id": report.id}
+            logger.info("[REPORT_VIDEO_PARSE] complete | report_id=%s status=%s", report_key, parse_status)
+            return {"status": parse_status, "report_id": report_key}
         except Exception as exc:
             db.session.rollback()
-            report = ReportVideoReport.query.get(report_id)
-            if report:
-                report.parse_status = "parse_failed"
-                report.ai_status = "ai_blocked"
-                report.error_message = str(exc)
-                report.updated_at = datetime.utcnow()
-                if report.task:
-                    _refresh_task_parse_status(report.task)
-                    report.task.updated_at = datetime.utcnow()
+            try:
+                _reset_db_session("report_pdf_parse_failure_before_persist")
+                _mark_report_failed(report_key, str(exc), parent_status="parse_failed")
                 db.session.commit()
+            except Exception:
+                db.session.rollback()
+                logger.exception("[REPORT_VIDEO_PARSE] failed to persist failure | report_id=%s", report_key)
             logger.exception("[REPORT_VIDEO_PARSE] failed | report_id=%s", report_id)
             raise
 

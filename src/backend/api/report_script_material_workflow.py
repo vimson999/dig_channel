@@ -1,12 +1,20 @@
 import json
+import hashlib
+import logging
 import os
+import time
+import uuid
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
+from types import SimpleNamespace
 
 from flask import Blueprint, jsonify, request, send_file
 from sqlalchemy import and_, inspect as sqlalchemy_inspect, or_
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
+from werkzeug.utils import secure_filename
 
 from celery_config import celery_app
 from models import db
@@ -18,6 +26,7 @@ from services.report_script_material_workflow import (
     DEFAULT_REVIEW_PROMPT,
     FEATURE_NAME,
     QUEUE_NAME,
+    RESULT_DETAIL_CACHE_VERSION,
     status_payload as workflow_status_payload,
     storage_path_for_job,
 )
@@ -57,6 +66,7 @@ TASK_LIST_COLUMNS = (
     PublicationTask.source_task_id,
     PublicationTask.report_audio_pdf_attachment_id,
     PublicationTask.report_audio_pdf_filename,
+    PublicationTask.report_audio_pdf_bytes,
     PublicationTask.report_audio_pdf_topic_title,
     PublicationTask.report_audio_structured_title,
     PublicationTask.report_audio_output_path,
@@ -67,6 +77,140 @@ TASK_LIST_COLUMNS = (
 )
 TASK_REQUEST_COLUMNS = (*TASK_LIST_COLUMNS, PublicationTask.params)
 TASK_DETAIL_COLUMNS = (*TASK_REQUEST_COLUMNS, PublicationTask.result)
+TERMINAL_DETAIL_CACHE_TTL_SECONDS = 300
+TERMINAL_DETAIL_REDIS_TTL_SECONDS = 86400
+TERMINAL_DETAIL_CACHE_MAX_ENTRIES = 512
+TERMINAL_DETAIL_DISK_ROOT = Path(__file__).resolve().parents[3] / "data" / "cache" / "report_script_material_detail"
+_TERMINAL_DETAIL_CACHE = {}
+_TERMINAL_DETAIL_CACHE_LOCK = Lock()
+logger = logging.getLogger(__name__)
+
+
+def _terminal_detail_cache_key(current_user, job_id):
+    return (str(getattr(current_user, "id", "") or ""), str(job_id))
+
+
+def _terminal_detail_redis_client():
+    try:
+        from utils.redis_client import redis_client
+
+        return redis_client
+    except Exception as exc:
+        logger.warning("material terminal cache unavailable: %s", exc)
+        return None
+
+
+def _terminal_detail_redis_key(current_user, job_id):
+    user_id, job_id = _terminal_detail_cache_key(current_user, job_id)
+    digest = hashlib.sha256(f"{user_id}:{job_id}".encode("utf-8")).hexdigest()
+    return f"shioa:report_script_material:terminal:v1:{digest}"
+
+
+def _persistent_terminal_detail_get(current_user, job_id):
+    client = _terminal_detail_redis_client()
+    if client is None:
+        return None
+    try:
+        raw = client.get(_terminal_detail_redis_key(current_user, job_id))
+        payload = json.loads(raw) if raw else None
+        return payload if isinstance(payload, dict) else None
+    except Exception as exc:
+        logger.warning("material terminal cache read failed: %s", exc)
+        return None
+
+
+def _persistent_terminal_detail_set(current_user, job_id, payload):
+    client = _terminal_detail_redis_client()
+    if client is None:
+        return
+    try:
+        client.setex(
+            _terminal_detail_redis_key(current_user, job_id),
+            TERMINAL_DETAIL_REDIS_TTL_SECONDS,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        )
+    except Exception as exc:
+        logger.warning("material terminal cache write failed: %s", exc)
+
+
+def _terminal_detail_disk_path(current_user, job_id):
+    user_id, job_id = _terminal_detail_cache_key(current_user, job_id)
+    digest = hashlib.sha256(f"{user_id}:{job_id}".encode("utf-8")).hexdigest()
+    return TERMINAL_DETAIL_DISK_ROOT / f"{digest}.json"
+
+
+def _terminal_detail_disk_get(current_user, job_id):
+    path = _terminal_detail_disk_path(current_user, job_id)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+        return payload if isinstance(payload, dict) else None
+    except Exception as exc:
+        logger.warning("material terminal disk cache read failed: %s", exc)
+        return None
+
+
+def _terminal_detail_disk_set(current_user, job_id, payload):
+    path = _terminal_detail_disk_path(current_user, job_id)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, path)
+    except Exception as exc:
+        logger.warning("material terminal disk cache write failed: %s", exc)
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _cached_terminal_detail(current_user, job_id):
+    key = _terminal_detail_cache_key(current_user, job_id)
+    now = time.time()
+    with _TERMINAL_DETAIL_CACHE_LOCK:
+        cached = _TERMINAL_DETAIL_CACHE.get(key)
+        if cached and float(cached.get("expires_at") or 0) > now:
+            return deepcopy(cached["payload"])
+        _TERMINAL_DETAIL_CACHE.pop(key, None)
+    payload = _terminal_detail_disk_get(current_user, job_id)
+    if payload is not None:
+        with _TERMINAL_DETAIL_CACHE_LOCK:
+            _TERMINAL_DETAIL_CACHE[key] = {
+                "expires_at": now + TERMINAL_DETAIL_CACHE_TTL_SECONDS,
+                "payload": deepcopy(payload),
+            }
+        return deepcopy(payload)
+    payload = _persistent_terminal_detail_get(current_user, job_id)
+    if payload is not None:
+        with _TERMINAL_DETAIL_CACHE_LOCK:
+            _TERMINAL_DETAIL_CACHE[key] = {
+                "expires_at": now + TERMINAL_DETAIL_CACHE_TTL_SECONDS,
+                "payload": deepcopy(payload),
+            }
+        _terminal_detail_disk_set(current_user, job_id, payload)
+        return deepcopy(payload)
+    return None
+
+
+def _cache_terminal_detail(current_user, job_id, payload):
+    key = _terminal_detail_cache_key(current_user, job_id)
+    with _TERMINAL_DETAIL_CACHE_LOCK:
+        if len(_TERMINAL_DETAIL_CACHE) >= TERMINAL_DETAIL_CACHE_MAX_ENTRIES:
+            _TERMINAL_DETAIL_CACHE.clear()
+        _TERMINAL_DETAIL_CACHE[key] = {
+            "expires_at": time.time() + TERMINAL_DETAIL_CACHE_TTL_SECONDS,
+            "payload": deepcopy(payload),
+        }
+    _terminal_detail_disk_set(current_user, job_id, payload)
+    _persistent_terminal_detail_set(current_user, job_id, payload)
+
+
+def _clear_terminal_detail_cache():
+    with _TERMINAL_DETAIL_CACHE_LOCK:
+        _TERMINAL_DETAIL_CACHE.clear()
 
 
 @report_script_material_workflow_bp.route("/status", methods=["GET"])
@@ -230,9 +374,15 @@ def get_pdf_asset_material(current_user, asset_id):
 def create_jobs(current_user):
     data = _request_payload()
     user_id = str(getattr(current_user, "id", None))
+    pdf_file = request.files.get("pdf") or request.files.get("file")
     asset_ids = _parse_asset_ids(data)
-    if not asset_ids:
-        return jsonify({"success": False, "message": "请选择至少 1 份 PDF"}), 400
+    if not pdf_file and not asset_ids:
+        return jsonify({"success": False, "message": "请上传 PDF 或选择至少 1 份已同步 PDF"}), 400
+    if pdf_file:
+        upload_error = _validate_pdf_upload(pdf_file)
+        if upload_error:
+            return jsonify({"success": False, "message": upload_error}), 400
+        asset_ids = []
     if len(asset_ids) > 50:
         return jsonify({"success": False, "message": "单次最多投递 50 份 PDF"}), 400
 
@@ -254,6 +404,21 @@ def create_jobs(current_user):
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     jobs = []
     errors = []
+    if pdf_file:
+        try:
+            task = _create_task_for_pdf(
+                _save_pdf_upload(pdf_file),
+                user_id=user_id,
+                prompt=prompt,
+                review_prompt=review_prompt,
+                followups=followups,
+                gemini_url=gemini_url,
+                metadata=metadata,
+            )
+            jobs.append(task)
+        except Exception as exc:
+            db.session.rollback()
+            errors.append({"filename": secure_filename(pdf_file.filename or ""), "message": str(exc)})
     for asset_id in dict.fromkeys(asset_ids):
         try:
             task = _create_task_for_asset(
@@ -347,16 +512,33 @@ def list_jobs(current_user):
 @report_script_material_workflow_bp.route("/jobs/<job_id>", methods=["GET"])
 @require_login
 def get_job(current_user, job_id):
-    task = _get_owned_task(current_user, job_id, include_result=True)
-    if not task:
+    include_raw = _truthy(request.args.get("include_raw"), False)
+    if not include_raw:
+        cached = _cached_terminal_detail(current_user, job_id)
+        if cached is not None:
+            return jsonify(cached)
+    reference = _get_owned_task_reference(current_user, job_id)
+    if not reference:
         return jsonify({"success": False, "message": "任务不存在"}), 404
+    task = None
+    if reference.status == "completed" and not include_raw:
+        result = _terminal_result_file(reference)
+        if result is not None:
+            task = _task_detail_snapshot(reference, result)
+    if task is None:
+        task = _get_owned_task(current_user, job_id, include_result=True)
+        if not task:
+            return jsonify({"success": False, "message": "任务不存在"}), 404
     payload = _job_payload(task, include_detail=True)
-    return jsonify({
+    response_payload = {
         "success": True,
         "job_id": payload.get("job_id"),
         "status": payload.get("status"),
         "data": payload,
-    })
+    }
+    if task.status == "completed" and not include_raw:
+        _cache_terminal_detail(current_user, task.id, response_payload)
+    return jsonify(response_payload)
 
 
 @report_script_material_workflow_bp.route("/jobs/<job_id>/cancel", methods=["POST"])
@@ -481,6 +663,18 @@ def input_pdf(current_user, job_id):
 
 def _create_task_for_asset(asset_id, *, user_id, prompt, review_prompt, followups, gemini_url, metadata):
     pdf = _pdf_meta_from_zsxq_attachment(asset_id)
+    return _create_task_for_pdf(
+        pdf,
+        user_id=user_id,
+        prompt=prompt,
+        review_prompt=review_prompt,
+        followups=followups,
+        gemini_url=gemini_url,
+        metadata=metadata,
+    )
+
+
+def _create_task_for_pdf(pdf, *, user_id, prompt, review_prompt, followups, gemini_url, metadata):
     title = str(pdf.get("topic_title") or pdf.get("filename") or "研报基础文案物料").strip()
     task_metadata = dict(metadata or {})
     task_metadata.setdefault("source", "report-script-material-workflow-test-page")
@@ -492,8 +686,8 @@ def _create_task_for_asset(asset_id, *, user_id, prompt, review_prompt, followup
         params={
             "feature": FEATURE_NAME,
             "user_id": user_id,
-            "source_feature": "zsxq_attachment",
-            "source_task_id": asset_id,
+            "source_feature": "zsxq_attachment" if pdf.get("attachment_id") else "uploaded_pdf",
+            "source_task_id": pdf.get("attachment_id"),
             FEATURE_NAME: {
                 "prompt": prompt,
                 "review_prompt": review_prompt,
@@ -559,6 +753,40 @@ def _create_task_for_asset(asset_id, *, user_id, prompt, review_prompt, followup
     }
 
 
+def _validate_pdf_upload(file_storage):
+    filename = secure_filename(file_storage.filename or "")
+    if not filename:
+        return "PDF 文件名为空"
+    if not filename.lower().endswith(".pdf"):
+        return "只支持上传 PDF 文件"
+    if request.content_length and request.content_length > _max_pdf_bytes():
+        return f"PDF 超过 {_max_pdf_mb()}MB 限制"
+    return None
+
+
+def _save_pdf_upload(file_storage):
+    filename = secure_filename(file_storage.filename or "")
+    upload_dir = Path(__file__).resolve().parents[3] / "data" / "uploads" / FEATURE_NAME / datetime.utcnow().strftime("%Y%m%d")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    output_path = upload_dir / f"{uuid.uuid4().hex}_{filename}"
+    file_storage.save(str(output_path))
+    size = output_path.stat().st_size
+    if size <= 0:
+        raise ValueError("PDF 文件为空")
+    if size > _max_pdf_bytes():
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+        raise ValueError(f"PDF 超过 {_max_pdf_mb()}MB 限制")
+    return {
+        "filename": filename,
+        "path": str(output_path),
+        "bytes": size,
+        "source": "uploaded_pdf",
+    }
+
+
 def _job_payload(task, include_detail=False):
     result = task.result if include_detail and isinstance(task.result, dict) else {}
     params = task.params if include_detail and isinstance(task.params, dict) else {}
@@ -614,6 +842,39 @@ def _get_owned_task(current_user, job_id, include_result=True):
     if str(task.user_id or (task.params or {}).get("user_id") or "").strip() not in _visible_user_ids(current_user):
         return None
     return task
+
+
+def _get_owned_task_reference(current_user, job_id):
+    task = PublicationTask.query.options(load_only(*TASK_LIST_COLUMNS)).filter(
+        PublicationTask.id == str(job_id)
+    ).one_or_none()
+    if not task:
+        return None
+    if task.feature:
+        if task.feature != FEATURE_NAME:
+            return None
+        if task.user_id:
+            return task if str(task.user_id).strip() in _visible_user_ids(current_user) else None
+    return _get_owned_task(current_user, job_id, include_result=False)
+
+
+def _terminal_result_file(task):
+    path = _result_file_path(task)
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8")) if path and Path(path).is_file() else None
+    except Exception as exc:
+        logger.warning("material result detail file read failed: %s", exc)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("detail_cache_version") or 0) < RESULT_DETAIL_CACHE_VERSION:
+        return None
+    return payload
+
+
+def _task_detail_snapshot(task, result):
+    values = {column.key: getattr(task, column.key) for column in TASK_LIST_COLUMNS}
+    return SimpleNamespace(**values, params={}, result=result)
 
 
 def _fresh_child_summaries(children):
@@ -788,7 +1049,7 @@ def _material_feature_label(feature):
 
 
 def _pdf_meta_from_zsxq_attachment(asset_id):
-    attachment = ZsxqAttachment.query.get(str(asset_id))
+    attachment = db.session.get(ZsxqAttachment, str(asset_id))
     if not attachment:
         raise ValueError("PDF 资产不存在")
     if attachment.download_status != "downloaded":
@@ -1006,6 +1267,17 @@ def _normalize_search_query(value, max_length=80):
 
 def _escape_like(value):
     return str(value or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _max_pdf_mb():
+    try:
+        return max(1, int(os.getenv("REPORT_SCRIPT_MATERIAL_MAX_PDF_MB", os.getenv("GEMINI_BROWSER_MAX_PDF_MB", "200"))))
+    except (TypeError, ValueError):
+        return 200
+
+
+def _max_pdf_bytes():
+    return _max_pdf_mb() * 1024 * 1024
 
 
 def _bounded_int(value, default, lower, upper):

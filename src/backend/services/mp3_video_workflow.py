@@ -6,10 +6,11 @@ import logging
 import mimetypes
 import os
 import re
+import subprocess
 import time
 from contextvars import ContextVar
 from datetime import datetime, timedelta
-from functools import wraps
+from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -68,14 +69,14 @@ TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
 HOT_AUDIO_DOWNLOAD_THRESHOLD = 20
-PLANNER_VERSION = "mp3_video_planner_20260715_v11"
+PLANNER_VERSION = "mp3_video_planner_20260719_v12"
 VISUAL_ARTIFACT_KEYS = (
     "finance_cover",
     "audio_background",
     "xiaojunjun_cover",
     "xiaojunjun_background",
 )
-VISUAL_ARTIFACT_VERSION = "mp3_video_visuals_20260715_v11"
+VISUAL_ARTIFACT_VERSION = "mp3_video_visuals_20260719_v12"
 KEYFRAME_ARTIFACT_VERSION = "mp3_video_keyframes_20260706_v6"
 TRANSCRIPT_DEEPSEEK_CACHE_VERSION = "mp3_transcript_deepseek_cache_20260706_v1"
 VISUAL_ARTIFACT_EXPECTED_SIZES = {
@@ -147,9 +148,27 @@ TASK_PROGRESS_RESULT_COLUMNS = (
     PublicationTask.progress,
     PublicationTask.result,
 )
+TASK_PROGRESS_STATUS_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.error_message,
+)
 TASK_STATUS_COLUMNS = (
     PublicationTask.id,
     PublicationTask.status,
+)
+TASK_WAITING_STATUS_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.waiting_child_label,
+    PublicationTask.waiting_child_id,
+    PublicationTask.waiting_child_status,
+    PublicationTask.waiting_child_step,
+    PublicationTask.waiting_child_updated_at,
 )
 TASK_PUBLIC_STATUS_COLUMNS = (
     PublicationTask.id,
@@ -160,6 +179,13 @@ TASK_PUBLIC_STATUS_COLUMNS = (
     PublicationTask.error_message,
     PublicationTask.feature,
     PublicationTask.task_video_path,
+    PublicationTask.publisher_aspect_ratio,
+    PublicationTask.publisher_generate_subtitles,
+    PublicationTask.publisher_audio_signature,
+    PublicationTask.publisher_vertical_video_path,
+    PublicationTask.publisher_vertical_cover_path,
+    PublicationTask.publisher_podcast_cover_path,
+    PublicationTask.publisher_bilibili_cover_path,
     PublicationTask.created_at,
     PublicationTask.updated_at,
     PublicationTask.completed_at,
@@ -191,6 +217,14 @@ TASK_NOTIFICATION_COLUMNS = (
     PublicationTask.current_step,
     PublicationTask.params,
     PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.created_at,
+    PublicationTask.completed_at,
+)
+TASK_NOTIFICATION_STATUS_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
     PublicationTask.error_message,
     PublicationTask.created_at,
     PublicationTask.completed_at,
@@ -293,6 +327,13 @@ def _cached_workflow_result(task_id: Any) -> Optional[Dict[str, Any]]:
     if not state or state.get("task_id") != str(task_id) or state.get("result") is None:
         return None
     return copy.deepcopy(state["result"])
+
+
+def _cached_workflow_params(task_id: Any) -> Optional[Dict[str, Any]]:
+    state = _active_workflow_state.get()
+    if not state or state.get("task_id") != str(task_id) or state.get("params") is None:
+        return None
+    return copy.deepcopy(state["params"])
 
 
 def _merge_cached_workflow_result(task_id: Any, values: Dict[str, Any]) -> None:
@@ -532,8 +573,170 @@ def audio_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
     return item
 
 
+def _resume_waiting_child_lightweight(task_id: str, wait_hint: Any) -> Optional[bool]:
+    if not isinstance(wait_hint, dict):
+        return None
+
+    label = str(wait_hint.get("label") or "").strip()
+    child_id = str(wait_hint.get("child_id") or "").strip()
+    expected_token = str(wait_hint.get("updated_at") or "").strip()
+    if not label or not child_id or not expected_token:
+        return None
+
+    parent = _load_task(task_id, *TASK_WAITING_STATUS_COLUMNS)
+    if not parent:
+        raise Mp3VideoWorkflowError(f"MP3 视频编排任务不存在: {task_id}")
+    if parent.status == "canceled":
+        return False
+    if parent.status == "completed":
+        return True
+    if (
+        str(parent.waiting_child_label or "") != label
+        or str(parent.waiting_child_id or "") != child_id
+    ):
+        return None
+    if str(parent.waiting_child_updated_at or "") != expected_token:
+        logger.info(
+            "Ignore stale MP3 child wait continuation: parent=%s child=%s token=%s current=%s",
+            task_id,
+            child_id,
+            expected_token,
+            parent.waiting_child_updated_at,
+        )
+        return True
+    parent_progress = int(parent.progress or 0)
+
+    child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS)
+    if not child:
+        return None
+
+    requeued = False
+    if child.status not in TERMINAL_STATUSES:
+        disk_video = _publisher_child_disk_video_path(child)
+        repair_due = _publisher_child_repair_due(child)
+        if disk_video:
+            child = _recover_completed_publisher_child_from_disk(child)
+        if child and child.status not in TERMINAL_STATUSES and repair_due:
+            full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+            if full_child:
+                full_child, requeued = maybe_requeue_stale_publisher_child(full_child, log=logger)
+                child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS) or full_child or child
+
+    child_status = str(child.status or "")
+    child_step = str(child.current_step or "")
+    if child_status in TERMINAL_STATUSES:
+        return None
+
+    celery_failure = _celery_failure_message(child)
+    if celery_failure:
+        full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+        if full_child:
+            _mark_child_failed(full_child, celery_failure)
+            db.session.expire_all()
+        return None
+
+    defer_count = int(wait_hint.get("defer_count") or wait_hint.get("count") or 0) + 1
+    max_defers = _parent_max_defers(label)
+    if defer_count > max_defers:
+        raise RuntimeError(f"等待子任务超过最大续跑次数: {label} {child_id}")
+
+    delay = _parent_retry_delay_seconds(label)
+    next_token = datetime.utcnow().isoformat() + "Z"
+    next_hint = {
+        **wait_hint,
+        "status": child_status,
+        "step": child_step,
+        "retry_delay_seconds": delay,
+        "defer_count": defer_count,
+        "max_defers": max_defers,
+        "updated_at": next_token,
+    }
+    next_progress = max(parent_progress, 80 if label == "landscape_video" else 92)
+
+    def persist_wait_projection():
+        updated = (
+            PublicationTask.query
+            .filter(PublicationTask.id == str(task_id))
+            .filter(PublicationTask.status.notin_(TERMINAL_STATUSES))
+            .filter(PublicationTask.waiting_child_id == child_id)
+            .filter(PublicationTask.waiting_child_updated_at == expected_token)
+            .update(
+                {
+                    PublicationTask.current_step: _safe_step_code(f"{label}_waiting"),
+                    PublicationTask.progress: next_progress,
+                    PublicationTask.waiting_child_status: child_status,
+                    # _db_retry removes the failed SQLAlchemy session before
+                    # invoking this closure again. Never dereference the ORM
+                    # child from inside a retryable operation: it is detached
+                    # after the first connection failure. Use the scalar
+                    # snapshot captured above instead.
+                    PublicationTask.waiting_child_step: child_step,
+                    PublicationTask.waiting_child_updated_at: next_token,
+                    PublicationTask.updated_at: datetime.utcnow(),
+                },
+                synchronize_session=False,
+            )
+        )
+        db.session.commit()
+        return updated
+
+    updated = _db_retry(persist_wait_projection, f"advance child wait projection {task_id}:{child_id}")
+    if not updated:
+        logger.info(
+            "Skip duplicate MP3 child wait continuation after compare-and-set: parent=%s child=%s",
+            task_id,
+            child_id,
+        )
+        return True
+
+    try:
+        celery_app.send_task(
+            "tasks.mp3_video_workflow.process_job",
+            args=[str(task_id), next_hint],
+            queue=QUEUE_NAME,
+            countdown=delay,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to enqueue lightweight MP3 child wait continuation: parent=%s child=%s",
+            task_id,
+            child_id,
+        )
+
+        def restore_wait_token():
+            PublicationTask.query.filter(
+                PublicationTask.id == str(task_id),
+                PublicationTask.waiting_child_updated_at == next_token,
+            ).update(
+                {
+                    PublicationTask.waiting_child_updated_at: expected_token,
+                    PublicationTask.updated_at: datetime.utcnow(),
+                },
+                synchronize_session=False,
+            )
+            db.session.commit()
+
+        _db_retry(restore_wait_token, f"restore child wait token {task_id}:{child_id}")
+        return None
+
+    logger.info(
+        "MP3 child wait continued without JSON payload read: parent=%s child=%s status=%s defer=%s/%s%s",
+        task_id,
+        child_id,
+        child_status,
+        defer_count,
+        max_defers,
+        " requeued" if requeued else "",
+    )
+    return True
+
+
 @_workflow_result_scope
-def process_job(task_id: str) -> bool:
+def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> bool:
+    lightweight_result = _resume_waiting_child_lightweight(task_id, wait_hint)
+    if lightweight_result is not None:
+        return lightweight_result
+
     task = _load_task(task_id, *TASK_WORKFLOW_COLUMNS)
     if not task:
         raise Mp3VideoWorkflowError(f"MP3 视频编排任务不存在: {task_id}")
@@ -547,6 +750,7 @@ def process_job(task_id: str) -> bool:
     workflow = task.params.get(FEATURE_NAME) or {}
     generate_subtitles = _workflow_generate_subtitles(workflow, task.result)
     audio = workflow.get("audio") if isinstance(workflow.get("audio"), dict) else {}
+    task_key = task.id
     audio_path = _resolve_project_path(audio.get("path"))
     if not audio_path or not audio_path.exists():
         _mark_failed(task, f"音频文件不存在: {audio.get('path')}")
@@ -555,7 +759,6 @@ def process_job(task_id: str) -> bool:
 
     user_id = task.user_id or (task.params or {}).get("user_id")
     created_at = task.created_at or datetime.utcnow()
-    task_key = task.id
     _start_task(task)
     _update_result(task_key, {"generate_subtitles": generate_subtitles})
     _queue_notification(task_key, "mp3_video_started", "MP3 视频编排已启动")
@@ -743,10 +946,10 @@ def process_job(task_id: str) -> bool:
             })
             _raise_if_parent_canceled(task_key)
             output_path = storage_path_for_job(task_key, created_at)
-            fresh = _load_task(task_key, *TASK_RESULT_COLUMNS, PublicationTask.status)
+            fresh = _load_task(task_key, *TASK_STATUS_COLUMNS)
             if not fresh or fresh.status == "canceled":
                 raise ParentTaskCanceled("父编排任务已取消")
-            final_result = _without_waiting_state(fresh.result or {})
+            final_result = _without_waiting_state(_fresh_result(task_key))
             final_result.update({
                 "output_path": output_path,
                 "completed_at": datetime.utcnow().isoformat() + "Z",
@@ -773,6 +976,7 @@ def process_job(task_id: str) -> bool:
             fresh.result = final_result
             flag_modified(fresh, "result")
             db.session.commit()
+            _replace_cached_workflow_result(task_key, final_result)
             _queue_notification(task_key, "mp3_video_completed", "MP3 视频关键帧预览已生成，未合成完整视频")
             return True
 
@@ -792,9 +996,10 @@ def process_job(task_id: str) -> bool:
                 audio_signature=audio_signature,
             )
         if landscape_summary:
+            landscape_child_summary = _task_public_summary(landscape_task) if landscape_task else None
             _emit(task_key, "landscape_video_reused", 90, "复用已完成的小君君横屏视频")
-            if landscape_task:
-                _record_child(task_key, "landscape_video", landscape_task)
+            if landscape_child_summary:
+                _record_child(task_key, "landscape_video", landscape_child_summary)
             _update_result(task_key, {"landscape_video": landscape_summary})
         else:
             landscape_task = _active_child_from_result(
@@ -805,9 +1010,10 @@ def process_job(task_id: str) -> bool:
             )
             if landscape_task:
                 landscape_task_key = str(landscape_task.id)
-                _emit(task_key, "landscape_video_wait_existing", 80, "继续等待已提交的小君君横屏视频")
                 _sync_publisher_video_task_title(landscape_task, _publisher_video_title(plan, role="xiaojunjun_landscape"))
-                _record_child(task_key, "landscape_video", landscape_task)
+                landscape_child_summary = _task_public_summary(landscape_task)
+                _emit(task_key, "landscape_video_wait_existing", 80, "继续等待已提交的小君君横屏视频")
+                _record_child(task_key, "landscape_video", landscape_child_summary)
             else:
                 _raise_if_parent_canceled(task_key)
                 _emit(task_key, "submit_landscape_video", 78, "提交小君君横屏视频合成任务")
@@ -823,7 +1029,7 @@ def process_job(task_id: str) -> bool:
                     force_new=force_video_regenerate,
                 )
                 landscape_task_key = str(landscape_task.id)
-                _record_child(task_key, "landscape_video", landscape_task)
+                _record_child(task_key, "landscape_video", _task_public_summary(landscape_task))
                 _queue_notification(task_key, "mp3_video_landscape_submitted", "小君君横屏视频合成任务已提交")
             landscape_task = _wait_child(task_key, landscape_task_key, "landscape_video", start_progress=80, end_progress=90)
             if landscape_task.status != "completed":
@@ -845,9 +1051,10 @@ def process_job(task_id: str) -> bool:
                 audio_signature=audio_signature,
             )
         if vertical_summary:
+            vertical_child_summary = _task_public_summary(vertical_task) if vertical_task else None
             _emit(task_key, "vertical_video_reused", 99, "复用已完成的此刻此声竖屏视频")
-            if vertical_task:
-                _record_child(task_key, "vertical_video", vertical_task)
+            if vertical_child_summary:
+                _record_child(task_key, "vertical_video", vertical_child_summary)
             _update_result(task_key, {"vertical_video": vertical_summary})
         else:
             vertical_task = _active_child_from_result(
@@ -858,9 +1065,10 @@ def process_job(task_id: str) -> bool:
             )
             if vertical_task:
                 vertical_task_key = str(vertical_task.id)
-                _emit(task_key, "vertical_video_wait_existing", 92, "继续等待已提交的此刻此声竖屏视频")
                 _sync_publisher_video_task_title(vertical_task, _publisher_video_title(plan, role="ciketc_vertical"))
-                _record_child(task_key, "vertical_video", vertical_task)
+                vertical_child_summary = _task_public_summary(vertical_task)
+                _emit(task_key, "vertical_video_wait_existing", 92, "继续等待已提交的此刻此声竖屏视频")
+                _record_child(task_key, "vertical_video", vertical_child_summary)
             else:
                 _raise_if_parent_canceled(task_key)
                 _emit(task_key, "submit_vertical_video", 91, "提交此刻此声竖屏视频合成任务")
@@ -876,7 +1084,7 @@ def process_job(task_id: str) -> bool:
                     force_new=force_video_regenerate,
                 )
                 vertical_task_key = str(vertical_task.id)
-                _record_child(task_key, "vertical_video", vertical_task)
+                _record_child(task_key, "vertical_video", _task_public_summary(vertical_task))
                 _queue_notification(task_key, "mp3_video_vertical_submitted", "此刻此声竖屏视频合成任务已提交")
             vertical_task = _wait_child(task_key, vertical_task_key, "vertical_video", start_progress=92, end_progress=99)
             if vertical_task.status != "completed":
@@ -887,10 +1095,10 @@ def process_job(task_id: str) -> bool:
 
         _raise_if_parent_canceled(task_key)
         output_path = storage_path_for_job(task_key, created_at)
-        fresh = _load_task(task_key, *TASK_RESULT_COLUMNS, PublicationTask.status)
+        fresh = _load_task(task_key, *TASK_STATUS_COLUMNS)
         if not fresh or fresh.status == "canceled":
             raise ParentTaskCanceled("父编排任务已取消")
-        final_result = _without_waiting_state(fresh.result or {})
+        final_result = _without_waiting_state(_fresh_result(task_key))
         final_result.update({
             "output_path": output_path,
             "completed_at": datetime.utcnow().isoformat() + "Z",
@@ -918,6 +1126,7 @@ def process_job(task_id: str) -> bool:
         fresh.result = final_result
         flag_modified(fresh, "result")
         db.session.commit()
+        _replace_cached_workflow_result(task_key, final_result)
         _queue_notification(task_key, "mp3_video_completed", "MP3 视频编排完成，横屏和竖屏视频均已生成")
         return True
     except ParentTaskCanceled:
@@ -1398,10 +1607,7 @@ def _record_retry_attempt(
     *,
     error: Optional[str] = None,
 ) -> None:
-    fresh = _load_task(task_id, *TASK_RESULT_COLUMNS)
-    if not fresh:
-        return
-    result = dict(fresh.result or {})
+    result = _fresh_result(task_id)
     attempts = dict(result.get("retry_attempts") or {})
     items = list(attempts.get(label) or [])
     updated_at = datetime.utcnow().isoformat() + "Z"
@@ -1418,10 +1624,10 @@ def _record_retry_attempt(
     result["retry_attempts"] = attempts
     retry_state = dict(result.get("retry_state") or {})
     retry_state[label] = entry
-    result["retry_state"] = retry_state
-    fresh.result = result
-    flag_modified(fresh, "result")
-    db.session.commit()
+    _update_result(task_id, {
+        "retry_attempts": attempts,
+        "retry_state": retry_state,
+    })
 
 
 def _is_retryable_gemini_error(message: Any) -> bool:
@@ -1490,7 +1696,13 @@ def plan_from_direct_ds_response(first_response: str, *, audio: Dict[str, Any]) 
         "cover_subtitle": _direct_ds_vertical_cover_subtitle(vertical_title, title_7, title_3),
         "finance_cover_subtitle": _direct_ds_finance_cover_title(finance_title, title_6),
         "xiaojunjun_title": "内资闭门会议",
-        "xiaojunjun_subtitle": _direct_ds_xiaojunjun_subtitle(title_6, finance_title or base_title, title_3),
+        # Section 6 remains the full landscape video title; the cover copy uses
+        # the independent high-density title version 2 so it cannot collapse
+        # into the finance cover derived from version 1.
+        "xiaojunjun_subtitle": _xiaojunjun_cover_subtitle(
+            title_2 or title_3 or base_title,
+            fallback=title_3 or base_title,
+        ),
         "xiaojunjun_video_title": title_6 or fallback.get("xiaojunjun_video_title"),
         "ciketc_video_title": title_7 or fallback.get("ciketc_video_title"),
         "date_text": _direct_ds_date(title_7 or title_6 or first_response) or fallback.get("date_text"),
@@ -1815,7 +2027,7 @@ def deepseek_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
         "- cover_main_title: 此刻此声横屏封皮栏目/场景主标题，默认可用“内资闭门会议”，不要把长内容标题放这里",
         "- cover_title: 此刻此声竖屏纯音频背景板主标题，必须是你从第一轮返回中判断出的最佳点击点，用 \\n 分成最多 2 行，每行不超过 10 个中文字符",
         "- cover_subtitle: 此刻此声竖屏背景副标题，必须 1 行，不超过 16 个中文字符，只补充主标题背后的逻辑/信号/机会，不要重复主标题",
-        "- finance_cover_subtitle: 此刻此声横屏封皮黄色大标题，优先使用高信息密度标题版本一，改写成 3 行短句，每行约 10-13 个中文字符或等价视觉宽度，约占画面宽度 60%-75%，必须避免占满整行；不要直接截断长句，要提炼为短促标题文案",
+        "- finance_cover_subtitle: 此刻此声横屏封皮黄色大标题，优先使用高信息密度标题版本一，必须改写成恰好 3 行短句，每行约 10-13 个中文字符或等价视觉宽度，约占画面宽度 60%-75%，必须避免占满整行；不要直接截断长句，要提炼为短促标题文案",
         "- xiaojunjun_title: 小君君横屏封皮/背景栏目主标题，默认可用“内资闭门会议”，不要把长内容标题放这里",
         "- xiaojunjun_subtitle: 小君君横屏封皮/背景黄色高亮条文案，2-3 行，每行不超过 18 个中文字符，只基于原文事实",
         "- xiaojunjun_video_title: 小君君横屏视频合成传入标题，必须优先使用原文第 6 条斜杠版完整标题，保留“内资闭门会 / ... / 日期”的完整格式，不要裁剪",
@@ -1823,7 +2035,8 @@ def deepseek_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
         "- infographic_title: 信息墙主题标题，8-18 字，必须是具体投资主题或判断，不能是流程说明",
         "- infographic_subtitle: 信息墙核心结论，16-36 字，优先选择最有信息差的观点",
         "- infographic_points: 严格包含 3 个字符串的数组；优先使用原文第 5 条金句，其次使用第 4 条核心逻辑；每条必须是可独立阅读的金句、事实或投资判断，不能出现寒暄、角色介绍、任务说明、栏目标题或时间戳",
-        "小君君文案规则：xiaojunjun_subtitle 必须是小君君横屏版本，不能照抄 cover_title、cover_subtitle 或 finance_cover_subtitle；"
+        "双封皮文案规则：finance_cover_subtitle 与 xiaojunjun_subtitle 是两个独立创意版本，必须有实质不同的切入点和措辞，严禁只换换行、标点或顺序。"
+        "xiaojunjun_subtitle 必须优先使用不同于高信息密度标题版本一的候选标题/观点，不能照抄 cover_title、cover_subtitle 或 finance_cover_subtitle；"
         "它应该更完整地保留闭门会标题的信息密度和投资逻辑，而不是此刻此声竖屏那种短促标题。",
         "- date_text: 日期，格式 YYYY.M.D",
         "- emotion: pro/macro/bull/bear 之一",
@@ -1880,6 +2093,7 @@ def fallback_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
     if audio_range:
         audio_plan["start_seconds"] = round(audio_range[0], 3)
         audio_plan["end_seconds"] = round(audio_range[1], 3)
+    xiaojunjun_copy_source = candidates[1] if len(candidates) > 1 else title
     return {
         "title": title,
         "title_options": candidates[:5],
@@ -1889,7 +2103,7 @@ def fallback_plan(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, An
         "cover_subtitle": _vertical_cover_subtitle(vertical_title, fallback=subtitle or title),
         "finance_cover_subtitle": _finance_cover_title(finance_title),
         "xiaojunjun_title": "内资闭门会议",
-        "xiaojunjun_subtitle": _xiaojunjun_cover_subtitle(title, fallback=subtitle),
+        "xiaojunjun_subtitle": _xiaojunjun_cover_subtitle(xiaojunjun_copy_source, fallback=subtitle),
         "xiaojunjun_video_title": role_video_titles.get("xiaojunjun_video_title") or _format_closed_door_video_title(title, separator="/"),
         "ciketc_video_title": role_video_titles.get("ciketc_video_title") or _format_closed_door_video_title(title, separator="|"),
         **infographic_copy,
@@ -1962,11 +2176,17 @@ def validate_plan(payload: Dict[str, Any], *, fallback: Dict[str, Any], audio: D
         or _finance_cover_title(finance_title)
     )
     xiaojunjun_disallowed = [planner_cover_title, planner_cover_subtitle, finance_cover_subtitle]
-    xiaojunjun_subtitle = (
-        _closed_door_visual_lines(xiaojunjun_video_title, max_units=18, max_lines=3)
-        or _format_planner_xiaojunjun_subtitle(payload.get("xiaojunjun_subtitle"), disallow=xiaojunjun_disallowed)
-        or _format_planner_xiaojunjun_subtitle(fallback.get("xiaojunjun_subtitle"), disallow=xiaojunjun_disallowed)
-        or _xiaojunjun_cover_subtitle(finance_title or title, fallback=subtitle)
+    # The planner's dedicated second creative must win.  Previously the formatted
+    # section-6 video title was evaluated first, so similar section-6/7 titles
+    # silently replaced the AI's distinct xiaojunjun copy with the finance copy.
+    role_title_copy = _closed_door_visual_lines(xiaojunjun_video_title, max_units=18, max_lines=3)
+    fallback_xiaojunjun_copy = fallback.get("xiaojunjun_subtitle")
+    alternate_title_copy = _xiaojunjun_cover_subtitle(vertical_title or title, fallback=subtitle)
+    fallback_candidates = [role_title_copy, fallback_xiaojunjun_copy, alternate_title_copy]
+    xiaojunjun_subtitle = _first_distinct_xiaojunjun_copy(
+        payload.get("xiaojunjun_subtitle"),
+        *fallback_candidates,
+        disallow=xiaojunjun_disallowed,
     )
     infographic_title = _clean_infographic_copy(
         payload.get("infographic_title") or fallback.get("infographic_title"),
@@ -2727,6 +2947,15 @@ def _format_planner_xiaojunjun_subtitle(value: Any, *, disallow: Optional[List[A
     return result
 
 
+def _first_distinct_xiaojunjun_copy(*values: Any, disallow: Optional[List[Any]] = None) -> str:
+    blocked = list(disallow or [])
+    for value in values:
+        result = _format_planner_xiaojunjun_subtitle(value, disallow=blocked)
+        if result:
+            return result
+    return ""
+
+
 def _xiaojunjun_cover_subtitle(value: Any, *, fallback: Any = "") -> str:
     text = _normalize_title_candidate(value) or _clean_line(fallback)
     if not text:
@@ -2994,11 +3223,16 @@ def create_publisher_video_task(
         },
     )
     db.session.add(child)
+    db.session.flush()
+    child_id = str(child.id)
     db.session.commit()
-    async_result = run_publication_pipeline.apply_async(args=[child.id], queue="render", retry=False)
-    child.celery_task_id = async_result.id
+    async_result = run_publication_pipeline.apply_async(args=[child_id], queue="render", retry=False)
+    PublicationTask.query.filter(PublicationTask.id == child_id).update(
+        {PublicationTask.celery_task_id: async_result.id},
+        synchronize_session=False,
+    )
     db.session.commit()
-    return child
+    return _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS)
 
 
 def _publisher_video_title(plan: Dict[str, Any], *, role: str) -> str:
@@ -3049,7 +3283,6 @@ def _sync_publisher_video_task_title(task: PublicationTask, title: str) -> None:
     task.result = result
     flag_modified(task, "params")
     flag_modified(task, "result")
-    db.session.commit()
 
 
 def _find_existing_publisher_video_task(
@@ -3086,7 +3319,7 @@ def _find_existing_publisher_video_task(
         if not selected:
             return None
         _cancel_duplicate_publisher_tasks(
-            _publisher_payload_tasks(matching, exclude_id=completed.id),
+            matching,
             keep_id=completed.id,
         )
         return selected
@@ -3098,22 +3331,11 @@ def _find_existing_publisher_video_task(
             return None
         keep = _recover_completed_publisher_child_from_disk(keep)
         _cancel_duplicate_publisher_tasks(
-            _publisher_payload_tasks(active[1:]),
+            active[1:],
             keep_id=keep.id,
         )
         return keep
     return None
-
-
-def _publisher_payload_tasks(tasks, *, exclude_id: Optional[str] = None) -> List[PublicationTask]:
-    loaded = []
-    for task in tasks:
-        if not task or task.id == exclude_id or task.status in TERMINAL_STATUSES:
-            continue
-        payload_task = _load_task(task.id, *TASK_PUBLIC_COLUMNS)
-        if payload_task:
-            loaded.append(payload_task)
-    return loaded
 
 
 def _publisher_child_role(task: PublicationTask) -> str:
@@ -3200,15 +3422,27 @@ def _cancel_duplicate_publisher_tasks(tasks: List[PublicationTask], *, keep_id: 
         if not task or task.id == keep_id or task.status in TERMINAL_STATUSES:
             continue
         _revoke_celery_task(task)
-        result = dict(task.result or {})
-        result["error"] = f"重复视频子任务已取消，保留 {keep_id}"
-        task.status = "canceled"
-        task.current_step = "canceled"
-        task.error_message = result["error"]
-        task.completed_at = datetime.utcnow()
-        task.result = result
-        flag_modified(task, "result")
-        changed = True
+        error = f"重复视频子任务已取消，保留 {keep_id}"
+        updated = db.session.execute(
+            text("""
+                UPDATE public.publication_tasks
+                SET status = 'canceled',
+                    current_step = 'canceled',
+                    error_message = :error,
+                    completed_at = NOW(),
+                    result = COALESCE(result, '{}'::jsonb)
+                        || jsonb_build_object('error', CAST(:error_json AS jsonb)),
+                    updated_at = NOW()
+                WHERE id = :task_id
+                  AND status NOT IN ('completed', 'failed', 'canceled')
+            """),
+            {
+                "task_id": str(task.id),
+                "error": error,
+                "error_json": json.dumps(error, ensure_ascii=False),
+            },
+        )
+        changed = bool(updated.rowcount) or changed
     if changed:
         db.session.commit()
 
@@ -3455,7 +3689,12 @@ def draw_closed_door_cover(output_path: str, plan: Dict[str, Any], *, include_da
 
 
 def planner_model() -> str:
-    return os.environ.get("MP3_VIDEO_PLANNER_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "deepseek-v4-flash"
+    return (
+        os.environ.get("MP3_VIDEO_PLANNER_MODEL")
+        or os.environ.get("DEEPSEEK_FLASH_MODEL")
+        or os.environ.get("DEEPSEEK_MODEL")
+        or "deepseek-v4-flash"
+    )
 
 
 def transcript_model() -> str:
@@ -4059,7 +4298,7 @@ def _video_summary_ready(summary: Any) -> bool:
     status = str(summary.get("status") or "").lower()
     if status and status not in {"completed", "succeeded"}:
         return False
-    return _path_ready(_video_output_message(summary))
+    return _video_file_ready(_video_output_message(summary))
 
 
 def _summary_matches_generate_subtitles(summary: Any, expected: Optional[bool]) -> bool:
@@ -4080,6 +4319,57 @@ def _path_ready(path: Any) -> bool:
     text = str(path or "").strip()
     resolved = _resolve_project_path(text) if text else None
     return bool(resolved and resolved.exists() and resolved.is_file() and resolved.stat().st_size > 0)
+
+
+def _video_file_ready(path: Any) -> bool:
+    """Return True only for a finalized, probeable video with positive duration."""
+    text_value = str(path or "").strip()
+    resolved = _resolve_project_path(text_value) if text_value else None
+    if not resolved or not resolved.exists() or not resolved.is_file():
+        return False
+    try:
+        stat = resolved.stat()
+    except OSError:
+        return False
+    if stat.st_size <= 0:
+        return False
+    return _probe_video_file_cached(str(resolved), int(stat.st_size), int(stat.st_mtime_ns))
+
+
+@lru_cache(maxsize=512)
+def _probe_video_file_cached(path: str, _size: int, _mtime_ns: int) -> bool:
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_type,width,height:format=duration",
+                "-of",
+                "json",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        payload = json.loads(probe.stdout or "{}")
+        streams = payload.get("streams") if isinstance(payload, dict) else []
+        duration = float(((payload.get("format") or {}).get("duration")) or 0)
+        return duration > 0.1 and any(
+            isinstance(stream, dict)
+            and stream.get("codec_type") == "video"
+            and int(stream.get("width") or 0) > 0
+            and int(stream.get("height") or 0) > 0
+            for stream in (streams or [])
+        )
+    except Exception as exc:
+        logger.warning("Reject invalid/incomplete video file: path=%s error=%s", path, exc)
+        return False
 
 
 def _image_file_ready(path: Any, *, expected_size: Optional[Tuple[int, int]] = None) -> bool:
@@ -4114,19 +4404,59 @@ def _recover_completed_publisher_child_from_disk(child: PublicationTask) -> Publ
     if not video_path:
         return child
 
+    child_id = str(child.id)
     now = datetime.utcnow()
-    result = dict(child.result or {})
-    result.update({
+    result_patch = {
         "video_path": str(video_path),
         "completed_at": now.isoformat() + "Z",
         "disk_recovered_at": now.isoformat() + "Z",
         "generate_subtitles": _publisher_child_generate_subtitles(child, default=True),
-    })
+    }
     aspect_ratio = _publisher_child_aspect_ratio(child)
     if aspect_ratio == "9:16":
-        result["vertical_video_path"] = str(video_path)
+        result_patch["vertical_video_path"] = str(video_path)
     else:
-        result["landscape_video_path"] = str(video_path)
+        result_patch["landscape_video_path"] = str(video_path)
+
+    bind = db.session.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        def persist_recovery():
+            updated = db.session.execute(
+                text("""
+                    UPDATE public.publication_tasks
+                    SET status = 'completed',
+                        current_step = 'done',
+                        progress = 100,
+                        error_message = NULL,
+                        completed_at = :completed_at,
+                        task_video_path = :video_path,
+                        result = COALESCE(result, '{}'::jsonb) || CAST(:result_patch AS jsonb),
+                        updated_at = :completed_at
+                    WHERE id = :task_id
+                      AND status NOT IN ('completed', 'failed', 'canceled')
+                """),
+                {
+                    "task_id": child_id,
+                    "completed_at": now,
+                    "video_path": str(video_path),
+                    "result_patch": json.dumps(result_patch, ensure_ascii=False),
+                },
+            )
+            db.session.commit()
+            return int(updated.rowcount or 0)
+
+        if not _db_retry(persist_recovery, f"recover publisher child from disk {child_id}"):
+            return child
+        recovered = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS) or child
+        logger.warning(
+            "Recovered completed publisher child from existing video file: child=%s path=%s",
+            child_id,
+            video_path,
+        )
+        return recovered
+
+    result = dict(child.result or {})
+    result.update(result_patch)
 
     child.status = "completed"
     child.current_step = "done"
@@ -4136,10 +4466,12 @@ def _recover_completed_publisher_child_from_disk(child: PublicationTask) -> Publ
     child.task_video_path = str(video_path)
     child.result = result
     flag_modified(child, "result")
+    db.session.flush()
+    db.session.expunge(child)
     db.session.commit()
     logger.warning(
         "Recovered completed publisher child from existing video file: child=%s path=%s",
-        child.id,
+        child_id,
         video_path,
     )
     return child
@@ -4181,7 +4513,9 @@ def _publisher_video_file_is_stable(path: Path) -> bool:
     if stat.st_size < min_bytes:
         return False
     grace_seconds = max(0, _int_env("MP3_VIDEO_PUBLISHER_DISK_RECOVERY_GRACE_SECONDS", 20))
-    return (time.time() - stat.st_mtime) >= grace_seconds
+    if (time.time() - stat.st_mtime) < grace_seconds:
+        return False
+    return _video_file_ready(path)
 
 
 def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: int, end_progress: int) -> PublicationTask:
@@ -4198,49 +4532,72 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
         child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS)
         if not child:
             raise RuntimeError(f"子任务不存在: {child_id}")
+
         now_mono = time.monotonic()
-        full_child_for_repair = None
+        requeued = False
         if child.status not in TERMINAL_STATUSES and now_mono >= next_full_recovery_check:
-            full_child_for_repair = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
-            if full_child_for_repair:
-                recovered_child = _recover_completed_publisher_child_from_disk(full_child_for_repair)
-                if recovered_child.status in TERMINAL_STATUSES:
-                    child = recovered_child
+            disk_video = _publisher_child_disk_video_path(child)
+            repair_due = _publisher_child_repair_due(child)
+            if disk_video or repair_due:
+                full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+                if full_child and disk_video:
+                    full_child = _recover_completed_publisher_child_from_disk(full_child)
+                if full_child and full_child.status not in TERMINAL_STATUSES and repair_due:
+                    full_child, requeued = maybe_requeue_stale_publisher_child(full_child, log=logger)
+                child = full_child or child
+                if requeued:
+                    child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS) or child
             next_full_recovery_check = now_mono + recovery_check_seconds
-        if child.current_step != last_step:
-            last_step = child.current_step
-            child_progress = int(child.progress or 0)
+
+        child_status = str(child.status or "")
+        child_step = str(child.current_step or "")
+        child_progress = int(child.progress or 0)
+        child_summary = _task_public_summary(child)
+        celery_failure = None if child_status in TERMINAL_STATUSES else _celery_failure_message(child)
+
+        if child_step != last_step or requeued:
+            last_step = None if requeued else child_step
             mapped = start_progress + int((end_progress - start_progress) * child_progress / 100)
-            _emit(parent_id, f"{label}_{child.current_step}", mapped, f"{label}: {child.current_step}")
-            _record_child(parent_id, label, child)
-        if child.status in TERMINAL_STATUSES:
+            suffix = "requeued" if requeued else child_step
+            message = f"{label}: requeued" if requeued else f"{label}: {child_step}"
+            _emit(parent_id, f"{label}_{suffix}", mapped, message)
+            _record_child(parent_id, label, child_summary)
+        if child_status in TERMINAL_STATUSES:
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_PUBLIC_COLUMNS) or child
-        celery_failure = _celery_failure_message(child)
         if celery_failure:
             full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS) or child
             _mark_child_failed(full_child, celery_failure)
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_PUBLIC_COLUMNS)
-        if full_child_for_repair and child.status not in TERMINAL_STATUSES:
-            child, requeued = maybe_requeue_stale_publisher_child(full_child_for_repair, log=logger)
-            if requeued:
-                _emit(parent_id, f"{label}_requeued", start_progress, f"{label}: requeued")
-                _record_child(parent_id, label, child)
-                last_step = None
         time.sleep(poll_seconds)
         db.session.expire_all()
-    child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+
+    child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS)
     if not child:
         raise RuntimeError(f"子任务不存在: {child_id}")
+    child_status = str(child.status or "")
+    child_step = str(child.current_step or "")
+    child_key = str(child.id)
+    child_summary = _task_public_summary(child)
     # The child can reach a terminal state between the final loop poll and this
     # deadline read. Treat that as a normal terminal result, not as a timeout.
-    if child.status in TERMINAL_STATUSES:
+    if child_status in TERMINAL_STATUSES:
         _clear_waiting_child(parent_id, label)
-        return child
-    _record_child(parent_id, label, child)
-    raise ChildTaskStillRunning(label, child.id, child.status or "", child.current_step or "")
+        return _load_task(child_id, *TASK_PUBLIC_COLUMNS) or child
+    _record_child(parent_id, label, child_summary)
+    raise ChildTaskStillRunning(label, child_key, child_status, child_step)
+
+
+def _publisher_child_repair_due(child: PublicationTask) -> bool:
+    if not child or child.feature != "publisher" or str(child.status or "").lower() != "pending":
+        return False
+    reference_time = child.updated_at or child.created_at
+    if not reference_time:
+        return True
+    grace_seconds = max(30, _int_env("PUBLISHER_CHILD_ORPHAN_GRACE_SECONDS", 180))
+    return (datetime.utcnow() - reference_time).total_seconds() >= grace_seconds
 
 
 def _raise_if_parent_canceled(parent_id: str) -> None:
@@ -4252,11 +4609,21 @@ def _raise_if_parent_canceled(parent_id: str) -> None:
 def _defer_parent_retry(parent_id: str, exc: ChildTaskStillRunning) -> None:
     delay = _parent_retry_delay_seconds(exc.label)
     max_defers = _parent_max_defers(exc.label)
-    fresh = _load_task(parent_id, *TASK_PROGRESS_RESULT_COLUMNS, PublicationTask.status, PublicationTask.error_message)
+    cached_result = _cached_workflow_result(parent_id)
+    if cached_result is None:
+        fresh = _load_task(
+            parent_id,
+            *TASK_PROGRESS_RESULT_COLUMNS,
+            PublicationTask.status,
+            PublicationTask.error_message,
+        )
+        result = dict(fresh.result or {}) if fresh and isinstance(fresh.result, dict) else {}
+    else:
+        fresh = _load_task(parent_id, *TASK_PROGRESS_STATUS_COLUMNS)
+        result = cached_result
     if not fresh or fresh.status == "canceled":
         return
 
-    result = dict(fresh.result or {})
     deferred_waits = dict(result.get("deferred_waits") or {})
     state = dict(deferred_waits.get(exc.label) or {})
     count = int(state.get("defer_count") or state.get("count") or 0) + 1
@@ -4284,10 +4651,11 @@ def _defer_parent_retry(parent_id: str, exc: ChildTaskStillRunning) -> None:
     fresh.result = result
     flag_modified(fresh, "result")
     db.session.commit()
+    _replace_cached_workflow_result(parent_id, result)
 
     celery_app.send_task(
         "tasks.mp3_video_workflow.process_job",
-        args=[parent_id],
+        args=[parent_id, waiting_child],
         queue=QUEUE_NAME,
         countdown=delay,
     )
@@ -4322,10 +4690,15 @@ def _parent_max_defers(label: str) -> int:
 
 
 def _clear_waiting_child(parent_id: str, label: str) -> None:
-    fresh = _load_task(parent_id, *TASK_PROGRESS_RESULT_COLUMNS)
-    if not fresh or not isinstance(fresh.result, dict):
+    cached_result = _cached_workflow_result(parent_id)
+    if cached_result is None:
+        fresh = _load_task(parent_id, *TASK_PROGRESS_RESULT_COLUMNS)
+        result = dict(fresh.result or {}) if fresh and isinstance(fresh.result, dict) else {}
+    else:
+        fresh = _load_task(parent_id, *TASK_PROGRESS_STATUS_COLUMNS)
+        result = cached_result
+    if not fresh or not result:
         return
-    result = dict(fresh.result or {})
     waiting_child = result.get("waiting_child")
     if not isinstance(waiting_child, dict) or waiting_child.get("label") != label:
         return
@@ -4333,9 +4706,11 @@ def _clear_waiting_child(parent_id: str, label: str) -> None:
     fresh.result = result
     flag_modified(fresh, "result")
     db.session.commit()
+    _replace_cached_workflow_result(parent_id, result)
 
 
 def _start_task(task: PublicationTask) -> None:
+    task_id = str(task.id)
     result = dict(task.result or {})
     started_at = datetime.utcnow().isoformat() + "Z"
     resume_waiting_child = isinstance(result.get("waiting_child"), dict)
@@ -4369,7 +4744,7 @@ def _start_task(task: PublicationTask) -> None:
     task.result = result
     flag_modified(task, "result")
     db.session.commit()
-    _replace_cached_workflow_result(task.id, result)
+    _replace_cached_workflow_result(task_id, result)
 
 
 def _emit(parent_id: str, step: str, progress: int, message: str, *, result: Optional[Dict[str, Any]] = None) -> None:
@@ -4387,18 +4762,6 @@ def _emit(parent_id: str, step: str, progress: int, message: str, *, result: Opt
                 UPDATE public.publication_tasks
                 SET current_step = :step,
                     progress = :progress,
-                    result = jsonb_set(
-                        COALESCE(result, '{}'::jsonb) || CAST(:patch AS jsonb),
-                        '{logs}',
-                        CASE
-                            WHEN CAST(:patch AS jsonb) ? 'logs'
-                            THEN COALESCE(CAST(:patch AS jsonb)->'logs', '[]'::jsonb)
-                            WHEN jsonb_array_length(COALESCE(result->'logs', '[]'::jsonb)) >= 160
-                            THEN (COALESCE(result->'logs', '[]'::jsonb) #- '{0}') || CAST(:entry AS jsonb)
-                            ELSE COALESCE(result->'logs', '[]'::jsonb) || CAST(:entry AS jsonb)
-                        END,
-                        true
-                    ),
                     updated_at = NOW()
                 WHERE id = :task_id
                   AND status IS DISTINCT FROM 'canceled'
@@ -4407,8 +4770,6 @@ def _emit(parent_id: str, step: str, progress: int, message: str, *, result: Opt
                 "task_id": str(parent_id),
                 "step": _safe_step_code(step),
                 "progress": max(0, min(100, int(progress or 0))),
-                "patch": json.dumps(patch, ensure_ascii=False),
-                "entry": json.dumps([log_entry], ensure_ascii=False),
             },
         )
         db.session.commit()
@@ -4450,8 +4811,8 @@ def _update_result(parent_id: str, values: Dict[str, Any]) -> None:
         _merge_cached_workflow_result(parent_id, values)
 
 
-def _record_child(parent_id: str, label: str, child: PublicationTask) -> None:
-    child_summary = _task_public_summary(child)
+def _record_child(parent_id: str, label: str, child: Any) -> None:
+    child_summary = copy.deepcopy(child) if isinstance(child, dict) else _task_public_summary(child)
 
     def operation():
         updated = db.session.execute(
@@ -4486,7 +4847,9 @@ def _record_child(parent_id: str, label: str, child: PublicationTask) -> None:
 
 
 def _mark_failed(task: PublicationTask, message: str) -> None:
-    result = dict(task.result or {})
+    result = _cached_workflow_result(task.id)
+    if result is None:
+        result = dict(task.result or {})
     result["error"] = message
     result["completed_at"] = datetime.utcnow().isoformat() + "Z"
     task.status = "failed"
@@ -4497,6 +4860,7 @@ def _mark_failed(task: PublicationTask, message: str) -> None:
     task.result = result
     flag_modified(task, "result")
     db.session.commit()
+    _replace_cached_workflow_result(task.id, result)
 
 
 def mark_job_failed_safely(task_id: str, message: str, *, notify: bool = True) -> bool:
@@ -4586,29 +4950,70 @@ def _mark_child_failed(child: PublicationTask, message: str) -> None:
 
 def _queue_notification(task_id: str, event_type: str, message: Optional[str] = None) -> bool:
     try:
-        fresh = _load_task(task_id, *TASK_NOTIFICATION_COLUMNS)
+        params_snapshot = _cached_workflow_params(task_id)
+        result_snapshot = _cached_workflow_result(task_id)
+        if params_snapshot is None or result_snapshot is None:
+            fresh = _load_task(task_id, *TASK_NOTIFICATION_COLUMNS)
+            params_snapshot = dict(fresh.params or {}) if fresh and isinstance(fresh.params, dict) else {}
+            result_snapshot = dict(fresh.result or {}) if fresh and isinstance(fresh.result, dict) else {}
+        else:
+            fresh = _load_task(task_id, *TASK_NOTIFICATION_STATUS_COLUMNS)
         if not fresh or fresh.status == "canceled":
             return False
-        result = dict(fresh.result or {})
-        notifications = dict(result.get("notifications") or {})
+        notifications = dict(result_snapshot.get("notifications") or {})
         if notifications.get(event_type, {}).get("queued"):
             return True
 
-        payload = _notification_payload(fresh, event_type, message)
+        payload = _notification_payload(
+            fresh,
+            event_type,
+            message,
+            params_snapshot=params_snapshot,
+            result_snapshot=result_snapshot,
+        )
         queued = workflow_notification_service.enqueue_workflow_event(event_type, payload)
         if not queued.get("queued"):
             return False
 
-        notifications[event_type] = {
+        notification = {
             "queued": True,
             "event_type": event_type,
             "celery_task_id": queued.get("celery_task_id"),
             "queued_at": datetime.utcnow().isoformat() + "Z",
         }
-        result["notifications"] = notifications
-        fresh.result = result
-        flag_modified(fresh, "result")
-        db.session.commit()
+        notifications[event_type] = notification
+
+        def persist_notification():
+            updated = db.session.execute(
+                text("""
+                    UPDATE public.publication_tasks
+                    SET result = jsonb_set(
+                            COALESCE(result, '{}'::jsonb),
+                            '{notifications}',
+                            COALESCE(result->'notifications', '{}'::jsonb)
+                                || jsonb_build_object(
+                                    CAST(:event_type AS text),
+                                    CAST(:notification AS jsonb)
+                                ),
+                            true
+                        ),
+                        updated_at = NOW()
+                    WHERE id = :task_id
+                      AND status IS DISTINCT FROM 'canceled'
+                """),
+                {
+                    "task_id": str(task_id),
+                    "event_type": str(event_type),
+                    "notification": json.dumps(notification, ensure_ascii=False),
+                },
+            )
+            db.session.commit()
+            return updated.rowcount
+
+        if not _db_retry(persist_notification, f"persist notification {task_id}:{event_type}"):
+            return False
+        result_snapshot["notifications"] = notifications
+        _replace_cached_workflow_result(task_id, result_snapshot)
         return True
     except Exception:
         db.session.rollback()
@@ -4645,9 +5050,20 @@ def _send_direct_mp3_workflow_failure_email(
         logger.exception("[MP3_VIDEO_WORKFLOW] direct failure email failed | task=%s", task_id)
 
 
-def _notification_payload(task: PublicationTask, event_type: str, message: Optional[str] = None) -> Dict[str, Any]:
-    result = task.result if isinstance(task.result, dict) else {}
-    params = task.params if isinstance(task.params, dict) else {}
+def _notification_payload(
+    task: PublicationTask,
+    event_type: str,
+    message: Optional[str] = None,
+    *,
+    params_snapshot: Optional[Dict[str, Any]] = None,
+    result_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    result = result_snapshot if isinstance(result_snapshot, dict) else (
+        task.result if isinstance(task.result, dict) else {}
+    )
+    params = params_snapshot if isinstance(params_snapshot, dict) else (
+        task.params if isinstance(task.params, dict) else {}
+    )
     workflow = params.get(FEATURE_NAME) if isinstance(params.get(FEATURE_NAME), dict) else {}
     metadata = workflow.get("metadata") if isinstance(workflow.get("metadata"), dict) else {}
     audio = result.get("audio") or workflow.get("audio") or {}
@@ -4970,15 +5386,19 @@ def _task_public_summary(task: Optional[PublicationTask]) -> Optional[Dict[str, 
 
 
 def _publisher_result_summary(task: PublicationTask) -> Dict[str, Any]:
-    result = task.result or {}
-    params = task.params or {}
+    result = task.result if _model_attr_loaded(task, "result") and isinstance(task.result, dict) else {}
     video_path = (
         result.get("video_path")
         or result.get("landscape_video_path")
         or result.get("vertical_video_path")
         or getattr(task, "task_video_path", None)
     )
-    aspect_ratio = params.get("aspect_ratio")
+    aspect_ratio = _publisher_child_aspect_ratio(task)
+    projected_cover_path = (
+        getattr(task, "publisher_vertical_cover_path", None)
+        or getattr(task, "publisher_podcast_cover_path", None)
+        or getattr(task, "publisher_bilibili_cover_path", None)
+    )
     return {
         **(_task_public_summary(task) or {}),
         "generate_subtitles": _publisher_child_generate_subtitles(task, default=True),
@@ -4986,7 +5406,7 @@ def _publisher_result_summary(task: PublicationTask) -> Dict[str, Any]:
         "video_path": video_path,
         "landscape_video_path": video_path if aspect_ratio != "9:16" else None,
         "vertical_video_path": result.get("vertical_video_path") or (video_path if aspect_ratio == "9:16" else None),
-        "cover_path": result.get("cover_path"),
+        "cover_path": result.get("cover_path") or projected_cover_path,
         "bilibili_result": result.get("bilibili_result"),
         "youtube_result": result.get("youtube_result"),
     }

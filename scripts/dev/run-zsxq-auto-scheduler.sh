@@ -15,6 +15,7 @@ else
 fi
 
 export PYTHONPATH="$PROJECT_ROOT/src/backend"
+export ZSXQ_PROJECT_ROOT="$PROJECT_ROOT"
 export DATABASE_TYPE="${DATABASE_TYPE:-postgresql}"
 export FLASK_DEBUG=0
 export FLASK_USE_RELOADER=0

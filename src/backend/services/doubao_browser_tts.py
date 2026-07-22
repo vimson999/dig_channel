@@ -117,7 +117,7 @@ def status_payload(options: Optional[DoubaoBrowserTTSOptions] = None) -> Dict[st
         "mode": "real_browser_with_extension",
         "worker_id": os.getenv("DOUBAO_BROWSER_TTS_WORKER_ID", "default"),
         "profile_pool_root": os.getenv("DOUBAO_BROWSER_TTS_PROFILE_POOL_ROOT", ""),
-        "profile_count": _int_env("DOUBAO_BROWSER_TTS_PROFILE_COUNT", 1),
+        "profile_count": _int_env("DOUBAO_BROWSER_TTS_PROFILE_COUNT", 6),
     }
 
 
@@ -160,6 +160,7 @@ class DoubaoBrowserTTSWorker:
                 try:
                     page.goto(self.options.doubao_url, wait_until="domcontentloaded", timeout=45_000)
                     self._raise_if_login_or_captcha(page, job_id)
+                    self._dismiss_known_promotional_dialogs(page)
                     self._guard_total_timeout(started)
 
                     self._emit(progress_callback, "clear_audio_cache", 12, "清空插件音频缓存")
@@ -177,6 +178,7 @@ class DoubaoBrowserTTSWorker:
 
                     self._emit(progress_callback, "start_reading", 62, "触发朗读")
                     self._raise_if_login_or_captcha(page, job_id)
+                    self._dismiss_known_promotional_dialogs(page)
                     read_button.click(timeout=10_000)
 
                     self._emit(progress_callback, "capture_audio", 72, "等待音频捕获")
@@ -244,6 +246,13 @@ class DoubaoBrowserTTSWorker:
             f"--disable-extensions-except={extension}",
             f"--load-extension={extension}",
             "--autoplay-policy=no-user-gesture-required",
+            # Keep cookie encryption compatible with the manual profile-login
+            # launcher on macOS. Playwright currently supplies these defaults,
+            # but making them explicit prevents a future launch-mode mismatch.
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "--no-first-run",
+            "--no-default-browser-check",
         ]
         if self.options.profile_directory:
             args.append(f"--profile-directory={self.options.profile_directory}")
@@ -315,12 +324,53 @@ class DoubaoBrowserTTSWorker:
     def _wait_for_read_button(self, page, job_id: str):
         deadline = time.monotonic() + self.options.response_timeout_seconds
         while time.monotonic() < deadline:
+            self._dismiss_known_promotional_dialogs(page)
             button = self._last_visible(page, self._selectors("read"))
             if button is not None:
                 return button
             self._raise_if_login_or_captcha(page, job_id)
             time.sleep(1)
         raise DoubaoBrowserTTSAutomationError("等待豆包回复或朗读按钮超时")
+
+    def _dismiss_known_promotional_dialogs(self, page) -> int:
+        """Close Doubao's desktop-app promotion without hiding auth/captcha UI."""
+        try:
+            return int(page.evaluate(
+                """() => {
+                    const markers = ["下载电脑版", "使用完整功能", "共享桌面应用", "下次提醒我"];
+                    let dismissed = 0;
+                    for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+                        const text = String(dialog.innerText || "");
+                        if (!markers.some((marker) => text.includes(marker))) continue;
+                        const direct = dialog.querySelector(
+                            'button[aria-label*="关闭"], button[title*="关闭"], '
+                            + '[data-slot="dialog-close"], [data-radix-dialog-close]'
+                        );
+                        if (direct) {
+                            direct.click();
+                            dismissed += 1;
+                            continue;
+                        }
+                        const box = dialog.getBoundingClientRect();
+                        const candidates = Array.from(dialog.querySelectorAll('button'))
+                            .filter((button) => {
+                                const rect = button.getBoundingClientRect();
+                                return rect.width > 0 && rect.height > 0
+                                    && rect.left >= box.right - 100
+                                    && rect.top <= box.top + 100;
+                            })
+                            .sort((left, right) => right.getBoundingClientRect().left - left.getBoundingClientRect().left);
+                        if (candidates[0]) {
+                            candidates[0].click();
+                            dismissed += 1;
+                        }
+                    }
+                    return dismissed;
+                }"""
+            ) or 0)
+        except Exception as exc:
+            logger.debug("Dismiss Doubao promotional dialog failed: %s", exc)
+            return 0
 
     def _wait_for_audio(self, page, started_at: float, job_id: str, *, text: str = "") -> Dict[str, Any]:
         chars = len(re.sub(r"\s+", "", str(text or "")))
@@ -366,6 +416,31 @@ class DoubaoBrowserTTSWorker:
         return last_stats
 
     def _export_wav_bytes(self, page, output_path: Path, job_id: str) -> bytes:
+        # Prefer the browser download path. Returning a Blob as
+        # ``Array.from(Uint8Array)`` serializes every byte as a JSON number over
+        # the Playwright protocol; a several-megabyte WAV can then spend tens
+        # of minutes in ``page.evaluate`` and look stale to the parent workflow.
+        has_download = page.evaluate(
+            """() => typeof window.downloadDoubaoWav === 'function'"""
+        )
+        if has_download:
+            with page.expect_download(timeout=30_000) as download_info:
+                ok = page.evaluate(
+                    """async (filename) => {
+                        if (typeof window.downloadDoubaoWav !== "function") return false;
+                        await window.downloadDoubaoWav(filename);
+                        return true;
+                    }""",
+                    output_path.name,
+                )
+                if not ok:
+                    raise DoubaoBrowserTTSAutomationError("插件调用 downloadDoubaoWav 失败")
+            download_info.value.save_as(str(output_path))
+            return b""
+
+        # Compatibility fallback for an older capture script without the
+        # download helper. Base64 keeps the protocol payload bounded compared
+        # with a JSON array containing one integer per byte.
         raw = page.evaluate(
             """async () => {
                 const candidateFns = [
@@ -378,10 +453,22 @@ class DoubaoBrowserTTSWorker:
                     const blob = value instanceof Blob ? value : (value && value.blob instanceof Blob ? value.blob : null);
                     if (blob) {
                         const buffer = await blob.arrayBuffer();
-                        return { kind: "bytes", data: Array.from(new Uint8Array(buffer)) };
+                        const bytes = new Uint8Array(buffer);
+                        const chunkSize = 0x8000;
+                        let binary = "";
+                        for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+                            binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+                        }
+                        return { kind: "base64", data: btoa(binary) };
                     }
                     if (value instanceof ArrayBuffer) {
-                        return { kind: "bytes", data: Array.from(new Uint8Array(value)) };
+                        const bytes = new Uint8Array(value);
+                        const chunkSize = 0x8000;
+                        let binary = "";
+                        for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+                            binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+                        }
+                        return { kind: "base64", data: btoa(binary) };
                     }
                     if (typeof value === "string" && value.startsWith("data:audio/wav;base64,")) {
                         return { kind: "base64", data: value.slice("data:audio/wav;base64,".length) };
@@ -394,22 +481,9 @@ class DoubaoBrowserTTSWorker:
             if raw.get("kind") == "base64":
                 return base64.b64decode(raw.get("data") or "")
             return bytes(raw.get("data") or [])
-
-        with page.expect_download(timeout=30_000) as download_info:
-            ok = page.evaluate(
-                """async () => {
-                    if (typeof window.downloadDoubaoWav !== "function") return false;
-                    await window.downloadDoubaoWav();
-                    return true;
-                }"""
-            )
-            if not ok:
-                raise DoubaoBrowserTTSAutomationError(
-                    "插件未提供 exportDoubaoWav/getDoubaoWavBlob/downloadDoubaoWav"
-                )
-        download = download_info.value
-        download.save_as(str(output_path))
-        return b""
+        raise DoubaoBrowserTTSAutomationError(
+            "插件未提供 exportDoubaoWav/getDoubaoWavBlob/downloadDoubaoWav"
+        )
 
     def _audio_stats(self, page) -> Dict[str, Any]:
         stats = page.evaluate(
@@ -450,9 +524,11 @@ class DoubaoBrowserTTSWorker:
                 "[title*='播放']",
             ],
             "login": [
-                "text=登录",
-                "text=手机号",
-                "text=验证码",
+                'button:has-text("登录")',
+                '[role="button"]:has-text("登录")',
+                'input[placeholder*="手机号"]',
+                'input[placeholder*="验证码"]',
+                'button:has-text("获取验证码")',
             ],
             "captcha": [
                 "text=人机验证",

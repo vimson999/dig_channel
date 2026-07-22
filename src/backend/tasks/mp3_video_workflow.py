@@ -26,7 +26,7 @@ logger = logging.getLogger("MP3_VIDEO_WORKFLOW_TASK")
     retry_jitter=True,
     retry_kwargs={"max_retries": 3},
 )
-def process_mp3_video_workflow_job(self, task_id):
+def process_mp3_video_workflow_job(self, task_id, wait_hint=None):
     app = create_app()
     with app.app_context():
         try:
@@ -36,7 +36,7 @@ def process_mp3_video_workflow_job(self, task_id):
                 feature="mp3_video_workflow",
                 queue="mp3_video_workflow",
             )
-            result = process_job(task_id)
+            result = process_job(task_id, wait_hint=wait_hint)
             if result is False:
                 mark_job_failed_if_unfinished(task_id, "MP3 视频编排任务异常结束，未写入失败状态", notify=True)
             return result

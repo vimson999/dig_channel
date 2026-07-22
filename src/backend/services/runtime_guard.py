@@ -5,8 +5,8 @@ import time
 from datetime import datetime
 
 from celery.exceptions import Retry
-from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy import func, text
+from sqlalchemy.exc import DBAPIError, OperationalError, PendingRollbackError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -22,9 +22,12 @@ RUNNING_STATUSES = ("processing",)
 DEFAULT_FEATURE_LIMITS = {
     "publisher": 4,
     "publisher_upload": 2,
+    "douyin_upload_test": 1,
+    "wechat_channels_upload_test": 1,
     "report_audio_workflow": 2,
     "report_pdf_audio_workflow": 2,
     "report_script_material_workflow": 2,
+    "report_visual_plan": 3,
     "report_top10_workflow": 1,
     "mp3_video_workflow": 1,
     "content_pdf_clean": 2,
@@ -35,9 +38,12 @@ DEFAULT_FEATURE_LIMITS = {
 DEFAULT_FEATURE_BACKLOG_LIMITS = {
     "publisher": 12,
     "publisher_upload": 20,
+    "douyin_upload_test": 5,
+    "wechat_channels_upload_test": 5,
     "report_audio_workflow": 10,
     "report_pdf_audio_workflow": 10,
     "report_script_material_workflow": 50,
+    "report_visual_plan": 20,
     "report_top10_workflow": 5,
     "mp3_video_workflow": 5,
     "content_pdf_clean": 10,
@@ -174,28 +180,34 @@ def maybe_guarded_apply_async(
     feature,
     task=None,
     task_id=None,
+    broker_task_id=None,
     retry=False,
 ):
     business_task_id = task_id or getattr(task, "id", None)
     admission = check_publication_task_admission(feature, task_id=business_task_id, mode="submit")
     countdown = 0 if admission.get("allowed") else _retry_delay_seconds(admission)
+    deferred_state = None
     if not admission.get("allowed") and business_task_id:
-        _mark_publication_task_deferred(
+        deferred_state = _mark_publication_task_deferred(
             business_task_id,
             admission=admission,
             queue=queue,
             countdown=countdown,
         )
-    async_result = celery_callable.apply_async(
-        args=list(args or []),
-        queue=queue,
-        countdown=countdown,
-        retry=retry,
-    )
+    apply_options = {
+        "args": list(args or []),
+        "queue": queue,
+        "countdown": countdown,
+        "retry": retry,
+    }
+    if broker_task_id:
+        apply_options["task_id"] = str(broker_task_id)
+    async_result = celery_callable.apply_async(**apply_options)
     return {
         "async_result": async_result,
         "admission": admission,
         "deferred": not admission.get("allowed"),
+        "deferred_state": deferred_state,
         "countdown": countdown,
     }
 
@@ -300,7 +312,7 @@ def retry_exception_types():
 
 
 def is_retryable_db_error(exc):
-    if isinstance(exc, OperationalError):
+    if isinstance(exc, (OperationalError, PendingRollbackError)):
         return True
     if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
         return True
@@ -317,27 +329,39 @@ def is_retryable_db_error(exc):
         "connection refused",
         "terminating connection",
         "connection not open",
+        "can't reconnect until invalid transaction is rolled back",
     )
     return any(fragment in text_value for fragment in retryable_fragments)
 
 
 def _publication_task_active_count(feature, *, task_id=None, mode="start"):
-    aliases = FEATURE_ALIASES.get(feature, (feature,))
-    statuses = RUNNING_STATUSES if mode == "start" else ACTIVE_STATUSES
-    query = (
-        PublicationTask.query
-        .filter(PublicationTask.feature.in_(aliases))
-        .filter(PublicationTask.status.in_(statuses))
-    )
-    if mode == "start":
-        passive_steps = _passive_running_steps(feature)
-        if passive_steps:
-            query = query.filter(~PublicationTask.current_step.in_(passive_steps))
-        for prefix in _passive_running_step_prefixes(feature):
-            query = query.filter(~PublicationTask.current_step.like(f"{prefix}%"))
-    if task_id:
-        query = query.filter(PublicationTask.id != str(task_id))
-    return int(query.count() or 0)
+    for attempt in range(2):
+        aliases = FEATURE_ALIASES.get(feature, (feature,))
+        statuses = RUNNING_STATUSES if mode == "start" else ACTIVE_STATUSES
+        query = (
+            db.session.query(func.count(PublicationTask.id))
+            .filter(PublicationTask.feature.in_(aliases))
+            .filter(PublicationTask.status.in_(statuses))
+        )
+        if mode == "start":
+            passive_steps = _passive_running_steps(feature)
+            if passive_steps:
+                query = query.filter(~PublicationTask.current_step.in_(passive_steps))
+            for prefix in _passive_running_step_prefixes(feature):
+                query = query.filter(~PublicationTask.current_step.like(f"{prefix}%"))
+        if task_id:
+            query = query.filter(PublicationTask.id != str(task_id))
+        try:
+            return int(query.scalar() or 0)
+        except Exception as exc:
+            if attempt or not is_retryable_db_error(exc):
+                raise
+            logger.warning(
+                "[TASK_GUARD] active-count connection invalidated; retrying once | feature=%s",
+                feature,
+            )
+            release_db_session_quietly()
+    return 0
 
 
 def _passive_running_steps(feature):
@@ -358,16 +382,7 @@ def _mark_publication_task_deferred(task_id, *, admission, queue, countdown):
     if not task_id:
         return False
     try:
-        task = (
-            PublicationTask.query.options(load_only(*DEFERRED_TASK_COLUMNS))
-            .filter(PublicationTask.id == str(task_id))
-            .first()
-        )
-        if not task or task.status == "canceled":
-            return False
         now = datetime.utcnow().isoformat() + "Z"
-        result = dict(task.result or {})
-        history = list(result.get("runtime_guard_history") or [])
         item = {
             "reason": admission.get("reason"),
             "message": admission.get("message"),
@@ -378,25 +393,123 @@ def _mark_publication_task_deferred(task_id, *, admission, queue, countdown):
             "active_count": admission.get("active_count"),
             "limit": admission.get("limit"),
         }
-        history.append(item)
-        result["runtime_guard"] = item
-        result["runtime_guard_history"] = history[-20:]
-        task.status = "pending"
-        task.current_step = (
+        current_step = (
             "deferred_db_pressure"
             if str(admission.get("reason") or "").startswith("db_")
             else ("deferred_backlog" if admission.get("reason") == "feature_backlog" else "deferred_capacity")
         )
+        if db.session.get_bind().dialect.name == "postgresql":
+            return _mark_publication_task_deferred_postgresql(
+                task_id,
+                item=item,
+                current_step=current_step,
+            )
+
+        task = (
+            PublicationTask.query.options(load_only(*DEFERRED_TASK_COLUMNS))
+            .filter(PublicationTask.id == str(task_id))
+            .first()
+        )
+        if not task or task.status == "canceled":
+            return False
+        result = dict(task.result or {})
+        history = list(result.get("runtime_guard_history") or [])
+        history.append(item)
+        result["runtime_guard"] = item
+        result["runtime_guard_history"] = history[-20:]
+        task.status = "pending"
+        task.current_step = current_step
         task.error_message = None
         task.completed_at = None
         task.result = result
         flag_modified(task, "result")
+        state = {
+            "status": task.status,
+            "current_step": task.current_step,
+            "result": result,
+            "error_message": task.error_message,
+            "completed_at": None,
+        }
         db.session.commit()
-        return True
+        return state
     except Exception:
         db.session.rollback()
         logger.exception("[TASK_GUARD] failed to persist deferred state | task=%s", task_id)
         return False
+
+
+def _mark_publication_task_deferred_postgresql(task_id, *, item, current_step):
+    item_json = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+    updated = db.session.execute(
+        text(
+            """
+            WITH candidate AS (
+                SELECT
+                    id,
+                    COALESCE(result::jsonb, '{}'::jsonb) AS payload
+                FROM public.publication_tasks
+                WHERE id = :task_id
+                  AND status <> 'canceled'
+                FOR UPDATE
+            ), trimmed AS (
+                SELECT
+                    candidate.id,
+                    candidate.payload,
+                    COALESCE((
+                        SELECT jsonb_agg(history.value ORDER BY history.ordinality)
+                        FROM (
+                            SELECT entry.value, entry.ordinality
+                            FROM jsonb_array_elements(
+                                CASE
+                                    WHEN jsonb_typeof(candidate.payload -> 'runtime_guard_history') = 'array'
+                                    THEN candidate.payload -> 'runtime_guard_history'
+                                    ELSE '[]'::jsonb
+                                END
+                            ) WITH ORDINALITY AS entry(value, ordinality)
+                            ORDER BY entry.ordinality DESC
+                            LIMIT 19
+                        ) AS history
+                    ), '[]'::jsonb) AS previous_history
+                FROM candidate
+            )
+            UPDATE public.publication_tasks AS task
+            SET
+                status = 'pending',
+                current_step = :current_step,
+                error_message = NULL,
+                completed_at = NULL,
+                updated_at = NOW(),
+                result = jsonb_set(
+                    jsonb_set(
+                        trimmed.payload,
+                        '{runtime_guard}',
+                        CAST(:item_json AS jsonb),
+                        true
+                    ),
+                    '{runtime_guard_history}',
+                    trimmed.previous_history || jsonb_build_array(CAST(:item_json AS jsonb)),
+                    true
+                )::json
+            FROM trimmed
+            WHERE task.id = trimmed.id
+            RETURNING task.id
+            """
+        ),
+        {
+            "task_id": str(task_id),
+            "current_step": current_step,
+            "item_json": item_json,
+        },
+    ).first()
+    db.session.commit()
+    if not updated:
+        return False
+    return {
+        "status": "pending",
+        "current_step": current_step,
+        "error_message": None,
+        "completed_at": None,
+    }
 
 
 def _retry_delay_seconds(admission):

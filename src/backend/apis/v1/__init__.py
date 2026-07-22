@@ -63,6 +63,10 @@ def register_blueprints(app):
     from .bilibili import bp as bilibili_bp
     app.register_blueprint(bilibili_bp)
 
+    # 注册 B站竞争对手情报台 API
+    from .bilibili_intelligence import bp as bilibili_intelligence_bp
+    app.register_blueprint(bilibili_intelligence_bp)
+
     # 注册视频剪辑 API (新增)
     from .video_editor import bp as video_editor_bp
     app.register_blueprint(video_editor_bp)
@@ -110,6 +114,14 @@ def register_blueprints(app):
     # 注册平台凭据管理 API
     from .platform_credentials import bp as platform_credentials_bp
     app.register_blueprint(platform_credentials_bp)
+
+    # 注册抖音 Cookie 上传测试台 API
+    from .douyin_publish_test import bp as douyin_publish_test_bp
+    app.register_blueprint(douyin_publish_test_bp)
+
+    # 注册视频号 Cookie 上传测试台 API
+    from .wechat_channels_publish_test import bp as wechat_channels_publish_test_bp
+    app.register_blueprint(wechat_channels_publish_test_bp)
 
 __all__ = [
     'auth_bp',

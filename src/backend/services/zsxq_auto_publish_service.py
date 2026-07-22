@@ -443,10 +443,8 @@ def _snapshot_config(config, include_secrets=False):
             "db_cookie_account_count": db_cookie_account_count,
             "active_cookie_account_count": db_cookie_account_count,
             "cookie_pool_ready": db_cookie_ready,
-            "cookie_source_mode": "db" if db_cookie_ready else ("env" if bool(_strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME))) else None),
+            "cookie_source_mode": "db" if db_cookie_ready else None,
         }
-    active_cookie_accounts = _eligible_cookie_accounts(config, config.get("group_id"))
-    effective_cookie_account_count = db_cookie_account_count or len(active_cookie_accounts)
     return {
         "exists": True,
         "path": str(CONFIG_PATH),
@@ -465,9 +463,9 @@ def _snapshot_config(config, include_secrets=False):
         "cookie_accounts": [_snapshot_cookie_account(item, include_secrets=include_secrets) for item in (config.get("cookie_accounts") or [])],
         "cookie_account_count": len(config.get("cookie_accounts") or []),
         "db_cookie_account_count": db_cookie_account_count,
-        "active_cookie_account_count": effective_cookie_account_count,
-        "cookie_pool_ready": bool(effective_cookie_account_count),
-        "cookie_source_mode": "db" if db_cookie_ready else ("pool" if active_cookie_accounts else ("env" if bool(_strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME))) else None)),
+        "active_cookie_account_count": db_cookie_account_count,
+        "cookie_pool_ready": db_cookie_ready,
+        "cookie_source_mode": "db" if db_cookie_ready else None,
     }
 
 
@@ -531,14 +529,18 @@ def _runtime_cookie_account(cookie, source, group_id):
 
 
 def _resolve_runtime_cookie_accounts(config, cookie_override=None, required=True):
-    db_accounts = _db_publish_cookie_accounts(group_id=config.get("group_id"), required=False)
-    if db_accounts:
+    group_id = config.get("group_id")
+    if has_app_context():
+        # Automatic publishing is DB-owned. The legacy JSON cookie pool is
+        # historical configuration and must never be used as a fallback.
+        db_accounts = _db_publish_cookie_accounts(group_id=group_id, required=True)
+        if not db_accounts:
+            raise ValueError("数据库中没有可用于当前星球的知识星球发帖凭据")
         return db_accounts, "db"
 
-    pool_accounts = _eligible_cookie_accounts(config, config.get("group_id"))
-    if pool_accounts:
-        return pool_accounts, "pool"
-
+    # Explicit runtime injection remains available only to isolated tools/tests
+    # that run without a Flask application context; it is not an automatic
+    # production fallback path.
     if cookie_override:
         return [_runtime_cookie_account(cookie_override, "page", config.get("group_id"))], "page"
 
@@ -563,6 +565,15 @@ def _db_publish_cookie_accounts(group_id=None, required=False):
         if required:
             raise
         return []
+    finally:
+        # The returned credentials are plain dictionaries. Do not retain the
+        # ORM transaction or connection across upload retries and verify sleeps.
+        try:
+            from models import db
+
+            db.session.remove()
+        except Exception:
+            logger.exception("[ZSXQ_AUTO_PUBLISH] failed to release credential session")
 
 
 def _db_publish_cookie_account_count(group_id=None):
@@ -637,12 +648,9 @@ def _auth_hint_from_error(error_text):
 
 def _mark_cookie_account_used(account):
     if account.get("credential_id"):
-        try:
-            from services.platform_credential_service import mark_credential_success
-
-            mark_credential_success(account.get("credential_id"))
-        except Exception:
-            logger.exception("[ZSXQ_AUTO_PUBLISH] credential used mark failed | credential=%s", account.get("credential_id"))
+        # DB credentials are finalized by _mark_cookie_account_success/limit.
+        # Marking them successful before the remote publish both misstates the
+        # outcome and duplicates a remote DB update for every batch.
         return
     if account.get("runtime_only"):
         return
@@ -657,6 +665,7 @@ def _mark_cookie_account_success(account):
 
             mark_credential_success(account.get("credential_id"))
         except Exception:
+            _rollback_db_session_safely()
             logger.exception("[ZSXQ_AUTO_PUBLISH] credential success mark failed | credential=%s", account.get("credential_id"))
         return
     if account.get("runtime_only"):
@@ -674,6 +683,7 @@ def _mark_cookie_account_limit(account, error_text):
 
             mark_credential_error(account.get("credential_id"), error_text, expired=is_auth_error(error_text))
         except Exception:
+            _rollback_db_session_safely()
             logger.exception("[ZSXQ_AUTO_PUBLISH] credential error mark failed | credential=%s", account.get("credential_id"))
         return
     if account.get("runtime_only"):
@@ -694,7 +704,18 @@ def _mark_cookie_account_error(account, error_text):
 
         mark_credential_error(account.get("credential_id"), error_text, expired=is_auth_error(error_text))
     except Exception:
+        _rollback_db_session_safely()
         logger.exception("[ZSXQ_AUTO_PUBLISH] credential error mark failed | credential=%s", account.get("credential_id"))
+
+
+def _rollback_db_session_safely():
+    """Clear a failed credential-write transaction before publishing continues."""
+    try:
+        from models import db
+
+        db.session.rollback()
+    except Exception:
+        logger.exception("[ZSXQ_AUTO_PUBLISH] failed to rollback credential transaction")
 
 
 def _validate_group(group_id, cookie):

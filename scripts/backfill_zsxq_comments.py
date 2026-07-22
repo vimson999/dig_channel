@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backfill structured ZSXQ comments and favorite topics replied to by 亦仁."""
+"""Backfill structured ZSXQ comments and explicit Yiren award favorites."""
 
 import argparse
 import sys
@@ -13,9 +13,10 @@ if str(BACKEND_DIR) not in sys.path:
 
 from app import create_app  # noqa: E402
 from models import db  # noqa: E402
-from models.zsxq_sync import ZsxqTopic, ZsxqTopicComment, ZsxqTopicFavorite  # noqa: E402
+from models.zsxq_sync import ZsxqTopic, ZsxqTopicComment  # noqa: E402
 from services.platform_credential_service import resolve_zsxq_cookie  # noqa: E402
 from services.zsxq_sync_service import zsxq_sync_service  # noqa: E402
+from services.zsxq_yiren_award_cleanup_service import cleanup_yiren_award_favorites  # noqa: E402
 from sqlalchemy.orm import load_only  # noqa: E402
 
 
@@ -23,6 +24,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fetch-truncated", action="store_true")
     parser.add_argument("--group-id")
+    parser.add_argument("--sync-run-id", help="Only process topics touched by this sync run")
     parser.add_argument("--batch-size", type=int, default=50)
     return parser.parse_args()
 
@@ -58,6 +60,8 @@ def main():
             ))
             if args.group_id:
                 query = query.filter(ZsxqTopic.group_id == str(args.group_id))
+            if args.sync_run_id:
+                query = query.filter(ZsxqTopic.last_sync_run_id == str(args.sync_run_id))
             if last_id:
                 query = query.filter(ZsxqTopic.id > last_id)
             topics = query.order_by(ZsxqTopic.id.asc()).limit(batch_size).all()
@@ -107,32 +111,15 @@ def main():
             db.session.commit()
             db.session.expunge_all()
 
-        yiren_rows = (
-            db.session.query(ZsxqTopicComment.group_id, ZsxqTopicComment.topic_id)
-            .filter(ZsxqTopicComment.owner_name == "亦仁")
-            .distinct()
-            .all()
-        )
-        favorites_added = 0
-        for group_id, topic_id in yiren_rows:
-            exists = ZsxqTopicFavorite.query.filter_by(group_id=group_id, topic_id=topic_id).first()
-            if exists is None:
-                db.session.add(ZsxqTopicFavorite(group_id=group_id, topic_id=topic_id))
-                favorites_added += 1
-        db.session.commit()
+        award_report = cleanup_yiren_award_favorites(group_id=args.group_id or "1824528822")
 
         summary.update({
             "comments_in_table": ZsxqTopicComment.query.count(),
-            "yiren_topics": len(yiren_rows),
-            "yiren_winning_comments": ZsxqTopicComment.query.filter(
-                ZsxqTopicComment.owner_name == "亦仁",
-                ZsxqTopicComment.text.ilike("%已中标%"),
-            ).count(),
-            "favorites_added": favorites_added,
-            "yiren_topics_favorited": sum(
-                1
-                for group_id, topic_id in yiren_rows
-                if ZsxqTopicFavorite.query.filter_by(group_id=group_id, topic_id=topic_id).first() is not None
+            "award_topics": award_report["candidate_topics"],
+            "award_comments": award_report["matched_comments"],
+            "favorites_added": award_report["favorites_added"],
+            "award_topics_favorited": (
+                award_report["already_favorited"] + award_report["favorites_added"]
             ),
         })
         print(summary)

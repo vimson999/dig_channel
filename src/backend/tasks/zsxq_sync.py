@@ -22,6 +22,53 @@ DEFAULT_UPSTREAM_RETRIES = 5
 DEFAULT_UPSTREAM_RETRY_DELAY_SECONDS = 300
 UPSTREAM_RETRIES_ENV_NAME = "ZSXQ_SYNC_UPSTREAM_RETRIES"
 UPSTREAM_RETRY_DELAY_ENV_NAME = "ZSXQ_SYNC_UPSTREAM_RETRY_DELAY_SECONDS"
+REPORT_ASSET_SCAN_DELAY_ENV_NAME = "ZSXQ_REPORT_ASSET_SCAN_DELAY_SECONDS"
+DEFAULT_REPORT_ASSET_SCAN_DELAY_SECONDS = 90
+
+SYNC_DELIVERY_SUMMARY_KEYS = (
+    "target_topics_per_tab",
+    "planned_topics_total",
+    "max_pages",
+    "planned_pages_total",
+    "pages_fetched",
+    "topics_fetched",
+    "topics_new",
+    "topics_updated",
+    "topics_existing",
+    "attachments_seen",
+    "attachments_downloaded",
+    "attachments_failed",
+    "attachments_skipped",
+    "attachments_below_threshold",
+    "attachments_missing_download_count",
+    "attachments_non_target_skipped",
+    "attachments_already_downloaded_skipped",
+    "attachments_reused_local",
+    "attachments_reused_existing",
+    "attachments_limited_skipped",
+    "max_download_files",
+    "download_limit_reached",
+    "auto_video_dispatch",
+    "auto_script_material_dispatch",
+)
+
+SYNC_DELIVERY_TAB_KEYS = (
+    "tab_id",
+    "tab_label",
+    "target_topics",
+    "planned_pages",
+    "max_pages",
+    "pages",
+    "topics_fetched",
+    "topics_new",
+    "topics_updated",
+    "topics_existing",
+    "attachments_seen",
+    "attachments_downloaded",
+    "attachments_failed",
+    "attachments_skipped",
+    "download_limit_reached",
+)
 
 
 @celery_app.task(bind=True, name="tasks.zsxq_sync.run_zsxq_sync")
@@ -137,8 +184,14 @@ def run_zsxq_sync(self, run_id, payload):
                     except Exception:
                         logger.exception("[ZSXQ_SYNC_TASK] failed to persist audio clean submit error | run_id=%s", run_id)
             _submit_report_asset_scan_after_sync(run_id, payload, result)
+            delivery_result = _compact_sync_delivery_result(result, run_id=run_id)
             if workflow_run_id:
-                queued_id = _notify_workflow_sync_finished(workflow_run_id, run_id, success=True, result=result)
+                queued_id = _notify_workflow_sync_finished(
+                    workflow_run_id,
+                    run_id,
+                    success=True,
+                    result=delivery_result,
+                )
                 if not queued_id:
                     _send_direct_sync_failure_email(
                         workflow_run_id=workflow_run_id,
@@ -154,7 +207,7 @@ def run_zsxq_sync(self, run_id, payload):
                 except Exception:
                     logger.exception("[ZSXQ_SYNC_TASK] credential success mark failed | credential=%s", credential_id)
             logger.info("[ZSXQ_SYNC_TASK] complete | run_id=%s", run_id)
-            return result
+            return delivery_result
         except retry_exception_types():
             raise
         except Exception as exc:
@@ -162,6 +215,13 @@ def run_zsxq_sync(self, run_id, payload):
             retryable_db_error = _is_retryable_db_error(exc)
             if retryable_db_error and self.request.retries < _db_retry_count():
                 countdown = _db_retry_delay_seconds(self.request.retries)
+                _mark_sync_run_db_retrying(
+                    run_id,
+                    exc,
+                    self,
+                    countdown=countdown,
+                    retry_count=_db_retry_count(),
+                )
                 logger.warning(
                     "[ZSXQ_SYNC_TASK] retry transient db error | run_id=%s retry=%s/%s countdown=%ss error=%s",
                     run_id,
@@ -171,6 +231,8 @@ def run_zsxq_sync(self, run_id, payload):
                     exc,
                 )
                 raise self.retry(exc=exc, countdown=countdown, max_retries=_db_retry_count())
+            if retryable_db_error:
+                _mark_sync_run_db_retry_exhausted(run_id, exc)
 
             _maybe_retry_transient_upstream_error(self, run_id, exc)
 
@@ -202,20 +264,24 @@ def _is_retryable_db_error(exc):
 def _terminal_delivery_result(run_id, task_id=None):
     from models.zsxq_sync import ZsxqSyncRun
 
-    persisted_run = db.session.get(ZsxqSyncRun, run_id)
-    if not persisted_run or persisted_run.status not in {"completed", "failed"}:
+    persisted = (
+        db.session.query(ZsxqSyncRun.status.label("status"))
+        .filter(ZsxqSyncRun.id == str(run_id))
+        .one_or_none()
+    )
+    if not persisted or persisted.status not in {"completed", "failed"}:
         return None
     logger.warning(
         "[ZSXQ_SYNC_TASK] duplicate terminal delivery ignored | run_id=%s status=%s task_id=%s",
         run_id,
-        persisted_run.status,
+        persisted.status,
         task_id,
     )
     return {
         "skipped": True,
         "reason": "duplicate_terminal_delivery",
         "run_id": run_id,
-        "status": persisted_run.status,
+        "status": persisted.status,
     }
 
 
@@ -268,6 +334,73 @@ def _maybe_retry_transient_upstream_error(celery_task, run_id, exc):
 
 
 def _mark_sync_run_upstream_retrying(run_id, exc, celery_task, *, countdown, retry_count):
+    _mark_sync_run_retrying(
+        run_id,
+        exc,
+        celery_task,
+        retry_kind="upstream",
+        countdown=countdown,
+        retry_count=retry_count,
+    )
+
+
+def _mark_sync_run_db_retrying(run_id, exc, celery_task, *, countdown, retry_count):
+    _mark_sync_run_retrying(
+        run_id,
+        exc,
+        celery_task,
+        retry_kind="database",
+        countdown=countdown,
+        retry_count=retry_count,
+    )
+
+
+def _mark_sync_run_db_retry_exhausted(run_id, exc):
+    if not run_id:
+        return
+    try:
+        from models.zsxq_sync import ZsxqSyncRun
+
+        run = ZsxqSyncRun.query.filter(ZsxqSyncRun.id == str(run_id)).one_or_none()
+        if not run:
+            return
+        now = datetime.utcnow()
+        result = dict(run.result or {})
+        retry_state = dict(result.get("retry_state") or {})
+        retry_state["database"] = {
+            "status": "exhausted",
+            "last_error": str(exc),
+            "updated_at": now.isoformat() + "Z",
+        }
+        result.update({
+            "queued": False,
+            "running": False,
+            "last_error": str(exc),
+            "retry_state": retry_state,
+        })
+        run.status = "failed"
+        run.completed_at = now
+        run.error_message = str(exc)
+        run.result = result
+        db.session.add(run)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        logger.exception(
+            "[ZSXQ_SYNC_TASK] failed to mark exhausted db retry | run_id=%s",
+            run_id,
+        )
+
+
+def _mark_sync_run_retrying(
+    run_id,
+    exc,
+    celery_task,
+    *,
+    retry_kind,
+    countdown,
+    retry_count,
+):
     if not run_id:
         return
     try:
@@ -283,7 +416,7 @@ def _mark_sync_run_upstream_retrying(run_id, exc, celery_task, *, countdown, ret
         retry_number = retries + 1
         result = dict(run.result or {})
         retry_state = dict(result.get("retry_state") or {})
-        retry_state["upstream"] = {
+        retry_state[retry_kind] = {
             "status": "scheduled",
             "retry_number": retry_number,
             "retry_limit": retry_count,
@@ -306,7 +439,11 @@ def _mark_sync_run_upstream_retrying(run_id, exc, celery_task, *, countdown, ret
         db.session.commit()
     except Exception:
         db.session.rollback()
-        logger.exception("[ZSXQ_SYNC_TASK] failed to mark upstream retry | run_id=%s", run_id)
+        logger.exception(
+            "[ZSXQ_SYNC_TASK] failed to mark %s retry | run_id=%s",
+            retry_kind,
+            run_id,
+        )
 
 
 def _request_retries(celery_task):
@@ -352,6 +489,38 @@ def _truthy(value):
     return bool(value)
 
 
+def _compact_sync_delivery_result(result, *, run_id):
+    result = result if isinstance(result, dict) else {}
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    compact_summary = {
+        key: summary.get(key)
+        for key in SYNC_DELIVERY_SUMMARY_KEYS
+        if key in summary
+    }
+    tabs = summary.get("tabs") if isinstance(summary.get("tabs"), list) else []
+    compact_summary["tabs"] = [
+        {key: tab.get(key) for key in SYNC_DELIVERY_TAB_KEYS if key in tab}
+        for tab in tabs[:20]
+        if isinstance(tab, dict)
+    ]
+
+    run = result.get("run") if isinstance(result.get("run"), dict) else {}
+    run_result = run.get("result") if isinstance(run.get("result"), dict) else {}
+    compact_run_result = {
+        key: run_result[key]
+        for key in ("content_pipeline", "report_asset_scan")
+        if key in run_result
+    }
+    return {
+        "run": {
+            "id": str(run.get("id") or run_id),
+            "status": run.get("status") or "completed",
+            "result": compact_run_result,
+        },
+        "summary": compact_summary,
+    }
+
+
 def _submit_report_asset_scan_after_sync(run_id, payload, result):
     try:
         from services.report_video_asset_service import (
@@ -363,21 +532,38 @@ def _submit_report_asset_scan_after_sync(run_id, payload, result):
         if not should_auto_scan_after_sync(payload, result):
             return
         scan_payload = build_sync_run_asset_scan_payload(run_id, payload)
+        delay_seconds = _report_asset_scan_delay_seconds(payload)
         celery_task = scan_zsxq_report_assets_task.apply_async(
             args=[scan_payload, False],
             queue="report_video",
+            countdown=delay_seconds,
             retry=False,
         )
         result.setdefault("run", {}).setdefault("result", {}).setdefault("report_asset_scan", {})[
             "celery_task_id"
         ] = celery_task.id
         logger.info(
-            "[ZSXQ_SYNC_TASK] report asset scan queued | run_id=%s celery_id=%s",
+            "[ZSXQ_SYNC_TASK] report asset scan queued | run_id=%s celery_id=%s delay=%ss",
             run_id,
             celery_task.id,
+            delay_seconds,
         )
     except Exception as exc:
         logger.warning("[ZSXQ_SYNC_TASK] report asset scan submit skipped | run_id=%s error=%s", run_id, exc)
+
+
+def _report_asset_scan_delay_seconds(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    value = payload.get("report_asset_scan_delay_seconds")
+    if value in (None, ""):
+        value = os.environ.get(
+            REPORT_ASSET_SCAN_DELAY_ENV_NAME,
+            DEFAULT_REPORT_ASSET_SCAN_DELAY_SECONDS,
+        )
+    try:
+        return max(0, min(int(value), 1800))
+    except (TypeError, ValueError):
+        return DEFAULT_REPORT_ASSET_SCAN_DELAY_SECONDS
 
 
 def _notify_workflow_sync_finished(workflow_run_id, run_id, *, success, result=None, error=None):

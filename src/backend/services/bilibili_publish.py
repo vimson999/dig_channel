@@ -2,14 +2,16 @@ import asyncio
 import re
 import time
 from datetime import datetime
+from types import SimpleNamespace
 
 from sqlalchemy.orm import load_only
-from sqlalchemy.orm.attributes import flag_modified
 
 from celery_config import celery_app
 from models import db
+from models.bilibili_publish import PublicationTaskBilibiliUpload
 from models.platform_credential import PlatformCredentialAccount
 from models.task import PublicationTask
+from services.platform_publish_dispatch import dispatch_platform_publish
 
 
 STATUS_MAP = {
@@ -19,6 +21,8 @@ STATUS_MAP = {
     "failed": "failed",
     "canceled": "canceled",
 }
+
+DEFAULT_BILIBILI_NEUTRAL_MARK = "个人观点，仅供参考"
 
 
 def truthy(value, default=True):
@@ -300,6 +304,22 @@ def create_bilibili_upload_task(
     delay_time = upload_delay_time(data)
     season_id = upload_season_id(data)
     tags = normalize_upload_tags(data.get("tags"), default=default_tags or ["财经", "音频"])
+    description = clean_upload_text(data.get("desc") or data.get("description"), max_length=2000)
+    tid = bounded_int(data.get("tid"), 207, 1, 9999)
+    copyright_value = bounded_int(data.get("copyright"), 1, 1, 2)
+    no_reprint = bounded_int(data.get("no_reprint"), 1, 0, 1)
+    dynamic = clean_upload_text(data.get("dynamic"), max_length=233)
+    neutral_mark = clean_upload_text(data.get("neutral_mark"), max_length=80) or DEFAULT_BILIBILI_NEUTRAL_MARK
+    is_only_self = bounded_int(
+        data.get("is_only_self") or data.get("isOnlySelf") or data.get("only_self"),
+        0,
+        0,
+        1,
+    )
+    space_hidden = _optional_int(data.get("space_hidden"))
+    creation_statement_id = _optional_int(
+        data.get("creation_statement_id") or data.get("creationStatementId")
+    )
     user_id = str(getattr(current_user, "id", None) or parent_task.user_id or "system")
     metadata = {
         "source": source_label,
@@ -327,16 +347,18 @@ def create_bilibili_upload_task(
             "credential_id": credential_id or None,
             "credential_name": credential_name,
             "title": title,
-            "desc": clean_upload_text(data.get("desc") or data.get("description"), max_length=2000),
+            "desc": description,
             "tags": tags,
-            "tid": bounded_int(data.get("tid"), 207, 1, 9999),
+            "tid": tid,
             "cover_path": cover_path,
             "cover_key": cover_key or "",
-            "copyright": bounded_int(data.get("copyright"), 1, 1, 2),
-            "no_reprint": bounded_int(data.get("no_reprint"), 1, 0, 1),
-            "neutral_mark": clean_upload_text(data.get("neutral_mark"), max_length=80) or "个人观点，仅供参考",
-            "is_only_self": bounded_int(data.get("is_only_self") or data.get("only_self"), 0, 0, 1),
-            "dynamic": clean_upload_text(data.get("dynamic"), max_length=233),
+            "copyright": copyright_value,
+            "no_reprint": no_reprint,
+            "neutral_mark": neutral_mark,
+            "is_only_self": is_only_self,
+            "space_hidden": space_hidden,
+            "creation_statement_id": creation_statement_id,
+            "dynamic": dynamic,
             "charging_pay": charging_pay,
             "delay_time": delay_time,
             "season_id": season_id,
@@ -363,104 +385,247 @@ def create_bilibili_upload_task(
         },
     )
     db.session.add(child)
+    db.session.flush()
+    projection = PublicationTaskBilibiliUpload(
+        task_id=child.id,
+        parent_task_id=parent_task.id,
+        parent_feature=parent_feature,
+        source_label=source_label,
+        video_key=video_key,
+        cover_key=cover_key or None,
+        title=title,
+        video_path=video_path,
+        cover_path=cover_path,
+        description=description or None,
+        tags=tags,
+        tid=tid,
+        copyright=copyright_value,
+        no_reprint=no_reprint,
+        dynamic=dynamic or None,
+        neutral_mark=neutral_mark,
+        is_only_self=is_only_self,
+        space_hidden=space_hidden,
+        creation_statement_id=creation_statement_id,
+        credential_id=credential_id or None,
+        credential_name=credential_name,
+        delay_time=delay_time,
+        season_id=season_id,
+        **_charging_projection_values(charging_pay),
+    )
+    db.session.add(projection)
+    db.session.flush()
+    response_payload = bilibili_upload_child_payload(child, upload=projection)
+    child_snapshot = SimpleNamespace(
+        id=str(child.id),
+        celery_task_id=None,
+        status="pending",
+        current_step="queued",
+        progress=0,
+        error_message=None,
+        created_at=child.created_at,
+        completed_at=None,
+        _bilibili_create_response_payload=response_payload,
+    )
     db.session.commit()
-    return child
+    return child_snapshot
+
+
+def bilibili_upload_execution_context(task_id):
+    """Load the complete upload command without opening task params/result."""
+    row = (
+        db.session.query(PublicationTask, PublicationTaskBilibiliUpload)
+        .join(
+            PublicationTaskBilibiliUpload,
+            PublicationTaskBilibiliUpload.task_id == PublicationTask.id,
+        )
+        .options(
+            load_only(
+                PublicationTask.id,
+                PublicationTask.celery_task_id,
+                PublicationTask.status,
+                PublicationTask.current_step,
+                PublicationTask.progress,
+            ),
+            load_only(
+                PublicationTaskBilibiliUpload.video_path,
+                PublicationTaskBilibiliUpload.cover_path,
+                PublicationTaskBilibiliUpload.title,
+                PublicationTaskBilibiliUpload.description,
+                PublicationTaskBilibiliUpload.tags,
+                PublicationTaskBilibiliUpload.tid,
+                PublicationTaskBilibiliUpload.copyright,
+                PublicationTaskBilibiliUpload.no_reprint,
+                PublicationTaskBilibiliUpload.dynamic,
+                PublicationTaskBilibiliUpload.neutral_mark,
+                PublicationTaskBilibiliUpload.is_only_self,
+                PublicationTaskBilibiliUpload.space_hidden,
+                PublicationTaskBilibiliUpload.creation_statement_id,
+                PublicationTaskBilibiliUpload.credential_id,
+                PublicationTaskBilibiliUpload.charging_enabled,
+                PublicationTaskBilibiliUpload.preview_start_time,
+                PublicationTaskBilibiliUpload.preview_end_time,
+                PublicationTaskBilibiliUpload.upower_level_id,
+                PublicationTaskBilibiliUpload.upower_unit_price,
+                PublicationTaskBilibiliUpload.upower_mode,
+                PublicationTaskBilibiliUpload.member_first_exp_time,
+                PublicationTaskBilibiliUpload.delay_time,
+                PublicationTaskBilibiliUpload.season_id,
+            ),
+        )
+        .filter(PublicationTask.id == str(task_id))
+        .one_or_none()
+    )
+    if row is None:
+        return None
+    task, upload = row
+    return SimpleNamespace(
+        task_id=str(task.id),
+        celery_task_id=str(task.celery_task_id or ""),
+        status=str(task.status or ""),
+        current_step=str(task.current_step or ""),
+        progress=int(task.progress or 0),
+        video_path=upload.video_path,
+        cover_path=upload.cover_path,
+        title=upload.title,
+        description=upload.description or "",
+        tags=list(upload.tags or []),
+        tid=int(upload.tid or 207),
+        copyright=int(upload.copyright or 1),
+        no_reprint=int(upload.no_reprint if upload.no_reprint is not None else 1),
+        dynamic=upload.dynamic or "",
+        neutral_mark=upload.neutral_mark or DEFAULT_BILIBILI_NEUTRAL_MARK,
+        is_only_self=int(upload.is_only_self or 0),
+        space_hidden=upload.space_hidden,
+        creation_statement_id=upload.creation_statement_id,
+        credential_id=upload.credential_id,
+        charging_pay=_charging_pay_from_projection(upload),
+        delay_time=upload.delay_time,
+        season_id=upload.season_id,
+    )
 
 
 def enqueue_bilibili_upload_task(child):
-    from tasks.publisher import PLATFORM_UPLOAD_QUEUE, run_bilibili_upload_only
-
-    child_id = child.id
+    child_id = str(child.id)
     try:
-        celery_task = run_bilibili_upload_only.apply_async(args=[child_id], queue=PLATFORM_UPLOAD_QUEUE, retry=False)
+        submission = dispatch_platform_publish("bilibili", child_id, retry=False)
     except Exception as exc:
-        child.status = "failed"
-        child.current_step = "failed"
-        child.progress = 0
-        child.error_message = f"B站上传任务入队失败: {exc}"
-        child.completed_at = datetime.utcnow()
+        message = f"B站上传任务入队失败: {exc}"
+        (
+            PublicationTask.query
+            .filter(PublicationTask.id == child_id)
+            .update({
+                PublicationTask.status: "failed",
+                PublicationTask.current_step: "failed",
+                PublicationTask.progress: 0,
+                PublicationTask.error_message: message,
+                PublicationTask.completed_at: datetime.utcnow(),
+            }, synchronize_session=False)
+        )
         db.session.commit()
         raise
-    child.celery_task_id = celery_task.id
-    db.session.flush()
-    # The commit below expires ORM attributes. Preserve the response while the
-    # child is still loaded so an already queued upload cannot be reported as a
-    # database failure merely while serializing the HTTP response.
-    response_payload = bilibili_upload_child_payload(child)
+    updated = (
+        PublicationTask.query
+        .filter(PublicationTask.id == child_id)
+        .update(
+            {PublicationTask.celery_task_id: submission["celery_id"]},
+            synchronize_session=False,
+        )
+    )
+    if not updated:
+        db.session.rollback()
+        raise ValueError(f"B站上传任务不存在: {child_id}")
+    response_payload = dict(getattr(child, "_bilibili_create_response_payload", None) or {})
+    response_payload["celery_id"] = submission["celery_id"]
     db.session.commit()
+    child.celery_task_id = submission["celery_id"]
     child._bilibili_enqueue_response_payload = response_payload
     return child
 
 
 def bilibili_upload_children(parent_id, *, parent_feature=None, source_label=None, limit=20):
     query = (
-        db.session.query(PublicationTask.id)
-        .filter(PublicationTask.parent_task_id == parent_id)
-        .filter(PublicationTask.feature == "publisher")
-    )
-    if parent_feature:
-        query = query.filter(PublicationTask.parent_feature == parent_feature)
-    candidate_ids = [
-        row.id
-        for row in query.order_by(PublicationTask.created_at.desc()).limit(limit).all()
-    ]
-    items = []
-    for candidate_id in candidate_ids:
-        row = (
-            PublicationTask.query.options(load_only(
+        db.session.query(PublicationTask, PublicationTaskBilibiliUpload)
+        .join(
+            PublicationTaskBilibiliUpload,
+            PublicationTaskBilibiliUpload.task_id == PublicationTask.id,
+        )
+        .options(
+            load_only(
                 PublicationTask.id,
                 PublicationTask.celery_task_id,
                 PublicationTask.status,
                 PublicationTask.current_step,
                 PublicationTask.progress,
                 PublicationTask.error_message,
-                PublicationTask.params,
-                PublicationTask.result,
                 PublicationTask.created_at,
                 PublicationTask.completed_at,
-            ))
-            .filter(PublicationTask.id == candidate_id)
-            .one_or_none()
+            ),
+            load_only(
+                PublicationTaskBilibiliUpload.parent_task_id,
+                PublicationTaskBilibiliUpload.parent_feature,
+                PublicationTaskBilibiliUpload.source_label,
+                PublicationTaskBilibiliUpload.video_key,
+                PublicationTaskBilibiliUpload.cover_key,
+                PublicationTaskBilibiliUpload.title,
+                PublicationTaskBilibiliUpload.credential_id,
+                PublicationTaskBilibiliUpload.credential_name,
+                PublicationTaskBilibiliUpload.charging_enabled,
+                PublicationTaskBilibiliUpload.preview_start_time,
+                PublicationTaskBilibiliUpload.preview_end_time,
+                PublicationTaskBilibiliUpload.upower_level_id,
+                PublicationTaskBilibiliUpload.upower_unit_price,
+                PublicationTaskBilibiliUpload.upower_mode,
+                PublicationTaskBilibiliUpload.member_first_exp_time,
+                PublicationTaskBilibiliUpload.delay_time,
+                PublicationTaskBilibiliUpload.season_id,
+                PublicationTaskBilibiliUpload.aid,
+                PublicationTaskBilibiliUpload.bvid,
+            ),
         )
-        if not row:
-            continue
-        item = bilibili_upload_child_payload(row, source_label=source_label)
-        if item:
-            items.append(item)
-    return items
+        .filter(PublicationTaskBilibiliUpload.parent_task_id == parent_id)
+    )
+    if parent_feature:
+        query = query.filter(PublicationTaskBilibiliUpload.parent_feature == parent_feature)
+    if source_label:
+        query = query.filter(PublicationTaskBilibiliUpload.source_label == source_label)
+    rows = (
+        query.order_by(PublicationTaskBilibiliUpload.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        bilibili_upload_child_payload(task, source_label=source_label, upload=upload)
+        for task, upload in rows
+    ]
 
 
-def bilibili_upload_child_payload(task, *, source_label=None):
-    params = task.params if isinstance(task.params, dict) else {}
-    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
-    source = metadata.get("source")
+def bilibili_upload_child_payload(task, *, source_label=None, upload=None):
+    if upload is None:
+        upload = PublicationTaskBilibiliUpload.query.filter_by(task_id=task.id).one_or_none()
+    if upload is None:
+        return None
+    source = upload.source_label
     if source_label and source != source_label:
         return None
     if not source_label and not str(source or "").endswith(":bilibili_upload"):
         return None
-    bili = params.get("bilibili") if isinstance(params.get("bilibili"), dict) else {}
-    result = task.result if isinstance(task.result, dict) else {}
     status = STATUS_MAP.get(task.status, task.status or "queued")
-    upload_result = result.get("bilibili_result")
+    upload_result = _upload_result_from_projection(upload)
     return {
         "task_id": task.id,
         "celery_id": task.celery_task_id,
         "status": status,
         "step": task.current_step,
         "progress": task.progress or 0,
-        "error": task.error_message or result.get("bilibili_error"),
-        "title": bili.get("title") or result.get("bilibili_title"),
-        "video_key": metadata.get("video_key"),
-        "cover_key": metadata.get("cover_key") or bili.get("cover_key"),
-        "credential_id": bili.get("credential_id") or result.get("bilibili_credential_id"),
-        "credential_name": (
-            result.get("bilibili_credential_name")
-            or bili.get("credential_name")
-            or platform_credential_display_name(bili.get("credential_id") or result.get("bilibili_credential_id"))
-        ),
-        "charging_pay": bili.get("charging_pay") or result.get("bilibili_charging_pay"),
-        "delay_time": bili.get("delay_time") or result.get("bilibili_delay_time"),
-        "season_id": bili.get("season_id") or result.get("bilibili_season_id"),
+        "error": task.error_message,
+        "title": upload.title,
+        "video_key": upload.video_key,
+        "cover_key": upload.cover_key,
+        "credential_id": upload.credential_id,
+        "credential_name": upload.credential_name,
+        "charging_pay": _charging_pay_from_projection(upload),
+        "delay_time": upload.delay_time,
+        "season_id": upload.season_id,
         "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
         "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else None,
         "result": upload_result,
@@ -478,15 +643,81 @@ def cancel_bilibili_upload_child(task):
         celery_app.control.revoke(task.celery_task_id, terminate=False)
 
     now = datetime.utcnow()
-    result = dict(task.result or {})
-    result["bilibili_upload_canceled_at"] = now.isoformat() + "Z"
-    result["bilibili_upload_cancel_reason"] = "user_canceled_queued_upload"
+    upload = PublicationTaskBilibiliUpload.query.filter_by(task_id=task.id).one_or_none()
+    if upload is None:
+        return False, "B站上传任务结构化记录不存在"
+    upload.canceled_at = now
+    upload.cancel_reason = "user_canceled_queued_upload"
     task.status = "canceled"
     task.current_step = "canceled"
     task.progress = task.progress or 0
     task.error_message = None
     task.completed_at = now
-    task.result = result
-    flag_modified(task, "result")
+    response_payload = bilibili_upload_child_payload(task, upload=upload)
     db.session.commit()
+    task._bilibili_cancel_response_payload = response_payload
     return True, "已取消 B站上传排队任务"
+
+
+def _charging_projection_values(charging_pay):
+    source = charging_pay if isinstance(charging_pay, dict) else {}
+    preview = source.get("preview") if isinstance(source.get("preview"), dict) else {}
+    member_first = source.get("member_first") if isinstance(source.get("member_first"), dict) else {}
+    return {
+        "charging_enabled": bool(source.get("enabled")),
+        "preview_start_time": _optional_int(
+            source.get("preview_start_time", preview.get("start_time"))
+        ),
+        "preview_end_time": _optional_int(
+            source.get("preview_end_time", preview.get("end_time"))
+        ),
+        "upower_level_id": clean_upload_text(source.get("upower_level_id"), 80) or None,
+        "upower_unit_price": _optional_int(source.get("upower_unit_price")),
+        "upower_mode": _optional_int(source.get("upower_mode")),
+        "member_first_exp_time": _optional_int(member_first.get("exp_time")),
+    }
+
+
+def _charging_pay_from_projection(upload):
+    if not upload.charging_enabled:
+        return None
+    payload = {"enabled": True}
+    if upload.preview_start_time is not None or upload.preview_end_time is not None:
+        preview = {
+            "need_preview": 1,
+            "start_time": int(upload.preview_start_time or 0),
+            "end_time": int(upload.preview_end_time or 0),
+        }
+        payload["preview"] = preview
+        payload["preview_end_time"] = preview["end_time"]
+    if upload.upower_level_id:
+        payload["upower_level_id"] = upload.upower_level_id
+    if upload.upower_unit_price is not None:
+        payload["upower_unit_price"] = upload.upower_unit_price
+    if upload.upower_mode is not None:
+        payload["upower_mode"] = upload.upower_mode
+    if upload.member_first_exp_time is not None:
+        payload["member_first"] = {
+            "enabled": 1,
+            "exp_time": upload.member_first_exp_time,
+        }
+    return payload
+
+
+def _upload_result_from_projection(upload):
+    payload = {}
+    if upload.aid:
+        payload["aid"] = upload.aid
+    if upload.bvid:
+        payload["bvid"] = upload.bvid
+        payload["url"] = f"https://www.bilibili.com/video/{upload.bvid}"
+    return payload or None
+
+
+def _optional_int(value):
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

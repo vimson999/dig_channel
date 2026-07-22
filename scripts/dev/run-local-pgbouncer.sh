@@ -19,7 +19,8 @@ python3 "$SCRIPT_DIR/setup-local-pgbouncer.py"
 if [ -f "$PID_FILE" ]; then
   existing_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [ -n "$existing_pid" ] && ps -p "$existing_pid" >/dev/null 2>&1; then
-    echo "✅ 本地 PgBouncer 已运行 PID: $existing_pid"
+    kill -HUP "$existing_pid"
+    echo "✅ 本地 PgBouncer 已运行并重载配置 PID: $existing_pid"
     exit 0
   fi
   rm -f "$PID_FILE"
@@ -28,7 +29,8 @@ fi
 listening_pid="$(lsof -ti "tcp:${LOCAL_PGBOUNCER_PORT:-6432}" -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
 if [ -n "$listening_pid" ] && ps -p "$listening_pid" -o command= 2>/dev/null | grep -q "pgbouncer"; then
   echo "$listening_pid" > "$PID_FILE"
-  echo "✅ 本地 PgBouncer 已运行 PID: $listening_pid"
+  kill -HUP "$listening_pid"
+  echo "✅ 本地 PgBouncer 已运行并重载配置 PID: $listening_pid"
   exit 0
 fi
 

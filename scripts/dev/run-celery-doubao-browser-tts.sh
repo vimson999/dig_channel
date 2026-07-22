@@ -15,7 +15,7 @@ fi
 
 if [ "$WORKER_ID" != "default" ] && [ ! -d "${DOUBAO_BROWSER_TTS_USER_DATA_DIR:-}" ]; then
     echo "❌ 缺少豆包 profile: $DOUBAO_BROWSER_TTS_USER_DATA_DIR"
-    echo "   请先运行: DOUBAO_BROWSER_TTS_PROFILE_COUNT=2 ./scripts/dev/prepare-doubao-browser-profile-pool.sh"
+    echo "   请先运行: DOUBAO_BROWSER_TTS_PROFILE_COUNT=6 ./scripts/dev/prepare-doubao-browser-profile-pool.sh"
     exit 1
 fi
 

@@ -45,7 +45,7 @@ def run_zsxq_workflow(self, workflow_run_id, runtime=None):
 
 
 @celery_app.task(bind=True, name="tasks.zsxq_workflow.advance_zsxq_workflow")
-def advance_zsxq_workflow(self, workflow_run_id, reason=None):
+def advance_zsxq_workflow(self, workflow_run_id, reason=None, event_payload=None):
     """Advance a workflow after one stage has reached a terminal state."""
     from app import create_app
     from services.zsxq_workflow_service import zsxq_workflow_service
@@ -54,7 +54,11 @@ def advance_zsxq_workflow(self, workflow_run_id, reason=None):
     with app.app_context():
         logger.info("[ZSXQ_WORKFLOW_TASK] advance | workflow=%s reason=%s", workflow_run_id, reason or "-")
         try:
-            return zsxq_workflow_service.advance_workflow(workflow_run_id, reason=reason)
+            return zsxq_workflow_service.advance_workflow(
+                workflow_run_id,
+                reason=reason,
+                event_payload=event_payload,
+            )
         except retry_exception_types():
             raise
         except Exception as exc:

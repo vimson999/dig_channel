@@ -84,7 +84,8 @@ def _resolve_request_cookie(data, *, purpose="zsxq.sync", prefer_db=True, form=N
         or form.get("platform_credential_id")
     )
     inline_cookie = ((data.get("cookie") if isinstance(data, dict) else None) or form.get("cookie") or "").strip()
-    if prefer_db or credential_id or not inline_cookie:
+    use_db = bool(prefer_db or credential_id or not inline_cookie)
+    if use_db:
         try:
             from services.platform_credential_service import resolve_zsxq_cookie
 
@@ -97,7 +98,10 @@ def _resolve_request_cookie(data, *, purpose="zsxq.sync", prefer_db=True, form=N
             data["_credential_source"] = credential.get("credential_source")
             return credential["cookie"]
         except Exception:
-            if not inline_cookie:
+            # Sync and publish endpoints are DB-backed. An inline Cookie in a
+            # stale page payload must never silently change which account a
+            # task uses when the selected DB credential cannot be resolved.
+            if prefer_db or credential_id or not inline_cookie:
                 raise
             logger.warning("[ZSXQ] DB credential unavailable, falling back to inline cookie for purpose=%s", purpose)
     if not inline_cookie:
@@ -608,6 +612,7 @@ def manual_download_workflows():
             queued = zsxq_workflow_service.enqueue_workflow_task(
                 workflow["id"],
                 credential_id=data.get("_credential_id") or data.get("credential_id"),
+                workflow_payload=workflow,
             )
         except Exception as exc:
             logger.exception("[ZSXQ_WORKFLOW] manual download workflow queue failed | workflow=%s", workflow.get("id"))

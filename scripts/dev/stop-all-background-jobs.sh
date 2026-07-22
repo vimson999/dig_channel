@@ -113,15 +113,12 @@ kill_project_processes "本项目 Watchdog/调度器残留进程" '
 
 echo
 echo "🔍 剩余后台进程检查："
-remaining="$(ps -axo pid=,command= | awk -v project="$PROJECT_ROOT" '
-  index($0, project) && (
-    $0 ~ /\/venv\/bin\/celery/ ||
-    $0 ~ /\/scripts\/dev\/run-celery-/ ||
-    $0 ~ /celery_watchdog_loop/ ||
-    $0 ~ /run_.*scheduler/ ||
-    $0 ~ /run_scheduler\.py/
-  ) { print }
-')"
+if ! remaining="$(ps -axo pid=,command= | awk -v project="$PROJECT_ROOT" '
+  index($0, project) && ($0 ~ /\/venv\/bin\/celery/ || $0 ~ /\/scripts\/dev\/run-celery-/ || $0 ~ /celery_watchdog_loop/ || $0 ~ /run_.*scheduler/ || $0 ~ /run_scheduler\.py/) { print }
+')"; then
+  echo "❌ 无法完成后台进程残留检查，拒绝报告重启前环境已清理。"
+  exit 1
+fi
 if [ -z "$remaining" ]; then
   echo "✅ 已停干净。"
 else

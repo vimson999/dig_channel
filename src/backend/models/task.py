@@ -115,6 +115,18 @@ class PublicationTask(db.Model):
     source_feature = db.Column(db.String(80), nullable=True)
     task_title = db.Column(db.String(500), nullable=True)
     task_video_path = db.Column(db.String(600), nullable=True)
+    # Report visual workflow strategy.  This is a hot routing key used by list,
+    # polling and retry paths; keep it out of large params/result JSON reads.
+    report_visual_scheme_key = db.Column(db.String(64), nullable=True)
+
+    # Content-clean terminal projections. Workflow polling and clean->publish
+    # handoff only need these bounded fields; the full file audit remains in
+    # result for detail pages and troubleshooting.
+    content_clean_output_dir = db.Column(db.String(600), nullable=True)
+    content_clean_files_count = db.Column(db.Integer, nullable=True)
+    content_clean_success_count = db.Column(db.Integer, nullable=True)
+    content_clean_failed_count = db.Column(db.Integer, nullable=True)
+    content_clean_message = db.Column(db.Text, nullable=True)
 
     # Publisher vertical-video and Doubao TTS child projections. These fields
     # keep child polling, cache matching, and artifact lookup off params/result.
@@ -126,6 +138,7 @@ class PublicationTask(db.Model):
     publisher_vertical_video_path = db.Column(db.String(600), nullable=True)
     publisher_vertical_cover_path = db.Column(db.String(600), nullable=True)
     publisher_podcast_cover_path = db.Column(db.String(600), nullable=True)
+    publisher_bilibili_cover_path = db.Column(db.String(600), nullable=True)
     publisher_child_role = db.Column(db.String(80), nullable=True)
     publisher_aspect_ratio = db.Column(db.String(16), nullable=True)
     publisher_generate_subtitles = db.Column(db.Boolean, nullable=True)
@@ -171,6 +184,9 @@ class PublicationTask(db.Model):
     report_audio_video_message = db.Column(db.Text, nullable=True)
     report_audio_video_path = db.Column(db.String(600), nullable=True)
     report_audio_cover_path = db.Column(db.String(600), nullable=True)
+    report_audio_vertical_cover_path = db.Column(db.String(600), nullable=True)
+    report_audio_podcast_cover_path = db.Column(db.String(600), nullable=True)
+    report_audio_bilibili_cover_path = db.Column(db.String(600), nullable=True)
     final_script_chars = db.Column(db.Integer, nullable=False, default=0)
 
     # Parent workflow hot-state projection. The full retry/children payload stays
@@ -209,6 +225,12 @@ class PublicationTask(db.Model):
             self.user_id = _compact_text(params.get('user_id'), 64)
             self.parent_task_id = _compact_text(params.get('parent_task_id'), 36)
             self.parent_feature = _compact_text(params.get('parent_feature'), 80)
+            self.report_visual_scheme_key = _compact_text(
+                params.get('visual_scheme_key')
+                or _nested(params, 'report_stick_figure_video_workflow', 'visual_scheme_key')
+                or _nested(params, 'report_visual_plan', 'visual_scheme_key'),
+                64,
+            )
 
             zsxq_publish = params.get('zsxq_publish') if isinstance(params.get('zsxq_publish'), dict) else {}
             mp3_workflow = params.get('mp3_video_workflow') if isinstance(params.get('mp3_video_workflow'), dict) else {}
@@ -246,6 +268,8 @@ class PublicationTask(db.Model):
             params if params_loaded else None,
             result if result_loaded else None,
         )
+        if result_loaded:
+            self._sync_content_clean_projection(result)
         if result_loaded:
             self._sync_workflow_state_projection(result)
         return self
@@ -296,6 +320,12 @@ class PublicationTask(db.Model):
                 if isinstance(params.get('report_script_material_workflow'), dict)
                 else {}
             )
+        if not workflow:
+            workflow = (
+                params.get('report_stick_figure_video_workflow')
+                if isinstance(params.get('report_stick_figure_video_workflow'), dict)
+                else {}
+            )
         if params_loaded:
             request_pdf = workflow.get('pdf') if isinstance(workflow.get('pdf'), dict) else {}
             self.report_audio_pdf_attachment_id = _compact_text(request_pdf.get('attachment_id'), 36)
@@ -310,6 +340,10 @@ class PublicationTask(db.Model):
             structured = result.get('structured_result') if isinstance(result.get('structured_result'), dict) else {}
             audio = result.get('audio') if isinstance(result.get('audio'), dict) else {}
             video = result.get('video') if isinstance(result.get('video'), dict) else {}
+            keyframes = video.get('keyframes') if isinstance(video.get('keyframes'), dict) else {}
+            vertical_cover = keyframes.get('vertical_cover') if isinstance(keyframes.get('vertical_cover'), dict) else {}
+            podcast_cover = keyframes.get('podcast_cover') if isinstance(keyframes.get('podcast_cover'), dict) else {}
+            bilibili_cover = keyframes.get('bilibili_cover') if isinstance(keyframes.get('bilibili_cover'), dict) else {}
 
             self.report_audio_result_pdf_filename = _compact_text(result_pdf.get('filename'), 500)
             self.report_audio_result_pdf_bytes = _compact_text(result_pdf.get('bytes'), 40)
@@ -333,6 +367,18 @@ class PublicationTask(db.Model):
             self.report_audio_video_message = _compact_text(video.get('message'))
             self.report_audio_video_path = _compact_text(video.get('video_path'), 600)
             self.report_audio_cover_path = _compact_text(video.get('cover_path'), 600)
+            self.report_audio_vertical_cover_path = _compact_text(
+                video.get('vertical_cover_path') or vertical_cover.get('path'),
+                600,
+            )
+            self.report_audio_podcast_cover_path = _compact_text(
+                video.get('podcast_cover_path') or podcast_cover.get('path'),
+                600,
+            )
+            self.report_audio_bilibili_cover_path = _compact_text(
+                video.get('bilibili_cover_path') or bilibili_cover.get('path'),
+                600,
+            )
             self.final_script_chars = _script_chars_from_result(result)
 
     def _sync_child_hot_projection(self, params=None, result=None):
@@ -403,6 +449,7 @@ class PublicationTask(db.Model):
             )
             self.publisher_vertical_cover_path = _compact_text(result.get('vertical_cover_path'), 600)
             self.publisher_podcast_cover_path = _compact_text(result.get('podcast_cover_path'), 600)
+            self.publisher_bilibili_cover_path = _compact_text(result.get('bilibili_cover_path'), 600)
 
             if metadata.get('text_hash'):
                 self.doubao_tts_text_hash = _compact_text(metadata.get('text_hash'), 64)
@@ -436,6 +483,25 @@ class PublicationTask(db.Model):
         except (TypeError, ValueError):
             duration = None
         self.mp3_audio_duration_seconds = max(0.0, duration) if duration is not None else None
+
+    def _sync_content_clean_projection(self, result):
+        if _loaded_model_attr(self, 'feature') not in {'content_pdf_clean', 'content_audio_clean'}:
+            return
+        result = result if isinstance(result, dict) else {}
+        cleaned_files = result.get('cleaned_files') if isinstance(result.get('cleaned_files'), list) else []
+        files = result.get('files') if isinstance(result.get('files'), list) else []
+        files_count = result.get('files_count')
+        success_count = result.get('success_count')
+        failed_count = result.get('failed_count')
+        self.content_clean_output_dir = _compact_text(result.get('local_output_dir'), 600)
+        self.content_clean_files_count = _non_negative_int(
+            files_count if files_count is not None else len(cleaned_files or files)
+        )
+        self.content_clean_success_count = _non_negative_int(
+            success_count if success_count is not None else len(cleaned_files)
+        )
+        self.content_clean_failed_count = _non_negative_int(failed_count)
+        self.content_clean_message = _compact_text(result.get('message'))
 
     def _sync_workflow_state_projection(self, result):
         waiting_child = result.get('waiting_child') if isinstance(result.get('waiting_child'), dict) else {}

@@ -140,7 +140,6 @@ def _process_job(task_id):
         if not _update_active_task(job_id, {
             PublicationTask.current_step: event.get("step") or "processing",
             PublicationTask.progress: int(event.get("progress") or 0),
-            PublicationTask.result: current_result,
         }):
             raise RuntimeError("任务已取消或不存在")
 

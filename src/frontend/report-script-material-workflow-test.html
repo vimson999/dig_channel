@@ -137,9 +137,31 @@
         </section>
     </main>
 
+    <div id="storyboard-raw-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm [&:not(.hidden)]:flex">
+        <section class="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl">
+            <header class="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
+                <div class="min-w-0">
+                    <h2 class="text-base font-black text-slate-900">Gem 原始返回值</h2>
+                    <p id="storyboard-raw-meta" class="mt-1 truncate text-xs text-slate-500"></p>
+                </div>
+                <div class="flex shrink-0 items-center gap-2">
+                    <button id="storyboard-raw-copy" type="button" class="rounded-md border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                        <i class="fas fa-copy mr-1"></i>复制原文
+                    </button>
+                    <button data-storyboard-raw-close type="button" class="rounded-md border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                        <i class="fas fa-xmark mr-1"></i>关闭
+                    </button>
+                </div>
+            </header>
+            <div class="min-h-0 flex-1 overflow-auto bg-slate-950 p-5">
+                <pre id="storyboard-raw-content" class="whitespace-pre-wrap break-words text-sm leading-7 text-slate-100"></pre>
+            </div>
+        </section>
+    </div>
+
     <script src="js/env.js"></script>
-    <script src="js/shared-navigation.js?v=20260625-script-material"></script>
+    <script src="js/shared-navigation.js?v=20260721-banner-footer-fix"></script>
     <script src="js/download-count-highlight.js?v=20260702"></script>
-    <script src="js/report-script-material-workflow-test.js?v=20260714-submission-date-filter"></script>
+    <script src="js/report-script-material-workflow-test.js?v=20260721-stick-video-link"></script>
 </body>
 </html>

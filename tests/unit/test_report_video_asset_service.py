@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from flask import Flask
+from sqlalchemy import event
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -14,7 +15,12 @@ if str(BACKEND_DIR) not in sys.path:
 import services.report_video_asset_service as asset_service  # noqa: E402
 from models import db  # noqa: E402
 from models.report_video import ReportVideoReport, ReportVideoTask  # noqa: E402
-from models.zsxq_sync import ZsxqSyncRun, ZsxqTopic  # noqa: E402
+from models.zsxq_sync import (  # noqa: E402
+    ZsxqAttachment,
+    ZsxqSyncRun,
+    ZsxqSyncRunDownload,
+    ZsxqTopic,
+)
 from services.report_video_asset_service import (  # noqa: E402
     ZsxqReportAssetService,
     build_sync_run_asset_scan_payload,
@@ -114,7 +120,9 @@ class ReportVideoAssetServiceTest(unittest.TestCase):
                         id="run-asset-1",
                         group_id="group-1",
                         group_name="前沿信息收录",
+                        download_ledger_complete=True,
                         result={
+                            "attachments_downloaded": 1,
                             "downloaded_pdf_files": [
                                 {
                                     "path": str(source_pdf),
@@ -135,15 +143,46 @@ class ReportVideoAssetServiceTest(unittest.TestCase):
                         title="AI 算力服务器深度",
                         content="光模块 GPU 数据中心",
                     )
-                    db.session.add_all([run, topic])
+                    attachment = ZsxqAttachment(
+                        id="attachment-1",
+                        group_id="group-1",
+                        tab_id="tab-report",
+                        topic_id="topic-1",
+                        attachment_key="attachment-1",
+                        attachment_type="file",
+                        name=source_pdf.name,
+                        local_path=str(source_pdf),
+                        file_ext="pdf",
+                        download_status="downloaded",
+                    )
+                    ledger = ZsxqSyncRunDownload(
+                        run_id=run.id,
+                        attachment_id=attachment.id,
+                        group_id="group-1",
+                        tab_id="tab-report",
+                        topic_id="topic-1",
+                        name=source_pdf.name,
+                        local_path=str(source_pdf),
+                        file_ext="pdf",
+                    )
+                    db.session.add_all([run, topic, attachment, ledger])
                     db.session.commit()
 
-                    result = asset_service.create_zsxq_report_asset_batch({
-                        "source": "sync_run",
-                        "run_id": "run-asset-1",
-                        "parse_pdfs": False,
-                        "config": {"max_files": 5, "tab_label_keyword": "外资研报"},
-                    })
+                    statements = []
+
+                    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+                        statements.append(" ".join(statement.lower().split()))
+
+                    event.listen(db.engine, "before_cursor_execute", capture)
+                    try:
+                        result = asset_service.create_zsxq_report_asset_batch({
+                            "source": "sync_run",
+                            "run_id": "run-asset-1",
+                            "parse_pdfs": False,
+                            "config": {"max_files": 5, "tab_label_keyword": "外资研报"},
+                        })
+                    finally:
+                        event.remove(db.engine, "before_cursor_execute", capture)
 
                     self.assertEqual(result["created_count"], 1)
                     self.assertEqual(ReportVideoTask.query.count(), 1)
@@ -153,6 +192,23 @@ class ReportVideoAssetServiceTest(unittest.TestCase):
                     self.assertEqual(auto_asset["source"], "sync_run")
                     self.assertEqual(auto_asset["zsxq"]["topic_id"], "topic-1")
                     self.assertEqual(auto_asset["theme_hint"], "AI算力")
+                    run_selects = [
+                        sql for sql in statements
+                        if sql.startswith("select") and " from zsxq_sync_runs " in sql
+                    ]
+                    self.assertEqual(len(run_selects), 1)
+                    self.assertNotIn("zsxq_sync_runs.result", run_selects[0])
+                    ledger_selects = [
+                        sql for sql in statements
+                        if sql.startswith("select") and " from zsxq_sync_run_downloads " in sql
+                    ]
+                    self.assertEqual(len(ledger_selects), 1)
+                    topic_selects = [
+                        sql for sql in statements
+                        if sql.startswith("select") and " from zsxq_topics " in sql
+                    ]
+                    self.assertEqual(len(topic_selects), 1)
+                    self.assertNotIn("raw_payload", topic_selects[0])
             finally:
                 asset_service.report_dir = old_report_dir
                 asset_service.rel_path = old_rel_path

@@ -99,7 +99,11 @@ def delete_platform_credential(account_id):
 @bp.route("/<account_id>/validate", methods=["POST"])
 def validate_platform_credential(account_id):
     try:
-        return jsonify({"success": True, "data": validate_credential(account_id)})
+        data = request.get_json(silent=True) or {}
+        live = str(data.get("live") or request.args.get("live") or "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        return jsonify({"success": True, "data": validate_credential(account_id, live=live)})
     except CredentialError as exc:
         return _json_error(str(exc), 400)
     except Exception as exc:

@@ -216,15 +216,19 @@ def create_app(config_class=Config):
         current_user = get_current_user()
         if not current_user:
             log_security_event('request.authorization', 'denied', reason='authentication_required')
+            if production:
+                abort(404)
             if path.startswith('/api/'):
                 return jsonify({'success': False, 'error': {'message': '请先登录'}}), 401
-            abort(404 if production else 401)
+            abort(401)
 
         if current_app.config.get('AUTH_REQUIRE_ADMIN', True) and not current_user.is_admin:
             log_security_event('request.authorization', 'denied', user=current_user, reason='admin_required')
+            if production:
+                abort(404)
             if path.startswith('/api/'):
                 return jsonify({'success': False, 'error': {'message': '访问被拒绝'}}), 403
-            abort(404 if production else 403)
+            abort(403)
 
         g.current_user = current_user
     

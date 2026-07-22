@@ -13,12 +13,18 @@
             border-radius: 999px;
             display: inline-block;
         }
+        .platform-publish-tab-body [data-publish-platform-panel] > div > section {
+            border: 0;
+            border-radius: 0;
+            box-shadow: none;
+            padding: 0;
+        }
     </style>
 </head>
 <body class="min-h-screen bg-slate-100 text-slate-900">
     <div id="nav-container"></div>
 
-    <main class="mx-auto max-w-[1280px] px-6 py-6">
+    <main class="mx-auto max-w-[1536px] px-4 py-6 sm:px-6">
         <div class="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
                 <div class="mb-2 flex flex-wrap items-center gap-2 text-xs font-bold text-slate-500">
@@ -41,12 +47,28 @@
         </div>
 
         <div id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm"></div>
-        <div id="detail-root" class="space-y-4"></div>
+        <div class="lg:grid lg:grid-cols-[11rem_minmax(0,1fr)] lg:items-start lg:gap-5">
+            <aside id="quick-nav" class="hidden lg:sticky lg:top-24 lg:block" aria-label="详情快速导航">
+                <nav class="rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
+                    <div class="px-3 pb-2 pt-1 text-[11px] font-black uppercase tracking-wider text-slate-400">快速导航</div>
+                    <button data-quick-nav="task-overview" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-list-check w-4 text-center"></i><span>任务概览</span></button>
+                    <button data-quick-nav="production-tools" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-wand-magic-sparkles w-4 text-center"></i><span>成片生成</span></button>
+                    <button data-quick-nav="visual-videos" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-photo-film w-4 text-center"></i><span>视觉方案</span></button>
+                    <button data-quick-nav="media-assets" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-play w-4 text-center"></i><span>素材预览</span></button>
+                    <button data-quick-nav="content-results" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-file-lines w-4 text-center"></i><span>文案内容</span></button>
+                    <button data-quick-nav="child-tasks" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-diagram-project w-4 text-center"></i><span>子任务</span></button>
+                    <button data-quick-nav="publish-center" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-share-nodes w-4 text-center"></i><span>发布投递</span></button>
+                    <button data-scroll-top class="mt-2 flex w-full items-center justify-center gap-2 border-t border-slate-100 px-3 pt-3 text-[11px] font-bold text-slate-400 hover:text-indigo-700"><i class="fas fa-arrow-up"></i>回到顶部</button>
+                </nav>
+            </aside>
+            <div id="detail-root" class="min-w-0 space-y-4"></div>
+        </div>
     </main>
 
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260614-report-audio-workflow-detail"></script>
-    <script src="js/bilibili-publish-panel.js?v=20260708-bili-empty-draft-fallback"></script>
-    <script src="js/report-audio-workflow-detail.js?v=20260714-institution-aliases-v2"></script>
+    <script src="js/bilibili-publish-panel.js?v=20260722-visual-video-upload-v1"></script>
+    <script src="js/platform-browser-publish-panel.js?v=20260721-douyin-verify"></script>
+    <script src="js/report-audio-workflow-detail.js?v=20260722-quick-nav-v2"></script>
 </body>
 </html>

@@ -12,6 +12,7 @@ from services.report_audio_workflow import (
 
 FEATURE_NAME = "report_script_material_workflow"
 QUEUE_NAME = "report_script_material_workflow"
+RESULT_DETAIL_CACHE_VERSION = 2
 
 
 def storage_path_for_job(job_id: str, created_at: Optional[datetime] = None) -> str:
@@ -29,14 +30,23 @@ def write_result_file(
     script_material: Dict[str, Any],
     pdf: Dict[str, Any],
     gemini: Optional[Dict[str, Any]] = None,
+    children: Optional[Dict[str, Any]] = None,
+    logs: Optional[list] = None,
+    tts_text: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
 ) -> str:
     output_path = storage_path_for_job(job_id, created_at)
     payload = {
+        "detail_cache_version": RESULT_DETAIL_CACHE_VERSION,
         "workflow_task_id": job_id,
         "structured_result": structured_result,
         "script_material": script_material,
         "pdf": pdf,
         "gemini": gemini,
+        "children": children or {},
+        "logs": logs or [],
+        "tts_text": tts_text,
+        "error": error,
         "audio": None,
         "video": {
             "enabled": False,

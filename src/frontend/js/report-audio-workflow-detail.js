@@ -7,11 +7,23 @@ class ReportAudioWorkflowDetailPage {
         this.biliPanel = null;
         this.biliPanelDraft = null;
         this.biliPanelDraftJobId = '';
+        this.douyinPanel = null;
+        this.douyinPanelDraft = null;
+        this.douyinPanelDraftJobId = '';
+        this.wechatChannelsPanel = null;
+        this.wechatChannelsPanelDraft = null;
+        this.wechatChannelsPanelDraftJobId = '';
+        this.activePublishPlatform = 'bilibili';
+        this.publishTabs = null;
         this.verticalVideoRequestIds = new Set();
         this.finalVideoRequestIds = new Set();
         this.selectedVerticalScheme = null;
         this.podcastCoverRequestIds = new Set();
         this.coverRegeneratingIds = new Set();
+        this.stickWorkflowRequestIds = new Set();
+        this.visualSchemes = [{ key: 'stick_figure', name: '白板火柴人', configured: true }];
+        this.selectedVisualSchemeKey = 'stick_figure';
+        this.quickNavObserver = null;
         this.els = {
             jobIdLabel: document.getElementById('job-id-label'),
             title: document.getElementById('detail-title'),
@@ -20,14 +32,28 @@ class ReportAudioWorkflowDetailPage {
             openApiJson: document.getElementById('open-api-json'),
             notice: document.getElementById('notice'),
             root: document.getElementById('detail-root'),
+            quickNav: document.getElementById('quick-nav'),
         };
         this.bind();
+        this.loadVisualSchemes();
         this.load();
     }
 
     bind() {
         this.els.refreshBtn?.addEventListener('click', () => this.load({ manual: true }));
-        window.addEventListener('beforeunload', () => this.clearAutoRefresh());
+        window.addEventListener('beforeunload', () => { this.clearAutoRefresh(); this.quickNavObserver?.disconnect(); this.douyinPanel?.destroy?.(); this.wechatChannelsPanel?.destroy?.(); });
+        this.els.quickNav?.addEventListener('click', (event) => {
+            const item = event.target.closest('[data-quick-nav]');
+            if (item && !item.disabled) {
+                const target = document.getElementById(item.dataset.quickNav || '');
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    this.setActiveQuickNav(target.id);
+                }
+                return;
+            }
+            if (event.target.closest('[data-scroll-top]')) window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
         this.els.root?.addEventListener('click', (event) => {
             const actionButton = event.target.closest('[data-detail-action]');
             if (actionButton) {
@@ -41,10 +67,28 @@ class ReportAudioWorkflowDetailPage {
             this.copyText(button.dataset.copyText || '');
         });
         this.els.root?.addEventListener('change', (event) => {
+            if (event.target.matches('[data-detail-visual-scheme]')) {
+                this.selectedVisualSchemeKey = String(event.target.value || 'stick_figure');
+                return;
+            }
             if (!event.target.matches('[data-detail-vertical-scheme]')) return;
             this.selectedVerticalScheme = this.normalizeVerticalScheme(event.target.value);
             this.render();
         });
+    }
+
+    async loadVisualSchemes() {
+        try {
+            const result = await this.request('/api/report-stick-figure-video-workflows/status', { timeoutMs: 10000 });
+            const schemes = result.data?.visual_schemes;
+            if (Array.isArray(schemes) && schemes.length) this.visualSchemes = schemes;
+            if (!this.visualSchemes.some((item) => item.key === this.selectedVisualSchemeKey && item.configured)) {
+                this.selectedVisualSchemeKey = this.visualSchemes.find((item) => item.configured)?.key || 'stick_figure';
+            }
+            if (this.job) this.render();
+        } catch (_) {
+            // Keep the backward-compatible stick-figure default when status is unavailable.
+        }
     }
 
     apiRoot() {
@@ -189,6 +233,7 @@ class ReportAudioWorkflowDetailPage {
         }
         if (payload.doubao_browser_tts) next.doubao_browser_tts = payload.doubao_browser_tts;
         if (payload.bilibili_uploads) next.bilibili_uploads = payload.bilibili_uploads;
+        if (payload.visual_videos) next.visual_videos = payload.visual_videos;
         return next;
     }
 
@@ -201,6 +246,7 @@ class ReportAudioWorkflowDetailPage {
             job?.publisher_video,
             job?.publisher_vertical_video,
             job?.publisher_vertical_preview_video,
+            ...(Array.isArray(job?.visual_videos) ? job.visual_videos : []),
         ].some((item) => this.isActiveStatus(item?.status));
     }
 
@@ -208,6 +254,9 @@ class ReportAudioWorkflowDetailPage {
         const job = this.job || {};
         const title = this.displayTitle(job) || job.job_id || '研报转语音详情';
         const biliPanelDraft = this.captureBilibiliPanelDraft(job);
+        const douyinPanelDraft = this.captureDouyinPanelDraft(job);
+        const wechatChannelsPanelDraft = this.captureWechatChannelsPanelDraft(job);
+        this.publishTabs?.destroy?.();
         this.els.title.textContent = title;
         this.els.subtitle.textContent = [
             job.pdf?.filename || job.request?.pdf?.filename || '',
@@ -215,17 +264,83 @@ class ReportAudioWorkflowDetailPage {
             job.completed_at ? `完成 ${this.formatDateTime(job.completed_at)}` : '',
         ].filter(Boolean).join(' · ');
         this.els.root.innerHTML = [
-            this.renderSummary(job),
-            this.renderActions(job),
-            this.renderDownloads(job),
-            this.renderMedia(job),
-            this.renderAudioScript(job),
-            this.renderStructured(job),
-            this.renderChildren(job),
-            '<div id="report-bilibili-publish-panel"></div>',
+            this.navSection('task-overview', this.renderSummary(job)),
+            this.navSection('production-tools', this.renderActions(job)),
+            this.navSection('visual-videos', this.renderVisualVideos(job)),
+            this.navSection('media-assets', [this.renderDownloads(job), this.renderMedia(job)].join('')),
+            this.navSection('content-results', [this.renderAudioScript(job), this.renderStructured(job)].join('')),
+            this.navSection('child-tasks', this.renderChildren(job)),
+            this.navSection('publish-center', this.renderPublishCenter()),
             this.renderRaw(job),
         ].join('');
         this.mountBilibiliPanel(job, biliPanelDraft);
+        this.mountDouyinPanel(job, douyinPanelDraft);
+        this.mountWechatChannelsPanel(job, wechatChannelsPanelDraft);
+        this.mountPublishTabs();
+        this.setupQuickNavigation();
+    }
+
+    navSection(id, html) {
+        const content = String(html || '').trim();
+        if (!content) return '';
+        return `<div id="${id}" data-nav-section class="scroll-mt-24 space-y-4">${content}</div>`;
+    }
+
+    setupQuickNavigation() {
+        if (!this.els.quickNav) return;
+        this.quickNavObserver?.disconnect();
+        const buttons = Array.from(this.els.quickNav.querySelectorAll('[data-quick-nav]'));
+        const sections = [];
+        buttons.forEach((button) => {
+            const section = document.getElementById(button.dataset.quickNav || '');
+            button.disabled = !section;
+            button.classList.toggle('opacity-40', !section);
+            button.classList.toggle('cursor-not-allowed', !section);
+            if (section) sections.push(section);
+        });
+        if (!sections.length) return;
+        this.setActiveQuickNav(sections[0].id);
+        this.quickNavObserver = new IntersectionObserver(() => {
+            const passed = sections.filter((section) => section.getBoundingClientRect().top <= 112);
+            this.setActiveQuickNav((passed[passed.length - 1] || sections[0]).id);
+        }, { rootMargin: '-96px 0px -62% 0px', threshold: [0, 0.05, 0.2] });
+        sections.forEach((section) => this.quickNavObserver.observe(section));
+    }
+
+    setActiveQuickNav(id) {
+        this.els.quickNav?.querySelectorAll('[data-quick-nav]').forEach((button) => {
+            const active = button.dataset.quickNav === id;
+            button.classList.toggle('bg-indigo-50', active);
+            button.classList.toggle('text-indigo-700', active);
+            button.classList.toggle('text-slate-600', !active);
+            if (active) button.setAttribute('aria-current', 'location');
+            else button.removeAttribute('aria-current');
+        });
+    }
+
+    renderPublishCenter() {
+        if (!window.renderPlatformPublishTabs) {
+            return '<div id="report-bilibili-publish-panel"></div><div id="report-douyin-publish-panel"></div><div id="report-wechat-channels-publish-panel"></div>';
+        }
+        return window.renderPlatformPublishTabs({
+            prefix: 'report',
+            activeKey: this.activePublishPlatform,
+            panelIds: {
+                bilibili: 'report-bilibili-publish-panel',
+                douyin: 'report-douyin-publish-panel',
+                wechat_channels: 'report-wechat-channels-publish-panel',
+            },
+        });
+    }
+
+    mountPublishTabs() {
+        const container = this.els.root?.querySelector('[data-platform-publish-tabs="report"]');
+        if (!container || !window.PlatformPublishTabs) return;
+        this.publishTabs = new window.PlatformPublishTabs({
+            container,
+            activeKey: this.activePublishPlatform,
+            onChange: (key) => { this.activePublishPlatform = key; },
+        });
     }
 
     handleDetailAction(button) {
@@ -254,6 +369,9 @@ class ReportAudioWorkflowDetailPage {
         }
         if (action === 'regenerate-cover-asset') {
             this.regenerateCoverAsset(jobId, button.dataset.coverKey || '', button);
+        }
+        if (action === 'open-stick-figure-workflow') {
+            this.openStickFigureWorkflow(jobId);
         }
     }
 
@@ -284,7 +402,7 @@ class ReportAudioWorkflowDetailPage {
                 uploadPath: (jobId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload`,
                 cancelPath: (jobId, uploadTaskId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload/${encodeURIComponent(uploadTaskId)}/cancel`,
                 uploads: (payload) => payload.bilibili_uploads || [],
-                videoOptions: (payload) => this.biliVideoOptions(payload),
+                videoOptions: (payload) => this.biliUploadVideoOptions(payload),
                 coverOptions: (payload, videoKey) => this.biliCoverOptions(payload, videoKey),
                 defaultCoverKey: (payload, videoKey) => this.defaultBiliCoverKey(payload, videoKey),
                 defaultTitle: (payload) => this.defaultBiliTitle(payload),
@@ -297,6 +415,72 @@ class ReportAudioWorkflowDetailPage {
         this.biliPanel.setJob(job, { formDraft });
         this.biliPanelDraft = this.biliPanel.readFormDraft?.() || formDraft || null;
         this.biliPanelDraftJobId = String(job?.job_id || job?.id || this.jobId || '');
+    }
+
+    captureDouyinPanelDraft(job) {
+        const nextJobId = String(job?.job_id || job?.id || this.jobId || '');
+        const currentJobId = String(this.douyinPanel?.job?.job_id || this.douyinPanel?.job?.id || this.douyinPanelDraftJobId || '');
+        if ((!currentJobId || !nextJobId || currentJobId === nextJobId) && this.douyinPanel?.readFormDraft) {
+            this.douyinPanelDraft = this.douyinPanel.readFormDraft() || this.douyinPanelDraft;
+        }
+        if (this.douyinPanelDraftJobId && nextJobId && this.douyinPanelDraftJobId !== nextJobId) this.douyinPanelDraft = null;
+        this.douyinPanelDraftJobId = nextJobId;
+        return this.douyinPanelDraft ? { ...this.douyinPanelDraft } : null;
+    }
+
+    mountDouyinPanel(job, formDraft = null) {
+        const container = document.getElementById('report-douyin-publish-panel');
+        if (!container || !window.DouyinPublishPanel) return;
+        if (!this.douyinPanel || this.douyinPanel.container !== container) {
+            this.douyinPanel?.destroy?.();
+            this.douyinPanel = new window.DouyinPublishPanel({
+                container,
+                apiRoot: () => this.apiRoot(),
+                request: (path, options) => this.request(path, options),
+                onNotice: (message, type) => this.setNotice(message, type),
+                listPath: (jobId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/douyin-uploads`,
+                uploadPath: (jobId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/douyin-upload`,
+                cancelPath: (jobId, taskId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/douyin-upload/${encodeURIComponent(taskId)}/cancel`,
+                videoOptions: (payload) => this.biliVideoOptions(payload),
+                defaultTitle: (payload, videoKey) => this.variantBiliTitle(payload, videoKey),
+                defaultTags: '财经,音频,研报解读',
+                emptyDescription: '当前任务还没有完整视频文件。请先生成横屏或竖屏视频。',
+            });
+        }
+        this.douyinPanel.setJob(job, { formDraft });
+    }
+
+    captureWechatChannelsPanelDraft(job) {
+        const nextJobId = String(job?.job_id || job?.id || this.jobId || '');
+        const currentJobId = String(this.wechatChannelsPanel?.job?.job_id || this.wechatChannelsPanel?.job?.id || this.wechatChannelsPanelDraftJobId || '');
+        if ((!currentJobId || !nextJobId || currentJobId === nextJobId) && this.wechatChannelsPanel?.readFormDraft) {
+            this.wechatChannelsPanelDraft = this.wechatChannelsPanel.readFormDraft() || this.wechatChannelsPanelDraft;
+        }
+        if (this.wechatChannelsPanelDraftJobId && nextJobId && this.wechatChannelsPanelDraftJobId !== nextJobId) this.wechatChannelsPanelDraft = null;
+        this.wechatChannelsPanelDraftJobId = nextJobId;
+        return this.wechatChannelsPanelDraft ? { ...this.wechatChannelsPanelDraft } : null;
+    }
+
+    mountWechatChannelsPanel(job, formDraft = null) {
+        const container = document.getElementById('report-wechat-channels-publish-panel');
+        if (!container || !window.WechatChannelsPublishPanel) return;
+        if (!this.wechatChannelsPanel || this.wechatChannelsPanel.container !== container) {
+            this.wechatChannelsPanel?.destroy?.();
+            this.wechatChannelsPanel = new window.WechatChannelsPublishPanel({
+                container,
+                apiRoot: () => this.apiRoot(),
+                request: (path, options) => this.request(path, options),
+                onNotice: (message, type) => this.setNotice(message, type),
+                listPath: (jobId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/wechat-channels-uploads`,
+                uploadPath: (jobId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/wechat-channels-upload`,
+                cancelPath: (jobId, taskId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/wechat-channels-upload/${encodeURIComponent(taskId)}/cancel`,
+                videoOptions: (payload) => this.biliVideoOptions(payload),
+                defaultTitle: (payload, videoKey) => this.variantBiliTitle(payload, videoKey),
+                defaultTags: '财经,音频,研报解读',
+                emptyDescription: '当前任务还没有完整视频文件。请先生成横屏或竖屏视频。',
+            });
+        }
+        this.wechatChannelsPanel.setJob(job, { formDraft });
     }
 
     renderSummary(job) {
@@ -339,7 +523,9 @@ class ReportAudioWorkflowDetailPage {
         const videoUrl = job.download_video_url || video?.video?.download_url || '';
         const coverUrl = job.download_cover_url || video?.cover?.download_url || '';
         const verticalVideoUrl = job.download_vertical_video_url || video?.vertical_video?.download_url || '';
+        const verticalVideoItems = Object.values(video?.vertical_videos || {});
         const verticalPreviewVideoUrl = video?.vertical_preview_video?.download_url || '';
+        const verticalPreviewItems = Object.values(video?.vertical_preview_videos || {});
         const verticalCoverUrl = job.download_vertical_cover_url || video?.vertical_cover?.download_url || '';
         const podcastCoverUrl = job.download_podcast_cover_url || video?.podcast_cover?.download_url || '';
         const bilibiliCoverUrl = this.bilibiliCoverUrl(job);
@@ -358,7 +544,14 @@ class ReportAudioWorkflowDetailPage {
             || video.vertical_preview_scheme
             || 'scheme1'
         );
+        const requestedSchemes = Array.isArray(job.request?.video?.vertical_video_schemes)
+            ? job.request.video.vertical_video_schemes.map((item) => this.normalizeVerticalScheme(item))
+            : [scheme];
+        const landscapeSelected = job.request?.video?.enabled !== false;
+        const scheme1Selected = requestedSchemes.includes('scheme1');
+        const scheme2Selected = requestedSchemes.includes('scheme2');
         const canRequestVertical = Boolean(audioUrl || videoUrl);
+        const stickWorkflowActive = this.stickWorkflowRequestIds.has(jobId);
         const keyframeMode = String(video.render_mode || job.request?.video?.render_mode || '').toLowerCase() === 'keyframes';
         return `
             <section class="rounded-lg border border-indigo-100 bg-indigo-50/60 p-4 shadow-sm">
@@ -372,20 +565,40 @@ class ReportAudioWorkflowDetailPage {
                 ${keyframeMode && !videoUrl ? `
                     <div class="mb-3 rounded-lg border border-indigo-200 bg-white p-3">
                         <div class="text-xs font-black text-indigo-950">关键帧确认完成后</div>
-                        <div class="mt-1 text-xs leading-5 text-slate-600">当前选择会同时生成横屏成片和${this.escape(this.verticalSchemeLabel(scheme))}竖屏成片，直接复用现有音频、文案和截图。</div>
+                        <div class="mt-1 text-xs leading-5 text-slate-600">勾选需要的成片版本，可同时生成多个版本；直接复用现有音频、文案和截图。</div>
+                        <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3" data-detail-final-video-options>
+                            <label class="flex cursor-pointer items-center gap-2 rounded-md border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs font-bold text-indigo-950">
+                                <input type="checkbox" value="landscape" data-detail-final-video-option ${landscapeSelected ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-indigo-700 focus:ring-indigo-500">
+                                横屏成片
+                            </label>
+                            <label class="flex cursor-pointer items-center gap-2 rounded-md border border-fuchsia-100 bg-fuchsia-50/60 px-3 py-2 text-xs font-bold text-fuchsia-950">
+                                <input type="checkbox" value="scheme1" data-detail-final-video-option ${scheme1Selected ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500">
+                                方案一竖屏
+                            </label>
+                            <label class="flex cursor-pointer items-center gap-2 rounded-md border border-fuchsia-100 bg-fuchsia-50/60 px-3 py-2 text-xs font-bold text-fuchsia-950">
+                                <input type="checkbox" value="scheme2" data-detail-final-video-option ${scheme2Selected ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500">
+                                方案二竖屏
+                            </label>
+                        </div>
                         <button type="button" data-detail-action="confirm-keyframes-generate-final" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive || finalVideoActive ? 'disabled' : ''} class="mt-2 rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-wait disabled:opacity-60">
-                            <i class="fas ${finalVideoActive ? 'fa-spinner fa-spin' : 'fa-circle-check'} mr-1"></i>${finalVideoActive ? '横竖屏生成中' : `确认关键帧，生成横屏 + ${this.escape(this.verticalSchemeLabel(scheme))}竖屏`}
+                            <i class="fas ${finalVideoActive ? 'fa-spinner fa-spin' : 'fa-circle-check'} mr-1"></i>${finalVideoActive ? '所选成片生成中' : '确认关键帧，生成所选成片'}
                         </button>
                     </div>
                 ` : ''}
                 <div class="flex flex-wrap items-center gap-2">
+                    <select data-detail-visual-scheme class="rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1.5 text-xs font-bold text-violet-800" aria-label="视觉方案">
+                        ${this.visualSchemes.map((item) => `<option value="${this.escapeAttr(item.key)}" ${item.key === this.selectedVisualSchemeKey ? 'selected' : ''} ${item.configured ? '' : 'disabled'}>${this.escape(item.name)}${item.configured ? '' : '（待配置 Gem）'}</option>`).join('')}
+                    </select>
+                    <button type="button" data-detail-action="open-stick-figure-workflow" data-job-id="${this.escapeAttr(jobId)}" ${!audioUrl || stickWorkflowActive ? 'disabled' : ''} class="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60">
+                        <i class="fas ${stickWorkflowActive ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${stickWorkflowActive ? '正在创建视觉方案' : '视觉方案横屏视频'}
+                    </button>
                     ${coverUrl ? `<a href="${this.absoluteUrl(coverUrl)}" download class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50"><i class="fas fa-image mr-1"></i>封面</a>` : ''}
                     <button type="button" data-detail-action="regenerate-cover" data-job-id="${this.escapeAttr(jobId)}" ${coverRegenerating ? 'disabled' : ''} class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60">
                         <i class="fas ${coverRegenerating ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${coverRegenerating ? '生成中' : '重做封面'}
                     </button>
                     ${videoUrl ? `<a href="${this.absoluteUrl(videoUrl)}" download class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800"><i class="fas fa-film mr-1"></i>横屏 MP4</a>` : ''}
-                    ${verticalVideoUrl ? `<a href="${this.absoluteUrl(verticalVideoUrl)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : ''}
-                    ${verticalPreviewVideoUrl ? `<a href="${this.absoluteUrl(verticalPreviewVideoUrl)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>10秒预览</a>` : ''}
+                    ${verticalVideoItems.length ? verticalVideoItems.map((item) => `<a href="${this.absoluteUrl(item.download_url)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>${this.escape(item.label || this.verticalSchemeLabel(item.scheme))}竖屏 MP4</a>`).join('') : (verticalVideoUrl ? `<a href="${this.absoluteUrl(verticalVideoUrl)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : '')}
+                    ${verticalPreviewItems.length ? verticalPreviewItems.map((item) => `<a href="${this.absoluteUrl(item.download_url)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>${this.escape(item.label || this.verticalSchemeLabel(item.scheme))}10秒预览</a>`).join('') : (verticalPreviewVideoUrl ? `<a href="${this.absoluteUrl(verticalPreviewVideoUrl)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>10秒预览</a>` : '')}
                     ${verticalCoverUrl ? `<a href="${this.absoluteUrl(verticalCoverUrl)}" download class="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><i class="fas fa-image-portrait mr-1"></i>竖版封皮</a>` : ''}
                     ${podcastCoverUrl ? `<a href="${this.absoluteUrl(podcastCoverUrl)}" download class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50"><i class="fas fa-record-vinyl mr-1"></i>播客封皮</a>` : ''}
                     ${bilibiliCoverUrl ? `<a href="${this.absoluteUrl(bilibiliCoverUrl)}" download class="rounded-md border border-pink-200 bg-white px-3 py-1.5 text-xs font-bold text-pink-700 hover:bg-pink-50"><i class="fas fa-tv mr-1"></i>B站封皮</a>` : ''}
@@ -410,6 +623,48 @@ class ReportAudioWorkflowDetailPage {
     currentDetailVerticalScheme() {
         const select = this.els.root?.querySelector('[data-detail-vertical-scheme]');
         return this.normalizeVerticalScheme(select?.value || this.job?.request?.video?.vertical_video_scheme || this.job?.video?.vertical_video_scheme);
+    }
+
+    currentFinalVideoSelection() {
+        const selected = Array.from(this.els.root?.querySelectorAll('[data-detail-final-video-option]:checked') || [])
+            .map((input) => String(input.value || '').trim());
+        return {
+            includeLandscape: selected.includes('landscape'),
+            schemes: ['scheme1', 'scheme2'].filter((scheme) => selected.includes(scheme)),
+        };
+    }
+
+    async openStickFigureWorkflow(jobId) {
+        if (!jobId || this.stickWorkflowRequestIds.has(jobId)) return;
+        const detailWindow = window.open('about:blank', '_blank');
+        if (detailWindow) detailWindow.opener = null;
+        this.stickWorkflowRequestIds.add(jobId);
+        this.render();
+        try {
+            const result = await this.request(`/api/report-stick-figure-video-workflows/jobs/from-report-audio/${encodeURIComponent(jobId)}`, {
+                method: 'POST',
+                timeoutMs: 30000,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ force_new: false, visual_scheme_key: this.selectedVisualSchemeKey || 'stick_figure' }),
+            });
+            const workflowJobId = result.workflow_job_id || result.job_id || result.data?.workflow_job_id || result.data?.job_id;
+            if (!workflowJobId) throw new Error('后端未返回视觉编排任务 ID');
+            const target = new URL('/report-stick-figure-video-workflow-detail.html', window.location.href);
+            target.searchParams.set('workflow_job_id', workflowJobId);
+            if (detailWindow && !detailWindow.closed) {
+                detailWindow.location.replace(target.href);
+            } else {
+                window.open(target.href, '_blank', 'noopener');
+            }
+            this.setNotice(result.message || '已复用整篇文案和 WAV，视觉方案已打开。', 'success');
+            await this.load({ manual: true });
+        } catch (error) {
+            if (detailWindow && !detailWindow.closed) detailWindow.close();
+            this.setNotice(`视觉方案创建失败：${error.message}`, 'error');
+        } finally {
+            this.stickWorkflowRequestIds.delete(jobId);
+            this.render();
+        }
     }
 
     async generatePodcastCover(jobId, options = {}) {
@@ -441,7 +696,11 @@ class ReportAudioWorkflowDetailPage {
 
     async generateVerticalVideo(jobId, options = {}) {
         if (!jobId || this.verticalVideoRequestIds.has(jobId)) return;
-        const scheme = this.normalizeVerticalScheme(options.scheme || this.currentDetailVerticalScheme());
+        const hasExplicitSchemes = Array.isArray(options.schemes);
+        const schemes = hasExplicitSchemes
+            ? [...new Set(options.schemes.map((item) => this.normalizeVerticalScheme(item)))]
+            : [this.normalizeVerticalScheme(options.scheme || this.currentDetailVerticalScheme())];
+        const scheme = schemes.includes('scheme2') ? 'scheme2' : (schemes[0] || this.currentDetailVerticalScheme());
         const previewSeconds = Math.max(0, Number(options.previewSeconds || 0));
         const isPreview = previewSeconds > 0;
         this.verticalVideoRequestIds.add(jobId);
@@ -465,6 +724,7 @@ class ReportAudioWorkflowDetailPage {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     scheme,
+                    vertical_video_schemes: schemes,
                     preview_seconds: previewSeconds,
                     force: options.force !== false,
                     include_landscape: options.includeLandscape === true,
@@ -508,15 +768,19 @@ class ReportAudioWorkflowDetailPage {
 
     async generateFinalVideos(jobId) {
         if (!jobId || this.finalVideoRequestIds.has(jobId)) return;
-        const scheme = this.currentDetailVerticalScheme();
+        const selection = this.currentFinalVideoSelection();
+        if (!selection.includeLandscape && selection.schemes.length === 0) {
+            this.setNotice('请至少选择一个成片版本。', 'error');
+            return;
+        }
         this.finalVideoRequestIds.add(jobId);
         this.render();
         try {
             await this.generateVerticalVideo(jobId, {
-                scheme,
+                schemes: selection.schemes,
                 previewSeconds: 0,
                 force: true,
-                includeLandscape: true,
+                includeLandscape: selection.includeLandscape,
             });
         } finally {
             this.finalVideoRequestIds.delete(jobId);
@@ -558,7 +822,9 @@ class ReportAudioWorkflowDetailPage {
             podcast_cover: 'podcast',
             bilibili_cover: 'bilibili',
         };
-        const coverType = typeMap[coverKey];
+        const verticalBackground = String(coverKey || '').startsWith('vertical_background');
+        const coverType = verticalBackground ? 'vertical_background' : typeMap[coverKey];
+        const scheme = button?.dataset.coverScheme || '';
         const requestKey = `${jobId}:${coverType || coverKey}`;
         if (!jobId || !coverType || this.coverRegeneratingIds.has(requestKey)) return;
         const editor = button?.closest('[data-cover-editor]');
@@ -580,11 +846,11 @@ class ReportAudioWorkflowDetailPage {
                 method: 'POST',
                 timeoutMs: 45000,
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cover_type: coverType, title, subtitle }),
+                body: JSON.stringify({ cover_type: coverType, title, subtitle, scheme }),
             });
             this.mergeJobPayload(result.data || result);
             this.render();
-            await this.load();
+            await this.load({ manual: true });
             this.setNotice(`${this.coverAssetLabel(coverKey)}已重新生成。`, 'success');
         } catch (error) {
             this.setNotice(`${this.coverAssetLabel(coverKey)}生成失败：${error.message}`, 'error');
@@ -597,9 +863,80 @@ class ReportAudioWorkflowDetailPage {
         }
     }
 
+    renderVisualVideos(job) {
+        const items = Array.isArray(job?.visual_videos) ? job.visual_videos : [];
+        if (!items.length) return '';
+        return `
+            <section class="rounded-lg border border-violet-200 bg-violet-50/40 p-4 shadow-sm" data-visual-video-variants>
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                        <div class="text-sm font-black text-slate-900">同一 PDF 的视觉方案视频</div>
+                        <div class="mt-1 text-xs leading-5 text-slate-500">自动归集从视觉编排台或当前研报语音任务生成的火柴人、哆啦A梦等方案。</div>
+                    </div>
+                    <span class="rounded-full bg-violet-100 px-2.5 py-1 text-xs font-black text-violet-700">${items.length} 个方案</span>
+                </div>
+                <div class="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
+                    ${items.map((item) => {
+                        const scheme = item?.visual_scheme || {};
+                        const status = this.statusMeta(item?.status);
+                        const video = item?.video || null;
+                        const progress = Math.max(0, Math.min(100, Number(item?.progress || 0)));
+                        const detailUrl = this.absoluteUrl(item?.detail_url || '');
+                        const sourceLabel = item?.source === 'report_audio'
+                            ? '由本研报语音任务创建'
+                            : '同 PDF 自动归集';
+                        return `
+                            <article class="overflow-hidden rounded-lg border border-violet-100 bg-white shadow-sm" data-visual-video-workflow-id="${this.escapeAttr(item?.workflow_job_id || '')}">
+                                <div class="flex flex-wrap items-start justify-between gap-2 border-b border-slate-100 px-4 py-3">
+                                    <div class="min-w-0">
+                                        <div class="truncate text-sm font-black text-slate-900">${this.escape(scheme.name || scheme.key || '视觉方案')}</div>
+                                        <div class="mt-1 text-[11px] text-slate-500">${this.escape(sourceLabel)}${item?.created_at ? ` · ${this.escape(this.formatDateTime(item.created_at))}` : ''}</div>
+                                    </div>
+                                    <span class="rounded-full px-2 py-1 text-[11px] font-black ${status.className}">${this.escape(item?.status === 'ready' ? '待合成' : status.label)}</span>
+                                </div>
+                                <div class="p-4">
+                                    ${video?.url ? `
+                                        <video controls preload="metadata" class="aspect-video w-full rounded-md bg-black object-contain" src="${this.absoluteUrl(video.url)}"></video>
+                                    ` : `
+                                        <div class="rounded-md border border-dashed border-violet-200 bg-violet-50/60 p-3">
+                                            <div class="flex items-center justify-between gap-3 text-xs font-bold text-violet-800">
+                                                <span>${this.escape(item?.step || status.label)}</span>
+                                                <span>${progress}%</span>
+                                            </div>
+                                            <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-violet-100">
+                                                <div class="h-full rounded-full ${status.bar}" style="width:${progress}%"></div>
+                                            </div>
+                                        </div>
+                                    `}
+                                    ${item?.error ? `<div class="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold leading-5 text-rose-700">${this.escape(item.error)}</div>` : ''}
+                                    <div class="mt-3 flex flex-wrap gap-2">
+                                        ${detailUrl ? `<a href="${detailUrl}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-violet-200 bg-white px-3 py-2 text-xs font-bold text-violet-700 hover:bg-violet-50"><i class="fas fa-arrow-up-right-from-square mr-1"></i>视觉任务详情</a>` : ''}
+                                        ${video?.url ? `<a href="${this.absoluteUrl(video.url)}" download class="rounded-md bg-violet-700 px-3 py-2 text-xs font-bold text-white hover:bg-violet-800"><i class="fas fa-download mr-1"></i>下载 ${this.escape(scheme.name || '视觉方案')} MP4${video.bytes ? ` · ${this.escape(this.formatBytes(video.bytes))}` : ''}</a>` : ''}
+                                    </div>
+                                </div>
+                            </article>
+                        `;
+                    }).join('')}
+                </div>
+            </section>
+        `;
+    }
+
     mergeJobPayload(payload) {
         if (!payload || typeof payload !== 'object') return;
-        this.job = { ...(this.job || {}), ...payload };
+        const current = this.job || {};
+        this.job = {
+            ...current,
+            ...payload,
+            video: {
+                ...(current.video || {}),
+                ...(payload.video || {}),
+            },
+            structured_result: {
+                ...(current.structured_result || {}),
+                ...(payload.structured_result || {}),
+            },
+        };
     }
 
     renderDownloads(job) {
@@ -677,12 +1014,34 @@ class ReportAudioWorkflowDetailPage {
                     <div class="mt-4">
                         <div class="mb-2 text-xs font-black text-slate-500">关键帧预览</div>
                         <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                            ${keyframeItems.map((item) => `
-                                <a href="${this.absoluteUrl(item.url)}" target="_blank" rel="noopener noreferrer" class="block rounded-md border border-slate-200 bg-slate-50 p-2 hover:border-emerald-200">
-                                    <img src="${this.previewUrl(item.url)}" alt="${this.escapeAttr(item.label)}" class="h-48 w-full rounded object-contain">
-                                    <div class="mt-2 text-xs font-bold text-slate-600">${this.escape(item.label)}</div>
-                                </a>
-                            `).join('')}
+                            ${keyframeItems.map((item) => {
+                                if (!item.editable) return `
+                                    <a href="${this.absoluteUrl(item.url)}" target="_blank" rel="noopener noreferrer" class="block rounded-md border border-slate-200 bg-slate-50 p-2 hover:border-emerald-200">
+                                        <img src="${this.previewUrl(item.url, item.version)}" alt="${this.escapeAttr(item.label)}" class="h-48 w-full rounded object-contain">
+                                        <div class="mt-2 text-xs font-bold text-slate-600">${this.escape(item.label)}</div>
+                                    </a>
+                                `;
+                                const draft = this.coverAssetDraft(job, item.key);
+                                return `
+                                    <div data-cover-editor="${this.escapeAttr(item.key)}" class="rounded-md border border-indigo-200 bg-indigo-50/40 p-2">
+                                        <a href="${this.absoluteUrl(item.url)}" target="_blank" rel="noopener noreferrer" class="block hover:opacity-90">
+                                            <img src="${this.previewUrl(item.url, item.version)}" alt="${this.escapeAttr(item.label)}" class="h-48 w-full rounded bg-white object-contain">
+                                        </a>
+                                        <div class="mt-2 text-xs font-black text-slate-700">${this.escape(item.label)}</div>
+                                        <label class="mt-2 block text-[11px] font-bold text-slate-500">
+                                            主标题
+                                            <textarea data-cover-title rows="2" class="mt-1 w-full resize-y rounded border border-slate-300 bg-white px-2 py-1.5 text-xs font-semibold leading-5 text-slate-800 outline-none focus:border-indigo-400">${this.escape(draft.title)}</textarea>
+                                        </label>
+                                        <label class="mt-2 block text-[11px] font-bold text-slate-500">
+                                            副标题
+                                            <input data-cover-subtitle type="text" value="${this.escapeAttr(draft.subtitle)}" class="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-800 outline-none focus:border-indigo-400">
+                                        </label>
+                                        <button type="button" data-detail-action="regenerate-cover-asset" data-cover-key="${this.escapeAttr(item.key)}" data-cover-scheme="${this.escapeAttr(item.scheme)}" data-job-id="${this.escapeAttr(job.job_id || job.id || this.jobId)}" class="mt-2 w-full rounded-md bg-indigo-700 px-2 py-2 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-wait disabled:opacity-60">
+                                            <i class="fas fa-wand-magic-sparkles mr-1"></i>重新生成竖屏背景
+                                        </button>
+                                    </div>
+                                `;
+                            }).join('')}
                         </div>
                     </div>
                 ` : ''}
@@ -852,6 +1211,28 @@ class ReportAudioWorkflowDetailPage {
         return items;
     }
 
+    biliUploadVideoOptions(job) {
+        const items = [...this.biliVideoOptions(job)];
+        const seen = new Set(items.map((item) => item.key));
+        for (const item of (Array.isArray(job?.visual_videos) ? job.visual_videos : [])) {
+            const workflowId = String(item?.workflow_job_id || '').trim();
+            const videoUrl = item?.video?.url || '';
+            if (!workflowId || !videoUrl) continue;
+            const key = `visual:${workflowId.replace(/-/g,'').slice(0,16)}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const schemeName = item?.visual_scheme?.name || item?.visual_scheme?.key || '视觉方案';
+            items.push({
+                key,
+                label: `${schemeName}视频`,
+                url: videoUrl,
+                visualWorkflowId: workflowId,
+                defaultTitle: this.variantBiliTitle(job, 'landscape'),
+            });
+        }
+        return items;
+    }
+
     biliCoverOptions(job, videoKey = '') {
         const entries = [];
         const video = job?.video || {};
@@ -899,6 +1280,11 @@ class ReportAudioWorkflowDetailPage {
                 label: item.label || key,
                 url: item.download_url,
                 ratio: item.ratio || '',
+                title: item.title || '',
+                subtitle: item.subtitle || '',
+                version: item.updated_at || '',
+                editable: key.startsWith('vertical_background'),
+                scheme: item.scheme || (key.endsWith('_scheme1') ? 'scheme1' : (key.endsWith('_scheme2') ? 'scheme2' : this.currentDetailVerticalScheme())),
             }));
     }
 
@@ -1062,6 +1448,7 @@ class ReportAudioWorkflowDetailPage {
     }
 
     coverAssetLabel(key) {
+        if (String(key || '').startsWith('vertical_background')) return '竖屏视频背景';
         return {
             cover: '横屏封面',
             vertical_cover: '竖版封皮',
@@ -1073,6 +1460,16 @@ class ReportAudioWorkflowDetailPage {
     coverAssetDraft(job, key) {
         const video = job?.video || {};
         const structured = job?.structured_result || {};
+        if (String(key || '').startsWith('vertical_background')) {
+            const keyframe = video?.keyframes?.[key] || {};
+            const scheme = keyframe.scheme || (String(key).endsWith('_scheme1') ? 'scheme1' : (String(key).endsWith('_scheme2') ? 'scheme2' : this.currentDetailVerticalScheme()));
+            const titleMap = video.vertical_background_titles || {};
+            const subtitleMap = video.vertical_background_subtitles || {};
+            return {
+                title: this.compactMultilineCoverText(keyframe.title || titleMap[scheme] || video.vertical_background_title || video.vertical_title || structured.vertical_title || structured.cover_title || this.coverTitleForEdit(job)),
+                subtitle: this.compactMultilineCoverText(keyframe.subtitle || subtitleMap[scheme] || video.vertical_background_subtitle || video.vertical_subtitle || structured.vertical_subtitle || structured.cover_subtitle || this.coverSubtitleForEdit(job)),
+            };
+        }
         const titleCandidates = {
             cover: [video.cover_title, structured.landscape_title, structured.cover_title],
             vertical_cover: [video.vertical_cover_title, structured.vertical_title, structured.cover_title],
@@ -1117,6 +1514,7 @@ class ReportAudioWorkflowDetailPage {
         if (['failed', 'failure'].includes(normalized)) return { label: '失败', className: 'bg-rose-50 text-rose-700', dot: 'bg-rose-500', bar: 'bg-rose-500' };
         if (['canceled', 'cancelled'].includes(normalized)) return { label: '已取消', className: 'bg-slate-100 text-slate-500', dot: 'bg-slate-400', bar: 'bg-slate-400' };
         if (['running', 'processing', 'submitting'].includes(normalized)) return { label: '运行中', className: 'bg-blue-50 text-blue-700', dot: 'bg-blue-500', bar: 'bg-blue-600' };
+        if (normalized === 'ready') return { label: '待合成', className: 'bg-violet-50 text-violet-700', dot: 'bg-violet-500', bar: 'bg-violet-500' };
         return { label: '排队中', className: 'bg-amber-50 text-amber-700', dot: 'bg-amber-500', bar: 'bg-amber-500' };
     }
 

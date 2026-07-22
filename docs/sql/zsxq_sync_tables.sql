@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS public.zsxq_sync_runs (
     attachments_failed integer,
     attachments_skipped integer,
     download_limit_reached boolean,
+    download_ledger_complete boolean NOT NULL DEFAULT false,
     error_message text,
     started_at timestamp without time zone NOT NULL,
     completed_at timestamp without time zone,
@@ -53,6 +54,9 @@ CREATE INDEX IF NOT EXISTS ix_zsxq_sync_runs_system_attempt_created_desc
     ON public.zsxq_sync_runs (system_attempt_id, created_at DESC)
     WHERE mode LIKE 'sys%'
       AND system_attempt_id IS NOT NULL;
+
+ALTER TABLE public.zsxq_sync_runs
+    ADD COLUMN IF NOT EXISTS download_ledger_complete boolean NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS public.zsxq_topics (
     id varchar(36) PRIMARY KEY,
@@ -134,6 +138,30 @@ ALTER TABLE public.zsxq_attachments
     ADD COLUMN IF NOT EXISTS publish_failed_count integer NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS publish_updated_at timestamp without time zone;
 
+CREATE TABLE IF NOT EXISTS public.zsxq_sync_run_downloads (
+    run_id varchar(36) NOT NULL
+        REFERENCES public.zsxq_sync_runs(id) ON DELETE CASCADE,
+    attachment_id varchar(36) NOT NULL
+        REFERENCES public.zsxq_attachments(id) ON DELETE CASCADE,
+    group_id varchar(32) NOT NULL,
+    tab_id varchar(128) NOT NULL,
+    topic_id varchar(64) NOT NULL,
+    name varchar(500),
+    local_path varchar(600) NOT NULL,
+    file_ext varchar(20),
+    downloaded_at timestamp without time zone NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, attachment_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_zsxq_sync_run_downloads_run_ext
+    ON public.zsxq_sync_run_downloads (run_id, file_ext);
+CREATE INDEX IF NOT EXISTS ix_zsxq_sync_run_downloads_attachment
+    ON public.zsxq_sync_run_downloads (attachment_id);
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON TABLE public.zsxq_sync_run_downloads
+    TO cappa_rw;
+
 CREATE TABLE IF NOT EXISTS public.zsxq_sync_cursors (
     id varchar(36) PRIMARY KEY,
     group_id varchar(32) NOT NULL,
@@ -153,6 +181,7 @@ CREATE INDEX IF NOT EXISTS ix_zsxq_sync_cursors_tab_id ON public.zsxq_sync_curso
 -- Optional, if the creator role is different from the application role:
 -- GRANT SELECT, INSERT, UPDATE, DELETE ON
 --     public.zsxq_sync_runs,
+--     public.zsxq_sync_run_downloads,
 --     public.zsxq_topics,
 --     public.zsxq_attachments,
 --     public.zsxq_sync_cursors

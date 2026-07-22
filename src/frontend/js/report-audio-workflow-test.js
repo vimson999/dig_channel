@@ -19,6 +19,7 @@ class ReportAudioWorkflowPage {
         this.jobPagination = { page: 1, per_page: 10, total: 0, pages: 0 };
         this.historyRequestSeq = 0;
         this.historyLoading = false;
+        this.pollInFlight = false;
         this.pollTimer = null;
         this.verticalVideoRequestIds = new Set();
         this.podcastCoverRequestIds = new Set();
@@ -55,7 +56,7 @@ class ReportAudioWorkflowPage {
             ttsVoicePanel: document.getElementById('tts-voice-panel'),
             ttsVoice: document.getElementById('tts-voice'),
             ttsVoiceId: document.getElementById('tts-voice-id'),
-            verticalVideoScheme: document.getElementById('vertical-video-scheme'),
+            verticalVideoSchemes: Array.from(document.querySelectorAll('input[name="vertical_video_schemes"]')),
             videoRenderMode: document.getElementById('video-render-mode'),
             bilibiliEnabled: document.getElementById('bilibili-enabled'),
             videoTitleInput: document.getElementById('video-title-input'),
@@ -300,6 +301,19 @@ class ReportAudioWorkflowPage {
 
     verticalSchemeLabel(value) {
         return this.normalizeVerticalScheme(value) === 'scheme2' ? '方案二' : '方案一';
+    }
+
+    selectedVerticalSchemes() {
+        const selected = (this.els.verticalVideoSchemes || [])
+            .filter((input) => input.checked)
+            .map((input) => this.normalizeVerticalScheme(input.value));
+        return [...new Set(selected)];
+    }
+
+    primarySelectedVerticalScheme() {
+        const schemes = this.selectedVerticalSchemes();
+        if (schemes.includes('scheme1') && schemes.includes('scheme2')) return 'scheme2';
+        return schemes[0] || 'scheme1';
     }
 
     normalizeVideoRenderMode(value) {
@@ -752,6 +766,12 @@ class ReportAudioWorkflowPage {
             this.setNotice(useAsset ? '请先选择一个已同步 PDF。' : '请先上传 PDF。', 'error');
             return;
         }
+        const verticalSchemes = this.selectedVerticalSchemes();
+        if (this.els.verticalVideoEnabled.checked && !verticalSchemes.length) {
+            this.setNotice('生成竖屏视频时，请至少勾选一个竖屏方案。', 'error');
+            return;
+        }
+        const primaryVerticalScheme = this.primarySelectedVerticalScheme();
         const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const pdfSummary = selectedAsset
             ? { filename: selectedAsset.filename, bytes: selectedAsset.bytes, source: 'zsxq_attachment', attachment_id: selectedAsset.id, topic_title: selectedAsset.topic_title, tab_label: selectedAsset.tab_label }
@@ -768,6 +788,10 @@ class ReportAudioWorkflowPage {
                 tts_provider: this.els.ttsProvider?.value || 'doubao_browser',
                 tts_voice: this.els.ttsProvider?.value === 'doubao_api' ? (this.els.ttsVoice?.value || '') : '',
                 video_render_mode: this.normalizeVideoRenderMode(this.els.videoRenderMode?.value),
+                video: {
+                    vertical_video_scheme: primaryVerticalScheme,
+                    vertical_video_schemes: verticalSchemes,
+                },
             },
             logs: [],
             created_at: new Date().toISOString(),
@@ -802,7 +826,8 @@ class ReportAudioWorkflowPage {
             }
             form.append('landscape_video_enabled', this.els.landscapeVideoEnabled.checked ? '1' : '0');
             form.append('vertical_video_enabled', this.els.verticalVideoEnabled.checked ? '1' : '0');
-            form.append('vertical_video_scheme', this.normalizeVerticalScheme(this.els.verticalVideoScheme?.value));
+            form.append('vertical_video_scheme', primaryVerticalScheme);
+            form.append('vertical_video_schemes', JSON.stringify(verticalSchemes));
             form.append('video_render_mode', this.normalizeVideoRenderMode(this.els.videoRenderMode?.value));
             form.append('preview_seconds', '10');
             form.append('bilibili_enabled', this.els.bilibiliEnabled.checked ? '1' : '0');
@@ -1029,16 +1054,28 @@ class ReportAudioWorkflowPage {
     }
 
     async refreshJobs() {
-        if (!this.jobs.some((job) => job.job_id && !this.isTerminal(job.status))) {
+        if (this.pollInFlight || this.historyLoading) return;
+        this.pollInFlight = true;
+        try {
+            if (!this.jobs.some((job) => job.job_id && !this.isTerminal(job.status))) {
+                const now = new Date();
+                const today = [
+                    now.getFullYear(),
+                    String(now.getMonth() + 1).padStart(2, '0'),
+                    String(now.getDate()).padStart(2, '0'),
+                ].join('-');
+                if (this.jobDate && this.jobDate < today) return;
+                await this.loadHistory({ page: this.jobPage, silent: true });
+                return;
+            }
+            const active = this.jobs.filter((job) => job.job_id && !this.isTerminal(job.status));
+            await Promise.all(active.map((job) => this.refreshJob(job.job_id).catch(() => null)));
             if (this.historyLoading) return;
             await this.loadHistory({ page: this.jobPage, silent: true });
-            return;
+            this.render();
+        } finally {
+            this.pollInFlight = false;
         }
-        const active = this.jobs.filter((job) => job.job_id && !this.isTerminal(job.status));
-        await Promise.all(active.map((job) => this.refreshJob(job.job_id).catch(() => null)));
-        if (this.historyLoading) return;
-        await this.loadHistory({ page: this.jobPage, silent: true });
-        this.render();
     }
 
     async refreshJob(jobId) {
@@ -1167,7 +1204,7 @@ class ReportAudioWorkflowPage {
 
     verticalGenerateOptionsFromButton(button, action) {
         const card = button.closest('[data-job-card]');
-        const scheme = this.normalizeVerticalScheme(card?.querySelector('[data-vertical-scheme]')?.value || this.els.verticalVideoScheme?.value);
+        const scheme = this.normalizeVerticalScheme(card?.querySelector('[data-vertical-scheme]')?.value || this.primarySelectedVerticalScheme());
         const previewSeconds = action === 'generate-vertical-preview'
             ? Number(button.dataset.previewSeconds || 10)
             : 0;
@@ -1181,7 +1218,7 @@ class ReportAudioWorkflowPage {
     podcastCoverOptionsFromButton(button) {
         const card = button.closest('[data-job-card]');
         return {
-            scheme: this.normalizeVerticalScheme(card?.querySelector('[data-vertical-scheme]')?.value || this.els.verticalVideoScheme?.value),
+            scheme: this.normalizeVerticalScheme(card?.querySelector('[data-vertical-scheme]')?.value || this.primarySelectedVerticalScheme()),
             force: false,
         };
     }
@@ -1189,7 +1226,7 @@ class ReportAudioWorkflowPage {
     async generatePodcastCover(jobId, options = {}) {
         if (!jobId || this.podcastCoverRequestIds.has(jobId)) return;
         const job = this.jobs.find((item) => item.job_id === jobId);
-        const scheme = this.normalizeVerticalScheme(options.scheme || this.els.verticalVideoScheme?.value);
+        const scheme = this.normalizeVerticalScheme(options.scheme || this.primarySelectedVerticalScheme());
         this.podcastCoverRequestIds.add(jobId);
         this.render();
         try {
@@ -1226,7 +1263,7 @@ class ReportAudioWorkflowPage {
     async generateVerticalVideo(jobId, options = {}) {
         if (!jobId || this.verticalVideoRequestIds.has(jobId)) return;
         const job = this.jobs.find((item) => item.job_id === jobId);
-        const scheme = this.normalizeVerticalScheme(options.scheme || this.els.verticalVideoScheme?.value);
+        const scheme = this.normalizeVerticalScheme(options.scheme || this.primarySelectedVerticalScheme());
         const previewSeconds = Math.max(0, Number(options.previewSeconds || 0));
         const isPreview = previewSeconds > 0;
         this.verticalVideoRequestIds.add(jobId);
@@ -1664,9 +1701,17 @@ class ReportAudioWorkflowPage {
         const verticalVideoUrl = job.download_vertical_video_url
             ? `${this.apiRoot()}${job.download_vertical_video_url}`
             : (video?.vertical_video?.download_url ? `${this.apiRoot()}${video.vertical_video.download_url}` : '');
+        const verticalVideoItems = Object.values(video?.vertical_videos || {}).map((item) => ({
+            label: item.label || this.verticalSchemeLabel(item.scheme),
+            url: `${this.apiRoot()}${item.download_url}`,
+        }));
         const verticalPreviewVideoUrl = video?.vertical_preview_video?.download_url
             ? `${this.apiRoot()}${video.vertical_preview_video.download_url}`
             : '';
+        const verticalPreviewItems = Object.values(video?.vertical_preview_videos || {}).map((item) => ({
+            label: item.label || this.verticalSchemeLabel(item.scheme),
+            url: `${this.apiRoot()}${item.download_url}`,
+        }));
         const verticalCoverUrl = job.download_vertical_cover_url
             ? `${this.apiRoot()}${job.download_vertical_cover_url}`
             : (video?.vertical_cover?.download_url ? `${this.apiRoot()}${video.vertical_cover.download_url}` : '');
@@ -1706,7 +1751,7 @@ class ReportAudioWorkflowPage {
             || job.request?.video?.vertical_scheme
             || video?.vertical_video_scheme
             || video?.vertical_preview_scheme
-            || this.els.verticalVideoScheme?.value
+            || this.primarySelectedVerticalScheme()
         );
         const retryState = job.retry_state || {};
         const childAttempts = job.child_attempts || {};
@@ -1778,8 +1823,8 @@ class ReportAudioWorkflowPage {
                                 ${coverUrl ? `<a href="${coverUrl}" download class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50"><i class="fas fa-image mr-1"></i>封面</a>` : ''}
                                 ${coverUrl ? `<button type="button" data-job-action="open-cover-regenerate" data-job-id="${this.escape(job.job_id)}" ${coverRegenerating ? 'disabled' : ''} class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60"><i class="fas ${coverRegenerating ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${coverRegenerating ? '生成中' : '重做封面'}</button>` : ''}
                                 ${showLandscapeVideoUrl ? `<a href="${videoUrl}" download class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800"><i class="fas fa-film mr-1"></i>横屏 MP4</a>` : ''}
-                                ${verticalVideoUrl ? `<a href="${verticalVideoUrl}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : ''}
-                                ${verticalPreviewVideoUrl ? `<a href="${verticalPreviewVideoUrl}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>10秒预览</a>` : ''}
+                                ${verticalVideoItems.length ? verticalVideoItems.map((item) => `<a href="${this.escape(item.url)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>${this.escape(item.label)}竖屏 MP4</a>`).join('') : (verticalVideoUrl ? `<a href="${verticalVideoUrl}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : '')}
+                                ${verticalPreviewItems.length ? verticalPreviewItems.map((item) => `<a href="${this.escape(item.url)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>${this.escape(item.label)}10秒预览</a>`).join('') : (verticalPreviewVideoUrl ? `<a href="${verticalPreviewVideoUrl}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>10秒预览</a>` : '')}
                                 ${verticalCoverUrl ? `<a href="${verticalCoverUrl}" download class="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><i class="fas fa-image-portrait mr-1"></i>竖版封皮</a>` : ''}
                                 ${podcastCoverUrl ? `<a href="${podcastCoverUrl}" download class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50"><i class="fas fa-record-vinyl mr-1"></i>播客封皮</a>` : ''}
                                 ${keyframeItems.map((item) => `<a href="${this.escape(item.url)}" download class="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><i class="fas fa-images mr-1"></i>${this.escape(item.label)}</a>`).join('')}

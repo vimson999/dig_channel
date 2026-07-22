@@ -8,7 +8,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app import create_app
 from celery_config import celery_app
-from models import db
+from models import ReportStickFigureSceneAsset, db
 from models.task import PublicationTask
 from services.doubao_browser_tts import (
     FEATURE_NAME,
@@ -25,6 +25,18 @@ logger = logging.getLogger("DOUBAO_BROWSER_TTS_TASK")
 DEFAULT_RETRY_LIMIT = 2
 DEFAULT_RETRY_DELAY_SECONDS = 20
 MAX_RETRY_LIMIT = 5
+PERSISTED_PROGRESS_STEPS = {
+    "clear_audio_cache",
+    "submit_text",
+    "wait_response",
+    "capture_audio",
+    "save_file",
+}
+
+
+class DoubaoBrowserTTSTaskCanceled(RuntimeError):
+    pass
+
 
 RETRYABLE_ERROR_FRAGMENTS = (
     "豆包音频时长异常",
@@ -57,7 +69,6 @@ TASK_UPDATE_COLUMNS = (
     PublicationTask.status,
     PublicationTask.current_step,
     PublicationTask.progress,
-    PublicationTask.result,
     PublicationTask.error_message,
     PublicationTask.created_at,
     PublicationTask.completed_at,
@@ -65,6 +76,7 @@ TASK_UPDATE_COLUMNS = (
 TASK_PAYLOAD_COLUMNS = (
     *TASK_UPDATE_COLUMNS,
     PublicationTask.params,
+    PublicationTask.result,
     PublicationTask.feature,
 )
 
@@ -110,9 +122,10 @@ def _process_job(task_id, celery_task=None):
     job_id = task.id
     job_created_at = task.created_at
     payload = task.params.get("doubao_browser_tts") or {}
-    text = (payload.get("text") or "").strip()
+    text = (payload.get("text") or "").strip() or _text_from_reference(payload.get("text_source"))
     retry_limit = _retry_limit(task)
     retry_delay_seconds = _retry_delay_seconds(task)
+    scene_asset_id = _scene_asset_id(task)
     if not text:
         _mark_failed(task, "文本不能为空")
         return False
@@ -125,6 +138,13 @@ def _process_job(task_id, celery_task=None):
     task.progress = 3
     task.result = result
     flag_modified(task, "result")
+    _update_scene_asset_tts_state(
+        scene_asset_id,
+        task_id,
+        status="processing",
+        progress=3,
+        error=None,
+    )
     db.session.commit()
     progress_result = dict(result)
 
@@ -143,32 +163,43 @@ def _process_job(task_id, celery_task=None):
             current_result.update(event["result"])
         step = event.get("step") or "processing"
         progress = int(event.get("progress") or 0)
+        progress_result = current_result
+        if step not in PERSISTED_PROGRESS_STEPS:
+            return
         last_error = None
         for attempt in range(1, 4):
             try:
                 db.session.rollback()
-                updated = (
-                    PublicationTask.query
-                    .filter(
-                        PublicationTask.id == str(task_id),
-                        PublicationTask.status != "canceled",
-                    )
-                    .update(
-                        {
-                            PublicationTask.current_step: step,
-                            PublicationTask.progress: progress,
-                            PublicationTask.result: current_result,
-                            PublicationTask.updated_at: datetime.utcnow(),
-                        },
-                        synchronize_session=False,
-                    )
+                scene_updated = _update_scene_asset_tts_state(
+                    scene_asset_id,
+                    task_id,
+                    status="processing",
+                    progress=progress,
+                    error=None,
+                    require_active_task=True,
                 )
-                if not updated:
-                    raise RuntimeError("任务已取消")
+                if not scene_updated:
+                    updated = (
+                        PublicationTask.query
+                        .filter(
+                            PublicationTask.id == str(task_id),
+                            PublicationTask.status != "canceled",
+                        )
+                        .update(
+                            {
+                                PublicationTask.current_step: step,
+                                PublicationTask.progress: progress,
+                                PublicationTask.updated_at: datetime.utcnow(),
+                            },
+                            synchronize_session=False,
+                        )
+                    )
+                    if not updated:
+                        raise DoubaoBrowserTTSTaskCanceled("任务已取消")
                 db.session.commit()
                 progress_result = current_result
                 return
-            except RuntimeError:
+            except DoubaoBrowserTTSTaskCanceled:
                 db.session.rollback()
                 raise
             except Exception as exc:
@@ -193,7 +224,9 @@ def _process_job(task_id, celery_task=None):
         fresh = _load_task(task_id, *TASK_UPDATE_COLUMNS)
         if not fresh:
             raise RuntimeError("任务不存在")
-        final_result = dict(fresh.result or {})
+        if fresh.status == "canceled":
+            return False
+        final_result = dict(progress_result)
         metadata = dict(final_result.get("metadata") or {})
         metadata.update({
             "worker_id": os.getenv("DOUBAO_BROWSER_TTS_WORKER_ID", "default"),
@@ -209,7 +242,7 @@ def _process_job(task_id, celery_task=None):
                 "sample_rate": audio.get("sample_rate"),
                 "bytes": audio.get("bytes"),
             },
-            "page_url": audio.get("page_url"),
+            "page_url": audio.get("page_url") or final_result.get("page_url"),
             "completed_at": datetime.utcnow().isoformat() + "Z",
         })
         fresh.status = "completed"
@@ -219,20 +252,43 @@ def _process_job(task_id, celery_task=None):
         fresh.error_message = None
         fresh.result = final_result
         flag_modified(fresh, "result")
+        _update_scene_asset_tts_state(
+            scene_asset_id,
+            task_id,
+            status="completed",
+            progress=100,
+            error=None,
+            audio_path=audio.get("wav_path"),
+            audio_bytes=audio.get("bytes"),
+            audio_seconds=audio.get("seconds"),
+        )
         db.session.commit()
         logger.info("Doubao browser TTS task completed: %s", task_id)
         return True
+    except DoubaoBrowserTTSTaskCanceled:
+        db.session.rollback()
+        logger.info("Doubao browser TTS task canceled while running: %s", task_id)
+        return False
     except DoubaoBrowserTTSCaptchaError as exc:
         db.session.rollback()
         task = _load_task(task_id, *TASK_UPDATE_COLUMNS)
         if task:
-            _mark_blocked_by_captcha(task, exc)
+            if task.status == "canceled":
+                return False
+            _mark_blocked_by_captcha(
+                task,
+                exc,
+                result_snapshot=progress_result,
+                scene_asset_id=scene_asset_id,
+            )
         logger.warning("Doubao browser TTS task blocked by captcha: %s", task_id, exc_info=True)
         return False
     except Exception as exc:
         db.session.rollback()
         task = _load_task(task_id, *TASK_UPDATE_COLUMNS)
         if task:
+            if task.status == "canceled":
+                return False
             if _should_auto_retry(task, exc, celery_task, retry_limit=retry_limit):
                 _mark_retrying(
                     task,
@@ -240,13 +296,20 @@ def _process_job(task_id, celery_task=None):
                     celery_task,
                     retry_limit=retry_limit,
                     retry_delay_seconds=retry_delay_seconds,
+                    result_snapshot=progress_result,
+                    scene_asset_id=scene_asset_id,
                 )
                 raise celery_task.retry(
                     exc=exc,
                     countdown=retry_delay_seconds,
                     max_retries=retry_limit,
                 )
-            _mark_failed(task, str(exc))
+            _mark_failed(
+                task,
+                str(exc),
+                result_snapshot=progress_result,
+                scene_asset_id=scene_asset_id,
+            )
         logger.error("Doubao browser TTS task failed: %s", exc, exc_info=True)
         return False
 
@@ -302,7 +365,62 @@ def _retry_delay_seconds(task):
         return DEFAULT_RETRY_DELAY_SECONDS
 
 
-def _mark_retrying(task, exc, celery_task, *, retry_limit=None, retry_delay_seconds=None):
+def _scene_asset_id(task):
+    params = task.params if task and isinstance(task.params, dict) else {}
+    payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return str(metadata.get("scene_asset_id") or "").strip() or None
+
+
+def _update_scene_asset_tts_state(
+    scene_asset_id,
+    task_id,
+    *,
+    status,
+    progress,
+    error,
+    audio_path=None,
+    audio_bytes=None,
+    audio_seconds=None,
+    require_active_task=False,
+):
+    if not scene_asset_id:
+        return 0
+    values = {
+        ReportStickFigureSceneAsset.tts_status: status,
+        ReportStickFigureSceneAsset.tts_progress: int(progress or 0),
+        ReportStickFigureSceneAsset.tts_error: error,
+        ReportStickFigureSceneAsset.updated_at: datetime.utcnow(),
+    }
+    if status == "completed":
+        values.update({
+            ReportStickFigureSceneAsset.audio_path: audio_path,
+            ReportStickFigureSceneAsset.audio_bytes: audio_bytes,
+            ReportStickFigureSceneAsset.audio_seconds: audio_seconds,
+        })
+    query = ReportStickFigureSceneAsset.query.filter(
+        ReportStickFigureSceneAsset.id == str(scene_asset_id),
+        ReportStickFigureSceneAsset.tts_task_id == str(task_id),
+    )
+    if require_active_task:
+        active_task_exists = db.session.query(PublicationTask.id).filter(
+            PublicationTask.id == str(task_id),
+            PublicationTask.status != "canceled",
+        ).exists()
+        query = query.filter(active_task_exists)
+    return query.update(values, synchronize_session=False)
+
+
+def _mark_retrying(
+    task,
+    exc,
+    celery_task,
+    *,
+    retry_limit=None,
+    retry_delay_seconds=None,
+    result_snapshot=None,
+    scene_asset_id=None,
+):
     now_dt = datetime.utcnow()
     now = now_dt.isoformat() + "Z"
     retries = int(getattr(getattr(celery_task, "request", None), "retries", 0) or 0)
@@ -310,7 +428,7 @@ def _mark_retrying(task, exc, celery_task, *, retry_limit=None, retry_delay_seco
     limit = _retry_limit(task) if retry_limit is None else int(retry_limit)
     delay = _retry_delay_seconds(task) if retry_delay_seconds is None else int(retry_delay_seconds)
     message = str(exc)
-    result = dict(task.result or {})
+    result = dict(result_snapshot if isinstance(result_snapshot, dict) else (task.result or {}))
     logs = list(result.get("logs") or [])
     logs.append({
         "step": "auto_retry",
@@ -335,11 +453,18 @@ def _mark_retrying(task, exc, celery_task, *, retry_limit=None, retry_delay_seco
     task.completed_at = None
     task.result = result
     flag_modified(task, "result")
+    _update_scene_asset_tts_state(
+        scene_asset_id,
+        task.id,
+        status="queued",
+        progress=task.progress or 0,
+        error=None,
+    )
     db.session.commit()
 
 
-def _mark_failed(task, message):
-    result = dict(task.result or {})
+def _mark_failed(task, message, *, result_snapshot=None, scene_asset_id=None):
+    result = dict(result_snapshot if isinstance(result_snapshot, dict) else (task.result or {}))
     result["error"] = message
     result["completed_at"] = datetime.utcnow().isoformat() + "Z"
     task.status = "failed"
@@ -349,10 +474,17 @@ def _mark_failed(task, message):
     task.completed_at = datetime.utcnow()
     task.result = result
     flag_modified(task, "result")
+    _update_scene_asset_tts_state(
+        scene_asset_id,
+        task.id,
+        status="failed",
+        progress=task.progress or 0,
+        error=message,
+    )
     db.session.commit()
 
 
-def _mark_blocked_by_captcha(task, exc):
+def _mark_blocked_by_captcha(task, exc, *, result_snapshot=None, scene_asset_id=None):
     now = datetime.utcnow()
     message = str(exc) or "豆包页面触发人机验证，浏览器自动化已被阻塞"
     captcha = {
@@ -364,7 +496,7 @@ def _mark_blocked_by_captcha(task, exc):
         "requires_human_action": True,
         "blocked_at": now.isoformat() + "Z",
     }
-    result = dict(task.result or {})
+    result = dict(result_snapshot if isinstance(result_snapshot, dict) else (task.result or {}))
     logs = list(result.get("logs") or [])
     logs.append({
         "step": "blocked_by_captcha",
@@ -387,6 +519,13 @@ def _mark_blocked_by_captcha(task, exc):
     task.completed_at = now
     task.result = result
     flag_modified(task, "result")
+    _update_scene_asset_tts_state(
+        scene_asset_id,
+        task.id,
+        status="blocked",
+        progress=task.progress or 0,
+        error=message,
+    )
     db.session.commit()
     _send_captcha_blocked_email(task.id)
 
@@ -422,6 +561,22 @@ def _send_captcha_blocked_email(task_id):
     flag_modified(task, "result")
     db.session.commit()
     return bool(notification.get("sent"))
+
+
+def _text_from_reference(reference):
+    if not isinstance(reference, dict) or reference.get("kind") != "report_visual_plan_segment":
+        return ""
+    segment_id = str(reference.get("segment_id") or "").strip()
+    if not segment_id:
+        return ""
+    from models.report_visual_plan import ReportVisualPlanSegment
+
+    row = (
+        db.session.query(ReportVisualPlanSegment.script_text)
+        .filter(ReportVisualPlanSegment.id == segment_id)
+        .first()
+    )
+    return str(row[0] or "").strip() if row else ""
 
 
 def _captcha_blocked_email_body(task, captcha):

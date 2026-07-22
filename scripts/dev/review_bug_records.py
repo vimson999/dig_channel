@@ -8,6 +8,15 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BUG_DIR = PROJECT_ROOT / "docs" / "bugs"
 REGISTRY_PATH = BUG_DIR / "recurrence-registry.json"
+DB_SQL_CLUSTERS = {"DB-SESSION-LIFECYCLE", "HOT-PATH-PAYLOAD-POLLING"}
+ACCEPTANCE_STAGES = {
+    "located",
+    "code_changed",
+    "migration_ready",
+    "migration_applied",
+    "runtime_replaced",
+    "accepted",
+}
 
 
 def bug_record_names(bug_dir=BUG_DIR):
@@ -46,6 +55,25 @@ def validate_registry(registry, bug_dir=BUG_DIR):
         assigned.update(cluster_records)
         cluster_counts[key] = len(cluster_records)
 
+        if key in DB_SQL_CLUSTERS:
+            acceptance_stage = str(cluster.get("acceptance_stage") or "").strip()
+            if acceptance_stage not in ACCEPTANCE_STAGES:
+                issues.append(
+                    f"{key} acceptance_stage 无效或缺失: {acceptance_stage or '-'}"
+                )
+            try:
+                date.fromisoformat(str(cluster.get("last_reopened_at") or ""))
+            except ValueError:
+                issues.append(f"{key} last_reopened_at 无效或缺失")
+            blockers = set(cluster.get("blocking_records") or [])
+            unknown_blockers = sorted(blockers - cluster_records)
+            for record in unknown_blockers:
+                issues.append(f"{key} 阻塞项不属于该复发簇: {record}")
+            if acceptance_stage == "accepted" and blockers:
+                issues.append(f"{key} 已 accepted 但仍有阻塞项")
+            if acceptance_stage != "accepted" and not blockers:
+                issues.append(f"{key} 尚未 accepted 却没有 blocking_records")
+
     for item in registry.get("standalone_records", []):
         record = str(item.get("record") or "").strip()
         if not record:
@@ -76,6 +104,11 @@ def validate_registry(registry, bug_dir=BUG_DIR):
         "classified_count": len(records & assigned),
         "cluster_count": len(cluster_counts),
         "cluster_counts": cluster_counts,
+        "acceptance_stages": {
+            cluster["key"]: cluster.get("acceptance_stage")
+            for cluster in registry.get("clusters", [])
+            if cluster.get("key") in DB_SQL_CLUSTERS
+        },
         "standalone_count": len(registry.get("standalone_records", [])),
         "reviewed_through": reviewed_through.isoformat(),
         "latest_record_date": latest_record_date.isoformat(),
@@ -100,7 +133,9 @@ def render_markdown(summary, issues):
         "",
     ]
     for key, count in summary["cluster_counts"].items():
-        lines.append(f"- `{key}`：{count} 条关联记录")
+        stage = summary["acceptance_stages"].get(key)
+        suffix = f"，验收阶段 `{stage}`" if stage else ""
+        lines.append(f"- `{key}`：{count} 条关联记录{suffix}")
     lines.extend(["", "## 检查结果", ""])
     if issues:
         lines.extend(f"- [FAIL] {issue}" for issue in issues)

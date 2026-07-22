@@ -9,9 +9,13 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services import zsxq_system_sync_test  # noqa: E402
+from services.zsxq_sync_service import STALE_SYNC_RUN_STATUSES  # noqa: E402
 
 
 class ZsxqSystemSyncPendingRecoveryTest(unittest.TestCase):
+    def test_stale_recovery_includes_orphaned_queued_runs(self):
+        self.assertIn("queued", STALE_SYNC_RUN_STATUSES)
+
     def test_stale_sync_runs_are_recovered_before_pending_check(self):
         with patch.object(
             zsxq_system_sync_test.zsxq_sync_service,

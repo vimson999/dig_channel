@@ -5,6 +5,7 @@
 import time
 import json
 import uuid
+from celery.exceptions import Retry
 from flask import request, g
 from functools import wraps
 from utils.colored_logger import setup_colored_logger, log_api_request
@@ -88,6 +89,9 @@ class RequestLoggerMiddleware:
     
     def teardown_request(self, error):
         """请求结束时清理"""
+        if isinstance(error, Retry):
+            logger.info("Celery task retry scheduled")
+            return
         if error:
             request_id = getattr(g, 'request_id', 'unknown')
             logger.error(f"💥 [{request_id}] 请求异常类型: {type(error).__name__}")

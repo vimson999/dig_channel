@@ -133,6 +133,7 @@ class FrontendThumbnailRenderer:
 
         worker_path = Path(__file__).with_name("frontend_thumbnail_render_worker.py")
         hard_timeout_ms = max(1000, int(os.getenv("REPORT_COVER_HARD_TIMEOUT_MS", "70000")))
+        retry_limit = max(0, min(2, int(os.getenv("REPORT_COVER_RENDER_RETRY_LIMIT", "1"))))
         payload = json.dumps(
             {
                 "project_root": str(self.project_root),
@@ -140,32 +141,43 @@ class FrontendThumbnailRenderer:
             },
             ensure_ascii=False,
         )
-        process = subprocess.Popen(
-            [sys.executable, str(worker_path)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
-        try:
-            stdout, stderr = process.communicate(payload, timeout=hard_timeout_ms / 1000)
-        except subprocess.TimeoutExpired as exc:
-            self._terminate_render_process(process)
-            stdout, stderr = process.communicate()
-            detail = (stderr or stdout or "no child output").strip()[-1000:]
-            raise FrontendThumbnailRenderError(
-                f"封面工具台渲染超过硬超时 {hard_timeout_ms}ms: {detail}"
-            ) from exc
-
-        if process.returncode != 0:
-            detail = (stderr or stdout or f"exit={process.returncode}").strip()[-2000:]
-            raise FrontendThumbnailRenderError(f"封面工具台子进程失败: {detail}")
-
         output = Path(output_path).expanduser().resolve()
-        if not output.is_file():
-            raise FrontendThumbnailRenderError(f"封面工具台子进程未生成文件: {output}")
-        return str(output)
+        for attempt in range(retry_limit + 1):
+            process = subprocess.Popen(
+                [sys.executable, str(worker_path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = process.communicate(payload, timeout=hard_timeout_ms / 1000)
+            except subprocess.TimeoutExpired as exc:
+                self._terminate_render_process(process)
+                stdout, stderr = process.communicate()
+                # Chrome occasionally finishes the canvas export but wedges while
+                # closing its context/process. The image is already usable in that
+                # case, so do not fail the whole workflow merely because cleanup
+                # exceeded the hard timeout.
+                if self._valid_render_output(output, expected_size=expected_size):
+                    return str(output)
+                if attempt < retry_limit:
+                    continue
+                detail = (stderr or stdout or "no child output").strip()[-1000:]
+                raise FrontendThumbnailRenderError(
+                    f"封面工具台渲染超过硬超时 {hard_timeout_ms}ms: {detail}"
+                ) from exc
+
+            if process.returncode != 0:
+                detail = (stderr or stdout or f"exit={process.returncode}").strip()[-2000:]
+                raise FrontendThumbnailRenderError(f"封面工具台子进程失败: {detail}")
+
+            if not self._valid_render_output(output, expected_size=expected_size):
+                raise FrontendThumbnailRenderError(f"封面工具台子进程未生成有效文件: {output}")
+            return str(output)
+
+        raise FrontendThumbnailRenderError(f"封面工具台子进程未生成有效文件: {output}")
 
     def _render_workbench_thumbnail_direct(
         self,
@@ -234,13 +246,35 @@ class FrontendThumbnailRenderer:
                 context.set_default_timeout(timeout_ms)
                 context.route("**/*", _route_local_render_request)
                 data_url = self._render_workbench_with_context(context, payload)
+                # Persist the completed canvas before closing Chrome. Browser
+                # cleanup can sporadically wedge even though rendering succeeded;
+                # the supervising process can then safely recover this file.
+                self._write_data_url(data_url, output, expected_size=expected_size)
             finally:
                 if context is not None:
                     context.close()
                 browser.close()
-
-        self._write_data_url(data_url, output, expected_size=expected_size)
         return str(output)
+
+    @staticmethod
+    def _valid_render_output(output: Path, *, expected_size: Optional[Tuple[int, int]] = None) -> bool:
+        try:
+            is_valid_file = output.is_file() and output.stat().st_size > 0
+        except OSError:
+            return False
+        if not is_valid_file:
+            return False
+        try:
+            from PIL import Image
+
+            with Image.open(output) as image:
+                image.verify()
+            if expected_size:
+                with Image.open(output) as image:
+                    return image.size == expected_size
+        except Exception:
+            return False
+        return True
 
     @staticmethod
     def _terminate_render_process(process: subprocess.Popen) -> None:

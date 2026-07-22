@@ -38,6 +38,7 @@ class ZsxqSyncRun(db.Model):
     attachments_failed = db.Column(db.Integer, nullable=True)
     attachments_skipped = db.Column(db.Integer, nullable=True)
     download_limit_reached = db.Column(db.Boolean, nullable=True)
+    download_ledger_complete = db.Column(db.Boolean, nullable=False, default=False)
     error_message = db.Column(db.Text, nullable=True)
     started_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     completed_at = db.Column(db.DateTime, nullable=True)
@@ -102,11 +103,49 @@ class ZsxqSyncRun(db.Model):
             "attachments_failed": self.attachments_failed or 0,
             "attachments_skipped": self.attachments_skipped or 0,
             "download_limit_reached": bool(self.download_limit_reached),
+            "download_ledger_complete": bool(self.download_ledger_complete),
             "error_message": self.error_message,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ZsxqSyncRunDownload(db.Model):
+    """Structured run-to-file ledger for downstream cleaning and asset scans."""
+
+    __tablename__ = "zsxq_sync_run_downloads"
+    __table_args__ = (
+        db.Index("ix_zsxq_sync_run_downloads_run_ext", "run_id", "file_ext"),
+        db.Index("ix_zsxq_sync_run_downloads_attachment", "attachment_id"),
+    )
+
+    run_id = db.Column(
+        db.String(36),
+        db.ForeignKey("zsxq_sync_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    attachment_id = db.Column(
+        db.String(36),
+        db.ForeignKey("zsxq_attachments.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    group_id = db.Column(db.String(32), nullable=False)
+    tab_id = db.Column(db.String(128), nullable=False)
+    topic_id = db.Column(db.String(64), nullable=False)
+    name = db.Column(db.String(500), nullable=True)
+    local_path = db.Column(db.String(600), nullable=False)
+    file_ext = db.Column(db.String(20), nullable=True)
+    downloaded_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_file_dict(self):
+        return {
+            "path": self.local_path,
+            "name": self.name,
+            "topic_id": self.topic_id,
+            "tab_id": self.tab_id,
+            "attachment_id": self.attachment_id,
         }
 
 

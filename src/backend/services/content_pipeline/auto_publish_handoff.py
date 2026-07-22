@@ -1,10 +1,12 @@
 import logging
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from models import db
 from models.task import PublicationTask
-from services.runtime_guard import maybe_guarded_apply_async
+from services.platform_publish_dispatch import dispatch_platform_publish
 from services.zsxq_auto_publish_service import (
     list_runs as auto_publish_list_runs,
     load_config as load_auto_publish_config,
@@ -47,7 +49,9 @@ def submit_publish_clean_output_task(
     if not source_dir.exists() or not source_dir.is_dir():
         raise ValueError(f"清洗输出目录不存在：{source_dir}")
 
+    broker_task_id = str(uuid4())
     task = PublicationTask(
+        celery_task_id=broker_task_id,
         status="pending",
         current_step="init",
         progress=0,
@@ -75,47 +79,81 @@ def submit_publish_clean_output_task(
         },
     )
     db.session.add(task)
+    db.session.flush()
+    task_id = str(task.id)
+    task_updated_at = task.updated_at
+    task_snapshot = task.to_dict()
+    initial_result = deepcopy(task.result or {})
     db.session.commit()
 
     try:
-        from tasks.zsxq_publish import run_publish_clean_output_task
-
-        submit_result = maybe_guarded_apply_async(
-            run_publish_clean_output_task,
-            args=[task.id],
-            queue="zsxq_publish",
-            feature="zsxq_clean_output_publish",
-            task=task,
+        submit_result = dispatch_platform_publish(
+            "zsxq",
+            task_id,
+            broker_task_id=broker_task_id,
             retry=False,
         )
-        celery_task = submit_result["async_result"]
     except Exception as exc:
-        logger.exception("知识星球发布任务入队失败: %s", task.id)
-        task.status = "failed"
-        task.current_step = "failed"
-        task.error_message = f"知识星球发布任务入队失败: {exc}"
-        task.result = {
-            **(task.result or {}),
+        logger.exception("知识星球发布任务入队失败: %s", task_id)
+        error_message = f"知识星球发布任务入队失败: {exc}"
+        failed_result = {
+            **initial_result,
             "queued": False,
             "status": "failed",
             "reason": "queue_failed",
-            "message": task.error_message,
+            "message": error_message,
         }
+        PublicationTask.query.filter(
+            PublicationTask.id == task_id,
+            PublicationTask.status == "pending",
+            PublicationTask.celery_task_id == broker_task_id,
+        ).update({
+            PublicationTask.status: "failed",
+            PublicationTask.current_step: "failed",
+            PublicationTask.error_message: error_message,
+            PublicationTask.result: failed_result,
+            PublicationTask.completed_at: datetime.utcnow(),
+            PublicationTask.updated_at: datetime.utcnow(),
+        }, synchronize_session=False)
         db.session.commit()
-        raise RuntimeError(task.error_message) from exc
+        raise RuntimeError(error_message) from exc
 
-    task.celery_task_id = celery_task.id
-    task.result = {
-        **(task.result or {}),
+    celery_task_id = str(submit_result["celery_id"])
+    if celery_task_id != broker_task_id:
+        raise RuntimeError(
+            f"知识星球发布任务 broker ID 不一致: expected={broker_task_id} actual={celery_task_id}"
+        )
+    final_result = {
+        **initial_result,
         "queued": not bool(submit_result.get("deferred")),
         "deferred": bool(submit_result.get("deferred")),
-        "task_id": task.id,
-        "celery_task_id": celery_task.id,
+        "task_id": task_id,
+        "celery_task_id": celery_task_id,
         "admission": submit_result.get("admission"),
         "message": "知识星球发布任务已提交。",
     }
+    compare_and_swap = PublicationTask.query.filter(
+        PublicationTask.id == task_id,
+        PublicationTask.status == "pending",
+        PublicationTask.celery_task_id == broker_task_id,
+    )
+    if task_updated_at is not None:
+        compare_and_swap = compare_and_swap.filter(PublicationTask.updated_at == task_updated_at)
+    compare_and_swap.update({
+        PublicationTask.result: final_result,
+        PublicationTask.updated_at: datetime.utcnow(),
+    }, synchronize_session=False)
     db.session.commit()
-    return task.to_dict()
+    task_snapshot.update({
+        "celery_task_id": celery_task_id,
+        "result": final_result,
+    })
+    deferred_state = submit_result.get("deferred_state")
+    if isinstance(deferred_state, dict):
+        for key in ("status", "current_step", "error_message", "completed_at"):
+            if key in deferred_state:
+                task_snapshot[key] = deferred_state[key]
+    return task_snapshot
 
 
 def publish_clean_output(*, file_type, output_dir, options=None, requested_by="content_pipeline"):

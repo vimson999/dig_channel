@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw
@@ -37,14 +38,17 @@ from services.mp3_video_workflow import (
     DEFAULT_SPEED,
     DEFAULT_TRANSCRIPT_DEEPSEEK_PROMPT,
     PLANNER_VERSION,
+    ChildTaskStillRunning,
     Mp3VideoWorkflowError,
     VISUAL_ARTIFACT_EXPECTED_SIZES,
     VISUAL_ARTIFACT_KEYS,
     VISUAL_ARTIFACT_VERSION,
     _build_transcript_user_prompt,
+    _active_workflow_state,
     _child_inline_wait_seconds,
     _child_id_from_result,
     _db_retry,
+    _emit,
     _finance_cover_highlight_text,
     _generate_from_transcript,
     _infographic_bullets,
@@ -52,13 +56,18 @@ from services.mp3_video_workflow import (
     _keyframe_artifacts_ready,
     _parent_max_defers,
     _parent_retry_delay_seconds,
+    _queue_notification,
     _replace_cached_workflow_result,
+    _resume_waiting_child_lightweight,
     _fresh_result,
     _publisher_child_generate_subtitles,
     _publisher_result_summary,
+    _recover_completed_publisher_child_from_disk,
+    _publisher_video_file_is_stable,
     _publisher_video_title,
     _reusable_video_summary,
     _video_summary_ready,
+    _video_file_ready,
     _visual_artifacts_ready,
     _wait_child,
     _without_waiting_state,
@@ -81,6 +90,7 @@ from services.mp3_video_workflow import (
     initial_gemini_prompt,
     initial_transcript_prompt,
     plan_from_direct_ds_response,
+    planner_model,
     transcript_model,
     validate_plan,
     _validate_strict_ds_plan,
@@ -88,6 +98,222 @@ from services.mp3_video_workflow import (
 
 
 class Mp3VideoWorkflowServiceTest(unittest.TestCase):
+    def test_disk_recovery_uses_atomic_json_patch_on_postgresql(self):
+        video_path = Path("/tmp/recovered-child.mp4")
+        child = SimpleNamespace(
+            id="child-recovered",
+            feature="publisher",
+            status="processing",
+            publisher_generate_subtitles=False,
+            publisher_aspect_ratio="9:16",
+        )
+        recovered = SimpleNamespace(id=child.id, status="completed")
+        bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+        execute_result = SimpleNamespace(rowcount=1)
+
+        with (
+            patch("services.mp3_video_workflow._publisher_child_disk_video_path", return_value=video_path),
+            patch("services.mp3_video_workflow.db.session.get_bind", return_value=bind),
+            patch("services.mp3_video_workflow.db.session.execute", return_value=execute_result) as execute,
+            patch("services.mp3_video_workflow.db.session.commit") as commit,
+            patch("services.mp3_video_workflow._db_retry", side_effect=lambda operation, _label: operation()),
+            patch("services.mp3_video_workflow._load_task", return_value=recovered) as load_task,
+        ):
+            result = _recover_completed_publisher_child_from_disk(child)
+
+        self.assertIs(result, recovered)
+        sql = str(execute.call_args.args[0])
+        self.assertIn("COALESCE(result, '{}'::jsonb) || CAST(:result_patch AS jsonb)", sql)
+        self.assertIn("status NOT IN ('completed', 'failed', 'canceled')", sql)
+        params = execute.call_args.args[1]
+        self.assertIn('"vertical_video_path": "/tmp/recovered-child.mp4"', params["result_patch"])
+        commit.assert_called_once()
+        self.assertNotIn(PublicationTask.params, load_task.call_args.args)
+        self.assertNotIn(PublicationTask.result, load_task.call_args.args)
+
+    def test_wait_continuation_uses_projected_state_and_carries_generation_token(self):
+        parent = SimpleNamespace(
+            status="processing",
+            progress=80,
+            waiting_child_label="landscape_video",
+            waiting_child_id="child-1",
+            waiting_child_updated_at="2026-07-18T04:00:00Z",
+        )
+        child = SimpleNamespace(
+            id="child-1",
+            status="pending",
+            current_step="queued",
+        )
+        hint = {
+            "label": "landscape_video",
+            "child_id": "child-1",
+            "defer_count": 3,
+            "updated_at": "2026-07-18T04:00:00Z",
+        }
+
+        with (
+            patch("services.mp3_video_workflow._load_task", side_effect=[parent, child]) as load_task,
+            patch("services.mp3_video_workflow._publisher_child_disk_video_path", return_value=None),
+            patch("services.mp3_video_workflow._publisher_child_repair_due", return_value=False),
+            patch("services.mp3_video_workflow._celery_failure_message", return_value=None),
+            patch("services.mp3_video_workflow._db_retry", return_value=1),
+            patch("services.mp3_video_workflow.celery_app.send_task") as send_task,
+        ):
+            result = _resume_waiting_child_lightweight("parent-1", hint)
+
+        self.assertTrue(result)
+        self.assertEqual(2, load_task.call_count)
+        for call in load_task.call_args_list:
+            self.assertNotIn(PublicationTask.params, call.args)
+            self.assertNotIn(PublicationTask.result, call.args)
+        queued_hint = send_task.call_args.kwargs["args"][1]
+        self.assertEqual(4, queued_hint["defer_count"])
+        self.assertNotEqual(hint["updated_at"], queued_hint["updated_at"])
+
+    def test_stale_wait_continuation_is_a_noop(self):
+        parent = SimpleNamespace(
+            status="processing",
+            progress=80,
+            waiting_child_label="landscape_video",
+            waiting_child_id="child-1",
+            waiting_child_updated_at="new-token",
+        )
+        hint = {
+            "label": "landscape_video",
+            "child_id": "child-1",
+            "defer_count": 3,
+            "updated_at": "old-token",
+        }
+
+        with (
+            patch("services.mp3_video_workflow._load_task", return_value=parent) as load_task,
+            patch("services.mp3_video_workflow._db_retry") as db_retry,
+            patch("services.mp3_video_workflow.celery_app.send_task") as send_task,
+        ):
+            result = _resume_waiting_child_lightweight("parent-1", hint)
+
+        self.assertTrue(result)
+        load_task.assert_called_once()
+        db_retry.assert_not_called()
+        send_task.assert_not_called()
+
+    def test_wait_continuation_captures_parent_progress_before_child_repair_commit(self):
+        expired = {"value": False}
+
+        class Parent:
+            status = "processing"
+            waiting_child_label = "landscape_video"
+            waiting_child_id = "child-1"
+            waiting_child_updated_at = "2026-07-18T04:00:00Z"
+
+            @property
+            def progress(self):
+                if expired["value"]:
+                    raise AssertionError("expired parent ORM entity was accessed")
+                return 81
+
+        child = SimpleNamespace(
+            id="child-1",
+            status="pending",
+            current_step="queued",
+        )
+        hint = {
+            "label": "landscape_video",
+            "child_id": "child-1",
+            "defer_count": 3,
+            "updated_at": "2026-07-18T04:00:00Z",
+        }
+
+        def requeue(full_child, log=None):
+            expired["value"] = True
+            return full_child, True
+
+        with (
+            patch(
+                "services.mp3_video_workflow._load_task",
+                side_effect=[Parent(), child, child, child],
+            ),
+            patch("services.mp3_video_workflow._publisher_child_disk_video_path", return_value=None),
+            patch("services.mp3_video_workflow._publisher_child_repair_due", return_value=True),
+            patch("services.mp3_video_workflow.maybe_requeue_stale_publisher_child", side_effect=requeue),
+            patch("services.mp3_video_workflow._celery_failure_message", return_value=None),
+            patch("services.mp3_video_workflow._db_retry", return_value=1),
+            patch("services.mp3_video_workflow.celery_app.send_task") as send_task,
+        ):
+            result = _resume_waiting_child_lightweight("parent-1", hint)
+
+        self.assertTrue(result)
+        self.assertEqual(send_task.call_args.kwargs["args"][1]["defer_count"], 4)
+
+    def test_wait_continuation_retry_does_not_dereference_detached_child(self):
+        class Child:
+            id = "child-1"
+            status = "processing"
+            current_step = "synthesis"
+
+        parent = SimpleNamespace(
+            status="processing",
+            progress=80,
+            waiting_child_label="landscape_video",
+            waiting_child_id="child-1",
+            waiting_child_updated_at="2026-07-20T01:29:59Z",
+        )
+        hint = {
+            "label": "landscape_video",
+            "child_id": "child-1",
+            "defer_count": 9,
+            "updated_at": "2026-07-20T01:29:59Z",
+        }
+
+        def assert_retry_closure_uses_only_scalar_snapshots(operation, _label):
+            self.assertNotIn("child", operation.__code__.co_freevars)
+            self.assertIn("child_step", operation.__code__.co_freevars)
+            return 1
+
+        with (
+            patch("services.mp3_video_workflow._load_task", side_effect=[parent, Child()]),
+            patch("services.mp3_video_workflow._publisher_child_disk_video_path", return_value=None),
+            patch("services.mp3_video_workflow._publisher_child_repair_due", return_value=False),
+            patch("services.mp3_video_workflow._celery_failure_message", return_value=None),
+            patch(
+                "services.mp3_video_workflow._db_retry",
+                side_effect=assert_retry_closure_uses_only_scalar_snapshots,
+            ),
+            patch("services.mp3_video_workflow.celery_app.send_task") as send_task,
+        ):
+            result = _resume_waiting_child_lightweight("parent-1", hint)
+
+        self.assertTrue(result)
+        send_task.assert_called_once()
+
+    def test_wait_child_pending_deadline_does_not_load_json_payload(self):
+        child = PublicationTask(
+            id="child-still-running",
+            status="processing",
+            current_step="rendering",
+            progress=50,
+        )
+
+        with (
+            patch("services.mp3_video_workflow._child_inline_wait_seconds", return_value=1),
+            patch("services.mp3_video_workflow.time.monotonic", side_effect=[0, 2]),
+            patch("services.mp3_video_workflow._load_task", return_value=child) as load_task,
+            patch("services.mp3_video_workflow._record_child"),
+        ):
+            with self.assertRaises(ChildTaskStillRunning):
+                _wait_child(
+                    "parent-1",
+                    child.id,
+                    "landscape_video",
+                    start_progress=80,
+                    end_progress=90,
+                )
+
+        load_task.assert_called_once()
+        loaded_columns = load_task.call_args.args[1:]
+        self.assertNotIn(PublicationTask.params, loaded_columns)
+        self.assertNotIn(PublicationTask.result, loaded_columns)
+
     def test_wait_child_accepts_completion_at_inline_deadline(self):
         child = PublicationTask(
             id="child-at-deadline",
@@ -123,6 +349,68 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
             return result
 
         self.assertEqual({"plan": {"title": "cached"}}, exercise("job-cached"))
+
+    def test_emit_buffers_progress_payload_without_writing_result_json(self):
+        @_workflow_result_scope
+        def exercise(task_id):
+            _replace_cached_workflow_result(task_id, {"logs": []})
+            with patch("services.mp3_video_workflow._db_retry", return_value=1):
+                _emit(
+                    task_id,
+                    "gemini_upload",
+                    18,
+                    "上传完成",
+                    result={"upload": {"file_id": "file-1"}},
+                )
+            return _fresh_result(task_id)
+
+        result = exercise("job-progress-buffer")
+
+        self.assertEqual("file-1", result["upload"]["file_id"])
+        self.assertEqual("gemini_upload", result["logs"][-1]["step"])
+        self.assertEqual(18, result["logs"][-1]["progress"])
+
+    def test_notification_uses_cached_payload_and_keeps_audit_state(self):
+        @_workflow_result_scope
+        def exercise(task_id):
+            state = _active_workflow_state.get()
+            state["params"] = {
+                "feature": "mp3_video_workflow",
+                "mp3_video_workflow": {"metadata": {"source": "manual"}},
+            }
+            _replace_cached_workflow_result(task_id, {
+                "logs": [],
+                "audio": {"filename": "demo.mp3"},
+                "notifications": {},
+            })
+            task = SimpleNamespace(
+                id=task_id,
+                status="processing",
+                current_step="gemini_upload",
+                error_message=None,
+                created_at=None,
+                completed_at=None,
+            )
+            with (
+                patch("services.mp3_video_workflow._load_task", return_value=task) as load_task,
+                patch(
+                    "services.mp3_video_workflow.workflow_notification_service.enqueue_workflow_event",
+                    return_value={"queued": True, "celery_task_id": "notify-1"},
+                ),
+                patch("services.mp3_video_workflow._db_retry", return_value=1),
+            ):
+                queued = _queue_notification(task_id, "mp3_video_started", "开始")
+            return queued, load_task.call_args, _fresh_result(task_id)
+
+        queued, load_call, result = exercise("job-notification-cache")
+
+        self.assertTrue(queued)
+        loaded_column_keys = [column.key for column in load_call.args[1:]]
+        self.assertNotIn("params", loaded_column_keys)
+        self.assertNotIn("result", loaded_column_keys)
+        notification = result["notifications"]["mp3_video_started"]
+        self.assertTrue(notification["queued"])
+        self.assertEqual("notify-1", notification["celery_task_id"])
 
     def test_api_bilibili_upload_parses_schedule_and_season(self):
         with patch("api.mp3_video_workflow.time.time", return_value=1000):
@@ -634,6 +922,7 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertEqual(plan["cover_subtitle"], "回归国家信用定价锚")
         self.assertEqual(plan["audio"]["start_seconds"], 11)
         self.assertEqual(plan["audio"]["end_seconds"], 1527)
+        self.assertNotEqual(plan["xiaojunjun_subtitle"], plan["finance_cover_subtitle"])
 
     def test_validate_plan_preserves_deepseek_vertical_cover_decision(self):
         response = (
@@ -692,6 +981,55 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertNotEqual(plan["xiaojunjun_subtitle"], plan["finance_cover_subtitle"])
         self.assertIn("小微", plan["xiaojunjun_subtitle"])
         self.assertIn("To C Agent", plan["xiaojunjun_subtitle"])
+
+    def test_validate_plan_prefers_dedicated_xiaojunjun_copy_when_role_titles_overlap(self):
+        fallback = fallback_plan(
+            "内资闭门会 / 科技股调整真相 / 机构重新定价三大信号 / 业绩兑现成新主线 / 2026-07-19\n"
+            "内资闭门会 | 科技股调整真相 | 机构重新定价三大信号 | 业绩兑现成新主线 | 2026-07-19",
+            audio={"filename": "demo.mp3", "duration_seconds": 1000},
+        )
+
+        plan = validate_plan(
+            {
+                "title": "科技股调整真相",
+                "finance_cover_subtitle": "科技股调整真相\n机构重新定价三大信号\n业绩兑现成新主线",
+                "xiaojunjun_subtitle": "龙头回撤并非转弱\n资金切向确定性业绩\n三季度验证估值切换",
+                "xiaojunjun_video_title": "内资闭门会 / 科技股调整真相 / 机构重新定价三大信号 / 业绩兑现成新主线 / 2026-07-19",
+                "ciketc_video_title": "内资闭门会 | 科技股调整真相 | 机构重新定价三大信号 | 业绩兑现成新主线 | 2026-07-19",
+                "audio": {},
+            },
+            fallback=fallback,
+            audio={"filename": "demo.mp3", "duration_seconds": 1000},
+        )
+
+        self.assertEqual(
+            plan["xiaojunjun_subtitle"],
+            "龙头回撤并非转弱\n资金切向确定性业绩\n三季度验证估值切换",
+        )
+        self.assertNotEqual(plan["xiaojunjun_subtitle"], plan["finance_cover_subtitle"])
+
+    def test_validate_plan_rejects_duplicate_dedicated_xiaojunjun_copy(self):
+        fallback = fallback_plan(
+            "版本一：科技股调整真相，机构重新定价三大信号，业绩兑现成新主线。\n"
+            "版本二：龙头回撤不是转弱，资金切向确定性业绩。",
+            audio={"filename": "demo.mp3", "duration_seconds": 1000},
+        )
+        duplicate = "科技股调整真相\n机构重新定价三大信号\n业绩兑现成新主线"
+
+        plan = validate_plan(
+            {
+                "title": "科技股调整真相",
+                "finance_cover_subtitle": duplicate,
+                "xiaojunjun_subtitle": duplicate,
+                "xiaojunjun_video_title": "内资闭门会 / 龙头回撤不是转弱 / 资金切向确定性业绩 / 2026-07-19",
+                "audio": {},
+            },
+            fallback=fallback,
+            audio={"filename": "demo.mp3", "duration_seconds": 1000},
+        )
+
+        self.assertNotEqual(plan["xiaojunjun_subtitle"], duplicate)
+        self.assertIn("龙头回撤不是转弱", plan["xiaojunjun_subtitle"])
 
     def test_vertical_cover_asset_focus_is_not_hardcoded_to_us_bonds_gold(self):
         response = (
@@ -1012,6 +1350,14 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         with patch.dict(os.environ, {"MP3_VIDEO_TRANSCRIPT_MODEL": "deepseek-transcript", "MP3_VIDEO_PLANNER_MODEL": "deepseek-planner"}, clear=False):
             self.assertEqual(transcript_model(), "deepseek-transcript")
 
+    def test_planner_model_uses_flash_specific_override(self):
+        with patch.dict(
+            os.environ,
+            {"DEEPSEEK_FLASH_MODEL": "deepseek-v4-flash-high"},
+            clear=True,
+        ):
+            self.assertEqual(planner_model(), "deepseek-v4-flash-high")
+
     def test_mp3_gemini_retryable_error_classification(self):
         self.assertTrue(_is_retryable_gemini_error("等待 Gemini 生成图片超时"))
         self.assertTrue(_is_retryable_gemini_error("页面自动化超时: Locator.click: Timeout 10000ms exceeded"))
@@ -1102,11 +1448,31 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
             )
             task.task_video_path = str(video_path)
 
-            summary = _publisher_result_summary(task)
+            with patch("services.mp3_video_workflow._video_file_ready", return_value=True):
+                summary = _publisher_result_summary(task)
 
-            self.assertEqual(summary["video_path"], str(video_path))
-            self.assertEqual(summary["landscape_video_path"], str(video_path))
-            self.assertTrue(_video_summary_ready(summary))
+                self.assertEqual(summary["video_path"], str(video_path))
+                self.assertEqual(summary["landscape_video_path"], str(video_path))
+                self.assertTrue(_video_summary_ready(summary))
+
+    def test_incomplete_mp4_is_not_reusable_or_disk_recoverable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = Path(tmpdir) / "broken.mp4"
+            video_path.write_bytes(b"not-a-real-mp4" * 100000)
+            old_time = max(0, video_path.stat().st_mtime - 60)
+            os.utime(video_path, (old_time, old_time))
+
+            self.assertFalse(_video_file_ready(video_path))
+            self.assertFalse(_video_summary_ready({"status": "completed", "video_path": str(video_path)}))
+            self.assertFalse(_publisher_video_file_is_stable(video_path))
+
+    def test_probeable_video_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = Path(tmpdir) / "ready.mp4"
+            video_path.write_bytes(b"placeholder")
+            probe_payload = '{"streams":[{"codec_type":"video","width":1280,"height":720}],"format":{"duration":"12.5"}}'
+            with patch("services.mp3_video_workflow.subprocess.run", return_value=SimpleNamespace(stdout=probe_payload)):
+                self.assertTrue(_video_file_ready(video_path))
 
     def test_publisher_result_summary_marks_subtitle_toggle(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1143,10 +1509,13 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
                 params={"aspect_ratio": "9:16"},
                 result={"video_path": str(video_path)},
             )
-            with patch(
-                "services.mp3_video_workflow._find_existing_publisher_video_task",
-                return_value=child,
-            ) as find_existing:
+            with (
+                patch(
+                    "services.mp3_video_workflow._find_existing_publisher_video_task",
+                    return_value=child,
+                ) as find_existing,
+                patch("services.mp3_video_workflow._video_file_ready", return_value=True),
+            ):
                 summary, task = _reusable_video_summary({}, "vertical_video", parent_id="parent-1")
 
             self.assertIs(task, child)

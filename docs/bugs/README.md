@@ -16,6 +16,30 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-07-22 | [终态轮询与图片孤儿修复再次放大任务表载荷](2026-07-22-terminal-polling-image-repair-payload-recurrence.md) | publication_tasks / 火柴人图片与 TTS / watchdog / ZSXQ | 全量回归通过；入库映射与过期 ORM 复发入口已修并完成托管新 PID 日志验收 |
+| 2026-07-21 | [火柴人视频音频滤镜拼接语法阻断后端启动](2026-07-21-stick-video-audio-filter-syntax-startup-block.md) | 火柴人视频 / Flask 启动 / ffmpeg | 已修复并完成新 PID 启动验收 |
+| 2026-07-21 | [已完成视觉方案详情重复查询远端数据库](2026-07-21-visual-plan-completed-detail-repeat-query.md) | 视觉方案 / 分镜详情 / PostgreSQL | 已部署并完成跨后端进程真实复验 |
+| 2026-07-21 | [火柴人视频预检失败未关闭父任务](2026-07-21-stick-video-preflight-failure-parent-not-closed.md) | 火柴人视频 / render / 父子任务状态机 | 已修复、现场收口并部署验收 |
+| 2026-07-21 | [研报子任务创建后重复回读整条 JSON 任务](2026-07-21-report-child-create-post-commit-json-reload.md) | 基础文案 / 研报音频 / Gemini / 豆包 / Publisher | 四个入口已修、全量回归并部署 |
+| 2026-07-21 | [ZSXQ 集合更新缺少 JSONB 类型转换导致整轮失败](2026-07-21-zsxq-set-update-jsonb-cast-regression.md) | ZSXQ 同步 / PostgreSQL JSONB / 真实负载验收 | 第 138 轮新 worker 真实验收通过 |
+| 2026-07-21 | [火柴人资产入队和媒体请求放大父任务查询](2026-07-21-stick-figure-asset-owner-query-amplification.md) | 火柴人视频 / 分镜资产 / publication_tasks | 已部署并完成 31 镜头真实页面验收 |
+| 2026-07-21 | [ZSXQ schema 合并查询把 PostgreSQL 数组当字符集合](2026-07-21-zsxq-schema-array-text-misread.md) | ZSXQ workflow / scheduler / PostgreSQL 驱动 / 真实验收 | 已修复并用应用连接复现验证，待补跑失败轮次 |
+| 2026-07-21 | [重启安全门无条件切换公网数据库导致无法验收](2026-07-21-restart-guard-unconditional-direct-db.md) | 完整重启 / 活动任务门禁 / PostgreSQL / PgBouncer | 代码与双分支测试已修，待真实安全重启验收 |
+| 2026-07-21 | [媒体宽字段被批量 JSON 更新绕过并持续漂移](2026-07-21-media-projection-bulk-update-drift.md) | report audio / publisher / publication_tasks / 启动门禁 | 入库已修、现场已回填，待新进程真实任务验收 |
+| 2026-07-21 | [ZSXQ 同步逐条点查放大远端数据库抖动](2026-07-21-zsxq-sync-point-query-amplification.md) | ZSXQ 同步 / 附件入库与下载 / PostgreSQL | 第 138 轮页面级真实负载验收通过 |
+| 2026-07-19 | [MP3 双封皮标题版本被格式标题覆盖](2026-07-19-mp3-cover-copy-variants-collapsed.md) | mp3_video_workflow / DS 标题规划 / 横屏封皮 | 代码已修复并完成回归，待新任务运行态验收 |
+| 2026-07-19 | [Report audio pending 父任务不在孤儿修复范围](2026-07-19-report-audio-pending-orphan-not-repairable.md) | report_audio_workflow / watchdog / publication_tasks | 已修复并完成历史任务收口与新进程验收 |
+| 2026-07-19 | [内容清洗 processing 孤儿不在自动修复范围](2026-07-19-content-clean-processing-orphan-not-repairable.md) | Content Pipeline / watchdog / 重启安全门 / ZSXQ workflow | 已修复并完成现场恢复与重启验收 |
+| 2026-07-18 | [回归套件范围不足并混入真实副作用测试](2026-07-18-regression-suite-false-green-and-live-side-effects.md) | pytest / 编译 / TypeScript / 迁移与运行时验收 | 确定性门禁已通过，待生产迁移和新进程验收 |
+| 2026-07-18 | [ZSXQ 发帖凭据会话跨远程等待后失效](2026-07-18-zsxq-credential-session-held-across-remote-publish.md) | ZSXQ 发帖 / 平台凭据 / DB Session | 代码已修复并回归，待新 worker 真实验收 |
+| 2026-07-18 | [重启安全检查依赖已停掉的 PgBouncer](2026-07-18-restart-safety-guard-depended-on-stopped-pgbouncer.md) | 开发栈重启 / PgBouncer / 活动任务保护 | 代码已修复，待完整重启验收 |
+| 2026-07-18 | [B站上传 JSON 轮询与在线 DDL 锁队列](2026-07-18-bilibili-upload-json-polling-and-online-ddl-lock-convoy.md) | MP3 / report audio / B站上传 / watchdog / PostgreSQL | 主迁移已应用；worker 遗漏已修，待增量迁移、新 PID 和真实验收 |
+| 2026-07-18 | [ZSXQ 批次结果被清洗与资产扫描重复搬运](2026-07-18-zsxq-run-result-clean-handoff-payload.md) | ZSXQ / Content Pipeline / 资产扫描 / PostgreSQL | 代码已修改，待迁移与新进程真实验收 |
+| 2026-07-18 | [完整重启误中断活动 render 任务](2026-07-18-full-restart-interrupted-active-render.md) | 开发栈重启 / Celery render / publisher | 代码已修改，真实阻断验收中 |
+| 2026-07-18 | [任务进度 JSON 写放大与热点读 120 秒失败](2026-07-18-publication-task-progress-json-write-amplification.md) | publication_tasks / report audio / Doubao / Gemini / MP3 / PgBouncer | 主迁移后取消收口再次复发；代码已修，待增量重启与真实验收 |
+| 2026-07-17 | [后台停止残留检查失败却报告已清理](2026-07-17-background-stop-residual-check-false-success.md) | 开发栈重启 / Celery / watchdog / scheduler | 已修复并完成真实重启验收 |
+| 2026-07-17 | [内容清洗进度反复读取 JSON 且重试异常被调用契约覆盖](2026-07-17-content-pipeline-progress-json-and-retry-contract.md) | Content Pipeline / Celery 重试 / PostgreSQL | 已加载新 worker，待真实任务验收 |
+| 2026-07-16 | [ZSXQ 任务提交后过期 ORM 触发整行大字段刷新](2026-07-16-zsxq-expired-orm-full-row-refresh.md) | ZSXQ / 内容清洗 / 研报视频 / 平台凭据 / PostgreSQL | 第 106 轮再次打开；第四轮待迁移和新进程验收 |
 | 2026-07-15 | [微信大页面正文被提前截断](2026-07-15-wechat-large-html-body-truncated.md) | 关联内容中心 / 微信文章抓取 | 已修复待 worker 回放 |
 | 2026-07-15 | [飞书动态文档壳层被误报为 Cookie 失效](2026-07-15-feishu-dynamic-docs-shell-misclassified-cookie-expired.md) | ZSXQ Lab / 外链文档 / 飞书抓取 | 已修复，真实 item 已回放 |
 | 2026-07-15 | [ZSXQ Lab 热度排行泄漏到非前沿信息收录组](2026-07-15-zsxq-lab-hot-rank-group-scope-leak.md) | ZSXQ Lab / 热度排行 / 分组切换 | 已修复 |
@@ -79,7 +103,7 @@
 | 2026-06-24 | [知识星球同步下载期间持有 DB session](2026-06-24-zsxq-sync-download-held-db-session.md) | zsxq sync / database session / attachment download | 已修复 |
 | 2026-06-24 | [知识星球同步下载后数据库服务端断开导致整轮失败](2026-06-24-zsxq-sync-db-connection-closed-mid-download.md) | zsxq sync / database | 已接入瞬断重试 |
 | 2026-06-23 | [知识星球编排业务任务卡住但 Celery 消息不可见](2026-06-23-zsxq-workflow-stale-celery-message.md) | zsxq workflow / content pipeline / publish | 已接入自动 repair |
-| 2026-06-23 | [父编排取消后 publisher 子任务仍显示业务进行中](2026-06-23-publisher-child-left-active-after-parent-canceled.md) | mp3 video workflow / publisher / celery monitor | 已接入自动收口 |
+| 2026-06-23 | [父编排终态后强绑定子任务仍保持 active](2026-06-23-publisher-child-left-active-after-parent-canceled.md) | 工作流父子状态 / publisher / 豆包 / Gemini / celery monitor | 已扩为统一收口矩阵并完成现场清理 |
 | 2026-06-23 | [知识星球系统同步计划未随本地重启启动](2026-06-23-zsxq-system-scheduler-not-autostarted.md) | zsxq scheduler | 已修复 |
 | 2026-06-23 | [任务准入保护把排队容量误收窄为运行并发](2026-06-23-task-admission-backlog-limit.md) | runtime guard | 已修复 |
 | 2026-06-23 | [研报音频编排历史列表 15 秒超时](2026-06-23-report-audio-history-timeout-large-result.md) | report audio workflow | 已修复 |

@@ -29,6 +29,7 @@ class AudioCleanOptions:
     sample_rate: int = 44100
     channels: int = 2
     fast_copy: bool = True
+    max_output_size_mb: float = 49.0
 
 
 class AudioCleanerAdapter:
@@ -146,7 +147,7 @@ class AudioCleanerAdapter:
             fast_error = ""
             if options.fast_copy:
                 try:
-                    return self._clean_one_stream_copy(
+                    result = self._clean_one_stream_copy(
                         source=source,
                         target=target,
                         duration=duration,
@@ -155,6 +156,11 @@ class AudioCleanerAdapter:
                         options=options,
                         started_at=started_at,
                     )
+                    if _exceeds_output_size_limit(target, options.max_output_size_mb):
+                        raise AudioCleanerError(
+                            f"流复制输出超过 {options.max_output_size_mb:g}MB，自动降码率重编码"
+                        )
+                    return result
                 except Exception as exc:
                     fast_error = str(exc)
                     if target.exists():
@@ -333,12 +339,14 @@ class AudioCleanerAdapter:
             "-codec:a",
             "libmp3lame",
             "-b:a",
-            str(options.bitrate),
+            _bounded_audio_bitrate(options.bitrate, output_duration=duration, max_output_size_mb=options.max_output_size_mb),
             str(target),
         ]
         _run_command(command, "音频重编码清洗失败")
         if not target.exists() or target.stat().st_size <= 0:
             raise AudioCleanerError("输出音频为空")
+        if _exceeds_output_size_limit(target, options.max_output_size_mb):
+            raise AudioCleanerError(f"重编码输出仍超过 {options.max_output_size_mb:g}MB")
 
         output_duration = _probe_duration(target)
         return {
@@ -395,6 +403,7 @@ class AudioCleanerAdapter:
                 "sample_rate": options.sample_rate,
                 "channels": options.channels,
                 "fast_copy": options.fast_copy,
+                "max_output_size_mb": options.max_output_size_mb,
             },
             "files": files_result,
         })
@@ -534,6 +543,33 @@ def _concat_file_line(path: Path) -> str:
 
 def _channel_layout(channels: int) -> str:
     return "mono" if int(channels or 2) == 1 else "stereo"
+
+
+def _exceeds_output_size_limit(path: Path, max_output_size_mb: float) -> bool:
+    if not max_output_size_mb or float(max_output_size_mb) <= 0:
+        return False
+    return path.stat().st_size > float(max_output_size_mb) * 1024 * 1024
+
+
+def _bounded_audio_bitrate(configured_bitrate: str, *, output_duration: float, max_output_size_mb: float) -> str:
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kKmM]?)\s*", str(configured_bitrate or "128k"))
+    if not match:
+        raise AudioCleanerError(f"无法解析音频码率: {configured_bitrate}")
+    configured_kbps = float(match.group(1)) * (1000 if match.group(2).lower() == "m" else 1)
+    if not max_output_size_mb or float(max_output_size_mb) <= 0 or float(output_duration or 0) <= 0:
+        return f"{max(8, int(configured_kbps))}k"
+
+    # Reserve 3% for MP3 container/metadata overhead so the result remains below
+    # the platform's hard upload limit instead of merely targeting it exactly.
+    target_bits = float(max_output_size_mb) * 1024 * 1024 * 8 * 0.97
+    size_limited_kbps = int(target_bits / float(output_duration) / 1000)
+    requested_kbps = max(8, min(int(configured_kbps), size_limited_kbps))
+    # libmp3lame rounds unsupported CBR values upward (for example 90k to
+    # 96k), which can put a long recording back over the hard size limit.
+    # Select the highest standard MP3 bitrate that does not exceed the budget.
+    standard_kbps = (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)
+    bounded_kbps = max(value for value in standard_kbps if value <= requested_kbps)
+    return f"{bounded_kbps}k"
 
 
 def _run_command(command: list[str], message: str):

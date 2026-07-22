@@ -15,6 +15,9 @@ class ReportScriptMaterialWorkflowPage {
         this.jobPagination = { page: 1, pages: 0, total: 0 };
         this.selectedJobId = '';
         this.selectedJobDetail = null;
+        this.storyboardJob = null;
+        this.storyboardPollTimer = null;
+        this.storyboardRawText = '';
         this.assetSearchTimer = null;
         this.jobSearchTimer = null;
         this.pollTimer = null;
@@ -49,6 +52,10 @@ class ReportScriptMaterialWorkflowPage {
             jobList: document.getElementById('job-list'),
             jobPagination: document.getElementById('job-pagination'),
             jobDetail: document.getElementById('job-detail'),
+            storyboardRawModal: document.getElementById('storyboard-raw-modal'),
+            storyboardRawMeta: document.getElementById('storyboard-raw-meta'),
+            storyboardRawContent: document.getElementById('storyboard-raw-content'),
+            storyboardRawCopy: document.getElementById('storyboard-raw-copy'),
         };
         this.renderGeminiUrlOptions();
         this.bind();
@@ -250,6 +257,19 @@ class ReportScriptMaterialWorkflowPage {
         this.els.jobPagination.addEventListener('click', (event) => this.handleJobPageClick(event));
         this.els.jobPagination.addEventListener('submit', (event) => this.handleJobPageJump(event));
         this.els.jobDetail.addEventListener('click', (event) => this.handleDetailClick(event));
+        this.els.storyboardRawModal?.addEventListener('click', (event) => {
+            if (event.target === this.els.storyboardRawModal || event.target.closest('[data-storyboard-raw-close]')) {
+                this.closeStoryboardRaw();
+            }
+        });
+        this.els.storyboardRawCopy?.addEventListener('click', () => {
+            this.copyText(this.storyboardRawText, 'Gem 原始返回值已复制。');
+        });
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && !this.els.storyboardRawModal?.classList.contains('hidden')) {
+                this.closeStoryboardRaw();
+            }
+        });
     }
 
     async refreshStatus() {
@@ -376,7 +396,10 @@ class ReportScriptMaterialWorkflowPage {
             this.updateJobUrl();
             this.renderJobs();
             if (this.selectedJobId && this.jobs.some((job) => job.job_id === this.selectedJobId)) {
-                this.loadJobDetail(this.selectedJobId, { silent: true });
+                const detailStatus = this.selectedJobDetail?.status || '';
+                if (!this.selectedJobDetail || !['succeeded', 'failed', 'canceled'].includes(detailStatus)) {
+                    this.loadJobDetail(this.selectedJobId, { silent: true });
+                }
             }
         } catch (error) {
             if (options.silent) return;
@@ -549,6 +572,16 @@ class ReportScriptMaterialWorkflowPage {
     }
 
     async handleDetailClick(event) {
+        const storyboardRaw = event.target.closest('[data-storyboard-raw]');
+        if (storyboardRaw) {
+            await this.showStoryboardRaw(storyboardRaw);
+            return;
+        }
+        const storyboard = event.target.closest('[data-storyboard-generate]');
+        if (storyboard) {
+            await this.submitStoryboard(storyboard);
+            return;
+        }
         const doubao = event.target.closest('[data-doubao-script]');
         if (doubao) {
             await this.submitSelectedDetailToDoubao(doubao);
@@ -559,6 +592,74 @@ class ReportScriptMaterialWorkflowPage {
             await navigator.clipboard.writeText(this.selectedJobDetail.final_script_for_tts);
             this.setNotice('文案已复制。', 'success');
         }
+    }
+
+    async submitStoryboard(trigger) {
+        if (!this.selectedJobDetail?.job_id || !this.selectedJobDetail?.final_script_for_tts) {
+            this.setNotice('请先选择一条已有完整基础文案的任务。', 'warning');
+            return;
+        }
+        const restore = this.setButtonBusy(trigger, '<i class="fas fa-spinner fa-spin mr-1"></i>投递中');
+        try {
+            const result = await this.request('/api/report-visual-plans/jobs', {
+                method: 'POST',
+                body: JSON.stringify({ material_job_id: this.selectedJobDetail.job_id }),
+                timeoutMs: 30000,
+            });
+            this.storyboardJob = { job_id: result.job_id, status: result.status || 'queued' };
+            this.renderDetail();
+            this.setNotice(result.cached ? '已复用这篇文案的分镜结果。' : '分镜任务已投递。', 'success');
+            await this.pollStoryboard(result.job_id);
+        } catch (error) {
+            this.setNotice(`投递分镜失败：${error.message}`, 'error');
+        } finally {
+            restore();
+        }
+    }
+
+    async pollStoryboard(jobId) {
+        clearTimeout(this.storyboardPollTimer);
+        try {
+            const result = await this.request(`/api/report-visual-plans/jobs/${encodeURIComponent(jobId)}`, { timeoutMs: 15000 });
+            this.storyboardJob = result.data || { job_id: jobId, status: result.status };
+            this.renderDetail();
+            if (['queued', 'running'].includes(this.storyboardJob.status)) {
+                this.storyboardPollTimer = setTimeout(() => this.pollStoryboard(jobId), 4000);
+            } else if (this.storyboardJob.status === 'succeeded') {
+                this.setNotice(`分镜梳理完成：${this.storyboardJob.segment_count || 0} 个分镜，原文覆盖完整。`, 'success');
+            } else if (this.storyboardJob.status === 'failed') {
+                this.setNotice(`分镜梳理失败：${this.storyboardJob.error || '未知错误'}`, 'error');
+            }
+        } catch (error) {
+            this.setNotice(`刷新分镜任务失败：${error.message}`, 'error');
+        }
+    }
+
+    async showStoryboardRaw(trigger) {
+        const jobId = this.storyboardJob?.job_id;
+        if (!jobId) {
+            this.setNotice('请先加载已完成的分镜结果。', 'warning');
+            return;
+        }
+        const restore = this.setButtonBusy(trigger, '<i class="fas fa-spinner fa-spin mr-1"></i>读取中');
+        try {
+            const result = await this.request(`/api/report-visual-plans/jobs/${encodeURIComponent(jobId)}/gemini-raw`, { timeoutMs: 20000 });
+            const data = result.data || {};
+            this.storyboardRawText = String(data.raw_text || '');
+            this.els.storyboardRawContent.textContent = this.storyboardRawText;
+            this.els.storyboardRawMeta.textContent = [data.completed_at ? `完成 ${this.formatDateTime(data.completed_at)}` : '', data.gemini_url || ''].filter(Boolean).join(' · ');
+            this.els.storyboardRawModal.classList.remove('hidden');
+            document.body.classList.add('overflow-hidden');
+        } catch (error) {
+            this.setNotice(`读取 Gem 原始返回失败：${error.message}`, 'error');
+        } finally {
+            restore();
+        }
+    }
+
+    closeStoryboardRaw() {
+        this.els.storyboardRawModal?.classList.add('hidden');
+        document.body.classList.remove('overflow-hidden');
     }
 
     async copyText(text, successMessage = '已复制。') {
@@ -586,10 +687,13 @@ class ReportScriptMaterialWorkflowPage {
         if (!assetId) return;
         try {
             const result = await this.request(`/api/report-script-material-workflows/pdf-assets/${encodeURIComponent(assetId)}/material`, { timeoutMs: 15000 });
-            this.selectedJobDetail = result.data || null;
+            const nextDetail = result.data || null;
+            if (this.selectedJobDetail?.job_id !== nextDetail?.job_id) this.storyboardJob = null;
+            this.selectedJobDetail = nextDetail;
             this.selectedJobId = this.selectedJobDetail?.job_id || '';
             this.renderJobs();
             this.renderDetail();
+            await this.loadExistingStoryboard(this.selectedJobDetail?.job_id);
             if (this.selectedJobDetail?.final_script_for_tts) {
                 this.setNotice('已加载这份 PDF 的基础文案。', 'success');
             } else {
@@ -603,11 +707,32 @@ class ReportScriptMaterialWorkflowPage {
     async loadJobDetail(jobId, options = {}) {
         try {
             const result = await this.request(`/api/report-script-material-workflows/jobs/${encodeURIComponent(jobId)}`, { timeoutMs: 15000 });
-            this.selectedJobDetail = result.data || null;
+            const nextDetail = result.data || null;
+            if (this.selectedJobDetail?.job_id !== nextDetail?.job_id) this.storyboardJob = null;
+            this.selectedJobDetail = nextDetail;
             this.renderJobs();
             this.renderDetail();
+            await this.loadExistingStoryboard(nextDetail?.job_id);
         } catch (error) {
             if (!options.silent) this.setNotice(`加载详情失败：${error.message}`, 'error');
+        }
+    }
+
+    async loadExistingStoryboard(sourceJobId) {
+        if (!sourceJobId) return;
+        try {
+            const result = await this.request(`/api/report-visual-plans/sources/${encodeURIComponent(sourceJobId)}/latest`, { timeoutMs: 15000 });
+            if (this.selectedJobDetail?.job_id !== sourceJobId) return;
+            this.storyboardJob = result.data || null;
+            this.renderDetail();
+            if (this.storyboardJob && ['queued', 'running'].includes(this.storyboardJob.status)) {
+                this.storyboardPollTimer = setTimeout(() => this.pollStoryboard(this.storyboardJob.job_id), 4000);
+            }
+        } catch (error) {
+            if (this.selectedJobDetail?.job_id === sourceJobId) {
+                this.storyboardJob = null;
+                this.renderDetail();
+            }
         }
     }
 
@@ -720,7 +845,8 @@ class ReportScriptMaterialWorkflowPage {
     resetPollTimer() {
         clearInterval(this.pollTimer);
         this.pollTimer = setInterval(() => {
-            this.loadHistory({ page: this.jobPage, silent: true });
+            const hasActiveJob = this.jobs.some((job) => ['queued', 'running', 'submitting'].includes(job.status));
+            if (hasActiveJob) this.loadHistory({ page: this.jobPage, silent: true });
             this.refreshWorkerStatus();
         }, 12000);
     }
@@ -998,11 +1124,21 @@ class ReportScriptMaterialWorkflowPage {
                         <button data-doubao-script ${hasScript ? '' : 'disabled'} class="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50">
                             <i class="fas fa-volume-high mr-1"></i>豆包朗读
                         </button>
+                        <button data-storyboard-generate ${hasScript ? '' : 'disabled'} class="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50">
+                            <i class="fas fa-clapperboard mr-1"></i>${this.storyboardJob?.status === 'succeeded' ? '查看分镜' : '生成分镜'}
+                        </button>
+                        ${hasScript ? `<a href="report-stick-figure-video-workflow-detail.html?material_job_id=${encodeURIComponent(detail.job_id || '')}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-bold text-violet-700 hover:bg-violet-100">
+                            <i class="fas fa-person-running mr-1"></i>火柴人详情
+                        </a>` : ''}
+                        ${this.storyboardJob?.status === 'succeeded' ? `<button data-storyboard-raw class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-100">
+                            <i class="fas fa-code mr-1"></i>Gem 原文
+                        </button>` : ''}
                         <button data-copy-script ${hasScript ? '' : 'disabled'} class="rounded-md border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">
                             <i class="fas fa-copy mr-1"></i>复制文案
                         </button>
                     </div>
                 </div>
+                ${this.renderStoryboardPanel()}
                 <div class="mt-4 grid grid-cols-2 gap-2 text-xs">
                     <div class="rounded-md bg-slate-50 p-2"><span class="font-bold text-slate-500">字数</span><div class="mt-1 font-black">${script.length}</div></div>
                     <div class="rounded-md bg-slate-50 p-2"><span class="font-bold text-slate-500">片段</span><div class="mt-1 font-black">${this.escape(detail.tts_text?.chunks ?? '-')}</div></div>
@@ -1025,6 +1161,27 @@ class ReportScriptMaterialWorkflowPage {
                 <pre class="mt-4 max-h-[34rem] overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-4 text-sm leading-7 text-slate-50">${this.escape(script || '等待生成。')}</pre>
             </div>
         `;
+    }
+
+    renderStoryboardPanel() {
+        const job = this.storyboardJob;
+        if (!job) return '';
+        if (['queued', 'running'].includes(job.status)) {
+            return `<div class="mt-4 rounded-md border border-indigo-100 bg-indigo-50 p-3 text-xs font-bold text-indigo-700"><i class="fas fa-spinner fa-spin mr-2"></i>分镜梳理中 · ${this.escape(job.step || job.status)} · ${Number(job.progress || 0)}%</div>`;
+        }
+        if (job.status === 'failed') {
+            return `<div class="mt-4 rounded-md border border-red-100 bg-red-50 p-3 text-xs text-red-700">分镜失败：${this.escape(job.error || '未知错误')}</div>`;
+        }
+        const segments = Array.isArray(job.segments) ? job.segments : [];
+        if (!segments.length) return '';
+        return `<div class="mt-4 rounded-lg border border-indigo-100 bg-indigo-50/40 p-3">
+            <div class="flex items-center justify-between gap-2 text-xs"><span class="font-black text-indigo-900">分镜列表 · ${segments.length} 段</span><span class="font-bold text-emerald-700">原文覆盖 ${job.coverage_complete ? '完整' : '待检查'}</span></div>
+            <div class="mt-3 max-h-[36rem] space-y-2 overflow-auto">${segments.map((item) => `<article class="rounded-md border border-slate-200 bg-white p-3 text-xs">
+                <div class="font-black text-slate-900">${Number(item.sequence || 0)}. ${this.escape(item.scene_title || '分镜')}</div>
+                <div class="mt-2 whitespace-pre-wrap leading-5 text-slate-600">${this.escape(item.script_text || '')}</div>
+                <div class="mt-2 rounded-md bg-slate-50 p-2 leading-5 text-indigo-800"><span class="font-black">画面提示词：</span>${this.escape(item.visual_prompt || '')}</div>
+            </article>`).join('')}</div>
+        </div>`;
     }
 
     renderMaterialField(label, value, multiline = false) {

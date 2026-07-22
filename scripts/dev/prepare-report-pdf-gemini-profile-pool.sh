@@ -41,7 +41,7 @@ truthy() {
     esac
 }
 
-COUNT="${REPORT_PDF_GEMINI_PROFILE_COUNT:-${1:-2}}"
+COUNT="${REPORT_PDF_GEMINI_PROFILE_COUNT:-${1:-5}}"
 if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [ "$COUNT" -lt 1 ]; then
     echo "❌ REPORT_PDF_GEMINI_PROFILE_COUNT 必须是正整数，当前: $COUNT"
     exit 1

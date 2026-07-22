@@ -25,7 +25,7 @@ class FrontendThumbnailRendererProcessTest(unittest.TestCase):
         renderer = FrontendThumbnailRenderer()
 
         with patch("services.frontend_thumbnail_renderer.subprocess.Popen", return_value=process), \
-             patch.object(Path, "is_file", return_value=True):
+             patch.object(renderer, "_valid_render_output", return_value=True):
             result = renderer.render_workbench_thumbnail(
                 output_path="/tmp/cover.jpg",
                 main_title="title",
@@ -46,7 +46,10 @@ class FrontendThumbnailRendererProcessTest(unittest.TestCase):
 
         with patch("services.frontend_thumbnail_renderer.subprocess.Popen", return_value=process), \
              patch.object(renderer, "_terminate_render_process") as terminate, \
-             patch.dict("os.environ", {"REPORT_COVER_HARD_TIMEOUT_MS": "1000"}, clear=False):
+             patch.dict("os.environ", {
+                 "REPORT_COVER_HARD_TIMEOUT_MS": "1000",
+                 "REPORT_COVER_RENDER_RETRY_LIMIT": "0",
+             }, clear=False):
             with self.assertRaisesRegex(FrontendThumbnailRenderError, "硬超时"):
                 renderer.render_workbench_thumbnail(
                     output_path="/tmp/cover.jpg",
@@ -54,6 +57,57 @@ class FrontendThumbnailRendererProcessTest(unittest.TestCase):
                 )
 
         terminate.assert_called_once_with(process)
+
+    def test_workbench_render_accepts_completed_file_when_browser_cleanup_times_out(self):
+        process = Mock()
+        process.pid = 12345
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="renderer", timeout=1),
+            ("", ""),
+        ]
+        renderer = FrontendThumbnailRenderer()
+
+        with patch("services.frontend_thumbnail_renderer.subprocess.Popen", return_value=process), \
+             patch.object(renderer, "_terminate_render_process") as terminate, \
+             patch.object(renderer, "_valid_render_output", return_value=True), \
+             patch.dict("os.environ", {"REPORT_COVER_HARD_TIMEOUT_MS": "1000"}, clear=False):
+            result = renderer.render_workbench_thumbnail(
+                output_path="/tmp/cover.jpg",
+                main_title="title",
+            )
+
+        self.assertEqual(result, str(Path("/tmp/cover.jpg").resolve()))
+        terminate.assert_called_once_with(process)
+
+    def test_workbench_render_retries_timeout_without_output(self):
+        timed_out = Mock()
+        timed_out.pid = 12345
+        timed_out.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="renderer", timeout=1),
+            ("", "stuck"),
+        ]
+        completed = Mock()
+        completed.returncode = 0
+        completed.communicate.return_value = ("", "")
+        renderer = FrontendThumbnailRenderer()
+
+        with patch(
+            "services.frontend_thumbnail_renderer.subprocess.Popen",
+            side_effect=[timed_out, completed],
+        ) as popen, patch.object(renderer, "_terminate_render_process") as terminate, \
+             patch.object(renderer, "_valid_render_output", side_effect=[False, True]), \
+             patch.dict("os.environ", {
+                 "REPORT_COVER_HARD_TIMEOUT_MS": "1000",
+                 "REPORT_COVER_RENDER_RETRY_LIMIT": "1",
+             }, clear=False):
+            result = renderer.render_workbench_thumbnail(
+                output_path="/tmp/cover.jpg",
+                main_title="title",
+            )
+
+        self.assertEqual(result, str(Path("/tmp/cover.jpg").resolve()))
+        self.assertEqual(popen.call_count, 2)
+        terminate.assert_called_once_with(timed_out)
 
     def test_worker_restores_expected_size_tuple_after_json_transport(self):
         renderer = Mock()

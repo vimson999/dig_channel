@@ -468,6 +468,7 @@ def queue_configured_jobs(trigger="scheduler", attempt_id=None):
         queued_workflow = zsxq_workflow_service.enqueue_workflow_task(
             workflow["id"],
             credential_id=credential_id,
+            workflow_payload=workflow,
         )
         queued = [{
             "batch_id": batch_id,
@@ -799,6 +800,11 @@ def _pending_system_sync_work(group_id):
     try:
         pending_run = (
             ZsxqSyncRun.query
+            .with_entities(
+                ZsxqSyncRun.id.label("id"),
+                ZsxqSyncRun.status.label("status"),
+                ZsxqSyncRun.updated_at.label("updated_at"),
+            )
             .filter(
                 ZsxqSyncRun.group_id == str(group_id),
                 text("zsxq_sync_runs.mode LIKE 'sys%'"),

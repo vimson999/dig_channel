@@ -1,6 +1,8 @@
 import logging
 from pathlib import Path
 
+from sqlalchemy import update
+
 from models import db
 from models.task import PublicationTask
 from services.runtime_guard import maybe_guarded_apply_async
@@ -59,6 +61,7 @@ def submit_audio_clean_task(
                         "sample_rate": int(cleaner.get("sample_rate") or 44100),
                         "channels": int(cleaner.get("channels") or 2),
                         "fast_copy": cleaner.get("fast_copy", True),
+                        "max_output_size_mb": float(cleaner.get("max_output_size_mb") or 49),
                         "output_root": cleaner.get("output_root") or None,
                     },
                 },
@@ -71,29 +74,49 @@ def submit_audio_clean_task(
         },
     )
     db.session.add(task)
+    db.session.flush()
+    task_id = str(task.id)
+    payload = task.to_dict()
     db.session.commit()
 
     try:
         submit_result = maybe_guarded_apply_async(
             run_audio_clean_task,
-            args=[task.id],
+            args=[task_id],
             queue="content_pipeline",
             feature="content_audio_clean",
-            task=task,
+            task_id=task_id,
             retry=False,
         )
         celery_task = submit_result["async_result"]
     except Exception as exc:
-        logger.exception("音频清洗任务入队失败: %s", task.id)
-        task.status = "failed"
-        task.current_step = "failed"
-        task.error_message = f"音频清洗任务入队失败: {exc}"
+        logger.exception("音频清洗任务入队失败: %s", task_id)
+        db.session.rollback()
+        error_message = f"音频清洗任务入队失败: {exc}"
+        db.session.execute(
+            update(PublicationTask)
+            .where(PublicationTask.id == task_id)
+            .values(
+                status="failed",
+                current_step="failed",
+                error_message=error_message,
+            )
+            .execution_options(synchronize_session=False)
+        )
         db.session.commit()
-        raise RuntimeError(task.error_message) from exc
+        raise RuntimeError(error_message) from exc
 
-    task.celery_task_id = celery_task.id
+    db.session.execute(
+        update(PublicationTask)
+        .where(PublicationTask.id == task_id)
+        .values(celery_task_id=celery_task.id)
+        .execution_options(synchronize_session=False)
+    )
     db.session.commit()
-    payload = task.to_dict()
+    payload["celery_task_id"] = celery_task.id
+    deferred_state = submit_result.get("deferred_state")
+    if isinstance(deferred_state, dict):
+        payload.update(deferred_state)
     payload["deferred"] = bool(submit_result.get("deferred"))
     payload["admission"] = submit_result.get("admission")
     return payload

@@ -3,6 +3,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 
+from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
 
@@ -20,6 +21,16 @@ from services.external_document_service import external_document_service
 logger = logging.getLogger(__name__)
 QUEUE_NAME = "content_pipeline"
 FEATURE_NAME = "external_document_backfill"
+TASK_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.params,
+    PublicationTask.result,
+    PublicationTask.error_message,
+    PublicationTask.completed_at,
+)
 
 
 def _create_app():
@@ -28,11 +39,19 @@ def _create_app():
     return create_app()
 
 
+def _load_task(task_id):
+    return (
+        PublicationTask.query.options(load_only(*TASK_COLUMNS))
+        .filter(PublicationTask.id == str(task_id))
+        .one_or_none()
+    )
+
+
 @celery_app.task(bind=True, name="tasks.external_documents.run_backfill")
 def run_external_document_backfill(self, task_id):
     app = _create_app()
     with app.app_context():
-        task = PublicationTask.query.get(str(task_id))
+        task = _load_task(task_id)
         if not task:
             logger.error("External document backfill task missing: %s", task_id)
             return False
@@ -56,6 +75,7 @@ def run_external_document_backfill(self, task_id):
         task.progress = 1
         task.result = {"scan": None, "processed": 0, "succeeded": 0, "failed": 0, "items": []}
         db.session.commit()
+        db.session.remove()
 
         try:
             scan_result = external_document_service.scan_existing_topics(
@@ -88,7 +108,9 @@ def run_external_document_backfill(self, task_id):
             document_ids = [row[0] for row in query.with_entities(ExternalDocument.id).all()]
             total = len(document_ids)
 
-            task = PublicationTask.query.get(str(task_id))
+            task = _load_task(task_id)
+            if not task:
+                raise RuntimeError(f"External document backfill task disappeared: {task_id}")
             result = dict(task.result or {})
             result.update({"scan": scan_result, "total": total, "providers": sorted(providers)})
             task.result = result
@@ -102,7 +124,17 @@ def run_external_document_backfill(self, task_id):
             for index, document_id in enumerate(document_ids, start=1):
                 item = {"id": document_id}
                 try:
-                    document = ExternalDocument.query.get(document_id)
+                    document = (
+                        ExternalDocument.query.options(
+                            load_only(
+                                ExternalDocument.id,
+                                ExternalDocument.provider,
+                                ExternalDocument.fetch_status,
+                            )
+                        )
+                        .filter(ExternalDocument.id == str(document_id))
+                        .one_or_none()
+                    )
                     if not document:
                         raise ValueError("关联内容不存在")
                     item["provider"] = document.provider
@@ -123,7 +155,9 @@ def run_external_document_backfill(self, task_id):
                 items.append(item)
                 items = items[-100:]
 
-                task = PublicationTask.query.get(str(task_id))
+                task = _load_task(task_id)
+                if not task:
+                    raise RuntimeError(f"External document backfill task disappeared: {task_id}")
                 result = dict(task.result or {})
                 result.update({
                     "processed": index,
@@ -136,7 +170,9 @@ def run_external_document_backfill(self, task_id):
                 flag_modified(task, "result")
                 db.session.commit()
 
-            task = PublicationTask.query.get(str(task_id))
+            task = _load_task(task_id)
+            if not task:
+                raise RuntimeError(f"External document backfill task disappeared: {task_id}")
             task.status = "completed"
             task.current_step = "done"
             task.progress = 100
@@ -149,7 +185,7 @@ def run_external_document_backfill(self, task_id):
             return True
         except Exception as exc:
             db.session.rollback()
-            task = PublicationTask.query.get(str(task_id))
+            task = _load_task(task_id)
             if task:
                 task.status = "failed"
                 task.current_step = "failed"

@@ -30,6 +30,7 @@ DEFAULT_WATCHDOG_SERVICES = (
     "report_pdf_gemini",
     "report_audio_workflow",
     "report_script_material_workflow",
+    "report_visual_plan",
     "report_top10_workflow",
     "mp3_video_workflow",
     "zsxq_sync",
@@ -41,10 +42,13 @@ DEFAULT_WATCHDOG_SERVICES = (
 )
 
 BUSINESS_TASK_FEATURES = {
-    "render": ("publisher",),
-    "platform_upload": ("publisher",),
+    "render": ("publisher", "report_stick_figure_video_render", "report_stick_figure_audio_alignment"),
+    "platform_upload": ("publisher", "douyin_upload_test", "wechat_channels_upload_test"),
+    "doubao_browser_tts": ("doubao_browser_tts",),
+    "report_pdf_gemini": ("report_pdf_gemini", "gemini_browser", "report_stick_figure_image"),
     "report_audio_workflow": ("report_audio_workflow", "report_pdf_audio_workflow"),
     "report_script_material_workflow": ("report_script_material_workflow",),
+    "report_visual_plan": ("report_visual_plan",),
     "report_top10_workflow": ("report_top10_workflow",),
     "mp3_video_workflow": ("mp3_video_workflow",),
     "content_pipeline": ("content_pdf_clean", "content_audio_clean"),
@@ -56,7 +60,16 @@ BUSINESS_TASK_ACTIVE_STATUSES = ("pending", "processing")
 BUSINESS_TASK_CONSUMER_GRACE_SECONDS_DEFAULT = 1800
 BUSINESS_TASK_LIMIT_PER_SERVICE = 8
 NON_INTERRUPTIBLE_SERVICE_STEPS = {
-    "platform_upload": ("upload_bilibili", "upload_youtube"),
+    "platform_upload": ("upload_bilibili", "upload_youtube", "uploading_video", "filling_copy", "submitting"),
+}
+INTERRUPTIBLE_BUSINESS_STEPS = {
+    "queued",
+    "pending",
+    "waiting",
+    "orphaned_processing",
+    "deferred_capacity",
+    "deferred_backlog",
+    "deferred_db_pressure",
 }
 BUSINESS_TASK_UUID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
@@ -69,7 +82,7 @@ SERVICES = {
         "hostname_prefix": "render@",
         "run_script": "scripts/dev/run-celery.sh",
         "log_file": "render.log",
-        "description": "publisher / video-editor 主视频渲染队列",
+        "description": "publisher / video-editor / 火柴人视频主渲染队列",
     },
     "platform_upload": {
         "label": "平台上传",
@@ -77,7 +90,7 @@ SERVICES = {
         "hostname_prefix": "platform_upload@",
         "run_script": "scripts/dev/run-celery-platform-upload.sh",
         "log_file": "platform_upload.log",
-        "description": "B站 / YouTube 后投上传队列，不占用视频合成 render 队列",
+        "description": "B站 / YouTube / 抖音 / 视频号后投上传队列，不占用视频合成 render 队列",
     },
     "cloud_tts": {
         "label": "豆包 TTS",
@@ -118,6 +131,14 @@ SERVICES = {
         "run_script": "scripts/dev/run-celery-report-script-material-workflow.sh",
         "log_file": "report_script_material_workflow.log",
         "description": "调度研报 PDF Gem 解析并生成可复用口播文案物料，不占用完整研报转语音编排容量",
+    },
+    "report_visual_plan": {
+        "label": "研报分镜梳理",
+        "queue": "report_visual_plan",
+        "hostname_prefix": "report_visual_plan@",
+        "run_script": "scripts/dev/run-celery-report-visual-plan.sh",
+        "log_file": "report_visual_plan.log",
+        "description": "消费已有基础文案，经分镜 Gem 与 DS v4 Flash 生成完整覆盖的结构化分镜列表",
     },
     "report_top10_workflow": {
         "label": "今日研报 Top10 编排",
@@ -577,8 +598,10 @@ def _start_scheduler(scheduler_id, scheduler):
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    env["SCHEDULER_STDOUT_REDIRECTED_TO_LOG"] = "1"
     _apply_db_process_role(env, "scheduler")
     env["PYTHONPATH"] = str(PROJECT_ROOT / "src" / "backend")
+    env["ZSXQ_PROJECT_ROOT"] = str(PROJECT_ROOT)
 
     with log_path.open("ab") as log:
         log.write(f"\n\n===== UI START {datetime.now().isoformat()} scheduler={scheduler_id} =====\n".encode("utf-8"))
@@ -954,7 +977,10 @@ def _watchdog_repair_stale_business_tasks(config):
             + (processing_repair_result.get("requeued") or 0)
             + (business_processing_repair_result.get("requeued") or 0)
         )
-        repair_result["demoted"] = processing_repair_result.get("demoted") or 0
+        repair_result["demoted"] = (
+            (processing_repair_result.get("demoted") or 0)
+            + (business_processing_repair_result.get("demoted") or 0)
+        )
         repair_result["closed"] = (
             (processing_repair_result.get("closed") or 0)
             + (business_processing_repair_result.get("closed") or 0)
@@ -994,8 +1020,12 @@ def run_watchdog_once():
         _clear_status_cache()
     inspect_data, inspect_error = _inspect_tasks_by_queue()
     results = []
-    business_tasks, business_task_errors = _business_tasks_snapshot(force_refresh=True)
-    _release_db_session_quietly()
+    # Worker recovery is decided from process state, queue depth and Celery
+    # inspect. Business-task snapshots are dashboard detail only; loading them
+    # in the minute watchdog duplicated remote DB polling without changing a
+    # restart decision. Repair functions above retain their own narrow reads.
+    business_tasks = {service_id: [] for service_id in config["services"]}
+    business_task_errors = {service_id: None for service_id in config["services"]}
 
     for service_id in config["services"]:
         service = SERVICES[service_id]
@@ -1223,6 +1253,17 @@ def _business_task_runtime_refs():
                 )
             for item in client.lrange(queue_name, 0, BUSINESS_TASKS_QUEUE_SCAN_LIMIT - 1):
                 refs.update(_uuid_refs_from_value(item))
+        unacked_length = int(client.hlen("unacked"))
+        if unacked_length > BUSINESS_TASKS_QUEUE_SCAN_LIMIT:
+            return refs, (
+                f"Celery unacked 数量 {unacked_length} 超过扫描上限 "
+                f"{BUSINESS_TASKS_QUEUE_SCAN_LIMIT}，跳过历史残留自动收口"
+            )
+        for _delivery_tag, item in client.hscan_iter(
+            "unacked",
+            count=min(BUSINESS_TASKS_QUEUE_SCAN_LIMIT, 200),
+        ):
+            refs.update(_uuid_refs_from_value(item))
     except Exception as exc:
         return refs, f"Redis 队列扫描失败: {exc}"
 
@@ -1844,7 +1885,8 @@ def _stop_service(service_id, service, *, pause=False, reason=None, force=False)
         except OSError:
             pass
 
-    deadline = time.time() + 3
+    graceful_timeout = max(3, _int_env("CELERY_STOP_GRACE_SECONDS", 10))
+    deadline = time.time() + graceful_timeout
     while time.time() < deadline:
         if not any(_process_exists(pid) for pid in pids):
             break
@@ -1867,52 +1909,49 @@ def _stop_service(service_id, service, *, pause=False, reason=None, force=False)
     return {"terminated_pids": pids, "force_killed_pids": killed, "paused": pause_state.get(service_id) if pause_state else None}
 
 
-def _service_stop_guard(service_id):
-    active_tasks = _active_non_interruptible_service_tasks(service_id)
+def _service_stop_guard(service_id, *, rows=None):
+    active_tasks = _active_non_interruptible_service_tasks(service_id, rows=rows)
     if not active_tasks:
         return None
     return {
         "skipped": True,
         "reason": "active_non_interruptible_tasks",
-        "message": "该队列有不可中断的平台上传任务正在进行，已跳过停止/重启以避免产生孤儿上传。",
+        "message": "该队列有不可中断的业务任务正在进行，已跳过停止/重启以避免产生孤儿任务。",
         "active_tasks": active_tasks,
     }
 
 
 def _active_non_interruptible_service_tasks(service_id, *, rows=None):
-    steps = NON_INTERRUPTIBLE_SERVICE_STEPS.get(service_id)
-    if not steps:
+    features = BUSINESS_TASK_FEATURES.get(service_id)
+    if not features:
         return []
 
     if rows is None:
         try:
-            from models.task import PublicationTask
-
-            rows = (
-                PublicationTask.query
-                .with_entities(
-                    PublicationTask.id,
-                    PublicationTask.status,
-                    PublicationTask.current_step,
-                    PublicationTask.progress,
-                    PublicationTask.task_title,
-                    PublicationTask.updated_at,
-                )
-                .filter(PublicationTask.feature == "publisher")
-                .filter(PublicationTask.status == "processing")
-                .filter(PublicationTask.current_step.in_(steps))
-                .order_by(PublicationTask.updated_at.desc(), PublicationTask.created_at.desc())
-                .limit(5)
-                .all()
+            rows = _query_non_interruptible_rows_with_retry(
+                features,
+                include_feature=False,
+                limit=BUSINESS_TASK_LIMIT_PER_SERVICE,
             )
-        except Exception:
-            return []
+        except Exception as exc:
+            return [{
+                "id": None,
+                "status": "unknown",
+                "step": "guard_check_failed",
+                "progress": None,
+                "title": None,
+                "updated_at": None,
+                "error": str(exc),
+            }]
 
     items = []
     for row in rows or []:
+        row_feature = str(_row_get(row, "feature") or "")
+        if row_feature and row_feature not in features:
+            continue
         status = str(_row_get(row, "status") or "").lower()
         step = str(_row_get(row, "current_step") or "").lower()
-        if status != "processing" or step not in steps:
+        if status != "processing" or not _is_non_interruptible_business_step(service_id, step):
             continue
         updated_at = _row_get(row, "updated_at")
         items.append({
@@ -1924,6 +1963,86 @@ def _active_non_interruptible_service_tasks(service_id, *, rows=None):
             "updated_at": updated_at.isoformat() + "Z" if hasattr(updated_at, "isoformat") else updated_at,
         })
     return items
+
+
+def _is_non_interruptible_business_step(service_id, step):
+    normalized = str(step or "").strip().lower()
+    explicit_steps = NON_INTERRUPTIBLE_SERVICE_STEPS.get(service_id)
+    if explicit_steps:
+        return normalized in explicit_steps
+    if not normalized:
+        return True
+    if normalized in INTERRUPTIBLE_BUSINESS_STEPS:
+        return False
+    if normalized.startswith("deferred_") or normalized.startswith("waiting_"):
+        return False
+    if normalized.endswith(("_waiting", "_queued")):
+        return False
+    return True
+
+
+def _restart_all_stop_guards():
+    try:
+        all_features = sorted({
+            feature
+            for features in BUSINESS_TASK_FEATURES.values()
+            for feature in features
+        })
+        rows = _query_non_interruptible_rows_with_retry(
+            all_features,
+            include_feature=True,
+        )
+    except Exception as exc:
+        return {
+            "restart_preflight": {
+                "skipped": True,
+                "reason": "guard_check_failed",
+                "message": "无法确认业务任务状态，拒绝重启。",
+                "active_tasks": [{"error": str(exc)}],
+            }
+        }
+
+    guards = {}
+    for service_id in SERVICES:
+        guard = _service_stop_guard(service_id, rows=rows)
+        if guard:
+            guards[service_id] = guard
+    return guards
+
+
+def _query_non_interruptible_rows_with_retry(features, *, include_feature, limit=None):
+    from models.task import PublicationTask
+    from services.runtime_guard import is_retryable_db_error
+
+    last_exc = None
+    for attempt in range(2):
+        try:
+            columns = [
+                PublicationTask.id,
+                PublicationTask.status,
+                PublicationTask.current_step,
+                PublicationTask.progress,
+                PublicationTask.task_title,
+                PublicationTask.updated_at,
+            ]
+            if include_feature:
+                columns.insert(1, PublicationTask.feature)
+            query = (
+                PublicationTask.query
+                .with_entities(*columns)
+                .filter(PublicationTask.feature.in_(features))
+                .filter(PublicationTask.status == "processing")
+                .order_by(PublicationTask.updated_at.desc(), PublicationTask.created_at.desc())
+            )
+            if limit is not None:
+                query = query.limit(int(limit))
+            return query.all()
+        except Exception as exc:
+            last_exc = exc
+            _release_db_session_quietly()
+            if attempt > 0 or not is_retryable_db_error(exc):
+                raise
+    raise last_exc
 
 
 def _row_get(row, key):
@@ -2226,6 +2345,12 @@ def restart(service_id):
     try:
         data = request.get_json(silent=True) or {}
         stop_result = _stop_service(service_id, service, force=bool(data.get("force")))
+        if stop_result.get("skipped"):
+            return jsonify({
+                "success": False,
+                "message": stop_result.get("message") or "该服务当前不允许重启。",
+                "data": {"stop": stop_result},
+            }), 409
         time.sleep(0.6)
         start_result = _start_service(service_id, service, clear_pause=True)
         return jsonify({
@@ -2251,6 +2376,15 @@ def restart_all():
         celery_results = {}
         scheduler_results = {}
 
+        if not force:
+            stop_guards = _restart_all_stop_guards()
+            if stop_guards:
+                return jsonify({
+                    "success": False,
+                    "message": "仍有不可中断的业务任务，未停止任何服务。",
+                    "data": {"stop_guards": stop_guards},
+                }), 409
+
         watchdog_stop = _stop_watchdog()
 
         paused_services = _load_paused_services()
@@ -2263,10 +2397,17 @@ def restart_all():
                     "pause": paused_services.get(service_id),
                 }
                 continue
+            # The global preflight above is the atomic safety decision for this
+            # restart. Re-querying once per worker keeps one long HTTP session
+            # open and can turn a transient disconnect into a false blocker.
+            stop_result = _stop_service(service_id, service, force=True)
             celery_results[service_id] = {
                 "label": service.get("label") or service_id,
-                "stop": _stop_service(service_id, service, force=force),
+                "stop": stop_result,
             }
+            if stop_result.get("skipped"):
+                celery_results[service_id]["skipped"] = True
+                celery_results[service_id]["reason"] = stop_result.get("reason")
 
         for scheduler_id, scheduler in SCHEDULERS.items():
             stop_result = _stop_scheduler(scheduler_id, scheduler) or {}
@@ -2301,8 +2442,14 @@ def restart_all():
         celery_started = sum(
             1
             for item in celery_results.values()
+            if not item.get("skipped") and _result_has_flag(item.get("start"), "started")
+        )
+        celery_online = sum(
+            1
+            for item in celery_results.values()
             if _result_has_flag(item.get("start"), "started", "already_running")
         )
+        celery_skipped = sum(1 for item in celery_results.values() if item.get("skipped"))
         schedulers_started = sum(
             1
             for item in scheduler_results.values()
@@ -2316,6 +2463,8 @@ def restart_all():
                 "summary": {
                     "celery_total": len(SERVICES),
                     "celery_started": celery_started,
+                    "celery_online": celery_online,
+                    "celery_skipped": celery_skipped,
                     "schedulers_total": len(SCHEDULERS),
                     "schedulers_started": schedulers_started,
                     "schedulers_skipped": schedulers_skipped,

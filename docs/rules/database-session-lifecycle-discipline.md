@@ -17,6 +17,8 @@
 - 释放 session 后，不能继续读旧 ORM 对象；跨等待只保存 ID，后续按 ID 重新加载。
 - 查询监控页面、任务快照、自动收口等看似“只读”的代码，也必须释放 session；只读查询同样会开启事务。
 - 新增 worker/scheduler/watchdog 时，必须使用角色化连接池配置，并接入数据库压力准入。
+- 数据库异常进入恢复分支后，任何查询、更新或提交之前必须先 `rollback/remove`；禁止在可能失效的 session 上二次查询，也禁止用 `finally: commit()` 收口这类分支。
+- 可重试数据库异常在 service 层不得提前写业务终态。由任务层先写 `retrying` 再安排 retry，只有重试耗尽才允许写 `failed`。
 
 推荐释放函数：
 
@@ -85,6 +87,7 @@ ORDER BY xact_start NULLS LAST;
 - 等待前是否释放 session？
 - 等待后是否按 ID 重新加载，而不是读旧 ORM？
 - 失败、重试、取消、超时路径是否都会 `rollback/remove`？
+- 故障注入是否覆盖“service 抛出 -> retrying 落库 -> Celery retry -> 下一次 delivery 不被终态去重”完整链路？
 - 页面轮询接口是否避免返回大 JSON，并在查询后释放 session？
 - 是否有测试或现场 SQL 能证明没有 `idle in transaction`？
 

@@ -18,7 +18,7 @@ resolve_path() {
     printf "%s" "$raw"
 }
 
-COUNT="${DOUBAO_BROWSER_TTS_PROFILE_COUNT:-${1:-2}}"
+COUNT="${DOUBAO_BROWSER_TTS_PROFILE_COUNT:-${1:-6}}"
 if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [ "$COUNT" -lt 1 ]; then
     echo "❌ DOUBAO_BROWSER_TTS_PROFILE_COUNT 必须是正整数，当前: $COUNT"
     exit 1

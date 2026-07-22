@@ -10,7 +10,7 @@ import time
 import ipaddress
 import logging
 from functools import wraps
-from threading import Lock
+from threading import RLock
 
 from flask import request, session, current_app
 import jwt
@@ -45,9 +45,9 @@ def _float_env(name, default):
         return float(default)
 
 
-_DEV_FALLBACK_USER_CACHE_TTL = max(0.0, _float_env("DEV_FALLBACK_USER_CACHE_TTL", 30))
+_DEV_FALLBACK_USER_CACHE_TTL = max(0.0, _float_env("DEV_FALLBACK_USER_CACHE_TTL", 300))
 _DEV_FALLBACK_USER_CACHE = {"expires_at": 0.0, "user": None}
-_DEV_FALLBACK_USER_CACHE_LOCK = Lock()
+_DEV_FALLBACK_USER_CACHE_LOCK = RLock()
 
 
 class DevFallbackUser:
@@ -147,15 +147,16 @@ def _get_local_bypass_user():
         logger.warning('local_auth_bypass_denied remote_addr=%s', request.remote_addr)
         return None
 
-    cached_user = _get_cached_dev_fallback_user()
-    if cached_user:
-        return cached_user
+    with _DEV_FALLBACK_USER_CACHE_LOCK:
+        cached_user = _get_cached_dev_fallback_user()
+        if cached_user:
+            return cached_user
 
-    admin_user = _light_user_query().filter_by(is_admin=True, is_active=True).order_by(User.id.asc()).first()
-    if not admin_user:
-        logger.error('local_auth_bypass_unavailable reason=no_active_admin')
-        return None
-    return _cache_dev_fallback_user(admin_user)
+        admin_user = _light_user_query().filter_by(is_admin=True, is_active=True).order_by(User.id.asc()).first()
+        if not admin_user:
+            logger.error('local_auth_bypass_unavailable reason=no_active_admin')
+            return None
+        return _cache_dev_fallback_user(admin_user)
 
 
 def get_current_user():

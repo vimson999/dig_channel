@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视频号投递测试台 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <div id="nav-container"></div>
+    <main class="mx-auto max-w-[1380px] px-5 py-7">
+        <div class="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+                <p class="text-xs font-black tracking-[.18em] text-emerald-600">WECHAT CHANNELS PUBLISH LAB</p>
+                <h1 class="mt-1 text-2xl font-black">视频号投递测试台</h1>
+                <p class="mt-1 text-sm text-slate-500">用平台凭据里的加密 Cookie 测试视频号助手上传；任务在 platform_upload worker 中运行。</p>
+            </div>
+            <div class="flex gap-2">
+                <a href="platform-credentials.html" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-key mr-1.5"></i>平台凭据</a>
+                <button id="refresh-btn" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-rotate mr-1.5"></i>刷新</button>
+            </div>
+        </div>
+        <div id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm"></div>
+        <section class="grid gap-5 xl:grid-cols-[430px_minmax(0,1fr)]">
+            <form id="upload-form" class="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div><h2 class="font-black">测试参数</h2><p class="mt-1 text-xs leading-5 text-slate-500">默认验证视频进入编辑器、文案填充和“仅自己可见”，不会点击发表。</p></div>
+                <label class="block"><span class="mb-1 block text-xs font-bold text-slate-500">视频号账号凭据</span><div class="flex gap-2"><select id="credential-input" name="credential_id" required class="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-500"><option value="">正在读取...</option></select><button id="validate-btn" type="button" class="rounded-lg border border-slate-300 px-3 text-xs font-bold text-slate-700 hover:bg-slate-50">登录校验</button></div></label>
+                <label class="block"><span class="mb-1 block text-xs font-bold text-slate-500">测试视频</span><input id="video-input" name="video" type="file" accept="video/mp4,.mp4,.mov,.m4v" required class="block w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs file:mr-3 file:rounded-md file:border-0 file:bg-slate-900 file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-white"><span id="file-meta" class="mt-1 block text-[11px] text-slate-400">支持 MP4 / MOV / M4V</span></label>
+                <label class="block"><span class="mb-1 block text-xs font-bold text-slate-500">标题</span><input name="title" minlength="6" maxlength="100" required class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-emerald-500" placeholder="至少 6 个字符；自动截取为短标题"></label>
+                <label class="block"><span class="mb-1 block text-xs font-bold text-slate-500">描述</span><textarea name="description" maxlength="1000" rows="5" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-emerald-500" placeholder="作品描述，可留空"></textarea></label>
+                <label class="block"><span class="mb-1 block text-xs font-bold text-slate-500">话题</span><input name="tags" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-emerald-500" placeholder="财经, 研报, 人工智能"></label>
+                <label class="block"><span class="mb-1 block text-xs font-bold text-slate-500">谁可以看</span><select name="visibility" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-500"><option value="private" selected>仅自己可见（测试默认）</option><option value="public">公开</option></select><span class="mt-1 block text-[11px] leading-5 text-slate-400">页面上无法确认已切换到所选范围时，任务会失败且不会点击发表。</span></label>
+                <label class="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3"><input id="submit-input" name="submit" type="checkbox" value="true" class="mt-0.5 h-4 w-4 rounded border-amber-400 text-amber-600"><span><strong class="block text-sm text-amber-900">确认点击发表</strong><em class="mt-0.5 block text-xs not-italic leading-5 text-amber-700">勾选后会产生真实视频号投稿；仍只记录 submitted，不误报为已可见。</em></span></label>
+                <button id="submit-btn" type="submit" class="w-full rounded-lg bg-slate-950 px-4 py-3 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-50"><i class="fas fa-cloud-arrow-up mr-2"></i>开始安全测试</button>
+            </form>
+            <section class="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"><div class="border-b border-slate-200 px-5 py-4"><h2 class="font-black">最近测试任务</h2><p id="summary" class="mt-1 text-xs text-slate-500">正在读取...</p></div><div id="job-list" class="space-y-3 p-5"></div></section>
+        </section>
+    </main>
+    <div id="footer-container"></div>
+    <script src="js/env.js"></script>
+    <script src="js/config.js"></script>
+    <script src="js/shared-navigation.js?v=20260720-wechat-channels"></script>
+    <script>
+        window.PLATFORM_PUBLISH_TEST_CONFIG = {
+            platformName: '视频号', credentialPlatform: 'wechat_channels', credentialPurpose: 'wechat_channels.publish',
+            apiPath: '/wechat-channels-publish-test', publishVerb: '发表', safeSubmitLabel: '开始安全测试',
+            progressClass: 'bg-emerald-500',
+            visibilityOptions: [{value:'private',label:'仅自己可见'},{value:'public',label:'公开'}]
+        };
+    </script>
+    <script src="js/platform-browser-publish-test.js?v=20260720-shared-platform-publish"></script>
+</body>
+</html>

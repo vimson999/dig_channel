@@ -3,6 +3,7 @@ import os
 import shutil
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from sqlalchemy import and_, or_
 
@@ -137,8 +138,15 @@ class ZsxqReportAssetService:
             },
         }
         task.updated_at = datetime.utcnow()
+        summary = self._summary(
+            normalized,
+            classified,
+            new_items,
+            task=task,
+            created_reports=created_reports,
+        )
         db.session.commit()
-        return self._summary(normalized, classified, new_items, task=task, created_reports=created_reports)
+        return summary
 
     def _normalize_payload(self, payload):
         payload = payload or {}
@@ -174,14 +182,18 @@ class ZsxqReportAssetService:
 
     def _candidate_items(self, normalized):
         if normalized["source"] == "sync_run":
-            return self._candidate_items_from_run(normalized["run_id"], normalized["config"])
+            return self._candidate_items_from_run(
+                normalized["run_id"],
+                normalized["config"],
+                normalized=normalized,
+            )
         return self._candidate_items_from_date(normalized["target_date"], normalized["config"])
 
-    def _candidate_items_from_run(self, run_id, config):
-        run = db.session.get(ZsxqSyncRun, str(run_id))
-        if not run:
-            raise ValueError(f"同步任务不存在: {run_id}")
+    def _candidate_items_from_run(self, run_id, config, normalized=None):
         cleanable = zsxq_sync_service.downloaded_pdf_files_for_run(run_id)
+        run = SimpleNamespace(**(cleanable.get("run") or {}))
+        if normalized is not None:
+            normalized["_run_label"] = run.group_name or run.group_id
         files = cleanable.get("files") or []
         items = []
         for file_item in files:
@@ -203,7 +215,23 @@ class ZsxqReportAssetService:
     def _candidate_items_from_date(self, target_date, config):
         start, end = _date_range(target_date)
         query = (
-            db.session.query(ZsxqAttachment, ZsxqTopic)
+            db.session.query(
+                ZsxqAttachment.id.label("attachment_id"),
+                ZsxqAttachment.group_id.label("attachment_group_id"),
+                ZsxqAttachment.tab_id.label("attachment_tab_id"),
+                ZsxqAttachment.topic_id.label("attachment_topic_id"),
+                ZsxqAttachment.name.label("attachment_name"),
+                ZsxqAttachment.local_path.label("attachment_local_path"),
+                ZsxqTopic.id.label("topic_row_id"),
+                ZsxqTopic.group_name.label("topic_group_name"),
+                ZsxqTopic.tab_id.label("topic_tab_id"),
+                ZsxqTopic.tab_label.label("topic_tab_label"),
+                ZsxqTopic.topic_id.label("topic_id"),
+                ZsxqTopic.title.label("topic_title"),
+                ZsxqTopic.content.label("topic_content"),
+                ZsxqTopic.author_name.label("topic_author_name"),
+                ZsxqTopic.create_time.label("topic_create_time"),
+            )
             .outerjoin(
                 ZsxqTopic,
                 and_(
@@ -219,15 +247,34 @@ class ZsxqReportAssetService:
             .limit(500)
         )
         items = []
-        for attachment, topic in query.all():
-            path = _resolve_existing_pdf(attachment.local_path)
+        for row in query.all():
+            path = _resolve_existing_pdf(row.attachment_local_path)
             if not path:
                 continue
+            attachment = SimpleNamespace(
+                id=row.attachment_id,
+                group_id=row.attachment_group_id,
+                tab_id=row.attachment_tab_id,
+                topic_id=row.attachment_topic_id,
+                name=row.attachment_name,
+            )
+            topic = None
+            if row.topic_row_id:
+                topic = SimpleNamespace(
+                    group_name=row.topic_group_name,
+                    tab_id=row.topic_tab_id,
+                    tab_label=row.topic_tab_label,
+                    topic_id=row.topic_id,
+                    title=row.topic_title,
+                    content=row.topic_content,
+                    author_name=row.topic_author_name,
+                    create_time=row.topic_create_time,
+                )
             if not self._matches_tab_keyword(topic, None, config):
                 continue
             items.append(self._candidate_from_path(
                 path,
-                attachment.name or path.name,
+                row.attachment_name or path.name,
                 run=None,
                 topic=topic,
                 attachment_id=attachment.id,
@@ -240,7 +287,21 @@ class ZsxqReportAssetService:
         tab_id = str(file_item.get("tab_id") or run.tab_id or "").strip()
         if not topic_id or not tab_id:
             return None
-        return ZsxqTopic.query.filter_by(group_id=run.group_id, tab_id=tab_id, topic_id=topic_id).first()
+        return (
+            ZsxqTopic.query
+            .with_entities(
+                ZsxqTopic.group_name,
+                ZsxqTopic.tab_id,
+                ZsxqTopic.tab_label,
+                ZsxqTopic.topic_id,
+                ZsxqTopic.title,
+                ZsxqTopic.content,
+                ZsxqTopic.author_name,
+                ZsxqTopic.create_time,
+            )
+            .filter_by(group_id=run.group_id, tab_id=tab_id, topic_id=topic_id)
+            .first()
+        )
 
     def _matches_tab_keyword(self, topic, run, config):
         keyword = config.get("tab_label_keyword")
@@ -345,8 +406,15 @@ class ZsxqReportAssetService:
 
     def _task_name(self, normalized):
         if normalized["source"] == "sync_run":
-            run = db.session.get(ZsxqSyncRun, normalized["run_id"])
-            label = run.group_name or run.group_id if run else "知识星球"
+            label = normalized.get("_run_label")
+            if not label:
+                run = (
+                    ZsxqSyncRun.query
+                    .with_entities(ZsxqSyncRun.group_name, ZsxqSyncRun.group_id)
+                    .filter(ZsxqSyncRun.id == normalized["run_id"])
+                    .one_or_none()
+                )
+                label = (run.group_name or run.group_id) if run else "知识星球"
             return f"{label} 研报资产扫描 {datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"[:240]
         return f"{normalized['target_date']} 研报资产补漏扫描"
 

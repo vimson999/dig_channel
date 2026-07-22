@@ -680,22 +680,18 @@ def synthesize_speech():
             }
             
             # 根据模型类型添加特定参数
-            try:
-                logger.info(f"🎯 使用模型: {model_config['name']}, 文本: '{text}'")
-            
-                if model_config['type'] == 'multi_speaker':
-                    # 多说话人模式，可以指定说话人
-                    speaker = data.get('speaker', None)
-                    if speaker:
+            logger.info(f"🎯 使用模型: {model_config['name']}, 文本: '{text}'")
+
+            if model_config['type'] == 'multi_speaker':
+                speaker = data.get('speaker', None)
+                if speaker:
                     tts_kwargs['speaker'] = speaker
                     logger.info(f"👤 使用指定说话人: {speaker}")
                 else:
-                    # 获取可用说话人列表的第一个
                     speakers = tts.speakers if hasattr(tts, 'speakers') and tts.speakers else None
                     if speakers:
                         tts_kwargs['speaker'] = speakers[0]
                         logger.info(f"👤 使用默认说话人: {speakers[0]}")
-                        
             elif model_config['type'] == 'voice_cloning':
                 # 声音克隆模式，需要参考音频
                 reference_audio = data.get('reference_audio_path')
@@ -774,9 +770,6 @@ def synthesize_speech():
                 logger.info(f"✅ 语音合成成功: {audio_path} (使用模型: {current_model_name})")
             else:
                 raise Exception("所有合成尝试都失败")
-        except Exception as e:
-            logger.error(f"❌ 语音合成失败: {str(e)}")
-            raise Exception(f"语音合成失败: {str(e)}")
         
         # 检查文件是否生成（对话模式和单人模式都需要检查）
         if not os.path.exists(audio_path):

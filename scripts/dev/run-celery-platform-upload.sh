@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# B站 / YouTube 后投上传专用 Celery Worker
+# B站 / YouTube / 抖音 / 视频号后投上传专用 Celery Worker
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"

@@ -5,16 +5,24 @@ import sys
 import os
 from datetime import date
 
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_YOUTUBE_API_INTEGRATION") != "1",
+    reason="会调用 YouTube 并写数据库；设置 RUN_YOUTUBE_API_INTEGRATION=1 后显式执行。",
+)
+
 # 添加项目根目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from app import create_app
-from models import db
-from services.youtube_sync_service import YouTubeSyncService
-from utils.youtube_api import validate_youtube_url, extract_video_id
-
 def test_youtube_api():
     """测试YouTube API功能"""
+    from app import create_app
+    from models import db
+    from services.youtube_sync_service import YouTubeSyncService
+    from utils.youtube_api import validate_youtube_url, extract_video_id
+
     print("🔧 YouTube API 集成测试")
     print("=" * 50)
     

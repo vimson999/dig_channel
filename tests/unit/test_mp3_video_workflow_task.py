@@ -16,6 +16,25 @@ from tasks import mp3_video_workflow  # noqa: E402
 
 
 class Mp3VideoWorkflowTaskTest(unittest.TestCase):
+    def test_wait_hint_is_forwarded_to_lightweight_resume_path(self):
+        app = Flask(__name__)
+        wait_hint = {
+            "label": "landscape_video",
+            "child_id": "child-1",
+            "updated_at": "2026-07-18T04:00:00Z",
+        }
+
+        with (
+            patch.object(mp3_video_workflow, "create_app", return_value=app),
+            patch.object(mp3_video_workflow, "guard_publication_task_start"),
+            patch.object(mp3_video_workflow, "process_job", return_value=True) as process_job,
+            patch.object(mp3_video_workflow.db.session, "remove", MagicMock()),
+        ):
+            result = mp3_video_workflow.process_mp3_video_workflow_job.run("job-1", wait_hint)
+
+        self.assertTrue(result)
+        process_job.assert_called_once_with("job-1", wait_hint=wait_hint)
+
     def test_retryable_database_disconnect_does_not_mark_business_task_failed(self):
         app = Flask(__name__)
         disconnect = OperationalError(

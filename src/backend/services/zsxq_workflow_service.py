@@ -4,8 +4,9 @@ import time
 import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
-from sqlalchemy import inspect, or_, text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -43,7 +44,14 @@ DEFAULT_AUTO_VIDEO_PDF_THRESHOLD = 35
 DEFAULT_AUTO_VIDEO_MP3_THRESHOLD = 25
 DEFAULT_AUTO_SCRIPT_MATERIAL_PDF_THRESHOLD = 40
 TOPIC_PAGE_SIZE_HINT = 20
-WORKFLOW_CLEAN_TASK_COLUMNS = (
+REQUIRED_CLEAN_PROJECTION_COLUMNS = {
+    "content_clean_output_dir",
+    "content_clean_files_count",
+    "content_clean_success_count",
+    "content_clean_failed_count",
+    "content_clean_message",
+}
+WORKFLOW_TASK_STATE_COLUMNS = (
     PublicationTask.id,
     PublicationTask.celery_task_id,
     PublicationTask.status,
@@ -51,15 +59,23 @@ WORKFLOW_CLEAN_TASK_COLUMNS = (
     PublicationTask.progress,
     PublicationTask.error_message,
     PublicationTask.feature,
+    PublicationTask.content_clean_output_dir,
+    PublicationTask.content_clean_files_count,
+    PublicationTask.content_clean_success_count,
+    PublicationTask.content_clean_failed_count,
+    PublicationTask.content_clean_message,
     PublicationTask.updated_at,
     PublicationTask.completed_at,
     PublicationTask.created_at,
-    PublicationTask.params,
-    PublicationTask.result,
 )
 WORKFLOW_CLEAN_RESULT_COLUMNS = (
     PublicationTask.id,
-    PublicationTask.result,
+    PublicationTask.feature,
+    PublicationTask.content_clean_output_dir,
+    PublicationTask.content_clean_files_count,
+    PublicationTask.content_clean_success_count,
+    PublicationTask.content_clean_failed_count,
+    PublicationTask.content_clean_message,
 )
 ZSXQ_SYNC_RUN_STATE_COLUMNS = (
     ZsxqSyncRun.id,
@@ -67,6 +83,10 @@ ZSXQ_SYNC_RUN_STATE_COLUMNS = (
     ZsxqSyncRun.error_message,
     ZsxqSyncRun.completed_at,
     ZsxqSyncRun.updated_at,
+)
+ZSXQ_SYNC_RUN_HEARTBEAT_COLUMNS = (
+    ZsxqSyncRun.id,
+    ZsxqSyncRun.result,
 )
 ZSXQ_SYNC_RUN_RESULT_COLUMNS = (
     *ZSXQ_SYNC_RUN_STATE_COLUMNS,
@@ -93,6 +113,7 @@ ZSXQ_SYNC_RUN_RESULT_COLUMNS = (
     ZsxqSyncRun.attachments_failed,
     ZsxqSyncRun.attachments_skipped,
     ZsxqSyncRun.download_limit_reached,
+    ZsxqSyncRun.download_ledger_complete,
     ZsxqSyncRun.started_at,
     ZsxqSyncRun.created_at,
 )
@@ -139,31 +160,47 @@ class ZsxqWorkflowService:
                 "工作流状态表必须创建在远端 PostgreSQL 中。当前 DATABASE_URL 指向本地 SQLite，"
                 "请配置 PostgreSQL DATABASE_URL 后执行 docs/sql/zsxq_workflow_runs.sql。"
             )
-        inspector = inspect(db.session.connection())
-        existing_tables = self._table_names(inspector)
-        if ZsxqWorkflowRun.__tablename__ not in existing_tables:
+        contract = db.session.execute(text("""
+            WITH target AS (
+                SELECT to_regclass('public.zsxq_workflow_runs') AS workflow_table
+            )
+            SELECT
+                target.workflow_table IS NOT NULL AS workflow_table_exists,
+                COALESCE((
+                    SELECT jsonb_agg(column_name ORDER BY ordinal_position)
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'publication_tasks'
+                ), '[]'::jsonb) AS publication_columns,
+                CASE
+                    WHEN target.workflow_table IS NULL THEN FALSE
+                    ELSE has_table_privilege(
+                        current_user,
+                        target.workflow_table,
+                        'SELECT, INSERT, UPDATE, DELETE'
+                    )
+                END AS has_workflow_privilege
+            FROM target
+        """)).one()
+        if not contract.workflow_table_exists:
             raise ValueError(
                 "知识星球工作流表尚未初始化，请先在远端 PostgreSQL 执行 "
                 "docs/sql/zsxq_workflow_runs.sql；缺失表：zsxq_workflow_runs"
             )
-        privilege_sql = text(
-            "SELECT has_table_privilege("
-            "current_user, 'public.zsxq_workflow_runs', 'SELECT, INSERT, UPDATE, DELETE'"
-            ")"
-        )
-        has_privilege = db.session.execute(privilege_sql).scalar()
-        if not has_privilege:
+        publication_columns = set(contract.publication_columns or ())
+        missing_clean_columns = sorted(REQUIRED_CLEAN_PROJECTION_COLUMNS - publication_columns)
+        if missing_clean_columns:
+            raise ValueError(
+                "清洗工作流结构化投影尚未部署，请先执行 "
+                "docs/sql/content_pipeline_run_download_projection_dbeaver_20260718.sql；缺失列："
+                + ", ".join(missing_clean_columns)
+            )
+        if not contract.has_workflow_privilege:
             raise ValueError(
                 "当前数据库账号没有 public.zsxq_workflow_runs 的读写权限。请用表 owner 或管理员执行："
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.zsxq_workflow_runs TO cappa_rw;"
             )
         self._schema_checked_at = now
-
-    def _table_names(self, inspector):
-        try:
-            return set(inspector.get_table_names(schema="public"))
-        except Exception:
-            return set(inspector.get_table_names())
 
     def create_system_workflow(
         self,
@@ -245,17 +282,31 @@ class ZsxqWorkflowService:
             ),
         )
 
-    def enqueue_workflow_task(self, workflow_run_id, *, cookie=None, credential_id=None):
+    def enqueue_workflow_task(
+        self,
+        workflow_run_id,
+        *,
+        cookie=None,
+        credential_id=None,
+        workflow_payload=None,
+    ):
         self.ensure_schema()
-        workflow = self._load_workflow_run(workflow_run_id, include_runtime=True)
-        if not workflow:
-            raise ValueError(f"工作流不存在: {workflow_run_id}")
+        supplied_payload = deepcopy(workflow_payload) if isinstance(workflow_payload, dict) else None
+        workflow = None
+        if supplied_payload is not None:
+            supplied_id = str(supplied_payload.get("id") or "")
+            if supplied_id != str(workflow_run_id):
+                raise ValueError("工作流快照与入队 ID 不一致")
+        else:
+            workflow = self._load_workflow_run(workflow_run_id, include_runtime=True)
+            if not workflow:
+                raise ValueError(f"工作流不存在: {workflow_run_id}")
 
         from tasks.zsxq_workflow import run_zsxq_workflow
 
         async_result = run_zsxq_workflow.apply_async(
             args=[
-                workflow.id,
+                str(workflow_run_id),
                 {
                     key: value
                     for key, value in {
@@ -268,20 +319,46 @@ class ZsxqWorkflowService:
             queue="zsxq_workflow",
             retry=False,
         )
-        stage_results = self._stage_results(workflow)
+        stage_results = (
+            deepcopy(supplied_payload.get("stage_results") or {})
+            if supplied_payload is not None
+            else self._stage_results(workflow)
+        )
         workflow_result = dict(stage_results.get("workflow") or {})
+        queued_at = self._now_iso()
         workflow_result.update({
             "status": "queued",
             "celery_task_id": async_result.id,
-            "queued_at": self._now_iso(),
+            "queued_at": queued_at,
         })
         stage_results["workflow"] = workflow_result
-        workflow.stage_results = stage_results
-        workflow_payload = self._commit_and_payload(workflow)
+        if supplied_payload is not None:
+            updated_at = datetime.utcnow()
+            updated = (
+                ZsxqWorkflowRun.query
+                .filter(ZsxqWorkflowRun.id == str(workflow_run_id))
+                .update(
+                    {
+                        ZsxqWorkflowRun.stage_results: stage_results,
+                        ZsxqWorkflowRun.updated_at: updated_at,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if updated != 1:
+                db.session.rollback()
+                raise ValueError(f"工作流不存在: {workflow_run_id}")
+            db.session.commit()
+            supplied_payload["stage_results"] = stage_results
+            supplied_payload["updated_at"] = updated_at.isoformat()
+            committed_payload = supplied_payload
+        else:
+            workflow.stage_results = stage_results
+            committed_payload = self._commit_and_payload(workflow)
         return {
-            "workflow_run_id": workflow_payload["id"],
+            "workflow_run_id": committed_payload["id"],
             "celery_task_id": async_result.id,
-            "workflow": workflow_payload,
+            "workflow": committed_payload,
         }
 
     def start_workflow(self, workflow_run_id, runtime=None):
@@ -456,12 +533,35 @@ class ZsxqWorkflowService:
             return self._commit_and_payload(workflow)
         return workflow
 
-    def advance_workflow(self, workflow_run_id, reason=None):
+    def advance_workflow(self, workflow_run_id, reason=None, event_payload=None):
         self.ensure_schema()
         workflow = self._load_workflow_run(workflow_run_id, include_runtime=True)
         if not workflow:
             raise ValueError(f"工作流不存在: {workflow_run_id}")
+        self._merge_stage_event(workflow, event_payload)
         return self._advance_workflow_loaded(workflow, reason=reason)
+
+    def _merge_stage_event(self, workflow, event_payload):
+        event = event_payload if isinstance(event_payload, dict) else {}
+        if event.get("stage") != "clean" or not event.get("task_id"):
+            return
+        source_refs = event.get("source_refs") if isinstance(event.get("source_refs"), list) else []
+        if not source_refs:
+            return
+        stage_results = self._stage_results(workflow)
+        clean_result = dict(stage_results.get("clean") or {})
+        task_id = str(event["task_id"])
+        tasks = [dict(item) for item in (clean_result.get("tasks") or []) if isinstance(item, dict)]
+        task_by_id = {str(item.get("task_id")): item for item in tasks if item.get("task_id")}
+        current = task_by_id.get(task_id, {"task_id": task_id})
+        current["source_refs"] = deepcopy(source_refs[:100])
+        task_by_id[task_id] = current
+        ordered_ids = [str(item.get("task_id")) for item in tasks if item.get("task_id")]
+        if task_id not in ordered_ids:
+            ordered_ids.append(task_id)
+        clean_result["tasks"] = [task_by_id[item_id] for item_id in ordered_ids]
+        stage_results["clean"] = clean_result
+        workflow.stage_results = stage_results
 
     def _advance_workflow_loaded(self, workflow, reason=None):
         if workflow.status in TERMINAL_WORKFLOW_STATUSES:
@@ -633,9 +733,31 @@ class ZsxqWorkflowService:
 
         now = datetime.utcnow()
         recovered = []
+        completed_workflow_ids = []
         for workflow in workflows:
-            sync_run = self._load_sync_run_state(workflow.sync_run_id, include_result=True)
-            sync_result = sync_run.result if sync_run and isinstance(sync_run.result, dict) else {}
+            sync_run = self._load_sync_run_state(workflow.sync_run_id)
+            if sync_run and sync_run.status == "completed":
+                completed_workflow_ids.append(str(workflow.id))
+                continue
+
+            if sync_run and sync_run.status == "failed":
+                message = sync_run.error_message or "同步阶段失败"
+                self._mark_failed(workflow, message, stage="sync")
+                recovered.append({
+                    "id": workflow.id,
+                    "workflow_id": workflow.id,
+                    "sync_run_id": workflow.sync_run_id,
+                    "message": message,
+                    "action": "terminal_failed_reconciled",
+                })
+                continue
+
+            heartbeat_run = self._load_sync_run_heartbeat(workflow.sync_run_id) if sync_run else None
+            sync_result = (
+                heartbeat_run.result
+                if heartbeat_run and isinstance(heartbeat_run.result, dict)
+                else {}
+            )
             partial = sync_result.get("partial") if isinstance(sync_result.get("partial"), dict) else {}
             heartbeat = _parse_iso_datetime(
                 sync_result.get("heartbeat_at")
@@ -651,8 +773,8 @@ class ZsxqWorkflowService:
                 f"同步任务长时间停留在 running/sync（超过 {stale_minutes} 分钟），"
                 "通常是 worker 重启或进程被杀导致 Celery 任务丢失；已自动标记失败，避免阻塞后续调度。"
             )
-            if sync_run and sync_run.status not in TERMINAL_TASK_STATUSES:
-                result = dict(sync_run.result or {})
+            if sync_run:
+                result = dict(sync_result)
                 result["error"] = message
                 result["stale_recovered"] = True
                 result["stale_recovered_at"] = self._now_iso()
@@ -664,22 +786,42 @@ class ZsxqWorkflowService:
 
             self._mark_failed(workflow, message, stage="sync")
             recovered.append({
+                "id": workflow.id,
                 "workflow_id": workflow.id,
                 "sync_run_id": workflow.sync_run_id,
                 "message": message,
+                "action": "stale_running_failed",
             })
 
-        if not recovered:
-            return []
+        if recovered:
+            db.session.commit()
+            logger.warning(
+                "[ZSXQ_WORKFLOW] stale running sync workflows reconciled as failed | "
+                "group_id=%s count=%s ids=%s",
+                group_id or "-",
+                len(recovered),
+                [item.get("workflow_id") for item in recovered],
+            )
 
-        db.session.commit()
-        logger.warning(
-            "[ZSXQ_WORKFLOW] stale running sync workflows marked failed | group_id=%s count=%s ids=%s",
-            group_id or "-",
-            len(recovered),
-            [item.get("workflow_id") for item in recovered],
-        )
-        return recovered
+        advanced = []
+        for workflow_id in completed_workflow_ids:
+            payload = self.advance_workflow(workflow_id, reason="stale_sync_terminal_recovery")
+            advanced.append({
+                "id": workflow_id,
+                "workflow_id": workflow_id,
+                "sync_run_id": payload.get("sync_run_id"),
+                "message": "同步任务已完成，工作流已自动继续推进。",
+                "action": "terminal_completed_advanced",
+            })
+        if advanced:
+            logger.warning(
+                "[ZSXQ_WORKFLOW] stale workflows with completed sync advanced | "
+                "group_id=%s count=%s ids=%s",
+                group_id or "-",
+                len(advanced),
+                [item.get("workflow_id") for item in advanced],
+            )
+        return recovered + advanced
 
     def recover_stale_running_clean_workflows(self, group_id=None, stale_minutes=None):
         self.ensure_schema()
@@ -706,7 +848,12 @@ class ZsxqWorkflowService:
             task_ids = [str(item) for item in (workflow.clean_task_ids or []) if item]
             if not task_ids:
                 continue
-            tasks = PublicationTask.query.filter(PublicationTask.id.in_(task_ids)).all()
+            tasks = (
+                PublicationTask.query
+                .options(load_only(*WORKFLOW_TASK_STATE_COLUMNS))
+                .filter(PublicationTask.id.in_(task_ids))
+                .all()
+            )
             stale_tasks = []
             for task in tasks:
                 if not task or task.status in TERMINAL_TASK_STATUSES:
@@ -719,24 +866,30 @@ class ZsxqWorkflowService:
                 continue
 
             for task in stale_tasks:
+                detail_task = (
+                    PublicationTask.query
+                    .options(load_only(PublicationTask.id, PublicationTask.result))
+                    .filter(PublicationTask.id == str(task.id))
+                    .first()
+                ) or task
                 message = (
                     f"清洗子任务长时间停留在 {task.status}/{task.current_step or '-'} "
                     f"（超过 {stale_minutes} 分钟），已自动标记失败，避免阻塞后续星球同步。"
                 )
-                result = dict(task.result or {})
+                result = dict(detail_task.result or {})
                 result["error"] = message
                 result["stale_recovered"] = True
                 result["stale_recovered_at"] = self._now_iso()
-                task.status = "failed"
-                task.current_step = "failed"
-                task.error_message = message
-                task.completed_at = now
-                task.result = result
-                flag_modified(task, "result")
+                detail_task.status = "failed"
+                detail_task.current_step = "failed"
+                detail_task.error_message = message
+                detail_task.completed_at = now
+                detail_task.result = result
+                flag_modified(detail_task, "result")
                 recovered.append({
                     "workflow_id": workflow.id,
                     "task_id": task.id,
-                    "feature": task.feature or (task.params or {}).get("feature"),
+                    "feature": task.feature,
                     "message": message,
                 })
             workflow_ids_to_advance.append(workflow.id)
@@ -777,30 +930,40 @@ class ZsxqWorkflowService:
             return
 
         run_id = workflow.sync_run_id
+        # PDF and audio belong to one transition. Reuse one materialized sync
+        # result and keep it current after each child submission writes back.
+        run_context = {}
         tasks = []
         task_ids = []
+        session = db.session()
+        previous_expire_on_commit = session.expire_on_commit
+        session.expire_on_commit = False
+        try:
+            if clean_config.get("auto_pdf_clean", True):
+                result = self._submit_one_clean_task(
+                    workflow=workflow,
+                    run_id=run_id,
+                    file_type="pdf",
+                    cleaner=self._normalize_pdf_cleaner(clean_config.get("pdf_cleaner")),
+                    run_context=run_context,
+                )
+                tasks.append(result)
+                if result.get("queued") and result.get("task_id"):
+                    task_ids.append(result["task_id"])
 
-        if clean_config.get("auto_pdf_clean", True):
-            result = self._submit_one_clean_task(
-                workflow=workflow,
-                run_id=run_id,
-                file_type="pdf",
-                cleaner=self._normalize_pdf_cleaner(clean_config.get("pdf_cleaner")),
-            )
-            tasks.append(result)
-            if result.get("queued") and result.get("task_id"):
-                task_ids.append(result["task_id"])
-
-        if clean_config.get("auto_audio_clean", True):
-            result = self._submit_one_clean_task(
-                workflow=workflow,
-                run_id=run_id,
-                file_type="audio",
-                cleaner=clean_config.get("audio_cleaner") or {},
-            )
-            tasks.append(result)
-            if result.get("queued") and result.get("task_id"):
-                task_ids.append(result["task_id"])
+            if clean_config.get("auto_audio_clean", True):
+                result = self._submit_one_clean_task(
+                    workflow=workflow,
+                    run_id=run_id,
+                    file_type="audio",
+                    cleaner=clean_config.get("audio_cleaner") or {},
+                    run_context=run_context,
+                )
+                tasks.append(result)
+                if result.get("queued") and result.get("task_id"):
+                    task_ids.append(result["task_id"])
+        finally:
+            session.expire_on_commit = previous_expire_on_commit
 
         workflow.clean_task_ids = task_ids
         submit_failed = any(item.get("status") == "failed" or item.get("reason") == "submit_failed" for item in tasks)
@@ -821,7 +984,7 @@ class ZsxqWorkflowService:
         else:
             self._queue_notification(workflow, "clean_skipped")
 
-    def _submit_one_clean_task(self, *, workflow, run_id, file_type, cleaner):
+    def _submit_one_clean_task(self, *, workflow, run_id, file_type, cleaner, run_context=None):
         try:
             if file_type == "pdf":
                 result = zsxq_sync_service.submit_pdf_clean_for_run(
@@ -830,6 +993,7 @@ class ZsxqWorkflowService:
                     trigger="zsxq_workflow",
                     auto_publish={"enabled": False},
                     workflow_run_id=workflow.id,
+                    run_context=run_context,
                 )
             else:
                 result = zsxq_sync_service.submit_audio_clean_for_run(
@@ -838,11 +1002,19 @@ class ZsxqWorkflowService:
                     trigger="zsxq_workflow",
                     auto_publish={"enabled": False},
                     workflow_run_id=workflow.id,
+                    run_context=run_context,
                 )
             result = dict(result or {})
             result["file_type"] = file_type
             return result
         except Exception as exc:
+            if is_retryable_db_error(exc):
+                # A disconnected PostgreSQL connection leaves SQLAlchemy's
+                # scoped session in a failed transaction. Do not swallow that
+                # error and attempt the next cleaner with the poisoned session;
+                # reset it and let the Celery task retry the whole transition.
+                db.session.rollback()
+                raise
             logger.exception(
                 "[ZSXQ_WORKFLOW] clean submit failed | workflow=%s type=%s",
                 workflow.id,
@@ -869,15 +1041,28 @@ class ZsxqWorkflowService:
 
         tasks = (
             PublicationTask.query
-            .options(load_only(*WORKFLOW_CLEAN_TASK_COLUMNS))
+            .with_entities(*WORKFLOW_TASK_STATE_COLUMNS)
             .filter(PublicationTask.id.in_(task_ids))
             .all()
         )
-        for task in tasks:
-            self._recover_publish_task_from_runtime(task)
         task_map = {task.id: task for task in tasks}
-        summaries = [self._task_summary(task_map.get(task_id), task_id=task_id) for task_id in task_ids]
-        statuses = [item.get("status") for item in summaries]
+        statuses = [task_map.get(task_id).status if task_map.get(task_id) else "failed" for task_id in task_ids]
+        previous_summaries = {
+            str(item.get("task_id")): item
+            for item in (clean_result.get("tasks") or [])
+            if isinstance(item, dict) and item.get("task_id")
+        }
+        summaries = [
+            self._merge_task_summary(
+                previous_summaries.get(task_id),
+                self._task_summary(
+                    task_map.get(task_id),
+                    task_id=task_id,
+                    include_payload=False,
+                ),
+            )
+            for task_id in task_ids
+        ]
         terminal_status = None
         if any(status not in TERMINAL_TASK_STATUSES for status in statuses):
             clean_result.update({
@@ -921,16 +1106,20 @@ class ZsxqWorkflowService:
         publish_task_ids = []
         publish_tasks = []
 
+        clean_summaries = {
+            str(item.get("task_id")): item
+            for item in ((stage_results.get("clean") or {}).get("tasks") or [])
+            if isinstance(item, dict) and item.get("task_id")
+        }
         for clean_task_id in clean_task_ids:
-            clean_task = (
-                PublicationTask.query.options(load_only(*WORKFLOW_CLEAN_TASK_COLUMNS))
-                .filter(PublicationTask.id == clean_task_id)
-                .first()
+            clean_task = self._clean_publish_context(
+                clean_task_id,
+                clean_summaries.get(clean_task_id),
             )
-            if not clean_task or clean_task.status != "completed":
+            if clean_task.get("status") != "completed":
                 continue
-            output_dir = (clean_task.result or {}).get("local_output_dir")
-            file_type = self._clean_task_file_type(clean_task)
+            output_dir = clean_task.get("local_output_dir")
+            file_type = clean_task.get("file_type")
             if not output_dir or not file_type:
                 continue
             try:
@@ -939,13 +1128,14 @@ class ZsxqWorkflowService:
                     file_type=file_type,
                     output_dir=output_dir,
                     options=publish_options,
-                    source_task_id=clean_task.id,
+                    source_task_id=clean_task_id,
                     trigger="zsxq_workflow_clean_complete",
                     metadata={
                         "workflow_run_id": workflow.id,
                         "batch_id": workflow.batch_id,
-                        "clean_task_id": clean_task.id,
+                        "clean_task_id": clean_task_id,
                         "sync_run_id": workflow.sync_run_id,
+                        "source_refs": deepcopy(clean_task.get("source_refs") or []),
                     },
                 )
                 publish_task_ids.append(publish_task["id"])
@@ -986,6 +1176,42 @@ class ZsxqWorkflowService:
         else:
             self._queue_notification(workflow, "publish_skipped")
 
+    def _clean_publish_context(self, clean_task_id, summary):
+        summary = dict(summary or {})
+        if summary.get("status") != "completed":
+            return summary
+        if summary.get("local_output_dir") and summary.get("file_type"):
+            return summary
+
+        # Compatibility for workflows that reached the clean stage before the
+        # compact summary was introduced. New transitions never take this path.
+        row = (
+            db.session.query(
+                PublicationTask.id,
+                PublicationTask.status,
+                PublicationTask.feature,
+                PublicationTask.content_clean_output_dir,
+            )
+            .filter(PublicationTask.id == str(clean_task_id))
+            .one_or_none()
+        )
+        if not row:
+            return summary
+        feature = row.feature
+        output_dir = row.content_clean_output_dir
+        if not output_dir:
+            output_dir = self._load_publication_task_result(clean_task_id).get("local_output_dir")
+        return {
+            **summary,
+            "task_id": row.id,
+            "status": row.status,
+            "file_type": {
+                "content_pdf_clean": "pdf",
+                "content_audio_clean": "audio",
+            }.get(feature),
+            "local_output_dir": output_dir,
+        }
+
     def _refresh_publish_stage(self, workflow):
         task_ids = [str(item) for item in (workflow.publish_task_ids or []) if item]
         stage_results = self._stage_results(workflow)
@@ -997,9 +1223,63 @@ class ZsxqWorkflowService:
             workflow.stage_results = stage_results
             return
 
-        tasks = PublicationTask.query.filter(PublicationTask.id.in_(task_ids)).all()
+        tasks = [
+            SimpleNamespace(**dict(row._mapping))
+            for row in (
+                PublicationTask.query
+                .with_entities(*WORKFLOW_TASK_STATE_COLUMNS)
+                .filter(PublicationTask.id.in_(task_ids))
+                .all()
+            )
+        ]
         task_map = {task.id: task for task in tasks}
-        summaries = [self._task_summary(task_map.get(task_id), task_id=task_id) for task_id in task_ids]
+        previous_summaries = {
+            str(item.get("task_id")): item
+            for item in (publish_result.get("tasks") or [])
+            if isinstance(item, dict) and item.get("task_id")
+        }
+        summaries = []
+        for task_id in task_ids:
+            task = task_map.get(task_id)
+            summary = self._task_summary(
+                task,
+                task_id=task_id,
+                include_payload=False,
+            )
+            publish_runtime = summary.get("publish_runtime") if isinstance(summary, dict) else None
+
+            # Runtime verification can finish before the worker records its
+            # terminal state. Only then load the one candidate's payload for
+            # recovery; ordinary polling remains a state-only query.
+            if task and task.status != "completed" and self._publish_runtime_can_recover(publish_runtime):
+                recovery_task = self._load_publish_recovery_task(task_id)
+                recovered = self._recover_publish_task_from_runtime(
+                    recovery_task,
+                    publish_runtime=publish_runtime,
+                )
+                if recovered:
+                    task.status = "completed"
+                    task.current_step = "done"
+                    task.progress = 100
+                    task.error_message = None
+                    task.completed_at = recovered.get("completed_at")
+                    summary = self._task_summary(
+                        task,
+                        task_id=task_id,
+                        include_payload=False,
+                        result_override=recovered.get("result") or {},
+                        publish_runtime_override=publish_runtime,
+                    )
+            elif task and task.status == "completed" and not self._publish_runtime_has_summary(publish_runtime):
+                summary = self._task_summary(
+                    task,
+                    task_id=task_id,
+                    include_payload=False,
+                    result_override=self._load_publication_task_result(task_id),
+                    publish_runtime_override=publish_runtime,
+                )
+
+            summaries.append(self._merge_task_summary(previous_summaries.get(task_id), summary))
         statuses = [item.get("status") for item in summaries]
         terminal_status = None
         if any(status not in TERMINAL_TASK_STATUSES for status in statuses):
@@ -1329,6 +1609,16 @@ class ZsxqWorkflowService:
             .first()
         )
 
+    def _load_sync_run_heartbeat(self, run_id):
+        if not run_id:
+            return None
+        return (
+            ZsxqSyncRun.query
+            .options(load_only(*ZSXQ_SYNC_RUN_HEARTBEAT_COLUMNS))
+            .filter(ZsxqSyncRun.id == str(run_id))
+            .first()
+        )
+
     def _sync_run_payload(self, run):
         if not run:
             return {}
@@ -1357,6 +1647,9 @@ class ZsxqWorkflowService:
             "attachments_failed": getattr(run, "attachments_failed", None) or 0,
             "attachments_skipped": getattr(run, "attachments_skipped", None) or 0,
             "download_limit_reached": bool(getattr(run, "download_limit_reached", False)),
+            "download_ledger_complete": bool(
+                getattr(run, "download_ledger_complete", False)
+            ),
             "error_message": run.error_message,
             "started_at": run.started_at.isoformat() if getattr(run, "started_at", None) else None,
             "completed_at": run.completed_at.isoformat() if run.completed_at else None,
@@ -1396,26 +1689,63 @@ class ZsxqWorkflowService:
             return "audio"
         return None
 
-    def _task_summary(self, task, task_id=None):
+    def _task_summary(
+        self,
+        task,
+        task_id=None,
+        *,
+        include_payload=True,
+        result_override=None,
+        publish_runtime_override=None,
+    ):
         if not task:
             return {
                 "task_id": task_id,
                 "status": "failed",
                 "error": "任务记录不存在",
             }
-        params = task.params or {}
-        feature = params.get("feature")
-        file_type = self._clean_task_file_type(task)
+        params = (task.params or {}) if include_payload else {}
+        feature = task.feature or params.get("feature")
+        file_type = {
+            "content_pdf_clean": "pdf",
+            "content_audio_clean": "audio",
+        }.get(feature)
+        if not file_type and include_payload:
+            file_type = self._clean_task_file_type(task)
         if feature == "zsxq_clean_output_publish":
             file_type = (params.get("zsxq_publish") or {}).get("file_type")
-        result = task.result or {}
+        result = (task.result or {}) if include_payload else (result_override or {})
+        if not include_payload:
+            result = {
+                **result,
+                "local_output_dir": result.get("local_output_dir") or getattr(task, "content_clean_output_dir", None),
+                "files_count": (
+                    result.get("files_count")
+                    if result.get("files_count") is not None
+                    else getattr(task, "content_clean_files_count", None)
+                ),
+                "success_count": (
+                    result.get("success_count")
+                    if result.get("success_count") is not None
+                    else getattr(task, "content_clean_success_count", None)
+                ),
+                "failed_count": (
+                    result.get("failed_count")
+                    if result.get("failed_count") is not None
+                    else getattr(task, "content_clean_failed_count", None)
+                ),
+                "message": result.get("message") or getattr(task, "content_clean_message", None),
+            }
         publish_runtime = None
         if feature == "zsxq_clean_output_publish":
-            try:
-                publish_runtime = summarize_publish_runs_for_request(f"zsxq_publish:{task.id}")
-            except Exception:
-                logger.exception("[ZSXQ_WORKFLOW] failed to summarize publish runtime runs | task=%s", task.id)
-                publish_runtime = None
+            if publish_runtime_override is not None:
+                publish_runtime = publish_runtime_override
+            else:
+                try:
+                    publish_runtime = summarize_publish_runs_for_request(f"zsxq_publish:{task.id}")
+                except Exception:
+                    logger.exception("[ZSXQ_WORKFLOW] failed to summarize publish runtime runs | task=%s", task.id)
+                    publish_runtime = None
         runtime_summary = (publish_runtime or {}).get("summary") if isinstance(publish_runtime, dict) else None
         result_summary = result.get("summary") if isinstance(result.get("summary"), dict) else None
         summary = runtime_summary if runtime_summary and any(runtime_summary.values()) else result_summary
@@ -1447,18 +1777,72 @@ class ZsxqWorkflowService:
             "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         }
 
-    def _recover_publish_task_from_runtime(self, task):
-        if not task or task.status in TERMINAL_TASK_STATUSES:
+    def _merge_task_summary(self, previous, current):
+        previous = previous if isinstance(previous, dict) else {}
+        current = current if isinstance(current, dict) else {}
+        merged = {**previous, **current}
+        for key, value in previous.items():
+            if merged.get(key) is None:
+                merged[key] = value
+        if "error_message" in current:
+            merged["error_message"] = current.get("error_message")
+        return merged
+
+    def _publish_runtime_has_summary(self, publish_runtime):
+        summary = (publish_runtime or {}).get("summary") if isinstance(publish_runtime, dict) else None
+        return bool(isinstance(summary, dict) and any(summary.values()))
+
+    def _publish_runtime_can_recover(self, publish_runtime):
+        summary = (publish_runtime or {}).get("summary") if isinstance(publish_runtime, dict) else {}
+        if not isinstance(summary, dict):
+            return False
+        return (
+            _safe_int(summary.get("verified_count")) > 0
+            and _safe_int(summary.get("failed_count")) == 0
+            and _safe_int(summary.get("pending_verify_count")) == 0
+        )
+
+    def _load_publish_recovery_task(self, task_id):
+        return (
+            PublicationTask.query.options(load_only(
+                PublicationTask.id,
+                PublicationTask.status,
+                PublicationTask.current_step,
+                PublicationTask.progress,
+                PublicationTask.error_message,
+                PublicationTask.feature,
+                PublicationTask.source_task_id,
+                PublicationTask.params,
+                PublicationTask.result,
+                PublicationTask.completed_at,
+                PublicationTask.updated_at,
+            ))
+            .filter(PublicationTask.id == str(task_id))
+            .one_or_none()
+        )
+
+    def _load_publication_task_result(self, task_id):
+        row = (
+            db.session.query(PublicationTask.result)
+            .filter(PublicationTask.id == str(task_id))
+            .one_or_none()
+        )
+        result = row[0] if row else None
+        return result if isinstance(result, dict) else {}
+
+    def _recover_publish_task_from_runtime(self, task, publish_runtime=None):
+        if not task or task.status == "completed":
             return False
         params = task.params if isinstance(task.params, dict) else {}
-        if params.get("feature") != "zsxq_clean_output_publish":
+        if (task.feature or params.get("feature")) != "zsxq_clean_output_publish":
             return False
 
-        try:
-            publish_runtime = summarize_publish_runs_for_request(f"zsxq_publish:{task.id}")
-        except Exception:
-            logger.exception("[ZSXQ_WORKFLOW] failed to recover publish task from runtime | task=%s", task.id)
-            return False
+        if publish_runtime is None:
+            try:
+                publish_runtime = summarize_publish_runs_for_request(f"zsxq_publish:{task.id}")
+            except Exception:
+                logger.exception("[ZSXQ_WORKFLOW] failed to recover publish task from runtime | task=%s", task.id)
+                return False
 
         summary = (publish_runtime or {}).get("summary") if isinstance(publish_runtime, dict) else {}
         if not self._publish_runtime_completed(task, summary):
@@ -1483,17 +1867,21 @@ class ZsxqWorkflowService:
         task.progress = 100
         task.error_message = None
         task.completed_at = task.completed_at or now
-        task.result = {
+        recovered_result = {
             **(task.result or {}),
             **recovered,
             "publish_result": recovered,
         }
+        task.result = recovered_result
         flag_modified(task, "result")
         try:
             zsxq_sync_service.update_attachment_publish_status_from_publish_task(task)
         except Exception:
             logger.exception("[ZSXQ_WORKFLOW] failed to backfill recovered publish task attachments | task=%s", task.id)
-        return True
+        return {
+            "result": deepcopy(recovered_result),
+            "completed_at": task.completed_at,
+        }
 
     def _publish_runtime_completed(self, task, summary):
         summary = summary if isinstance(summary, dict) else {}
@@ -1521,7 +1909,15 @@ class ZsxqWorkflowService:
             .filter(PublicationTask.id == source_task_id)
             .first()
         )
-        result = clean_task.result if clean_task and isinstance(clean_task.result, dict) else {}
+        if not clean_task:
+            return 0
+        projected = _safe_int(
+            clean_task.content_clean_success_count
+            or clean_task.content_clean_files_count
+        )
+        if projected:
+            return projected
+        result = self._load_publication_task_result(source_task_id)
         for key in ("cleaned_files", "files"):
             files = result.get(key)
             if isinstance(files, list):
@@ -1557,11 +1953,75 @@ class ZsxqWorkflowService:
             "attachments_limited_skipped": summary.get("attachments_limited_skipped"),
             "max_download_files": summary.get("max_download_files"),
             "download_limit_reached": summary.get("download_limit_reached"),
-            "auto_video_dispatch": summary.get("auto_video_dispatch"),
-            "auto_script_material_dispatch": summary.get("auto_script_material_dispatch"),
+            "auto_video_dispatch": self._compact_dispatch_summary(summary.get("auto_video_dispatch")),
+            "auto_script_material_dispatch": self._compact_dispatch_summary(
+                summary.get("auto_script_material_dispatch")
+            ),
         }
         tabs = summary.get("tabs") if isinstance(summary.get("tabs"), list) else []
         compact["tabs"] = [self._sync_tab_summary(tab) for tab in tabs[:20] if isinstance(tab, dict)]
+        return compact
+
+    def _compact_dispatch_summary(self, value):
+        if not isinstance(value, dict):
+            return value
+        compact = {
+            key: value.get(key)
+            for key in (
+                "enabled",
+                "status",
+                "reason",
+                "source",
+                "run_id",
+                "workflow_run_id",
+                "group_id",
+                "group_name",
+                "attachments_checked",
+                "attachments_loaded",
+                "missing_attachment_rows",
+                "skipped_non_target",
+                "queued_count",
+                "deferred_count",
+                "dispatched_count",
+                "failed_count",
+                "eligible_count",
+            )
+            if value.get(key) is not None
+        }
+        task_ids = [str(item) for item in (value.get("queued_task_ids") or []) if item]
+        if task_ids:
+            compact["queued_task_ids"] = task_ids[:20]
+        errors = [item for item in (value.get("errors") or []) if isinstance(item, dict)]
+        if errors:
+            compact["errors"] = [
+                {
+                    key: item.get(key)
+                    for key in ("kind", "attachment_id", "task_id", "message")
+                    if item.get(key) is not None
+                }
+                for item in errors[:5]
+            ]
+        for bucket_name in ("pdf", "mp3"):
+            bucket = value.get(bucket_name)
+            if not isinstance(bucket, dict):
+                continue
+            compact[bucket_name] = {
+                key: bucket.get(key)
+                for key in (
+                    "threshold",
+                    "checked",
+                    "eligible",
+                    "queued",
+                    "deferred",
+                    "failed",
+                    "skipped_existing",
+                    "skipped_below_threshold",
+                    "skipped_missing_download_count",
+                    "skipped_not_downloaded",
+                    "skipped_missing_file",
+                )
+                if bucket.get(key) is not None
+            }
         return compact
 
     def _sync_tab_summary(self, tab):
@@ -1682,8 +2142,8 @@ class ZsxqWorkflowService:
     def _find_existing_system_workflow(self, *, batch_id, group_id, batch_round):
         if not batch_id or not group_id:
             return None
-        return (
-            ZsxqWorkflowRun.query
+        existing = (
+            db.session.query(ZsxqWorkflowRun.id)
             .filter(
                 ZsxqWorkflowRun.batch_id == str(batch_id),
                 ZsxqWorkflowRun.group_id == str(group_id),
@@ -1692,12 +2152,15 @@ class ZsxqWorkflowService:
             .order_by(ZsxqWorkflowRun.created_at.desc())
             .first()
         )
+        if not existing:
+            return None
+        return ZsxqWorkflowRun.query.filter(ZsxqWorkflowRun.id == existing.id).one()
 
     def _find_existing_manual_workflow(self, *, batch_id, group_id, trigger):
         if not batch_id or not group_id:
             return None
-        return (
-            ZsxqWorkflowRun.query
+        existing = (
+            db.session.query(ZsxqWorkflowRun.id)
             .filter(
                 ZsxqWorkflowRun.batch_id == str(batch_id),
                 ZsxqWorkflowRun.group_id == str(group_id),
@@ -1706,6 +2169,9 @@ class ZsxqWorkflowService:
             .order_by(ZsxqWorkflowRun.created_at.desc())
             .first()
         )
+        if not existing:
+            return None
+        return ZsxqWorkflowRun.query.filter(ZsxqWorkflowRun.id == existing.id).one()
 
     def _commit_and_payload(self, workflow):
         db.session.flush()

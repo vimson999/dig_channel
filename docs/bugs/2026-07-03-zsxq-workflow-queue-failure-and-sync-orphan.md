@@ -2,7 +2,7 @@
 
 ## 基本信息
 
-- 状态：已修复，已恢复当前阻塞
+- 状态：已修复；2026-07-19 复发审计补齐状态投影、终态收口和回归测试
 - 严重级别：高
 - 影响模块：知识星球系统同步、`zsxq_workflow`、`zsxq_sync`、自动调度器、SQLAlchemy session
 - 首次发现：2026-07-03 20:43 邮件告警
@@ -99,6 +99,11 @@ workflow_run_id=None
 
 ## 验证
 
+2026-07-19 复发审计发现旧恢复器会先读取 `zsxq_sync_runs.result` 大 JSON，再判断同步是否已经终态；
+终态失败还可能被恢复逻辑覆盖。现改为先只读状态列，只有仍处于非终态的 stale 候选才点读
+`id/result` 心跳；失败终态保留原错误，完成终态推进后续阶段。新增测试覆盖 failed、completed 和
+running/fresh 三条路径。真实自动轮次 117 从同步、双清洗到双发布全部完成，活动任务归零。
+
 - `py_compile` 通过：
 
 ```bash
@@ -116,7 +121,8 @@ venv/bin/python -m py_compile \
   - `2471324e-d97f-4df1-a719-bf878baa26f4`：`running`，且 `result.heartbeat_at` 正常更新。
 - 进程确认：
   - `zsxq_sync`、`zsxq_workflow`、`zsxq_publish`、watchdog、`zsxq_auto_scheduler` 均在线。
-- 未执行 pytest：当前 `venv` 缺少 `pytest` 模块。
+- 2026-07-19 定向回归覆盖状态投影、心跳读取和终态推进；完整已知问题回归另由
+  `scripts/dev/run-known-issue-regression.sh` 统一执行。
 
 ## 复发预防
 
@@ -128,6 +134,4 @@ venv/bin/python -m py_compile \
 
 ## 后续事项
 
-- 为 `recover_stale_running_sync_workflows()` 补单元测试。
-- 排查 `ZsxqSyncRun.updated_at` 被读路径刷新的具体入口，避免状态字段被观测逻辑污染。
 - 将 `sync` 阶段 heartbeat 展示到 celery monitor 或知识星球编排详情页。

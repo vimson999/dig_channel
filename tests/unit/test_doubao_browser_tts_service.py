@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,7 +10,9 @@ if str(BACKEND_DIR) not in sys.path:
 
 from services.doubao_browser_tts import (  # noqa: E402
     DOUBAO_REPEAT_PROMPT_PREFIX,
+    DoubaoBrowserTTSWorker,
     DoubaoBrowserTTSError,
+    DoubaoBrowserTTSOptions,
     build_repeat_prompt,
     validate_audio_duration_for_text,
 )
@@ -17,6 +20,25 @@ from services.report_audio_workflow import split_tts_text  # noqa: E402
 
 
 class DoubaoBrowserTTSServiceTest(unittest.TestCase):
+    def test_login_selectors_do_not_match_narration_containing_login_word(self):
+        options = DoubaoBrowserTTSOptions(
+            user_data_dir="/tmp/profile",
+            extension_path="/tmp/extension",
+        )
+        worker = DoubaoBrowserTTSWorker.__new__(DoubaoBrowserTTSWorker)
+        worker.options = options
+        selectors = worker._selectors("login")
+        self.assertNotIn("text=登录", selectors)
+        self.assertIn('button:has-text("登录")', selectors)
+
+    def _worker(self):
+        return DoubaoBrowserTTSWorker(
+            DoubaoBrowserTTSOptions(
+                user_data_dir="/tmp/doubao-test-profile",
+                extension_path=str(BACKEND_DIR.parents[1] / "tools" / "doubao-audio-capture-extension"),
+            )
+        )
+
     def test_repeat_prompt_wraps_original_text(self):
         text = "第一句。\n第二句，不要被总结。"
 
@@ -46,6 +68,64 @@ class DoubaoBrowserTTSServiceTest(unittest.TestCase):
 
         self.assertGreater(len(chunks), 1)
         self.assertLessEqual(max(len(chunk) for chunk in chunks), 500)
+
+    def test_wav_export_prefers_browser_download_without_serializing_blob(self):
+        saved = {}
+
+        class Download:
+            def save_as(self, path):
+                saved["path"] = path
+
+        class DownloadContext:
+            value = Download()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class Page:
+            def __init__(self):
+                self.evaluate_calls = []
+
+            def evaluate(self, expression, arg=None):
+                self.evaluate_calls.append((expression, arg))
+                if expression == "() => typeof window.downloadDoubaoWav === 'function'" and arg is None:
+                    return True
+                if "downloadDoubaoWav(filename)" in expression:
+                    return True
+                raise AssertionError("Blob serialization fallback should not run")
+
+            def expect_download(self, timeout):
+                self.download_timeout = timeout
+                return DownloadContext()
+
+        page = Page()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "job.wav"
+            wav_bytes = self._worker()._export_wav_bytes(page, output, "job-1")
+
+        self.assertEqual(wav_bytes, b"")
+        self.assertEqual(saved["path"], str(output))
+        self.assertEqual(page.download_timeout, 30_000)
+        self.assertEqual(page.evaluate_calls[1][1], "job.wav")
+
+    def test_dismiss_known_promotional_dialog_uses_page_script(self):
+        class Page:
+            expression = ""
+
+            def evaluate(self, expression):
+                self.expression = expression
+                return 1
+
+        page = Page()
+
+        dismissed = self._worker()._dismiss_known_promotional_dialogs(page)
+
+        self.assertEqual(dismissed, 1)
+        self.assertIn("下载电脑版", page.expression)
+        self.assertIn("dialog-close", page.expression)
 
 
 if __name__ == "__main__":

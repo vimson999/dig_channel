@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>研报 PDF 视觉视频编排 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>.status-dot{width:8px;height:8px;border-radius:999px;display:inline-block}</style>
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <div id="nav-container"></div>
+    <main class="mx-auto max-w-[1440px] px-6 py-6">
+        <div class="mb-5 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+                <h1 class="text-2xl font-black tracking-tight">研报 PDF 视觉视频编排台</h1>
+                <p class="mt-1 text-sm text-slate-500">PDF → 基础文案 → 按视觉方案生成分镜 → Gemini 图片 → 语音 → 视频。</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <span id="provider-status" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-500">配置检查中</span>
+                <span id="worker-status" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-500">Worker 检查中</span>
+                <button id="refresh-status-btn" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-rotate mr-1.5"></i>刷新状态</button>
+            </div>
+        </div>
+        <div id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm"></div>
+
+        <section class="grid grid-cols-1 gap-5 xl:grid-cols-[460px_minmax(0,1fr)]">
+            <aside class="space-y-4">
+                <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                    <h2 class="text-base font-black">投递 PDF</h2>
+                    <div class="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+                        <div class="mb-3 grid grid-cols-2 gap-2 text-xs font-bold">
+                            <label class="flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-700"><input id="pdf-source-upload" name="pdf-source" type="radio" value="upload" checked>上传 PDF</label>
+                            <label class="flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-700"><input id="pdf-source-asset" name="pdf-source" type="radio" value="asset">选择已同步 PDF</label>
+                        </div>
+                        <div id="pdf-upload-panel">
+                            <label class="block rounded-md border border-dashed border-slate-300 bg-white px-3 py-3 text-xs text-slate-500"><span class="mb-2 block font-bold text-slate-700">研报 PDF</span><input id="pdf-input" type="file" accept="application/pdf,.pdf" class="block w-full text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-900 file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-white"></label>
+                        </div>
+                        <div id="pdf-asset-panel" class="hidden">
+                            <div id="pdf-asset-tabs" class="mb-2 grid grid-cols-2 gap-2 text-xs font-bold"><button type="button" data-scope="all" aria-pressed="true" class="rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-white shadow-sm transition">全部 PDF</button><button type="button" data-scope="hot" aria-pressed="false" class="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-600 transition hover:bg-slate-50">热门 PDF（下载 ≥40）</button></div>
+                            <div class="flex gap-2"><input id="pdf-asset-search" type="search" class="min-w-0 flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" placeholder="搜索已同步 PDF / 主题"><button id="pdf-asset-refresh" type="button" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-rotate mr-1"></i>刷新</button></div>
+                            <div id="pdf-asset-summary" class="mt-2 text-xs text-slate-500">等待加载已同步 PDF。</div>
+                            <div id="pdf-asset-list" class="mt-2 max-h-[34rem] space-y-2 overflow-auto"></div>
+                            <div id="pdf-asset-pagination" class="mt-2"></div>
+                        </div>
+                    </div>
+
+                    <div class="mt-4 rounded-md border border-violet-200 bg-violet-50 p-3">
+                        <label for="visual-scheme-select" class="block text-xs font-black text-violet-950">视觉方案</label>
+                        <select id="visual-scheme-select" class="mt-2 w-full rounded-md border border-violet-200 bg-white px-3 py-2 text-sm font-bold text-violet-950 focus:border-violet-500 focus:outline-none">
+                            <option value="stick_figure">白板火柴人</option>
+                        </select>
+                        <p id="visual-scheme-description" class="mt-2 text-xs leading-5 text-violet-700">分镜 Gem、图片生成风格和失败续跑都会绑定到所选方案。</p>
+                    </div>
+
+                    <details class="mt-4 rounded-md border border-slate-200 bg-slate-50">
+                        <summary class="cursor-pointer px-3 py-2 text-xs font-black text-slate-700">基础文案参数</summary>
+                        <div class="space-y-3 p-3">
+                            <label class="block"><span class="mb-1 block text-xs font-bold text-slate-500">第一轮解析 Prompt</span><textarea id="prompt-input" rows="4" class="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm leading-6">请解析上传的研报 PDF，提取核心观点、关键数据、风险提示和可用于口播的摘要。</textarea></label>
+                            <label class="block"><span class="mb-1 block text-xs font-bold text-slate-500">自审 Prompt</span><textarea id="review-prompt-input" rows="5" class="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm leading-6">担任首席责任主编，对内容逐条复核与勘误，确认事实准确、逻辑清晰、表达规范，并给出最终优化后的完整口播文案。</textarea></label>
+                        </div>
+                    </details>
+
+                    <div class="mt-4 rounded-md border border-indigo-100 bg-indigo-50 p-3">
+                        <h3 class="text-xs font-black text-indigo-900">视觉视频阶段</h3>
+                        <p class="mt-1 text-xs leading-5 text-indigo-700">基础文案完成后，按所选方案生成“标题镜头 + 正文分镜”。图片、TTS 和视频随后按镜头继续。</p>
+                    </div>
+                    <button id="submit-btn" class="mt-4 w-full rounded-md bg-slate-900 px-3 py-2.5 text-sm font-bold text-white hover:bg-slate-800"><i class="fas fa-paper-plane mr-1.5"></i>投递视觉视频编排</button>
+                </div>
+
+                <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                    <div class="flex items-center justify-between"><h2 class="text-base font-black">队列</h2><button id="refresh-jobs-btn" class="rounded-md border px-3 py-2 text-xs font-bold"><i class="fas fa-rotate mr-1"></i>刷新任务</button></div>
+                    <div class="mt-3 grid grid-cols-2 gap-2 text-xs"><div class="rounded-md bg-slate-50 p-3"><span class="text-slate-400">基础文案</span><div id="material-queue" class="mt-1 font-black">检查中</div></div><div class="rounded-md bg-slate-50 p-3"><span class="text-slate-400">分镜并发</span><div class="mt-1 font-black">3</div></div></div>
+                </div>
+            </aside>
+
+            <section class="min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                <div class="flex flex-col gap-3 border-b border-slate-200 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div><h2 class="text-base font-black">编排结果</h2><p id="summary-text" class="mt-1 text-xs text-slate-500">加载中。</p></div>
+                    <div class="flex flex-wrap items-center gap-2 text-xs">
+                        <div class="relative"><i class="fas fa-magnifying-glass pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"></i><input id="job-search" type="search" class="h-9 w-60 rounded-md border border-slate-200 pl-8 pr-3 font-bold" placeholder="按名称搜索"></div>
+                        <label class="font-bold text-slate-500">投递日期</label><input id="job-date" type="date" class="h-9 rounded-md border border-slate-200 px-2.5 font-bold">
+                        <label class="font-bold text-slate-500">状态</label><select id="job-status" class="h-9 rounded-md border border-slate-200 px-2.5 font-bold"><option value="">全部</option><option value="queued">排队中</option><option value="running">运行中</option><option value="succeeded">成功</option><option value="failed">失败</option><option value="canceled">已取消</option></select>
+                    </div>
+                </div>
+                <div id="job-list" class="space-y-3 p-4"></div>
+                <div id="job-pagination" class="border-t border-slate-100 px-4 py-3"></div>
+            </section>
+        </section>
+    </main>
+    <div id="footer-container"></div>
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20260721-stick-audio-layout"></script>
+    <script src="js/report-stick-figure-video-workflow.js?v=20260722-visual-schemes-v1"></script>
+</body>
+</html>

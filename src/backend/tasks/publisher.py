@@ -7,6 +7,8 @@ import subprocess
 import time
 from datetime import datetime
 from types import SimpleNamespace
+from sqlalchemy import cast, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 # Ensure src/backend is in sys.path for Celery worker
@@ -18,6 +20,7 @@ if backend_dir not in sys.path:
 PROJECT_ROOT = os.path.dirname(os.path.dirname(backend_dir))
 
 from celery_config import celery_app
+from models.bilibili_publish import PublicationTaskBilibiliUpload
 from models.task import PublicationTask
 from models import db
 from services.video_editor import video_editor_service
@@ -25,6 +28,7 @@ from services.thumbnail_service import thumbnail_service
 from services.bilibili.uploader import BiliUploader, DEFAULT_NEUTRAL_MARK
 from services.youtube.uploader import YouTubeUploader
 from services.platform_credential_service import resolve_bilibili_auth
+from services.platform_publish_dispatch import PLATFORM_UPLOAD_QUEUE
 from services.runtime_guard import (
     guard_publication_task_start,
     is_retryable_db_error,
@@ -36,7 +40,6 @@ from sqlalchemy.orm import load_only
 logger = logging.getLogger(__name__)
 
 RENDER_QUEUE = "render"
-PLATFORM_UPLOAD_QUEUE = "platform_upload"
 AUDIO_PREPROCESS_VERSION = "v2"
 AUDIO_DURATION_TOLERANCE_SECONDS = 2.0
 DEFAULT_DB_RETRIES = 5
@@ -103,6 +106,33 @@ def _load_task_with_retries(task_id, *columns):
     raise last_error
 
 
+def _load_bilibili_upload_context_with_retries(task_id):
+    from services.bilibili_publish import bilibili_upload_execution_context
+
+    retries = _bounded_int(os.environ.get(DB_RETRIES_ENV_NAME), DEFAULT_DB_RETRIES, lower=1, upper=20)
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            db.session.rollback()
+            return bilibili_upload_execution_context(task_id)
+        except Exception as exc:
+            last_error = exc
+            db.session.rollback()
+            if not _is_retryable_db_error(exc) or attempt >= retries:
+                raise
+            delay = _db_retry_delay_seconds(attempt - 1)
+            logger.warning(
+                "Task %s Bilibili execution load failed (%s/%s), retrying in %ss: %s",
+                task_id,
+                attempt,
+                retries,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+    raise last_error
+
+
 def _is_retryable_db_error(exc):
     return is_retryable_db_error(exc)
 
@@ -119,7 +149,15 @@ def _bounded_int(value, default, *, lower, upper):
         parsed = int(default)
     return min(max(parsed, lower), upper)
 
-def update_task_record(task_id, retries=3, **fields):
+
+def _postgres_jsonb_merge(column, patch):
+    return func.coalesce(
+        cast(column, JSONB),
+        cast({}, JSONB),
+    ).op("||")(cast(patch, JSONB))
+
+
+def update_task_record(task_id, retries=3, result_patch=None, **fields):
     """Persist task state in a short transaction with rollback/retry.
 
     Long media synthesis can outlive a cloud PostgreSQL connection. Keeping task
@@ -132,14 +170,37 @@ def update_task_record(task_id, retries=3, **fields):
     for attempt in range(1, retries + 1):
         try:
             db.session.rollback()
+            if result_patch is not None and not isinstance(result_patch, dict):
+                raise ValueError("result_patch must be a dict")
+            if result_patch is not None and "result" in fields:
+                raise ValueError("result and result_patch cannot be written together")
+            projection_fields = dict(fields)
+            if result_patch is not None:
+                projection_fields["result"] = result_patch
             values = {}
             persisted_fields = dict(fields)
-            persisted_fields.update(_publisher_hot_projection_values(fields))
+            persisted_fields.update(_publisher_hot_projection_values(projection_fields))
             for key, value in persisted_fields.items():
                 column = getattr(PublicationTask, key, None)
                 if column is None:
                     raise ValueError(f"Unknown PublicationTask field: {key}")
                 values[column] = value
+            if result_patch is not None:
+                dialect = db.session.get_bind().dialect.name
+                if dialect == "postgresql":
+                    values[PublicationTask.result] = _postgres_jsonb_merge(
+                        PublicationTask.result,
+                        result_patch,
+                    )
+                else:
+                    current_result = (
+                        db.session.query(PublicationTask.result)
+                        .filter(PublicationTask.id == str(task_id))
+                        .scalar()
+                    )
+                    merged_result = dict(current_result or {})
+                    merged_result.update(result_patch)
+                    values[PublicationTask.result] = merged_result
             updated = (
                 PublicationTask.query
                 .filter(PublicationTask.id == str(task_id))
@@ -147,6 +208,13 @@ def update_task_record(task_id, retries=3, **fields):
             )
             if not updated:
                 raise ValueError(f"Task {task_id} not found")
+            projection_values = _bilibili_upload_projection_values(projection_fields)
+            if projection_values:
+                (
+                    PublicationTaskBilibiliUpload.query
+                    .filter(PublicationTaskBilibiliUpload.task_id == str(task_id))
+                    .update(projection_values, synchronize_session=False)
+                )
             db.session.commit()
             return SimpleNamespace(id=str(task_id), **fields)
         except Exception as exc:
@@ -201,10 +269,39 @@ def _publisher_hot_projection_values(fields):
             values["publisher_vertical_cover_path"] = str(result.get("vertical_cover_path") or "")[:600] or None
         if "podcast_cover_path" in result:
             values["publisher_podcast_cover_path"] = str(result.get("podcast_cover_path") or "")[:600] or None
+        if "bilibili_cover_path" in result:
+            values["publisher_bilibili_cover_path"] = str(result.get("bilibili_cover_path") or "")[:600] or None
         if result.get("vertical_video_scheme"):
             values["publisher_vertical_scheme"] = str(result.get("vertical_video_scheme"))[:32]
         if "vertical_preview_seconds" in result:
             values["publisher_preview_seconds"] = _bounded_non_negative_int(result.get("vertical_preview_seconds"))
+    return values
+
+
+def _bilibili_upload_projection_values(fields):
+    result = fields.get("result") if isinstance(fields.get("result"), dict) else None
+    if result is None:
+        return {}
+
+    values = {}
+    upload_result = result.get("bilibili_result")
+    if isinstance(upload_result, dict):
+        if upload_result.get("aid") not in (None, ""):
+            values[PublicationTaskBilibiliUpload.aid] = str(upload_result.get("aid"))[:32]
+        if upload_result.get("bvid") not in (None, ""):
+            values[PublicationTaskBilibiliUpload.bvid] = str(upload_result.get("bvid"))[:32]
+    if result.get("bilibili_title") not in (None, ""):
+        values[PublicationTaskBilibiliUpload.title] = str(result.get("bilibili_title"))[:120]
+    if result.get("bilibili_credential_id") not in (None, ""):
+        values[PublicationTaskBilibiliUpload.credential_id] = str(
+            result.get("bilibili_credential_id")
+        )[:80]
+    if result.get("bilibili_credential_name") not in (None, ""):
+        values[PublicationTaskBilibiliUpload.credential_name] = str(
+            result.get("bilibili_credential_name")
+        )[:255]
+    if values:
+        values[PublicationTaskBilibiliUpload.updated_at] = datetime.utcnow()
     return values
 
 
@@ -708,6 +805,15 @@ def run_publication_pipeline(self, task_id):
                 
                 # 如果是显式指定竖屏，则参数从 vid_params 取；否则从 v_vid_params 取
                 active_v_params = vid_params if is_explicit_vertical else v_vid_params
+                vertical_scheme = str(
+                    active_v_params.get('scheme')
+                    or active_v_params.get('render_scheme')
+                    or 'scheme1'
+                ).strip().lower()
+                if vertical_scheme not in {'scheme1', 'scheme2', 'workbench', 'thumbnail_workbench'}:
+                    vertical_scheme = 'scheme1'
+                if vertical_scheme in {'workbench', 'thumbnail_workbench'}:
+                    vertical_scheme = 'scheme2'
                 vertical_thumb_params = params.get('vertical_thumbnail') if isinstance(params.get('vertical_thumbnail'), dict) else {}
                 vertical_cover_params = params.get('vertical_cover') if isinstance(params.get('vertical_cover'), dict) else {}
                 podcast_cover_params = params.get('podcast_cover') if isinstance(params.get('podcast_cover'), dict) else {}
@@ -786,9 +892,12 @@ def run_publication_pipeline(self, task_id):
                             screenshot_path=screenshot_path,
                             output_filename=f"vbg_{base_name}.jpg",
                         )
+                    vertical_background_paths = dict(result_state.get('vertical_background_paths') or {})
+                    vertical_background_paths[vertical_scheme] = v_image_path
                     result_state = {
                         **result_state,
                         'vertical_background_path': v_image_path,
+                        'vertical_background_paths': vertical_background_paths,
                         'vertical_video_scheme': vertical_scheme,
                         **({'vertical_cover_path': vertical_cover_path} if vertical_cover_path else {}),
                         **({'podcast_cover_path': podcast_cover_path} if podcast_cover_path else {}),
@@ -828,7 +937,14 @@ def run_publication_pipeline(self, task_id):
                 logger.info(f"  - ✅ Vertical Done: {v_video_path}")
                 
                 # 如果这是唯一的合成任务，把它也放到主 video_path 里方便前端下载
-                res_dict = {**result_state, 'vertical_video_path': v_video_path}
+                vertical_paths = dict(result_state.get('vertical_video_paths') or {})
+                vertical_paths[vertical_scheme] = v_video_path
+                res_dict = {
+                    **result_state,
+                    'vertical_video_path': v_video_path,
+                    'vertical_video_scheme': vertical_scheme,
+                    'vertical_video_paths': vertical_paths,
+                }
                 if preview_seconds > 0:
                     res_dict['vertical_preview_seconds'] = preview_seconds
                 if is_explicit_vertical or not final_video_path:
@@ -844,16 +960,60 @@ def run_publication_pipeline(self, task_id):
                 
                 logger.info(f"Task {task_id}: Starting alternative vertical video synthesis...")
                 
+                v2_scheme = str(v_vid_2_params.get('scheme') or 'scheme1').strip().lower()
+                if v2_scheme not in {'scheme1', 'scheme2'}:
+                    v2_scheme = 'scheme1'
                 v2_image_path = to_abs_path(v_vid_2_params.get('image_path'))
+                v2_screenshot_path = to_abs_path(v_vid_2_params.get('screenshot_path') or v2_image_path)
+                v2_main_title = v_vid_2_params.get('main_title') or ""
+                v2_sub_title = v_vid_2_params.get('sub_title') or ""
+                if v2_scheme == 'scheme2':
+                    v2_image_path = thumbnail_service.generate_workbench_vertical_thumbnail(
+                        main_title=v2_main_title,
+                        sub_title=v2_sub_title,
+                        screenshot_path=v2_screenshot_path,
+                        output_filename=f"vbg2_alt_{base_name}.jpg",
+                        institution=v_vid_2_params.get('institution') or '深度研报',
+                        emotion=v_vid_2_params.get('emotion') or 'bull',
+                        footer_text=v_vid_2_params.get('footer_text') or '听见资本',
+                        image_transform=v_vid_2_params.get('image_transform') or {},
+                    )
+                else:
+                    v2_image_path = thumbnail_service.generate_vertical_thumbnail(
+                        main_title=v2_main_title,
+                        sub_title=v2_sub_title,
+                        date_text=v_vid_2_params.get('date_text') or "",
+                        screenshot_path=v2_screenshot_path,
+                        output_filename=f"vbg_alt_{base_name}.jpg",
+                    )
                 if v2_image_path and os.path.exists(v2_image_path):
+                    v2_preview_seconds = v_vid_2_params.get('preview_seconds') or params.get('preview_seconds')
+                    try:
+                        v2_preview_seconds = float(v2_preview_seconds or 0)
+                    except (TypeError, ValueError):
+                        v2_preview_seconds = 0
                     v2_video_path = video_editor_service.process_vertical_video(
                         image_file=v2_image_path,
                         audio_files=audio_path_abs,
                         subtitles=final_subtitles,
                         output_filename=f"v2_{base_name}.mp4",
-                        margin_v_override=200
+                        subtitle_position=v_vid_2_params.get('subtitle_position'),
+                        subtitle_size=v_vid_2_params.get('subtitle_size', 'normal'),
+                        subtitle_style=v_vid_2_params.get('subtitle_style') if isinstance(v_vid_2_params.get('subtitle_style'), dict) else None,
+                        export_params=params.get('export_params'),
+                        duration_limit=v2_preview_seconds if v2_preview_seconds > 0 else None,
                     )
-                    result_state = {**result_state, 'vertical_video_2_path': v2_video_path}
+                    vertical_paths = dict(result_state.get('vertical_video_paths') or {})
+                    vertical_paths[v2_scheme] = v2_video_path
+                    vertical_background_paths = dict(result_state.get('vertical_background_paths') or {})
+                    vertical_background_paths[v2_scheme] = v2_image_path
+                    result_state = {
+                        **result_state,
+                        'vertical_video_2_path': v2_video_path,
+                        'vertical_video_2_scheme': v2_scheme,
+                        'vertical_video_paths': vertical_paths,
+                        'vertical_background_paths': vertical_background_paths,
+                    }
                     task = update_task_record(task_id, result=result_state)
                 else:
                     logger.warning(f"Task {task_id}: Skipping vertical_video_2, image path missing or invalid.")
@@ -1113,13 +1273,13 @@ def run_bilibili_upload_only(self, task_id):
     app = create_app()
 
     with app.app_context():
-        task = _load_task_with_retries(task_id, *TASK_PAYLOAD_COLUMNS)
-        if not task:
+        context = _load_bilibili_upload_context_with_retries(task_id)
+        if not context:
             logger.error("Task %s not found", task_id)
             return
 
         request_id = str(getattr(getattr(self, "request", None), "id", "") or "")
-        current_celery_id = str(task.celery_task_id or "")
+        current_celery_id = context.celery_task_id
         if request_id and current_celery_id and request_id != current_celery_id:
             logger.info(
                 "Task %s received stale Bilibili upload message %s, current celery id is %s; skipping.",
@@ -1128,8 +1288,8 @@ def run_bilibili_upload_only(self, task_id):
                 current_celery_id,
             )
             return
-        if task.status in {"completed", "canceled"}:
-            logger.info("Task %s is terminal (%s) before Bilibili upload; skipping.", task_id, task.status)
+        if context.status in {"completed", "canceled"}:
+            logger.info("Task %s is terminal (%s) before Bilibili upload; skipping.", task_id, context.status)
             return
         guard_publication_task_start(
             self,
@@ -1138,20 +1298,8 @@ def run_bilibili_upload_only(self, task_id):
             queue=PLATFORM_UPLOAD_QUEUE,
         )
 
-        params = task.params or {}
-        result_state = dict(task.result or {})
-        bili_params = params.get("bilibili") if isinstance(params.get("bilibili"), dict) else {}
-        video_params = params.get("video") if isinstance(params.get("video"), dict) else {}
-
-        video_path = _first_existing_path(
-            result_state.get("video_path"),
-            params.get("upload_video_path"),
-            video_params.get("video_path"),
-        )
-        cover_path = _first_existing_path(
-            bili_params.get("cover_path"),
-            result_state.get("cover_path"),
-        )
+        video_path = _first_existing_path(context.video_path)
+        cover_path = _first_existing_path(context.cover_path)
         if not video_path:
             message = "无法补发 B站：找不到已生成的视频文件"
             update_task_record(
@@ -1164,27 +1312,21 @@ def run_bilibili_upload_only(self, task_id):
             )
             raise FileNotFoundError(message)
 
-        title = str(bili_params.get("title") or "").strip() or os.path.splitext(os.path.basename(video_path))[0]
-        desc = str(bili_params.get("desc") or "").strip()
-        tags = _normalize_tag_list(bili_params.get("tags"), default=["财经", "音频", "视频"])
+        title = str(context.title or "").strip() or os.path.splitext(os.path.basename(video_path))[0]
+        desc = str(context.description or "").strip()
+        tags = _normalize_tag_list(context.tags, default=["财经", "音频", "视频"])
 
         try:
-            result_state = {
-                **result_state,
-                "video_path": video_path,
-                **({"cover_path": cover_path} if cover_path else {}),
-            }
-            task = update_task_record(
+            update_task_record(
                 task_id,
                 status="processing",
                 current_step="upload_bilibili",
-                progress=max(int(task.progress or 0), 10),
-                result=result_state,
+                progress=max(context.progress, 10),
                 error_message=None,
             )
 
             bili_auth = resolve_bilibili_auth(
-                account_id=bili_params.get("credential_id") or bili_params.get("platform_credential_id"),
+                account_id=context.credential_id,
                 required=True,
             )
             db.session.remove()
@@ -1200,27 +1342,19 @@ def run_bilibili_upload_only(self, task_id):
                     video_path=video_path,
                     title=title,
                     desc=desc,
-                    tid=int(bili_params.get("tid", 207)),
+                    tid=context.tid,
                     tags=tags,
                     cover_path=cover_path,
-                    copyright=int(bili_params.get("copyright", 1)),
-                    no_reprint=int(bili_params.get("no_reprint", 1)),
-                    dynamic=bili_params.get("dynamic", ""),
-                    neutral_mark=bili_params.get("neutral_mark") or DEFAULT_NEUTRAL_MARK,
-                    charging_pay=bili_params.get("charging_pay"),
-                    delay_time=bili_params.get("delay_time") or bili_params.get("dtime"),
-                    season_id=bili_params.get("season_id"),
-                    is_only_self=(
-                        bili_params.get("is_only_self")
-                        or bili_params.get("isOnlySelf")
-                        or bili_params.get("only_self")
-                        or 0
-                    ),
-                    space_hidden=bili_params.get("space_hidden"),
-                    creation_statement_id=(
-                        bili_params.get("creation_statement_id")
-                        or bili_params.get("creationStatementId")
-                    ),
+                    copyright=context.copyright,
+                    no_reprint=context.no_reprint,
+                    dynamic=context.dynamic,
+                    neutral_mark=context.neutral_mark or DEFAULT_NEUTRAL_MARK,
+                    charging_pay=context.charging_pay,
+                    delay_time=context.delay_time,
+                    season_id=context.season_id,
+                    is_only_self=context.is_only_self,
+                    space_hidden=context.space_hidden,
+                    creation_statement_id=context.creation_statement_id,
                 )
 
             try:
@@ -1244,8 +1378,9 @@ def run_bilibili_upload_only(self, task_id):
                     logger.exception("[PUBLISHER] Bilibili credential error mark failed")
                 raise
 
-            result_state = {
-                **result_state,
+            result_patch = {
+                "video_path": video_path,
+                **({"cover_path": cover_path} if cover_path else {}),
                 "bilibili_result": upload_result,
                 "bilibili_title": title,
                 "bilibili_credential_id": bili_auth.get("credential_id"),
@@ -1256,7 +1391,7 @@ def run_bilibili_upload_only(self, task_id):
                 status="completed",
                 current_step="done",
                 progress=100,
-                result=result_state,
+                result_patch=result_patch,
                 completed_at=datetime.utcnow(),
             )
             logger.info("Task %s: Bilibili upload supplement successful.", task_id)
@@ -1265,10 +1400,9 @@ def run_bilibili_upload_only(self, task_id):
             raise
         except Exception as exc:
             logger.error("Bilibili upload supplement failed for task %s: %s", task_id, exc, exc_info=True)
-            result_state = {**result_state, "bilibili_error": str(exc)}
             update_task_record(
                 task_id,
-                result=result_state,
+                result_patch={"bilibili_error": str(exc)},
                 status="failed",
                 current_step="failed",
                 progress=10,

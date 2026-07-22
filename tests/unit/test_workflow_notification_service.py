@@ -68,8 +68,8 @@ class WorkflowNotificationServiceTest(unittest.TestCase):
 
         self.assertIn("下载 23 个，下载失败 2 个", text)
         self.assertIn("清洗成功 23 个，清洗失败 0 个", text)
-        self.assertIn("发布已提交 23 个，已确认可见 7 个，待审核/待确认 16 个，发布失败 0 个", text)
-        self.assertIn("发布：成功 | 任务 1 个，完成 1，失败 0，跳过 0，进行中 0 | 已提交 23，已确认 7，待审核/待确认 16，失败 0", text)
+        self.assertIn("发布已提交 23 个，发布后回查确认 7 个，待审核/待复核 16 个，发布失败 0 个", text)
+        self.assertIn("发布：成功 | 任务 1 个，完成 1，失败 0，跳过 0，进行中 0 | 已提交 23，回查确认 7，待审核/待复核 16，失败 0", text)
 
     def test_stage_lines_include_sync_audit_breakdown(self):
         workflow = {
@@ -180,10 +180,10 @@ class WorkflowNotificationServiceTest(unittest.TestCase):
 
         text = "\n".join(workflow_notification_service._stage_lines(workflow))
 
-        self.assertIn("业务结论：下载 21 个，清洗成功 21 个，发布确认 21 个。未完成项：下载失败 1 个。", text)
-        self.assertIn("PDF：1 批，1 个附件，1 个 topic，全部确认可见。", text)
-        self.assertIn("音频：3 批，8 + 8 + 4 = 20 个附件，3 个 topic，全部确认可见。", text)
-        self.assertIn("说明：有 1 个发布子任务状态为失败，但本地发布运行记录显示已有内容确认可见", text)
+        self.assertIn("业务结论：下载 21 个，清洗成功 21 个，发布后回查确认 21 个。未完成项：下载失败 1 个。", text)
+        self.assertIn("PDF：1 批，1 个附件，1 个 topic，全部发布后回查确认。", text)
+        self.assertIn("音频：3 批，8 + 8 + 4 = 20 个附件，3 个 topic，全部发布后回查确认。", text)
+        self.assertIn("说明：有 1 个发布子任务状态为失败，但本地发布运行记录显示已有内容发布后回查确认", text)
 
     def test_mp3_video_event_label_and_stage_lines(self):
         payload = {

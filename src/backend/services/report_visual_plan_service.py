@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import re
 import uuid
@@ -15,9 +16,180 @@ except Exception:  # pragma: no cover - optional at import time
     fitz = None
 
 FEATURE_NAME = "report_visual_plan"
+QUEUE_NAME = "report_visual_plan"
 SCHEMA_VERSION = "20260627_visual_plan_v2"
+STORYBOARD_SCHEMA_VERSION = "20260721_storyboard_v2_title_scene"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 OUTPUT_ROOT = PROJECT_ROOT / "data" / "report_visual_plans"
+
+
+def storyboard_prompt(material: Dict[str, Any]) -> str:
+    script = _script_from_material(material)
+    if not script:
+        raise ValueError("基础文案为空，无法生成分镜")
+    return (
+        "请按照这个 Gem 已配置的规则，把下面这篇完整口播文案逐段转换为分镜画面提示词。"
+        "在正文分镜之前，必须先单独输出一个‘标题镜头’，标题镜头只表现研报标题，"
+        "并且必须包含一条可直接用于生成图片的完整提示词；不得省略标题镜头。"
+        "必须覆盖原文全部内容，保持原文顺序，不得省略、概括或改写原文。"
+        "每个分镜同时给出对应的原文片段和可直接用于生成图片的提示词。"
+        "提示词的语言、格式和措辞必须遵循这个 Gem 的既有规则；如果 Gem 默认输出英文，"
+        "必须保留英文，禁止翻译或改写。\n\n"
+        f"标题：{_material_title(material)}\n\n完整口播文案：\n{script}"
+    )
+
+
+def normalize_storyboard_response(material: Dict[str, Any], gemini_text: str) -> Dict[str, Any]:
+    script = _script_from_material(material)
+    if not script:
+        raise ValueError("基础文案为空，无法梳理分镜")
+    if not str(gemini_text or "").strip():
+        raise ValueError("分镜 Gem 未返回内容")
+    payload = _deepseek_json(
+        "你是分镜数据整理器，只输出严格 JSON。不得删减、概括、改写输入的原始口播文案。",
+        f"""
+把“分镜 Gem 返回值”整理成有序分镜列表。
+
+硬性规则：
+1. segments 必须覆盖“完整原始口播文案”的每一个非空字符，并保持顺序；
+2. 每个 script_text 必须逐字复制原文中的连续片段，所有 script_text 拼接后必须等于完整原文（允许分段边界处空白差异）；
+3. 不得把提示词、解释或新增内容混入 script_text；
+4. visual_prompt 只能从 Gem 返回值中逐字复制，只允许去掉字段标签和调整首尾空白；
+5. 禁止翻译、润色、缩写、扩写或重写 visual_prompt，必须保留 Gem 原有语言和措辞；
+6. title_scene 必须提取 Gem 为研报标题生成的标题镜头提示词，不得丢弃；
+7. segments 分镜数量以完整表达为准，不得为了减少数量而遗漏文案。
+
+只输出：
+{{"title_scene":{{"scene_title":"标题镜头","visual_prompt":"从 Gem 返回值逐字复制的标题提示词","estimated_seconds":3}},"segments":[{{"scene_title":"...","script_text":"原文连续片段","visual_prompt":"从 Gem 返回值逐字复制的原提示词","estimated_seconds":6}}]}}
+
+完整原始口播文案：
+{script}
+
+分镜 Gem 返回值：
+{str(gemini_text).strip()}
+""".strip(),
+        temperature=0.08,
+        timeout=int(os.getenv("REPORT_VISUAL_PLAN_NORMALIZER_TIMEOUT_SECONDS", "150")),
+        model=_storyboard_model_name(),
+    )
+    raw_segments = payload.get("segments") if isinstance(payload, dict) else None
+    if not isinstance(raw_segments, list) or not raw_segments:
+        raise ValueError("DS 未返回有效的 segments 列表")
+    raw_title_scene = payload.get("title_scene") if isinstance(payload, dict) else None
+    if not isinstance(raw_title_scene, dict):
+        raise ValueError("DS 未返回标题镜头 title_scene")
+    title_prompt = str(raw_title_scene.get("visual_prompt") or "").strip()
+    if not title_prompt:
+        raise ValueError("DS 未返回标题镜头提示词")
+    exact_title_prompt, prompt_offset = _extract_exact_gemini_prompt(str(gemini_text), title_prompt)
+    title_scene = {
+        "sequence": 0,
+        "scene_title": _trim(raw_title_scene.get("scene_title") or "标题镜头", 120),
+        "script_text": _material_title(material),
+        "visual_prompt": exact_title_prompt,
+        "estimated_seconds": _safe_seconds(raw_title_scene.get("estimated_seconds")) or 3.0,
+    }
+    segments = _align_storyboard_segments(script, raw_segments, str(gemini_text), prompt_offset=prompt_offset)
+    return {
+        "schema_version": STORYBOARD_SCHEMA_VERSION,
+        "source_script_hash": hashlib.sha256(script.encode("utf-8")).hexdigest(),
+        "source_script_chars": len(script),
+        "covered_script_chars": sum(len(item["script_text"]) for item in segments),
+        "segment_count": len(segments) + 1,
+        "provider": payload.get("provider") or "deepseek",
+        "model": payload.get("model") or _model_name(),
+        "title_scene": title_scene,
+        "segments": segments,
+    }
+
+
+def _align_storyboard_segments(
+    script: str,
+    raw_segments: List[Dict[str, Any]],
+    gemini_text: str,
+    *,
+    prompt_offset: int = 0,
+) -> List[Dict[str, Any]]:
+    compact_source, source_positions = _compact_with_positions(script)
+    compact_gemini, gemini_positions = _compact_with_positions(gemini_text)
+    compact_parts = []
+    cleaned = []
+    exact_prompts = []
+    for item in raw_segments:
+        if not isinstance(item, dict):
+            continue
+        part = str(item.get("script_text") or "")
+        compact_part, _ = _compact_with_positions(part)
+        prompt = str(item.get("visual_prompt") or "").strip()
+        if compact_part and prompt:
+            compact_prompt, _ = _compact_with_positions(prompt)
+            prompt_start = compact_gemini.find(compact_prompt, prompt_offset)
+            if prompt_start < 0:
+                raise ValueError("DS 改写或翻译了 Gem 提示词，已拒绝保存")
+            prompt_end = prompt_start + len(compact_prompt)
+            exact_start = gemini_positions[prompt_start]
+            exact_end = gemini_positions[prompt_end - 1] + 1
+            compact_parts.append(compact_part)
+            cleaned.append(item)
+            exact_prompts.append(gemini_text[exact_start:exact_end])
+            prompt_offset = prompt_end
+    if not cleaned or "".join(compact_parts) != compact_source:
+        raise ValueError("DS 分镜未完整覆盖原始文案，已拒绝保存不完整结果")
+
+    aligned = []
+    offset = 0
+    for index, (item, compact_part, exact_prompt) in enumerate(
+        zip(cleaned, compact_parts, exact_prompts),
+        start=1,
+    ):
+        start_compact = offset
+        offset += len(compact_part)
+        start = source_positions[start_compact]
+        end = source_positions[offset - 1] + 1
+        if index < len(cleaned):
+            next_start = source_positions[offset]
+            end = next_start
+        else:
+            end = len(script)
+        aligned.append({
+            "sequence": index,
+            "scene_title": _trim(item.get("scene_title") or f"分镜 {index}", 120),
+            "script_text": script[start:end],
+            "visual_prompt": exact_prompt,
+            "estimated_seconds": _safe_seconds(item.get("estimated_seconds")),
+        })
+    if "".join(item["script_text"] for item in aligned) != script:
+        raise ValueError("分镜边界校验失败，已拒绝保存")
+    return aligned
+
+
+def _extract_exact_gemini_prompt(gemini_text: str, prompt: str, offset: int = 0) -> Tuple[str, int]:
+    compact_gemini, gemini_positions = _compact_with_positions(gemini_text)
+    compact_prompt, _ = _compact_with_positions(prompt)
+    prompt_start = compact_gemini.find(compact_prompt, max(0, int(offset or 0)))
+    if prompt_start < 0:
+        raise ValueError("DS 改写或翻译了 Gem 提示词，已拒绝保存")
+    prompt_end = prompt_start + len(compact_prompt)
+    exact_start = gemini_positions[prompt_start]
+    exact_end = gemini_positions[prompt_end - 1] + 1
+    return gemini_text[exact_start:exact_end], prompt_end
+
+
+def _compact_with_positions(text: str) -> Tuple[str, List[int]]:
+    chars = []
+    positions = []
+    for index, char in enumerate(str(text or "")):
+        if not char.isspace():
+            chars.append(char)
+            positions.append(index)
+    return "".join(chars), positions
+
+
+def _safe_seconds(value: Any) -> Optional[float]:
+    try:
+        return max(1.0, min(30.0, float(value)))
+    except (TypeError, ValueError):
+        return None
 
 
 def provider_status() -> Dict[str, Any]:
@@ -259,7 +431,8 @@ JSON 格式：
 """.strip()
 
 
-def _deepseek_json(system_prompt: str, user_prompt: str, *, temperature: float, timeout: int) -> Dict[str, Any]:
+def _deepseek_json(system_prompt: str, user_prompt: str, *, temperature: float, timeout: int, model: Optional[str] = None) -> Dict[str, Any]:
+    model_name = model or _model_name()
     response = requests.post(
         f"{_base_url().rstrip('/')}/v1/chat/completions",
         headers={
@@ -267,7 +440,7 @@ def _deepseek_json(system_prompt: str, user_prompt: str, *, temperature: float, 
             "Content-Type": "application/json",
         },
         json={
-            "model": _model_name(),
+            "model": model_name,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -280,7 +453,7 @@ def _deepseek_json(system_prompt: str, user_prompt: str, *, temperature: float, 
     content = response.json()["choices"][0]["message"]["content"]
     payload = _json_from_text(content)
     payload["provider"] = "deepseek"
-    payload["model"] = _model_name()
+    payload["model"] = model_name
     return payload
 
 
@@ -724,6 +897,10 @@ def _base_url() -> str:
 
 def _model_name() -> str:
     return os.getenv("REPORT_VISUAL_PLAN_MODEL") or os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-flash"
+
+
+def _storyboard_model_name() -> str:
+    return os.getenv("REPORT_VISUAL_PLAN_NORMALIZER_MODEL") or os.getenv("DEEPSEEK_FLASH_MODEL") or "deepseek-v4-flash"
 
 
 def _json_from_text(value: str) -> Dict[str, Any]:

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import time
@@ -6,9 +7,11 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
+from types import SimpleNamespace
 
 from flask import Blueprint, jsonify, request, send_file
-from sqlalchemy import and_, func, inspect as sqlalchemy_inspect, or_
+from sqlalchemy import and_, func, inspect as sqlalchemy_inspect, or_, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 from werkzeug.utils import secure_filename
@@ -29,6 +32,8 @@ from services.report_audio_workflow import (
     status_payload as workflow_status_payload,
     structured_result_quality_issue,
 )
+from services.report_visual_scheme import visual_scheme
+from services.runtime_guard import maybe_guarded_apply_async
 from services.bilibili_publish import (
     bilibili_upload_child_payload,
     bilibili_upload_children,
@@ -36,6 +41,22 @@ from services.bilibili_publish import (
     clean_upload_text as clean_bilibili_upload_text,
     create_bilibili_upload_task,
     enqueue_bilibili_upload_task,
+)
+from services.douyin_publish_jobs import (
+    FEATURE_NAME as DOUYIN_FEATURE_NAME,
+    cancel_douyin_publish_task,
+    create_douyin_publish_task,
+    douyin_publish_children,
+    douyin_publish_payload,
+    enqueue_douyin_publish_task,
+)
+from services.wechat_channels_publish_jobs import (
+    FEATURE_NAME as WECHAT_CHANNELS_FEATURE_NAME,
+    cancel_wechat_channels_publish_task,
+    create_wechat_channels_publish_task,
+    enqueue_wechat_channels_publish_task,
+    wechat_channels_publish_children,
+    wechat_channels_publish_payload,
 )
 from services.thumbnail_service import thumbnail_service
 from tasks.publisher import run_publication_pipeline
@@ -56,6 +77,7 @@ from utils.date_filters import submission_date_utc_range as _submission_date_utc
 
 report_audio_workflow_bp = Blueprint("report_audio_workflow", __name__, url_prefix="/api/report-audio-workflows")
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+logger = logging.getLogger(__name__)
 
 
 def _float_env(name, default):
@@ -79,10 +101,34 @@ def _escape_like(value):
 
 
 REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS = max(0.0, _float_env("REPORT_AUDIO_JOBS_CACHE_TTL", 15))
+REPORT_AUDIO_ASSET_STATS_CACHE_TTL_SECONDS = max(
+    0.0,
+    _float_env("REPORT_AUDIO_ASSET_STATS_CACHE_TTL", 10),
+)
+REPORT_AUDIO_MEDIA_PATH_CACHE_TTL_SECONDS = max(
+    0.0,
+    _float_env("REPORT_AUDIO_MEDIA_PATH_CACHE_TTL", 30),
+)
+REPORT_AUDIO_STALE_CACHE_TTL_SECONDS = max(
+    REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS,
+    _float_env("REPORT_AUDIO_STALE_CACHE_TTL", 300),
+)
+REPORT_AUDIO_READ_STATEMENT_TIMEOUT_MS = int(max(
+    500,
+    min(15000, _float_env("REPORT_AUDIO_READ_STATEMENT_TIMEOUT_MS", 5000)),
+))
 _REPORT_AUDIO_JOBS_CACHE = {}
 _REPORT_AUDIO_JOBS_CACHE_LOCK = Lock()
 _REPORT_AUDIO_JOB_DETAIL_CACHE = {}
 _REPORT_AUDIO_JOB_DETAIL_CACHE_LOCK = Lock()
+_REPORT_AUDIO_ASSET_STATS_CACHE = {}
+_REPORT_AUDIO_ASSET_STATS_CACHE_LOCK = Lock()
+_REPORT_AUDIO_ASSET_REFERENCE_CACHE = {}
+_REPORT_AUDIO_ASSET_REFERENCE_CACHE_LOCK = Lock()
+_REPORT_AUDIO_KEYFRAME_TASK_CACHE = {}
+_REPORT_AUDIO_KEYFRAME_TASK_CACHE_LOCK = Lock()
+_REPORT_AUDIO_MEDIA_PATH_CACHE = {}
+_REPORT_AUDIO_MEDIA_PATH_CACHE_LOCK = Lock()
 
 STATUS_MAP = {
     "pending": "queued",
@@ -95,6 +141,10 @@ SYSTEM_USER_ID = "system"
 TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 VERTICAL_BACKFILL_SOURCE = "report_audio_workflow_vertical_backfill"
 BILIBILI_UPLOAD_SOURCE = f"{FEATURE_NAME}:bilibili_upload"
+DOUYIN_UPLOAD_SOURCE = f"{FEATURE_NAME}:douyin_upload"
+WECHAT_CHANNELS_UPLOAD_SOURCE = f"{FEATURE_NAME}:wechat_channels_upload"
+VISUAL_VIDEO_WORKFLOW_FEATURE = "report_stick_figure_video_workflow"
+VISUAL_VIDEO_RENDER_FEATURE = "report_stick_figure_video_render"
 SCRIPT_MATERIAL_FEATURE_NAME = "report_script_material_workflow"
 MATERIAL_STATUS_FEATURES = (SCRIPT_MATERIAL_FEATURE_NAME, FEATURE_NAME, "report_audio_workflow")
 VERTICAL_VIDEO_SCHEME_DEFAULT = "scheme1"
@@ -121,10 +171,16 @@ OWNED_TASK_REFERENCE_COLUMNS = (
     PublicationTask.created_at,
     PublicationTask.updated_at,
     PublicationTask.completed_at,
+    PublicationTask.report_audio_pdf_attachment_id,
+    PublicationTask.report_audio_pdf_filename,
+    PublicationTask.report_audio_pdf_bytes,
     PublicationTask.report_audio_output_path,
     PublicationTask.report_audio_wav_path,
     PublicationTask.report_audio_video_path,
     PublicationTask.report_audio_cover_path,
+    PublicationTask.report_audio_vertical_cover_path,
+    PublicationTask.report_audio_podcast_cover_path,
+    PublicationTask.report_audio_bilibili_cover_path,
 )
 
 
@@ -147,7 +203,7 @@ def _clear_jobs_summary_cache(user_id=None):
             _REPORT_AUDIO_JOBS_CACHE.clear()
         else:
             for key in list(_REPORT_AUDIO_JOBS_CACHE):
-                if key[0] == user_id:
+                if user_id in str(key[0]).split("+"):
                     _REPORT_AUDIO_JOBS_CACHE.pop(key, None)
     with _REPORT_AUDIO_JOB_DETAIL_CACHE_LOCK:
         if not user_id:
@@ -156,6 +212,64 @@ def _clear_jobs_summary_cache(user_id=None):
             for key in list(_REPORT_AUDIO_JOB_DETAIL_CACHE):
                 if key[0] == user_id:
                     _REPORT_AUDIO_JOB_DETAIL_CACHE.pop(key, None)
+    with _REPORT_AUDIO_ASSET_STATS_CACHE_LOCK:
+        if not user_id:
+            _REPORT_AUDIO_ASSET_STATS_CACHE.clear()
+        else:
+            for key in list(_REPORT_AUDIO_ASSET_STATS_CACHE):
+                if key[0] == user_id:
+                    _REPORT_AUDIO_ASSET_STATS_CACHE.pop(key, None)
+    for cache, lock in (
+        (_REPORT_AUDIO_ASSET_REFERENCE_CACHE, _REPORT_AUDIO_ASSET_REFERENCE_CACHE_LOCK),
+        (_REPORT_AUDIO_KEYFRAME_TASK_CACHE, _REPORT_AUDIO_KEYFRAME_TASK_CACHE_LOCK),
+        (_REPORT_AUDIO_MEDIA_PATH_CACHE, _REPORT_AUDIO_MEDIA_PATH_CACHE_LOCK),
+    ):
+        with lock:
+            if not user_id:
+                cache.clear()
+            else:
+                for key in list(cache):
+                    if key[0] == user_id:
+                        cache.pop(key, None)
+
+
+def _set_hot_read_statement_timeout():
+    bind = db.session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    db.session.execute(text(
+        f"SET LOCAL statement_timeout = '{REPORT_AUDIO_READ_STATEMENT_TIMEOUT_MS}ms'"
+    ))
+
+
+def _reset_failed_db_session():
+    try:
+        db.session.rollback()
+    finally:
+        db.session.remove()
+
+
+def _stale_success_payload(payload):
+    stale = deepcopy(payload)
+    stale["stale"] = True
+    data = stale.get("data")
+    if isinstance(data, dict):
+        data["stale"] = True
+    return stale
+
+
+def _store_ttl_cache(cache, lock, key, payload, ttl_seconds):
+    now = time.time()
+    stale_until = now + REPORT_AUDIO_STALE_CACHE_TTL_SECONDS
+    with lock:
+        for cached_key, entry in list(cache.items()):
+            if float(entry.get("stale_until") or 0) <= now:
+                cache.pop(cached_key, None)
+        cache[key] = {
+            "expires_at": now + max(0.0, ttl_seconds),
+            "stale_until": stale_until,
+            "payload": deepcopy(payload),
+        }
 
 
 @report_audio_workflow_bp.route("/status", methods=["GET"])
@@ -291,17 +405,43 @@ def list_pdf_assets(_current_user):
 @require_login
 def pdf_asset_workflow_stats(current_user):
     raw_ids = request.args.get("ids") or ""
-    ids = [item.strip() for item in raw_ids.split(",") if item.strip()]
-    ids = ids[:50]
-    stats = _pdf_asset_workflow_stats(
-        ids,
-        user_id=str(getattr(current_user, "id", None)),
-    )
-    return jsonify({
+    ids = list(dict.fromkeys(
+        item.strip() for item in raw_ids.split(",") if item.strip()
+    ))[:50]
+    user_id = str(getattr(current_user, "id", None) or "")
+    cache_key = (user_id, tuple(ids))
+    cached = None
+    if REPORT_AUDIO_ASSET_STATS_CACHE_TTL_SECONDS > 0:
+        with _REPORT_AUDIO_ASSET_STATS_CACHE_LOCK:
+            cached = _REPORT_AUDIO_ASSET_STATS_CACHE.get(cache_key)
+            if cached and cached["expires_at"] > time.time():
+                return jsonify(deepcopy(cached["payload"]))
+
+    try:
+        _set_hot_read_statement_timeout()
+        stats = _pdf_asset_workflow_stats(ids, user_id=user_id)
+    except SQLAlchemyError as exc:
+        _reset_failed_db_session()
+        if cached and float(cached.get("stale_until") or 0) > time.time():
+            logger.warning("PDF asset workflow stats DB read failed; serving stale cache: %s", type(exc).__name__)
+            return jsonify(_stale_success_payload(cached["payload"]))
+        logger.error("PDF asset workflow stats DB read failed without fallback: %s", type(exc).__name__)
+        return jsonify({"success": False, "message": "数据库暂时繁忙，请稍后重试"}), 503
+
+    payload = {
         "success": True,
         "data": {"stats": stats},
         "stats": stats,
-    })
+    }
+    if REPORT_AUDIO_ASSET_STATS_CACHE_TTL_SECONDS > 0:
+        _store_ttl_cache(
+            _REPORT_AUDIO_ASSET_STATS_CACHE,
+            _REPORT_AUDIO_ASSET_STATS_CACHE_LOCK,
+            cache_key,
+            payload,
+            REPORT_AUDIO_ASSET_STATS_CACHE_TTL_SECONDS,
+        )
+    return jsonify(payload)
 
 
 @report_audio_workflow_bp.route("/pdf-assets/<asset_id>/preview", methods=["GET"])
@@ -462,57 +602,7 @@ def create_job(current_user):
     })
 
 
-@report_audio_workflow_bp.route("/jobs", methods=["GET"])
-@require_login
-def list_jobs(current_user):
-    page = _bounded_int(request.args.get("page"), 1, 1, 100000)
-    per_page = _bounded_int(request.args.get("per_page"), 20, 1, 100)
-    status = (request.args.get("status") or "").strip()
-    search = _normalize_search_query(
-        request.args.get("q") or request.args.get("search") or request.args.get("job_search")
-    )
-    submitted_on = str(request.args.get("submitted_on") or request.args.get("job_date") or "").strip()
-    submitted_range = _submission_date_utc_range(submitted_on)
-    if not submitted_range:
-        submitted_on = ""
-    include_detail = str(request.args.get("detail") or "").lower() in {"1", "true", "yes"}
-    user_id = str(getattr(current_user, "id", None))
-
-    visible_user_ids = _visible_user_ids(current_user)
-    cache_key = ("+".join(sorted(visible_user_ids)), page, per_page, status, search, submitted_on)
-    if not include_detail and REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS > 0:
-        with _REPORT_AUDIO_JOBS_CACHE_LOCK:
-            cached = _REPORT_AUDIO_JOBS_CACHE.get(cache_key)
-            if cached and cached["expires_at"] > time.time():
-                return jsonify(deepcopy(cached["payload"]))
-
-    query = PublicationTask.query.filter(
-        PublicationTask.feature == FEATURE_NAME,
-        PublicationTask.user_id.in_(visible_user_ids),
-    )
-    if status:
-        reverse_status = {value: key for key, value in STATUS_MAP.items()}
-        query = query.filter(PublicationTask.status == reverse_status.get(status, status))
-    if submitted_range:
-        submitted_start, submitted_end = submitted_range
-        query = query.filter(
-            PublicationTask.created_at >= submitted_start,
-            PublicationTask.created_at < submitted_end,
-        )
-    if search:
-        pattern = f"%{_escape_like(search)}%"
-        query = query.filter(or_(
-            PublicationTask.task_title.ilike(pattern, escape="\\"),
-            PublicationTask.report_audio_pdf_filename.ilike(pattern, escape="\\"),
-            PublicationTask.report_audio_pdf_topic_title.ilike(pattern, escape="\\"),
-            PublicationTask.report_audio_result_pdf_filename.ilike(pattern, escape="\\"),
-            PublicationTask.report_audio_result_pdf_topic_title.ilike(pattern, escape="\\"),
-            PublicationTask.report_audio_metadata_title.ilike(pattern, escape="\\"),
-            PublicationTask.report_audio_video_title.ilike(pattern, escape="\\"),
-            PublicationTask.report_audio_cover_title.ilike(pattern, escape="\\"),
-            PublicationTask.report_audio_structured_title.ilike(pattern, escape="\\"),
-        ))
-
+def _query_jobs_page(query, *, page, per_page, include_detail):
     ordered = query.order_by(PublicationTask.created_at.desc())
     if include_detail:
         pagination = ordered.paginate(
@@ -521,10 +611,17 @@ def list_jobs(current_user):
             error_out=False,
         )
         items = [_job_payload(task) for task in pagination.items]
-        total = pagination.total
-        pages = pagination.pages
-    else:
-        offset = (page - 1) * per_page
+        return items, pagination.total, pagination.pages
+
+    offset = (page - 1) * per_page
+    total = int(
+        query.order_by(None)
+        .with_entities(func.count(PublicationTask.id))
+        .scalar()
+        or 0
+    )
+    rows = []
+    if offset < total:
         rows = (
             ordered.with_entities(
                 PublicationTask.id.label("id"),
@@ -558,18 +655,83 @@ def list_jobs(current_user):
                 PublicationTask.report_audio_video_message.label("video_message"),
                 PublicationTask.report_audio_video_path.label("video_path"),
                 PublicationTask.report_audio_cover_path.label("cover_path"),
-                func.count(PublicationTask.id).over().label("total_count"),
             )
             .offset(offset)
             .limit(per_page)
             .all()
         )
-        total = int(rows[0].total_count or 0) if rows else 0
-        if not rows and offset:
-            total = query.with_entities(PublicationTask.id).order_by(None).count()
-        child_summaries = _child_summaries_for_parent_ids([row.id for row in rows])
-        items = [_job_summary_payload(row, child_summaries.get(row.id)) for row in rows]
-        pages = ((total + per_page - 1) // per_page) if total else 0
+    child_summaries = _child_summaries_for_parent_ids([row.id for row in rows])
+    items = [_job_summary_payload(row, child_summaries.get(row.id)) for row in rows]
+    pages = ((total + per_page - 1) // per_page) if total else 0
+    return items, total, pages
+
+
+@report_audio_workflow_bp.route("/jobs", methods=["GET"])
+@require_login
+def list_jobs(current_user):
+    page = _bounded_int(request.args.get("page"), 1, 1, 100000)
+    per_page = _bounded_int(request.args.get("per_page"), 20, 1, 100)
+    status = (request.args.get("status") or "").strip()
+    search = _normalize_search_query(
+        request.args.get("q") or request.args.get("search") or request.args.get("job_search")
+    )
+    submitted_on = str(request.args.get("submitted_on") or request.args.get("job_date") or "").strip()
+    submitted_range = _submission_date_utc_range(submitted_on)
+    if not submitted_range:
+        submitted_on = ""
+    include_detail = str(request.args.get("detail") or "").lower() in {"1", "true", "yes"}
+
+    visible_user_ids = _visible_user_ids(current_user)
+    cache_key = ("+".join(sorted(visible_user_ids)), page, per_page, status, search, submitted_on)
+    cached = None
+    if not include_detail and REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS > 0:
+        with _REPORT_AUDIO_JOBS_CACHE_LOCK:
+            cached = _REPORT_AUDIO_JOBS_CACHE.get(cache_key)
+            if cached and cached["expires_at"] > time.time():
+                return jsonify(deepcopy(cached["payload"]))
+
+    query = PublicationTask.query.filter(
+        PublicationTask.feature == FEATURE_NAME,
+        PublicationTask.user_id.in_(visible_user_ids),
+    )
+    if status:
+        reverse_status = {value: key for key, value in STATUS_MAP.items()}
+        query = query.filter(PublicationTask.status == reverse_status.get(status, status))
+    if submitted_range:
+        submitted_start, submitted_end = submitted_range
+        query = query.filter(
+            PublicationTask.created_at >= submitted_start,
+            PublicationTask.created_at < submitted_end,
+        )
+    if search:
+        pattern = f"%{_escape_like(search)}%"
+        query = query.filter(or_(
+            PublicationTask.task_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_pdf_filename.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_pdf_topic_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_result_pdf_filename.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_result_pdf_topic_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_metadata_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_video_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_cover_title.ilike(pattern, escape="\\"),
+            PublicationTask.report_audio_structured_title.ilike(pattern, escape="\\"),
+        ))
+
+    try:
+        _set_hot_read_statement_timeout()
+        items, total, pages = _query_jobs_page(
+            query,
+            page=page,
+            per_page=per_page,
+            include_detail=include_detail,
+        )
+    except SQLAlchemyError as exc:
+        _reset_failed_db_session()
+        if cached and float(cached.get("stale_until") or 0) > time.time():
+            logger.warning("Report audio jobs DB read failed; serving stale cache: %s", type(exc).__name__)
+            return jsonify(_stale_success_payload(cached["payload"]))
+        logger.error("Report audio jobs DB read failed without fallback: %s", type(exc).__name__)
+        return jsonify({"success": False, "message": "数据库暂时繁忙，请稍后重试"}), 503
     payload = {
         "success": True,
         "data": {
@@ -586,11 +748,13 @@ def list_jobs(current_user):
         "items": items,
     }
     if not include_detail and REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS > 0:
-        with _REPORT_AUDIO_JOBS_CACHE_LOCK:
-            _REPORT_AUDIO_JOBS_CACHE[cache_key] = {
-                "expires_at": time.time() + REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS,
-                "payload": deepcopy(payload),
-            }
+        _store_ttl_cache(
+            _REPORT_AUDIO_JOBS_CACHE,
+            _REPORT_AUDIO_JOBS_CACHE_LOCK,
+            cache_key,
+            payload,
+            REPORT_AUDIO_JOBS_CACHE_TTL_SECONDS,
+        )
     return jsonify(payload)
 
 
@@ -607,12 +771,28 @@ def get_job(current_user, job_id):
         cached = _REPORT_AUDIO_JOB_DETAIL_CACHE.get(cache_key)
         if cached and cached.get("version") == version:
             payload = deepcopy(cached["payload"])
+            # Bilibili uploads are independent child tasks. Their projection
+            # rows can be created or completed after the parent report task is
+            # already done, so the parent's detail-cache version does not
+            # change. Always overlay this small, structured query on a cache
+            # hit to avoid hiding newly submitted upload records until the
+            # backend process or cache is manually refreshed.
+            payload["bilibili_uploads"] = bilibili_upload_children(
+                reference.id,
+                parent_feature=FEATURE_NAME,
+                source_label=BILIBILI_UPLOAD_SOURCE,
+            )
+            payload["visual_videos"] = _linked_visual_video_payloads(current_user, reference)
             return jsonify({"success": True, **payload, "data": payload})
 
     task = _get_owned_task(current_user, job_id)
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    payload = _job_payload(task, include_raw=True)
+    payload = _job_payload(
+        task,
+        include_raw=True,
+        visual_videos=_linked_visual_video_payloads(current_user, task),
+    )
     with _REPORT_AUDIO_JOB_DETAIL_CACHE_LOCK:
         _REPORT_AUDIO_JOB_DETAIL_CACHE[cache_key] = {
             "version": version,
@@ -628,6 +808,7 @@ def get_job_status(current_user, job_id):
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
     payload = _job_status_payload(task)
+    payload["visual_videos"] = _linked_visual_video_payloads(current_user, task)
     return jsonify({"success": True, **payload, "data": payload})
 
 
@@ -683,13 +864,41 @@ def _send_previewable_file(path, mimetype, download_name):
     return response
 
 
+def _cached_owned_media_path(current_user, job_id, asset_key, loader, resolver):
+    user_id = str(getattr(current_user, "id", None) or "")
+    cache_key = (user_id, str(job_id), str(asset_key))
+    now = time.time()
+    with _REPORT_AUDIO_MEDIA_PATH_CACHE_LOCK:
+        cached = _REPORT_AUDIO_MEDIA_PATH_CACHE.get(cache_key)
+        if cached and float(cached.get("expires_at") or 0) > now:
+            path = cached.get("path")
+            if path and os.path.exists(path):
+                return SimpleNamespace(id=str(job_id)), path
+            _REPORT_AUDIO_MEDIA_PATH_CACHE.pop(cache_key, None)
+        task = loader(current_user, job_id)
+        if not task:
+            return None, None
+        path = resolver(task)
+        if path and os.path.exists(path):
+            _REPORT_AUDIO_MEDIA_PATH_CACHE[cache_key] = {
+                "expires_at": now + REPORT_AUDIO_MEDIA_PATH_CACHE_TTL_SECONDS,
+                "path": path,
+            }
+        return task, path
+
+
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-audio", methods=["GET"])
 @require_login
 def download_audio(current_user, job_id):
-    task = _get_owned_task_reference(current_user, job_id)
+    task, wav_path = _cached_owned_media_path(
+        current_user,
+        job_id,
+        "audio",
+        _get_owned_asset_reference,
+        lambda item: item.report_audio_wav_path,
+    )
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    wav_path = task.report_audio_wav_path
     if not wav_path or not os.path.exists(wav_path):
         return jsonify({"success": False, "message": "WAV 文件不存在"}), 404
     return _send_previewable_file(wav_path, "audio/wav", f"{task.id}.wav")
@@ -698,10 +907,15 @@ def download_audio(current_user, job_id):
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-result", methods=["GET"])
 @require_login
 def download_result(current_user, job_id):
-    task = _get_owned_task_reference(current_user, job_id)
+    task, output_path = _cached_owned_media_path(
+        current_user,
+        job_id,
+        "result",
+        _get_owned_asset_reference,
+        lambda item: item.report_audio_output_path,
+    )
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    output_path = task.report_audio_output_path
     if not output_path or not os.path.exists(output_path):
         return jsonify({"success": False, "message": "结果文件不存在"}), 404
     return send_file(output_path, mimetype="application/json", as_attachment=True, download_name=f"{task.id}.json")
@@ -710,10 +924,15 @@ def download_result(current_user, job_id):
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-video", methods=["GET"])
 @require_login
 def download_video(current_user, job_id):
-    task = _get_owned_task_reference(current_user, job_id)
+    task, video_path = _cached_owned_media_path(
+        current_user,
+        job_id,
+        "landscape_video",
+        _get_owned_asset_reference,
+        _landscape_video_path_for_task,
+    )
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    video_path = _landscape_video_path_for_task(task)
     if not video_path or not os.path.exists(video_path):
         return jsonify({"success": False, "message": "视频文件不存在"}), 404
     return _send_previewable_file(video_path, "video/mp4", f"{task.id}.mp4")
@@ -722,28 +941,45 @@ def download_video(current_user, job_id):
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-vertical-video", methods=["GET"])
 @require_login
 def download_vertical_video(current_user, job_id):
-    task = _get_owned_task_reference(current_user, job_id)
+    preview = _truthy(request.args.get("preview"), False)
+    requested_scheme = request.args.get("scheme")
+
+    def resolve_vertical_video(task):
+        if preview:
+            if requested_scheme:
+                return _vertical_video_path_for_scheme(task.id, requested_scheme, preview=True)
+            child = _latest_vertical_video_child(task.id, preview=True)
+            return _vertical_video_path_from_child(child) if child else None
+        return _vertical_video_path_for_task(task, scheme=requested_scheme)
+
+    task, video_path = _cached_owned_media_path(
+        current_user,
+        job_id,
+        f"vertical_video:{int(preview)}:{requested_scheme or ''}",
+        _get_owned_asset_reference,
+        resolve_vertical_video,
+    )
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    preview = _truthy(request.args.get("preview"), False)
-    if preview:
-        child = _latest_vertical_video_child(task.id, preview=True)
-        video_path = _vertical_video_path_from_child(child) if child else None
-    else:
-        video_path = _vertical_video_path_for_task(task)
     if not video_path or not os.path.exists(video_path):
         return jsonify({"success": False, "message": "竖屏视频文件不存在"}), 404
-    suffix = "vertical-preview" if preview else "vertical"
+    scheme_suffix = f"-{_normalize_vertical_video_scheme(requested_scheme)}" if requested_scheme else ""
+    suffix = ("vertical-preview" if preview else "vertical") + scheme_suffix
     return _send_previewable_file(video_path, "video/mp4", f"{task.id}-{suffix}.mp4")
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-vertical-cover", methods=["GET"])
 @require_login
 def download_vertical_cover(current_user, job_id):
-    task = _get_owned_task_reference(current_user, job_id)
+    task, cover_path = _cached_owned_media_path(
+        current_user,
+        job_id,
+        "vertical_cover",
+        _get_owned_media_task,
+        _vertical_cover_path_for_task,
+    )
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    cover_path = _vertical_cover_path_for_task(task)
     if not cover_path or not os.path.exists(cover_path):
         return jsonify({"success": False, "message": "竖版封皮文件不存在"}), 404
     return _send_previewable_file(cover_path, "image/jpeg", f"{task.id}-vertical-cover.jpg")
@@ -752,10 +988,15 @@ def download_vertical_cover(current_user, job_id):
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-podcast-cover", methods=["GET"])
 @require_login
 def download_podcast_cover(current_user, job_id):
-    task = _get_owned_task_reference(current_user, job_id)
+    task, cover_path = _cached_owned_media_path(
+        current_user,
+        job_id,
+        "podcast_cover",
+        _get_owned_media_task,
+        _podcast_cover_path_for_task,
+    )
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    cover_path = _podcast_cover_path_for_task(task)
     if not cover_path or not os.path.exists(cover_path):
         return jsonify({"success": False, "message": "播客封皮文件不存在"}), 404
     return _send_previewable_file(cover_path, "image/jpeg", f"{task.id}-podcast-cover.jpg")
@@ -764,10 +1005,15 @@ def download_podcast_cover(current_user, job_id):
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-bilibili-cover", methods=["GET"])
 @require_login
 def download_bilibili_cover(current_user, job_id):
-    task = _get_owned_task(current_user, job_id)
+    task, cover_path = _cached_owned_media_path(
+        current_user,
+        job_id,
+        "bilibili_cover",
+        _get_owned_media_task,
+        _bilibili_cover_path_for_task,
+    )
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    cover_path = _bilibili_cover_path_for_task(task)
     if not cover_path or not os.path.exists(cover_path):
         return jsonify({"success": False, "message": "B站封皮文件不存在"}), 404
     return _send_previewable_file(cover_path, "image/jpeg", f"{task.id}-bilibili-cover.jpg")
@@ -776,10 +1022,15 @@ def download_bilibili_cover(current_user, job_id):
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-cover", methods=["GET"])
 @require_login
 def download_cover(current_user, job_id):
-    task = _get_owned_task_reference(current_user, job_id)
+    task, cover_path = _cached_owned_media_path(
+        current_user,
+        job_id,
+        "cover",
+        _get_owned_asset_reference,
+        lambda item: item.report_audio_cover_path,
+    )
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    cover_path = task.report_audio_cover_path
     if not cover_path or not os.path.exists(cover_path):
         return jsonify({"success": False, "message": "封面文件不存在"}), 404
     return _send_previewable_file(cover_path, "image/jpeg", f"{task.id}.jpg")
@@ -788,14 +1039,23 @@ def download_cover(current_user, job_id):
 @report_audio_workflow_bp.route("/jobs/<job_id>/download-keyframe/<key>", methods=["GET"])
 @require_login
 def download_keyframe(current_user, job_id, key):
-    task = _get_owned_task(current_user, job_id)
+    safe_key = re.sub(r"[^a-zA-Z0-9_-]", "", str(key or ""))[:80]
+
+    def resolve_keyframe(task):
+        video = (task.result or {}).get("video") or {}
+        keyframes = video.get("keyframes") if isinstance(video.get("keyframes"), dict) else {}
+        artifact = keyframes.get(safe_key) if isinstance(keyframes.get(safe_key), dict) else {}
+        return artifact.get("path")
+
+    task, path = _cached_owned_media_path(
+        current_user,
+        job_id,
+        f"keyframe:{safe_key}",
+        _get_owned_keyframe_task,
+        resolve_keyframe,
+    )
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    safe_key = re.sub(r"[^a-zA-Z0-9_-]", "", str(key or ""))[:80]
-    video = (task.result or {}).get("video") or {}
-    keyframes = video.get("keyframes") if isinstance(video.get("keyframes"), dict) else {}
-    artifact = keyframes.get(safe_key) if isinstance(keyframes.get(safe_key), dict) else {}
-    path = artifact.get("path")
     if not path or not os.path.exists(path):
         return jsonify({"success": False, "message": "关键帧文件不存在"}), 404
     return _send_previewable_file(path, "image/jpeg", f"{task.id}-{safe_key}.jpg")
@@ -811,10 +1071,18 @@ def submit_bilibili_upload(current_user, job_id):
     current_user_id = getattr(current_user, "id", None)
     data = _request_payload()
     video_key = str(data.get("video_key") or data.get("video") or "landscape").strip().lower()
-    if video_key not in {"landscape", "vertical"}:
-        return jsonify({"success": False, "message": "video_key 只能是 landscape 或 vertical"}), 400
+    visual_workflow_id = str(data.get("visual_workflow_id") or "").strip()
+    if video_key.startswith("visual:"):
+        if not visual_workflow_id:
+            return jsonify({"success": False, "message": "视觉方案视频缺少工作流 ID"}), 400
+        video_path = _linked_visual_video_path(current_user, task, visual_workflow_id)
+        if not video_path:
+            return jsonify({"success": False, "message": "视觉方案视频不存在、尚未完成或不属于同一 PDF"}), 400
+    elif video_key in {"landscape", "vertical"}:
+        video_path = _report_bilibili_video_path(task, video_key)
+    else:
+        return jsonify({"success": False, "message": "video_key 只能是 landscape、vertical 或已归集的视觉方案视频"}), 400
 
-    video_path = _report_bilibili_video_path(task, video_key)
     if not _path_exists(video_path):
         return jsonify({"success": False, "message": "当前任务还没有可上传的视频文件"}), 400
 
@@ -838,7 +1106,10 @@ def submit_bilibili_upload(current_user, job_id):
             cover_path=cover_path,
             cover_key=resolved_cover_key,
             default_tags=["财经", "音频", "研报解读"],
-            metadata_extra={"title_source": "manual" if manual_title else "report_audio_default"},
+            metadata_extra={
+                "title_source": "manual" if manual_title else "report_audio_default",
+                "visual_workflow_id": visual_workflow_id or None,
+            },
         )
         child_id = child.id
         enqueue_bilibili_upload_task(child)
@@ -899,6 +1170,149 @@ def cancel_bilibili_upload(current_user, job_id, upload_task_id):
     }), (200 if ok else 409)
 
 
+@report_audio_workflow_bp.route("/jobs/<job_id>/douyin-uploads", methods=["GET"])
+@require_login
+def get_douyin_uploads(current_user, job_id):
+    task = _get_owned_task_reference(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    items = douyin_publish_children(task.id, parent_feature=FEATURE_NAME)
+    return jsonify({"success": True, "data": {"items": items}, "items": items})
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/douyin-upload", methods=["POST"])
+@require_login
+def submit_douyin_upload(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    data = _request_payload()
+    video_key = str(data.get("video_key") or "vertical").strip().lower()
+    if video_key not in {"landscape", "vertical"}:
+        return jsonify({"success": False, "message": "video_key 只能是 landscape 或 vertical"}), 400
+    video_path = _report_bilibili_video_path(task, video_key)
+    if not _path_exists(video_path):
+        return jsonify({"success": False, "message": "当前任务还没有可上传的视频文件"}), 400
+    submit = _truthy(data.get("submit"), default=False)
+    if submit and data.get("publish_confirmation") != "PUBLISH":
+        return jsonify({"success": False, "message": "确认发布校验失败，请重新勾选"}), 400
+    title = clean_bilibili_upload_text(data.get("title"), max_length=100) or _report_bilibili_default_title(task, video_key)[:100]
+    try:
+        child = create_douyin_publish_task(
+            current_user=current_user,
+            parent_task=task,
+            parent_feature=FEATURE_NAME,
+            source_label=DOUYIN_UPLOAD_SOURCE,
+            video_path=video_path,
+            video_key=video_key,
+            title=title,
+            description=data.get("description") or data.get("desc") or "",
+            tags=data.get("tags") or ["财经", "音频", "研报解读"],
+            credential_id=data.get("credential_id"),
+            visibility=data.get("visibility") or "private",
+            declaration=data.get("declaration") or "none",
+            submit=submit,
+        )
+        enqueue_douyin_publish_task(child)
+        item = douyin_publish_payload(child)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 502
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
+    return jsonify({
+        "success": True,
+        "message": "抖音上传任务已入队；发布成功以作品管理页回查为准",
+        "data": {"upload_task": item},
+        "upload_task": item,
+    })
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/douyin-upload/<upload_task_id>/cancel", methods=["POST"])
+@require_login
+def cancel_douyin_upload(current_user, job_id, upload_task_id):
+    parent = _get_owned_task_reference(current_user, job_id)
+    if not parent:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    child = PublicationTask.query.filter(
+        PublicationTask.id == str(upload_task_id),
+        PublicationTask.feature == DOUYIN_FEATURE_NAME,
+        PublicationTask.parent_task_id == str(parent.id),
+        PublicationTask.parent_feature == FEATURE_NAME,
+    ).one_or_none()
+    if not child:
+        return jsonify({"success": False, "message": "抖音上传任务不存在"}), 404
+    ok, message = cancel_douyin_publish_task(child)
+    item = douyin_publish_payload(child)
+    return jsonify({"success": ok, "message": message, "data": {"upload_task": item}, "upload_task": item}), (200 if ok else 409)
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/wechat-channels-uploads", methods=["GET"])
+@require_login
+def get_wechat_channels_uploads(current_user, job_id):
+    task = _get_owned_task_reference(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    items = wechat_channels_publish_children(task.id, parent_feature=FEATURE_NAME)
+    return jsonify({"success": True, "data": {"items": items}, "items": items})
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/wechat-channels-upload", methods=["POST"])
+@require_login
+def submit_wechat_channels_upload(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    data = _request_payload()
+    video_key = str(data.get("video_key") or "vertical").strip().lower()
+    if video_key not in {"landscape", "vertical"}:
+        return jsonify({"success": False, "message": "video_key 只能是 landscape 或 vertical"}), 400
+    video_path = _report_bilibili_video_path(task, video_key)
+    if not _path_exists(video_path):
+        return jsonify({"success": False, "message": "当前任务还没有可上传的视频文件"}), 400
+    submit = _truthy(data.get("submit"), default=False)
+    if submit and data.get("publish_confirmation") != "PUBLISH":
+        return jsonify({"success": False, "message": "确认发布校验失败，请重新勾选"}), 400
+    title = clean_bilibili_upload_text(data.get("title"), max_length=100) or _report_bilibili_default_title(task, video_key)[:100]
+    try:
+        child = create_wechat_channels_publish_task(
+            current_user=current_user, parent_task=task, parent_feature=FEATURE_NAME,
+            source_label=WECHAT_CHANNELS_UPLOAD_SOURCE, video_path=video_path,
+            video_key=video_key, title=title,
+            description=data.get("description") or data.get("desc") or "",
+            tags=data.get("tags") or ["财经", "音频", "研报解读"],
+            credential_id=data.get("credential_id"),
+            visibility=data.get("visibility") or "private", submit=submit,
+        )
+        enqueue_wechat_channels_publish_task(child)
+        item = wechat_channels_publish_payload(child)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 502
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
+    return jsonify({"success": True, "message": "已投递视频号上传任务", "data": {"upload_task": item}, "upload_task": item})
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/wechat-channels-upload/<upload_task_id>/cancel", methods=["POST"])
+@require_login
+def cancel_wechat_channels_upload(current_user, job_id, upload_task_id):
+    parent = _get_owned_task_reference(current_user, job_id)
+    if not parent:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    child = PublicationTask.query.filter(
+        PublicationTask.id == str(upload_task_id),
+        PublicationTask.feature == WECHAT_CHANNELS_FEATURE_NAME,
+        PublicationTask.parent_task_id == str(parent.id),
+        PublicationTask.parent_feature == FEATURE_NAME,
+    ).one_or_none()
+    if not child:
+        return jsonify({"success": False, "message": "视频号上传任务不存在"}), 404
+    ok, message = cancel_wechat_channels_publish_task(child)
+    item = wechat_channels_publish_payload(child)
+    return jsonify({"success": ok, "message": message, "data": {"upload_task": item}, "upload_task": item}), (200 if ok else 409)
+
+
 def _merge_cover_response_payload(payload, cover_type, cover):
     """Merge a committed cover result without touching an expired ORM object."""
     merged = dict(payload or {})
@@ -909,7 +1323,24 @@ def _merge_cover_response_payload(payload, cover_type, cover):
         "title": cover.get("title"),
         "subtitle": cover.get("subtitle"),
         "download_url": cover.get("download_url"),
+        "updated_at": cover.get("updated_at"),
     }
+    if cover_type == "vertical_background":
+        keyframe_key = str(cover.get("keyframe_key") or "vertical_background")
+        keyframes = dict(video.get("keyframes") or {})
+        keyframes[keyframe_key] = {
+            **cover_payload,
+            "label": cover.get("label") or "竖屏背景关键帧",
+            "ratio": "9:16",
+            "scheme": cover.get("scheme"),
+        }
+        video["keyframes"] = keyframes
+        video["vertical_background"] = cover_payload
+        video["vertical_background_title"] = cover.get("title")
+        video["vertical_background_subtitle"] = cover.get("subtitle")
+        video["vertical_background_regenerated_at"] = cover.get("updated_at")
+        merged["video"] = video
+        return merged
     field_map = {
         "landscape": ("cover", "download_cover_url"),
         "vertical": ("vertical_cover", "download_vertical_cover_url"),
@@ -918,6 +1349,13 @@ def _merge_cover_response_payload(payload, cover_type, cover):
     }
     video_key, download_key = field_map[cover_type]
     video[video_key] = cover_payload
+    regenerated_key = {
+        "landscape": "cover_regenerated_at",
+        "vertical": "vertical_cover_regenerated_at",
+        "podcast": "podcast_cover_regenerated_at",
+        "bilibili": "bilibili_cover_regenerated_at",
+    }[cover_type]
+    video[regenerated_key] = cover.get("updated_at")
     merged["video"] = video
     merged[download_key] = cover.get("download_url")
     if cover_type == "landscape":
@@ -970,11 +1408,12 @@ def regenerate_cover_asset(current_user, job_id):
     cover_type = str(data.get("cover_type") or "").strip().lower()
     title = _normalize_cover_text(data.get("title") or data.get("main_title"), 160)
     subtitle = _normalize_cover_text(data.get("subtitle") or data.get("sub_title"), 220)
-    if cover_type not in {"landscape", "vertical", "podcast", "bilibili"}:
+    if cover_type not in {"landscape", "vertical", "podcast", "bilibili", "vertical_background"}:
         return jsonify({"success": False, "message": "不支持的封皮类型"}), 400
     if not title:
         return jsonify({"success": False, "message": "请填写封皮标题"}), 400
-    title = _cover_title_with_institution(task, title)
+    if cover_type != "vertical_background":
+        title = _cover_title_with_institution(task, title)
     payload = _job_payload(task)
 
     try:
@@ -984,6 +1423,13 @@ def regenerate_cover_asset(current_user, job_id):
             cover = _generate_vertical_cover_for_task(task, title=title, subtitle=subtitle)
         elif cover_type == "podcast":
             cover = _generate_podcast_cover_for_task(task, title=title, subtitle=subtitle)
+        elif cover_type == "vertical_background":
+            cover = _generate_vertical_background_for_task(
+                task,
+                scheme=data.get("scheme"),
+                title=title,
+                subtitle=subtitle,
+            )
         else:
             cover = _generate_bilibili_cover_for_task(task, title=title, subtitle=subtitle)
     except ValueError as exc:
@@ -1106,11 +1552,18 @@ def generate_vertical_video(current_user, job_id):
     data = _request_payload()
     has_explicit_options = any(
         key in data
-        for key in ("scheme", "vertical_scheme", "vertical_video_scheme", "preview_seconds", "duration_seconds", "force", "include_landscape")
+        for key in ("scheme", "vertical_scheme", "vertical_video_scheme", "vertical_video_schemes", "preview_seconds", "duration_seconds", "force", "include_landscape")
     )
-    scheme = _normalize_vertical_video_scheme(
-        data.get("scheme") or data.get("vertical_scheme") or data.get("vertical_video_scheme") or _task_vertical_video_scheme(task)
+    explicit_schemes = "vertical_video_schemes" in data
+    schemes = (
+        _normalize_vertical_video_schemes(data.get("vertical_video_schemes"))
+        if explicit_schemes
+        else _normalize_vertical_video_schemes(
+            data.get("scheme") or data.get("vertical_scheme") or data.get("vertical_video_scheme"),
+            _task_vertical_video_scheme(task),
+        )
     )
+    scheme = _primary_vertical_video_scheme(schemes) if schemes else _normalize_vertical_video_scheme(_task_vertical_video_scheme(task))
     preview_seconds = _bounded_int(
         data.get("preview_seconds") or data.get("duration_seconds") or 0,
         0,
@@ -1119,6 +1572,8 @@ def generate_vertical_video(current_user, job_id):
     )
     force = _truthy(data.get("force"), False)
     include_landscape = _truthy(data.get("include_landscape"), False)
+    if not include_landscape and not schemes:
+        return jsonify({"success": False, "message": "请至少选择一个成片版本"}), 400
     if include_landscape and preview_seconds > 0:
         return jsonify({"success": False, "message": "横屏成片不能使用竖屏预览时长"}), 400
 
@@ -1149,6 +1604,7 @@ def generate_vertical_video(current_user, job_id):
         child = _create_vertical_video_backfill_task(
             task,
             scheme=scheme,
+            schemes=schemes,
             preview_seconds=preview_seconds,
             include_landscape=include_landscape,
         )
@@ -1166,6 +1622,7 @@ def generate_vertical_video(current_user, job_id):
         "progress": 0,
         "vertical_video_scheme": scheme,
         "vertical_video_scheme_label": _vertical_video_scheme_label(scheme),
+        "vertical_video_schemes": schemes,
         "preview_seconds": preview_seconds,
         "is_preview": preview_seconds > 0,
     }
@@ -1176,10 +1633,13 @@ def generate_vertical_video(current_user, job_id):
         "children": {**(payload.get("children") or {}), child_key: child_summary},
     }
     preview_label = f"{preview_seconds}s 预览" if preview_seconds > 0 else "完整视频"
-    output_label = "横屏 + 竖屏 MP4" if include_landscape else "竖屏 MP4"
+    selected_labels = (["横屏"] if include_landscape else []) + [
+        f"{_vertical_video_scheme_label(item)}竖屏" for item in schemes
+    ]
+    output_label = " + ".join(selected_labels)
     return jsonify({
         "success": True,
-        "message": f"{output_label} 已提交生成（{_vertical_video_scheme_label(scheme)} · {preview_label}）",
+        "message": f"{output_label}已提交生成（{preview_label}）",
         "vertical_video_task": child_summary,
         **payload,
         "data": payload,
@@ -1227,39 +1687,81 @@ def retry_job(current_user, job_id):
         return jsonify({"success": False, "message": "任务已完成，无需续跑", **payload, "data": payload}), 400
 
     result = dict(task.result or {})
+    retry_requested_at = datetime.utcnow().isoformat() + "Z"
     logs = list(result.get("logs") or [])
     logs.append({
         "step": "retry_requested",
         "message": "用户请求从失败处续跑编排",
         "progress": task.progress or 0,
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": retry_requested_at,
     })
     result["logs"] = logs[-120:]
-    result["retry_requested_at"] = datetime.utcnow().isoformat() + "Z"
+    result["retry_requested_at"] = retry_requested_at
     result["error"] = None
+    result.pop("error_type", None)
+    result.pop("completed_at", None)
+    queue_repair = result.pop("queue_repair", None)
+    if isinstance(queue_repair, dict):
+        queue_repair_history = list(result.get("queue_repair_history") or [])
+        queue_repair_history.append({
+            **queue_repair,
+            "archived_at": retry_requested_at,
+            "archive_reason": "manual_retry",
+        })
+        result["queue_repair_history"] = queue_repair_history[-8:]
     task.status = "pending"
     task.current_step = "queued"
     task.error_message = None
     task.completed_at = None
     task.result = result
     flag_modified(task, "result")
+    task_key = str(task.id)
+    # Preserve the rich response contract while the task payload is already in
+    # memory. Commits below expire ORM attributes and must not trigger another
+    # params/result point read merely to serialize the enqueue response.
+    payload = _job_payload(task)
     db.session.commit()
 
     try:
-        celery_task = process_report_audio_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+        submit_result = maybe_guarded_apply_async(
+            process_report_audio_workflow_job,
+            args=[task_key],
+            queue=QUEUE_NAME,
+            feature=FEATURE_NAME,
+            task_id=task_key,
+            retry=False,
+        )
+        celery_task = submit_result["async_result"]
     except Exception as exc:
-        task.status = "failed"
-        task.current_step = "failed"
-        task.error_message = f"续跑任务入队失败: {exc}"
-        task.completed_at = datetime.utcnow()
+        error_message = f"续跑任务入队失败: {exc}"
+        PublicationTask.query.filter(PublicationTask.id == task_key).update(
+            {
+                PublicationTask.status: "failed",
+                PublicationTask.current_step: "failed",
+                PublicationTask.error_message: error_message,
+                PublicationTask.completed_at: datetime.utcnow(),
+                PublicationTask.updated_at: datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
         db.session.commit()
         _clear_jobs_summary_cache(getattr(current_user, "id", None))
-        return jsonify({"success": False, "message": task.error_message}), 502
+        return jsonify({"success": False, "message": error_message}), 502
 
-    task.celery_task_id = celery_task.id
+    PublicationTask.query.filter(PublicationTask.id == task_key).update(
+        {
+            PublicationTask.celery_task_id: celery_task.id,
+            PublicationTask.updated_at: datetime.utcnow(),
+        },
+        synchronize_session=False,
+    )
     db.session.commit()
     _clear_jobs_summary_cache(getattr(current_user, "id", None))
-    payload = _job_payload(task)
+    deferred_state = submit_result.get("deferred_state")
+    if isinstance(deferred_state, dict) and deferred_state.get("current_step"):
+        payload["step"] = deferred_state["current_step"]
+    payload["deferred"] = bool(submit_result.get("deferred"))
+    payload["admission"] = submit_result.get("admission")
     return jsonify({"success": True, "message": "任务已从失败处续跑", **payload, "data": payload})
 
 
@@ -1278,6 +1780,9 @@ def _get_owned_task(current_user, job_id):
             PublicationTask.user_id,
             PublicationTask.created_at,
             PublicationTask.completed_at,
+            PublicationTask.report_audio_pdf_attachment_id,
+            PublicationTask.report_audio_pdf_filename,
+            PublicationTask.report_audio_pdf_bytes,
         )
     ).filter(PublicationTask.id == str(job_id)).one_or_none()
     if not task or (task.feature or (task.params or {}).get("feature")) != FEATURE_NAME:
@@ -1289,20 +1794,84 @@ def _get_owned_task(current_user, job_id):
 
 
 def _get_owned_task_reference(current_user, job_id):
-    task = (
-        PublicationTask.query
-        .options(load_only(*OWNED_TASK_REFERENCE_COLUMNS))
-        .filter(PublicationTask.id == str(job_id))
-        .one_or_none()
-    )
-    if not task:
-        return None
-    if task.feature != FEATURE_NAME or not task.user_id:
-        # Legacy rows were backfilled, but preserve access for an incomplete old row.
-        return _get_owned_task(current_user, job_id)
-    if str(task.user_id).strip() not in _visible_user_ids(current_user):
-        return None
-    return task
+    # A completed detail page opens several platform/asset subrequests at once.
+    # Share their immutable ownership snapshot while active status polling stays fresh.
+    return _get_owned_asset_reference(current_user, job_id, terminal_only=True)
+
+
+def _get_owned_media_task(current_user, job_id):
+    """Load ownership and projected cover paths without opening task JSON."""
+    return _get_owned_asset_reference(current_user, job_id)
+
+
+def _get_owned_asset_reference(current_user, job_id, *, terminal_only=False):
+    user_id = str(getattr(current_user, "id", None) or "")
+    cache_key = (user_id, str(job_id))
+    now = time.time()
+    with _REPORT_AUDIO_ASSET_REFERENCE_CACHE_LOCK:
+        cached = _REPORT_AUDIO_ASSET_REFERENCE_CACHE.get(cache_key)
+        if cached and float(cached.get("expires_at") or 0) > now:
+            cached_task = cached["task"]
+            if not terminal_only or cached_task.status in TERMINAL_STATUSES:
+                return deepcopy(cached_task)
+        row = (
+            db.session.query(*OWNED_TASK_REFERENCE_COLUMNS)
+            .filter(PublicationTask.id == str(job_id))
+            .one_or_none()
+        )
+        if not row:
+            return None
+        if row.feature != FEATURE_NAME or not row.user_id:
+            # Legacy rows were backfilled, but preserve access for an incomplete old row.
+            return _get_owned_task(current_user, job_id)
+        if str(row.user_id).strip() not in _visible_user_ids(current_user):
+            return None
+        task = SimpleNamespace(**{
+            column.key: getattr(row, column.key)
+            for column in OWNED_TASK_REFERENCE_COLUMNS
+        })
+        if not terminal_only or task.status in TERMINAL_STATUSES:
+            _REPORT_AUDIO_ASSET_REFERENCE_CACHE[cache_key] = {
+                "expires_at": now + REPORT_AUDIO_MEDIA_PATH_CACHE_TTL_SECONDS,
+                "task": deepcopy(task),
+            }
+        return task
+
+
+def _get_owned_keyframe_task(current_user, job_id):
+    """Keyframes remain an audit/detail payload and are loaded one task at a time."""
+    user_id = str(getattr(current_user, "id", None) or "")
+    cache_key = (user_id, str(job_id))
+    now = time.time()
+    with _REPORT_AUDIO_KEYFRAME_TASK_CACHE_LOCK:
+        cached = _REPORT_AUDIO_KEYFRAME_TASK_CACHE.get(cache_key)
+        if cached and float(cached.get("expires_at") or 0) > now:
+            return deepcopy(cached["task"])
+        row = (
+            db.session.query(
+                PublicationTask.id,
+                PublicationTask.result,
+                PublicationTask.feature,
+                PublicationTask.user_id,
+            )
+            .filter(PublicationTask.id == str(job_id))
+            .one_or_none()
+        )
+        if not row or row.feature != FEATURE_NAME or not row.user_id:
+            return None
+        if str(row.user_id).strip() not in _visible_user_ids(current_user):
+            return None
+        task = SimpleNamespace(
+            id=row.id,
+            result=deepcopy(row.result or {}),
+            feature=row.feature,
+            user_id=row.user_id,
+        )
+        _REPORT_AUDIO_KEYFRAME_TASK_CACHE[cache_key] = {
+            "expires_at": now + REPORT_AUDIO_MEDIA_PATH_CACHE_TTL_SECONDS,
+            "task": deepcopy(task),
+        }
+        return task
 
 
 def _job_detail_version(task):
@@ -1357,6 +1926,38 @@ def _normalize_vertical_video_scheme(value):
     }
     normalized = aliases.get(text, text)
     return normalized if normalized in VERTICAL_VIDEO_SCHEMES else VERTICAL_VIDEO_SCHEME_DEFAULT
+
+
+def _normalize_vertical_video_schemes(value, fallback=None):
+    items = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            items = []
+        else:
+            try:
+                parsed = json.loads(text)
+                items = parsed if isinstance(parsed, list) else [text]
+            except Exception:
+                items = re.split(r"[,;，；\s]+", text)
+    elif not isinstance(value, (list, tuple, set)):
+        items = [] if value is None else [value]
+
+    schemes = []
+    for item in items:
+        normalized = _normalize_vertical_video_scheme(item)
+        if normalized not in schemes:
+            schemes.append(normalized)
+    if not schemes and fallback is not None:
+        schemes = [_normalize_vertical_video_scheme(fallback)]
+    return schemes
+
+
+def _primary_vertical_video_scheme(schemes):
+    normalized = _normalize_vertical_video_schemes(schemes, VERTICAL_VIDEO_SCHEME_DEFAULT)
+    if "scheme1" in normalized and "scheme2" in normalized:
+        return "scheme2"
+    return normalized[0]
 
 
 def _vertical_video_scheme_label(scheme):
@@ -1586,6 +2187,130 @@ def _generate_vertical_cover_for_task(task, *, title, subtitle=""):
     }
 
 
+def _generate_vertical_background_for_task(task, *, scheme=None, title, subtitle=""):
+    task_id = task.id
+    result = task.result if isinstance(task.result, dict) else {}
+    params = task.params if isinstance(task.params, dict) else {}
+    payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
+    video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+    video = result.get("video") if isinstance(result.get("video"), dict) else {}
+    structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
+    pdf = payload.get("pdf") if isinstance(payload.get("pdf"), dict) else {}
+    if not pdf:
+        pdf = result.get("pdf") if isinstance(result.get("pdf"), dict) else {}
+    pdf_screenshot = _ensure_pdf_first_page_image(task)
+    screenshot_path = pdf_screenshot.get("path") if isinstance(pdf_screenshot, dict) else None
+    if not screenshot_path or not os.path.exists(screenshot_path):
+        raise ValueError("PDF 首屏图不存在，无法生成竖屏背景")
+
+    scheme = _normalize_vertical_video_scheme(
+        scheme
+        or video.get("vertical_video_scheme")
+        or video_options.get("vertical_video_scheme")
+        or video_options.get("vertical_scheme")
+    )
+    title = _normalize_cover_text(title, 160)
+    subtitle = _normalize_cover_text(subtitle, 220)
+    if not title:
+        raise ValueError("请填写竖屏背景标题")
+    transform = {
+        "anchor": "top-left",
+        "title_max_lines": 2,
+        "subtitle_max_lines": 1,
+        **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
+    }
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    filename = f"vertical_background_{scheme}_{task_id[:8]}_{timestamp}.jpg"
+    if scheme == "scheme2":
+        background_path = thumbnail_service.generate_workbench_vertical_thumbnail(
+            main_title=title,
+            sub_title=subtitle,
+            screenshot_path=screenshot_path,
+            output_filename=filename,
+            institution=_workbench_institution(structured, pdf, video_options),
+            emotion="bull",
+            footer_text=str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
+            image_transform=transform,
+        )
+    else:
+        date_text = str(video_options.get("date_text") or "").strip() or _publisher_date_text(task.created_at)
+        background_path = thumbnail_service.generate_vertical_thumbnail(
+            main_title=title,
+            sub_title=subtitle,
+            date_text=date_text,
+            screenshot_path=screenshot_path,
+            output_filename=filename,
+        )
+    if not background_path or not os.path.exists(background_path):
+        raise RuntimeError("竖屏背景文件未生成")
+
+    updated_result = dict(task.result or result)
+    updated_video = dict(updated_result.get("video") or {}) if isinstance(updated_result.get("video"), dict) else {}
+    primary_scheme = _normalize_vertical_video_scheme(
+        updated_video.get("vertical_video_scheme")
+        or video_options.get("vertical_video_scheme")
+        or video_options.get("vertical_scheme")
+    )
+    keyframe_key = "vertical_background" if scheme == primary_scheme else f"vertical_background_{scheme}"
+    background_paths = dict(updated_video.get("vertical_background_paths") or {})
+    previous_path = background_paths.get(scheme)
+    background_paths[scheme] = background_path
+    keyframes = dict(updated_video.get("keyframes") or {})
+    now = datetime.utcnow().isoformat() + "Z"
+    label = f"{_vertical_video_scheme_label(scheme)}竖屏背景关键帧"
+    keyframes[keyframe_key] = {
+        "path": background_path,
+        "label": label,
+        "ratio": "9:16",
+        "bytes": os.path.getsize(background_path),
+        "title": title,
+        "subtitle": subtitle,
+        "scheme": scheme,
+        "updated_at": now,
+    }
+    title_map = dict(updated_video.get("vertical_background_titles") or {})
+    subtitle_map = dict(updated_video.get("vertical_background_subtitles") or {})
+    title_map[scheme] = title
+    subtitle_map[scheme] = subtitle
+    updated_video.update({
+        "vertical_background_paths": background_paths,
+        "vertical_background_titles": title_map,
+        "vertical_background_subtitles": subtitle_map,
+        "vertical_background_title": title,
+        "vertical_background_subtitle": subtitle,
+        "vertical_background_regenerated_at": now,
+        "keyframes": keyframes,
+        "pdf_first_page_image": pdf_screenshot,
+    })
+    if scheme == primary_scheme or not _path_exists(updated_video.get("vertical_background_path")):
+        updated_video["vertical_background_path"] = background_path
+
+    history = list(updated_result.get("vertical_background_regenerations") or [])
+    if previous_path:
+        history.append({
+            "scheme": scheme,
+            "vertical_background_path": previous_path,
+            "replaced_at": now,
+        })
+    updated_result["video"] = updated_video
+    updated_result["vertical_background_regenerations"] = history[-20:]
+    task.result = updated_result
+    flag_modified(task, "result")
+    db.session.commit()
+    return {
+        "path": background_path,
+        "bytes": os.path.getsize(background_path),
+        "title": title,
+        "subtitle": subtitle,
+        "download_url": f"/api/report-audio-workflows/jobs/{task_id}/download-keyframe/{keyframe_key}",
+        "updated_at": now,
+        "keyframe_key": keyframe_key,
+        "scheme": scheme,
+        "label": label,
+        "ratio": "9:16",
+    }
+
+
 def _generate_podcast_cover_for_task(task, *, scheme=None, title=None, subtitle=None):
     task_id = task.id
     result = task.result if isinstance(task.result, dict) else {}
@@ -1734,7 +2459,7 @@ def _generate_bilibili_cover_for_task(task, *, title=None, subtitle=None):
     }
 
 
-def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds=0, include_landscape=False):
+def _create_vertical_video_backfill_task(parent, *, scheme=None, schemes=None, preview_seconds=0, include_landscape=False):
     result = parent.result if isinstance(parent.result, dict) else {}
     params = parent.params if isinstance(parent.params, dict) else {}
     payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
@@ -1754,7 +2479,16 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
 
     video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
     existing_video = result.get("video") if isinstance(result.get("video"), dict) else {}
-    scheme = _normalize_vertical_video_scheme(scheme or video_options.get("vertical_video_scheme") or video_options.get("vertical_scheme"))
+    if schemes is None:
+        vertical_schemes = _normalize_vertical_video_schemes(
+            scheme or video_options.get("vertical_video_scheme") or video_options.get("vertical_scheme"),
+            VERTICAL_VIDEO_SCHEME_DEFAULT,
+        )
+    else:
+        vertical_schemes = _normalize_vertical_video_schemes(schemes)
+    vertical_enabled = bool(vertical_schemes)
+    scheme = _primary_vertical_video_scheme(vertical_schemes) if vertical_enabled else VERTICAL_VIDEO_SCHEME_DEFAULT
+    secondary_scheme = next((item for item in vertical_schemes if item != scheme), None)
     existing_vertical_scheme = _normalize_vertical_video_scheme(existing_video.get("vertical_video_scheme"))
     existing_vertical_background = (
         existing_video.get("vertical_background_path")
@@ -1807,6 +2541,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
         "pdf": pdf,
         "vertical_video_scheme": scheme,
         "vertical_video_scheme_label": _vertical_video_scheme_label(scheme),
+        "vertical_video_schemes": vertical_schemes,
         "preview_seconds": preview_seconds,
         "is_preview": preview_seconds > 0,
         "include_landscape": bool(include_landscape),
@@ -1837,7 +2572,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
             "cta": _publisher_cta(video_options),
         },
         "vertical_video": {
-            "enabled": True,
+            "enabled": vertical_enabled,
             "asr_model": str(video_options.get("asr_model") or "base"),
             "audio_path": audio_path,
             "image_path": existing_vertical_background or screenshot_path,
@@ -1847,9 +2582,28 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
             **({"subtitle_position": vertical_subtitle_position} if vertical_subtitle_position else {}),
             **({"subtitle_style": vertical_subtitle_style} if vertical_subtitle_style else {}),
         },
-        "vertical_video_2": {"enabled": False, "image_path": ""},
+        "vertical_video_2": {
+            "enabled": bool(secondary_scheme),
+            "scheme": secondary_scheme,
+            "asr_model": str(video_options.get("asr_model") or "base"),
+            "image_path": screenshot_path,
+            "screenshot_path": screenshot_path,
+            "main_title": main_title,
+            "sub_title": sub_title,
+            "date_text": date_text,
+            "institution": institution,
+            "emotion": "bull",
+            "footer_text": str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
+            "image_transform": {
+                "anchor": "top-left",
+                "title_max_lines": 2,
+                "subtitle_max_lines": 1,
+                **(video_options.get("vertical_image_transform") if isinstance(video_options.get("vertical_image_transform"), dict) else {}),
+            },
+            **({"preview_seconds": preview_seconds} if preview_seconds > 0 else {}),
+        },
         "vertical_thumbnail": {
-            "enabled": not bool(existing_vertical_background),
+            "enabled": vertical_enabled and not bool(existing_vertical_background),
             "scheme": scheme,
             "main_title": main_title,
             "sub_title": sub_title,
@@ -1866,7 +2620,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
             },
         },
         "vertical_cover": {
-            "enabled": scheme == "scheme2" and not _path_exists(existing_video.get("vertical_cover_path")),
+            "enabled": vertical_enabled and scheme == "scheme2" and not _path_exists(existing_video.get("vertical_cover_path")),
             "scheme": scheme,
             "format": "wx_cover",
             "main_title": main_title,
@@ -1883,7 +2637,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
             },
         },
         "podcast_cover": {
-            "enabled": scheme == "scheme2" and not _path_exists(existing_video.get("podcast_cover_path")),
+            "enabled": vertical_enabled and scheme == "scheme2" and not _path_exists(existing_video.get("podcast_cover_path")),
             "scheme": scheme,
             "format": "podcast",
             "main_title": main_title,
@@ -1900,7 +2654,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
             },
         },
         "bilibili_cover": {
-            "enabled": scheme == "scheme2" and not _path_exists(existing_video.get("bilibili_cover_path")),
+            "enabled": vertical_enabled and scheme == "scheme2" and not _path_exists(existing_video.get("bilibili_cover_path")),
             "scheme": scheme,
             "format": "bilibili_wx_cover",
             "main_title": main_title,
@@ -1968,6 +2722,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, preview_seconds
     enqueue_response_summary.update({
         "vertical_video_scheme": scheme,
         "vertical_video_scheme_label": _vertical_video_scheme_label(scheme),
+        "vertical_video_schemes": vertical_schemes,
         "preview_seconds": preview_seconds,
         "is_preview": preview_seconds > 0,
     })
@@ -2013,7 +2768,7 @@ def _landscape_video_path_from_child(child):
 def _landscape_video_path_for_task(task):
     parent_path = getattr(task, "report_audio_video_path", None)
     if not parent_path:
-        result = task.result if isinstance(getattr(task, "result", None), dict) else {}
+        result = _task_mapping_attr(task, "result")
         video = result.get("video") if isinstance(result.get("video"), dict) else {}
         parent_path = video.get("video_path")
     if _path_exists(parent_path):
@@ -2159,6 +2914,9 @@ def _podcast_cover_path_from_child(child):
 def _bilibili_cover_path_from_child(child):
     if not child:
         return None
+    projected = getattr(child, "publisher_bilibili_cover_path", None)
+    if projected:
+        return projected
     result = _task_mapping_attr(child, "result")
     return result.get("bilibili_cover_path")
 
@@ -2238,24 +2996,81 @@ def _task_mapping_attr(task, name):
     return value if isinstance(value, dict) else {}
 
 
-def _vertical_video_path_for_task(task):
-    child = _latest_vertical_video_child(task.id, preview=False)
-    if child and child.status == "completed":
-        path = _vertical_video_path_from_child(child)
-        if _path_exists(path):
-            return path
+def _vertical_video_path_for_task(task, scheme=None):
+    normalized_scheme = _normalize_vertical_video_scheme(scheme) if scheme else None
     result = _task_mapping_attr(task, "result")
     video = result.get("video") if isinstance(result.get("video"), dict) else {}
-    if _path_exists(video.get("vertical_video_path")):
+    if normalized_scheme:
+        paths = video.get("vertical_video_paths") if isinstance(video.get("vertical_video_paths"), dict) else {}
+        if _path_exists(paths.get(normalized_scheme)):
+            return paths.get(normalized_scheme)
+        matching_path = _vertical_video_path_for_scheme(task.id, normalized_scheme, preview=False)
+        if matching_path:
+            return matching_path
+    child = _latest_vertical_video_child(task.id, preview=False)
+    if child and child.status == "completed":
+        if normalized_scheme:
+            child_result = _task_mapping_attr(child, "result")
+            child_paths = child_result.get("vertical_video_paths") if isinstance(child_result.get("vertical_video_paths"), dict) else {}
+            if _path_exists(child_paths.get(normalized_scheme)):
+                return child_paths.get(normalized_scheme)
+        path = _vertical_video_path_from_child(child)
+        if _path_exists(path) and (not normalized_scheme or _vertical_child_scheme(child) == normalized_scheme):
+            return path
+    if not normalized_scheme and _path_exists(video.get("vertical_video_path")):
         return video.get("vertical_video_path")
     return None
 
 
+def _vertical_video_path_for_scheme(parent_id, scheme, *, preview=False):
+    normalized_scheme = _normalize_vertical_video_scheme(scheme)
+    query = (
+        PublicationTask.query
+        .options(load_only(
+            PublicationTask.id,
+            PublicationTask.status,
+            PublicationTask.result,
+            PublicationTask.publisher_vertical_scheme,
+            PublicationTask.publisher_vertical_video_path,
+            PublicationTask.publisher_preview_seconds,
+        ))
+        .filter(PublicationTask.feature == "publisher")
+        .filter(PublicationTask.source_task_id == parent_id)
+        .filter(PublicationTask.publisher_vertical_enabled.is_(True))
+        .order_by(PublicationTask.created_at.desc())
+    )
+    if preview:
+        query = query.filter(PublicationTask.publisher_preview_seconds > 0)
+    else:
+        query = query.filter(or_(
+            PublicationTask.publisher_preview_seconds == 0,
+            PublicationTask.publisher_preview_seconds.is_(None),
+        ))
+    for child in query.limit(30).all():
+        if child.status != "completed":
+            continue
+        result = child.result if isinstance(child.result, dict) else {}
+        paths = result.get("vertical_video_paths") if isinstance(result.get("vertical_video_paths"), dict) else {}
+        if _path_exists(paths.get(normalized_scheme)):
+            return paths.get(normalized_scheme)
+        if _normalize_vertical_video_scheme(child.publisher_vertical_scheme) == normalized_scheme:
+            path = child.publisher_vertical_video_path or result.get("vertical_video_path")
+            if _path_exists(path):
+                return path
+    return None
+
+
 def _vertical_cover_path_for_task(task):
+    projected = getattr(task, "report_audio_vertical_cover_path", None)
+    if _path_exists(projected):
+        return projected
     result = _task_mapping_attr(task, "result")
     video = result.get("video") if isinstance(result.get("video"), dict) else {}
     if _path_exists(video.get("vertical_cover_path")):
         return video.get("vertical_cover_path")
+    keyframe_path = _video_keyframe_path(video, "vertical_cover")
+    if _path_exists(keyframe_path):
+        return keyframe_path
     for preview in (True, False):
         child = _latest_vertical_video_child(task.id, preview=preview)
         path = _vertical_cover_path_from_child(child)
@@ -2265,10 +3080,16 @@ def _vertical_cover_path_for_task(task):
 
 
 def _podcast_cover_path_for_task(task):
+    projected = getattr(task, "report_audio_podcast_cover_path", None)
+    if _path_exists(projected):
+        return projected
     result = _task_mapping_attr(task, "result")
     video = result.get("video") if isinstance(result.get("video"), dict) else {}
     if _path_exists(video.get("podcast_cover_path")):
         return video.get("podcast_cover_path")
+    keyframe_path = _video_keyframe_path(video, "podcast_cover")
+    if _path_exists(keyframe_path):
+        return keyframe_path
     for preview in (True, False):
         child = _latest_vertical_video_child(task.id, preview=preview)
         path = _podcast_cover_path_from_child(child)
@@ -2278,14 +3099,15 @@ def _podcast_cover_path_for_task(task):
 
 
 def _bilibili_cover_path_for_task(task):
-    result = task.result if isinstance(task.result, dict) else {}
+    projected = getattr(task, "report_audio_bilibili_cover_path", None)
+    if _path_exists(projected):
+        return projected
+    result = _task_mapping_attr(task, "result")
     video = result.get("video") if isinstance(result.get("video"), dict) else {}
     direct_path = video.get("bilibili_cover_path")
     if _path_exists(direct_path):
         return direct_path
-    keyframes = video.get("keyframes") if isinstance(video.get("keyframes"), dict) else {}
-    artifact = keyframes.get("bilibili_cover") if isinstance(keyframes.get("bilibili_cover"), dict) else {}
-    path = artifact.get("path")
+    path = _video_keyframe_path(video, "bilibili_cover")
     if _path_exists(path):
         return path
     for preview in (True, False):
@@ -2294,6 +3116,12 @@ def _bilibili_cover_path_for_task(task):
         if child and child.status == "completed" and _path_exists(path):
             return path
     return None
+
+
+def _video_keyframe_path(video, key):
+    keyframes = video.get("keyframes") if isinstance(video, dict) and isinstance(video.get("keyframes"), dict) else {}
+    artifact = keyframes.get(key) if isinstance(keyframes.get(key), dict) else {}
+    return artifact.get("path")
 
 
 def _report_bilibili_video_path(task, video_key):
@@ -2531,7 +3359,7 @@ def _vertical_child_summary(task, parent_job_id=None, *, lightweight=False):
     return payload
 
 
-def _job_payload(task, include_raw=False):
+def _job_payload(task, include_raw=False, *, visual_videos=None):
     result = task.result or {}
     params = task.params or {}
     request_payload = params.get("report_audio_workflow") or {}
@@ -2626,11 +3454,204 @@ def _job_payload(task, include_raw=False):
         "metadata": result.get("metadata") or request_payload.get("metadata") or {},
         "notifications": result.get("notifications") or {},
         "logs": result.get("logs") or [],
+        "visual_videos": list(visual_videos or []),
     }
     if include_raw:
         payload["raw_params"] = params
         payload["raw_result"] = result
     return payload
+
+
+def _linked_visual_video_path(current_user, audio_task, workflow_id):
+    """Resolve one same-PDF visual video without trusting a client file path."""
+    workflow_id = str(workflow_id or "").strip()
+    if not workflow_id:
+        return None
+    attachment_id = str(
+        getattr(audio_task, "report_audio_pdf_attachment_id", None) or ""
+    ).strip()
+    filename = str(getattr(audio_task, "report_audio_pdf_filename", None) or "").strip()
+    try:
+        pdf_bytes = int(getattr(audio_task, "report_audio_pdf_bytes", None) or 0)
+    except (TypeError, ValueError):
+        pdf_bytes = 0
+    if not attachment_id and (not filename or pdf_bytes <= 0):
+        return None
+
+    query = (
+        db.session.query(
+            PublicationTask.id,
+            PublicationTask.task_video_path,
+        )
+        .filter(
+            PublicationTask.id == workflow_id,
+            PublicationTask.feature == VISUAL_VIDEO_WORKFLOW_FEATURE,
+            PublicationTask.user_id.in_(_visible_user_ids(current_user)),
+        )
+    )
+    if attachment_id:
+        query = query.filter(PublicationTask.report_audio_pdf_attachment_id == attachment_id)
+    else:
+        query = query.filter(
+            PublicationTask.report_audio_pdf_filename == filename,
+            PublicationTask.report_audio_pdf_bytes == pdf_bytes,
+        )
+    parent = query.one_or_none()
+    if not parent:
+        return None
+    parent_path = str(parent.task_video_path or "").strip()
+    if _path_exists(parent_path):
+        return parent_path
+
+    child = (
+        db.session.query(PublicationTask.task_video_path)
+        .filter(
+            PublicationTask.feature == VISUAL_VIDEO_RENDER_FEATURE,
+            PublicationTask.parent_task_id == workflow_id,
+            PublicationTask.status == "completed",
+        )
+        .order_by(PublicationTask.created_at.desc())
+        .first()
+    )
+    child_path = str(getattr(child, "task_video_path", None) or "").strip()
+    return child_path if _path_exists(child_path) else None
+
+
+def _linked_visual_video_payloads(current_user, audio_task):
+    """Return visual-video workflows that belong to the same PDF.
+
+    Synced PDFs use the immutable attachment id.  A manual-upload legacy row
+    may not have one, so only an exact filename + byte-size pair is accepted as
+    fallback; filename alone is deliberately insufficient.
+    """
+    attachment_id = str(
+        getattr(audio_task, "report_audio_pdf_attachment_id", None) or ""
+    ).strip()
+    filename = str(getattr(audio_task, "report_audio_pdf_filename", None) or "").strip()
+    try:
+        pdf_bytes = int(getattr(audio_task, "report_audio_pdf_bytes", None) or 0)
+    except (TypeError, ValueError):
+        pdf_bytes = 0
+    if not attachment_id and (not filename or pdf_bytes <= 0):
+        return []
+
+    query = (
+        db.session.query(
+            PublicationTask.id,
+            PublicationTask.status,
+            PublicationTask.current_step,
+            PublicationTask.progress,
+            PublicationTask.error_message,
+            PublicationTask.user_id,
+            PublicationTask.source_task_id,
+            PublicationTask.source_feature,
+            PublicationTask.task_title,
+            PublicationTask.task_video_path,
+            PublicationTask.report_visual_scheme_key,
+            PublicationTask.created_at,
+            PublicationTask.updated_at,
+            PublicationTask.completed_at,
+        )
+        .filter(PublicationTask.feature == VISUAL_VIDEO_WORKFLOW_FEATURE)
+        .filter(PublicationTask.user_id.in_(_visible_user_ids(current_user)))
+    )
+    if attachment_id:
+        query = query.filter(PublicationTask.report_audio_pdf_attachment_id == attachment_id)
+        identity_kind = "attachment_id"
+    else:
+        query = query.filter(
+            PublicationTask.report_audio_pdf_filename == filename,
+            PublicationTask.report_audio_pdf_bytes == pdf_bytes,
+        )
+        identity_kind = "filename_bytes"
+    parents = query.order_by(PublicationTask.created_at.desc()).limit(20).all()
+    if not parents:
+        return []
+
+    workflow_ids = [str(row.id) for row in parents]
+    child_rows = (
+        db.session.query(
+            PublicationTask.id,
+            PublicationTask.parent_task_id,
+            PublicationTask.status,
+            PublicationTask.current_step,
+            PublicationTask.progress,
+            PublicationTask.error_message,
+            PublicationTask.task_video_path,
+            PublicationTask.created_at,
+            PublicationTask.completed_at,
+        )
+        .filter(
+            PublicationTask.feature == VISUAL_VIDEO_RENDER_FEATURE,
+            PublicationTask.parent_task_id.in_(workflow_ids),
+        )
+        .order_by(PublicationTask.created_at.desc())
+        .all()
+    )
+    latest_child = {}
+    for row in child_rows:
+        latest_child.setdefault(str(row.parent_task_id or ""), row)
+
+    result = []
+    audio_task_id = str(getattr(audio_task, "id", None) or "")
+    for parent in parents:
+        workflow_id = str(parent.id)
+        child = latest_child.get(workflow_id)
+        video_path = str(
+            (parent.task_video_path or "")
+            or (getattr(child, "task_video_path", None) or "")
+        ).strip()
+        video_ready = _path_exists(video_path)
+        state_row = child or parent
+        status = "succeeded" if video_ready else STATUS_MAP.get(
+            str(state_row.status or ""),
+            str(state_row.status or "queued"),
+        )
+        if not video_ready and not child and status == "queued":
+            status = "ready"
+        scheme_key = str(parent.report_visual_scheme_key or "stick_figure")
+        try:
+            scheme_payload = visual_scheme(scheme_key, require_configured=False).public_payload()
+        except ValueError:
+            scheme_payload = {
+                "key": scheme_key,
+                "name": scheme_key,
+                "description": "历史视觉方案",
+                "configured": False,
+            }
+        result.append({
+            "workflow_job_id": workflow_id,
+            "visual_scheme": scheme_payload,
+            "status": status,
+            "step": "done" if video_ready else str(state_row.current_step or status),
+            "progress": 100 if video_ready else max(0, min(100, int(state_row.progress or 0))),
+            "error": None if video_ready else state_row.error_message,
+            "source": "report_audio" if (
+                str(parent.source_feature or "") == FEATURE_NAME
+                and str(parent.source_task_id or "") == audio_task_id
+            ) else "same_pdf",
+            "pdf_identity": identity_kind,
+            "title": parent.task_title,
+            "created_at": parent.created_at.isoformat() + "Z" if parent.created_at else None,
+            "updated_at": parent.updated_at.isoformat() + "Z" if parent.updated_at else None,
+            "completed_at": (
+                (getattr(child, "completed_at", None) or parent.completed_at).isoformat() + "Z"
+                if (getattr(child, "completed_at", None) or parent.completed_at)
+                else None
+            ),
+            "detail_url": (
+                "/report-stick-figure-video-workflow-detail.html"
+                f"?workflow_job_id={workflow_id}"
+            ),
+            "video": {
+                "url": (
+                    "/api/report-stick-figure-video-workflows/jobs/"
+                    f"{workflow_id}/video/file"
+                ),
+                "bytes": Path(video_path).stat().st_size,
+            } if video_ready else None,
+        })
+    return result
 
 
 def _job_status_payload(task):
@@ -2931,6 +3952,7 @@ def _child_task_summary_query():
         PublicationTask.publisher_vertical_video_path.label("publisher_vertical_video_path"),
         PublicationTask.publisher_vertical_cover_path.label("publisher_vertical_cover_path"),
         PublicationTask.publisher_podcast_cover_path.label("publisher_podcast_cover_path"),
+        PublicationTask.publisher_bilibili_cover_path.label("publisher_bilibili_cover_path"),
         PublicationTask.created_at.label("created_at"),
         PublicationTask.completed_at.label("completed_at"),
     )
@@ -3049,6 +4071,7 @@ def _vertical_child_summary_groups(parent_ids):
                 PublicationTask.publisher_vertical_video_path.label("publisher_vertical_video_path"),
                 PublicationTask.publisher_vertical_cover_path.label("publisher_vertical_cover_path"),
                 PublicationTask.publisher_podcast_cover_path.label("publisher_podcast_cover_path"),
+                PublicationTask.publisher_bilibili_cover_path.label("publisher_bilibili_cover_path"),
                 PublicationTask.created_at.label("created_at"),
                 PublicationTask.completed_at.label("completed_at"),
             )
@@ -3268,6 +4291,12 @@ def _parse_video_options(data):
                 return options.get(key)
         return default
 
+    vertical_schemes = _normalize_vertical_video_schemes(
+        pick("vertical_video_schemes", "vertical_schemes", default=None),
+        pick("vertical_video_scheme", "vertical_scheme", default=VERTICAL_VIDEO_SCHEME_DEFAULT),
+    )
+    primary_vertical_scheme = _primary_vertical_video_scheme(vertical_schemes)
+
     return {
         "enabled": _truthy(pick("landscape_video_enabled", "video_enabled", "enabled", default=False)),
         "title": str(pick("video_title", "cover_title", "title", default="") or "").strip(),
@@ -3277,9 +4306,8 @@ def _parse_video_options(data):
         "cta_enabled": _truthy(pick("video_cta_enabled", "cta_enabled", default=True), default=True),
         "cta_text": str(pick("video_cta_text", "cta_text", default="") or "").strip(),
         "vertical_enabled": _truthy(pick("vertical_video_enabled", "vertical_enabled", default=False)),
-        "vertical_video_scheme": _normalize_vertical_video_scheme(
-            pick("vertical_video_scheme", "vertical_scheme", default=VERTICAL_VIDEO_SCHEME_DEFAULT)
-        ),
+        "vertical_video_scheme": primary_vertical_scheme,
+        "vertical_video_schemes": vertical_schemes,
         "render_mode": _normalize_video_render_mode(
             pick("video_render_mode", "render_mode", "output_mode", default="full_video")
         ),
@@ -3812,6 +4840,15 @@ def _public_video(job_id, video):
         "vertical_enabled": video.get("vertical_enabled"),
         "cover_title": video.get("cover_title"),
         "cover_subtitle": video.get("cover_subtitle"),
+        "landscape_title": video.get("landscape_title"),
+        "landscape_subtitle": video.get("landscape_subtitle"),
+        "vertical_title": video.get("vertical_title"),
+        "vertical_subtitle": video.get("vertical_subtitle"),
+        "vertical_background_title": video.get("vertical_background_title"),
+        "vertical_background_subtitle": video.get("vertical_background_subtitle"),
+        "vertical_background_titles": video.get("vertical_background_titles"),
+        "vertical_background_subtitles": video.get("vertical_background_subtitles"),
+        "vertical_background_regenerated_at": video.get("vertical_background_regenerated_at"),
         "cover_regenerated_at": video.get("cover_regenerated_at"),
         "vertical_cover_title": video.get("vertical_cover_title"),
         "vertical_cover_subtitle": video.get("vertical_cover_subtitle"),
@@ -3823,20 +4860,25 @@ def _public_video(job_id, video):
         "bilibili_cover_subtitle": video.get("bilibili_cover_subtitle"),
         "bilibili_cover_regenerated_at": video.get("bilibili_cover_regenerated_at"),
         "vertical_video_scheme": video.get("vertical_video_scheme"),
+        "vertical_video_schemes": video.get("vertical_video_schemes"),
         "vertical_preview_scheme": video.get("vertical_preview_scheme"),
         "vertical_preview_seconds": video.get("vertical_preview_seconds"),
         "bilibili_result": video.get("bilibili_result"),
     }
     video_path = video.get("video_path")
     vertical_video_path = video.get("vertical_video_path")
+    vertical_video_paths = video.get("vertical_video_paths") if isinstance(video.get("vertical_video_paths"), dict) else {}
     vertical_preview_video_path = video.get("vertical_preview_video_path")
+    vertical_preview_video_paths = video.get("vertical_preview_video_paths") if isinstance(video.get("vertical_preview_video_paths"), dict) else {}
     vertical_cover_path = video.get("vertical_cover_path")
     podcast_cover_path = video.get("podcast_cover_path")
     bilibili_cover_path = video.get("bilibili_cover_path")
+    if not _path_exists(vertical_cover_path):
+        vertical_cover_path = _video_keyframe_path(video, "vertical_cover")
+    if not _path_exists(podcast_cover_path):
+        podcast_cover_path = _video_keyframe_path(video, "podcast_cover")
     if not _path_exists(bilibili_cover_path):
-        keyframes = video.get("keyframes") if isinstance(video.get("keyframes"), dict) else {}
-        artifact = keyframes.get("bilibili_cover") if isinstance(keyframes.get("bilibili_cover"), dict) else {}
-        bilibili_cover_path = artifact.get("path")
+        bilibili_cover_path = _video_keyframe_path(video, "bilibili_cover")
     cover_path = video.get("cover_path")
     if video_path and os.path.exists(video_path):
         public["video"] = {
@@ -3848,11 +4890,35 @@ def _public_video(job_id, video):
             "bytes": os.path.getsize(vertical_video_path),
             "download_url": f"/api/report-audio-workflows/jobs/{job_id}/download-vertical-video",
         }
+    public_vertical_videos = {}
+    for scheme, path in vertical_video_paths.items():
+        normalized_scheme = _normalize_vertical_video_scheme(scheme)
+        if path and os.path.exists(path):
+            public_vertical_videos[normalized_scheme] = {
+                "scheme": normalized_scheme,
+                "label": _vertical_video_scheme_label(normalized_scheme),
+                "bytes": os.path.getsize(path),
+                "download_url": f"/api/report-audio-workflows/jobs/{job_id}/download-vertical-video?scheme={normalized_scheme}",
+            }
+    if public_vertical_videos:
+        public["vertical_videos"] = public_vertical_videos
     if vertical_preview_video_path and os.path.exists(vertical_preview_video_path):
         public["vertical_preview_video"] = {
             "bytes": os.path.getsize(vertical_preview_video_path),
             "download_url": f"/api/report-audio-workflows/jobs/{job_id}/download-vertical-video?preview=1",
         }
+    public_vertical_previews = {}
+    for scheme, path in vertical_preview_video_paths.items():
+        normalized_scheme = _normalize_vertical_video_scheme(scheme)
+        if path and os.path.exists(path):
+            public_vertical_previews[normalized_scheme] = {
+                "scheme": normalized_scheme,
+                "label": _vertical_video_scheme_label(normalized_scheme),
+                "bytes": os.path.getsize(path),
+                "download_url": f"/api/report-audio-workflows/jobs/{job_id}/download-vertical-video?preview=1&scheme={normalized_scheme}",
+            }
+    if public_vertical_previews:
+        public["vertical_preview_videos"] = public_vertical_previews
     if vertical_cover_path and os.path.exists(vertical_cover_path):
         public["vertical_cover"] = {
             "bytes": os.path.getsize(vertical_cover_path),
@@ -3905,6 +4971,10 @@ def _public_keyframes(job_id, video):
             "bytes": os.path.getsize(path),
             "width": item.get("width"),
             "height": item.get("height"),
+            "title": item.get("title"),
+            "subtitle": item.get("subtitle"),
+            "scheme": item.get("scheme"),
+            "updated_at": item.get("updated_at"),
             "download_url": f"/api/report-audio-workflows/jobs/{job_id}/download-keyframe/{safe_key}",
         }
     return public

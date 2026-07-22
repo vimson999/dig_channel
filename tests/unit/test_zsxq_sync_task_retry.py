@@ -3,7 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -31,8 +31,10 @@ class FakeCeleryTask:
 class ZsxqSyncTaskRetryTest(unittest.TestCase):
     def test_terminal_duplicate_delivery_is_ignored(self):
         persisted_run = SimpleNamespace(status="completed")
+        query = MagicMock()
+        query.filter.return_value.one_or_none.return_value = persisted_run
 
-        with patch.object(zsxq_sync.db.session, "get", return_value=persisted_run):
+        with patch.object(zsxq_sync.db.session, "query", return_value=query):
             result = zsxq_sync._terminal_delivery_result("run-1", task_id="task-1")
 
         self.assertEqual(
@@ -47,8 +49,10 @@ class ZsxqSyncTaskRetryTest(unittest.TestCase):
 
     def test_non_terminal_delivery_continues(self):
         persisted_run = SimpleNamespace(status="running")
+        query = MagicMock()
+        query.filter.return_value.one_or_none.return_value = persisted_run
 
-        with patch.object(zsxq_sync.db.session, "get", return_value=persisted_run):
+        with patch.object(zsxq_sync.db.session, "query", return_value=query):
             result = zsxq_sync._terminal_delivery_result("run-1", task_id="task-1")
 
         self.assertIsNone(result)
@@ -70,6 +74,60 @@ class ZsxqSyncTaskRetryTest(unittest.TestCase):
             self.assertEqual(zsxq_sync._db_retry_count(), 7)
             self.assertEqual(zsxq_sync._db_retry_delay_seconds(0), 30)
             self.assertEqual(zsxq_sync._db_retry_delay_seconds(2), 90)
+
+    def test_db_retry_state_is_non_terminal_and_keeps_delivery_retryable(self):
+        run = SimpleNamespace(
+            status="running",
+            completed_at=None,
+            error_message=None,
+            result={"running": True},
+        )
+        query = MagicMock()
+        query.filter.return_value.one_or_none.return_value = run
+        fake_model = SimpleNamespace(id="id-column", query=query)
+        celery_task = FakeCeleryTask(retries=1)
+
+        with patch("models.zsxq_sync.ZsxqSyncRun", fake_model), patch.object(
+            zsxq_sync.db.session,
+            "add",
+        ), patch.object(zsxq_sync.db.session, "commit"):
+            zsxq_sync._mark_sync_run_db_retrying(
+                "run-1",
+                RuntimeError("server closed the connection unexpectedly"),
+                celery_task,
+                countdown=60,
+                retry_count=5,
+            )
+
+        self.assertEqual(run.status, "retrying")
+        self.assertIsNone(run.completed_at)
+        self.assertIsNone(run.error_message)
+        self.assertEqual(run.result["retry_state"]["database"]["status"], "scheduled")
+
+    def test_exhausted_db_retry_is_the_only_db_path_that_marks_failed(self):
+        run = SimpleNamespace(
+            status="retrying",
+            completed_at=None,
+            error_message=None,
+            result={"retry_state": {}},
+        )
+        query = MagicMock()
+        query.filter.return_value.one_or_none.return_value = run
+        fake_model = SimpleNamespace(id="id-column", query=query)
+
+        with patch("models.zsxq_sync.ZsxqSyncRun", fake_model), patch.object(
+            zsxq_sync.db.session,
+            "add",
+        ), patch.object(zsxq_sync.db.session, "commit"):
+            zsxq_sync._mark_sync_run_db_retry_exhausted(
+                "run-1",
+                RuntimeError("server closed the connection unexpectedly"),
+            )
+
+        self.assertEqual(run.status, "failed")
+        self.assertIsNotNone(run.completed_at)
+        self.assertIn("server closed", run.error_message)
+        self.assertEqual(run.result["retry_state"]["database"]["status"], "exhausted")
 
     def test_1059_upstream_error_is_retryable(self):
         exc = ZsxqTransientUpstreamError("1059", "内部错误")

@@ -3,7 +3,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from flask import Flask
 
@@ -141,6 +142,83 @@ class ReportScriptMaterialWorkflowTaskTest(unittest.TestCase):
         self.assertTrue(report_script_material_workflow._is_retryable_normalizer_error("Read timed out"))
         self.assertTrue(report_script_material_workflow._is_retryable_normalizer_error("HTTP 503"))
         self.assertFalse(report_script_material_workflow._is_retryable_normalizer_error("返回内容缺少 final_script_for_tts"))
+
+    def test_postgresql_progress_and_patch_updates_never_select_parent_json_first(self):
+        fake_session = SimpleNamespace(execute=Mock(), commit=Mock())
+        fake_db = SimpleNamespace(session=fake_session)
+
+        with (
+            patch.object(report_script_material_workflow, "db", fake_db),
+            patch.object(report_script_material_workflow, "_is_postgresql_session", return_value=True),
+        ):
+            report_script_material_workflow._emit("parent-1", "normalize_result", 58, "整理结果")
+            report_script_material_workflow._update_result(
+                "parent-1",
+                {"gemini": {"job_id": "child-1", "status": "completed"}},
+            )
+
+        self.assertEqual(fake_session.execute.call_count, 2)
+        statements = [str(call.args[0]).lower() for call in fake_session.execute.call_args_list]
+        self.assertTrue(all("update public.publication_tasks" in statement for statement in statements))
+        self.assertTrue(all("select " not in statement for statement in statements))
+        self.assertEqual(fake_session.commit.call_count, 2)
+
+    def test_postgresql_child_summary_is_merged_without_loading_parent_result(self):
+        fake_session = SimpleNamespace(execute=Mock(), commit=Mock())
+        fake_db = SimpleNamespace(session=fake_session)
+
+        with (
+            patch.object(report_script_material_workflow, "db", fake_db),
+            patch.object(report_script_material_workflow, "_is_postgresql_session", return_value=True),
+            patch.object(report_script_material_workflow, "_load_task") as load_task,
+        ):
+            report_script_material_workflow._record_child_summary(
+                "parent-1",
+                "gemini",
+                {"job_id": "child-1", "status": "completed"},
+            )
+
+        load_task.assert_not_called()
+        statement = str(fake_session.execute.call_args.args[0]).lower()
+        self.assertIn("update public.publication_tasks", statement)
+        self.assertIn("jsonb_set", statement)
+        self.assertNotIn("select ", statement)
+        self.assertEqual(fake_session.commit.call_count, 1)
+
+    def test_postgresql_attempt_history_is_updated_without_loading_parent_result(self):
+        fake_session = SimpleNamespace(execute=Mock(), commit=Mock())
+        fake_db = SimpleNamespace(session=fake_session)
+
+        with (
+            patch.object(report_script_material_workflow, "db", fake_db),
+            patch.object(report_script_material_workflow, "_is_postgresql_session", return_value=True),
+            patch.object(report_script_material_workflow, "_load_task") as load_task,
+        ):
+            report_script_material_workflow._record_child_attempt(
+                "parent-1",
+                "gemini",
+                None,
+                2,
+                3,
+                "failed",
+                error="timeout",
+            )
+            report_script_material_workflow._record_normalizer_attempt(
+                "parent-1",
+                2,
+                3,
+                "completed",
+            )
+
+        load_task.assert_not_called()
+        self.assertEqual(fake_session.execute.call_count, 2)
+        statements = [str(call.args[0]).lower() for call in fake_session.execute.call_args_list]
+        self.assertTrue(all("update public.publication_tasks" in statement for statement in statements))
+        self.assertTrue(all("jsonb_set" in statement for statement in statements))
+        self.assertTrue(all("select publication_tasks" not in statement for statement in statements))
+        self.assertIn("child_attempts", statements[0])
+        self.assertIn("normalizer_attempts", statements[1])
+        self.assertEqual(fake_session.commit.call_count, 2)
 
 
 if __name__ == "__main__":

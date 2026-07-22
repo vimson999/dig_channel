@@ -470,7 +470,7 @@ def post_to_youtube(task_id):
     """
     Directly upload an existing task's video to YouTube.
     """
-    from tasks.publisher import PLATFORM_UPLOAD_QUEUE, run_youtube_upload_only
+    from services.platform_publish_dispatch import dispatch_platform_publish
     
     try:
         task = _get_publication_task(
@@ -484,14 +484,13 @@ def post_to_youtube(task_id):
         if not task.result or not task.result.get('video_path'):
             return jsonify({'error': 'No video file found for this task. It must be completed first.'}), 400
             
-        # Trigger Celery
-        celery_task = run_youtube_upload_only.apply_async(args=[task.id], queue=PLATFORM_UPLOAD_QUEUE)
+        submission = dispatch_platform_publish("youtube", task.id)
         
         return jsonify({
             'success': True,
             'message': 'YouTube upload started',
             'task_id': task.id,
-            'celery_id': celery_task.id
+            'celery_id': submission["celery_id"]
         })
         
     except Exception as e:

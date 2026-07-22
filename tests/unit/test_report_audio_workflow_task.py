@@ -220,6 +220,7 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
                 "apply_async",
                 return_value=SimpleNamespace(id="celery-1"),
             ), \
+            patch.object(report_audio_workflow, "_persist_child_celery_task_id"), \
             patch.object(report_audio_workflow, "_load_task", side_effect=lambda *args: FakePublisherTask.latest):
             child = _create_publisher_video_task(
                 parent,
@@ -258,6 +259,55 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         ):
             with self.subTest(asset_key=asset_key):
                 self.assertTrue(child.params[asset_key]["main_title"].startswith("机构："))
+
+    def test_publisher_video_task_generates_both_selected_vertical_schemes(self):
+        class FakePublisherTask:
+            latest = None
+
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+                self.id = "publisher-child-both"
+                FakePublisherTask.latest = self
+
+        fake_session = SimpleNamespace(add=lambda child: None, flush=lambda: None, commit=lambda: None)
+        parent = SimpleNamespace(id="parent-both", created_at=datetime.utcnow())
+
+        with patch.object(report_audio_workflow, "_find_existing_publisher_video_task", return_value=None), \
+            patch.object(report_audio_workflow, "PublicationTask", FakePublisherTask), \
+            patch.object(report_audio_workflow, "db", SimpleNamespace(session=fake_session)), \
+            patch.object(
+                report_audio_workflow.run_publication_pipeline,
+                "apply_async",
+                return_value=SimpleNamespace(id="celery-both"),
+            ), \
+            patch.object(report_audio_workflow, "_persist_child_celery_task_id"), \
+            patch.object(report_audio_workflow, "_load_task", side_effect=lambda *args: FakePublisherTask.latest):
+            child = _create_publisher_video_task(
+                parent,
+                audio={"wav_path": "/tmp/audio.wav", "seconds": 12},
+                structured={
+                    "title": "双竖屏测试",
+                    "cover_title": "双竖屏测试",
+                    "cover_subtitle": "一次生成方案一和方案二",
+                    "final_script_for_tts": "这是一段用于测试两个竖屏方案的视频文案。",
+                },
+                pdf={"filename": "source.pdf"},
+                pdf_screenshot={"path": "/tmp/source-page.jpg", "width": 100, "height": 100},
+                payload={
+                    "video": {
+                        "enabled": True,
+                        "vertical_enabled": True,
+                        "vertical_video_schemes": ["scheme1", "scheme2"],
+                        "vertical_video_scheme": "scheme2",
+                        "bilibili_enabled": False,
+                    }
+                },
+            )
+
+        self.assertEqual(child.params["vertical_video"]["scheme"], "scheme2")
+        self.assertTrue(child.params["vertical_video_2"]["enabled"])
+        self.assertEqual(child.params["vertical_video_2"]["scheme"], "scheme1")
+        self.assertEqual(child.params["metadata"]["vertical_video_schemes"], ["scheme1", "scheme2"])
 
     def test_scheme2_publisher_generates_bilibili_cover_without_footer(self):
         with patch.object(
@@ -323,6 +373,34 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertIn("bilibili_cover", result["keyframes"])
         self.assertEqual(result["keyframes"]["bilibili_cover"]["label"], "B站封皮关键帧")
         self.assertEqual(result["keyframes"]["bilibili_cover"]["ratio"], "1146:717")
+
+    def test_keyframe_mode_reuses_valid_files_after_partial_failure(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            landscape_path = tmp / "report_audio_keyframe_landscape_parent-1_1.jpg"
+            bilibili_path = tmp / "report_audio_keyframe_bilibili_cover_parent-1_2.jpg"
+            Image.new("RGB", (1920, 1080), "white").save(landscape_path)
+            Image.new("RGB", (1146, 717), "black").save(bilibili_path)
+
+            with patch.object(report_audio_workflow.thumbnail_service, "output_dir", str(tmp)), \
+                patch.object(report_audio_workflow.thumbnail_service, "generate_thumbnail") as generate_landscape, \
+                patch.object(report_audio_workflow.thumbnail_service, "generate_workbench_bilibili_cover") as generate_bilibili:
+                result = report_audio_workflow._generate_report_audio_keyframes(
+                    "parent-1",
+                    datetime(2026, 7, 9, 12, 0, 0),
+                    structured={"cover_title": "测试标题", "cover_subtitle": "测试副标题"},
+                    pdf={"filename": "source.pdf"},
+                    audio={"seconds": 60},
+                    pdf_screenshot={"path": "/tmp/source-page.jpg"},
+                    payload={"video": {"enabled": True, "vertical_enabled": False}},
+                )
+
+        generate_landscape.assert_not_called()
+        generate_bilibili.assert_not_called()
+        self.assertEqual(result["cover_path"], str(landscape_path))
+        self.assertEqual(result["bilibili_cover_path"], str(bilibili_path))
 
     def test_publisher_result_summary_exposes_vertical_video(self):
         class FakePublisherTask:
@@ -655,6 +733,50 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         self.assertEqual(completed.current_step, "done")
         self.assertEqual(completed.progress, 100)
 
+    def test_result_patch_updates_media_projection_columns(self):
+        task = PublicationTask(
+            status="processing",
+            current_step="video",
+            progress=90,
+            params={"feature": "report_pdf_audio_workflow"},
+            result={},
+        )
+        db.session.add(task)
+        db.session.commit()
+
+        report_audio_workflow._update_result(task.id, {
+            "output_path": "/tmp/output",
+            "audio": {
+                "wav_path": "/tmp/audio.wav",
+                "seconds": 12.5,
+                "bytes": 2048,
+            },
+            "video": {
+                "enabled": True,
+                "status": "completed",
+                "video_path": "/tmp/video.mp4",
+                "cover_path": "/tmp/cover.jpg",
+                "keyframes": {
+                    "vertical_cover": {"path": "/tmp/vertical.jpg"},
+                    "podcast_cover": {"path": "/tmp/podcast.jpg"},
+                    "bilibili_cover": {"path": "/tmp/bilibili.jpg"},
+                },
+            },
+        })
+
+        db.session.refresh(task)
+        self.assertEqual(task.report_audio_output_path, "/tmp/output")
+        self.assertEqual(task.report_audio_wav_path, "/tmp/audio.wav")
+        self.assertEqual(task.report_audio_seconds, "12.5")
+        self.assertEqual(task.report_audio_audio_bytes, "2048")
+        self.assertTrue(task.report_audio_video_enabled)
+        self.assertEqual(task.report_audio_video_status, "completed")
+        self.assertEqual(task.report_audio_video_path, "/tmp/video.mp4")
+        self.assertEqual(task.report_audio_cover_path, "/tmp/cover.jpg")
+        self.assertEqual(task.report_audio_vertical_cover_path, "/tmp/vertical.jpg")
+        self.assertEqual(task.report_audio_podcast_cover_path, "/tmp/podcast.jpg")
+        self.assertEqual(task.report_audio_bilibili_cover_path, "/tmp/bilibili.jpg")
+
     def test_reusable_material_for_pdf_reads_script_material_workflow(self):
         structured = {
             "title": "缓存文案",
@@ -809,6 +931,43 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         db.session.refresh(stale)
         self.assertEqual(stale.status, "failed")
         self.assertIn("stale", stale.error_message)
+
+    def test_active_tts_task_for_chunk_keeps_queued_child_during_worker_backlog(self):
+        text = "这是一段仍在队列中等待浏览器 worker 的文本。"
+        queued = PublicationTask(
+            status="pending",
+            current_step="queued",
+            progress=0,
+            params={
+                "feature": "doubao_browser_tts",
+                "parent_task_id": "parent-queued",
+                "doubao_browser_tts": {
+                    "text": text,
+                    "metadata": {"chunk_index": 1, "text_hash": _tts_text_hash(text)},
+                },
+            },
+            result={
+                "metadata": {"chunk_index": 1, "text_hash": _tts_text_hash(text)},
+                "logs": [],
+            },
+            updated_at=datetime.utcnow() - timedelta(minutes=10),
+        )
+        db.session.add(queued)
+        db.session.commit()
+
+        with patch.dict(
+            os.environ,
+            {
+                "REPORT_AUDIO_DOUBAO_STALE_SECONDS": "60",
+                "REPORT_AUDIO_DOUBAO_QUEUE_STALE_SECONDS": "1800",
+            },
+            clear=False,
+        ):
+            active = _active_tts_task_for_chunk("parent-queued", 1, text)
+
+        self.assertIsNotNone(active)
+        db.session.refresh(queued)
+        self.assertEqual(queued.status, "pending")
 
     def test_ordered_doubao_tts_outputs_uses_chunk_index_not_completion_order(self):
         root = Path(self.app.instance_path)

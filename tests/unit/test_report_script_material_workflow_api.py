@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -22,6 +23,12 @@ from services.report_script_material_workflow import FEATURE_NAME, QUEUE_NAME  #
 class ReportScriptMaterialWorkflowApiTest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
+        self.disk_cache_patcher = patch.object(
+            material_api,
+            "TERMINAL_DETAIL_DISK_ROOT",
+            Path(self.tmpdir.name) / "detail-cache",
+        )
+        self.disk_cache_patcher.start()
         self.app = Flask(__name__)
         self.app.config.update(
             SQLALCHEMY_DATABASE_URI="sqlite:///:memory:",
@@ -31,8 +38,11 @@ class ReportScriptMaterialWorkflowApiTest(unittest.TestCase):
         self.ctx = self.app.app_context()
         self.ctx.push()
         db.create_all()
+        material_api._clear_terminal_detail_cache()
 
     def tearDown(self):
+        material_api._clear_terminal_detail_cache()
+        self.disk_cache_patcher.stop()
         db.session.remove()
         db.drop_all()
         self.ctx.pop()
@@ -137,6 +147,119 @@ class ReportScriptMaterialWorkflowApiTest(unittest.TestCase):
         self.assertEqual(payload["job_id"], task.id)
         self.assertEqual(payload["feature_label"], "研报转语音")
         self.assertEqual(payload["final_script_for_tts"], "这是一段历史完整研报任务留下的基础文案。")
+
+    def test_completed_detail_cache_skips_database_and_is_user_scoped(self):
+        first_user = SimpleNamespace(id="user-1")
+        second_user = SimpleNamespace(id="user-2")
+        payload = {
+            "success": True,
+            "job_id": "job-1",
+            "status": "succeeded",
+            "data": {"final_script_for_tts": "完整文案", "logs": []},
+        }
+
+        with patch.object(material_api, "_terminal_detail_redis_client", return_value=None):
+            material_api._cache_terminal_detail(first_user, "job-1", payload)
+            with self.app.test_request_context():
+                with patch.object(
+                    material_api,
+                    "_get_owned_task",
+                    side_effect=AssertionError("cached request must not query publication_tasks"),
+                ):
+                    response = material_api.get_job.__wrapped__(first_user, "job-1")
+
+            self.assertEqual(payload, response.get_json())
+            self.assertIsNone(material_api._cached_terminal_detail(second_user, "job-1"))
+            response.get_json()["data"]["final_script_for_tts"] = "mutated"
+            self.assertEqual(
+                "完整文案",
+                material_api._cached_terminal_detail(first_user, "job-1")["data"]["final_script_for_tts"],
+            )
+
+    def test_completed_detail_cache_survives_process_memory_loss(self):
+        class FakeRedis:
+            def __init__(self):
+                self.values = {}
+
+            def get(self, key):
+                return self.values.get(key)
+
+            def setex(self, key, _ttl, value):
+                self.values[key] = value
+
+        user = SimpleNamespace(id="user-1")
+        payload = {"success": True, "job_id": "job-1", "data": {"logs": ["done"]}}
+        fake_redis = FakeRedis()
+
+        with patch.object(material_api, "_terminal_detail_redis_client", return_value=fake_redis):
+            material_api._cache_terminal_detail(user, "job-1", payload)
+            material_api._TERMINAL_DETAIL_CACHE.clear()
+            restored = material_api._cached_terminal_detail(user, "job-1")
+
+        self.assertEqual(payload, restored)
+        self.assertTrue(fake_redis.values)
+
+    def test_completed_detail_disk_cache_survives_redis_timeout(self):
+        user = SimpleNamespace(id="user-1")
+        payload = {"success": True, "job_id": "job-1", "data": {"logs": ["done"]}}
+        material_api._terminal_detail_disk_set(user, "job-1", payload)
+        material_api._TERMINAL_DETAIL_CACHE.clear()
+
+        with patch.object(
+            material_api,
+            "_persistent_terminal_detail_get",
+            side_effect=AssertionError("disk cache must be checked before Redis"),
+        ):
+            restored = material_api._cached_terminal_detail(user, "job-1")
+
+        self.assertEqual(payload, restored)
+
+    def test_completed_detail_reads_versioned_result_file_without_json_columns(self):
+        task = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            feature=FEATURE_NAME,
+            user_id="user-1",
+            task_title="完整物料",
+            final_script_chars=4,
+            params={"feature": FEATURE_NAME, "large": "ignored"},
+            result={"large": "ignored"},
+        )
+        db.session.add(task)
+        db.session.commit()
+        PublicationTask.query.filter(PublicationTask.id == task.id).update({
+            PublicationTask.feature: FEATURE_NAME,
+            PublicationTask.user_id: "user-1",
+        }, synchronize_session=False)
+        db.session.commit()
+        db.session.expire_all()
+        result_path = Path(self.tmpdir.name) / "result.json"
+        result_path.write_text(
+            json.dumps({
+                "detail_cache_version": material_api.RESULT_DETAIL_CACHE_VERSION,
+                "structured_result": {"final_script_for_tts": "完整文案"},
+                "script_material": {"status": "completed"},
+                "children": {},
+                "logs": ["done"],
+                "tts_text": {"chars": 4, "chunks": 1},
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        user = SimpleNamespace(id="user-1")
+
+        with self.app.test_request_context():
+            with patch.object(material_api, "_cached_terminal_detail", return_value=None), patch.object(
+                material_api, "_result_file_path", return_value=str(result_path)
+            ), patch.object(
+                material_api, "_get_owned_task",
+                side_effect=AssertionError("versioned result file must avoid params/result SELECT"),
+            ):
+                response = material_api.get_job.__wrapped__(user, task.id)
+
+        data = response.get_json()["data"]
+        self.assertEqual("完整文案", data["final_script_for_tts"])
+        self.assertEqual(["done"], data["logs"])
 
 
 if __name__ == "__main__":

@@ -106,14 +106,21 @@ class DatabaseLoggerMiddleware:
         log_msg = f"{icon} [{request_id}] SQL完成: {query_type} - {duration_ms}ms, 影响行数: {rowcount}"
         getattr(logger, level)(log_msg)
         
-        # 使用现有的数据库日志记录函数
-        success = duration_ms < 5000  # 5秒内认为成功
+        # Reaching after_cursor_execute means the database operation succeeded.
+        # Duration controls the slow-query warning, never the success flag.
+        success = True
         details = f"耗时: {duration_ms}ms, 影响行数: {rowcount}"
         log_database_operation(query_type, self._get_table_name(statement), success, details)
         
         # 记录慢查询
         if duration_ms > 1000:
-            self._log_slow_query(statement, parameters, duration_ms, request_id)
+            self._log_slow_query(
+                statement,
+                parameters,
+                duration_ms,
+                request_id,
+                dialect_name=getattr(getattr(conn, "dialect", None), "name", "unknown"),
+            )
 
         diagnostic = self._publication_task_diagnostic(statement, duration_ms=duration_ms)
         if diagnostic:
@@ -122,13 +129,14 @@ class DatabaseLoggerMiddleware:
                 duration_ms=duration_ms,
                 request_id=request_id,
                 diagnostic=diagnostic,
+                dialect_name=getattr(getattr(conn, "dialect", None), "name", "unknown"),
             )
 
     def _handle_error(self, exception_context):
         """Capture failed hot-table statements; after_cursor_execute is not called on failure."""
         try:
             connection = getattr(exception_context, "connection", None)
-            query_start_times = connection.info.setdefault('query_start_time', []) if connection is not None else []
+            query_start_times = self._query_start_times_quietly(connection)
             started_at = query_start_times.pop(-1) if query_start_times else time.time()
             duration_ms = round((time.time() - started_at) * 1000, 2)
             statement = getattr(exception_context, "statement", None) or ""
@@ -145,10 +153,24 @@ class DatabaseLoggerMiddleware:
                     request_id=self._request_id(),
                     diagnostic=diagnostic,
                     error=error,
+                    dialect_name=getattr(
+                        getattr(connection, "dialect", None),
+                        "name",
+                        "unknown",
+                    ),
                 )
         except Exception:
             # Diagnostics must never replace the original database exception.
             logger.exception("Failed to record publication_tasks SQL error diagnostics")
+
+    @staticmethod
+    def _query_start_times_quietly(connection):
+        if connection is None:
+            return []
+        try:
+            return connection.info.setdefault('query_start_time', [])
+        except Exception:
+            return []
     
     @staticmethod
     def _get_query_type(statement):
@@ -181,7 +203,9 @@ class DatabaseLoggerMiddleware:
                 # 查找FROM后的表名
                 from_idx = words.index('FROM')
                 return words[from_idx + 1] if from_idx + 1 < len(words) else 'unknown'
-            elif words[0] in ['INSERT', 'UPDATE', 'DELETE']:
+            elif words[0] == 'UPDATE':
+                return words[1] if len(words) > 1 else 'unknown'
+            elif words[0] in ['INSERT', 'DELETE']:
                 # 查找INTO/FROM后的表名
                 for i, word in enumerate(words):
                     if word in ['INTO', 'FROM']:
@@ -216,19 +240,28 @@ class DatabaseLoggerMiddleware:
         except:
             return statement
     
-    def _log_slow_query(self, statement, parameters, duration_ms, request_id):
+    def _log_slow_query(
+        self,
+        statement,
+        parameters,
+        duration_ms,
+        request_id,
+        *,
+        dialect_name="unknown",
+    ):
         """记录慢查询"""
         logger.warning(f"🐌 [{request_id}] 慢查询警告: {duration_ms}ms")
         
         # 记录到专门的慢查询日志
         slow_query_logger = setup_colored_logger('slow_query')
         slow_query_logger.warning(
-            "慢查询 [%s] %sms [pid=%s role=%s process=%s origin=%s]: %s",
+            "慢查询 [%s] %sms [pid=%s role=%s process=%s dialect=%s origin=%s]: %s",
             request_id,
             duration_ms,
             os.getpid(),
-            os.environ.get("DB_PROCESS_ROLE") or "unknown",
-            Path(sys.argv[0] or "python").name,
+            self._process_role(),
+            self._process_name(),
+            dialect_name,
             self._query_origin(),
             statement,
         )
@@ -249,12 +282,30 @@ class DatabaseLoggerMiddleware:
             from_index = lowered.index(" from ")
             projection = lowered[:from_index]
             predicate = lowered[from_index:]
+        elif query_type == "UPDATE":
+            where_index = lowered.find(" where ")
+            projection = lowered if where_index < 0 else lowered[:where_index]
+            predicate = "" if where_index < 0 else lowered[where_index:]
 
-        payload_columns = [
-            column
-            for column in ("params", "result")
-            if re.search(rf'\bpublication_tasks[."]+{column}\b', projection)
-        ]
+        if query_type == "UPDATE":
+            payload_columns = [
+                column
+                for column in ("params", "result")
+                if re.search(
+                    rf'\b(?:publication_tasks[."]+)?{column}\b\s*=',
+                    projection,
+                )
+            ]
+        else:
+            payload_columns = [
+                column
+                for column in ("params", "result")
+                if re.search(
+                    rf'\bpublication_tasks[."]+{column}\b'
+                    r'(?=\s+(?:as\b|from\b)|\s*,|\s*$)',
+                    projection,
+                )
+            ]
         json_predicate = bool(
             query_type == "SELECT"
             and re.search(
@@ -263,10 +314,14 @@ class DatabaseLoggerMiddleware:
                 predicate,
             )
         )
-        point_lookup = bool(
-            re.search(r'\bpublication_tasks[."]+id\b\s*=\s*(?:%\(|:\w+|\$\d+)', predicate)
+        point_lookup_pattern = (
+            r'\b(?:publication_tasks[."]+)?id\b\s*=\s*(?:%\(|:\w+|\$\d+)'
+            if query_type == "UPDATE"
+            else r'\bpublication_tasks[."]+id\b\s*=\s*(?:%\(|:\w+|\$\d+)'
         )
+        point_lookup = bool(re.search(point_lookup_pattern, predicate))
         multirow_payload = bool(payload_columns and not point_lookup)
+        payload_write = bool(payload_columns and query_type == "UPDATE")
         slow_threshold_ms = cls._publication_task_slow_ms()
 
         categories = []
@@ -276,6 +331,8 @@ class DatabaseLoggerMiddleware:
             categories.append("json_predicate")
         if multirow_payload:
             categories.append("multirow_payload")
+        if payload_write and duration_ms >= slow_threshold_ms:
+            categories.append("slow_payload_write")
         if payload_columns and duration_ms >= slow_threshold_ms:
             categories.append("slow_payload")
         if duration_ms >= slow_threshold_ms:
@@ -313,6 +370,7 @@ class DatabaseLoggerMiddleware:
         request_id,
         diagnostic,
         error=None,
+        dialect_name="unknown",
     ):
         hot_table_logger = setup_colored_logger("publication_tasks_query")
         error_name = type(error).__name__ if error is not None else "none"
@@ -320,7 +378,8 @@ class DatabaseLoggerMiddleware:
         hot_table_logger.warning(
             "publication_tasks SQL categories=%s fingerprint=%s duration_ms=%s "
             "operation=%s payload=%s point_lookup=%s request_id=%s pid=%s "
-            "role=%s process=%s process_started_at=%s origin=%s error_type=%s error=%s sql=%s",
+            "role=%s process=%s dialect=%s process_started_at=%s origin=%s "
+            "error_type=%s error=%s sql=%s",
             ",".join(diagnostic["categories"]),
             diagnostic["fingerprint"],
             duration_ms,
@@ -329,14 +388,27 @@ class DatabaseLoggerMiddleware:
             diagnostic["point_lookup"],
             request_id,
             os.getpid(),
-            os.environ.get("DB_PROCESS_ROLE") or "unknown",
-            Path(sys.argv[0] or "python").name,
+            self._process_role(),
+            self._process_name(),
+            dialect_name,
             _process_started_at,
             self._query_origin(),
             error_name,
             error_text or "none",
             statement,
         )
+
+    @staticmethod
+    def _process_role():
+        if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
+            return "test"
+        return os.environ.get("DB_PROCESS_ROLE") or "unknown"
+
+    @staticmethod
+    def _process_name():
+        if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
+            return "pytest"
+        return Path(sys.argv[0] or "python").name
 
     @staticmethod
     def _request_id():

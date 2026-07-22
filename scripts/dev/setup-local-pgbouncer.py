@@ -112,16 +112,21 @@ auth_file = {USERLIST_PATH}
 pool_mode = transaction
 max_client_conn = 300
 default_pool_size = 15
-min_pool_size = 1
+min_pool_size = 2
 reserve_pool_size = 5
 reserve_pool_timeout = 5
 
 server_reset_query = DISCARD ALL
-server_idle_timeout = 60
+server_connect_timeout = 10
+server_idle_timeout = 120
 server_lifetime = 3600
-query_timeout = 120
+query_timeout = 30
 query_wait_timeout = 30
 client_idle_timeout = 300
+tcp_keepalive = 1
+tcp_keepcnt = 3
+tcp_keepidle = 30
+tcp_keepintvl = 10
 ignore_startup_parameters = extra_float_digits, options
 
 pidfile = {PID_PATH}

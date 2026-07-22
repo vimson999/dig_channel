@@ -17,7 +17,30 @@ mkdir -p "$LOG_DIR" "$RUNTIME_DIR"
 echo "🔁 正在全面重启开发环境..."
 
 echo
-echo "1/3 停止 Flask 后端..."
+echo "0/7 检查数据库结构迁移是否完整..."
+if [ ! -x "$PROJECT_ROOT/venv/bin/python" ]; then
+  echo "❌ 无法执行数据库结构预检：缺少 $PROJECT_ROOT/venv/bin/python"
+  exit 1
+fi
+"$PROJECT_ROOT/venv/bin/python" "$SCRIPT_DIR/check-runtime-schema.py"
+
+if [ "${FORCE_RESTART_ACTIVE_TASKS:-0}" = "1" ]; then
+  echo "⚠️ 已显式允许中断活动业务任务，跳过重启安全预检。"
+else
+  echo
+  echo "1/7 首次检查是否仍有不可中断的业务任务..."
+  PYTHONPATH="$PROJECT_ROOT/src/backend" \
+    "$PROJECT_ROOT/venv/bin/python" "$SCRIPT_DIR/check-restart-safety.py"
+fi
+
+echo
+echo "2/7 停止 Watchdog 并冻结 Celery 新消费..."
+"$SCRIPT_DIR/stop-celery-watchdog.sh"
+PYTHONPATH="$PROJECT_ROOT/src/backend" \
+  "$PROJECT_ROOT/venv/bin/python" "$SCRIPT_DIR/quiesce-celery-consumers.py"
+
+echo
+echo "3/7 停止 Flask 后端，关闭新的 API 入队入口..."
 "$SCRIPT_DIR/stop-backend.sh"
 
 if old_listener="$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null)" && [ -n "$old_listener" ]; then
@@ -26,11 +49,42 @@ if old_listener="$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null)" && [ -n "$old
 fi
 
 echo
-echo "2/3 停止所有 Celery worker、Watchdog、计划任务..."
+echo "4/7 冻结后再次检查，消除检查与停机之间的竞态..."
+if [ "${FORCE_RESTART_ACTIVE_TASKS:-0}" = "1" ]; then
+  echo "⚠️ 已显式允许中断活动业务任务，跳过冻结后的安全复检。"
+else
+  drain_timeout="${RESTART_DRAIN_TIMEOUT_SECONDS:-900}"
+  drain_interval="${RESTART_DRAIN_CHECK_INTERVAL_SECONDS:-10}"
+  drain_started="$(date +%s)"
+  while true; do
+    set +e
+    PYTHONPATH="$PROJECT_ROOT/src/backend" \
+      "$PROJECT_ROOT/venv/bin/python" "$SCRIPT_DIR/check-restart-safety.py"
+    guard_status=$?
+    set -e
+    if [ "$guard_status" -eq 0 ]; then
+      break
+    fi
+    if [ "$guard_status" -ne 2 ]; then
+      echo "❌ 冻结后的安全复检失败，拒绝停止 worker。"
+      exit "$guard_status"
+    fi
+    elapsed=$(( $(date +%s) - drain_started ))
+    if [ "$elapsed" -ge "$drain_timeout" ]; then
+      echo "❌ 等待活动任务自然结束已超过 ${drain_timeout}s，拒绝强杀 worker。"
+      exit 2
+    fi
+    echo "⏳ 有任务在首次检查后被领取，等待自然结束后再复检..."
+    sleep "$drain_interval"
+  done
+fi
+
+echo
+echo "5/7 停止所有 Celery worker、Watchdog、计划任务..."
 "$SCRIPT_DIR/stop-all-background-jobs.sh"
 
 echo
-echo "3/3 启动 Flask 后端，并按安全默认值补齐托管进程..."
+echo "6/7 启动 Flask 后端，并按安全默认值补齐托管进程..."
 export DB_PROCESS_ROLE="${DB_PROCESS_ROLE:-web}"
 export WEB_DB_POOL_MODE="${WEB_DB_POOL_MODE:-queue}"
 export WEB_DB_POOL_SIZE="${WEB_DB_POOL_SIZE:-4}"
@@ -102,6 +156,7 @@ for _ in $(seq 1 30); do
     echo "✅ 后端已监听 http://localhost:$PORT"
     echo "✅ 已确认监听 PID 为本次启动的新进程: $backend_pid"
     echo "✅ 后端 bootstrap 将按配置补齐托管进程。"
+    echo "✅ 7/7 新进程监听验收通过。"
     echo
     echo "查看状态："
     echo "  http://localhost:8888/celery-monitor.html"

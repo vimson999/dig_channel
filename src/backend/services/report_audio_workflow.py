@@ -576,9 +576,28 @@ def _clean_text(value: Any) -> str:
 def _clean_tts_script(value: Any) -> str:
     text = _strip_gemini_capture_artifacts(value)
     text = re.sub(r"(^|\s)PDF(?:\s*\+\s*\d+)?(?=\s|$)", " ", text, flags=re.I)
+    text = _strip_tts_citations(text)
     text = _strip_leading_style_fragments(text)
     text = _strip_tts_structure_labels(text)
     return _strip_trailing_section_stub(_clean_text(text))
+
+
+def _strip_tts_citations(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+
+    citation = r"cite\s*[:：]\s*\d+(?:\s*(?:[-–—,，、]|\band\b)\s*\d+)*"
+    # DeepSeek/Gemini may emit the same citation with ASCII or Chinese wrappers,
+    # or leave it bare inside a sentence. None of these markers should be read.
+    text = re.sub(
+        rf"[\[\(（【]\s*{citation}\s*[\]\)）】]",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(rf"(?<![A-Za-z0-9_]){citation}(?![A-Za-z0-9_])", " ", text, flags=re.I)
+    return _clean_text(text)
 
 
 def _strip_leading_style_fragments(value: Any) -> str:

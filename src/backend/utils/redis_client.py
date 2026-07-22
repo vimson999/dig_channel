@@ -1,17 +1,18 @@
 import redis
 import json
 import logging
+import os
 from functools import wraps
 from config.base import BaseConfig
 
 logger = logging.getLogger(__name__)
 
 # 初始化 Redis 客户端
-redis_client = redis.Redis(
-    host=BaseConfig.REDIS_HOST,
-    port=BaseConfig.REDIS_PORT,
-    db=BaseConfig.REDIS_DB,
-    decode_responses=True
+redis_client = redis.Redis.from_url(
+    os.environ.get("REDIS_URL") or BaseConfig.REDIS_URL,
+    decode_responses=True,
+    socket_connect_timeout=2,
+    socket_timeout=2,
 )
 
 def cache_response(timeout=3600, key_prefix="cache"):

@@ -63,6 +63,9 @@ class ProductionBoundaryTests(unittest.TestCase):
     def test_business_page_is_hidden_without_authentication(self):
         self.assertEqual(self.app.test_client().get('/index.html').status_code, 404)
 
+    def test_business_api_is_hidden_without_authentication(self):
+        self.assertEqual(self.app.test_client().get('/api/v1/channels').status_code, 404)
+
     def test_direct_login_filename_is_hidden(self):
         self.assertEqual(self.app.test_client().get('/login.html').status_code, 404)
 

@@ -260,6 +260,76 @@ class GeminiBrowserWorker:
                 finally:
                     context.close()
 
+    def generate_image(
+        self,
+        *,
+        job_id: str,
+        prompt: str,
+        image_output_path: str,
+        target_url: Optional[str] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Create one image in a fresh Gemini session without rewriting the prompt."""
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            raise ValueError("图片提示词不能为空")
+        output = Path(image_output_path).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+
+        try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise GeminiBrowserConfigError("缺少 playwright 依赖，请安装 requirements 后执行 playwright install") from exc
+
+        url = str(target_url or os.getenv("REPORT_STICK_FIGURE_IMAGE_GEMINI_URL") or "https://gemini.google.com/app").strip()
+        self._emit(progress_callback, "wait_browser_profile", 4, "等待 Gemini 图片浏览器 profile 空闲")
+        with _gemini_profile_lock(self.options):
+            self._wait_for_profile_singleton_release()
+            self._emit(progress_callback, "prepare_browser", 8, "启动 Gemini 图片浏览器")
+            with sync_playwright() as playwright:
+                context = self._launch_context(playwright)
+                page = context.pages[0] if context.pages else context.new_page()
+                page.set_default_timeout(10_000)
+                try:
+                    self._emit(progress_callback, "open_page", 15, "打开新的 Gemini 会话")
+                    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                    self._wait_for_interactive_page(page, started)
+                    self._raise_if_login_or_captcha(page)
+                    self._guard_total_timeout(started)
+
+                    self._emit(progress_callback, "select_image_mode", 24, "选择 Gemini 生成图片")
+                    self._select_image_generation_mode(page, started)
+                    baseline_images = self._visible_image_keys(page)
+                    baseline_text = self._body_text(page)
+
+                    self._emit(progress_callback, "submit_image_prompt", 32, "原样提交分镜图片提示词")
+                    self._submit_prompt(page, prompt)
+                    self._guard_total_timeout(started)
+                    self._emit(progress_callback, "wait_generated_image", 65, "等待 Gemini 生成图片")
+                    image_record = self._wait_for_generated_image(page, baseline_images, started)
+                    image_info = self._save_generated_image(page, image_record, str(output))
+                    response_text = self._latest_response_text(page, prompt, baseline_text)
+                    result = {
+                        **image_info,
+                        "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                        "page_url": page.url,
+                        "target_url": url,
+                        "response_text": response_text,
+                        "completed_at": datetime.utcnow().isoformat() + "Z",
+                    }
+                    self._emit(progress_callback, "generated_image_saved", 96, "Gemini 图片已按分镜序号保存", result={"image": image_info})
+                    return result
+                except PlaywrightTimeoutError as exc:
+                    screenshot = self._save_failure_screenshot(page, job_id)
+                    raise GeminiBrowserAutomationError(f"Gemini 图片自动化超时: {exc}; screenshot={screenshot}") from exc
+                except Exception:
+                    self._save_failure_screenshot(page, job_id)
+                    raise
+                finally:
+                    context.close()
+
     def generate_from_file(
         self,
         *,
@@ -610,6 +680,71 @@ class GeminiBrowserWorker:
         raise GeminiBrowserAutomationError(
             f"等待 Gemini 文件上传完成超时: {filename} ({timeout_seconds}s); {summary}"
         )
+
+    def _select_image_generation_mode(self, page, started_at: float) -> None:
+        image_labels = (
+            "制作图片", "制作图像", "生成图片", "生成图像", "创建图片", "创建图像",
+            "Create image", "Create images", "Generate image", "Generate images",
+        )
+        direct_selectors = []
+        for label in image_labels:
+            direct_selectors.extend((
+                f"button:has-text('{label}')",
+                f"[role='button']:has-text('{label}')",
+                f"[role='menuitem']:has-text('{label}')",
+                f"[role='menuitemcheckbox']:has-text('{label}')",
+                f"[role='option']:has-text('{label}')",
+            ))
+        if self._click_first_visible(page, direct_selectors):
+            time.sleep(0.8)
+            return
+
+        tool_selectors = (
+            "button:has-text('工具')",
+            "[role='button']:has-text('工具')",
+            "button:has-text('Tools')",
+            "[role='button']:has-text('Tools')",
+            "button[aria-label*='Tools']",
+            "button[aria-label*='工具']",
+            "button[aria-label*='上传和工具']",
+            "button[aria-label*='Upload and tools']",
+            "button[aria-label*='Add files and more']",
+        )
+        tool_button = self._wait_for_visible_enabled(
+            page,
+            list(tool_selectors),
+            started_at,
+            timeout_seconds=30,
+        )
+        if tool_button is None:
+            raise GeminiBrowserAutomationError("未找到 Gemini 工具/生成图片入口")
+        try:
+            tool_button.click(timeout=10_000)
+        except Exception as exc:
+            raise GeminiBrowserAutomationError(f"Gemini 工具入口点击失败: {exc}") from exc
+
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            self._guard_total_timeout(started_at)
+            self._raise_if_login_or_captcha(page)
+            if self._click_first_visible(page, direct_selectors):
+                time.sleep(0.8)
+                return
+            time.sleep(0.5)
+        raise GeminiBrowserAutomationError("Gemini 工具菜单中没有找到生成图片选项")
+
+    def _click_first_visible(self, page, selectors) -> bool:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector)
+                for index in range(locator.count() - 1, -1, -1):
+                    candidate = locator.nth(index)
+                    if candidate.is_visible() and candidate.is_enabled():
+                        candidate.click(timeout=5_000)
+                        return True
+            except Exception:
+                continue
+        return False
 
     def _submit_prompt(self, page, prompt: str) -> None:
         input_locator = self._last_visible(page, self._selectors("input"))
@@ -1095,6 +1230,9 @@ class GeminiBrowserWorker:
     def _save_generated_image(self, page, record: Dict[str, Any], output_path: str) -> Dict[str, Any]:
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
+        pending = output.with_suffix(f"{output.suffix}.part")
+        if pending.exists():
+            pending.unlink()
         src = record.get("currentSrc") or record.get("src") or ""
         saved_by = "screenshot"
         if src:
@@ -1114,17 +1252,21 @@ class GeminiBrowserWorker:
                 )
                 if isinstance(data_url, str) and data_url.startswith("data:") and "," in data_url:
                     header, payload = data_url.split(",", 1)
-                    output.write_bytes(base64.b64decode(payload))
+                    pending.write_bytes(base64.b64decode(payload))
                     saved_by = "fetch"
             except Exception:
                 saved_by = "screenshot"
 
-        if not output.exists() or output.stat().st_size <= 0:
+        if not pending.exists() or pending.stat().st_size <= 0:
             dom_index = record.get("dom_index")
             if dom_index is None:
                 raise GeminiBrowserAutomationError("无法定位 Gemini 生成图片")
-            page.locator("img").nth(int(dom_index)).screenshot(path=str(output))
+            page.locator("img").nth(int(dom_index)).screenshot(path=str(pending))
             saved_by = "screenshot"
+
+        if not pending.exists() or pending.stat().st_size <= 0:
+            raise GeminiBrowserAutomationError("Gemini 新图片保存为空")
+        pending.replace(output)
 
         return {
             "path": str(output),
@@ -1273,6 +1415,9 @@ class GeminiBrowserWorker:
                 "[data-testid*='send']",
             ],
             "attach": [
+                "button[aria-label*='上传和工具']",
+                "button[aria-label*='Upload and tools']",
+                "button[aria-label*='Add files and more']",
                 "button[aria-label*='Add files']",
                 "button[aria-label*='Add file']",
                 "button[aria-label*='Add image']",

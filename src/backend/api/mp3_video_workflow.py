@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import math
 import mimetypes
@@ -10,7 +11,8 @@ from datetime import datetime
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_file
-from sqlalchemy import or_
+from sqlalchemy import func, or_, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -19,6 +21,29 @@ from models import db
 from models.platform_credential import PlatformCredentialAccount
 from models.task import PublicationTask
 from services import gemini_browser
+from services.bilibili_publish import (
+    bilibili_upload_child_payload as shared_bilibili_upload_child_payload,
+    bilibili_upload_children as shared_bilibili_upload_children,
+    cancel_bilibili_upload_child as shared_cancel_bilibili_upload_child,
+    create_bilibili_upload_task,
+    enqueue_bilibili_upload_task,
+)
+from services.douyin_publish_jobs import (
+    FEATURE_NAME as DOUYIN_FEATURE_NAME,
+    cancel_douyin_publish_task,
+    create_douyin_publish_task,
+    douyin_publish_children,
+    douyin_publish_payload,
+    enqueue_douyin_publish_task,
+)
+from services.wechat_channels_publish_jobs import (
+    FEATURE_NAME as WECHAT_CHANNELS_FEATURE_NAME,
+    cancel_wechat_channels_publish_task,
+    create_wechat_channels_publish_task,
+    enqueue_wechat_channels_publish_task,
+    wechat_channels_publish_children,
+    wechat_channels_publish_payload,
+)
 from services.mp3_video_workflow import (
     DEFAULT_GEMINI_URL,
     FEATURE_NAME,
@@ -27,6 +52,7 @@ from services.mp3_video_workflow import (
     QUEUE_NAME,
     VISUAL_ARTIFACT_KEYS,
     _db_retry,
+    _video_file_ready,
     audio_meta_from_zsxq_attachment,
     initial_gemini_prompt,
     initial_transcript_prompt,
@@ -57,6 +83,45 @@ except (TypeError, ValueError):
 DOWNLOAD_RESULT_CACHE_MAX_SIZE = 512
 _download_result_cache = {}
 _download_result_cache_lock = threading.RLock()
+try:
+    JOB_DETAIL_CACHE_TTL_SECONDS = max(
+        0,
+        int(os.environ.get("MP3_VIDEO_WORKFLOW_DETAIL_CACHE_TTL", "5")),
+    )
+except (TypeError, ValueError):
+    JOB_DETAIL_CACHE_TTL_SECONDS = 5
+try:
+    JOB_DETAIL_STALE_MAX_SECONDS = max(
+        JOB_DETAIL_CACHE_TTL_SECONDS,
+        int(os.environ.get("MP3_VIDEO_WORKFLOW_DETAIL_STALE_MAX", "300")),
+    )
+except (TypeError, ValueError):
+    JOB_DETAIL_STALE_MAX_SECONDS = 300
+try:
+    JOB_DETAIL_STATEMENT_TIMEOUT_MS = max(
+        500,
+        min(15000, int(os.environ.get("MP3_VIDEO_WORKFLOW_DETAIL_DB_TIMEOUT_MS", "5000"))),
+    )
+except (TypeError, ValueError):
+    JOB_DETAIL_STATEMENT_TIMEOUT_MS = 5000
+try:
+    JOB_LIST_CACHE_TTL_SECONDS = max(
+        0,
+        int(os.environ.get("MP3_VIDEO_WORKFLOW_LIST_CACHE_TTL", "5")),
+    )
+except (TypeError, ValueError):
+    JOB_LIST_CACHE_TTL_SECONDS = 5
+try:
+    JOB_LIST_STALE_MAX_SECONDS = max(
+        JOB_LIST_CACHE_TTL_SECONDS,
+        int(os.environ.get("MP3_VIDEO_WORKFLOW_LIST_STALE_MAX", "300")),
+    )
+except (TypeError, ValueError):
+    JOB_LIST_STALE_MAX_SECONDS = 300
+_job_list_cache = {}
+_job_list_cache_lock = threading.RLock()
+_job_detail_cache = {}
+_job_detail_cache_lock = threading.RLock()
 
 JOB_LIST_COLUMNS = (
     PublicationTask.id,
@@ -366,10 +431,12 @@ def create_job(current_user):
         task.error_message = f"编排任务入队失败: {exc}"
         task.completed_at = datetime.utcnow()
         db.session.commit()
+        _clear_job_list_cache(user_id)
         return jsonify({"success": False, "message": task.error_message}), 502
 
     task.celery_task_id = celery_task.id
     db.session.commit()
+    _clear_job_list_cache(user_id)
     return jsonify({
         "success": True,
         "job_id": task.id,
@@ -391,8 +458,20 @@ def list_jobs(current_user):
     submitted_range = submission_date_utc_range(submitted_on)
     if not submitted_range:
         submitted_on = ""
+    cache_key = _job_list_cache_key(
+        current_user,
+        page=page,
+        per_page=per_page,
+        status=status,
+        search=search,
+        submitted_on=submitted_on,
+    )
+    cached = _cached_job_list(cache_key)
+    if cached is not None:
+        return jsonify(cached)
 
     def load_page():
+        _set_job_list_statement_timeout()
         query = PublicationTask.query.options(load_only(*JOB_LIST_COLUMNS)).filter(
             PublicationTask.feature == FEATURE_NAME,
             PublicationTask.user_id.in_(_visible_user_ids(current_user)),
@@ -413,39 +492,100 @@ def list_jobs(current_user):
                 PublicationTask.source_task_id.ilike(pattern, escape="\\"),
                 PublicationTask.id.ilike(pattern, escape="\\"),
             ))
-        pagination = query.order_by(PublicationTask.created_at.desc()).paginate(
-            page=page,
-            per_page=per_page,
-            error_out=False,
+        total = int(
+            query.order_by(None)
+            .with_entities(func.count(PublicationTask.id))
+            .scalar()
+            or 0
         )
-        return pagination, [_job_list_payload(task) for task in pagination.items]
-
-    pagination, items = _db_retry(load_page, "mp3 video workflow list jobs")
-    return jsonify({
-        "success": True,
-        "data": {
-            "items": items,
-            "pagination": {
-                "page": page,
-                "per_page": per_page,
-                "total": pagination.total,
-                "pages": pagination.pages,
-                "q": search,
-                "submitted_on": submitted_on,
+        rows = []
+        offset = (page - 1) * per_page
+        if offset < total:
+            rows = (
+                query.order_by(PublicationTask.created_at.desc())
+                .offset(offset)
+                .limit(per_page)
+                .all()
+            )
+        items = [_job_list_payload(task) for task in rows]
+        return {
+            "success": True,
+            "data": {
+                "items": items,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total": total,
+                    "pages": ((total + per_page - 1) // per_page) if total else 0,
+                    "q": search,
+                    "submitted_on": submitted_on,
+                },
             },
-        },
-        "items": items,
-    })
+            "items": items,
+        }
+
+    try:
+        payload = _db_retry(
+            load_page,
+            "mp3 video workflow list jobs",
+            attempts=1,
+        )
+        _store_job_list(cache_key, payload)
+        return jsonify(payload)
+    except SQLAlchemyError:
+        db.session.rollback()
+        stale = _cached_job_list(cache_key, allow_stale=True)
+        if stale is not None:
+            stale["stale"] = True
+            stale["stale_reason"] = "database_busy"
+            stale["data"]["stale"] = True
+            return jsonify(stale)
+        return jsonify({
+            "success": False,
+            "message": "数据库暂时繁忙，请稍后重试",
+        }), 503
 
 
 @mp3_video_workflow_bp.route("/jobs/<job_id>", methods=["GET"])
 @require_login
 def get_job(current_user, job_id):
-    task = _get_owned_task(current_user, job_id)
-    if not task:
-        return jsonify({"success": False, "message": "任务不存在"}), 404
-    payload = _job_payload(task, include_raw=True)
-    return jsonify({"success": True, **payload, "data": payload})
+    cache_key = _job_detail_cache_key(current_user, job_id)
+    try:
+        _set_job_detail_statement_timeout()
+        reference = _get_owned_task(
+            current_user,
+            job_id,
+            include_params=False,
+            include_result=False,
+            db_attempts=1,
+        )
+        if not reference:
+            _clear_job_detail_cache(job_id, current_user=current_user)
+            return jsonify({"success": False, "message": "任务不存在"}), 404
+
+        version = _job_detail_version(reference)
+        cached = _cached_job_detail(cache_key, version=version)
+        if cached is not None:
+            cached["bilibili_uploads"] = _bilibili_upload_children(reference.id)
+            return jsonify({"success": True, **cached, "data": cached})
+
+        task = _get_owned_task(current_user, job_id, db_attempts=1)
+        if not task:
+            return jsonify({"success": False, "message": "任务不存在"}), 404
+        payload = _job_payload(task, include_raw=True)
+        _store_job_detail(cache_key, _job_detail_version(task), payload)
+        return jsonify({"success": True, **payload, "data": payload})
+    except SQLAlchemyError:
+        db.session.rollback()
+        stale = _cached_job_detail(cache_key, allow_stale=True)
+        if stale is not None:
+            stale["stale"] = True
+            stale["stale_reason"] = "database_busy"
+            return jsonify({"success": True, "stale": True, **stale, "data": stale})
+        return jsonify({
+            "success": False,
+            "message": "数据库暂时繁忙，请稍后重试",
+        }), 503
 
 
 @mp3_video_workflow_bp.route("/jobs/<job_id>/bilibili-uploads", methods=["GET"])
@@ -481,8 +621,8 @@ def submit_bilibili_upload(current_user, job_id):
 
     video = _video_by_key(task, video_key)
     video_path = _video_output_path(video)
-    if not _path_exists(video_path):
-        return jsonify({"success": False, "message": "当前任务还没有可上传的视频文件"}), 400
+    if not _video_file_ready(video_path):
+        return jsonify({"success": False, "message": "视频文件损坏或尚未完成，请重新生成后再上传"}), 400
 
     result = task.result or {}
     ds = _ds_extract_payload(result)
@@ -495,99 +635,40 @@ def submit_bilibili_upload(current_user, job_id):
     if cover_key and not cover_path:
         return jsonify({"success": False, "message": f"封面产物不存在：{cover_key}"}), 400
 
-    tags = _normalize_upload_tags(data.get("tags"), default=["财经", "音频", "内资闭门会"])
-    credential_id = _clean_upload_text(
-        data.get("credential_id") or data.get("platform_credential_id"),
-        max_length=80,
-    )
-    credential_name = _platform_credential_display_name(credential_id)
-    desc = _clean_upload_text(data.get("desc") or data.get("description"), max_length=2000)
     try:
-        charging_pay = _charging_pay_from_upload_payload(data)
-        delay_time = _bilibili_upload_delay_time(data)
-        season_id = _bilibili_upload_season_id(data)
+        child = create_bilibili_upload_task(
+            task,
+            current_user=current_user,
+            parent_feature=FEATURE_NAME,
+            source_label=f"{FEATURE_NAME}:bilibili_upload",
+            video_path=video_path,
+            video_key=video_key,
+            title=title,
+            data=data,
+            cover_path=cover_path,
+            cover_key=resolved_cover_key,
+            default_tags=["财经", "音频", "内资闭门会"],
+            metadata_extra={
+                "title_source": (
+                    "manual"
+                    if _clean_upload_text(data.get("title"))
+                    else ("ds_6" if video_key == "landscape" else "ds_7")
+                ),
+            },
+        )
     except ValueError as exc:
         return jsonify({"success": False, "message": str(exc)}), 400
 
-    user_id = str(getattr(current_user, "id", None) or task.user_id or SYSTEM_USER_ID)
-    params = {
-        "feature": "publisher",
-        "user_id": user_id,
-        "parent_feature": FEATURE_NAME,
-        "parent_task_id": task.id,
-        "source_feature": FEATURE_NAME,
-        "source_task_id": task.id,
-        "upload_video_path": video_path,
-        "video": {
-            "enabled": False,
-            "video_path": video_path,
-            "media_type": "existing_video",
-        },
-        "thumbnail": {},
-        "bilibili": {
-            "enabled": True,
-            "credential_id": credential_id or None,
-            "credential_name": credential_name,
-            "title": title,
-            "desc": desc,
-            "tags": tags,
-            "tid": _bounded_int(data.get("tid"), 207, 1, 9999),
-            "cover_path": cover_path,
-            "cover_key": resolved_cover_key,
-            "copyright": _bounded_int(data.get("copyright"), 1, 1, 2),
-            "no_reprint": _bounded_int(data.get("no_reprint"), 1, 0, 1),
-            "neutral_mark": _clean_upload_text(data.get("neutral_mark"), max_length=80) or "个人观点，仅供参考",
-            "is_only_self": _bounded_int(data.get("is_only_self") or data.get("only_self"), 0, 0, 1),
-            "dynamic": _clean_upload_text(data.get("dynamic"), max_length=233),
-            "charging_pay": charging_pay,
-            "delay_time": delay_time,
-            "season_id": season_id,
-        },
-        "youtube": {"enabled": False},
-        "metadata": {
-            "source": f"{FEATURE_NAME}:bilibili_upload",
-            "parent_task_id": task.id,
-            "video_key": video_key,
-            "cover_key": resolved_cover_key,
-            "title_source": "manual" if _clean_upload_text(data.get("title")) else ("ds_6" if video_key == "landscape" else "ds_7"),
-        },
-    }
-    child = PublicationTask(
-        status="pending",
-        current_step="queued",
-        progress=0,
-        params=params,
-        result={
-            "metadata": params["metadata"],
-            "source_task_id": task.id,
-            "video_path": video_path,
-            "cover_path": cover_path,
-            "bilibili_credential_id": credential_id or None,
-            "bilibili_credential_name": credential_name,
-            "bilibili_charging_pay": charging_pay,
-            "bilibili_delay_time": delay_time,
-            "bilibili_season_id": season_id,
-        },
-    )
-    db.session.add(child)
-    db.session.commit()
-
     try:
-        from tasks.publisher import PLATFORM_UPLOAD_QUEUE, run_bilibili_upload_only
-
-        celery_task = run_bilibili_upload_only.apply_async(args=[child.id], queue=PLATFORM_UPLOAD_QUEUE, retry=False)
+        enqueue_bilibili_upload_task(child)
     except Exception as exc:
-        child.status = "failed"
-        child.current_step = "failed"
-        child.progress = 0
-        child.error_message = f"B站上传任务入队失败: {exc}"
-        child.completed_at = datetime.utcnow()
-        db.session.commit()
-        return jsonify({"success": False, "message": child.error_message}), 502
+        return jsonify({
+            "success": False,
+            "message": f"B站上传任务入队失败: {exc}",
+        }), 502
 
-    child.celery_task_id = celery_task.id
-    db.session.commit()
-    item = _bilibili_upload_child_payload(child)
+    _clear_job_detail_cache(job_id)
+    item = getattr(child, "_bilibili_enqueue_response_payload", None)
     return jsonify({
         "success": True,
         "message": "已投递 B站上传任务",
@@ -604,7 +685,19 @@ def cancel_bilibili_upload(current_user, job_id, upload_task_id):
         return jsonify({"success": False, "message": "任务不存在"}), 404
 
     child = (
-        PublicationTask.query
+        PublicationTask.query.options(load_only(
+            PublicationTask.id,
+            PublicationTask.celery_task_id,
+            PublicationTask.status,
+            PublicationTask.current_step,
+            PublicationTask.progress,
+            PublicationTask.error_message,
+            PublicationTask.feature,
+            PublicationTask.parent_feature,
+            PublicationTask.parent_task_id,
+            PublicationTask.created_at,
+            PublicationTask.completed_at,
+        ))
         .filter(PublicationTask.id == upload_task_id)
         .filter(PublicationTask.feature == "publisher")
         .filter(PublicationTask.parent_feature == FEATURE_NAME)
@@ -615,7 +708,11 @@ def cancel_bilibili_upload(current_user, job_id, upload_task_id):
         return jsonify({"success": False, "message": "B站上传任务不存在"}), 404
 
     ok, message = _cancel_bilibili_upload_child(child)
-    item = _bilibili_upload_child_payload(child)
+    if ok:
+        _clear_job_detail_cache(job_id)
+    item = getattr(child, "_bilibili_cancel_response_payload", None)
+    if item is None:
+        item = _bilibili_upload_child_payload(child)
     status_code = 200 if ok else 409
     return jsonify({
         "success": ok,
@@ -623,6 +720,159 @@ def cancel_bilibili_upload(current_user, job_id, upload_task_id):
         "data": {"upload_task": item},
         "upload_task": item,
     }), status_code
+
+
+@mp3_video_workflow_bp.route("/jobs/<job_id>/douyin-uploads", methods=["GET"])
+@require_login
+def get_douyin_uploads(current_user, job_id):
+    task = _get_owned_task(current_user, job_id, include_params=False, include_result=False)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    items = douyin_publish_children(task.id, parent_feature=FEATURE_NAME)
+    return jsonify({"success": True, "data": {"items": items}, "items": items})
+
+
+@mp3_video_workflow_bp.route("/jobs/<job_id>/douyin-upload", methods=["POST"])
+@require_login
+def submit_douyin_upload(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    data = _request_payload()
+    video_key = str(data.get("video_key") or "vertical").strip().lower()
+    if video_key not in {"landscape", "vertical"}:
+        return jsonify({"success": False, "message": "video_key 只能是 landscape 或 vertical"}), 400
+    video = _video_by_key(task, video_key)
+    video_path = _video_output_path(video)
+    if not _video_file_ready(video_path):
+        return jsonify({"success": False, "message": "视频文件损坏或尚未完成，请重新生成后再上传"}), 400
+    submit = _truthy(data.get("submit"), default=False)
+    if submit and data.get("publish_confirmation") != "PUBLISH":
+        return jsonify({"success": False, "message": "确认发布校验失败，请重新勾选"}), 400
+    result = task.result or {}
+    ds = _ds_extract_payload(result)
+    title = _clean_upload_text(data.get("title"), max_length=100) or _default_bilibili_title(result, ds, video_key)[:100]
+    try:
+        child = create_douyin_publish_task(
+            current_user=current_user,
+            parent_task=task,
+            parent_feature=FEATURE_NAME,
+            source_label=f"{FEATURE_NAME}:douyin_upload",
+            video_path=video_path,
+            video_key=video_key,
+            title=title,
+            description=data.get("description") or data.get("desc") or "",
+            tags=data.get("tags") or ["财经", "音频", "内资闭门会"],
+            credential_id=data.get("credential_id"),
+            visibility=data.get("visibility") or "private",
+            declaration=data.get("declaration") or "none",
+            submit=submit,
+        )
+        enqueue_douyin_publish_task(child)
+        item = douyin_publish_payload(child)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 502
+    _clear_job_detail_cache(job_id)
+    return jsonify({
+        "success": True,
+        "message": "抖音上传任务已入队；发布成功以作品管理页回查为准",
+        "data": {"upload_task": item},
+        "upload_task": item,
+    })
+
+
+@mp3_video_workflow_bp.route("/jobs/<job_id>/douyin-upload/<upload_task_id>/cancel", methods=["POST"])
+@require_login
+def cancel_douyin_upload(current_user, job_id, upload_task_id):
+    parent = _get_owned_task(current_user, job_id, include_params=False, include_result=False)
+    if not parent:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    child = PublicationTask.query.filter(
+        PublicationTask.id == str(upload_task_id),
+        PublicationTask.feature == DOUYIN_FEATURE_NAME,
+        PublicationTask.parent_task_id == str(parent.id),
+        PublicationTask.parent_feature == FEATURE_NAME,
+    ).one_or_none()
+    if not child:
+        return jsonify({"success": False, "message": "抖音上传任务不存在"}), 404
+    ok, message = cancel_douyin_publish_task(child)
+    item = douyin_publish_payload(child)
+    if ok:
+        _clear_job_detail_cache(job_id)
+    return jsonify({"success": ok, "message": message, "data": {"upload_task": item}, "upload_task": item}), (200 if ok else 409)
+
+
+@mp3_video_workflow_bp.route("/jobs/<job_id>/wechat-channels-uploads", methods=["GET"])
+@require_login
+def get_wechat_channels_uploads(current_user, job_id):
+    task = _get_owned_task(current_user, job_id, include_params=False, include_result=False)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    items = wechat_channels_publish_children(task.id, parent_feature=FEATURE_NAME)
+    return jsonify({"success": True, "data": {"items": items}, "items": items})
+
+
+@mp3_video_workflow_bp.route("/jobs/<job_id>/wechat-channels-upload", methods=["POST"])
+@require_login
+def submit_wechat_channels_upload(current_user, job_id):
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    data = _request_payload()
+    video_key = str(data.get("video_key") or "vertical").strip().lower()
+    if video_key not in {"landscape", "vertical"}:
+        return jsonify({"success": False, "message": "video_key 只能是 landscape 或 vertical"}), 400
+    video = _video_by_key(task, video_key)
+    video_path = _video_output_path(video)
+    if not _video_file_ready(video_path):
+        return jsonify({"success": False, "message": "视频文件损坏或尚未完成，请重新生成后再上传"}), 400
+    submit = _truthy(data.get("submit"), default=False)
+    if submit and data.get("publish_confirmation") != "PUBLISH":
+        return jsonify({"success": False, "message": "确认发布校验失败，请重新勾选"}), 400
+    result = task.result or {}
+    ds = _ds_extract_payload(result)
+    title = _clean_upload_text(data.get("title"), max_length=100) or _default_bilibili_title(result, ds, video_key)[:100]
+    try:
+        child = create_wechat_channels_publish_task(
+            current_user=current_user, parent_task=task, parent_feature=FEATURE_NAME,
+            source_label=f"{FEATURE_NAME}:wechat_channels_upload", video_path=video_path,
+            video_key=video_key, title=title,
+            description=data.get("description") or data.get("desc") or "",
+            tags=data.get("tags") or ["财经", "音频", "内资闭门会"],
+            credential_id=data.get("credential_id"),
+            visibility=data.get("visibility") or "private", submit=submit,
+        )
+        enqueue_wechat_channels_publish_task(child)
+        item = wechat_channels_publish_payload(child)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 502
+    _clear_job_detail_cache(job_id)
+    return jsonify({"success": True, "message": "已投递视频号上传任务", "data": {"upload_task": item}, "upload_task": item})
+
+
+@mp3_video_workflow_bp.route("/jobs/<job_id>/wechat-channels-upload/<upload_task_id>/cancel", methods=["POST"])
+@require_login
+def cancel_wechat_channels_upload(current_user, job_id, upload_task_id):
+    parent = _get_owned_task(current_user, job_id, include_params=False, include_result=False)
+    if not parent:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    child = PublicationTask.query.filter(
+        PublicationTask.id == str(upload_task_id),
+        PublicationTask.feature == WECHAT_CHANNELS_FEATURE_NAME,
+        PublicationTask.parent_task_id == str(parent.id),
+        PublicationTask.parent_feature == FEATURE_NAME,
+    ).one_or_none()
+    if not child:
+        return jsonify({"success": False, "message": "视频号上传任务不存在"}), 404
+    ok, message = cancel_wechat_channels_publish_task(child)
+    item = wechat_channels_publish_payload(child)
+    if ok:
+        _clear_job_detail_cache(job_id)
+    return jsonify({"success": ok, "message": message, "data": {"upload_task": item}, "upload_task": item}), (200 if ok else 409)
 
 
 @mp3_video_workflow_bp.route("/jobs/<job_id>/cancel", methods=["POST"])
@@ -644,6 +894,7 @@ def cancel_job(current_user, job_id):
     task.result = result
     flag_modified(task, "result")
     db.session.commit()
+    _clear_job_detail_cache(task.id)
     payload = _job_payload(task)
     return jsonify({"success": True, "message": "任务已取消", **payload, "data": payload})
 
@@ -700,6 +951,7 @@ def retry_job(current_user, job_id):
         return jsonify({"success": False, "message": task.error_message}), 502
     task.celery_task_id = celery_task.id
     db.session.commit()
+    _clear_job_detail_cache(task.id)
     payload = _job_payload(task)
     return jsonify({"success": True, "message": "任务已从失败处续跑", **payload, "data": payload})
 
@@ -731,6 +983,7 @@ def continue_full_video(current_user, job_id):
         return jsonify({"success": False, "message": task.error_message}), 502
     task.celery_task_id = celery_task.id
     db.session.commit()
+    _clear_job_detail_cache(task.id)
     payload = _job_payload(task)
     return jsonify({"success": True, "message": "已从关键帧继续生成完整视频", **payload, "data": payload})
 
@@ -762,6 +1015,7 @@ def regenerate_videos(current_user, job_id):
         return jsonify({"success": False, "message": task.error_message}), 502
     task.celery_task_id = celery_task.id
     db.session.commit()
+    _clear_job_detail_cache(task.id)
     payload = _job_payload(task)
     return jsonify({"success": True, "message": "已重新投递横屏和竖屏视频生成任务", **payload, "data": payload})
 
@@ -913,12 +1167,19 @@ def download_video(current_user, job_id, video_key):
     if not video:
         return jsonify({"success": False, "message": "视频不存在"}), 404
     path = video.get("video_path") or video.get("landscape_video_path") or video.get("vertical_video_path")
-    if not path or not os.path.exists(path):
-        return jsonify({"success": False, "message": "视频文件不存在"}), 404
+    if not _video_file_ready(path):
+        return jsonify({"success": False, "message": "视频文件损坏或尚未完成，请重新生成"}), 409
     return send_file(path, mimetype="video/mp4", as_attachment=True, download_name=f"{job_id}-{video_key}.mp4")
 
 
-def _get_owned_task(current_user, job_id, *, include_params=True, include_result=True):
+def _get_owned_task(
+    current_user,
+    job_id,
+    *,
+    include_params=True,
+    include_result=True,
+    db_attempts=3,
+):
     def load_task():
         columns = [
             PublicationTask.id,
@@ -930,6 +1191,7 @@ def _get_owned_task(current_user, job_id, *, include_params=True, include_result
             PublicationTask.feature,
             PublicationTask.user_id,
             PublicationTask.created_at,
+            PublicationTask.updated_at,
             PublicationTask.completed_at,
         ]
         if include_params:
@@ -940,9 +1202,19 @@ def _get_owned_task(current_user, job_id, *, include_params=True, include_result
             load_only(*columns)
         ).filter(PublicationTask.id == str(job_id)).first()
 
-    task = _db_retry(load_task, f"mp3 video workflow get job {job_id}")
+    task = _db_retry(
+        load_task,
+        f"mp3 video workflow get job {job_id}",
+        attempts=max(1, int(db_attempts or 1)),
+    )
     if task and not include_params and (not task.feature or not task.user_id):
-        return _get_owned_task(current_user, job_id, include_params=True, include_result=include_result)
+        return _get_owned_task(
+            current_user,
+            job_id,
+            include_params=True,
+            include_result=include_result,
+            db_attempts=db_attempts,
+        )
     params = task.params if task and include_params and isinstance(task.params, dict) else {}
     if not task or (task.feature or params.get("feature")) != FEATURE_NAME:
         return None
@@ -950,6 +1222,132 @@ def _get_owned_task(current_user, job_id, *, include_params=True, include_result
     if task_user_id not in _visible_user_ids(current_user):
         return None
     return task
+
+
+def _job_detail_cache_key(current_user, job_id):
+    return (
+        str(getattr(current_user, "id", "") or "").strip(),
+        str(job_id or "").strip(),
+    )
+
+
+def _job_list_cache_key(current_user, *, page, per_page, status, search, submitted_on):
+    return (
+        "+".join(sorted(_visible_user_ids(current_user))),
+        int(page),
+        int(per_page),
+        str(status or ""),
+        str(search or ""),
+        str(submitted_on or ""),
+    )
+
+
+def _cached_job_list(cache_key, *, allow_stale=False):
+    now = time.monotonic()
+    with _job_list_cache_lock:
+        cached = _job_list_cache.get(cache_key)
+        if not cached:
+            return None
+        deadline = cached["stale_until"] if allow_stale else cached["expires_at"]
+        if deadline <= now:
+            _job_list_cache.pop(cache_key, None)
+            return None
+        return copy.deepcopy(cached["payload"])
+
+
+def _store_job_list(cache_key, payload):
+    if JOB_LIST_CACHE_TTL_SECONDS <= 0:
+        return
+    now = time.monotonic()
+    with _job_list_cache_lock:
+        _job_list_cache[cache_key] = {
+            "payload": copy.deepcopy(payload),
+            "expires_at": now + JOB_LIST_CACHE_TTL_SECONDS,
+            "stale_until": now + JOB_LIST_STALE_MAX_SECONDS,
+        }
+        if len(_job_list_cache) > DOWNLOAD_RESULT_CACHE_MAX_SIZE:
+            oldest = min(
+                _job_list_cache,
+                key=lambda key: _job_list_cache[key]["stale_until"],
+            )
+            _job_list_cache.pop(oldest, None)
+
+
+def _clear_job_list_cache(user_id=None):
+    user_id = str(user_id or "").strip()
+    with _job_list_cache_lock:
+        if not user_id:
+            _job_list_cache.clear()
+            return
+        for key in list(_job_list_cache):
+            if user_id in str(key[0]).split("+"):
+                _job_list_cache.pop(key, None)
+
+
+def _job_detail_version(task):
+    updated_at = getattr(task, "updated_at", None)
+    return updated_at.isoformat() if updated_at else ":".join((
+        str(getattr(task, "status", "") or ""),
+        str(getattr(task, "current_step", "") or ""),
+        str(getattr(task, "progress", 0) or 0),
+    ))
+
+
+def _cached_job_detail(cache_key, *, version=None, allow_stale=False):
+    if not cache_key[0] or not cache_key[1]:
+        return None
+    now = time.monotonic()
+    with _job_detail_cache_lock:
+        cached = _job_detail_cache.get(cache_key)
+        if not cached:
+            return None
+        if version is not None and cached["version"] != version:
+            return None
+        deadline = cached["stale_until"] if allow_stale or version is not None else cached["expires_at"]
+        if deadline <= now:
+            _job_detail_cache.pop(cache_key, None)
+            return None
+        return copy.deepcopy(cached["payload"])
+
+
+def _store_job_detail(cache_key, version, payload):
+    if JOB_DETAIL_CACHE_TTL_SECONDS <= 0 or not cache_key[0] or not cache_key[1]:
+        return
+    now = time.monotonic()
+    with _job_detail_cache_lock:
+        _job_detail_cache[cache_key] = {
+            "version": version,
+            "payload": copy.deepcopy(payload),
+            "expires_at": now + JOB_DETAIL_CACHE_TTL_SECONDS,
+            "stale_until": now + JOB_DETAIL_STALE_MAX_SECONDS,
+        }
+        if len(_job_detail_cache) > DOWNLOAD_RESULT_CACHE_MAX_SIZE:
+            oldest = min(
+                _job_detail_cache,
+                key=lambda key: _job_detail_cache[key]["stale_until"],
+            )
+            _job_detail_cache.pop(oldest, None)
+
+
+def _clear_job_detail_cache(job_id, *, current_user=None):
+    job_key = str(job_id or "").strip()
+    with _job_detail_cache_lock:
+        if current_user is not None:
+            _job_detail_cache.pop(_job_detail_cache_key(current_user, job_key), None)
+            return
+        for key in [key for key in _job_detail_cache if key[1] == job_key]:
+            _job_detail_cache.pop(key, None)
+
+
+def _set_job_detail_statement_timeout():
+    bind = db.session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    db.session.execute(text(f"SET LOCAL statement_timeout = {JOB_DETAIL_STATEMENT_TIMEOUT_MS}"))
+
+
+def _set_job_list_statement_timeout():
+    _set_job_detail_statement_timeout()
 
 
 def _download_result_for_owned_task(current_user, job_id):
@@ -994,6 +1392,7 @@ def _trim_download_result_cache(now=None):
 def _clear_download_result_cache(job_id):
     with _download_result_cache_lock:
         _download_result_cache.pop(str(job_id or "").strip(), None)
+    _clear_job_detail_cache(job_id)
 
 
 def _write_result_json_if_present(result):
@@ -1180,8 +1579,8 @@ def _job_payload(task, include_raw=False):
         "download_result_url": f"/api/mp3-video-workflows/jobs/{task.id}/download-result" if _path_exists(result.get("output_path")) else None,
         "download_source_result_url": f"/api/mp3-video-workflows/jobs/{task.id}/download-source" if _path_exists(source_output_path) else None,
         "download_infographic_url": f"/api/mp3-video-workflows/jobs/{task.id}/download-artifact/infographic" if _path_exists((infographic or {}).get("path")) else None,
-        "download_landscape_video_url": f"/api/mp3-video-workflows/jobs/{task.id}/download-video/landscape" if _path_exists(landscape_path) else None,
-        "download_vertical_video_url": f"/api/mp3-video-workflows/jobs/{task.id}/download-video/vertical" if _path_exists(vertical_path) else None,
+        "download_landscape_video_url": f"/api/mp3-video-workflows/jobs/{task.id}/download-video/landscape" if _video_file_ready(landscape_path) else None,
+        "download_vertical_video_url": f"/api/mp3-video-workflows/jobs/{task.id}/download-video/vertical" if _video_file_ready(vertical_path) else None,
     }
     artifact_urls = {}
     for key, artifact in artifacts.items():
@@ -1330,7 +1729,7 @@ def _prepare_keyframe_job_for_full_video(task, payload=None):
     ))
     if render_mode != "keyframes" and not has_keyframes:
         return False, "当前任务不是关键帧预览任务，不能用这个入口续跑完整视频"
-    if _path_exists(_video_output_path(result.get("landscape_video"))) and _path_exists(_video_output_path(result.get("vertical_video"))):
+    if _video_file_ready(_video_output_path(result.get("landscape_video"))) and _video_file_ready(_video_output_path(result.get("vertical_video"))):
         return False, "当前任务已经有完整横屏和竖屏视频，无需续跑"
 
     ok, message, audio_range = _apply_continue_audio_range_override(result, workflow, payload)
@@ -1680,94 +2079,23 @@ def _bilibili_upload_season_id(data):
 
 
 def _bilibili_upload_children(parent_id):
-    child_ids = (
-        db.session.query(PublicationTask.id)
-        .filter(PublicationTask.parent_feature == FEATURE_NAME)
-        .filter(PublicationTask.parent_task_id == parent_id)
-        .filter(PublicationTask.feature == "publisher")
-        .order_by(PublicationTask.created_at.desc())
-        .limit(20)
-        .all()
+    return shared_bilibili_upload_children(
+        parent_id,
+        parent_feature=FEATURE_NAME,
+        source_label=f"{FEATURE_NAME}:bilibili_upload",
+        limit=20,
     )
-    items = []
-    for (child_id,) in child_ids:
-        row = PublicationTask.query.options(load_only(
-            PublicationTask.id,
-            PublicationTask.celery_task_id,
-            PublicationTask.status,
-            PublicationTask.current_step,
-            PublicationTask.progress,
-            PublicationTask.error_message,
-            PublicationTask.params,
-            PublicationTask.result,
-            PublicationTask.created_at,
-            PublicationTask.completed_at,
-        )).filter(PublicationTask.id == child_id).one_or_none()
-        if not row:
-            continue
-        item = _bilibili_upload_child_payload(row)
-        if item:
-            items.append(item)
-    return items
 
 
 def _bilibili_upload_child_payload(task):
-    params = task.params if isinstance(task.params, dict) else {}
-    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
-    if metadata.get("source") != f"{FEATURE_NAME}:bilibili_upload":
-        return None
-    bili = params.get("bilibili") if isinstance(params.get("bilibili"), dict) else {}
-    result = task.result if isinstance(task.result, dict) else {}
-    status = STATUS_MAP.get(task.status, task.status or "queued")
-    upload_result = result.get("bilibili_result")
-    return {
-        "task_id": task.id,
-        "celery_id": task.celery_task_id,
-        "status": status,
-        "step": task.current_step,
-        "progress": task.progress or 0,
-        "error": task.error_message or result.get("bilibili_error"),
-        "title": bili.get("title") or result.get("bilibili_title"),
-        "video_key": metadata.get("video_key"),
-        "cover_key": metadata.get("cover_key") or bili.get("cover_key"),
-        "credential_id": bili.get("credential_id") or result.get("bilibili_credential_id"),
-        "credential_name": (
-            result.get("bilibili_credential_name")
-            or bili.get("credential_name")
-            or _platform_credential_display_name(bili.get("credential_id") or result.get("bilibili_credential_id"))
-        ),
-        "charging_pay": bili.get("charging_pay") or result.get("bilibili_charging_pay"),
-        "delay_time": bili.get("delay_time") or result.get("bilibili_delay_time"),
-        "season_id": bili.get("season_id") or result.get("bilibili_season_id"),
-        "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
-        "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else None,
-        "result": upload_result,
-    }
+    return shared_bilibili_upload_child_payload(
+        task,
+        source_label=f"{FEATURE_NAME}:bilibili_upload",
+    )
 
 
 def _cancel_bilibili_upload_child(task):
-    status = str(task.status or "").lower()
-    if status in {"completed", "failed", "canceled"}:
-        return True, "上传任务已结束"
-    if status not in {"pending", "queued"}:
-        return False, "上传任务已开始运行，暂不支持从这里取消"
-
-    if task.celery_task_id:
-        celery_app.control.revoke(task.celery_task_id, terminate=False)
-
-    now = datetime.utcnow()
-    result = dict(task.result or {})
-    result["bilibili_upload_canceled_at"] = now.isoformat() + "Z"
-    result["bilibili_upload_cancel_reason"] = "user_canceled_queued_upload"
-    task.status = "canceled"
-    task.current_step = "canceled"
-    task.progress = task.progress or 0
-    task.error_message = None
-    task.completed_at = now
-    task.result = result
-    flag_modified(task, "result")
-    db.session.commit()
-    return True, "已取消 B站上传排队任务"
+    return shared_cancel_bilibili_upload_child(task)
 
 
 def _source_output_path(result):

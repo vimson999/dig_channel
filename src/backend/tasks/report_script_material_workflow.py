@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from sqlalchemy import inspect as sqlalchemy_inspect
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
@@ -314,8 +315,88 @@ def _process_job(task_id: str) -> bool:
         source=source,
         source_task_id=source_task_id,
     )
+    _dispatch_auto_storyboard(workflow_task_id)
     logger.info("Report script material workflow completed: %s", workflow_task_id)
     return True
+
+
+def _dispatch_auto_storyboard(material_task_id: str) -> None:
+    material = _load_task(
+        material_task_id,
+        PublicationTask.id,
+        PublicationTask.params,
+        PublicationTask.user_id,
+        PublicationTask.status,
+    )
+    if not material or material.status != "completed":
+        return
+    payload = _workflow_payload(material)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    if str(metadata.get("source") or "") != "report-stick-figure-video-workflow":
+        return
+    workflow_task_id = str(metadata.get("workflow_job_id") or "").strip()
+    if not workflow_task_id:
+        return
+    try:
+        from tasks.report_visual_plan import enqueue_report_visual_plan_for_material
+
+        dispatch = enqueue_report_visual_plan_for_material(
+            material_task_id,
+            user_id=str(material.user_id or ""),
+            parent_feature="report_stick_figure_video_workflow",
+            parent_task_id=workflow_task_id,
+            visual_scheme_key=str(metadata.get("visual_scheme_key") or "stick_figure"),
+        )
+        storyboard_id = str(dispatch.get("job_id") or "")
+        storyboard_status = str(dispatch.get("status") or "pending")
+        parent_status = "completed" if storyboard_status == "completed" else "pending"
+        now = datetime.utcnow()
+        PublicationTask.query.filter(
+            PublicationTask.id == workflow_task_id,
+            PublicationTask.feature == "report_stick_figure_video_workflow",
+            PublicationTask.status != "canceled",
+        ).update({
+            PublicationTask.status: "processing",
+            PublicationTask.current_step: "storyboard_done" if parent_status == "completed" else "storyboard_queued",
+            PublicationTask.progress: 60 if parent_status == "completed" else 35,
+            PublicationTask.waiting_child_id: storyboard_id,
+            PublicationTask.waiting_child_label: "标题与正文分镜",
+            PublicationTask.waiting_child_status: parent_status,
+            PublicationTask.waiting_child_step: "done" if parent_status == "completed" else "queued",
+            PublicationTask.waiting_child_updated_at: now.isoformat() + "Z",
+            PublicationTask.error_message: None,
+            PublicationTask.updated_at: now,
+        }, synchronize_session=False)
+        db.session.commit()
+        logger.info(
+            "Auto storyboard dispatched: workflow=%s material=%s storyboard=%s status=%s",
+            workflow_task_id,
+            material_task_id,
+            storyboard_id,
+            storyboard_status,
+        )
+    except Exception as exc:
+        db.session.rollback()
+        now = datetime.utcnow()
+        PublicationTask.query.filter(
+            PublicationTask.id == workflow_task_id,
+            PublicationTask.feature == "report_stick_figure_video_workflow",
+            PublicationTask.status != "canceled",
+        ).update({
+            PublicationTask.status: "failed",
+            PublicationTask.current_step: "storyboard_submit_failed",
+            PublicationTask.error_message: str(exc)[:4000],
+            PublicationTask.completed_at: now,
+            PublicationTask.updated_at: now,
+        }, synchronize_session=False)
+        db.session.commit()
+        logger.error(
+            "Auto storyboard dispatch failed: workflow=%s material=%s error=%s",
+            workflow_task_id,
+            material_task_id,
+            exc,
+            exc_info=True,
+        )
 
 
 def _workflow_payload(task: PublicationTask) -> Dict[str, Any]:
@@ -431,12 +512,12 @@ def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload, *, at
     db.session.add(child)
     db.session.flush()
     child_id = child.id
+    child_snapshot = _task_snapshot(child)
     db.session.commit()
     async_result = process_report_pdf_gemini_job.apply_async(args=[child_id], queue=gemini_service.QUEUE_NAME, retry=False)
-    child = _load_task(child_id, *TASK_CHILD_COLUMNS)
-    child.celery_task_id = async_result.id
-    db.session.commit()
-    return _load_task(child_id, *TASK_CHILD_COLUMNS)
+    _persist_child_celery_task_id(child_id, async_result.id)
+    child_snapshot.celery_task_id = async_result.id
+    return child_snapshot
 
 
 def _reusable_material_for_pdf(pdf: Dict[str, Any], *, exclude_task_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -608,6 +689,11 @@ def _complete_material_task(
     task = _load_task(task_id, *TASK_STATE_COLUMNS)
     if not task:
         raise RuntimeError("基础文案物料任务不存在")
+    result = dict(task.result or {})
+    tts_text = {
+        "chars": len(structured.get("final_script_for_tts") or ""),
+        "chunks": len(chunks),
+    }
     output_path = write_result_file(
         job_id=task.id,
         created_at=task.created_at,
@@ -615,15 +701,15 @@ def _complete_material_task(
         script_material=script_material,
         pdf=pdf,
         gemini=gemini_result,
+        children=result.get("children") if isinstance(result.get("children"), dict) else {},
+        logs=result.get("logs") if isinstance(result.get("logs"), list) else [],
+        tts_text=tts_text,
+        error=result.get("error"),
     )
-    result = dict(task.result or {})
     result.update({
         "gemini": _task_public_summary(gemini_task) if gemini_task else result.get("gemini"),
         "structured_result": structured,
-        "tts_text": {
-            "chars": len(structured.get("final_script_for_tts") or ""),
-            "chunks": len(chunks),
-        },
+        "tts_text": tts_text,
         "script_material": script_material,
         "audio": None,
         "video": video_result,
@@ -673,6 +759,33 @@ def _record_child(parent_id: str, label: str, child) -> None:
 def _record_child_summary(parent_id: str, label: str, summary: Optional[Dict[str, Any]]) -> None:
     if not summary:
         return
+    if _is_postgresql_session():
+        db.session.execute(
+            text("""
+                UPDATE public.publication_tasks
+                SET result = jsonb_set(
+                        jsonb_set(
+                            COALESCE(result, '{}'::jsonb),
+                            '{children}',
+                            COALESCE(result->'children', '{}'::jsonb),
+                            true
+                        ),
+                        ARRAY['children', CAST(:label AS text)],
+                        COALESCE(result #> ARRAY['children', CAST(:label AS text)], '{}'::jsonb)
+                            || CAST(:child AS jsonb),
+                        true
+                    ),
+                    updated_at = NOW()
+                WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+            """),
+            {
+                "task_id": str(parent_id),
+                "label": str(label),
+                "child": json.dumps(summary, ensure_ascii=False),
+            },
+        )
+        db.session.commit()
+        return
     parent = _load_task(parent_id, *TASK_STATE_COLUMNS)
     if not parent:
         return
@@ -688,12 +801,6 @@ def _record_child_summary(parent_id: str, label: str, summary: Optional[Dict[str
 
 def _record_child_attempt(parent_id: str, label: str, child, attempt: int, max_attempts: int, status: str, *, error: Optional[str] = None) -> None:
     summary = _task_public_summary(child) if child else {}
-    parent = _load_task(parent_id, *TASK_STATE_COLUMNS)
-    if not parent:
-        return
-    result = dict(parent.result or {})
-    attempts = dict(result.get("child_attempts") or {})
-    items = list(attempts.get(label) or [])
     updated_at = datetime.utcnow().isoformat() + "Z"
     summary.update({
         "attempt": int(attempt or 1),
@@ -702,6 +809,64 @@ def _record_child_attempt(parent_id: str, label: str, child, attempt: int, max_a
         "error": error or summary.get("error"),
         "updated_at": updated_at,
     })
+    if _is_postgresql_session():
+        db.session.execute(
+            text("""
+                UPDATE public.publication_tasks
+                SET result = jsonb_set(
+                        jsonb_set(
+                            COALESCE(result, '{}'::jsonb),
+                            '{child_attempts}',
+                            CASE
+                                WHEN jsonb_typeof(result->'child_attempts') = 'object'
+                                THEN result->'child_attempts'
+                                ELSE '{}'::jsonb
+                            END,
+                            true
+                        ),
+                        ARRAY['child_attempts', CAST(:label AS text)],
+                        (
+                            SELECT COALESCE(
+                                jsonb_agg(retained.item ORDER BY retained.ordinality),
+                                '[]'::jsonb
+                            ) || CAST(:entry AS jsonb)
+                            FROM (
+                                SELECT existing.item, existing.ordinality
+                                FROM jsonb_array_elements(
+                                    CASE
+                                        WHEN jsonb_typeof(
+                                            result #> ARRAY['child_attempts', CAST(:label AS text)]
+                                        ) = 'array'
+                                        THEN result #> ARRAY['child_attempts', CAST(:label AS text)]
+                                        ELSE '[]'::jsonb
+                                    END
+                                ) WITH ORDINALITY AS existing(item, ordinality)
+                                WHERE existing.item->>'attempt' IS DISTINCT FROM :attempt_text
+                                ORDER BY existing.ordinality DESC
+                                LIMIT :retain_count
+                            ) AS retained
+                        ),
+                        true
+                    ),
+                    updated_at = NOW()
+                WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+            """),
+            {
+                "task_id": str(parent_id),
+                "label": str(label),
+                "attempt_text": str(int(attempt or 1)),
+                "retain_count": max(0, int(max_attempts or 1) - 1),
+                "entry": json.dumps([summary], ensure_ascii=False),
+            },
+        )
+        db.session.commit()
+        return
+    parent = _load_task(parent_id, *TASK_STATE_COLUMNS)
+    if not parent:
+        return
+    result = dict(parent.result or {})
+    attempts = dict(result.get("child_attempts") or {})
+    items = list(attempts.get(label) or [])
     items = [item for item in items if int(item.get("attempt") or 0) != int(attempt or 1)]
     items.append(summary)
     attempts[label] = items[-int(max_attempts or 1):]
@@ -747,7 +912,31 @@ def _child_metadata(child) -> Dict[str, Any]:
     return payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
 
 
+def _is_postgresql_session() -> bool:
+    try:
+        return db.session.get_bind().dialect.name == "postgresql"
+    except Exception:
+        return False
+
+
 def _update_result(parent_id: str, values: Dict[str, Any]) -> None:
+    if not isinstance(values, dict) or not values:
+        return
+    if _is_postgresql_session():
+        db.session.execute(
+            text("""
+                UPDATE public.publication_tasks
+                SET result = COALESCE(result, '{}'::jsonb) || CAST(:patch AS jsonb),
+                    updated_at = NOW()
+                WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+            """),
+            {
+                "task_id": str(parent_id),
+                "patch": json.dumps(values, ensure_ascii=False),
+            },
+        )
+        db.session.commit()
+        return
     task = _load_task(parent_id, *TASK_STATE_COLUMNS)
     if not task:
         return
@@ -819,20 +1008,61 @@ def _record_normalizer_attempt(
     *,
     error: Optional[str] = None,
 ) -> None:
-    parent = _load_task(parent_id, *TASK_STATE_COLUMNS)
-    if not parent:
-        return
-    result = dict(parent.result or {})
-    attempts = list(result.get("normalizer_attempts") or [])
     updated_at = datetime.utcnow().isoformat() + "Z"
-    attempts = [item for item in attempts if int(item.get("attempt") or 0) != int(attempt or 1)]
-    attempts.append({
+    entry = {
         "attempt": int(attempt or 1),
         "max_attempts": int(max_attempts or 1),
         "status": status,
         "error": error,
         "updated_at": updated_at,
-    })
+    }
+    if _is_postgresql_session():
+        db.session.execute(
+            text("""
+                UPDATE public.publication_tasks
+                SET result = jsonb_set(
+                        COALESCE(result, '{}'::jsonb),
+                        '{normalizer_attempts}',
+                        (
+                            SELECT COALESCE(
+                                jsonb_agg(retained.item ORDER BY retained.ordinality),
+                                '[]'::jsonb
+                            ) || CAST(:entry AS jsonb)
+                            FROM (
+                                SELECT existing.item, existing.ordinality
+                                FROM jsonb_array_elements(
+                                    CASE
+                                        WHEN jsonb_typeof(result->'normalizer_attempts') = 'array'
+                                        THEN result->'normalizer_attempts'
+                                        ELSE '[]'::jsonb
+                                    END
+                                ) WITH ORDINALITY AS existing(item, ordinality)
+                                WHERE existing.item->>'attempt' IS DISTINCT FROM :attempt_text
+                                ORDER BY existing.ordinality DESC
+                                LIMIT :retain_count
+                            ) AS retained
+                        ),
+                        true
+                    ),
+                    updated_at = NOW()
+                WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+            """),
+            {
+                "task_id": str(parent_id),
+                "attempt_text": str(int(attempt or 1)),
+                "retain_count": max(0, int(max_attempts or 1) - 1),
+                "entry": json.dumps([entry], ensure_ascii=False),
+            },
+        )
+        db.session.commit()
+        return
+    parent = _load_task(parent_id, *TASK_STATE_COLUMNS)
+    if not parent:
+        return
+    result = dict(parent.result or {})
+    attempts = list(result.get("normalizer_attempts") or [])
+    attempts = [item for item in attempts if int(item.get("attempt") or 0) != int(attempt or 1)]
+    attempts.append(entry)
     result["normalizer_attempts"] = attempts[-int(max_attempts or 1):]
     parent.result = result
     flag_modified(parent, "result")
@@ -840,19 +1070,50 @@ def _record_normalizer_attempt(
 
 
 def _emit(parent_id: str, step: str, progress: int, message: str) -> None:
+    log_entry = {
+        "step": step,
+        "message": message,
+        "progress": progress,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    step_code = _current_step_code(step)
+    progress_value = max(0, min(100, int(progress or 0)))
+    if _is_postgresql_session():
+        db.session.execute(
+            text("""
+                UPDATE public.publication_tasks
+                SET current_step = :step,
+                    progress = CASE WHEN :progress > 0 THEN :progress ELSE progress END,
+                    result = jsonb_set(
+                        COALESCE(result, '{}'::jsonb),
+                        '{logs}',
+                        CASE
+                            WHEN jsonb_array_length(COALESCE(result->'logs', '[]'::jsonb)) >= 120
+                            THEN (COALESCE(result->'logs', '[]'::jsonb) #- '{0}') || CAST(:entry AS jsonb)
+                            ELSE COALESCE(result->'logs', '[]'::jsonb) || CAST(:entry AS jsonb)
+                        END,
+                        true
+                    ),
+                    updated_at = NOW()
+                WHERE id = :task_id AND status IS DISTINCT FROM 'canceled'
+            """),
+            {
+                "task_id": str(parent_id),
+                "step": step_code,
+                "progress": progress_value,
+                "entry": json.dumps([log_entry], ensure_ascii=False),
+            },
+        )
+        db.session.commit()
+        return
     task = _load_task(parent_id, *TASK_STATE_COLUMNS)
     if not task:
         return
     result = dict(task.result or {})
     logs = list(result.get("logs") or [])
-    logs.append({
-        "step": step,
-        "message": message,
-        "progress": progress,
-        "updated_at": datetime.utcnow().isoformat() + "Z",
-    })
+    logs.append(log_entry)
     result["logs"] = logs[-120:]
-    task.current_step = _current_step_code(step)
+    task.current_step = step_code
     task.progress = max(0, min(100, int(progress or task.progress or 0)))
     task.result = result
     flag_modified(task, "result")
@@ -1008,6 +1269,21 @@ def _load_task(task_id: str, *columns) -> Optional[PublicationTask]:
         .filter(PublicationTask.id == task_id)
         .one_or_none()
     )
+
+
+def _persist_child_celery_task_id(child_id: str, celery_task_id: str) -> None:
+    (
+        PublicationTask.query
+        .filter(PublicationTask.id == child_id)
+        .update(
+            {
+                "celery_task_id": celery_task_id,
+                "updated_at": datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+    )
+    db.session.commit()
 
 
 def _load_task_results(task_ids) -> Dict[str, PublicationTask]:
