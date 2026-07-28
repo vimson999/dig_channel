@@ -271,7 +271,10 @@ if __name__ == '__main__':
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_ENABLED", "1")
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_MODE", "ensure")
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES", "all")
-    os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS", "zsxq_auto")
+    os.environ.setdefault(
+        "BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS",
+        "zsxq_auto,content_retention,bilibili_charging,youtube_channel_sync,youtube_video_sync",
+    )
     os.environ.setdefault("BACKEND_PROCESS_BOOTSTRAP_WATCHDOG", "1")
     os.environ.setdefault(
         "CELERY_AUTO_HEAL_SERVICES",

@@ -46,6 +46,8 @@ const state = {
     selectedTabDefinitions: [],
     syncConfig: null,
     schedulerStatus: null,
+    allTabsConfigs: [],
+    allTabsConfigError: '',
     batches: [],
     batchesError: null,
     schedulerPollTimer: null,
@@ -100,6 +102,7 @@ const els = {
     configMp3VideoThresholdInput: document.getElementById('system-sync-mp3-video-threshold-input'),
     configAutoScriptMaterialDispatchCheckbox: document.getElementById('system-sync-auto-script-material-dispatch-checkbox'),
     configPdfScriptMaterialThresholdInput: document.getElementById('system-sync-pdf-script-material-threshold-input'),
+    configAutoStickFigureVisualCheckbox: document.getElementById('system-sync-auto-stick-figure-visual-checkbox'),
     configAutoPdfCleanCheckbox: document.getElementById('system-sync-auto-pdf-clean-checkbox'),
     configAutoAudioCleanCheckbox: document.getElementById('system-sync-auto-audio-clean-checkbox'),
     configAutoPublishAfterCleanCheckbox: document.getElementById('system-sync-auto-publish-after-clean-checkbox'),
@@ -113,6 +116,9 @@ const els = {
     refreshBtn: document.getElementById('system-sync-scheduler-refresh-btn'),
     openLogsBtn: document.getElementById('system-sync-scheduler-open-logs-btn'),
     logsPanel: document.getElementById('system-sync-scheduler-logs'),
+    allTabsConfigPanel: document.getElementById('all-tabs-config-panel'),
+    allTabsConfigMessage: document.getElementById('all-tabs-config-message'),
+    allTabsConfigRefreshBtn: document.getElementById('all-tabs-config-refresh-btn'),
     configBadge: document.getElementById('config-status-badge'),
     configSummary: document.getElementById('config-summary'),
     configDetail: document.getElementById('config-detail'),
@@ -266,6 +272,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setActiveMode(resolveModeFromHash(window.location.hash), { updateHash: false });
     const initialLoadTasks = [
         loadSystemSyncSchedulerStatus({ render: false }),
+        loadAllTabsAutoSyncConfigs({ render: false }),
         loadSystemSyncBatches({ render: false }),
         loadAutoPublishConfig({ render: false }),
         loadAutoPublishSchedulerStatus({ render: false }),
@@ -281,6 +288,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderWorkspaceSnapshot();
     void Promise.allSettled(initialLoadTasks).then(() => {
         renderSyncSchedulerPanel();
+        renderAllTabsAutoSyncConfigs();
         renderBatchesPanel();
         renderAutoPublishCurrentGroup();
         renderAutoPublishSchedulerPanel();
@@ -418,6 +426,8 @@ function bindEvents() {
     els.stopBtn.addEventListener('click', stopSystemSyncScheduler);
     els.refreshBtn.addEventListener('click', () => loadSystemSyncSchedulerStatus());
     els.openLogsBtn.addEventListener('click', toggleSchedulerLogs);
+    els.allTabsConfigRefreshBtn?.addEventListener('click', () => loadAllTabsAutoSyncConfigs());
+    els.allTabsConfigPanel?.addEventListener('click', handleAllTabsConfigAction);
     els.autoPublishLoadTagsBtn.addEventListener('click', loadAutoPublishTags);
     els.autoPublishAccountFillCurrentCookieBtn?.addEventListener('click', fillAutoPublishAccountWithCurrentCookie);
     els.autoPublishAccountFillCurrentGroupBtn?.addEventListener('click', fillAutoPublishAccountWithCurrentGroup);
@@ -566,6 +576,7 @@ async function initializeCookieProfiles() {
     updateCookieFormatHint();
     updateCookieSummary();
     setCookieEditorOpen(!hasRequestCredential());
+    renderAllTabsAutoSyncConfigs();
     renderWorkspaceSnapshot();
 }
 
@@ -1448,10 +1459,15 @@ function formatAutoVideoDispatchText(config = {}) {
     return `视频编排旁路：PDF≥${value.pdf_min_download_count}，MP3≥${value.mp3_min_download_count}`;
 }
 
-function buildAutoScriptMaterialDispatchConfig(enabled, pdfThreshold) {
+function buildAutoScriptMaterialDispatchConfig(enabled, pdfThreshold, visualSchemeKeys = []) {
     return {
         enabled: Boolean(enabled),
         pdf_min_download_count: Number(pdfThreshold),
+        visual_scheme_keys: [...new Set(
+            (Array.isArray(visualSchemeKeys) ? visualSchemeKeys : [])
+                .map(value => String(value || '').trim().toLowerCase())
+                .filter(value => ['stick_figure', 'doraemon'].includes(value)),
+        )],
         wait_for_completion: false,
     };
 }
@@ -1462,11 +1478,13 @@ function autoScriptMaterialDispatchConfig(config = {}) {
         return buildAutoScriptMaterialDispatchConfig(
             SYSTEM_SYNC_AUTO_SCRIPT_MATERIAL_DISPATCH,
             SYSTEM_SYNC_PDF_SCRIPT_MATERIAL_THRESHOLD,
+            [],
         );
     }
     return buildAutoScriptMaterialDispatchConfig(
         value.enabled === true,
         parseBoundedInt(value.pdf_min_download_count, SYSTEM_SYNC_PDF_SCRIPT_MATERIAL_THRESHOLD, 0, 100000),
+        value.visual_scheme_keys,
     );
 }
 
@@ -1475,7 +1493,10 @@ function formatAutoScriptMaterialDispatchText(config = {}) {
     if (!value.enabled) {
         return '基础文案物料未开启';
     }
-    return `基础文案物料：PDF≥${value.pdf_min_download_count}`;
+    const visualText = value.visual_scheme_keys.includes('stick_figure')
+        ? ' → 白板火柴人分镜与图片'
+        : '';
+    return `基础文案物料：PDF≥${value.pdf_min_download_count}${visualText}`;
 }
 
 async function saveSystemSyncConfig() {
@@ -1543,6 +1564,7 @@ async function saveSystemSyncConfig() {
     const autoScriptMaterialDispatch = buildAutoScriptMaterialDispatchConfig(
         Boolean(els.configAutoScriptMaterialDispatchCheckbox?.checked),
         pdfScriptMaterialThreshold,
+        els.configAutoStickFigureVisualCheckbox?.checked ? ['stick_figure'] : [],
     );
     const attachmentDownloadRules = buildAttachmentDownloadRules(
         jobs,
@@ -1658,6 +1680,203 @@ async function loadSystemSyncSchedulerStatus(options = {}) {
         renderSyncSchedulerPanel();
         renderSyncOverviewCard();
         renderContextPanel();
+    }
+}
+
+async function loadAllTabsAutoSyncConfigs(options = {}) {
+    state.allTabsConfigError = '';
+    if (els.allTabsConfigRefreshBtn) {
+        setLoading(els.allTabsConfigRefreshBtn, true, '读取中...');
+    }
+    try {
+        const data = await apiGet('/zsxq/all-tabs-auto-sync/configs');
+        state.allTabsConfigs = Array.isArray(data?.configs) ? data.configs : [];
+    } catch (error) {
+        state.allTabsConfigs = [];
+        state.allTabsConfigError = error.message || '读取计划配置失败';
+    } finally {
+        if (els.allTabsConfigRefreshBtn) {
+            setLoading(
+                els.allTabsConfigRefreshBtn,
+                false,
+                '<i class="fas fa-rotate mr-1"></i>刷新',
+            );
+        }
+    }
+
+    if (options.render !== false) {
+        renderAllTabsAutoSyncConfigs();
+    }
+}
+
+function showAllTabsConfigMessage(type, text) {
+    if (!els.allTabsConfigMessage) return;
+    const colorMap = {
+        success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+        error: 'border-red-200 bg-red-50 text-red-700',
+        warning: 'border-amber-200 bg-amber-50 text-amber-700',
+        muted: 'border-slate-200 bg-slate-50 text-slate-600',
+    };
+    els.allTabsConfigMessage.className = `mb-3 rounded-lg border px-3 py-2 text-xs ${colorMap[type] || colorMap.muted}`;
+    els.allTabsConfigMessage.textContent = text;
+    els.allTabsConfigMessage.classList.remove('hidden');
+}
+
+function renderAllTabsCredentialOptions(selectedId) {
+    const selected = String(selectedId || '');
+    const profiles = Array.isArray(state.cookieProfiles) ? state.cookieProfiles : [];
+    const options = ['<option value="">未选择 DB Cookie</option>'];
+    profiles.forEach((profile) => {
+        const id = String(profile.id || '');
+        options.push(
+            `<option value="${escapeHtml(id)}"${id === selected ? ' selected' : ''}>${escapeHtml(credentialProfileLabel(profile))}</option>`,
+        );
+    });
+    if (selected && !profiles.some(profile => String(profile.id) === selected)) {
+        options.push(`<option value="${escapeHtml(selected)}" selected>已配置凭据（当前列表不可见）</option>`);
+    }
+    return options.join('');
+}
+
+function renderAllTabsAutoSyncConfigs() {
+    if (!els.allTabsConfigPanel) return;
+    if (state.allTabsConfigError) {
+        els.allTabsConfigPanel.innerHTML = `
+            <div class="rounded-lg border border-red-200 bg-red-50 px-3 py-4 text-xs text-red-700">
+                读取失败：${escapeHtml(state.allTabsConfigError)}
+            </div>
+        `;
+        return;
+    }
+    if (!state.allTabsConfigs.length) {
+        els.allTabsConfigPanel.innerHTML = `
+            <div class="rounded-lg border border-dashed border-slate-300 px-3 py-5 text-center text-xs text-slate-400">
+                暂无洪灝 / 生财同步计划配置。
+            </div>
+        `;
+        return;
+    }
+
+    els.allTabsConfigPanel.innerHTML = state.allTabsConfigs.map((config) => {
+        const key = String(config.key || config.schedule_key || '');
+        const enabled = config.enabled !== false;
+        const notifyMilestones = config.notify_milestones !== false;
+        const stopOnExisting = config.stop_on_existing === true;
+        const updatedAt = config.updated_at ? formatZsxqTime(config.updated_at) : '默认配置';
+        return `
+            <article class="rounded-xl border border-slate-200 bg-slate-50/70 p-3" data-schedule-key="${escapeHtml(key)}">
+                <div class="mb-3 flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                        <div class="font-black text-slate-800">${escapeHtml(config.group_name || key)}</div>
+                        <div class="mt-1 text-[11px] text-slate-500">group_id=${escapeHtml(config.group_id || '-')} · 更新：${escapeHtml(updatedAt)}</div>
+                    </div>
+                    <label class="inline-flex items-center gap-2 text-xs font-bold text-slate-700">
+                        <input data-field="enabled" type="checkbox" class="rounded border-slate-300"${enabled ? ' checked' : ''}>
+                        启用计划
+                    </label>
+                </div>
+                <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <label class="text-[11px] font-bold text-slate-600">
+                        间隔（分钟）
+                        <input data-field="interval_minutes" type="number" min="1" max="1440" value="${escapeHtml(config.interval_minutes || 180)}" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs text-slate-800">
+                    </label>
+                    <label class="text-[11px] font-bold text-slate-600">
+                        每页主题数
+                        <input data-field="topic_count" type="number" min="1" max="50" value="${escapeHtml(config.topic_count || 20)}" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs text-slate-800">
+                    </label>
+                    <label class="text-[11px] font-bold text-slate-600">
+                        最大页数
+                        <input data-field="max_pages" type="number" min="1" max="20" value="${escapeHtml(config.max_pages || 1)}" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs text-slate-800">
+                    </label>
+                    <label class="text-[11px] font-bold text-slate-600">
+                        DB Cookie
+                        <select data-field="credential_id" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs text-slate-800">
+                            ${renderAllTabsCredentialOptions(config.credential_id)}
+                        </select>
+                    </label>
+                </div>
+                <div class="mt-3 flex flex-wrap gap-x-5 gap-y-2">
+                    <label class="inline-flex items-center gap-2 text-xs text-slate-700">
+                        <input data-field="notify_milestones" type="checkbox" class="rounded border-slate-300"${notifyMilestones ? ' checked' : ''}>
+                        节点邮件通知
+                    </label>
+                    <label class="inline-flex items-center gap-2 text-xs text-slate-700">
+                        <input data-field="stop_on_existing" type="checkbox" class="rounded border-slate-300"${stopOnExisting ? ' checked' : ''}>
+                        遇到已有主题后停止翻页
+                    </label>
+                </div>
+                <div class="mt-3 flex flex-wrap gap-2">
+                    <button data-all-tabs-action="save" class="rounded-lg border border-blue-300 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 hover:bg-blue-100">
+                        <i class="fas fa-floppy-disk mr-1"></i>保存配置
+                    </button>
+                    <button data-all-tabs-action="run" class="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100"${enabled ? '' : ' disabled'}>
+                        <i class="fas fa-play mr-1"></i>立即执行
+                    </button>
+                </div>
+            </article>
+        `;
+    }).join('');
+}
+
+async function handleAllTabsConfigAction(event) {
+    const button = event.target.closest('[data-all-tabs-action]');
+    if (!button) return;
+    const card = button.closest('[data-schedule-key]');
+    const scheduleKey = card?.dataset.scheduleKey;
+    if (!card || !scheduleKey) return;
+
+    const action = button.dataset.allTabsAction;
+    const original = button.innerHTML;
+    if (action === 'save') {
+        const field = name => card.querySelector(`[data-field="${name}"]`);
+        const payload = {
+            enabled: Boolean(field('enabled')?.checked),
+            interval_minutes: parseBoundedInt(field('interval_minutes')?.value, 180, 1, 1440),
+            topic_count: parseBoundedInt(field('topic_count')?.value, 20, 1, 50),
+            max_pages: parseBoundedInt(field('max_pages')?.value, 1, 1, 20),
+            credential_id: String(field('credential_id')?.value || '').trim() || null,
+            notify_milestones: Boolean(field('notify_milestones')?.checked),
+            stop_on_existing: Boolean(field('stop_on_existing')?.checked),
+        };
+        setLoading(button, true, '保存中...');
+        try {
+            const data = await apiRequest(
+                `/zsxq/all-tabs-auto-sync/configs/${encodeURIComponent(scheduleKey)}`,
+                { method: 'PUT', payload },
+            );
+            const saved = data?.config;
+            state.allTabsConfigs = state.allTabsConfigs.map(item => (
+                String(item.key || item.schedule_key) === scheduleKey && saved ? saved : item
+            ));
+            showAllTabsConfigMessage('success', `${saved?.group_name || scheduleKey} 配置已保存，调度器将自动热加载。`);
+            renderAllTabsAutoSyncConfigs();
+        } catch (error) {
+            showAllTabsConfigMessage('error', `保存失败：${error.message}`);
+            setLoading(button, false, original);
+        }
+        return;
+    }
+
+    if (action === 'run') {
+        setLoading(button, true, '提交中...');
+        try {
+            const data = await apiPost('/zsxq/all-tabs-auto-sync/run-once', {
+                schedule_key: scheduleKey,
+            });
+            const result = data?.result || {};
+            const targets = Array.isArray(result.targets) ? result.targets : [];
+            const queued = targets.filter(item => item?.queued === true).length;
+            const failed = targets.filter(item => item?.reason === 'error' || item?.error).length;
+            const type = queued > 0 ? 'success' : (failed > 0 ? 'error' : 'warning');
+            const text = queued > 0
+                ? `已提交 ${queued} 条同步任务；节点邮件会按配置发送。`
+                : `本次没有提交任务${failed > 0 ? `，失败 ${failed} 条` : ''}。`;
+            showAllTabsConfigMessage(type, text);
+        } catch (error) {
+            showAllTabsConfigMessage('error', `立即执行失败：${error.message}`);
+        } finally {
+            setLoading(button, false, original);
+        }
     }
 }
 
@@ -2037,6 +2256,9 @@ function hydrateSystemSyncRuntimeConfigInputs(config = {}) {
     }
     if (els.configPdfScriptMaterialThresholdInput) {
         els.configPdfScriptMaterialThresholdInput.value = String(autoScriptMaterialDispatch.pdf_min_download_count);
+    }
+    if (els.configAutoStickFigureVisualCheckbox) {
+        els.configAutoStickFigureVisualCheckbox.checked = autoScriptMaterialDispatch.visual_scheme_keys.includes('stick_figure');
     }
 
     if (els.configMaxRoundsInput) {

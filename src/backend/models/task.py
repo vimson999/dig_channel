@@ -184,6 +184,7 @@ class PublicationTask(db.Model):
     report_audio_video_message = db.Column(db.Text, nullable=True)
     report_audio_video_path = db.Column(db.String(600), nullable=True)
     report_audio_cover_path = db.Column(db.String(600), nullable=True)
+    report_audio_landscape_keyframe_path = db.Column(db.String(600), nullable=True)
     report_audio_vertical_cover_path = db.Column(db.String(600), nullable=True)
     report_audio_podcast_cover_path = db.Column(db.String(600), nullable=True)
     report_audio_bilibili_cover_path = db.Column(db.String(600), nullable=True)
@@ -341,6 +342,7 @@ class PublicationTask(db.Model):
             audio = result.get('audio') if isinstance(result.get('audio'), dict) else {}
             video = result.get('video') if isinstance(result.get('video'), dict) else {}
             keyframes = video.get('keyframes') if isinstance(video.get('keyframes'), dict) else {}
+            landscape_cover = keyframes.get('landscape_cover') if isinstance(keyframes.get('landscape_cover'), dict) else {}
             vertical_cover = keyframes.get('vertical_cover') if isinstance(keyframes.get('vertical_cover'), dict) else {}
             podcast_cover = keyframes.get('podcast_cover') if isinstance(keyframes.get('podcast_cover'), dict) else {}
             bilibili_cover = keyframes.get('bilibili_cover') if isinstance(keyframes.get('bilibili_cover'), dict) else {}
@@ -367,6 +369,10 @@ class PublicationTask(db.Model):
             self.report_audio_video_message = _compact_text(video.get('message'))
             self.report_audio_video_path = _compact_text(video.get('video_path'), 600)
             self.report_audio_cover_path = _compact_text(video.get('cover_path'), 600)
+            self.report_audio_landscape_keyframe_path = _compact_text(
+                landscape_cover.get('path'),
+                600,
+            )
             self.report_audio_vertical_cover_path = _compact_text(
                 video.get('vertical_cover_path') or vertical_cover.get('path'),
                 600,

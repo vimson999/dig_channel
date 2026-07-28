@@ -39,7 +39,10 @@ from services.report_visual_scheme import (
 )
 from services import gemini_browser
 from services.runtime_guard import maybe_guarded_apply_async
-from tasks.report_visual_plan import process_report_visual_plan_job
+from tasks.report_visual_plan import (
+    process_report_visual_plan_job,
+    retry_normalize_report_visual_plan_job,
+)
 from utils.auth_utils import require_login
 
 
@@ -229,6 +232,26 @@ def create_storyboard_job(current_user):
     _clear_terminal_storyboard_cache(source_cache_key, current_user=current_user)
 
     user_id = str(getattr(current_user, "id", "") or "")
+    workflow_id = str(data.get("workflow_job_id") or "").strip()
+    if workflow_id:
+        workflow = (
+            PublicationTask.query.options(load_only(
+                PublicationTask.id,
+                PublicationTask.source_task_id,
+            ))
+            .filter(
+                PublicationTask.id == workflow_id,
+                PublicationTask.feature == "report_stick_figure_video_workflow",
+                PublicationTask.source_task_id == material_task.id,
+                or_(
+                    PublicationTask.user_id.in_(_visible_user_ids(current_user)),
+                    PublicationTask.user_id.is_(None),
+                ),
+            )
+            .one_or_none()
+        )
+        if not workflow:
+            return jsonify({"success": False, "message": "火柴人视频编排任务不存在或与文案不匹配"}), 400
     task = PublicationTask(
         status="pending",
         current_step="queued",
@@ -238,7 +261,12 @@ def create_storyboard_job(current_user):
             "user_id": user_id,
             "source_task_id": material_task.id,
             "source_feature": material_task.feature,
-            "parent_feature": "storyboard",
+            "parent_feature": (
+                "report_stick_figure_video_workflow"
+                if workflow_id
+                else "storyboard"
+            ),
+            "parent_task_id": workflow_id or None,
             "visual_scheme_key": scheme.key,
             FEATURE_NAME: {
                 "schema_version": STORYBOARD_SCHEMA_VERSION,
@@ -421,6 +449,62 @@ def get_job(current_user, job_id):
     return jsonify(response_payload)
 
 
+@report_visual_plan_bp.route("/jobs/<job_id>/retry-normalize", methods=["POST"])
+@require_login
+def retry_storyboard_normalize(current_user, job_id):
+    task = _get_owned_visual_task(current_user, job_id, include_result=False)
+    if not task:
+        return jsonify({"success": False, "message": "分镜任务不存在"}), 404
+    if task.status in {"pending", "processing"}:
+        return jsonify({
+            "success": True,
+            "job_id": task.id,
+            "status": _status_label(task.status),
+            "message": "分镜梳理正在运行",
+        })
+    gemini_path = (OUTPUT_ROOT / task.id / "gemini_storyboard.json").resolve()
+    task_root = (OUTPUT_ROOT / task.id).resolve()
+    if task_root not in gemini_path.parents or not gemini_path.is_file():
+        return jsonify({
+            "success": False,
+            "message": "没有可复用的 Gem 原始返回，请重新生成分镜方案",
+        }), 409
+
+    try:
+        submit_result = maybe_guarded_apply_async(
+            retry_normalize_report_visual_plan_job,
+            args=[task.id],
+            queue=QUEUE_NAME,
+            feature=FEATURE_NAME,
+            task_id=task.id,
+            retry=False,
+        )
+        async_result = submit_result["async_result"]
+    except Exception as exc:
+        return jsonify({"success": False, "message": f"续跑梳理入队失败：{exc}"}), 502
+
+    PublicationTask.query.filter(PublicationTask.id == task.id).update({
+        PublicationTask.status: "pending",
+        PublicationTask.current_step: "normalize_queued",
+        PublicationTask.progress: 70,
+        PublicationTask.error_message: None,
+        PublicationTask.completed_at: None,
+        PublicationTask.celery_task_id: async_result.id,
+    }, synchronize_session=False)
+    db.session.commit()
+    scheme_key = task.report_visual_scheme_key or DEFAULT_VISUAL_SCHEME_KEY
+    _clear_terminal_storyboard_cache(
+        f"{task.source_task_id}:{scheme_key}",
+        current_user=current_user,
+    )
+    return jsonify({
+        "success": True,
+        "job_id": task.id,
+        "status": "queued",
+        "message": "已复用 Gem 原文继续梳理，不会重新请求 Gemini",
+    })
+
+
 @report_visual_plan_bp.route("/sources/<source_task_id>/latest", methods=["GET"])
 @require_login
 def get_latest_storyboard_for_source(current_user, source_task_id):
@@ -495,11 +579,10 @@ def get_storyboard_gemini_raw(current_user, job_id):
         .filter(ReportVisualPlanOutput.task_id == task.id)
         .first()
     )
-    if not output or not output.gemini_output_path:
-        return jsonify({"success": False, "message": "Gem 原始返回值尚未生成"}), 404
-
-    path = Path(output.gemini_output_path).resolve()
     root = (OUTPUT_ROOT / task.id).resolve()
+    path = Path(output.gemini_output_path).resolve() if output and output.gemini_output_path else (
+        root / "gemini_storyboard.json"
+    ).resolve()
     if root not in path.parents or not path.is_file():
         return jsonify({"success": False, "message": "Gem 原始返回文件不存在或路径非法"}), 404
     try:
@@ -514,7 +597,10 @@ def get_storyboard_gemini_raw(current_user, job_id):
         "success": True,
         "data": {
             "job_id": task.id,
-            "gemini_url": output.gemini_url,
+            "gemini_url": (
+                output.gemini_url if output
+                else visual_scheme(task.report_visual_scheme_key, require_configured=False).storyboard_gemini_url
+            ),
             "completed_at": stored.get("completed_at"),
             "raw_text": raw_text,
         },

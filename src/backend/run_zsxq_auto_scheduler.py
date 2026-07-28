@@ -30,6 +30,12 @@ from services.zsxq_system_sync_test import (
     queue_configured_jobs,
     _scheduler_interval_minutes,
 )
+from services.zsxq_all_tabs_auto_sync_service import (
+    all_tabs_auto_sync_enabled,
+    load_all_tabs_auto_sync_configs,
+    queue_all_tabs_auto_sync_targets,
+    record_all_tabs_schedule_plan,
+)
 
 DEFAULT_PROJECT_ROOT = BACKEND_DIR.parents[1]
 PROJECT_ROOT = Path(os.environ.get("ZSXQ_PROJECT_ROOT", str(DEFAULT_PROJECT_ROOT))).resolve()
@@ -75,6 +81,8 @@ logging.basicConfig(
     handlers=logging_handlers,
 )
 logger = logging.getLogger("zsxq_auto_scheduler")
+SYSTEM_SYNC_SCHEDULE_TAG = "zsxq-auto-sync-test"
+ALL_TABS_SYNC_SCHEDULE_TAG = "zsxq-all-tabs-auto-sync"
 
 
 def _skip_startup_trigger():
@@ -205,6 +213,8 @@ class ZsxqAutoScheduler:
         self.running = False
         self.interval_minutes = self._interval_minutes()
         self._scheduled_interval = None
+        self._scheduled_all_tabs_signature = None
+        self._scheduled_all_tabs_degraded = None
 
     def _interval_minutes(self):
         status = config_status()
@@ -278,12 +288,10 @@ class ZsxqAutoScheduler:
                         time.monotonic() - started_at,
                     )
                     if result.get("reason") in {"max_rounds_reached", "invalid_group", "missing_config"}:
-                        logger.info(
-                            "[ZSXQ_AUTO_SYNC] scheduler stopped by trigger_reason=%s | attempt_id=%s",
+                        self._stop_when_no_independent_schedule(
                             result.get("reason") or "unknown",
                             attempt_id,
                         )
-                        self.stop()
                     return {
                         "queued": False,
                         "skipped": True,
@@ -296,13 +304,10 @@ class ZsxqAutoScheduler:
                 if result.get("reason") == "queue_failed" and result.get("error"):
                     error_text = str(result.get("error"))[:200]
                     if result.get("testing_complete") or result.get("reason") == "max_rounds_reached":
-                        logger.info(
-                            "[ZSXQ_AUTO_SYNC] max rounds reached after queue failure, stopping scheduler | attempt_id=%s round=%s/%s",
+                        self._stop_when_no_independent_schedule(
+                            "max_rounds_reached_after_queue_failure",
                             attempt_id,
-                            result.get("round") or "-",
-                            result.get("max_rounds") or "-",
                         )
-                        self.stop()
                     return {
                         "queued": False,
                         "skipped": False,
@@ -327,8 +332,10 @@ class ZsxqAutoScheduler:
                     time.monotonic() - started_at,
                 )
                 if result.get("testing_complete") or result.get("reason") == "max_rounds_reached":
-                    logger.info("[ZSXQ_AUTO_SYNC] max rounds reached, stopping scheduler | attempt_id=%s", attempt_id)
-                    self.stop()
+                    self._stop_when_no_independent_schedule(
+                        "max_rounds_reached",
+                        attempt_id,
+                    )
                 return {
                     "queued": True,
                     "skipped": False,
@@ -373,6 +380,87 @@ class ZsxqAutoScheduler:
                 "config": locals().get("status"),
             }
 
+    def queue_all_tabs_once(self, trigger="scheduler", schedule_key=None):
+        started_at = time.monotonic()
+        try:
+            with self.app.app_context():
+                _reset_db_session("all_tabs_trigger_start")
+                result = queue_all_tabs_auto_sync_targets(
+                    trigger=trigger,
+                    schedule_key=schedule_key,
+                )
+            logger.info(
+                "[ZSXQ_ALL_TABS_AUTO] trigger_complete | trigger=%s schedule_key=%s "
+                "queued=%s skipped=%s targets=%s elapsed=%.2fs",
+                trigger,
+                schedule_key or "all",
+                bool(result.get("queued")),
+                bool(result.get("skipped")),
+                result.get("targets") or [],
+                time.monotonic() - started_at,
+            )
+            return result
+        except Exception as exc:
+            try:
+                with self.app.app_context():
+                    _reset_db_session("all_tabs_trigger_failed")
+            except Exception:
+                logger.exception("[ZSXQ_ALL_TABS_AUTO] db session reset failed")
+            logger.exception(
+                "[ZSXQ_ALL_TABS_AUTO] trigger_failed | trigger=%s elapsed=%.2fs error=%s",
+                trigger,
+                time.monotonic() - started_at,
+                exc,
+            )
+            return {
+                "queued": False,
+                "skipped": False,
+                "reason": "error",
+                "error": str(exc),
+                "targets": [],
+            }
+
+    def _all_tabs_configs(self):
+        with self.app.app_context():
+            _reset_db_session("all_tabs_config_refresh")
+            return load_all_tabs_auto_sync_configs(include_disabled=False)
+
+    @staticmethod
+    def _all_tabs_signature(configs):
+        return tuple(
+            (
+                config["key"],
+                config["interval_minutes"],
+                config.get("updated_at"),
+                config.get("source"),
+            )
+            for config in configs or []
+        )
+
+    @staticmethod
+    def _all_tabs_configs_degraded(configs):
+        return any(
+            config.get("source") != "database"
+            for config in configs or []
+        )
+
+    def _stop_when_no_independent_schedule(self, reason, attempt_id):
+        if all_tabs_auto_sync_enabled():
+            logger.info(
+                "[ZSXQ_AUTO_SYNC] frontier schedule inactive but all-tabs schedule remains active | "
+                "reason=%s attempt_id=%s",
+                reason,
+                attempt_id,
+            )
+            return False
+        logger.info(
+            "[ZSXQ_AUTO_SYNC] scheduler stopped by trigger_reason=%s | attempt_id=%s",
+            reason,
+            attempt_id,
+        )
+        self.stop()
+        return True
+
     @staticmethod
     def _skip_message(reason, attempt_id):
         if reason == "max_rounds_reached":
@@ -391,15 +479,85 @@ class ZsxqAutoScheduler:
             return "上一轮系统同步仍在排队或执行中，本轮已跳过，避免重复入队。"
         return f"触发尝试 {attempt_id}：已跳过（{reason}）。"
 
-    def refresh_schedule(self):
-        schedule.clear("zsxq-auto-sync-test")
+    def refresh_schedule(self, *, all_tabs_configs=None):
+        schedule.clear(SYSTEM_SYNC_SCHEDULE_TAG)
+        schedule.clear(ALL_TABS_SYNC_SCHEDULE_TAG)
         self.interval_minutes = self._interval_minutes()
-        job = schedule.every(self.interval_minutes).minutes.do(self.queue_once).tag("zsxq-auto-sync-test")
+        if all_tabs_configs is None:
+            all_tabs_configs = self._all_tabs_configs()
+        job = (
+            schedule.every(self.interval_minutes)
+            .minutes.do(self.queue_once)
+            .tag(SYSTEM_SYNC_SCHEDULE_TAG)
+        )
         logger.info(
             "ZSXQ 自动同步计划已设置：每 %s 分钟执行一次 | next_run=%s",
             self.interval_minutes,
             self._format_next_run(job.next_run),
         )
+        schedule_plans = []
+        for config in all_tabs_configs:
+            all_tabs_job = (
+                schedule.every(config["interval_minutes"])
+                .minutes.do(
+                    self.queue_all_tabs_once,
+                    trigger="scheduler",
+                    schedule_key=config["key"],
+                )
+                .tag(
+                    ALL_TABS_SYNC_SCHEDULE_TAG,
+                    f"{ALL_TABS_SYNC_SCHEDULE_TAG}:{config['key']}",
+                )
+            )
+            logger.info(
+                "ZSXQ %s 全部 Tab 自动同步已设置：每 %s 分钟、每 Tab %s 条 | next_run=%s",
+                config["group_name"],
+                config["interval_minutes"],
+                config["topic_count"],
+                self._format_next_run(all_tabs_job.next_run),
+            )
+            schedule_plans.append({
+                "key": config["key"],
+                "interval_minutes": config["interval_minutes"],
+                "topic_count": config["topic_count"],
+                "next_run": all_tabs_job.next_run.isoformat(),
+            })
+        record_all_tabs_schedule_plan(schedule_plans)
+        self._scheduled_all_tabs_signature = self._all_tabs_signature(all_tabs_configs)
+        self._scheduled_all_tabs_degraded = self._all_tabs_configs_degraded(
+            all_tabs_configs
+        )
+
+    def refresh_runtime_schedule(self):
+        """Refresh changed schedules and immediately retry after DB recovery."""
+        self.interval_minutes = self._interval_minutes()
+        all_tabs_configs = self._all_tabs_configs()
+        all_tabs_signature = self._all_tabs_signature(all_tabs_configs)
+        all_tabs_degraded = self._all_tabs_configs_degraded(all_tabs_configs)
+        recovered_from_db_outage = (
+            self._scheduled_all_tabs_degraded is True
+            and not all_tabs_degraded
+        )
+        if (
+            self._scheduled_interval != self.interval_minutes
+            or self._scheduled_all_tabs_signature != all_tabs_signature
+        ):
+            self.refresh_schedule(all_tabs_configs=all_tabs_configs)
+            self._scheduled_interval = self.interval_minutes
+
+        if not recovered_from_db_outage:
+            return None
+
+        result = self.queue_all_tabs_once(trigger="scheduler_db_recovered")
+        logger.info(
+            "[ZSXQ_ALL_TABS_AUTO] db_recovery_catch_up | queued=%s skipped=%s "
+            "reason=%s targets=%s",
+            bool(result.get("queued")),
+            bool(result.get("skipped")),
+            result.get("reason") or "completed",
+            result.get("targets") or [],
+        )
+        return result
 
     def start(self):
         self.running = True
@@ -424,13 +582,26 @@ class ZsxqAutoScheduler:
                 )
             except Exception as exc:
                 logger.exception("[ZSXQ_AUTO_SYNC] startup_trigger_failed | error=%s", exc)
+            try:
+                all_tabs_result = self.queue_all_tabs_once(trigger="scheduler_start")
+                logger.info(
+                    "[ZSXQ_ALL_TABS_AUTO] startup_trigger | queued=%s skipped=%s reason=%s targets=%s",
+                    bool(all_tabs_result.get("queued")),
+                    bool(all_tabs_result.get("skipped")),
+                    all_tabs_result.get("reason") or "completed",
+                    all_tabs_result.get("targets") or [],
+                )
+            except Exception as exc:
+                logger.exception("[ZSXQ_ALL_TABS_AUTO] startup_trigger_failed | error=%s", exc)
 
         while self.running:
-            self.interval_minutes = self._interval_minutes()
-            if self._scheduled_interval != self.interval_minutes:
-                self.refresh_schedule()
-                self._scheduled_interval = self.interval_minutes
-            due_count = sum(1 for job in schedule.get_jobs("zsxq-auto-sync-test") if job.should_run)
+            self.refresh_runtime_schedule()
+            due_count = sum(
+                1
+                for tag in (SYSTEM_SYNC_SCHEDULE_TAG, ALL_TABS_SYNC_SCHEDULE_TAG)
+                for job in schedule.get_jobs(tag)
+                if job.should_run
+            )
             schedule.run_pending()
             if due_count:
                 logger.info(
@@ -441,13 +612,15 @@ class ZsxqAutoScheduler:
 
     def stop(self):
         self.running = False
-        schedule.clear("zsxq-auto-sync-test")
+        schedule.clear(SYSTEM_SYNC_SCHEDULE_TAG)
+        schedule.clear(ALL_TABS_SYNC_SCHEDULE_TAG)
         logger.info("ZSXQ 自动同步调度器停止")
 
     def _next_run(self):
         next_runs = [
             job.next_run
-            for job in schedule.get_jobs("zsxq-auto-sync-test")
+            for tag in (SYSTEM_SYNC_SCHEDULE_TAG, ALL_TABS_SYNC_SCHEDULE_TAG)
+            for job in schedule.get_jobs(tag)
             if job.next_run is not None
         ]
         return min(next_runs) if next_runs else None
@@ -460,7 +633,11 @@ class ZsxqAutoScheduler:
 
 def main():
     parser = argparse.ArgumentParser(description="ZSXQ 自动同步测试调度器")
-    parser.add_argument("command", choices=["start", "once", "status"], help="start: 启动调度；once: 立即投递一次；status: 查看配置")
+    parser.add_argument(
+        "command",
+        choices=["start", "once", "all-tabs-once", "status"],
+        help="start: 启动调度；once: 立即投递前沿编排；all-tabs-once: 立即投递生财/洪灝全部 Tab；status: 查看配置",
+    )
     args = parser.parse_args()
 
     service = ZsxqAutoScheduler()
@@ -482,6 +659,9 @@ def main():
             _remove_runtime_pid_file()
     elif args.command == "once":
         result = service.queue_once(trigger="manual_cli")
+        print(json.dumps(result, ensure_ascii=False))
+    elif args.command == "all-tabs-once":
+        result = service.queue_all_tabs_once(trigger="manual_cli")
         print(json.dumps(result, ensure_ascii=False))
     elif args.command == "status":
         with service.app.app_context():

@@ -407,6 +407,36 @@ class ThumbnailService:
         logger.info("Workbench vertical thumbnail generated: %s", rendered)
         return rendered
 
+    def generate_workbench_video_background(
+        self,
+        main_title: str,
+        sub_title: str = "",
+        *,
+        output_filename: str = None,
+        institution: str = "深度研报",
+        emotion: str = "bull",
+        footer_text: str = "听见资本",
+    ) -> str:
+        """Generate the 9:16 workbench frame used to embed a 16:9 visual video."""
+        if not output_filename:
+            output_filename = f"workbench_video_bg_{uuid.uuid4().hex[:8]}.jpg"
+        if not output_filename.lower().endswith((".jpg", ".jpeg")):
+            output_filename += ".jpg"
+        output_path = os.path.join(self.output_dir, output_filename)
+        rendered = frontend_thumbnail_renderer.render_workbench_thumbnail(
+            output_path=output_path,
+            format_name="video_bg",
+            main_title=main_title,
+            sub_title=sub_title,
+            footer_text=footer_text,
+            institution=institution or "深度研报",
+            emotion=emotion if emotion in {"pro", "macro", "bull", "bear"} else "bull",
+            show_guides=False,
+            expected_size=(1080, 1920),
+        )
+        logger.info("Workbench video background generated: %s", rendered)
+        return rendered
+
     def generate_workbench_vertical_cover(
         self,
         main_title: str,

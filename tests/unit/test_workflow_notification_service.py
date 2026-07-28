@@ -1,6 +1,8 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -11,6 +13,54 @@ from services.workflow_notification_service import workflow_notification_service
 
 
 class WorkflowNotificationServiceTest(unittest.TestCase):
+    def test_failure_only_level_includes_direct_sync_failure(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "WORKFLOW_NOTIFY_PROVIDER": "email",
+                "WORKFLOW_NOTIFY_LEVEL": "failure_only",
+            },
+            clear=False,
+        ):
+            self.assertTrue(
+                workflow_notification_service.should_send_event("sync_failed")
+            )
+            self.assertFalse(
+                workflow_notification_service.should_send_event("sync_completed")
+            )
+
+    def test_browser_human_intervention_email_is_deduplicated_during_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {
+                "WORKFLOW_NOTIFY_PROVIDER": "email",
+                "WORKFLOW_EMAIL_USER": "sender@example.test",
+                "WORKFLOW_EMAIL_PASSWORD": "secret",
+                "WORKFLOW_NOTIFY_TO": "owner@example.test",
+                "BROWSER_HUMAN_INTERVENTION_STATE_DIR": directory,
+                "BROWSER_HUMAN_INTERVENTION_EMAIL_COOLDOWN_SECONDS": "1800",
+            },
+            clear=False,
+        ), patch.object(workflow_notification_service, "_send_email_with_retry") as send:
+            first = workflow_notification_service.send_browser_human_intervention(
+                provider="Gemini",
+                reason="login",
+                message="登录态失效",
+                job_id="job-1",
+                profile="profile-a",
+            )
+            second = workflow_notification_service.send_browser_human_intervention(
+                provider="Gemini",
+                reason="login",
+                message="登录态失效",
+                job_id="job-2",
+                profile="profile-a",
+            )
+
+        self.assertTrue(first["sent"])
+        self.assertEqual("cooldown", second["reason"])
+        send.assert_called_once()
+
     def test_skipped_clean_checks_are_not_reported_as_running(self):
         workflow = {
             "stage_results": {

@@ -7,6 +7,7 @@ from sqlalchemy.orm import load_only
 from models import db
 from models.task import PublicationTask
 from services.doubao_tts_ws import is_configured as is_doubao_tts_configured
+from services.runtime_guard import apply_async_after_db_release
 from tasks.tts import process_doubao_tts_task
 from utils.auth_utils import require_login
 
@@ -172,7 +173,12 @@ def submit_tts_task(current_user):
         db.session.commit()
 
         try:
-            celery_task = process_doubao_tts_task.apply_async(args=[task.id], queue='cloud_tts', retry=False)
+            celery_task = apply_async_after_db_release(
+                process_doubao_tts_task,
+                args=[task.id],
+                queue='cloud_tts',
+                retry=False,
+            )
         except Exception as exc:
             logger.exception("提交TTS任务入队失败: %s", task.id)
             task.status = 'failed'

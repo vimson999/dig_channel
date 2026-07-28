@@ -29,7 +29,7 @@ class ExternalDocument(db.Model):
     document_type = db.Column(db.String(40), nullable=True, index=True)
     source_url = db.Column(db.Text, nullable=False)
     canonical_url = db.Column(db.Text, nullable=False)
-    url_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    url_hash = db.Column(db.String(64), nullable=False)
     title = db.Column(db.String(500), nullable=True)
     author_name = db.Column(db.String(255), nullable=True)
     content_text = db.Column(db.Text, nullable=True)

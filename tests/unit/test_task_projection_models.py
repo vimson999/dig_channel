@@ -8,10 +8,20 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from models.task import PublicationTask  # noqa: E402
-from models.zsxq_sync import ZsxqAttachment, ZsxqSyncRun  # noqa: E402
+from models.zsxq_sync import ZsxqAttachment, ZsxqSyncRun, ZsxqTopic  # noqa: E402
 
 
 class TaskProjectionModelTest(unittest.TestCase):
+    def test_zsxq_topic_payload_hash_matches_postgres_jsonb_text(self):
+        topic = ZsxqTopic(
+            group_id="g",
+            tab_id="t",
+            topic_id="topic",
+            raw_payload={"long_key": 1, "a": {"zz": 2, "b": 3}},
+        )
+
+        self.assertEqual(topic.raw_payload_hash, "4980f2e2724efb21f18e87bf5557f3e4")
+
     def test_publication_task_projects_content_clean_terminal_result(self):
         task = PublicationTask(
             params={"feature": "content_pdf_clean"},
@@ -65,6 +75,7 @@ class TaskProjectionModelTest(unittest.TestCase):
                     "cover_path": "/tmp/cover.png",
                     "vertical_cover_path": "/tmp/vertical-cover.jpg",
                     "keyframes": {
+                        "landscape_cover": {"path": "/tmp/landscape-keyframe.jpg"},
                         "podcast_cover": {"path": "/tmp/podcast-cover.jpg"},
                         "bilibili_cover": {"path": "/tmp/bilibili-cover.jpg"},
                     },
@@ -83,6 +94,7 @@ class TaskProjectionModelTest(unittest.TestCase):
         self.assertEqual(task.report_audio_wav_path, "/tmp/audio.wav")
         self.assertTrue(task.report_audio_video_enabled)
         self.assertEqual(task.report_audio_video_path, "/tmp/video.mp4")
+        self.assertEqual(task.report_audio_landscape_keyframe_path, "/tmp/landscape-keyframe.jpg")
         self.assertEqual(task.report_audio_vertical_cover_path, "/tmp/vertical-cover.jpg")
         self.assertEqual(task.report_audio_podcast_cover_path, "/tmp/podcast-cover.jpg")
         self.assertEqual(task.report_audio_bilibili_cover_path, "/tmp/bilibili-cover.jpg")

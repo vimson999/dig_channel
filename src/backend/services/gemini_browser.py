@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import time
@@ -10,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+from services.workflow_notification_service import workflow_notification_service
 
 try:
     import fcntl
@@ -23,6 +26,11 @@ LEGACY_FEATURE_NAME = "gemini_browser"
 LEGACY_QUEUE_NAME = "gemini_browser"
 DEFAULT_GEMINI_URL = "https://gemini.google.com/gem/980ba0a0ff22"
 _ACTIVE_PROFILE_LOCKS: Dict[str, Dict[str, Any]] = {}
+logger = logging.getLogger(__name__)
+_IMAGE_ONLY_STORYBOARD_RECOVERY_PROMPT = """你刚才只生成了图片，没有返回可保存的完整分镜文字。
+请停止继续生图，现在只输出完整分镜文本，不要再次调用图片工具。
+必须逐个分镜包含【文案原句】【画面动作】【视觉隐喻】【AI 提示词】；保留刚才使用的英文 AI 提示词原文，不得翻译、改写、缩写或遗漏。
+所有【文案原句】合并后必须 100% 覆盖用户提供的正文。"""
 
 
 class GeminiBrowserError(RuntimeError):
@@ -112,6 +120,7 @@ def status_payload(options: Optional[GeminiBrowserOptions] = None) -> Dict[str, 
 class GeminiBrowserWorker:
     def __init__(self, options: Optional[GeminiBrowserOptions] = None):
         self.options = options or GeminiBrowserOptions.from_env()
+        self._current_job_id = ""
         self._validate_options()
 
     def generate(
@@ -123,8 +132,13 @@ class GeminiBrowserWorker:
         pdf_path: Optional[str] = None,
         target_url: Optional[str] = None,
         followup_prompts: Optional[List[str]] = None,
+        embedded_image_output_dir: Optional[str] = None,
+        recover_image_only_storyboard: bool = False,
+        response_complete_callback: Optional[Callable[[str], bool]] = None,
+        incomplete_response_followup_prompt: str = "",
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
+        self._current_job_id = str(job_id or "")
         prompt = (prompt or "").strip()
         followups = [str(item).strip() for item in (followup_prompts or []) if str(item).strip()]
         pdf_file = Path(pdf_path).expanduser() if pdf_path else None
@@ -150,17 +164,24 @@ class GeminiBrowserWorker:
             self._emit(progress_callback, "prepare_browser", 5, "启动研报 PDF Gem 浏览器")
             with sync_playwright() as playwright:
                 context = self._launch_context(playwright)
+                # Profile contention is queueing, not execution. Start the hard
+                # budget only after this worker actually owns a browser context.
+                started = time.monotonic()
                 page = context.pages[0] if context.pages else context.new_page()
                 page.set_default_timeout(10_000)
 
                 try:
                     self._emit(progress_callback, "open_page", 12, "打开 Gemini 页面")
                     page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                    self._recover_gem_manager_redirect(page, url, started)
+                    self._wait_for_interactive_page(page, started)
+                    self._recover_gem_manager_redirect(page, url, started)
                     self._wait_for_interactive_page(page, started)
                     self._raise_if_login_or_captcha(page)
                     self._guard_total_timeout(started)
 
                     baseline_text = self._body_text(page)
+                    baseline_image_keys = self._visible_image_keys(page)
                     if pdf_file:
                         self._emit(progress_callback, "upload_pdf", 25, "上传 PDF 到 Gemini")
                         self._upload_file(page, str(pdf_file), started)
@@ -171,12 +192,49 @@ class GeminiBrowserWorker:
                     self._guard_total_timeout(started)
 
                     self._emit(progress_callback, "wait_response", 48, "等待 Gemini 回复")
-                    response = self._wait_for_response(page, prompt, baseline_text, started)
+                    response = self._wait_for_response(
+                        page,
+                        prompt,
+                        baseline_text,
+                        started,
+                        image_only_baseline_keys=baseline_image_keys if recover_image_only_storyboard else None,
+                    )
+                    embedded_images = []
+                    if response.get("image_only"):
+                        if embedded_image_output_dir:
+                            try:
+                                embedded_images = self._save_embedded_response_images(
+                                    page,
+                                    baseline_image_keys,
+                                    embedded_image_output_dir,
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "Gemini image-only response images were not saved for job %s: %s",
+                                    job_id,
+                                    exc,
+                                )
+                        self._emit(
+                            progress_callback,
+                            "recover_image_only_storyboard",
+                            52,
+                            f"Gem 仅返回了 {len(embedded_images)} 张图片，自动追问完整分镜文字",
+                        )
+                        recovery_baseline_text = self._body_text(page)
+                        self._submit_prompt(page, _IMAGE_ONLY_STORYBOARD_RECOVERY_PROMPT)
+                        self._guard_total_timeout(started)
+                        response = self._wait_for_response(
+                            page,
+                            _IMAGE_ONLY_STORYBOARD_RECOVERY_PROMPT,
+                            recovery_baseline_text,
+                            started,
+                        )
+                    initial_response_text = response["text"]
                     turns = [{
                         "index": 1,
-                        "kind": "initial",
+                        "kind": "image_only_recovery" if embedded_images else "initial",
                         "prompt": prompt,
-                        "response_text": response["text"],
+                        "response_text": initial_response_text,
                         "page_url": page.url,
                         "completed_at": datetime.utcnow().isoformat() + "Z",
                     }]
@@ -186,29 +244,114 @@ class GeminiBrowserWorker:
                         55,
                         "第一轮 Gemini 回复已获取",
                         result={
-                            "initial_response_text": response["text"],
-                            "response_text": response["text"],
+                            "initial_response_text": initial_response_text,
+                            "response_text": initial_response_text,
                             "turns": turns,
                         },
                     )
 
-                    for index, followup in enumerate(followups, start=2):
+                    combined_response_text = initial_response_text
+                    _write_generation_checkpoint(
+                        output,
+                        prompt=prompt,
+                        followups=followups,
+                        initial_response_text=initial_response_text,
+                        combined_response_text=combined_response_text,
+                        turns=turns,
+                        page_url=page.url,
+                        target_url=url,
+                        embedded_images=embedded_images,
+                    )
+                    continuation_prompt = str(incomplete_response_followup_prompt or "").strip()
+                    max_continuations = max(
+                        0,
+                        _int_env("GEMINI_BROWSER_INCOMPLETE_CONTINUATION_MAX", 12),
+                    )
+                    continuation_round = 0
+                    while (
+                        response_complete_callback
+                        and continuation_prompt
+                        and continuation_round < max_continuations
+                        and not response_complete_callback(combined_response_text)
+                    ):
+                        continuation_round += 1
+                        baseline_text = self._body_text(page)
+                        continuation_baseline_images = self._visible_image_keys(page)
+                        self._emit(
+                            progress_callback,
+                            f"incomplete_continuation_{continuation_round}_submit",
+                            min(88, 55 + continuation_round * 2),
+                            f"Gem 分镜尚未覆盖全文，继续请求剩余部分（第 {continuation_round} 次）",
+                        )
+                        self._submit_prompt(page, continuation_prompt)
+                        self._guard_total_timeout(started)
+                        continuation_response = self._wait_for_response(
+                            page,
+                            continuation_prompt,
+                            baseline_text,
+                            started,
+                            image_only_baseline_keys=continuation_baseline_images,
+                        )
+                        if continuation_response.get("image_only"):
+                            recovery_baseline_text = self._body_text(page)
+                            self._emit(
+                                progress_callback,
+                                f"incomplete_continuation_{continuation_round}_recover_text",
+                                min(89, 56 + continuation_round * 2),
+                                "本轮仅返回图片，自动追问本轮分镜文字",
+                            )
+                            self._submit_prompt(page, _IMAGE_ONLY_STORYBOARD_RECOVERY_PROMPT)
+                            self._guard_total_timeout(started)
+                            continuation_response = self._wait_for_response(
+                                page,
+                                _IMAGE_ONLY_STORYBOARD_RECOVERY_PROMPT,
+                                recovery_baseline_text,
+                                started,
+                            )
+                        continuation_text = str(continuation_response.get("text") or "").strip()
+                        if continuation_text:
+                            combined_response_text = (
+                                f"{combined_response_text}\n\n{continuation_text}".strip()
+                            )
+                        turns.append({
+                            "index": len(turns) + 1,
+                            "kind": "incomplete_storyboard_continuation",
+                            "prompt": continuation_prompt,
+                            "response_text": continuation_text,
+                            "page_url": page.url,
+                            "completed_at": datetime.utcnow().isoformat() + "Z",
+                        })
+                        _write_generation_checkpoint(
+                            output,
+                            prompt=prompt,
+                            followups=followups,
+                            initial_response_text=initial_response_text,
+                            combined_response_text=combined_response_text,
+                            turns=turns,
+                            page_url=page.url,
+                            target_url=url,
+                            embedded_images=embedded_images,
+                        )
+                    response = {"text": combined_response_text}
+
+                    for followup_number, followup in enumerate(followups, start=1):
+                        index = len(turns) + 1
                         progress_base = min(88, 50 + (index - 1) * 10)
                         baseline_text = self._body_text(page)
                         self._emit(
                             progress_callback,
-                            f"followup_{index - 1}_submit",
+                            f"followup_{followup_number}_submit",
                             progress_base,
-                            f"提交第 {index - 1} 个追问",
+                            f"提交第 {followup_number} 个追问",
                         )
                         self._submit_prompt(page, followup)
                         self._guard_total_timeout(started)
 
                         self._emit(
                             progress_callback,
-                            f"followup_{index - 1}_wait",
+                            f"followup_{followup_number}_wait",
                             min(92, progress_base + 5),
-                            f"等待第 {index - 1} 个追问回复",
+                            f"等待第 {followup_number} 个追问回复",
                         )
                         followup_response = self._wait_for_response(page, followup, baseline_text, started)
                         turns.append({
@@ -219,17 +362,42 @@ class GeminiBrowserWorker:
                             "page_url": page.url,
                             "completed_at": datetime.utcnow().isoformat() + "Z",
                         })
+                        _write_generation_checkpoint(
+                            output,
+                            prompt=prompt,
+                            followups=followups,
+                            initial_response_text=initial_response_text,
+                            combined_response_text=turns[-1]["response_text"],
+                            turns=turns,
+                            page_url=page.url,
+                            target_url=url,
+                            embedded_images=embedded_images,
+                        )
                         self._emit(
                             progress_callback,
-                            f"followup_{index - 1}_response",
+                            f"followup_{followup_number}_response",
                             min(94, progress_base + 8),
-                            f"第 {index - 1} 个追问回复已获取",
+                            f"第 {followup_number} 个追问回复已获取",
                             result={
                                 "response_text": turns[-1]["response_text"],
                                 "final_response_text": turns[-1]["response_text"],
                                 "turns": turns,
                             },
                         )
+
+                    if embedded_image_output_dir and not embedded_images:
+                        try:
+                            embedded_images = self._save_embedded_response_images(
+                                page,
+                                baseline_image_keys,
+                                embedded_image_output_dir,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Gemini embedded response images were not adopted for job %s: %s",
+                                job_id,
+                                exc,
+                            )
 
                     result = {
                         "prompt": prompt,
@@ -239,12 +407,13 @@ class GeminiBrowserWorker:
                             "filename": pdf_file.name if pdf_file else None,
                             "bytes": pdf_file.stat().st_size if pdf_file else None,
                         } if pdf_file else None,
-                        "initial_response_text": response["text"],
+                        "initial_response_text": initial_response_text,
                         "response_text": turns[-1]["response_text"],
                         "final_response_text": turns[-1]["response_text"],
                         "turns": turns,
                         "page_url": page.url,
                         "target_url": url,
+                        "embedded_images": embedded_images,
                         "completed_at": datetime.utcnow().isoformat() + "Z",
                     }
                     output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -270,6 +439,7 @@ class GeminiBrowserWorker:
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """Create one image in a fresh Gemini session without rewriting the prompt."""
+        self._current_job_id = str(job_id or "")
         prompt = str(prompt or "").strip()
         if not prompt:
             raise ValueError("图片提示词不能为空")
@@ -290,11 +460,15 @@ class GeminiBrowserWorker:
             self._emit(progress_callback, "prepare_browser", 8, "启动 Gemini 图片浏览器")
             with sync_playwright() as playwright:
                 context = self._launch_context(playwright)
+                started = time.monotonic()
                 page = context.pages[0] if context.pages else context.new_page()
                 page.set_default_timeout(10_000)
                 try:
                     self._emit(progress_callback, "open_page", 15, "打开新的 Gemini 会话")
                     page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                    self._recover_gem_manager_redirect(page, url, started)
+                    self._wait_for_interactive_page(page, started)
+                    self._recover_gem_manager_redirect(page, url, started)
                     self._wait_for_interactive_page(page, started)
                     self._raise_if_login_or_captcha(page)
                     self._guard_total_timeout(started)
@@ -343,6 +517,7 @@ class GeminiBrowserWorker:
         image_output_path: Optional[str] = None,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
+        self._current_job_id = str(job_id or "")
         source_file = Path(file_path).expanduser() if file_path else None
         if not source_file or not source_file.exists() or not source_file.is_file():
             raise GeminiBrowserConfigError(f"上传文件不存在: {file_path}")
@@ -370,12 +545,16 @@ class GeminiBrowserWorker:
         self._emit(progress_callback, "prepare_browser", 4, "启动 Gemini 浏览器")
         with sync_playwright() as playwright:
             context = self._launch_context(playwright)
+            started = time.monotonic()
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(10_000)
 
             try:
                 self._emit(progress_callback, "open_page", 8, "打开 Gemini 页面")
                 page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                self._recover_gem_manager_redirect(page, url, started)
+                self._wait_for_interactive_page(page, started)
+                self._recover_gem_manager_redirect(page, url, started)
                 self._wait_for_interactive_page(page, started)
                 self._raise_if_login_or_captcha(page)
                 self._guard_total_timeout(started)
@@ -586,6 +765,45 @@ class GeminiBrowserWorker:
                 raise
             return playwright.chromium.launch_persistent_context(user_data_dir, **kwargs)
 
+    def _recover_gem_manager_redirect(self, page, target_url: str, started_at: float) -> None:
+        """Open the requested custom Gem when Google redirects a deep link to Gems manager."""
+        match = re.search(r"/gem/([a-zA-Z0-9_-]+)", str(target_url or ""))
+        if not match:
+            return
+        gem_id = match.group(1)
+        if f"/gem/{gem_id}" in str(page.url or ""):
+            page.wait_for_timeout(2_500)
+            if f"/gem/{gem_id}" in str(page.url or ""):
+                return
+        if "/gems/view" not in str(page.url or ""):
+            return
+
+        self._guard_total_timeout(started_at)
+        link = page.locator(f'a[href*="/gem/{gem_id}"]').first
+        try:
+            if link.count() < 1:
+                raise GeminiBrowserAutomationError(
+                    f"Gemini 已跳转到 Gem 管理器，但未找到目标 Gem: {gem_id}"
+                )
+            link.scroll_into_view_if_needed(timeout=10_000)
+            link.click(timeout=15_000)
+        except GeminiBrowserAutomationError:
+            raise
+        except Exception as exc:
+            raise GeminiBrowserAutomationError(
+                f"从 Gem 管理器打开目标 Gem 失败: {gem_id}; {exc}"
+            ) from exc
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            self._guard_total_timeout(started_at)
+            if f"/gem/{gem_id}" in str(page.url or ""):
+                return
+            time.sleep(0.5)
+        raise GeminiBrowserAutomationError(
+            f"点击目标 Gem 后页面未进入对话: {gem_id}; current_url={page.url}"
+        )
+
     def _wait_for_interactive_page(self, page, started_at: float) -> None:
         deadline = time.monotonic() + self.options.ready_timeout_seconds
         last_text = ""
@@ -747,6 +965,7 @@ class GeminiBrowserWorker:
         return False
 
     def _submit_prompt(self, page, prompt: str) -> None:
+        self._raise_if_login_or_captcha(page)
         input_locator = self._last_visible(page, self._selectors("input"))
         if input_locator is None:
             raise GeminiBrowserAutomationError("未找到 Gemini 输入框")
@@ -776,6 +995,7 @@ class GeminiBrowserWorker:
         promptless = not _clean_text(prompt)
         last_error = None
         for attempt in range(3):
+            self._raise_if_login_or_captcha(page)
             input_locator = self._last_visible(page, self._selectors("input")) or input_locator
             send_button = self._wait_for_send_button(page)
             clicked_send = False
@@ -1094,7 +1314,14 @@ class GeminiBrowserWorker:
             time.sleep(0.3)
         return None
 
-    def _wait_for_response(self, page, prompt: str, baseline_text: str, started_at: float) -> Dict[str, Any]:
+    def _wait_for_response(
+        self,
+        page,
+        prompt: str,
+        baseline_text: str,
+        started_at: float,
+        image_only_baseline_keys: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         deadline = time.monotonic() + self.options.response_timeout_seconds
         incomplete_extra_wait = max(0, _int_env("GEMINI_BROWSER_INCOMPLETE_RESPONSE_EXTRA_WAIT", 90))
         last_text = ""
@@ -1103,6 +1330,8 @@ class GeminiBrowserWorker:
         normalized_prompt = _clean_text(prompt)
         resubmit_attempts = 0
         last_resubmit_at = 0.0
+        image_only_since = None
+        idle_empty_since = None
 
         while time.monotonic() < deadline:
             self._guard_total_timeout(started_at)
@@ -1124,21 +1353,67 @@ class GeminiBrowserWorker:
                             time.sleep(1)
                             continue
                     return {"text": candidate}
+            elif image_only_baseline_keys is not None and self._has_new_large_image(
+                page,
+                image_only_baseline_keys,
+            ):
+                state = self._composer_submit_state(page, "")
+                finished = (
+                    not self._is_generating(page)
+                    and state.get("enabledSend")
+                    and not state.get("busy")
+                )
+                if finished:
+                    if image_only_since is None:
+                        image_only_since = time.monotonic()
+                    elif time.monotonic() - image_only_since >= max(
+                        3.0,
+                        _float_env("GEMINI_BROWSER_IMAGE_ONLY_STABLE_SECONDS", 8.0),
+                    ):
+                        return {"text": "", "image_only": True}
+                else:
+                    image_only_since = None
             elif normalized_prompt and resubmit_attempts < 3:
                 now = time.monotonic()
+                generating = self._is_generating(page)
+                state = self._composer_submit_state(page, "")
+                composer_text = _clean_text(self._composer_text(page))
+                prompt_still_in_composer = normalized_prompt in composer_text
+                idle_empty = (
+                    not composer_text
+                    and state.get("enabledSend")
+                    and not state.get("busy")
+                    and not generating
+                )
+                if idle_empty:
+                    idle_empty_since = idle_empty_since or now
+                else:
+                    idle_empty_since = None
+                stalled_after_submit = bool(
+                    idle_empty_since
+                    and now - idle_empty_since
+                    >= max(
+                        30.0,
+                        _float_env("GEMINI_BROWSER_IDLE_EMPTY_RESUBMIT_SECONDS", 60.0),
+                    )
+                )
                 if now - last_resubmit_at >= 8:
-                    generating = self._is_generating(page)
-                    state = self._composer_submit_state(page, "")
-                    composer_text = _clean_text(self._composer_text(page))
-                    prompt_still_in_composer = normalized_prompt in composer_text
                     if prompt_still_in_composer and state.get("enabledSend") and not state.get("busy") and not generating:
                         button = self._wait_for_send_button(page)
                         if button is not None:
                             self._click_send_button(page, button, force=resubmit_attempts > 0)
                             resubmit_attempts += 1
                             last_resubmit_at = now
+                            idle_empty_since = None
                             time.sleep(2)
                             continue
+                    elif stalled_after_submit:
+                        self._submit_prompt(page, prompt)
+                        resubmit_attempts += 1
+                        last_resubmit_at = now
+                        idle_empty_since = None
+                        time.sleep(2)
+                        continue
             time.sleep(1)
 
         if last_text:
@@ -1148,6 +1423,21 @@ class GeminiBrowserWorker:
             debug = f"{debug}; resubmit_attempts={resubmit_attempts}" if debug else f"resubmit_attempts={resubmit_attempts}"
         suffix = f"; {debug}" if debug else ""
         raise GeminiBrowserAutomationError(f"等待 Gemini 回复超时{suffix}")
+
+    def _has_new_large_image(self, page, baseline_keys: List[str]) -> bool:
+        baseline = {str(item or "") for item in (baseline_keys or [])}
+        for record in self._visible_image_records(page):
+            key = str(
+                record.get("src")
+                or record.get("currentSrc")
+                or record.get("alt")
+                or record.get("dom_index")
+                or ""
+            )
+            area = float(record.get("width") or 0) * float(record.get("height") or 0)
+            if key not in baseline and area >= 30_000:
+                return True
+        return False
 
     def _visible_image_keys(self, page) -> List[str]:
         records = self._visible_image_records(page)
@@ -1277,6 +1567,61 @@ class GeminiBrowserWorker:
             "height": record.get("naturalHeight") or record.get("height"),
         }
 
+    def _save_embedded_response_images(
+        self,
+        page,
+        baseline_keys: List[str],
+        output_dir: str,
+    ) -> List[Dict[str, Any]]:
+        """Persist large images newly added by one Gemini text response.
+
+        Storyboard Gems do not behave consistently: some generate every image,
+        some generate only a prefix, and some return text only.  This collector
+        is best-effort so a capture failure never fails the storyboard itself.
+        """
+        baseline = {str(item or "") for item in (baseline_keys or [])}
+        records = []
+        seen = set()
+        for record in self._visible_image_records(page):
+            key = str(
+                record.get("currentSrc")
+                or record.get("src")
+                or record.get("alt")
+                or record.get("dom_index")
+                or ""
+            )
+            area = float(record.get("width") or 0) * float(record.get("height") or 0)
+            if not key or key in baseline or key in seen or area < 30_000:
+                continue
+            seen.add(key)
+            records.append(record)
+
+        records.sort(key=lambda item: int(item.get("dom_index") or 0))
+        root = Path(output_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        saved = []
+        for ordinal, record in enumerate(records, start=1):
+            try:
+                info = self._save_generated_image(
+                    page,
+                    record,
+                    str(root / f"{ordinal:03d}.png"),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Skipping Gemini embedded response image %s for job %s: %s",
+                    ordinal,
+                    self._current_job_id,
+                    exc,
+                )
+                continue
+            saved.append({
+                **info,
+                "ordinal": ordinal,
+                "dom_index": record.get("dom_index"),
+            })
+        return saved
+
     def _latest_response_text(self, page, prompt: str, baseline_text: str) -> str:
         candidates = page.evaluate(
             """(selectors) => {
@@ -1312,6 +1657,7 @@ class GeminiBrowserWorker:
             if not text:
                 continue
             text = self._strip_prompt_from_candidate(text, normalized_prompt)
+            text = _strip_gemini_page_suffix(text)
             if normalized_baseline and text and text in normalized_baseline:
                 continue
             if self._looks_like_response(text, normalized_prompt):
@@ -1324,6 +1670,7 @@ class GeminiBrowserWorker:
         if baseline and body.startswith(baseline):
             body = body[len(baseline):].strip()
         body = self._strip_prompt_from_candidate(body, normalized_prompt)
+        body = _strip_gemini_page_suffix(body)
         return body if self._looks_like_response(body, normalized_prompt) else ""
 
     def _strip_prompt_from_candidate(self, text: str, prompt: str) -> str:
@@ -1341,6 +1688,8 @@ class GeminiBrowserWorker:
     def _looks_like_response(self, text: str, prompt: str) -> bool:
         if not text or len(text) < 2:
             return False
+        if "【文案原句】" in text and ("【AI 提示词】" in text or "【AI提示词】" in text):
+            return True
         lowered = text.lower()
         blocked_markers = (
             "sign in",
@@ -1486,11 +1835,17 @@ class GeminiBrowserWorker:
                 "article",
             ],
             "login": [
-                "text=Sign in",
-                "text=Sign into",
-                "text=Login",
-                "text=登录",
-                "text=使用 Google 账号",
+                "button:has-text('Sign in')",
+                "a:has-text('Sign in')",
+                "[role='button']:has-text('Sign in')",
+                "button:has-text('Login')",
+                "a:has-text('Login')",
+                "[role='button']:has-text('Login')",
+                "button:has-text('登录')",
+                "a:has-text('登录')",
+                "[role='button']:has-text('登录')",
+                "button:has-text('使用 Google 账号')",
+                "a:has-text('使用 Google 账号')",
             ],
             "captcha": [
                 "text=Captcha",
@@ -1515,10 +1870,13 @@ class GeminiBrowserWorker:
 
     def _first_visible(self, page, selectors: List[str]):
         for selector in selectors:
-            locator = page.locator(selector).first
             try:
-                if locator.count() > 0 and locator.is_visible(timeout=500):
-                    return locator
+                locator = page.locator(selector)
+                count = locator.count()
+                for index in range(count):
+                    candidate = locator.nth(index)
+                    if candidate.is_visible(timeout=500):
+                        return candidate
             except Exception:
                 continue
         return None
@@ -1554,11 +1912,29 @@ class GeminiBrowserWorker:
 
         return None
 
+    def _notify_human_intervention(self, page, *, reason: str, message: str) -> None:
+        job_id = str(getattr(self, "_current_job_id", "") or "")
+        screenshot = self._save_failure_screenshot(page, job_id or "browser_auth")
+        workflow_notification_service.send_browser_human_intervention(
+            provider="Gemini",
+            reason=reason,
+            message=message,
+            job_id=job_id,
+            page_url=str(getattr(page, "url", "") or ""),
+            screenshot_path=screenshot,
+            profile=str(self.options.user_data_dir or ""),
+            worker_id=str(self.options.profile_directory or "Default"),
+        )
+
     def _raise_if_login_or_captcha(self, page) -> None:
         if self._first_visible(page, self._selectors("captcha")) is not None:
-            raise GeminiBrowserAutomationError("Gemini 页面出现验证码或安全验证，需要人工处理")
+            message = "Gemini 页面出现验证码或安全验证，需要人工处理"
+            self._notify_human_intervention(page, reason="verification", message=message)
+            raise GeminiBrowserAutomationError(message)
         if self._first_visible(page, self._selectors("login")) is not None:
-            raise GeminiBrowserAutomationError("Gemini 登录态失效，需要先在浏览器 profile 中登录")
+            message = "Gemini 登录态失效，需要先在浏览器 profile 中登录"
+            self._notify_human_intervention(page, reason="login", message=message)
+            raise GeminiBrowserAutomationError(message)
 
     def _save_failure_screenshot(self, page, job_id: str) -> str:
         try:
@@ -1571,7 +1947,9 @@ class GeminiBrowserWorker:
 
     def _guard_total_timeout(self, started_at: float) -> None:
         if time.monotonic() - started_at > self.options.total_timeout_seconds:
-            raise GeminiBrowserAutomationError("任务总超时")
+            raise GeminiBrowserAutomationError(
+                f"任务总超时（{self.options.total_timeout_seconds} 秒）"
+            )
 
     def _emit(
         self,
@@ -1590,6 +1968,40 @@ class GeminiBrowserWorker:
                 "updated_at": datetime.utcnow().isoformat() + "Z",
                 "result": result or {},
             })
+
+
+def _write_generation_checkpoint(
+    output: Path,
+    *,
+    prompt: str,
+    followups: List[str],
+    initial_response_text: str,
+    combined_response_text: str,
+    turns: List[Dict[str, Any]],
+    page_url: str,
+    target_url: str,
+    embedded_images: List[Dict[str, Any]],
+) -> None:
+    """Persist every completed Gemini turn so a later timeout does not erase it."""
+    payload = {
+        "status": "partial",
+        "prompt": prompt,
+        "followup_prompts": followups,
+        "initial_response_text": initial_response_text,
+        "response_text": combined_response_text,
+        "final_response_text": combined_response_text,
+        "turns": turns,
+        "page_url": page_url,
+        "target_url": target_url,
+        "embedded_images": embedded_images,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    temp_output = output.with_name(f".{output.name}.tmp")
+    temp_output.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temp_output.replace(output)
 
 
 def storage_path_for_job(job_id: str, created_at: Optional[datetime] = None) -> str:
@@ -1638,7 +2050,16 @@ def _gemini_profile_lock(options: GeminiBrowserOptions):
         yield
         return
 
-    timeout_seconds = max(1, _int_env("GEMINI_BROWSER_PROFILE_LOCK_TIMEOUT_SECONDS", 1800))
+    # A shared signed-in profile is intentionally serial. Queueing behind other
+    # valid long-form turns must not fail before this job gets a chance to run.
+    default_lock_timeout = max(
+        1800,
+        int(getattr(options, "total_timeout_seconds", 0) or 0) * 3,
+    )
+    timeout_seconds = max(
+        1,
+        _int_env("GEMINI_BROWSER_PROFILE_LOCK_TIMEOUT_SECONDS", default_lock_timeout),
+    )
     user_data_dir = str(Path(options.user_data_dir or "").expanduser())
     profile = options.profile_directory or "Default"
     key = hashlib.sha1(f"{user_data_dir}|{profile}".encode("utf-8")).hexdigest()[:16]
@@ -1785,6 +2206,21 @@ def _pid_is_running(pid: int) -> bool:
 
 def _clean_text(value: str) -> str:
     return " ".join(str(value or "").split()).strip()
+
+
+def _strip_gemini_page_suffix(value: str) -> str:
+    """Remove Gemini's disclaimer/footer without discarding a valid reply."""
+    text = str(value or "").strip()
+    lowered = text.lower()
+    markers = (
+        "gemini 是一款 ai 工具",
+        "gemini can make mistakes",
+    )
+    positions = [lowered.find(marker) for marker in markers]
+    positions = [position for position in positions if position >= 0]
+    if positions:
+        text = text[:min(positions)].rstrip()
+    return text
 
 
 def _upload_is_ready(state: Any) -> bool:

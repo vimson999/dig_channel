@@ -29,6 +29,36 @@ class FakeCeleryTask:
 
 
 class ZsxqSyncTaskRetryTest(unittest.TestCase):
+    def test_all_tabs_terminal_event_reuses_workflow_notification_payload(self):
+        payload = {
+            "group_id": "1824528822",
+            "group_name": "生财有术",
+            "trigger": "scheduler",
+            "auto_all_tabs": {
+                "attempt_id": "attempt-1",
+                "notify_milestones": True,
+            },
+        }
+        with patch(
+            "services.zsxq_all_tabs_auto_sync_service._enqueue_all_tabs_notification",
+            return_value={"queued": True},
+        ) as notify:
+            result = zsxq_sync._notify_direct_all_tabs_sync(
+                "sync_completed",
+                payload,
+                run_id="run-1",
+                status="completed",
+                summary={"topics_new": 3},
+            )
+
+        self.assertTrue(result["queued"])
+        self.assertEqual("sync_completed", notify.call_args.args[0])
+        self.assertEqual("run-1", notify.call_args.kwargs["run_id"])
+        self.assertEqual(
+            {"topics_new": 3},
+            notify.call_args.kwargs["summary"],
+        )
+
     def test_terminal_duplicate_delivery_is_ignored(self):
         persisted_run = SimpleNamespace(status="completed")
         query = MagicMock()

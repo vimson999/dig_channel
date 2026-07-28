@@ -49,6 +49,209 @@ class ReportAudioWorkflowServiceTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(_normalizer_model(), "deepseek-v4-flash")
 
+    def test_default_title_review_model_uses_pro_variant(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(report_audio_service._title_generation_model(), "deepseek-v4-pro")
+            self.assertEqual(report_audio_service._title_review_model(), "deepseek-v4-pro")
+
+    def test_pdf_original_title_is_kept_as_review_baseline(self):
+        title = report_audio_service._pdf_title_baseline(
+            "高盛-Alphabet：人工智能投资周期向上推进-260723.pdf",
+            "#外资研报",
+        )
+
+        self.assertEqual(title, "高盛-Alphabet：人工智能投资周期向上推进")
+
+    def test_title_candidate_converts_literal_newline_escape(self):
+        candidate = report_audio_service._clean_title_candidate(
+            {"title": r"第一行\n第二行", "subtitle": "副标题"},
+            candidate_id="generated_1",
+            source="generated",
+        )
+
+        self.assertEqual(candidate["title"], "第一行\n第二行")
+
+    def test_title_review_applies_separate_landscape_and_vertical_winners(self):
+        structured = {
+            "landscape_title": "旧横屏标题",
+            "landscape_subtitle": "旧横屏副标题",
+            "vertical_title": "旧竖屏标题",
+            "vertical_subtitle": "旧竖屏副标题",
+            "final_script_for_tts": "谷歌云收入增长，人工智能投资周期继续向上推进。",
+        }
+        generated = [
+            {
+                "candidate_id": "generated_1",
+                "source": "generated",
+                "angle": "stable",
+                "title": "AI投资周期继续向上",
+                "subtitle": "谷歌云增长验证需求",
+                "evidence": "正文",
+            },
+            {
+                "candidate_id": "generated_2",
+                "source": "generated",
+                "angle": "data",
+                "title": "谷歌云加速兑现",
+                "subtitle": "AI投入仍在上行",
+                "evidence": "正文",
+            },
+        ]
+        review = {
+            "evaluations": [
+                {"candidate_id": "original_pdf", "landscape_score": 80, "vertical_score": 76},
+                {"candidate_id": "generated_1", "landscape_score": 92, "vertical_score": 84, "reason": "主结论清楚"},
+                {"candidate_id": "generated_2", "landscape_score": 83, "vertical_score": 91, "reason": "移动端更聚焦"},
+            ],
+            "landscape_candidate_id": "generated_1",
+            "vertical_candidate_id": "generated_2",
+            "backup_candidate_id": "original_pdf",
+            "decision_summary": "横屏忠于主结论，竖屏突出核心变量。",
+        }
+
+        with patch.object(report_audio_service, "_deepseek_generate_title_candidates", return_value=generated), \
+            patch.object(report_audio_service, "_deepseek_review_title_candidates", return_value=review):
+            result = report_audio_service.review_report_cover_titles(
+                structured,
+                pdf_filename="高盛-Alphabet：人工智能投资周期向上推进-260723.pdf",
+            )
+
+        self.assertEqual(result["landscape_title"], "AI投资周期继续向上")
+        self.assertEqual(result["vertical_title"], "谷歌云加速兑现")
+        self.assertEqual(result["cover_title"], result["landscape_title"])
+        self.assertEqual(result["title_review"]["selected"]["backup"]["candidate_id"], "original_pdf")
+
+    def test_title_review_retains_original_when_generated_title_does_not_clearly_win(self):
+        structured = {
+            "landscape_title": "旧标题",
+            "vertical_title": "旧标题",
+            "final_script_for_tts": "人工智能投资周期继续向上推进。",
+        }
+        generated = [{
+            "candidate_id": "generated_1",
+            "source": "generated",
+            "angle": "contradiction",
+            "title": "资本开支挤压现金流",
+            "subtitle": "",
+            "evidence": "",
+        }]
+        review = {
+            "evaluations": [
+                {"candidate_id": "original_pdf", "landscape_score": 88, "vertical_score": 88},
+                {"candidate_id": "generated_1", "landscape_score": 90, "vertical_score": 90},
+            ],
+            "landscape_candidate_id": "generated_1",
+            "vertical_candidate_id": "generated_1",
+        }
+
+        with patch.object(report_audio_service, "_deepseek_generate_title_candidates", return_value=generated), \
+            patch.object(report_audio_service, "_deepseek_review_title_candidates", return_value=review):
+            result = report_audio_service.review_report_cover_titles(
+                structured,
+                pdf_filename="高盛-Alphabet：人工智能投资周期向上推进-260723.pdf",
+            )
+
+        self.assertEqual(result["title_review"]["selected"]["landscape"]["candidate_id"], "original_pdf")
+        self.assertEqual(result["landscape_title"], "高盛-Alphabet：人工智能投资周期向上推进")
+
+    def test_title_review_uses_distinct_vertical_candidate_when_both_winners_match(self):
+        candidates = [
+            {
+                "candidate_id": "original_pdf",
+                "title": "原始研报标题",
+                "subtitle": "",
+                "landscape_score": 80,
+                "vertical_score": 80,
+            },
+            {
+                "candidate_id": "generated_1",
+                "title": "横屏主结论",
+                "subtitle": "横屏副标题",
+                "landscape_score": 96,
+                "vertical_score": 94,
+            },
+            {
+                "candidate_id": "generated_2",
+                "title": "竖屏数据钩子",
+                "subtitle": "竖屏副标题",
+                "landscape_score": 82,
+                "vertical_score": 90,
+            },
+        ]
+
+        selected = report_audio_service._select_reviewed_titles(candidates, {
+            "landscape_candidate_id": "generated_1",
+            "vertical_candidate_id": "generated_1",
+        })
+
+        self.assertEqual(selected["landscape"]["candidate_id"], "generated_1")
+        self.assertEqual(selected["vertical"]["candidate_id"], "generated_2")
+
+    def test_cached_title_review_is_normalized_without_calling_deepseek_again(self):
+        structured = {
+            "landscape_title": "同一个标题",
+            "vertical_title": "同一个标题",
+            "title_review": {
+                "schema_version": report_audio_service.TITLE_REVIEW_SCHEMA_VERSION,
+                "selected": {
+                    "landscape": {"candidate_id": "generated_1"},
+                    "vertical": {"candidate_id": "generated_1"},
+                },
+                "candidates": [
+                    {
+                        "candidate_id": "original_pdf",
+                        "title": "原始标题",
+                        "landscape_score": 80,
+                        "vertical_score": 80,
+                    },
+                    {
+                        "candidate_id": "generated_1",
+                        "title": "同一个标题",
+                        "landscape_score": 96,
+                        "vertical_score": 94,
+                    },
+                    {
+                        "candidate_id": "generated_2",
+                        "title": "竖屏标题",
+                        "landscape_score": 82,
+                        "vertical_score": 90,
+                    },
+                ],
+            },
+        }
+
+        with patch.object(report_audio_service, "_deepseek_generate_title_candidates") as generate:
+            result = report_audio_service.review_report_cover_titles(structured)
+
+        generate.assert_not_called()
+        self.assertEqual(result["landscape_title"], "同一个标题")
+        self.assertEqual(result["vertical_title"], "竖屏标题")
+
+    def test_title_review_failure_keeps_existing_titles(self):
+        structured = {
+            "landscape_title": "保留横屏",
+            "landscape_subtitle": "保留副标题",
+            "vertical_title": "保留竖屏",
+            "vertical_subtitle": "保留竖屏副标题",
+            "final_script_for_tts": "这是一段正文。",
+        }
+
+        with patch.object(report_audio_service, "_deepseek_generate_title_candidates", return_value=[]), \
+            patch.object(
+                report_audio_service,
+                "_deepseek_review_title_candidates",
+                side_effect=ReportAudioWorkflowError("评审服务暂不可用"),
+            ):
+            result = report_audio_service.review_report_cover_titles(
+                structured,
+                pdf_filename="测试研报-260723.pdf",
+            )
+
+        self.assertEqual(result["landscape_title"], "保留横屏")
+        self.assertEqual(result["vertical_title"], "保留竖屏")
+        self.assertEqual(result["title_review"]["status"], "fallback")
+        self.assertIn("暂不可用", result["title_review"]["review_error"])
+
     def test_status_marks_normalizer_unavailable_without_deepseek_or_fallback(self):
         with patch.dict(os.environ, {}, clear=True):
             payload = status_payload()

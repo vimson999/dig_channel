@@ -810,7 +810,7 @@ def run_publication_pipeline(self, task_id):
                     or active_v_params.get('render_scheme')
                     or 'scheme1'
                 ).strip().lower()
-                if vertical_scheme not in {'scheme1', 'scheme2', 'workbench', 'thumbnail_workbench'}:
+                if vertical_scheme not in {'scheme1', 'scheme2', 'scheme3', 'workbench', 'thumbnail_workbench'}:
                     vertical_scheme = 'scheme1'
                 if vertical_scheme in {'workbench', 'thumbnail_workbench'}:
                     vertical_scheme = 'scheme2'
@@ -834,7 +834,22 @@ def run_publication_pipeline(self, task_id):
                     )
                     main_title = vertical_thumb_params.get('main_title') or thumb_params.get('main_title') or bili_params.get('title') or ""
                     sub_title = vertical_thumb_params.get('sub_title') or thumb_params.get('sub_title') or ""
-                    if vertical_scheme in {'scheme2', 'workbench', 'thumbnail_workbench'}:
+                    if vertical_scheme == 'scheme3':
+                        workbench_institution = vertical_thumb_params.get('institution') or '深度研报'
+                        workbench_emotion = vertical_thumb_params.get('emotion') or 'bull'
+                        workbench_footer = vertical_thumb_params.get('footer_text') or '听见资本'
+                        v_image_path = thumbnail_service.generate_workbench_video_background(
+                            main_title=main_title,
+                            sub_title=sub_title,
+                            output_filename=f"vbg3_{base_name}.jpg",
+                            institution=workbench_institution,
+                            emotion=workbench_emotion,
+                            footer_text=workbench_footer,
+                        )
+                        vertical_cover_path = None
+                        podcast_cover_path = None
+                        bilibili_cover_path = None
+                    elif vertical_scheme in {'scheme2', 'workbench', 'thumbnail_workbench'}:
                         workbench_institution = vertical_thumb_params.get('institution') or vertical_cover_params.get('institution') or '深度研报'
                         workbench_emotion = vertical_thumb_params.get('emotion') or vertical_cover_params.get('emotion') or 'bull'
                         workbench_footer = vertical_thumb_params.get('footer_text') or vertical_cover_params.get('footer_text') or '听见资本'
@@ -923,17 +938,55 @@ def run_publication_pipeline(self, task_id):
                 except (TypeError, ValueError):
                     preview_seconds = 0
 
-                v_video_path = video_editor_service.process_vertical_video(
-                    image_file=v_image_path,
-                    audio_files=audio_path_abs,
-                    subtitles=final_subtitles,
-                    output_filename=f"v_{base_name}.mp4",
-                    subtitle_position=v_subtitle_position,
-                    subtitle_size=v_subtitle_size,
-                    subtitle_style=v_subtitle_style,
-                    export_params=v_export_params,
-                    duration_limit=preview_seconds if preview_seconds > 0 else None
-                )
+                if vertical_scheme == 'scheme3':
+                    scene_timeline = active_v_params.get('visual_scene_timeline')
+                    direct_scenes = (
+                        scene_timeline.get('scenes')
+                        if isinstance(scene_timeline, dict)
+                        and isinstance(scene_timeline.get('scenes'), list)
+                        else []
+                    )
+                    if direct_scenes:
+                        v_video_path = video_editor_service.process_framed_vertical_scenes(
+                            background_image=v_image_path,
+                            scenes=direct_scenes,
+                            audio_files=audio_path_abs,
+                            subtitles=final_subtitles,
+                            output_filename=f"v_{base_name}.mp4",
+                            subtitle_position=v_subtitle_position,
+                            subtitle_size=v_subtitle_size,
+                            subtitle_style=v_subtitle_style,
+                            export_params=v_export_params,
+                            duration_limit=preview_seconds if preview_seconds > 0 else None,
+                        )
+                    else:
+                        visual_video_path = to_abs_path(active_v_params.get('visual_video_path'))
+                        if not visual_video_path or not os.path.isfile(visual_video_path):
+                            raise ValueError("方案三需要已完成的正文分镜图片或兼容视觉视频")
+                        v_video_path = video_editor_service.process_framed_vertical_video(
+                            background_image=v_image_path,
+                            content_video=visual_video_path,
+                            audio_files=audio_path_abs,
+                            subtitles=final_subtitles,
+                            output_filename=f"v_{base_name}.mp4",
+                            subtitle_position=v_subtitle_position,
+                            subtitle_size=v_subtitle_size,
+                            subtitle_style=v_subtitle_style,
+                            export_params=v_export_params,
+                            duration_limit=preview_seconds if preview_seconds > 0 else None,
+                        )
+                else:
+                    v_video_path = video_editor_service.process_vertical_video(
+                        image_file=v_image_path,
+                        audio_files=audio_path_abs,
+                        subtitles=final_subtitles,
+                        output_filename=f"v_{base_name}.mp4",
+                        subtitle_position=v_subtitle_position,
+                        subtitle_size=v_subtitle_size,
+                        subtitle_style=v_subtitle_style,
+                        export_params=v_export_params,
+                        duration_limit=preview_seconds if preview_seconds > 0 else None
+                    )
                 logger.info(f"  - ✅ Vertical Done: {v_video_path}")
                 
                 # 如果这是唯一的合成任务，把它也放到主 video_path 里方便前端下载
@@ -961,13 +1014,22 @@ def run_publication_pipeline(self, task_id):
                 logger.info(f"Task {task_id}: Starting alternative vertical video synthesis...")
                 
                 v2_scheme = str(v_vid_2_params.get('scheme') or 'scheme1').strip().lower()
-                if v2_scheme not in {'scheme1', 'scheme2'}:
+                if v2_scheme not in {'scheme1', 'scheme2', 'scheme3'}:
                     v2_scheme = 'scheme1'
                 v2_image_path = to_abs_path(v_vid_2_params.get('image_path'))
                 v2_screenshot_path = to_abs_path(v_vid_2_params.get('screenshot_path') or v2_image_path)
                 v2_main_title = v_vid_2_params.get('main_title') or ""
                 v2_sub_title = v_vid_2_params.get('sub_title') or ""
-                if v2_scheme == 'scheme2':
+                if v2_scheme == 'scheme3':
+                    v2_image_path = thumbnail_service.generate_workbench_video_background(
+                        main_title=v2_main_title,
+                        sub_title=v2_sub_title,
+                        output_filename=f"vbg3_alt_{base_name}.jpg",
+                        institution=v_vid_2_params.get('institution') or '深度研报',
+                        emotion=v_vid_2_params.get('emotion') or 'bull',
+                        footer_text=v_vid_2_params.get('footer_text') or '听见资本',
+                    )
+                elif v2_scheme == 'scheme2':
                     v2_image_path = thumbnail_service.generate_workbench_vertical_thumbnail(
                         main_title=v2_main_title,
                         sub_title=v2_sub_title,
@@ -992,17 +1054,55 @@ def run_publication_pipeline(self, task_id):
                         v2_preview_seconds = float(v2_preview_seconds or 0)
                     except (TypeError, ValueError):
                         v2_preview_seconds = 0
-                    v2_video_path = video_editor_service.process_vertical_video(
-                        image_file=v2_image_path,
-                        audio_files=audio_path_abs,
-                        subtitles=final_subtitles,
-                        output_filename=f"v2_{base_name}.mp4",
-                        subtitle_position=v_vid_2_params.get('subtitle_position'),
-                        subtitle_size=v_vid_2_params.get('subtitle_size', 'normal'),
-                        subtitle_style=v_vid_2_params.get('subtitle_style') if isinstance(v_vid_2_params.get('subtitle_style'), dict) else None,
-                        export_params=params.get('export_params'),
-                        duration_limit=v2_preview_seconds if v2_preview_seconds > 0 else None,
-                    )
+                    if v2_scheme == 'scheme3':
+                        scene_timeline = v_vid_2_params.get('visual_scene_timeline')
+                        direct_scenes = (
+                            scene_timeline.get('scenes')
+                            if isinstance(scene_timeline, dict)
+                            and isinstance(scene_timeline.get('scenes'), list)
+                            else []
+                        )
+                        if direct_scenes:
+                            v2_video_path = video_editor_service.process_framed_vertical_scenes(
+                                background_image=v2_image_path,
+                                scenes=direct_scenes,
+                                audio_files=audio_path_abs,
+                                subtitles=final_subtitles,
+                                output_filename=f"v2_{base_name}.mp4",
+                                subtitle_position=v_vid_2_params.get('subtitle_position'),
+                                subtitle_size=v_vid_2_params.get('subtitle_size', 'normal'),
+                                subtitle_style=v_vid_2_params.get('subtitle_style') if isinstance(v_vid_2_params.get('subtitle_style'), dict) else None,
+                                export_params=params.get('export_params'),
+                                duration_limit=v2_preview_seconds if v2_preview_seconds > 0 else None,
+                            )
+                        else:
+                            visual_video_path = to_abs_path(v_vid_2_params.get('visual_video_path'))
+                            if not visual_video_path or not os.path.isfile(visual_video_path):
+                                raise ValueError("方案三需要已完成的正文分镜图片或兼容视觉视频")
+                            v2_video_path = video_editor_service.process_framed_vertical_video(
+                                background_image=v2_image_path,
+                                content_video=visual_video_path,
+                                audio_files=audio_path_abs,
+                                subtitles=final_subtitles,
+                                output_filename=f"v2_{base_name}.mp4",
+                                subtitle_position=v_vid_2_params.get('subtitle_position'),
+                                subtitle_size=v_vid_2_params.get('subtitle_size', 'normal'),
+                                subtitle_style=v_vid_2_params.get('subtitle_style') if isinstance(v_vid_2_params.get('subtitle_style'), dict) else None,
+                                export_params=params.get('export_params'),
+                                duration_limit=v2_preview_seconds if v2_preview_seconds > 0 else None,
+                            )
+                    else:
+                        v2_video_path = video_editor_service.process_vertical_video(
+                            image_file=v2_image_path,
+                            audio_files=audio_path_abs,
+                            subtitles=final_subtitles,
+                            output_filename=f"v2_{base_name}.mp4",
+                            subtitle_position=v_vid_2_params.get('subtitle_position'),
+                            subtitle_size=v_vid_2_params.get('subtitle_size', 'normal'),
+                            subtitle_style=v_vid_2_params.get('subtitle_style') if isinstance(v_vid_2_params.get('subtitle_style'), dict) else None,
+                            export_params=params.get('export_params'),
+                            duration_limit=v2_preview_seconds if v2_preview_seconds > 0 else None,
+                        )
                     vertical_paths = dict(result_state.get('vertical_video_paths') or {})
                     vertical_paths[v2_scheme] = v2_video_path
                     vertical_background_paths = dict(result_state.get('vertical_background_paths') or {})

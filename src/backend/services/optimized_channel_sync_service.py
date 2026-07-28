@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from flask import current_app
 
 from services.channel_service import ChannelService
+from services.runtime_guard import release_db_session_quietly
 from services.youtube_sync_service import YouTubeSyncService
 
 
@@ -55,6 +56,9 @@ class OptimizedChannelSyncService:
             max_workers = max(1, min(int(max_workers or 1), 10))
 
             channels = ChannelService.get_all_channels(active_only=active_only, order_by_sort=False)
+            # ChannelService returns plain dictionaries. Release the scheduler/web
+            # session before the thread pool starts remote YouTube requests.
+            release_db_session_quietly()
             total_channels = len(channels)
 
             if total_channels == 0:

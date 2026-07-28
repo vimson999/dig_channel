@@ -19,6 +19,7 @@ from api import report_audio_workflow as report_audio_api  # noqa: E402
 from models import db  # noqa: E402
 from models.bilibili_publish import PublicationTaskBilibiliUpload  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
+from models.zsxq_sync import ZsxqAttachment, ZsxqTopic  # noqa: E402
 from services.bilibili_publish import (  # noqa: E402
     bilibili_upload_execution_context,
     bilibili_upload_children,
@@ -70,6 +71,16 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(options["vertical_video_schemes"], ["scheme1", "scheme2"])
         self.assertEqual(options["vertical_video_scheme"], "scheme2")
 
+    def test_video_options_accept_scheme3_as_primary(self):
+        options = report_audio_api._parse_video_options({
+            "vertical_video_enabled": "1",
+            "vertical_video_schemes": '["scheme1", "scheme3"]',
+        })
+
+        self.assertEqual(options["vertical_video_schemes"], ["scheme1", "scheme3"])
+        self.assertEqual(options["vertical_video_scheme"], "scheme3")
+        self.assertEqual(report_audio_api._vertical_video_scheme_label("video_bg"), "方案三")
+
     def test_video_options_keep_legacy_single_vertical_scheme(self):
         options = report_audio_api._parse_video_options({
             "vertical_video_enabled": "1",
@@ -78,6 +89,69 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
 
         self.assertEqual(options["vertical_video_schemes"], ["scheme1"])
         self.assertEqual(options["vertical_video_scheme"], "scheme1")
+
+    def test_scheme3_scene_timeline_falls_back_to_script_weight(self):
+        root = Path(self.tmpdir.name)
+        first_image = root / "scene-1.png"
+        second_image = root / "scene-2.png"
+        first_image.write_bytes(b"image-1")
+        second_image.write_bytes(b"image-2")
+        rows = [
+            SimpleNamespace(
+                asset_id="asset-1",
+                sequence=1,
+                image_status="completed",
+                image_path=str(first_image),
+                script_text="十个字的短文案",
+                estimated_seconds=None,
+                timeline_start_seconds=None,
+                timeline_end_seconds=None,
+            ),
+            SimpleNamespace(
+                asset_id="asset-2",
+                sequence=2,
+                image_status="completed",
+                image_path=str(second_image),
+                script_text="这是一段明显更长的正文文案，用于获得更长的画面停留时间。",
+                estimated_seconds=None,
+                timeline_start_seconds=None,
+                timeline_end_seconds=None,
+            ),
+        ]
+
+        timeline = report_audio_api._build_scheme3_scene_timeline(rows, 30)
+
+        self.assertEqual(timeline["timing_source"], "script_weight")
+        self.assertEqual(timeline["scene_count"], 2)
+        self.assertEqual(timeline["scenes"][0]["start_seconds"], 0)
+        self.assertEqual(timeline["scenes"][-1]["end_seconds"], 30)
+        self.assertGreater(
+            timeline["scenes"][1]["duration_seconds"],
+            timeline["scenes"][0]["duration_seconds"],
+        )
+
+    def test_ready_linked_visual_workflow_uses_live_scene_readiness(self):
+        with patch.object(
+            report_audio_api,
+            "_linked_visual_video_payloads",
+            return_value=[
+                {
+                    "workflow_job_id": "visual-running-but-ready",
+                    "visual_scheme": {"key": "stick_figure"},
+                    "status": "running",
+                    "step": "images_queued",
+                    "progress": 65,
+                    "scheme3_ready": True,
+                },
+            ],
+        ):
+            workflow_id = report_audio_api._ready_linked_visual_workflow_id(
+                SimpleNamespace(id="user-1"),
+                SimpleNamespace(id="audio-1"),
+                "stick_figure",
+            )
+
+        self.assertEqual(workflow_id, "visual-running-but-ready")
 
     def test_public_video_exposes_each_vertical_scheme_download(self):
         root = Path(self.tmpdir.name)
@@ -221,7 +295,7 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             str(unrelated_task.id),
         ))
 
-    def test_job_summary_page_keeps_exact_pagination_without_window_count(self):
+    def test_job_summary_page_keeps_exact_pagination_with_two_round_trips(self):
         for index in range(3):
             db.session.add(PublicationTask(
                 status="completed",
@@ -241,17 +315,30 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             PublicationTask.feature == FEATURE_NAME,
             PublicationTask.user_id == "user-1",
         )
-        items, total, pages = report_audio_api._query_jobs_page(
-            query,
-            page=1,
-            per_page=2,
-            include_detail=False,
-        )
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            normalized = " ".join(statement.lower().split())
+            if " from publication_tasks " in normalized:
+                statements.append(normalized)
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            items, total, pages = report_audio_api._query_jobs_page(
+                query,
+                page=1,
+                per_page=2,
+                include_detail=False,
+            )
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
 
         self.assertEqual(total, 3)
         self.assertEqual(pages, 2)
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0]["request"]["pdf"]["filename"], "report-2.pdf")
+        self.assertEqual(2, len(statements), statements)
+        self.assertIn("select count(publication_tasks.id)", statements[0])
 
     def test_clear_jobs_cache_matches_composite_visible_user_key(self):
         key = ("system+user-1", 1, 10, "", "", "")
@@ -298,8 +385,9 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             result={"video": {"keyframes": {"cover": {"path": "/tmp/cover.jpg"}}}},
         )
         db.session.add(task)
-        db.session.commit()
+        db.session.flush()
         task_id = task.id
+        db.session.commit()
         statements = []
 
         def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
@@ -317,6 +405,89 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(1, len(statements))
         self.assertEqual(first.result, second.result)
         self.assertEqual("/tmp/cover.jpg", second.result["video"]["keyframes"]["cover"]["path"])
+
+    def test_landscape_keyframe_uses_structured_projection(self):
+        keyframe_path = Path(self.tmpdir.name) / "landscape-keyframe.jpg"
+        keyframe_path.write_bytes(b"keyframe")
+        task = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            feature=FEATURE_NAME,
+            user_id="user-1",
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={
+                "video": {
+                    "keyframes": {
+                        "landscape_cover": {"path": str(keyframe_path)},
+                    },
+                },
+            },
+        )
+        db.session.add(task)
+        db.session.flush()
+        task_id = task.id
+        db.session.commit()
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            if "publication_tasks" in statement.lower() and statement.lstrip().lower().startswith("select"):
+                statements.append(statement.lower())
+
+        loader, resolver = report_audio_api._keyframe_media_accessors("landscape_cover")
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            loaded = loader(SimpleNamespace(id="user-1"), task_id)
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        self.assertEqual(str(keyframe_path), resolver(loaded))
+        self.assertEqual(1, len(statements))
+        self.assertNotIn("publication_tasks.result", statements[0])
+        self.assertIn("report_audio_landscape_keyframe_path", statements[0])
+
+    def test_pdf_asset_lookup_excludes_attachment_raw_payload(self):
+        pdf_path = Path(self.tmpdir.name) / "report.pdf"
+        pdf_path.write_bytes(b"%PDF-test")
+        topic = ZsxqTopic(
+            group_id="group-1",
+            group_name="测试星球",
+            tab_id="tab-1",
+            tab_label="研报",
+            topic_id="topic-1",
+            title="结构化标题",
+            raw_payload={"large": "payload"},
+        )
+        attachment = ZsxqAttachment(
+            group_id="group-1",
+            tab_id="tab-1",
+            topic_id="topic-1",
+            attachment_key="attachment-1",
+            name="report.pdf",
+            local_path=str(pdf_path),
+            download_status="downloaded",
+            raw_payload={"large": "payload"},
+        )
+        db.session.add_all([topic, attachment])
+        db.session.flush()
+        attachment_id = attachment.id
+        db.session.commit()
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            if "zsxq_attachments" in statement.lower() and statement.lstrip().lower().startswith("select"):
+                statements.append(statement.lower())
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            metadata = report_audio_api._pdf_meta_from_zsxq_attachment(attachment_id, "job-1")
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        self.assertEqual("结构化标题", metadata["topic_title"])
+        self.assertEqual("研报", metadata["tab_label"])
+        self.assertEqual(1, len(statements))
+        self.assertNotIn("raw_payload", statements[0])
 
     def test_terminal_owner_reference_is_shared_by_parallel_detail_subrequests(self):
         task = PublicationTask(
@@ -523,6 +694,63 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertNotIn("completed_at", parent.result)
         self.assertEqual(parent.result["queue_repair_history"][-1]["count"], 3)
         self.assertEqual(parent.result["queue_repair_history"][-1]["archive_reason"], "manual_retry")
+
+    def test_manual_retry_can_switch_failed_browser_tts_to_doubao_api(self):
+        parent = PublicationTask(
+            status="failed",
+            current_step="failed",
+            progress=88,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                FEATURE_NAME: {
+                    "tts_provider": "doubao_browser",
+                    "tts_voice": None,
+                },
+            },
+            result={"error": "豆包浏览器朗读失败"},
+            error_message="豆包浏览器朗读失败",
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        with self.app.test_request_context(
+            "/retry",
+            method="POST",
+            json={
+                "tts_provider": "doubao_api",
+                "tts_voice": "zh_female_mizai_uranus_bigtts",
+            },
+        ), patch.object(
+            report_audio_api,
+            "_get_owned_task",
+            return_value=parent,
+        ), patch.object(
+            report_audio_api,
+            "is_doubao_api_configured",
+            return_value=True,
+        ), patch.object(
+            report_audio_api,
+            "maybe_guarded_apply_async",
+            return_value={
+                "async_result": SimpleNamespace(id="celery-api-fallback"),
+                "deferred": False,
+                "admission": {"allowed": True, "reason": "ok"},
+            },
+        ):
+            response = report_audio_api.retry_job.__wrapped__(
+                SimpleNamespace(id="user-1"),
+                parent.id,
+            )
+
+        payload = response.get_json()
+        db.session.refresh(parent)
+        workflow = parent.params[FEATURE_NAME]
+        self.assertTrue(payload["success"])
+        self.assertEqual(workflow["tts_provider"], "doubao_api")
+        self.assertEqual(workflow["tts_voice"], "zh_female_mizai_uranus_bigtts")
+        self.assertEqual(parent.result["retry_tts_override"]["previous_provider"], "doubao_browser")
+        self.assertEqual(parent.result["retry_tts_override"]["provider"], "doubao_api")
 
     def test_cover_lookup_reads_projection_columns_without_parent_result_json(self):
         root = Path(self.tmpdir.name)
@@ -1097,8 +1325,22 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             report_audio_api._report_bilibili_default_title(parent, "vertical"),
             "机构研报 | 竖屏标题：核心机会 | 2026-07-11",
         )
-        self.assertEqual(report_audio_api._report_bilibili_cover_path(parent, "landscape"), (str(landscape_cover), "cover"))
+        self.assertEqual(report_audio_api._report_bilibili_cover_path(parent, "landscape"), (str(bilibili_cover), "bilibili_cover"))
         self.assertEqual(report_audio_api._report_bilibili_cover_path(parent, "vertical"), (str(bilibili_cover), "bilibili_cover"))
+
+    def test_bilibili_upload_defaults_and_renderer_use_dual_ratio_safe_cover(self):
+        frontend_dir = BACKEND_DIR.parent / "frontend"
+        detail_script = (frontend_dir / "js" / "report-audio-workflow-detail.js").read_text(encoding="utf-8")
+        workbench_script = (frontend_dir / "js" / "thumbnail-workbench.js").read_text(encoding="utf-8")
+        cover_options_body = detail_script.split("\n    biliCoverOptions(job", 1)[1].split("\n    bilibiliCoverUrl(job", 1)[0]
+
+        self.assertIn("add('bilibili_cover', 'B站双比例安全封皮'", cover_options_body)
+        self.assertLess(
+            cover_options_body.index("add('bilibili_cover', 'B站双比例安全封皮'"),
+            cover_options_body.index("add('cover', '横屏封面'"),
+        )
+        self.assertIn("const margin = isBiliWxCover ? 150 : 80", workbench_script)
+        self.assertIn("Math.round(h * 0.60)", workbench_script)
 
     def test_bilibili_publish_title_extracts_bank_and_report_date(self):
         parent = PublicationTask(
@@ -1232,6 +1474,8 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(video["vertical_background_paths"]["scheme2"], str(new_background))
         self.assertEqual(video["vertical_background_title"], "用户修改后的标题")
         self.assertEqual(video["keyframes"]["vertical_background"]["subtitle"], "用户修改后的副标题")
+        self.assertEqual(video["keyframes"]["vertical_background"]["width"], 1080)
+        self.assertEqual(video["keyframes"]["vertical_background"]["height"], 1920)
         public = report_audio_api._public_keyframes(parent.id, video)
         self.assertEqual(public["vertical_background"]["title"], "用户修改后的标题")
         self.assertEqual(public["vertical_background"]["scheme"], "scheme2")
@@ -1754,6 +1998,29 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             title,
             "野村：中国火箭回收重复使用的原创路线\n决定商业航天生死的根本不是订单",
         )
+
+    def test_manual_cover_title_preserves_reviewed_full_institution_and_line_break(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "report_audio_workflow": {
+                    "pdf": {"filename": "Morgan Stanley-China Steel Weekly Update.pdf"},
+                },
+            },
+            result={"structured_result": {"title": "中国钢铁与铁矿石周度更新"}},
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        title = report_audio_api._cover_title_with_institution(
+            parent,
+            "摩根士丹利：中国钢铁与铁矿石\n周度更新",
+        )
+
+        self.assertEqual(title, "摩根士丹利：中国钢铁与铁矿石\n周度更新")
 
     def test_jefferies_cover_title_removes_legacy_generic_prefix(self):
         parent = PublicationTask(

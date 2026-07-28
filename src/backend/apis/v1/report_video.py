@@ -51,6 +51,7 @@ from services.report_video_auto_service import (
     save_auto_scan_config,
 )
 from services.report_video_render_service import media_duration, render_report_video, render_task_video, safe_filename
+from services.runtime_guard import apply_async_after_db_release
 from tasks.doubao_browser_tts import process_doubao_browser_tts_job
 
 
@@ -2003,7 +2004,8 @@ def _create_report_video_doubao_tts_task(task, item, index, total, *, force=Fals
     child_id = child.id
     db.session.commit()
     try:
-        async_result = process_doubao_browser_tts_job.apply_async(
+        async_result = apply_async_after_db_release(
+            process_doubao_browser_tts_job,
             args=[child_id],
             queue=os.getenv("DOUBAO_BROWSER_TTS_QUEUE", doubao_tts_service.QUEUE_NAME),
             retry=False,

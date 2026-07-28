@@ -41,6 +41,12 @@ class BilibiliCompetitor(db.Model):
         cascade="all, delete-orphan",
         lazy=True,
     )
+    charging_snapshots = db.relationship(
+        "BilibiliChargingSnapshot",
+        backref="competitor",
+        cascade="all, delete-orphan",
+        lazy=True,
+    )
 
     def compact_dict(self):
         return {
@@ -169,3 +175,40 @@ class BilibiliCompetitorVideo(db.Model):
             "raw_payload": self.raw_payload or {},
         })
         return payload
+
+
+class BilibiliChargingSnapshot(db.Model):
+    """One business-day snapshot of a competitor's public charger count."""
+
+    __tablename__ = "bilibili_charging_snapshots"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "competitor_id",
+            "snapshot_date",
+            name="uq_bilibili_charging_snapshot_competitor_date",
+        ),
+        db.Index(
+            "ix_bilibili_charging_snapshots_date_competitor",
+            "snapshot_date",
+            "competitor_id",
+        ),
+    )
+
+    id = db.Column(db.String(36), primary_key=True, default=_new_id)
+    competitor_id = db.Column(
+        db.String(36),
+        db.ForeignKey("bilibili_competitors.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    snapshot_date = db.Column(db.Date, nullable=False, index=True)
+    charger_count = db.Column(db.Integer, nullable=False)
+    fetched_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    source = db.Column(db.String(40), nullable=False, default="bilibili_elec_monthly")
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(
+        db.DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )

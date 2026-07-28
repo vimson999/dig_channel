@@ -17,6 +17,7 @@ from services.doubao_browser_tts import (
     storage_path_for_job,
     validate_audio_duration_for_text,
 )
+from services.runtime_guard import end_db_transaction_before_external_io
 from services.workflow_notification_service import workflow_notification_service
 
 
@@ -146,6 +147,7 @@ def _process_job(task_id, celery_task=None):
         error=None,
     )
     db.session.commit()
+    end_db_transaction_before_external_io("doubao browser synthesis")
     progress_result = dict(result)
 
     def update_progress(event):
@@ -541,14 +543,30 @@ def _send_captcha_blocked_email(task_id):
         return True
 
     captcha = result.get("captcha_blocked") if isinstance(result.get("captcha_blocked"), dict) else {}
-    subject = f"[豆包浏览器朗读] 人机验证阻塞 · {str(task.id)[:8]}"
-    body = _captcha_blocked_email_body(task, captcha)
+    params = task.params if isinstance(task.params, dict) else {}
+    payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     notification = {
         "event_type": event_key,
         "sent_at": datetime.utcnow().isoformat() + "Z",
     }
     try:
-        send_result = workflow_notification_service.send_email_message(subject, body)
+        send_result = workflow_notification_service.send_browser_human_intervention(
+            provider="豆包",
+            reason="verification",
+            message=captcha.get("message") or task.error_message or "豆包页面触发人机验证",
+            job_id=str(task.id),
+            page_url=captcha.get("page_url") or "",
+            screenshot_path=captcha.get("screenshot_path") or "",
+            profile=str(payload.get("user_data_dir") or ""),
+            worker_id=str(metadata.get("worker_id") or ""),
+            details={
+                "父编排任务": metadata.get("parent_task_id") or params.get("parent_task_id") or "-",
+                "分段": f"{metadata.get('chunk_index') or '-'}/{metadata.get('chunk_total') or '-'}",
+                "尝试": metadata.get("chunk_attempt") or "-",
+                "文本长度": f"{len(str(payload.get('text') or ''))} 字",
+            },
+        )
         notification.update(send_result if isinstance(send_result, dict) else {"sent": False, "result": send_result})
         logger.info("[DOUBAO_BROWSER_TTS] captcha blocked email result | task=%s result=%s", task.id, send_result)
     except Exception as exc:

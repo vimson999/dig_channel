@@ -17,30 +17,34 @@ mkdir -p "$LOG_DIR" "$RUNTIME_DIR"
 echo "🔁 正在全面重启开发环境..."
 
 echo
-echo "0/7 检查数据库结构迁移是否完整..."
+echo "0/8 检查 Redis 运行依赖..."
 if [ ! -x "$PROJECT_ROOT/venv/bin/python" ]; then
-  echo "❌ 无法执行数据库结构预检：缺少 $PROJECT_ROOT/venv/bin/python"
+  echo "❌ 无法执行运行依赖预检：缺少 $PROJECT_ROOT/venv/bin/python"
   exit 1
 fi
+"$PROJECT_ROOT/venv/bin/python" "$SCRIPT_DIR/check-runtime-redis.py"
+
+echo
+echo "1/8 检查数据库结构迁移是否完整..."
 "$PROJECT_ROOT/venv/bin/python" "$SCRIPT_DIR/check-runtime-schema.py"
 
 if [ "${FORCE_RESTART_ACTIVE_TASKS:-0}" = "1" ]; then
   echo "⚠️ 已显式允许中断活动业务任务，跳过重启安全预检。"
 else
   echo
-  echo "1/7 首次检查是否仍有不可中断的业务任务..."
+  echo "2/8 首次检查是否仍有不可中断的业务任务..."
   PYTHONPATH="$PROJECT_ROOT/src/backend" \
     "$PROJECT_ROOT/venv/bin/python" "$SCRIPT_DIR/check-restart-safety.py"
 fi
 
 echo
-echo "2/7 停止 Watchdog 并冻结 Celery 新消费..."
+echo "3/8 停止 Watchdog 并冻结 Celery 新消费..."
 "$SCRIPT_DIR/stop-celery-watchdog.sh"
 PYTHONPATH="$PROJECT_ROOT/src/backend" \
   "$PROJECT_ROOT/venv/bin/python" "$SCRIPT_DIR/quiesce-celery-consumers.py"
 
 echo
-echo "3/7 停止 Flask 后端，关闭新的 API 入队入口..."
+echo "4/8 停止 Flask 后端，关闭新的 API 入队入口..."
 "$SCRIPT_DIR/stop-backend.sh"
 
 if old_listener="$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null)" && [ -n "$old_listener" ]; then
@@ -49,7 +53,7 @@ if old_listener="$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null)" && [ -n "$old
 fi
 
 echo
-echo "4/7 冻结后再次检查，消除检查与停机之间的竞态..."
+echo "5/8 冻结后再次检查，消除检查与停机之间的竞态..."
 if [ "${FORCE_RESTART_ACTIVE_TASKS:-0}" = "1" ]; then
   echo "⚠️ 已显式允许中断活动业务任务，跳过冻结后的安全复检。"
 else
@@ -80,11 +84,11 @@ else
 fi
 
 echo
-echo "5/7 停止所有 Celery worker、Watchdog、计划任务..."
+echo "6/8 停止所有 Celery worker、Watchdog、计划任务..."
 "$SCRIPT_DIR/stop-all-background-jobs.sh"
 
 echo
-echo "6/7 启动 Flask 后端，并按安全默认值补齐托管进程..."
+echo "7/8 启动 Flask 后端，并按安全默认值补齐托管进程..."
 export DB_PROCESS_ROLE="${DB_PROCESS_ROLE:-web}"
 export WEB_DB_POOL_MODE="${WEB_DB_POOL_MODE:-queue}"
 export WEB_DB_POOL_SIZE="${WEB_DB_POOL_SIZE:-4}"
@@ -111,7 +115,7 @@ export LOCAL_PGBOUNCER_ENABLED="${LOCAL_PGBOUNCER_ENABLED:-1}"
 export BACKEND_PROCESS_BOOTSTRAP_ENABLED="${BACKEND_PROCESS_BOOTSTRAP_ENABLED:-1}"
 export BACKEND_PROCESS_BOOTSTRAP_MODE="${BACKEND_PROCESS_BOOTSTRAP_MODE:-ensure}"
 export BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES="${BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES:-all}"
-export BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS="${BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS:-zsxq_auto,content_retention}"
+export BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS="${BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS:-zsxq_auto,content_retention,bilibili_charging,youtube_channel_sync,youtube_video_sync}"
 export BACKEND_PROCESS_BOOTSTRAP_WATCHDOG="${BACKEND_PROCESS_BOOTSTRAP_WATCHDOG:-1}"
 export CELERY_AUTO_HEAL_SERVICES="${CELERY_AUTO_HEAL_SERVICES:-$BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES}"
 export CELERY_AUTO_HEAL_REQUEUE_STALE_TASKS="${CELERY_AUTO_HEAL_REQUEUE_STALE_TASKS:-1}"
@@ -156,7 +160,7 @@ for _ in $(seq 1 30); do
     echo "✅ 后端已监听 http://localhost:$PORT"
     echo "✅ 已确认监听 PID 为本次启动的新进程: $backend_pid"
     echo "✅ 后端 bootstrap 将按配置补齐托管进程。"
-    echo "✅ 7/7 新进程监听验收通过。"
+    echo "✅ 8/8 新进程监听验收通过。"
     echo
     echo "查看状态："
     echo "  http://localhost:8888/celery-monitor.html"

@@ -37,6 +37,7 @@ GEMINI_CAPTURE_LABELS = (
     "Hook策略",
     "结尾情绪基调",
 )
+TITLE_REVIEW_SCHEMA_VERSION = "report_audio_title_review_20260724_v1"
 
 
 class ReportAudioWorkflowError(RuntimeError):
@@ -296,8 +297,495 @@ def status_payload() -> Dict[str, Any]:
         "local_fallback_allowed": fallback_allowed,
         "normalizer_provider": "deepseek" if deepseek_configured else ("local_fallback" if fallback_allowed else "unavailable"),
         "normalizer_model": _normalizer_model() if deepseek_configured else None,
+        "title_review_model": _title_review_model() if deepseek_configured else None,
         "mode": "celery_orchestrator",
     }
+
+
+def review_report_cover_titles(
+    structured: Dict[str, Any],
+    *,
+    source_text: str = "",
+    pdf_filename: str = "",
+    pdf_topic_title: str = "",
+    timeout_seconds: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Generate and independently review cover titles without blocking the workflow.
+
+    The original PDF title is a formal baseline. A generated title only replaces it
+    when the reviewer scores it materially higher for the target format.
+    """
+    result = dict(structured or {})
+    if (result.get("title_review") or {}).get("schema_version") == TITLE_REVIEW_SCHEMA_VERSION:
+        return _normalize_existing_title_review(result)
+
+    original_title = _pdf_title_baseline(pdf_filename, pdf_topic_title)
+    candidates = _base_title_candidates(result, original_title)
+    generation_error = ""
+    review_error = ""
+    generation_model = _title_generation_model()
+    review_model = _title_review_model()
+
+    try:
+        generated = _deepseek_generate_title_candidates(
+            result,
+            source_text=source_text,
+            original_title=original_title,
+            timeout_seconds=timeout_seconds,
+        )
+        candidates = _dedupe_title_candidates(candidates + generated)
+    except Exception as exc:  # The title layer must never stop audio production.
+        generation_error = str(exc)
+        LOGGER.warning("Report title candidate generation failed: %s", exc)
+
+    review_candidates = _title_review_candidate_subset(candidates)
+    review_payload: Dict[str, Any] = {}
+    try:
+        review_payload = _deepseek_review_title_candidates(
+            result,
+            candidates=review_candidates,
+            source_text=source_text,
+            original_title=original_title,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as exc:  # Keep the existing structured titles on review failure.
+        review_error = str(exc)
+        LOGGER.warning("Report title review failed: %s", exc)
+
+    evaluated = _merge_title_evaluations(review_candidates, review_payload.get("evaluations"))
+    selected = {}
+    if review_payload:
+        selected = _select_reviewed_titles(evaluated, review_payload)
+        landscape = selected.get("landscape") or {}
+        vertical = selected.get("vertical") or {}
+        if landscape.get("title"):
+            result["landscape_title"] = landscape["title"]
+            result["landscape_subtitle"] = landscape.get("subtitle") or ""
+            result["cover_title"] = landscape["title"]
+            result["cover_subtitle"] = landscape.get("subtitle") or ""
+        if vertical.get("title"):
+            result["vertical_title"] = vertical["title"]
+            result["vertical_subtitle"] = vertical.get("subtitle") or ""
+
+    status = "completed"
+    if review_error or not review_payload:
+        status = "fallback"
+    elif generation_error:
+        status = "completed_with_generation_fallback"
+    result["title_review"] = {
+        "schema_version": TITLE_REVIEW_SCHEMA_VERSION,
+        "status": status,
+        "generation_model": generation_model,
+        "review_model": review_model,
+        "original_pdf_title": original_title,
+        "selected": selected,
+        "candidates": evaluated,
+        "decision_summary": _clean_text(review_payload.get("decision_summary") or "")[:1000],
+        "generation_error": generation_error[:1000],
+        "review_error": review_error[:1000],
+    }
+    return result
+
+
+def _deepseek_generate_title_candidates(
+    structured: Dict[str, Any],
+    *,
+    source_text: str,
+    original_title: str,
+    timeout_seconds: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    prompt = "\n".join([
+        "你是财经视频封面标题编辑。只依据所给研报内容生成候选，不得新增事实。",
+        "请输出严格 JSON：{\"candidates\":[{\"angle\":\"stable|opportunity|data|contradiction|original_refined\","
+        "\"title\":\"最多两行，用\\\\n换行\",\"subtitle\":\"一行补充信息\",\"evidence\":\"原文依据\"}]}。",
+        "总共生成 10 条：稳健研报型3条、机会发现型3条、数据驱动型2条、矛盾型2条。",
+        "规则：主标题每行不超过18个中文字符，最多两行；副标题不超过28个中文字符；"
+        "不要使用竖线分隔，不堆砌三个以上概念，不把矛盾和负面词当固定公式。",
+        "必须准确表达研报主结论。原始 PDF 标题是强基准，至少给出一条忠实压缩版。",
+        f"原始PDF标题：{original_title}",
+        f"现有结构化标题：{json.dumps(_title_context(structured), ensure_ascii=False)}",
+        "研报内容：",
+        _compact_text(source_text or structured.get("final_script_for_tts") or "", 12000),
+    ])
+    payload = _deepseek_json_call(
+        prompt,
+        model=_title_generation_model(),
+        timeout_seconds=timeout_seconds,
+        temperature=0.35,
+        purpose="标题候选生成",
+    )
+    raw_candidates = payload.get("candidates") if isinstance(payload, dict) else []
+    candidates = []
+    for index, item in enumerate(raw_candidates or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        candidate = _clean_title_candidate(
+            item,
+            candidate_id=f"generated_{index}",
+            source="generated",
+        )
+        if candidate:
+            candidates.append(candidate)
+    if not candidates:
+        raise ReportAudioWorkflowError("DeepSeek 标题候选生成没有返回有效候选")
+    return candidates
+
+
+def _deepseek_review_title_candidates(
+    structured: Dict[str, Any],
+    *,
+    candidates: List[Dict[str, Any]],
+    source_text: str,
+    original_title: str,
+    timeout_seconds: Optional[int] = None,
+) -> Dict[str, Any]:
+    prompt = "\n".join([
+        "你是独立的财经内容责任主编。评审候选标题，不负责继续创作。",
+        "输出严格 JSON，包含 evaluations、landscape_candidate_id、vertical_candidate_id、"
+        "backup_candidate_id、decision_summary。",
+        "evaluations 每项必须包含 candidate_id、thesis_alignment、factuality、information_gain、"
+        "cover_readability、restraint、landscape_score、vertical_score（均0-100）、reason、rejection_reason。",
+        "reason 和 rejection_reason 各不超过50个中文字符，不要复述候选标题或研报正文。",
+        "评分重点依次为：是否贴合原研报主结论、事实是否可靠、信息增量、两行封面可读性、表达是否克制。",
+        "横屏偏完整稳健；竖屏/B站可更敏锐，但不得用夸张矛盾替代主结论。",
+        "原始 PDF 标题是正式基准：AI 候选没有明显胜出时必须保留原始标题。",
+        "硬性口径：原始 PDF 标题的语义核心就是研报主论点。不得因为正文里出现“核心矛盾”等写作措辞，"
+        "擅自把目标价微调、现金流压力或戏剧性反差改判成研报主论点。",
+        "original_refined 候选是原题的封面压缩版；渲染器会自动补投行名称，不能因它未写机构名而扣分。",
+        "若候选没有保留原题的核心方向，只是事实正确或更有冲突感，thesis_alignment 不得超过70，"
+        "也不得选为横屏第一。竖屏可以换角度，但仍须保留原题核心方向。",
+        "含竖线分隔、超过两行、堆砌三个以上概念或把“却、反而、承压”当固定套路的候选，"
+        "cover_readability 或 restraint 必须明显扣分。",
+        f"原始PDF标题：{original_title}",
+        f"候选：{json.dumps(candidates, ensure_ascii=False)}",
+        f"现有结构化信息：{json.dumps(_title_context(structured), ensure_ascii=False)}",
+        "研报内容：",
+        _compact_text(source_text or structured.get("final_script_for_tts") or "", 12000),
+    ])
+    payload = _deepseek_json_call(
+        prompt,
+        model=_title_review_model(),
+        timeout_seconds=timeout_seconds,
+        temperature=0.05,
+        purpose="标题独立评审",
+    )
+    evaluations = payload.get("evaluations") if isinstance(payload, dict) else None
+    if not isinstance(evaluations, list) or not any(
+        isinstance(item, dict) and item.get("candidate_id") for item in evaluations
+    ):
+        raise ReportAudioWorkflowError("DeepSeek 标题独立评审没有返回有效评分")
+    return payload
+
+
+def _deepseek_json_call(
+    prompt: str,
+    *,
+    model: str,
+    timeout_seconds: Optional[int],
+    temperature: float,
+    purpose: str,
+) -> Dict[str, Any]:
+    api_key = os.environ.get("REPORT_AUDIO_NORMALIZER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise ReportAudioWorkflowError(f"DeepSeek 未配置，无法执行{purpose}")
+    base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    response = requests.post(
+        f"{base_url.rstrip('/')}/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "只输出严格 JSON，不要 Markdown，不要解释。"},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": temperature,
+            "max_tokens": _int_env("REPORT_AUDIO_TITLE_REVIEW_MAX_TOKENS", 8192),
+        },
+        timeout=_title_review_timeout(timeout_seconds),
+    )
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise ReportAudioWorkflowError(
+            f"DeepSeek {purpose}失败: HTTP {response.status_code} {response.text[:800]}"
+        ) from exc
+    try:
+        response_payload = response.json()
+        choice = (response_payload.get("choices") or [{}])[0]
+        content = ((choice.get("message") or {}).get("content") or "")
+        payload = _json_from_text(content)
+    except (ValueError, json.JSONDecodeError, TypeError, KeyError, IndexError) as exc:
+        finish_reason = ""
+        try:
+            finish_reason = str(choice.get("finish_reason") or "")
+        except (NameError, AttributeError):
+            pass
+        raise ReportAudioWorkflowError(
+            f"DeepSeek {purpose}返回不可用 JSON"
+            f"{f'（finish_reason={finish_reason}）' if finish_reason else ''}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ReportAudioWorkflowError(f"DeepSeek {purpose}返回结构错误")
+    return payload
+
+
+def _base_title_candidates(structured: Dict[str, Any], original_title: str) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    if original_title:
+        candidates.append(_clean_title_candidate(
+            {"title": original_title, "subtitle": "", "angle": "original"},
+            candidate_id="original_pdf",
+            source="original_pdf",
+        ))
+    pairs = [
+        ("existing_landscape", structured.get("landscape_title") or structured.get("cover_title"),
+         structured.get("landscape_subtitle") or structured.get("cover_subtitle"), "existing"),
+        ("existing_vertical", structured.get("vertical_title"), structured.get("vertical_subtitle"), "existing"),
+        ("existing_general", structured.get("title"), "", "existing"),
+    ]
+    for candidate_id, title, subtitle, source in pairs:
+        candidate = _clean_title_candidate(
+            {"title": title, "subtitle": subtitle, "angle": source},
+            candidate_id=candidate_id,
+            source=source,
+        )
+        if candidate:
+            candidates.append(candidate)
+    title_groups = structured.get("titles") if isinstance(structured.get("titles"), dict) else {}
+    for group_name in ("standard", "short"):
+        for index, item in enumerate(title_groups.get(group_name) or [], start=1):
+            title = item.get("title") if isinstance(item, dict) else item
+            subtitle = item.get("subtitle") if isinstance(item, dict) else ""
+            candidate = _clean_title_candidate(
+                {"title": title, "subtitle": subtitle, "angle": group_name},
+                candidate_id=f"normalized_{group_name}_{index}",
+                source="normalized",
+            )
+            if candidate:
+                candidates.append(candidate)
+    return _dedupe_title_candidates(candidates)
+
+
+def _clean_title_candidate(
+    item: Dict[str, Any],
+    *,
+    candidate_id: str,
+    source: str,
+) -> Optional[Dict[str, Any]]:
+    title = _clean_multiline_text(item.get("title") or "")[:180]
+    if not title:
+        return None
+    return {
+        "candidate_id": candidate_id,
+        "source": source,
+        "angle": _clean_text(item.get("angle") or "")[:40],
+        "title": title,
+        "subtitle": _clean_text(item.get("subtitle") or "")[:100],
+        "evidence": _clean_text(item.get("evidence") or "")[:500],
+    }
+
+
+def _dedupe_title_candidates(candidates: List[Optional[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    result = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        key = re.sub(r"\s+", "", f"{candidate.get('title', '')}{candidate.get('subtitle', '')}").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+    return result
+
+
+def _title_review_candidate_subset(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep a diverse, bounded review set so Pro cannot exhaust its JSON budget."""
+    result: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add(candidate: Optional[Dict[str, Any]]) -> None:
+        if not candidate:
+            return
+        candidate_id = candidate.get("candidate_id")
+        if not candidate_id or candidate_id in seen:
+            return
+        seen.add(candidate_id)
+        result.append(candidate)
+
+    by_id = {item.get("candidate_id"): item for item in candidates}
+    for candidate_id in ("original_pdf", "existing_landscape", "existing_vertical"):
+        add(by_id.get(candidate_id))
+
+    quotas = {
+        "original_refined": 1,
+        "stable": 2,
+        "opportunity": 2,
+        "data": 2,
+        "contradiction": 1,
+    }
+    for angle, limit in quotas.items():
+        count = 0
+        for candidate in candidates:
+            if candidate.get("source") != "generated" or candidate.get("angle") != angle:
+                continue
+            add(candidate)
+            count += 1
+            if count >= limit:
+                break
+
+    for candidate in candidates:
+        if len(result) >= 11:
+            break
+        add(candidate)
+    return result
+
+
+def _merge_title_evaluations(
+    candidates: List[Dict[str, Any]],
+    evaluations: Any,
+) -> List[Dict[str, Any]]:
+    evaluation_map = {
+        str(item.get("candidate_id") or ""): item
+        for item in (evaluations or [])
+        if isinstance(item, dict) and item.get("candidate_id")
+    }
+    result = []
+    for candidate in candidates:
+        merged = dict(candidate)
+        evaluation = evaluation_map.get(candidate["candidate_id"]) or {}
+        for field in (
+            "thesis_alignment", "factuality", "information_gain", "cover_readability",
+            "restraint", "landscape_score", "vertical_score",
+        ):
+            try:
+                merged[field] = max(0, min(100, int(float(evaluation.get(field, 0)))))
+            except (TypeError, ValueError):
+                merged[field] = 0
+        merged["reason"] = _clean_text(evaluation.get("reason") or "")[:500]
+        merged["rejection_reason"] = _clean_text(evaluation.get("rejection_reason") or "")[:500]
+        result.append(merged)
+    return result
+
+
+def _select_reviewed_titles(
+    candidates: List[Dict[str, Any]],
+    review_payload: Dict[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    by_id = {item["candidate_id"]: item for item in candidates}
+    original = by_id.get("original_pdf")
+
+    def select(kind: str, score_field: str) -> Optional[Dict[str, Any]]:
+        requested = by_id.get(str(review_payload.get(f"{kind}_candidate_id") or ""))
+        ranked = sorted(candidates, key=lambda item: item.get(score_field, 0), reverse=True)
+        chosen = requested or (ranked[0] if ranked else None)
+        if (
+            chosen and original and chosen["candidate_id"] != "original_pdf"
+            and chosen.get(score_field, 0) < original.get(score_field, 0) + 3
+        ):
+            chosen = original
+        return dict(chosen) if chosen else None
+
+    landscape = select("landscape", "landscape_score")
+    vertical = select("vertical", "vertical_score")
+    if landscape and vertical and _review_title_key(landscape) == _review_title_key(vertical):
+        ranked_vertical = sorted(candidates, key=lambda item: item.get("vertical_score", 0), reverse=True)
+        distinct_vertical = next(
+            (
+                item for item in ranked_vertical
+                if _review_title_key(item) != _review_title_key(landscape)
+                and (
+                    not original
+                    or item["candidate_id"] == "original_pdf"
+                    or item.get("vertical_score", 0) >= original.get("vertical_score", 0) + 3
+                )
+            ),
+            None,
+        )
+        if distinct_vertical:
+            vertical = dict(distinct_vertical)
+    backup_id = str(review_payload.get("backup_candidate_id") or "")
+    backup = by_id.get(backup_id)
+    if not backup:
+        selected_ids = {
+            item.get("candidate_id") for item in (landscape, vertical) if isinstance(item, dict)
+        }
+        backup = next(
+            (item for item in sorted(
+                candidates,
+                key=lambda candidate: max(
+                    candidate.get("landscape_score", 0),
+                    candidate.get("vertical_score", 0),
+                ),
+                reverse=True,
+            ) if item["candidate_id"] not in selected_ids),
+            None,
+        )
+    return {
+        key: value for key, value in {
+            "landscape": landscape,
+            "vertical": vertical,
+            "backup": dict(backup) if backup else None,
+        }.items() if value
+    }
+
+
+def _review_title_key(candidate: Dict[str, Any]) -> str:
+    title = _clean_multiline_text((candidate or {}).get("title") or "")
+    return re.sub(r"[\s：:｜|/／\-—_]+", "", title).lower()
+
+
+def _normalize_existing_title_review(structured: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply current selection invariants to already-reviewed, cached results."""
+    result = dict(structured or {})
+    review = dict(result.get("title_review") or {})
+    candidates = [dict(item) for item in (review.get("candidates") or []) if isinstance(item, dict)]
+    if not candidates:
+        return result
+
+    previous = review.get("selected") if isinstance(review.get("selected"), dict) else {}
+    review_payload = {
+        f"{kind}_candidate_id": str((previous.get(kind) or {}).get("candidate_id") or "")
+        for kind in ("landscape", "vertical", "backup")
+    }
+    selected = _select_reviewed_titles(candidates, review_payload)
+    landscape = selected.get("landscape") or {}
+    vertical = selected.get("vertical") or {}
+    if landscape.get("title"):
+        result["landscape_title"] = landscape["title"]
+        result["landscape_subtitle"] = landscape.get("subtitle") or ""
+        result["cover_title"] = landscape["title"]
+        result["cover_subtitle"] = landscape.get("subtitle") or ""
+    if vertical.get("title"):
+        result["vertical_title"] = vertical["title"]
+        result["vertical_subtitle"] = vertical.get("subtitle") or ""
+    review["selected"] = selected
+    result["title_review"] = review
+    return result
+
+
+def _title_context(structured: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "title": structured.get("title"),
+        "summary": structured.get("summary"),
+        "landscape_title": structured.get("landscape_title") or structured.get("cover_title"),
+        "landscape_subtitle": structured.get("landscape_subtitle") or structured.get("cover_subtitle"),
+        "vertical_title": structured.get("vertical_title"),
+        "vertical_subtitle": structured.get("vertical_subtitle"),
+        "titles": structured.get("titles"),
+    }
+
+
+def _pdf_title_baseline(pdf_filename: str, pdf_topic_title: str = "") -> str:
+    filename = Path(str(pdf_filename or "")).stem.strip()
+    filename = re.sub(
+        r"[-_（(]?(?:(?:20)?\d{2}[01]\d[0-3]\d|20\d{2}[-_.年]\d{1,2}[-_.月]\d{1,2}日?)[）)]?$",
+        "",
+        filename,
+    ).strip(" -_")
+    topic = _clean_text(pdf_topic_title or "")
+    generic_topics = {"外资研报", "#外资研报", "研报", "#研报"}
+    return _clean_text(filename or ("" if topic in generic_topics else topic))[:300]
 
 
 def _deepseek_normalize(
@@ -548,9 +1036,31 @@ def _json_from_text(value: str) -> Dict[str, Any]:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?", "", text).strip()
         text = re.sub(r"```$", "", text).strip()
-    match = re.search(r"\{.*\}", text, flags=re.S)
-    if match:
-        text = match.group(0)
+    start = text.find("{")
+    if start >= 0:
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\" and in_string:
+                escaped = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    text = text[start:index + 1]
+                    break
     return json.loads(text)
 
 
@@ -697,7 +1207,8 @@ def _contains_tts_structure_label(value: Any) -> bool:
 
 
 def _clean_multiline_text(value: Any) -> str:
-    lines = [_clean_text(line) for line in str(value or "").replace("\r", "\n").split("\n")]
+    normalized = str(value or "").replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r", "\n")
+    lines = [_clean_text(line) for line in normalized.split("\n")]
     return "\n".join(line for line in lines if line)
 
 
@@ -726,6 +1237,33 @@ def _local_fallback_allowed(value: Optional[bool] = None) -> bool:
 
 def _normalizer_model() -> str:
     return os.environ.get("REPORT_AUDIO_NORMALIZER_MODEL") or os.environ.get("DEEPSEEK_MODEL") or "deepseek-v4-flash"
+
+
+def _title_generation_model() -> str:
+    return (
+        os.environ.get("REPORT_AUDIO_TITLE_GENERATION_MODEL")
+        or os.environ.get("REPORT_AUDIO_TITLE_REVIEW_MODEL")
+        or os.environ.get("DEEPSEEK_PRO_MODEL")
+        or "deepseek-v4-pro"
+    )
+
+
+def _title_review_model() -> str:
+    return (
+        os.environ.get("REPORT_AUDIO_TITLE_REVIEW_MODEL")
+        or os.environ.get("REPORT_AUDIO_TITLE_GENERATION_MODEL")
+        or os.environ.get("DEEPSEEK_PRO_MODEL")
+        or "deepseek-v4-pro"
+    )
+
+
+def _title_review_timeout(timeout_seconds: Optional[int] = None) -> int:
+    if timeout_seconds is not None:
+        try:
+            return max(1, int(timeout_seconds))
+        except (TypeError, ValueError):
+            pass
+    return _int_env("REPORT_AUDIO_TITLE_REVIEW_TIMEOUT", 120)
 
 
 def _project_root() -> str:

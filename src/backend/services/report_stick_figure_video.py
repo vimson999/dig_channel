@@ -24,6 +24,9 @@ DEFAULT_RENDER_OPTIONS = {
     "subtitle_outline_color": "#000000",
     "subtitle_outline": 3,
     "subtitle_position": "bottom",
+    "subtitle_background_enabled": True,
+    "subtitle_background_color": "#111827",
+    "subtitle_background_opacity": 28,
     "watermark_enabled": False,
     "watermark_text": "Shioa",
     "watermark_font_size": 28,
@@ -85,6 +88,22 @@ def normalize_render_options(value=None) -> dict:
     if position not in SUBTITLE_POSITIONS:
         raise ValueError("字幕位置只支持 top、middle 或 bottom")
     options["subtitle_position"] = position
+    options["subtitle_background_enabled"] = _boolish(
+        raw.get("subtitle_background_enabled"),
+        options["subtitle_background_enabled"],
+    )
+    options["subtitle_background_color"] = _hex_color(
+        raw.get("subtitle_background_color"),
+        options["subtitle_background_color"],
+        "字幕背景颜色",
+    )
+    options["subtitle_background_opacity"] = _bounded_int(
+        raw.get("subtitle_background_opacity"),
+        options["subtitle_background_opacity"],
+        0,
+        80,
+        "字幕背景不透明度",
+    )
     options["watermark_enabled"] = _boolish(
         raw.get("watermark_enabled"),
         options["watermark_enabled"],
@@ -595,6 +614,25 @@ def _build_ass(entries: list, width: int, height: int, options: dict, *, duratio
     position = options["subtitle_position"]
     alignment = {"bottom": 2, "middle": 5, "top": 8}[position]
     margin_v = 46 if position in {"top", "bottom"} else 0
+    background_enabled = bool(options.get("subtitle_background_enabled"))
+    subtitle_border_style = 3 if background_enabled else 1
+    subtitle_outline = max(7, int(options["subtitle_outline"])) if background_enabled else int(options["subtitle_outline"])
+    subtitle_outline_color = (
+        _ass_color(
+            options["subtitle_background_color"],
+            options["subtitle_background_opacity"],
+        )
+        if background_enabled
+        else _ass_color(options["subtitle_outline_color"])
+    )
+    subtitle_back_color = (
+        _ass_color(
+            options["subtitle_background_color"],
+            options["subtitle_background_opacity"],
+        )
+        if background_enabled
+        else "&H00000000"
+    )
     header = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
@@ -608,8 +646,8 @@ def _build_ass(entries: list, width: int, height: int, options: dict, *, duratio
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,{options['subtitle_font_name']},{options['subtitle_font_size']},"
         f"{_ass_color(options['subtitle_font_color'])},&H000000FF,"
-        f"{_ass_color(options['subtitle_outline_color'])},&H00000000,"
-        f"-1,0,0,0,100,100,0,0,1,{options['subtitle_outline']},0,"
+        f"{subtitle_outline_color},{subtitle_back_color},"
+        f"-1,0,0,0,100,100,0,0,{subtitle_border_style},{subtitle_outline},0,"
         f"{alignment},30,30,{margin_v},1\n"
         f"Style: Watermark,{options['subtitle_font_name']},{options['watermark_font_size']},"
         f"{_ass_color(options['watermark_color'], options['watermark_opacity'])},&H000000FF,"

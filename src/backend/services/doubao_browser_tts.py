@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from services.workflow_notification_service import workflow_notification_service
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX fallback
@@ -581,7 +583,23 @@ class DoubaoBrowserTTSWorker:
         if captcha_error:
             raise captcha_error
         if self._first_visible(page, self._selectors("login")) is not None:
-            raise DoubaoBrowserTTSAutomationError("豆包登录态失效，需要先在浏览器 profile 中登录")
+            message = "豆包登录态失效，需要先在浏览器 profile 中登录"
+            screenshot = self._save_failure_screenshot(page, job_id or "browser_auth")
+            workflow_notification_service.send_browser_human_intervention(
+                provider="豆包",
+                reason="login",
+                message=message,
+                job_id=str(job_id or ""),
+                page_url=str(getattr(page, "url", "") or ""),
+                screenshot_path=screenshot,
+                profile=str(self.options.user_data_dir or ""),
+                worker_id=str(
+                    os.getenv("DOUBAO_BROWSER_TTS_WORKER_ID", "")
+                    or self.options.profile_directory
+                    or "default"
+                ),
+            )
+            raise DoubaoBrowserTTSAutomationError(message)
 
     def _save_failure_screenshot(self, page, job_id: str) -> str:
         try:

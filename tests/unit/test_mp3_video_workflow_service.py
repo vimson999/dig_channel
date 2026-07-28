@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageDraw
 from sqlalchemy.exc import OperationalError
@@ -98,6 +98,34 @@ from services.mp3_video_workflow import (
 
 
 class Mp3VideoWorkflowServiceTest(unittest.TestCase):
+    def test_gemini_login_selectors_target_controls_not_prompt_text(self):
+        worker = object.__new__(GeminiBrowserWorker)
+        worker.options = GeminiBrowserOptions(user_data_dir="/tmp/gemini-test")
+
+        selectors = worker._selectors("login")
+
+        self.assertNotIn("text=登录", selectors)
+        self.assertNotIn("text=Sign in", selectors)
+        self.assertIn("button:has-text('登录')", selectors)
+        self.assertIn("a:has-text('Sign in')", selectors)
+
+    def test_gemini_first_visible_skips_hidden_duplicate_login_control(self):
+        worker = object.__new__(GeminiBrowserWorker)
+        worker.options = GeminiBrowserOptions(user_data_dir="/tmp/gemini-test")
+        hidden = MagicMock()
+        hidden.is_visible.return_value = False
+        visible = MagicMock()
+        visible.is_visible.return_value = True
+        locator = MagicMock()
+        locator.count.return_value = 2
+        locator.nth.side_effect = [hidden, visible]
+        page = MagicMock()
+        page.locator.return_value = locator
+
+        result = worker._first_visible(page, ["button:has-text('登录')"])
+
+        self.assertIs(result, visible)
+
     def test_disk_recovery_uses_atomic_json_patch_on_postgresql(self):
         video_path = Path("/tmp/recovered-child.mp4")
         child = SimpleNamespace(

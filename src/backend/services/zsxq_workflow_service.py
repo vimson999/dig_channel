@@ -19,7 +19,11 @@ from services.content_pipeline.auto_publish_handoff import (
     summarize_publish_runs_for_request,
 )
 from services.workflow_notification_service import workflow_notification_service
-from services.runtime_guard import is_retryable_db_error, release_db_session_quietly
+from services.runtime_guard import (
+    apply_async_after_db_release,
+    is_retryable_db_error,
+    release_db_session_quietly,
+)
 from services.zsxq_sync_service import zsxq_sync_service
 from services.zsxq_system_sync_test import SYSTEM_SYNC_GROUP_ID, SYSTEM_SYNC_GROUP_NAME
 
@@ -304,7 +308,8 @@ class ZsxqWorkflowService:
 
         from tasks.zsxq_workflow import run_zsxq_workflow
 
-        async_result = run_zsxq_workflow.apply_async(
+        async_result = apply_async_after_db_release(
+            run_zsxq_workflow,
             args=[
                 str(workflow_run_id),
                 {
@@ -437,7 +442,8 @@ class ZsxqWorkflowService:
 
             from tasks.zsxq_sync import run_zsxq_sync
 
-            async_result = run_zsxq_sync.apply_async(
+            async_result = apply_async_after_db_release(
+                run_zsxq_sync,
                 args=[run["id"], payload],
                 queue="zsxq_sync",
                 retry=False,
@@ -2079,13 +2085,16 @@ class ZsxqWorkflowService:
         self._queue_notification(workflow, "workflow_completed")
 
     def _queue_notification(self, workflow, event_type):
+        workflow_id = str(workflow.id)
         try:
             stage_results = self._stage_results(workflow)
             notifications = dict(stage_results.get("notifications") or {})
             if notifications.get(event_type, {}).get("queued"):
                 return
 
-            result = workflow_notification_service.enqueue_workflow_event(event_type, workflow.to_dict())
+            workflow_payload = workflow.to_dict()
+            db.session.commit()
+            result = workflow_notification_service.enqueue_workflow_event(event_type, workflow_payload)
             if not result.get("queued"):
                 return
 
@@ -2097,8 +2106,10 @@ class ZsxqWorkflowService:
             }
             stage_results["notifications"] = notifications
             workflow.stage_results = stage_results
+            db.session.commit()
         except Exception:
-            logger.exception("[ZSXQ_WORKFLOW] notification queue failed | workflow=%s event=%s", workflow.id, event_type)
+            db.session.rollback()
+            logger.exception("[ZSXQ_WORKFLOW] notification queue failed | workflow=%s event=%s", workflow_id, event_type)
 
     def _snapshot(self, workflow):
         return workflow.config_snapshot if isinstance(workflow.config_snapshot, dict) else {}
@@ -2238,6 +2249,11 @@ class ZsxqWorkflowService:
 
     def _normalize_auto_script_material_dispatch(self, value):
         value = value if isinstance(value, dict) else {}
+        visual_scheme_keys = []
+        for item in value.get("visual_scheme_keys") if isinstance(value.get("visual_scheme_keys"), list) else []:
+            key = str(item or "").strip().lower()
+            if key in {"stick_figure", "doraemon"} and key not in visual_scheme_keys:
+                visual_scheme_keys.append(key)
         return {
             "enabled": bool(value.get("enabled", False)),
             "pdf_min_download_count": _bounded_int(
@@ -2246,6 +2262,7 @@ class ZsxqWorkflowService:
                 lower=0,
                 upper=1_000_000,
             ),
+            "visual_scheme_keys": visual_scheme_keys,
             "wait_for_completion": False,
         }
 

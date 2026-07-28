@@ -16,6 +16,29 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-07-28 | [YouTube 频道与视频同步跨远端请求持有数据库 Session](2026-07-28-youtube-sync-held-db-session.md) | 首页频道管理 / 视频管理 / YouTube scheduler / PostgreSQL | 已修复，待首次真实执行验收 |
+| 2026-07-27 | [Watchdog 停止脚本误匹配管理命令自身](2026-07-27-watchdog-stop-script-self-match.md) | Celery Watchdog / 本地运行维护脚本 | 已修复并完成进程边界回归 |
+| 2026-07-27 | [Celery solo Worker 被误判卡死且 Watchdog 误报重启](2026-07-27-celery-solo-inspect-false-stuck-watchdog.md) | Celery Monitor / Watchdog / report_pdf_gemini | 已修复并完成真实运行时验收 |
+| 2026-07-27 | [评论索引清理迁移被混合所有者阻断](2026-07-27-comment-cleanup-migration-mixed-index-owner.md) | Alembic / PostgreSQL 索引维护 / 后端启动门禁 | 已修复并完成真实数据库迁移验收 |
+| 2026-07-27 | [方案三错误依赖完整视觉视频并重复编码](2026-07-27-scheme3-redundant-intermediate-video.md) | 研报音频 / 方案三竖屏 / 火柴人视觉工作流 / Publisher | 已修复并完成真实预览与完整成片验收 |
+| 2026-07-27 | [分镜多轮 Gem 被固定总时限截断且丢失已完成回复](2026-07-27-visual-plan-multiturn-gemini-total-timeout.md) | 火柴人视觉视频 / 标题与正文分镜 / Gemini 浏览器自动化 | 已修复并完成新 worker、真实长任务和 checkpoint 续跑验收 |
+| 2026-07-27 | [研报音频方案三关键帧缺失与标题契约漂移](2026-07-27-report-audio-scheme3-keyframe-title-contract.md) | 研报转语音 / 方案三关键帧 / 标题评审 / 封面工具台 | 已修复并完成真实任务、真实页面与新 worker 验收 |
+| 2026-07-27 | [ZSXQ 全部 Tab 计划缺少节点通知与配置入口](2026-07-27-zsxq-all-tabs-notification-and-config-ui-gap.md) | ZSXQ 洪灝/生财全部 Tab 同步 / 工作流邮件 / 系统同步页面 | 代码与回归完成，待运行时重载与真实同步验收 |
+| 2026-07-27 | [知识星球不完整 Cookie 被误报保存成功](2026-07-27-zsxq-incomplete-cookie-save-false-success.md) | 平台凭据 / ZSXQ 同步 / Cookie JSON 解析 | 代码与回归完成，待新凭据真实同步验收 |
+| 2026-07-27 | [ZSXQ 调度器数据库恢复后跳过补跑](2026-07-27-zsxq-scheduler-db-recovery-skipped-catch-up.md) | ZSXQ 自动调度器 / 洪灝与生财有术全部 Tab 同步 | 代码与回归完成，待凭据更新和真实补跑 |
+| 2026-07-24 | [数据库 Session 跨 Celery Broker 与远程 I/O](2026-07-24-db-session-crossed-broker-and-remote-io.md) | runtime guard / 外链文档 / Celery broker / SQLAlchemy Session | 共享防线和回归已完成，待重启后真实任务验收 |
+| 2026-07-24 | [自动图片重放把已完成视频父任务降回处理中](2026-07-24-auto-image-replay-downgraded-completed-video.md) | 火柴人视觉视频 / 自动图片初始化 / 重启安全门 | 代码、回归与现场任务收口已完成，待新 worker 验收 |
+| 2026-07-24 | [ZSXQ 评论重复重写与数据库连接、索引治理复发](2026-07-24-zsxq-comment-rewrite-stale-db-pool-index-sprawl.md) | ZSXQ 同步入库 / PgBouncer / PostgreSQL 重点表索引 | 代码、迁移和契约测试已落地，待数据库迁移、新 worker 与真实同步验收 |
+| 2026-07-24 | [B站自动投稿后仍需手工调整双比例封皮](2026-07-24-bilibili-dual-ratio-cover-manual-crop.md) | report audio / B站自动投稿 / 双比例封皮 | 已修复并完成双比例渲染验收，待新投稿观察 |
+| 2026-07-24 | [整篇 WAV 就绪后试听区仍显示无音频](2026-07-24-whole-audio-preview-placeholder-stale.md) | 火柴人视觉视频 / 视频合成 / 倍速试听 | 已修复并完成真实页面音频加载验收 |
+| 2026-07-24 | [ZSXQ watchdog 误杀活动中的全部 Tab 同步](2026-07-24-zsxq-watchdog-killed-active-all-tabs-sync.md) | Celery watchdog / ZSXQ sync / Celery Monitor | 已修复并完成真实任务重投与运行时门禁验收 |
+| 2026-07-24 | [Gem 分镜漏句被误判为提示词改写](2026-07-24-visual-plan-gem-gap-false-prompt-rewrite.md) | 火柴人视觉视频 / Gem 分镜解析 / DS 整理 | 已修复并完成真实任务页面复跑验收 |
+| 2026-07-24 | [视觉详情把研报音频来源误当基础文案任务](2026-07-24-visual-detail-report-audio-source-misrouted.md) | report audio / 火柴人视觉视频 / 详情页 | 已修复并完成新后端进程页面验收 |
+| 2026-07-23 | [研报横屏关键帧投影再次被核心写入器绕过](2026-07-23-report-audio-landscape-projection-core-writer-bypass.md) | report audio / publication_tasks / 媒体下载 | Core 写入器已修、4 条漂移已回填，待新 worker 真实任务验收 |
+| 2026-07-23 | [优化视频缓存误连本机导致数据库并发回源](2026-07-23-optimized-video-redis-localhost-db-thundering-herd.md) | optimized video sync / Redis / video_data / PostgreSQL | 根因与降载防线已修，待完整重启后的真实同步观察 |
+| 2026-07-22 | [ZSXQ 发布收尾逐条回写附件状态](2026-07-22-zsxq-publish-attachment-status-n-plus-one.md) | ZSXQ 发布收尾 / zsxq_attachments / PostgreSQL | 代码与查询预算测试已通过，待新 worker 和真实发布验收 |
+| 2026-07-22 | [ZSXQ 已有主题无差别重写原始载荷](2026-07-22-zsxq-topic-unchanged-payload-rewrite.md) | ZSXQ 同步入库 / zsxq_topics / PostgreSQL | 代码与全量回归已通过，管理员迁移脚本已就绪，待迁移、新 worker 和真实同步验收 |
+| 2026-07-22 | [PgBouncer 冷连接扩容把窄查询放大到十秒](2026-07-22-pgbouncer-cold-pool-connect-timeout.md) | PgBouncer / PostgreSQL / 研报音频媒体接口 | 迁移、完整重启和关键路径真实负载已通过，持续观察中 |
 | 2026-07-22 | [终态轮询与图片孤儿修复再次放大任务表载荷](2026-07-22-terminal-polling-image-repair-payload-recurrence.md) | publication_tasks / 火柴人图片与 TTS / watchdog / ZSXQ | 全量回归通过；入库映射与过期 ORM 复发入口已修并完成托管新 PID 日志验收 |
 | 2026-07-21 | [火柴人视频音频滤镜拼接语法阻断后端启动](2026-07-21-stick-video-audio-filter-syntax-startup-block.md) | 火柴人视频 / Flask 启动 / ffmpeg | 已修复并完成新 PID 启动验收 |
 | 2026-07-21 | [已完成视觉方案详情重复查询远端数据库](2026-07-21-visual-plan-completed-detail-repeat-query.md) | 视觉方案 / 分镜详情 / PostgreSQL | 已部署并完成跨后端进程真实复验 |

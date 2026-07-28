@@ -1,4 +1,6 @@
 from datetime import datetime
+import hashlib
+import json
 import uuid
 
 from sqlalchemy import event, inspect as sqlalchemy_inspect
@@ -16,7 +18,7 @@ class ZsxqSyncRun(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     group_id = db.Column(db.String(32), nullable=False, index=True)
     group_name = db.Column(db.String(255), nullable=True)
-    tab_id = db.Column(db.String(128), nullable=True, index=True)
+    tab_id = db.Column(db.String(128), nullable=True)
     tab_label = db.Column(db.String(255), nullable=True)
     mode = db.Column(db.String(20), nullable=False, default="manual")
     status = db.Column(db.String(20), nullable=False, default="running", index=True)
@@ -177,6 +179,7 @@ class ZsxqTopic(db.Model):
     create_time = db.Column(db.String(64), nullable=True, index=True)
     raw_json_path = db.Column(db.String(600), nullable=True)
     raw_payload = db.Column(db.JSON, default=dict)
+    raw_payload_hash = db.Column(db.String(32), nullable=True)
     first_sync_run_id = db.Column(db.String(36), nullable=True, index=True)
     last_sync_run_id = db.Column(db.String(36), nullable=True, index=True)
     first_synced_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
@@ -191,6 +194,7 @@ class ZsxqTopic(db.Model):
         if payload is None:
             return self
         payload = payload if isinstance(payload, dict) else {}
+        self.raw_payload_hash = jsonb_payload_md5(payload)
         question = payload.get("question") if isinstance(payload.get("question"), dict) else {}
         answer = payload.get("answer") if isinstance(payload.get("answer"), dict) else {}
         talk = payload.get("talk") if isinstance(payload.get("talk"), dict) else {}
@@ -291,16 +295,17 @@ class ZsxqTopicComment(db.Model):
     tab_id = db.Column(db.String(128), nullable=True, index=True)
     topic_id = db.Column(db.String(64), nullable=False, index=True)
     comment_id = db.Column(db.String(64), nullable=False, index=True)
-    parent_comment_id = db.Column(db.String(64), nullable=True, index=True)
-    owner_user_id = db.Column(db.String(64), nullable=True, index=True)
-    owner_name = db.Column(db.String(255), nullable=True, index=True)
+    parent_comment_id = db.Column(db.String(64), nullable=True)
+    owner_user_id = db.Column(db.String(64), nullable=True)
+    owner_name = db.Column(db.String(255), nullable=True)
     text = db.Column(db.Text, nullable=True)
-    create_time = db.Column(db.String(64), nullable=True, index=True)
+    create_time = db.Column(db.String(64), nullable=True)
     likes_count = db.Column(db.Integer, nullable=False, default=0)
     replies_count = db.Column(db.Integer, nullable=False, default=0)
     rewards_count = db.Column(db.Integer, nullable=False, default=0)
     sticky = db.Column(db.Boolean, nullable=False, default=False)
     raw_payload = db.Column(db.JSON, nullable=False, default=dict)
+    raw_payload_hash = db.Column(db.String(32), nullable=True)
     first_synced_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     last_synced_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -517,6 +522,31 @@ def _bool_or_none(value):
     if text in {"0", "false", "no", "off"}:
         return False
     return None
+
+
+def jsonb_payload_md5(value):
+    """Match PostgreSQL jsonb::text ordering so hashes can be backfilled in SQL."""
+    def canonicalize(item):
+        if isinstance(item, dict):
+            keys = sorted(
+                item,
+                key=lambda key: (
+                    len(str(key).encode("utf-8")),
+                    str(key).encode("utf-8"),
+                ),
+            )
+            return {str(key): canonicalize(item[key]) for key in keys}
+        if isinstance(item, list):
+            return [canonicalize(child) for child in item]
+        return item
+
+    payload = value if isinstance(value, dict) else {}
+    serialized = json.dumps(
+        canonicalize(payload),
+        ensure_ascii=False,
+        separators=(", ", ": "),
+    )
+    return hashlib.md5(serialized.encode("utf-8")).hexdigest()
 
 
 @event.listens_for(ZsxqSyncRun, "before_insert")

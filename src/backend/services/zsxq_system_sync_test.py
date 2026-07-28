@@ -1313,9 +1313,19 @@ def _normalize_auto_script_material_dispatch(value, previous=None):
         lower=0,
         upper=1_000_000,
     )
+    raw_visual_schemes = value.get(
+        "visual_scheme_keys",
+        previous.get("visual_scheme_keys", []),
+    )
+    visual_scheme_keys = []
+    for item in raw_visual_schemes if isinstance(raw_visual_schemes, list) else []:
+        key = str(item or "").strip().lower()
+        if key in {"stick_figure", "doraemon"} and key not in visual_scheme_keys:
+            visual_scheme_keys.append(key)
     return {
         "enabled": enabled,
         "pdf_min_download_count": pdf_threshold,
+        "visual_scheme_keys": visual_scheme_keys,
         "wait_for_completion": False,
     }
 

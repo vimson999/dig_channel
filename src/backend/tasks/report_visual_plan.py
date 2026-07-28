@@ -1,8 +1,10 @@
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
+from PIL import Image
 from sqlalchemy.exc import OperationalError
 from sqlalchemy import or_
 from sqlalchemy.orm import load_only
@@ -11,20 +13,68 @@ from app import create_app
 from celery_config import celery_app
 from models import db, ReportVisualPlanOutput, ReportVisualPlanSegment
 from models.task import PublicationTask
-from services.gemini_browser import GeminiBrowserWorker
+from services.gemini_browser import GeminiBrowserOptions, GeminiBrowserWorker
 from services.report_visual_plan_service import (
     FEATURE_NAME,
     OUTPUT_ROOT,
     QUEUE_NAME,
     STORYBOARD_SCHEMA_VERSION,
     normalize_storyboard_response,
+    storyboard_response_covers_script,
     storyboard_prompt,
 )
+from services.report_audio_workflow import FEATURE_NAME as REPORT_AUDIO_WORKFLOW_FEATURE
+from services.report_stick_figure_assets import scene_image_path
 from services.report_visual_scheme import DEFAULT_VISUAL_SCHEME_KEY, visual_scheme
 from services.runtime_guard import maybe_guarded_apply_async, release_db_session_quietly
 
 
 logger = logging.getLogger("REPORT_VISUAL_PLAN_TASK")
+PROCESSING_SCRIPT_READY_FEATURES = frozenset((
+    REPORT_AUDIO_WORKFLOW_FEATURE,
+    "report_audio_workflow",
+))
+
+
+def _storyboard_gemini_worker():
+    """Use the proven long-form Gemini budget for multi-turn storyboard output."""
+    options = GeminiBrowserOptions.from_env()
+    response_floor = max(1800, int(options.response_timeout_seconds or 0))
+    total_floor = max(7200, response_floor * 3 + 300)
+    options.response_timeout_seconds = _positive_env_int(
+        "REPORT_VISUAL_PLAN_GEMINI_RESPONSE_TIMEOUT",
+        response_floor,
+    )
+    options.total_timeout_seconds = _positive_env_int(
+        "REPORT_VISUAL_PLAN_GEMINI_TOTAL_TIMEOUT",
+        max(total_floor, options.response_timeout_seconds * 3 + 300),
+    )
+    return GeminiBrowserWorker(options)
+
+
+def _positive_env_int(name, default):
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return int(default)
+
+
+def _material_source_ready(source):
+    """Accept completed material, or an audio workflow after its script projection."""
+    return bool(
+        source
+        and int(source.final_script_chars or 0) > 0
+        and (
+            source.status == "completed"
+            or (
+                source.feature in PROCESSING_SCRIPT_READY_FEATURES
+                and source.status == "processing"
+            )
+        )
+    )
 
 
 @celery_app.task(
@@ -42,6 +92,21 @@ def process_report_visual_plan_job(self, task_id):
         return _process_job(str(task_id))
 
 
+@celery_app.task(
+    bind=True,
+    name="tasks.report_visual_plan.retry_normalize_job",
+    store_errors_even_if_ignored=True,
+    autoretry_for=(OperationalError,),
+    retry_backoff=True,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 3},
+)
+def retry_normalize_report_visual_plan_job(self, task_id):
+    app = create_app()
+    with app.app_context():
+        return _retry_normalize_job(str(task_id))
+
+
 def enqueue_report_visual_plan_for_material(
     material_task_id,
     *,
@@ -50,7 +115,7 @@ def enqueue_report_visual_plan_for_material(
     parent_task_id="",
     visual_scheme_key=DEFAULT_VISUAL_SCHEME_KEY,
 ):
-    """Idempotently reuse or enqueue one storyboard for a completed material task."""
+    """Idempotently reuse or enqueue one storyboard for a script-ready source task."""
     material_task_id = str(material_task_id or "").strip()
     if not material_task_id:
         raise ValueError("基础文案任务 ID 不能为空")
@@ -70,7 +135,7 @@ def enqueue_report_visual_plan_for_material(
         .filter(PublicationTask.id == material_task_id)
         .one_or_none()
     )
-    if not source or source.status != "completed" or int(source.final_script_chars or 0) <= 0:
+    if not _material_source_ready(source):
         raise ValueError("基础文案任务还没有完整文案")
 
     existing = (
@@ -210,6 +275,7 @@ def _process_job(task_id):
     output_dir.mkdir(parents=True, exist_ok=True)
     gemini_path = output_dir / "gemini_storyboard.json"
     normalized_path = output_dir / "storyboard_segments.json"
+    embedded_image_dir = output_dir / "gemini_embedded_images"
     release_db_session_quietly()
 
     def progress(event):
@@ -218,12 +284,23 @@ def _process_job(task_id):
 
     try:
         _update_status(task_id, "gemini_storyboard", 5, status="processing")
-        gemini_result = GeminiBrowserWorker().generate(
+        gemini_result = _storyboard_gemini_worker().generate(
             job_id=task_id,
             prompt=prompt,
             output_path=str(gemini_path),
             target_url=scheme.storyboard_gemini_url,
             followup_prompts=[],
+            embedded_image_output_dir=str(embedded_image_dir),
+            recover_image_only_storyboard=True,
+            response_complete_callback=lambda text: storyboard_response_covers_script(material, text),
+            incomplete_response_followup_prompt=(
+                "你刚才没有覆盖完最初提供的完整口播文案。"
+                "请从上一次最后一个【文案原句】之后继续输出尚未覆盖的剩余分镜，"
+                "保持原文顺序且逐字复制，不要重复已输出内容；"
+                "每个分镜必须继续包含【文案原句】【画面动作】【视觉隐喻】【AI 提示词】；"
+                "本轮仍然只允许输出文字，严禁调用任何图片生成、绘图或图片编辑工具，"
+                "不得生成、插入或展示图片。"
+            ),
             progress_callback=progress,
         )
         raw_text = str(gemini_result.get("final_response_text") or gemini_result.get("response_text") or "").strip()
@@ -250,6 +327,111 @@ def _process_job(task_id):
         return _fail(task_id, str(exc))
     finally:
         release_db_session_quietly()
+
+
+def _retry_normalize_job(task_id):
+    task = (
+        PublicationTask.query.options(load_only(
+            PublicationTask.id,
+            PublicationTask.status,
+            PublicationTask.feature,
+            PublicationTask.source_task_id,
+            PublicationTask.report_visual_scheme_key,
+        ))
+        .filter(PublicationTask.id == task_id)
+        .first()
+    )
+    if not task or task.feature != FEATURE_NAME or task.status == "canceled":
+        release_db_session_quietly()
+        return False
+    source_task_id = str(task.source_task_id or "")
+    scheme = visual_scheme(task.report_visual_scheme_key or DEFAULT_VISUAL_SCHEME_KEY)
+    source = (
+        PublicationTask.query.options(load_only(
+            PublicationTask.id,
+            PublicationTask.feature,
+            PublicationTask.params,
+            PublicationTask.result,
+            PublicationTask.task_title,
+            PublicationTask.report_audio_pdf_filename,
+            PublicationTask.report_audio_pdf_topic_title,
+        ))
+        .filter(PublicationTask.id == source_task_id)
+        .first()
+    )
+    if not source:
+        return _fail(task_id, "基础文案任务不存在")
+
+    from api.report_script_material_workflow import _material_task_payload
+    material = _material_task_payload(source)
+    task_title = str(material.get("title") or source.task_title or "研报分镜").strip()[:500]
+    output_dir = Path(OUTPUT_ROOT) / task_id
+    gemini_path = output_dir / "gemini_storyboard.json"
+    normalized_path = output_dir / "storyboard_segments.json"
+    if not gemini_path.is_file():
+        return _fail(task_id, "Gem 原始返回文件不存在，无法续跑梳理")
+    try:
+        stored = json.loads(gemini_path.read_text(encoding="utf-8"))
+        raw_text = _checkpoint_storyboard_text(stored)
+    except (OSError, ValueError) as exc:
+        return _fail(task_id, f"读取 Gem 原始返回失败：{exc}")
+    if not raw_text:
+        return _fail(task_id, "Gem 原始返回为空，无法续跑梳理")
+    release_db_session_quietly()
+
+    try:
+        _update_status(task_id, "normalize_storyboard", 72, status="processing")
+        PublicationTask.query.filter(PublicationTask.id == task_id).update({
+            PublicationTask.error_message: None,
+            PublicationTask.completed_at: None,
+        }, synchronize_session=False)
+        db.session.commit()
+        normalized = normalize_storyboard_response(material, raw_text)
+        normalized_path.write_text(
+            json.dumps(normalized, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _persist_success(
+            task_id,
+            source_task_id=source_task_id,
+            title=task_title,
+            gemini_path=str(gemini_path),
+            normalized_path=str(normalized_path),
+            normalized=normalized,
+            scheme=scheme,
+        )
+        try:
+            _dispatch_auto_scene_images(task_id)
+        except Exception as exc:
+            logger.error("Auto scene image dispatch after normalize retry failed: %s", exc, exc_info=True)
+            _sync_parent_image_dispatch_failure(task_id, str(exc))
+        return True
+    except Exception as exc:
+        logger.error("Report visual plan normalize retry failed: %s", exc, exc_info=True)
+        return _fail(task_id, str(exc))
+    finally:
+        release_db_session_quietly()
+
+
+def _checkpoint_storyboard_text(stored):
+    """Prefer the first self-contained completed turn over repeated continuations."""
+    turns = stored.get("turns") if isinstance(stored, dict) else None
+    if isinstance(turns, list):
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            text = str(turn.get("response_text") or "").strip()
+            if (
+                "【全文分镜完成】" in text
+                and "标题镜头" in text
+                and "【AI 提示词】" in text
+            ):
+                return text
+    return str(
+        (stored.get("final_response_text") or stored.get("response_text") or "")
+        if isinstance(stored, dict)
+        else ""
+    ).strip()
 
 
 def _update_status(task_id, step, progress, status=None):
@@ -374,6 +556,11 @@ def _dispatch_auto_scene_images(storyboard_task_id, workflow_job_id=None):
     storyboard, assets = _ensure_scene_assets(parent_snapshot, force_refresh=True)
     if str(storyboard.id) != str(storyboard_task_id):
         raise RuntimeError("自动初始化图片时匹配到了另一版分镜")
+    adopted = _adopt_storyboard_embedded_images(
+        storyboard_task_id,
+        workflow_id,
+        assets,
+    )
 
     queued = []
     skipped = []
@@ -396,6 +583,26 @@ def _dispatch_auto_scene_images(storyboard_task_id, workflow_job_id=None):
         item.image_status == "completed" for item in asset_snapshots
     )
     fatal_error = bool(errors) and not queued
+    if _preserve_completed_video_state(
+        parent_snapshot,
+        all_completed=all_completed,
+        queued=queued,
+        errors=errors,
+    ):
+        logger.info(
+            "Auto scene images left completed workflow unchanged: "
+            "workflow=%s storyboard=%s skipped=%s",
+            workflow_id,
+            storyboard_task_id,
+            len(skipped),
+        )
+        return {
+            "workflow_job_id": workflow_id,
+            "queued": len(queued),
+            "skipped": len(skipped),
+            "adopted": adopted,
+            "errors": errors,
+        }
     PublicationTask.query.filter(PublicationTask.id == workflow_id).update({
         PublicationTask.status: "failed" if fatal_error else "processing",
         PublicationTask.current_step: (
@@ -420,19 +627,85 @@ def _dispatch_auto_scene_images(storyboard_task_id, workflow_job_id=None):
     }, synchronize_session=False)
     db.session.commit()
     logger.info(
-        "Auto scene images dispatched: workflow=%s storyboard=%s queued=%s skipped=%s errors=%s",
+        "Auto scene images dispatched: workflow=%s storyboard=%s adopted=%s queued=%s skipped=%s errors=%s",
         workflow_id,
         storyboard_task_id,
+        adopted,
         len(queued),
         len(skipped),
         len(errors),
     )
     return {
         "workflow_job_id": workflow_id,
+        "adopted": adopted,
         "queued": len(queued),
         "skipped": len(skipped),
         "errors": errors,
     }
+
+
+def _preserve_completed_video_state(parent, *, all_completed, queued, errors):
+    video_path = Path(str(getattr(parent, "task_video_path", "") or ""))
+    return bool(
+        all_completed
+        and not queued
+        and not errors
+        and video_path.is_file()
+    )
+
+
+def _adopt_storyboard_embedded_images(storyboard_task_id, workflow_id, assets):
+    """Adopt inline Gem images, leaving only missing scenes for the old queue."""
+    gemini_path = Path(OUTPUT_ROOT) / str(storyboard_task_id) / "gemini_storyboard.json"
+    if not gemini_path.is_file() or not assets:
+        return 0
+    try:
+        payload = json.loads(gemini_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    images = payload.get("embedded_images")
+    if not isinstance(images, list) or not images:
+        return 0
+
+    # Gemini emits inline pictures in the same order as the storyboard blocks.
+    # A partial reply is therefore treated as an ordered prefix; later scenes
+    # stay pending and continue through the existing image worker.
+    ordered_assets = sorted(assets, key=lambda item: int(item.sequence))
+    adopted = 0
+    for asset, image_row in zip(ordered_assets, images):
+        if not isinstance(image_row, dict):
+            continue
+        current_path = Path(str(asset.image_path or "")) if asset.image_path else None
+        if asset.image_status == "completed" and current_path and current_path.is_file():
+            continue
+        source = Path(str(image_row.get("path") or ""))
+        if not source.is_file():
+            continue
+        destination = Path(scene_image_path(workflow_id, asset.sequence))
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with Image.open(source) as image:
+                width, height = image.size
+                if width < 256 or height < 256:
+                    continue
+                image.convert("RGB").save(destination, format="PNG")
+            image_bytes = destination.stat().st_size
+        except (OSError, ValueError):
+            continue
+        asset.image_task_id = f"storyboard-gemini:{storyboard_task_id}"
+        asset.image_status = "completed"
+        asset.image_progress = 100
+        asset.image_attempt = max(1, int(asset.image_attempt or 0))
+        asset.image_path = str(destination)
+        asset.image_bytes = image_bytes
+        asset.image_width = width
+        asset.image_height = height
+        asset.image_error = None
+        asset.updated_at = datetime.utcnow()
+        adopted += 1
+    if adopted:
+        db.session.commit()
+    return adopted
 
 
 def _sync_parent_storyboard_failure(storyboard_task_id, message):

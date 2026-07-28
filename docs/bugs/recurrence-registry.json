@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "reviewed_through": "2026-07-22",
+  "reviewed_through": "2026-07-24",
   "max_days_between_reviews": 7,
   "clusters": [
     {
@@ -8,8 +8,8 @@
       "title": "数据库 Session 生命周期与热查询",
       "priority": "P0",
       "status": "in_progress",
-      "acceptance_stage": "code_changed",
-      "last_reopened_at": "2026-07-22",
+      "acceptance_stage": "runtime_replaced",
+      "last_reopened_at": "2026-07-24",
       "blocking_records": [
         "2026-07-18-publication-task-progress-json-write-amplification.md",
         "2026-07-18-zsxq-run-result-clean-handoff-payload.md",
@@ -17,9 +17,17 @@
         "2026-07-18-zsxq-credential-session-held-across-remote-publish.md",
         "2026-07-21-watchdog-repair-idle-transaction-and-poll-overlap.md",
         "2026-07-21-zsxq-sync-point-query-amplification.md",
-        "2026-07-22-terminal-polling-image-repair-payload-recurrence.md"
-      ],
-      "systemic_guardrail": "短事务边界、跨等待只传 ID/快照、第一次 commit 前冻结 run/task/asset 标量身份并禁止 ORM 跨 commit、循环提交前把 ORM 集合转为不可变 Row/DTO、commit 后禁止继续访问 ORM parent/asset、子任务创建固定使用 commit 前快照加无 SELECT 窄回写、所有任务生产者成功/失败/延迟分支必须捕获 commit 后 SQL 并拒绝 params/result 回读、热循环每页集合查询次数预算、阶段内写后共享快照、mapper 钩子禁止读取延迟列、大 JSON 延迟物化、批次产物和 source-output 映射必须在源事务/入库端写结构化关系台账并沿工作流传递、历史任务才允许显式兼容回退、阶段内子服务共享有界上下文、阶段轮询状态 Row、worker 异常/取消收口复用内存快照并只重查状态、数据库异常后先 rollback 再执行恢复 SQL、可重试异常保持 retrying 且完整验证下一次 delivery、runtime guard 与磁盘恢复使用服务端原子 JSONB 更新、flush 后 commit 前响应快照、完成消费者错峰、远端 schema readiness 只允许一次紧凑显式目录查询、跨所有者 DDL 单事务执行并拒绝应用连接、重复索引预检，以及完整调用链实际 SQL 契约测试",
+        "2026-07-22-terminal-polling-image-repair-payload-recurrence.md",
+        "2026-07-22-pgbouncer-cold-pool-connect-timeout.md",
+        "2026-07-22-zsxq-topic-unchanged-payload-rewrite.md",
+      "2026-07-22-zsxq-publish-attachment-status-n-plus-one.md",
+      "2026-07-23-optimized-video-redis-localhost-db-thundering-herd.md",
+      "2026-07-24-zsxq-comment-rewrite-stale-db-pool-index-sprawl.md",
+      "2026-07-24-db-session-crossed-broker-and-remote-io.md",
+      "2026-07-27-comment-cleanup-migration-mixed-index-owner.md",
+      "2026-07-28-youtube-sync-held-db-session.md"
+    ],
+    "systemic_guardrail": "短事务边界、跨等待只传 ID/快照、第一次 commit 前冻结 run/task/asset 标量身份并禁止 ORM 跨 commit、循环提交前把 ORM 集合转为不可变 Row/DTO、commit 后禁止继续访问 ORM parent/asset、子任务创建固定使用 commit 前快照加无 SELECT 窄回写、所有任务生产者成功/失败/延迟分支必须捕获 commit 后 SQL 并拒绝 params/result 回读、热循环每页集合查询次数预算、阶段内写后共享快照、mapper 钩子禁止读取延迟列、大 JSON 延迟物化、批次产物和 source-output 映射必须在源事务/入库端写结构化关系台账并沿工作流传递、周期入库以 JSON 指纹区分结构化变化/审计载荷变化/同步心跳且禁止无差别整行写回、历史任务才允许显式兼容回退、阶段内子服务共享有界上下文、阶段轮询状态 Row、worker 异常/取消收口复用内存快照并只重查状态、数据库异常后先 rollback 再执行恢复 SQL、可重试异常保持 retrying 且完整验证下一次 delivery、runtime guard 与磁盘恢复使用服务端原子 JSONB 更新、外部 I/O 前强制检查 session.new/dirty/deleted 并结束只读事务、任务生产统一采用提交后投递和短事务回写 broker ID、AST 契约禁止 mutation/flush 后未提交直接 apply_async、flush 后 commit 前响应快照、完成消费者错峰、远端 schema readiness 只允许一次紧凑显式目录查询、跨所有者 DDL 单事务执行并拒绝应用连接、重复索引预检、PgBouncer 热连接安全下限由配置生成源和契约测试共同锁定、完整重启门禁覆盖 publication_tasks 与独立业务心跳表、应用总耗时与 PostgreSQL executor/PgBouncer 连接事件联合诊断，以及完整调用链实际 SQL 契约测试",
       "records": [
         "2026-06-23-report-audio-detached-session.md",
         "2026-06-24-report-top10-failure-marker-pending-rollback.md",
@@ -42,8 +50,16 @@
         "2026-07-21-zsxq-sync-point-query-amplification.md",
         "2026-07-21-stick-figure-asset-owner-query-amplification.md",
         "2026-07-21-report-child-create-post-commit-json-reload.md",
-        "2026-07-22-terminal-polling-image-repair-payload-recurrence.md"
-      ]
+        "2026-07-22-terminal-polling-image-repair-payload-recurrence.md",
+        "2026-07-22-pgbouncer-cold-pool-connect-timeout.md",
+        "2026-07-22-zsxq-topic-unchanged-payload-rewrite.md",
+      "2026-07-22-zsxq-publish-attachment-status-n-plus-one.md",
+      "2026-07-23-optimized-video-redis-localhost-db-thundering-herd.md",
+      "2026-07-24-zsxq-comment-rewrite-stale-db-pool-index-sprawl.md",
+      "2026-07-24-db-session-crossed-broker-and-remote-io.md",
+      "2026-07-27-comment-cleanup-migration-mixed-index-owner.md",
+      "2026-07-28-youtube-sync-held-db-session.md"
+    ]
     },
     {
       "key": "ORCH-PARENT-CHILD-STATE",
@@ -52,6 +68,7 @@
       "status": "in_progress",
       "systemic_guardrail": "统一父子任务生命周期策略、集中状态迁移 API、reconciler、完整的父 feature × 子 feature × 父状态契约矩阵，以及 fail-closed 重启预检；任何写回 pending 的 queued、deferred 或 auto_retry 状态都必须登记消息可见、消息丢失和重启窗口三类 watchdog 契约，超过宽限期且 broker/worker 不可见时才能 CAS 重排",
       "records": [
+        "2026-07-24-auto-image-replay-downgraded-completed-video.md",
         "2026-06-23-mp3-video-parent-long-wait.md",
         "2026-06-23-publisher-child-left-active-after-parent-canceled.md",
         "2026-06-23-zsxq-workflow-stale-celery-message.md",
@@ -84,16 +101,21 @@
       "priority": "P0",
       "status": "in_progress",
       "acceptance_stage": "code_changed",
-      "last_reopened_at": "2026-07-22",
+      "last_reopened_at": "2026-07-24",
       "blocking_records": [
         "2026-07-18-publication-task-progress-json-write-amplification.md",
         "2026-07-18-zsxq-run-result-clean-handoff-payload.md",
         "2026-07-18-bilibili-upload-json-polling-and-online-ddl-lock-convoy.md",
         "2026-07-21-watchdog-repair-idle-transaction-and-poll-overlap.md",
         "2026-07-21-zsxq-sync-point-query-amplification.md",
-        "2026-07-22-terminal-polling-image-repair-payload-recurrence.md"
+        "2026-07-22-terminal-polling-image-repair-payload-recurrence.md",
+        "2026-07-22-pgbouncer-cold-pool-connect-timeout.md",
+        "2026-07-22-zsxq-topic-unchanged-payload-rewrite.md",
+        "2026-07-22-zsxq-publish-attachment-status-n-plus-one.md",
+        "2026-07-23-optimized-video-redis-localhost-db-thundering-herd.md",
+        "2026-07-24-zsxq-comment-rewrite-stale-db-pool-index-sprawl.md"
       ],
-      "systemic_guardrail": "投影列白名单、每页集合查询次数预算、页面媒体并发请求共享用户作用域权限快照、子任务创建后 Celery ID 只做无 SELECT 窄回写、所有任务生产者成功/失败/延迟分支必须捕获 commit 后 SQL 并拒绝 params/result 回读、阶段内写后共享 Row/DTO、mapper 钩子禁止延迟列补查、单一能力所有者、source-output 映射必须在入库端产生并随事件传递且只有历史任务允许 JSON 回退、批次产物结构化台账、结构化命令生产/消费/终态写回闭环、阶段轮询状态 Row 与终态按需载荷、状态生产者同事务维护结构化投影、轮询端禁止反向扫描通用任务 JSON 修补投影、批量提交事务数必须 O(1)、worker 异常/取消收口只重查状态、进度 JSON 写入预算与终态强制落盘、兼容回退覆盖判据、Celery 收尾消息体预算/消费者错峰、单飞轮询、热点列表短超时/新鲜缓存/有界 stale fallback、完整 API/service/worker/watchdog 实际 SQL 预算、热点接口冷请求基准、远端 schema readiness 单次紧凑目录查询、区分 executor 与端到端往返、加索引前强制 EXPLAIN/等价定义/使用量检查、watchdog 判定禁止加载仅供 UI 展示的业务快照、broker 发布后只允许版本 CAS 且 CAS 失败必须撤销消息，以及 publication_tasks 500ms SQL 指纹/JSON 条件/批量载荷运行时守卫",
+      "systemic_guardrail": "投影列白名单、每页集合查询次数预算、页面媒体并发请求共享用户作用域权限快照、子任务创建后 Celery ID 只做无 SELECT 窄回写、所有任务生产者成功/失败/延迟分支必须捕获 commit 后 SQL 并拒绝 params/result 回读、阶段内写后共享 Row/DTO、mapper 钩子禁止延迟列补查、单一能力所有者、source-output 映射必须在入库端产生并随事件传递且只有历史任务允许 JSON 回退、批次产物结构化台账、结构化命令生产/消费/终态写回闭环、阶段轮询状态 Row 与终态按需载荷、状态生产者同事务维护结构化投影、轮询端禁止反向扫描通用任务 JSON 修补投影、周期入库必须用轻量指纹跳过未变化 JSON 并以双向测试证明变化时完整写入、批量提交事务数必须 O(1)、worker 异常/取消收口只重查状态、进度 JSON 写入预算与终态强制落盘、兼容回退覆盖判据、Celery 收尾消息体预算/消费者错峰、单飞轮询、热点列表短超时/新鲜缓存/有界 stale fallback、完整 API/service/worker/watchdog 实际 SQL 预算、热点接口冷请求基准、远端 schema readiness 单次紧凑目录查询、区分 executor 与端到端往返、加索引前强制 EXPLAIN/等价定义/使用量检查、executor 小于 10ms 而应用超过 500ms 时强制转查连接池与网络、watchdog 判定禁止加载仅供 UI 展示的业务快照、broker 发布后只允许版本 CAS 且 CAS 失败必须撤销消息，以及 publication_tasks 500ms SQL 指纹/JSON 条件/批量载荷运行时守卫",
       "records": [
         "2026-06-23-report-audio-history-timeout-large-result.md",
         "2026-06-24-report-top10-detail-flicker-and-missing-item-detail.md",
@@ -113,7 +135,12 @@
         "2026-07-21-stick-figure-asset-owner-query-amplification.md",
         "2026-07-21-report-child-create-post-commit-json-reload.md",
         "2026-07-21-visual-plan-completed-detail-repeat-query.md",
-        "2026-07-22-terminal-polling-image-repair-payload-recurrence.md"
+        "2026-07-22-terminal-polling-image-repair-payload-recurrence.md",
+        "2026-07-22-pgbouncer-cold-pool-connect-timeout.md",
+        "2026-07-22-zsxq-topic-unchanged-payload-rewrite.md",
+        "2026-07-22-zsxq-publish-attachment-status-n-plus-one.md",
+        "2026-07-23-optimized-video-redis-localhost-db-thundering-herd.md",
+        "2026-07-24-zsxq-comment-rewrite-stale-db-pool-index-sprawl.md"
       ]
     },
     {
@@ -136,8 +163,8 @@
       "title": "AI/媒体产物缺少语义校验",
       "priority": "P0",
       "status": "in_progress",
-      "last_reopened_at": "2026-07-19",
-      "systemic_guardrail": "结构化 schema、fail-closed、禁止不可用 local_fallback、生成前后产物语义验收",
+      "last_reopened_at": "2026-07-24",
+      "systemic_guardrail": "结构化 schema、fail-closed、禁止不可用 local_fallback、生成前后产物语义验收；多模型链路必须声明权威字段所有者，稳定标签优先确定性解析，原文片段只有在顺序映射成立时才允许从权威源补洞，提示词始终保留其生成源原文",
       "records": [
         "2026-06-23-report-audio-local-fallback-gemini-artifact.md",
         "2026-06-24-report-top10-final-script-placeholder.md",
@@ -148,7 +175,8 @@
         "2026-07-07-mp3-video-audio-speed-not-applied.md",
         "2026-07-09-report-audio-tts-section-outline-labels.md",
         "2026-07-13-mp3-publisher-reuse-filter-after-limit.md",
-        "2026-07-19-mp3-cover-copy-variants-collapsed.md"
+        "2026-07-19-mp3-cover-copy-variants-collapsed.md",
+        "2026-07-24-visual-plan-gem-gap-false-prompt-rewrite.md"
       ]
     },
     {
@@ -156,7 +184,7 @@
       "title": "外部 AI/浏览器调用超时与重试不一致",
       "priority": "P1",
       "status": "in_progress",
-      "systemic_guardrail": "统一外部调用超时、错误分类、有限重试、文件就绪确认和失败收口包装器；浏览器/媒体子进程必须有 OS 级硬超时并清理进程组",
+      "systemic_guardrail": "统一外部调用超时、错误分类、有限重试、文件就绪确认和失败收口包装器；多轮调用的总预算必须从单轮预算和必要轮次推导，每个有业务价值的完成轮次必须原子持久化 checkpoint；串行 profile、连接池或外部配额的排队等待不得消耗实际远程执行预算，执行硬时限必须在资源所有权取得后开始；AI 输出的浏览器终止容差与最终权威数据校验必须分层，避免可修复微小漂移触发无限追问，同时禁止容差绕过最终 100% 覆盖校验；浏览器/媒体子进程必须有 OS 级硬超时并清理进程组",
       "records": [
         "2026-06-24-report-top10-editor-prompt-too-large.md",
         "2026-06-24-report-top10-gemini-child-no-retry.md",
@@ -165,7 +193,8 @@
         "2026-07-09-report-script-material-normalizer-timeout-no-retry.md",
         "2026-07-10-publisher-cover-browser-no-hard-timeout.md",
         "2026-07-13-mp3-db-disconnect-marked-parent-failed.md",
-        "2026-07-17-content-pipeline-progress-json-and-retry-contract.md"
+        "2026-07-17-content-pipeline-progress-json-and-retry-contract.md",
+        "2026-07-27-visual-plan-multiturn-gemini-total-timeout.md"
       ]
     },
     {
@@ -174,17 +203,23 @@
       "priority": "P0",
       "status": "in_progress",
       "acceptance_stage": "code_changed",
-      "last_reopened_at": "2026-07-21",
+      "last_reopened_at": "2026-07-27",
       "blocking_records": [
-        "2026-07-21-media-projection-bulk-update-drift.md"
+        "2026-07-21-media-projection-bulk-update-drift.md",
+        "2026-07-23-report-audio-landscape-projection-core-writer-bypass.md",
+        "2026-07-24-bilibili-dual-ratio-cover-manual-crop.md",
+        "2026-07-27-report-audio-scheme3-keyframe-title-contract.md"
       ],
-      "systemic_guardrail": "统一视觉资产注册，契约覆盖生成、持久化、父子回写、API 投影、下载、预览、操作 resolver 和历史补生；所有 ORM、bulk UPDATE、原生 SQL、重试和维护补写必须共享宽字段写入合同，原子 JSONB patch 在同一 SQL 基于合并后 payload 写投影，启动门禁逐行验证来源与投影一致",
+      "systemic_guardrail": "统一视觉资产注册，契约覆盖生成、持久化、父子回写、API 投影、下载、预览、操作 resolver、平台裁切安全区和历史补生；所有 ORM、bulk UPDATE、原生 SQL、重试和维护补写必须共享宽字段写入合同，原子 JSONB patch 在同一 SQL 基于合并后 payload 写投影，启动门禁逐行验证来源与投影一致；B站所有视频变体默认使用同一双比例安全封皮，并以 4:3、16:9 实际裁切验收；显式方案选择必须在提交端和 worker 端共同导出资产启用状态，评审标题必须原样贯穿编辑器与渲染器，横竖标题差异及模板最终行数由契约测试和像素验收共同保证",
       "records": [
         "2026-06-26-report-audio-vertical-video-download-missing.md",
         "2026-07-10-report-audio-bilibili-cover-not-promoted.md",
         "2026-07-10-report-audio-scheme2-bilibili-cover-missing.md",
         "2026-07-14-report-audio-institution-prefix-missing-from-render-assets.md",
-        "2026-07-21-media-projection-bulk-update-drift.md"
+        "2026-07-21-media-projection-bulk-update-drift.md",
+        "2026-07-23-report-audio-landscape-projection-core-writer-bypass.md",
+        "2026-07-24-bilibili-dual-ratio-cover-manual-crop.md",
+        "2026-07-27-report-audio-scheme3-keyframe-title-contract.md"
       ]
     },
     {
@@ -192,12 +227,17 @@
       "title": "Worker/调度器注册、队列拓扑与代码重载",
       "priority": "P0",
       "status": "in_progress",
-      "acceptance_stage": "code_changed",
-      "last_reopened_at": "2026-07-21",
+      "acceptance_stage": "runtime_replaced",
+      "last_reopened_at": "2026-07-27",
       "blocking_records": [
-        "2026-07-18-full-restart-interrupted-active-render.md"
+        "2026-07-18-full-restart-interrupted-active-render.md",
+        "2026-07-23-optimized-video-redis-localhost-db-thundering-herd.md",
+        "2026-07-24-auto-image-replay-downgraded-completed-video.md",
+        "2026-07-24-zsxq-watchdog-killed-active-all-tabs-sync.md",
+        "2026-07-27-celery-solo-inspect-false-stuck-watchdog.md",
+        "2026-07-27-watchdog-stop-script-self-match.md"
       ],
-      "systemic_guardrail": "单一服务注册表、启动后拓扑验收、代码版本指纹和队列消费者契约测试；所有 shell/UI/API/watchdog 停止与重启入口统一执行 fail-closed 业务阶段门禁；完整重启必须首次预检、停止 watchdog、cancel_consumer 冻结新领取、关闭 API 入队入口、再次预检并等待竞态领取任务自然结束，禁止检查后直接强杀；backend-only 停止只能递归同 pgid 后代并以真实进程树实验验收，禁止依赖 Darwin/Linux 语义不一致的 ps session 字段；acks_late 恢复必须核对普通队列、worker 快照与 Redis unacked，原消息可见时只降回 pending；控制面使用独立直连路径，不得依赖流程中已停止的本地代理，也不得用强制中断参数掩盖控制面连接失败；每个托管服务必须显式共享同一项目根和 PID 文件，重启验收必须证明实例唯一且维护重载没有触发业务",
+      "systemic_guardrail": "单一服务注册表、启动后拓扑验收、代码版本指纹和队列消费者契约测试；所有 shell/UI/API/watchdog 停止与重启入口统一执行 fail-closed 业务阶段门禁；非 publication_tasks 队列必须从自己的结构化业务表读取近期心跳作为重启门禁，Celery inspect 空响应不得覆盖近期业务心跳；solo/浏览器 Worker 疑似卡死时只对目标服务做窄心跳复核，心跳存在或查询失败均禁止告警和重启；stop 返回 skipped/blocked/guard_check_failed 后不得继续 start 或记录 restarted；完整重启必须首次预检、停止 watchdog、cancel_consumer 冻结新领取、关闭 API 入队入口、再次预检并等待竞态领取任务自然结束，禁止检查后直接强杀；backend-only 停止只能递归同 pgid 后代并以真实进程树实验验收，禁止依赖 Darwin/Linux 语义不一致的 ps session 字段；acks_late 恢复必须核对普通队列、worker 快照与 Redis unacked，原消息可见时只降回 pending；Redis unacked 只能证明消息未确认，孤儿 running 收口必须以 active/reserved/scheduled 和业务心跳联合判断；控制面使用独立直连路径，不得依赖流程中已停止的本地代理，也不得用强制中断参数掩盖控制面连接失败；每个托管服务必须显式共享同一项目根和 PID 文件，重启验收必须证明实例唯一、PgBouncer 热池配置与实际后端连接数符合页面并发预算，且维护重载没有触发业务",
       "records": [
         "2026-06-23-zsxq-system-scheduler-not-autostarted.md",
         "2026-06-29-feishu-cookie-import-stale-celery-workers.md",
@@ -212,7 +252,14 @@
         "2026-07-21-restart-guard-unconditional-direct-db.md",
         "2026-07-18-restart-safety-guard-depended-on-stopped-pgbouncer.md",
         "2026-07-19-zsxq-scheduler-wrong-root-duplicate-instance.md",
-        "2026-07-21-stick-video-audio-filter-syntax-startup-block.md"
+        "2026-07-21-stick-video-audio-filter-syntax-startup-block.md",
+        "2026-07-22-pgbouncer-cold-pool-connect-timeout.md",
+        "2026-07-23-optimized-video-redis-localhost-db-thundering-herd.md",
+        "2026-07-24-auto-image-replay-downgraded-completed-video.md",
+        "2026-07-24-zsxq-watchdog-killed-active-all-tabs-sync.md",
+        "2026-07-27-zsxq-scheduler-db-recovery-skipped-catch-up.md",
+        "2026-07-27-celery-solo-inspect-false-stuck-watchdog.md",
+        "2026-07-27-watchdog-stop-script-self-match.md"
       ]
     },
     {
@@ -245,6 +292,14 @@
       "watch_for": "运行配置保存的凭据 ID 失效后再次阻塞动态凭据发现，或凭据错误再次被归类为资源无效"
     },
     {
+      "record": "2026-07-27-zsxq-incomplete-cookie-save-false-success.md",
+      "watch_for": "知识星球或其他平台凭据再次只按非空保存、保存与运行解析格式不一致，导致不可用凭据被误报成功"
+    },
+    {
+      "record": "2026-07-27-zsxq-all-tabs-notification-and-config-ui-gap.md",
+      "watch_for": "轻量调度任务再次只复用底层 worker，却缺少配置入口、提交/完成/最终失败通知或立即执行能力"
+    },
+    {
       "record": "2026-07-14-zsxq-lab-special-group-controls-leaked.md",
       "watch_for": "普通知识星球组再次显示或可调用前沿信息收录专属的批量下载、清洗或发布操作"
     },
@@ -267,6 +322,18 @@
     {
       "record": "2026-07-15-wechat-large-html-body-truncated.md",
       "watch_for": "外部 HTML 再次在 DOM 解析前按保存长度上限机械截断，导致靠后正文被误报为空"
+    },
+    {
+      "record": "2026-07-24-visual-detail-report-audio-source-misrouted.md",
+      "watch_for": "跨编排引用再次只传任务 ID、不传 source feature，导致详情、重试或状态查询路由到错误业务 API"
+    },
+    {
+      "record": "2026-07-24-whole-audio-preview-placeholder-stale.md",
+      "watch_for": "异步音频、图片或视频从空状态变为可用后，选择控件已更新但预览区仍保留首次渲染的占位结构"
+    },
+    {
+      "record": "2026-07-27-scheme3-redundant-intermediate-video.md",
+      "watch_for": "任何合成方案再次把可选中间成片当作必需源素材，导致重复编码或素材齐全仍被错误阻塞"
     }
   ]
 }

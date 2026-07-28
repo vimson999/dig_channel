@@ -608,6 +608,429 @@ class VideoEditorService:
         finally:
             if os.path.exists(temp_audio): os.remove(temp_audio)
 
+    def process_framed_vertical_video(
+        self,
+        background_image,
+        content_video,
+        audio_files,
+        subtitles=None,
+        output_filename=None,
+        subtitle_position=None,
+        subtitle_size='normal',
+        subtitle_style=None,
+        export_params=None,
+        duration_limit=None,
+    ):
+        """Embed a 16:9 visual video in the workbench 9:16 ``video_bg`` frame."""
+        if not content_video or not os.path.isfile(content_video):
+            raise ValueError("方案三缺少已完成的视觉视频")
+        output_path = os.path.join(
+            self.output_folder,
+            output_filename or f"v_framed_{uuid.uuid4().hex[:6]}.mp4",
+        )
+        temp_audio = os.path.join(self.upload_folder, f"temp_vf_a_{uuid.uuid4().hex[:6]}.mp3")
+        try:
+            audio_list = audio_files if isinstance(audio_files, list) else [audio_files]
+            global_subs = self._extract_global_subtitles(subtitles, audio_list)
+            from moviepy import AudioFileClip, concatenate_audioclips
+            clips = [AudioFileClip(path) for path in audio_list if os.path.exists(path)]
+            if not clips:
+                raise ValueError("No valid audio clips.")
+            final_audio = concatenate_audioclips(clips)
+            if duration_limit:
+                limit = max(0.1, float(duration_limit))
+                if getattr(final_audio, "duration", 0) > limit:
+                    final_audio = (
+                        final_audio.subclipped(0, limit)
+                        if hasattr(final_audio, "subclipped")
+                        else final_audio.subclip(0, limit)
+                    )
+            final_audio.write_audiofile(temp_audio, logger=None)
+            for clip in clips:
+                clip.close()
+            final_audio.close()
+            return self._synthesize_framed_vertical_ffmpeg(
+                background_image=background_image,
+                content_video=content_video,
+                audio_file=temp_audio,
+                output_path=output_path,
+                subtitles=global_subs,
+                subtitle_position=subtitle_position,
+                subtitle_size=subtitle_size,
+                subtitle_style=subtitle_style,
+                export_params=export_params,
+            )
+        finally:
+            if os.path.exists(temp_audio):
+                os.remove(temp_audio)
+
+    def process_framed_vertical_scenes(
+        self,
+        background_image,
+        scenes,
+        audio_files,
+        subtitles=None,
+        output_filename=None,
+        subtitle_position=None,
+        subtitle_size='normal',
+        subtitle_style=None,
+        export_params=None,
+        duration_limit=None,
+    ):
+        """Render scheme3 directly from scene images and whole audio in one encode."""
+        scene_items = [
+            dict(item)
+            for item in (scenes or [])
+            if isinstance(item, dict) and item.get("image_path")
+        ]
+        if not scene_items:
+            raise ValueError("方案三缺少已完成的正文分镜图片")
+        for item in scene_items:
+            if not os.path.isfile(str(item.get("image_path") or "")):
+                raise ValueError(f"方案三第 {item.get('sequence')} 段图片不存在")
+
+        output_path = os.path.join(
+            self.output_folder,
+            output_filename or f"v_framed_scenes_{uuid.uuid4().hex[:6]}.mp4",
+        )
+        temp_audio = os.path.join(self.upload_folder, f"temp_vfs_a_{uuid.uuid4().hex[:6]}.mp3")
+        try:
+            audio_list = audio_files if isinstance(audio_files, list) else [audio_files]
+            global_subs = self._extract_global_subtitles(subtitles, audio_list)
+            valid_audio_paths = [path for path in audio_list if os.path.exists(path)]
+            if len(valid_audio_paths) == 1 and not duration_limit:
+                return self._synthesize_framed_vertical_scenes_ffmpeg(
+                    background_image=background_image,
+                    scenes=scene_items,
+                    audio_file=valid_audio_paths[0],
+                    output_path=output_path,
+                    subtitles=global_subs,
+                    subtitle_position=subtitle_position,
+                    subtitle_size=subtitle_size,
+                    subtitle_style=subtitle_style,
+                    export_params=export_params,
+                )
+            from moviepy import AudioFileClip, concatenate_audioclips
+            clips = [AudioFileClip(path) for path in valid_audio_paths]
+            if not clips:
+                raise ValueError("No valid audio clips.")
+            final_audio = concatenate_audioclips(clips)
+            if duration_limit:
+                limit = max(0.1, float(duration_limit))
+                if getattr(final_audio, "duration", 0) > limit:
+                    final_audio = (
+                        final_audio.subclipped(0, limit)
+                        if hasattr(final_audio, "subclipped")
+                        else final_audio.subclip(0, limit)
+                    )
+            final_audio.write_audiofile(temp_audio, logger=None)
+            for clip in clips:
+                clip.close()
+            final_audio.close()
+            return self._synthesize_framed_vertical_scenes_ffmpeg(
+                background_image=background_image,
+                scenes=scene_items,
+                audio_file=temp_audio,
+                output_path=output_path,
+                subtitles=global_subs,
+                subtitle_position=subtitle_position,
+                subtitle_size=subtitle_size,
+                subtitle_style=subtitle_style,
+                export_params=export_params,
+            )
+        finally:
+            if os.path.exists(temp_audio):
+                os.remove(temp_audio)
+
+    def _synthesize_framed_vertical_scenes_ffmpeg(
+        self,
+        *,
+        background_image,
+        scenes,
+        audio_file,
+        output_path,
+        subtitles=None,
+        subtitle_position=None,
+        subtitle_size='normal',
+        subtitle_style=None,
+        export_params=None,
+    ):
+        """Compose scene stills inside the scheme3 frame without an intermediate MP4."""
+        export_params = export_params or {}
+        res_key = str(export_params.get("resolution") or "1080p").lower()
+        target_w, target_h = {
+            "480p": (480, 854),
+            "720p": (720, 1280),
+            "1080p": (1080, 1920),
+        }.get(res_key, (1080, 1920))
+        frame_y = round(target_h * (620 / 1920))
+        frame_h = round(target_w * 9 / 16)
+        fps = int(export_params.get("fps") or 30)
+        bitrate = {
+            "low": "1500k",
+            "medium": "4000k",
+            "high": "8000k",
+        }.get(str(export_params.get("bitrate") or "medium").lower(), "4000k")
+        audio_duration = self._probe_media_duration(audio_file)
+        if audio_duration <= 0:
+            raise ValueError("方案三音频时长无效")
+
+        raw_durations = []
+        for item in scenes:
+            try:
+                duration = float(item.get("duration_seconds") or 0)
+            except (TypeError, ValueError):
+                duration = 0
+            raw_durations.append(max(0.001, duration))
+        total_duration = sum(raw_durations)
+        if total_duration <= 0:
+            raise ValueError("方案三分镜时长无效")
+
+        normalized_scenes = []
+        cursor = 0.0
+        if audio_duration < total_duration - 0.5:
+            # A preview uses the beginning of the real timeline; it must not
+            # squeeze every scene into the shorter preview audio.
+            for item, raw_duration in zip(scenes, raw_durations):
+                if cursor >= audio_duration - 0.001:
+                    break
+                duration = min(raw_duration, audio_duration - cursor)
+                normalized_scenes.append({**item, "duration_seconds": duration})
+                cursor += duration
+        else:
+            # Full renders may differ by a few milliseconds after MP3 muxing.
+            # Normalize that tiny discrepancy so video and audio end together.
+            for item, raw_duration in zip(scenes, raw_durations):
+                duration = audio_duration * raw_duration / total_duration
+                if cursor >= audio_duration - 0.001:
+                    break
+                duration = min(duration, audio_duration - cursor)
+                normalized_scenes.append({**item, "duration_seconds": duration})
+                cursor += duration
+        if normalized_scenes and abs(cursor - audio_duration) > 0.001:
+            normalized_scenes[-1]["duration_seconds"] += audio_duration - cursor
+        if not normalized_scenes:
+            raise ValueError("方案三没有可合成的正文分镜")
+
+        # Quantize cumulative scene boundaries to frames. Quantizing every
+        # scene independently inside FFmpeg can otherwise lose almost one
+        # frame per cut and truncate the final audio on long storyboards.
+        target_frames = max(1, round(audio_duration * fps))
+        previous_frame = 0
+        cumulative_seconds = 0.0
+        for index, item in enumerate(normalized_scenes):
+            cumulative_seconds += float(item["duration_seconds"])
+            end_frame = (
+                target_frames
+                if index == len(normalized_scenes) - 1
+                else max(previous_frame + 1, round(cumulative_seconds * fps))
+            )
+            end_frame = min(target_frames, end_frame)
+            item["duration_seconds"] = (end_frame - previous_frame) / fps
+            previous_frame = end_frame
+
+        sub_path = None
+        output_root, _ = os.path.splitext(output_path)
+        working_output_path = f"{output_root}.part-{uuid.uuid4().hex[:8]}.mp4"
+        try:
+            filters = [f"[0:v]scale={target_w}:{target_h},setsar=1[bg]"]
+            concat_inputs = []
+            for index, item in enumerate(normalized_scenes, start=1):
+                duration = float(item["duration_seconds"])
+                filters.append(
+                    f"[{index}:v]scale={target_w}:{frame_h}:force_original_aspect_ratio=increase,"
+                    f"crop={target_w}:{frame_h},setsar=1,fps={fps},format=yuv420p,"
+                    f"trim=duration={duration:.6f},setpts=PTS-STARTPTS[scene{index}]"
+                )
+                concat_inputs.append(f"[scene{index}]")
+            filters.append(
+                f"{''.join(concat_inputs)}concat=n={len(normalized_scenes)}:v=1:a=0[content]"
+            )
+            filters.append(f"[bg][content]overlay=0:{frame_y}:shortest=1[composed]")
+            output_label = "composed"
+            if subtitles:
+                srt_content = self._generate_srt(subtitles, 0)
+                if srt_content:
+                    alignment, margin_v, font_size = self._compute_subtitle_params(
+                        True,
+                        subtitle_position=subtitle_position,
+                        canvas_h=target_h,
+                        subtitle_size=subtitle_size,
+                    )
+                    if isinstance(subtitle_style, dict) and subtitle_style.get("font_size"):
+                        font_size = max(16, int(subtitle_style["font_size"]))
+                    ass_content = self._generate_ass(
+                        srt_content,
+                        alignment,
+                        margin_v,
+                        font_size,
+                        target_w,
+                        target_h,
+                        subtitle_style=subtitle_style,
+                    )
+                    sub_path = os.path.join(self.upload_folder, f"temp_{uuid.uuid4().hex[:6]}.ass")
+                    with open(sub_path, "w", encoding="utf-8") as handle:
+                        handle.write(ass_content)
+                    safe_sub_path = sub_path.replace(":", "\\:").replace("'", "'\\\\''")
+                    filters.append(f"[composed]ass='{safe_sub_path}'[vout]")
+                    output_label = "vout"
+
+            ffmpeg = self._ffmpeg_executable()
+            command = [
+                ffmpeg, "-y",
+                "-loop", "1", "-framerate", str(fps),
+                "-i", background_image,
+            ]
+            for item in normalized_scenes:
+                command.extend([
+                    "-loop", "1",
+                    "-framerate", str(fps),
+                    "-i", str(item["image_path"]),
+                ])
+            audio_input = len(normalized_scenes) + 1
+            command.extend([
+                "-i", audio_file,
+                "-filter_complex", ";".join(filters),
+                "-map", f"[{output_label}]",
+                "-map", f"{audio_input}:a:0",
+                "-r", str(fps),
+                "-c:v", self.video_codec,
+                "-b:v", bitrate,
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-shortest",
+                working_output_path,
+            ])
+            try:
+                subprocess.run(command, check=True, capture_output=True)
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr.decode(errors="ignore") if exc.stderr else ""
+                if self.video_codec == "h264_videotoolbox" and "h264_videotoolbox" in stderr:
+                    fallback = list(command)
+                    codec_index = fallback.index("h264_videotoolbox")
+                    fallback[codec_index:codec_index + 1] = ["libx264", "-preset", "medium"]
+                    subprocess.run(fallback, check=True, capture_output=True)
+                else:
+                    detail = stderr.splitlines()[-1] if stderr else str(exc)
+                    raise RuntimeError(f"方案三分镜直出 FFmpeg 合成失败: {detail}") from exc
+            self._assert_playable_video(working_output_path)
+            os.replace(working_output_path, output_path)
+            return output_path
+        finally:
+            if sub_path and os.path.exists(sub_path):
+                os.remove(sub_path)
+            if os.path.exists(working_output_path):
+                os.remove(working_output_path)
+
+    def _synthesize_framed_vertical_ffmpeg(
+        self,
+        *,
+        background_image,
+        content_video,
+        audio_file,
+        output_path,
+        subtitles=None,
+        subtitle_position=None,
+        subtitle_size='normal',
+        subtitle_style=None,
+        export_params=None,
+    ):
+        """Render scheme3 with the visual content constrained to the template frame."""
+        export_params = export_params or {}
+        res_key = str(export_params.get("resolution") or "1080p").lower()
+        target_w, target_h = {
+            "480p": (480, 854),
+            "720p": (720, 1280),
+            "1080p": (1080, 1920),
+        }.get(res_key, (1080, 1920))
+        frame_y = round(target_h * (620 / 1920))
+        frame_h = round(target_w * 9 / 16)
+        fps = int(export_params.get("fps") or 30)
+        bitrate = {
+            "low": "1500k",
+            "medium": "4000k",
+            "high": "8000k",
+        }.get(str(export_params.get("bitrate") or "medium").lower(), "4000k")
+        audio_duration = self._probe_media_duration(audio_file)
+        if audio_duration <= 0:
+            raise ValueError("方案三音频时长无效")
+
+        sub_path = None
+        output_root, _ = os.path.splitext(output_path)
+        working_output_path = f"{output_root}.part-{uuid.uuid4().hex[:8]}.mp4"
+        try:
+            filters = [
+                f"[0:v]scale={target_w}:{target_h},setsar=1[bg]",
+                (
+                    f"[1:v]scale={target_w}:{frame_h}:force_original_aspect_ratio=increase,"
+                    f"crop={target_w}:{frame_h},setsar=1[content]"
+                ),
+                f"[bg][content]overlay=0:{frame_y}:shortest=1[composed]",
+            ]
+            output_label = "composed"
+            if subtitles:
+                srt_content = self._generate_srt(subtitles, 0)
+                if srt_content:
+                    alignment, margin_v, font_size = self._compute_subtitle_params(
+                        True,
+                        subtitle_position=subtitle_position,
+                        canvas_h=target_h,
+                        subtitle_size=subtitle_size,
+                    )
+                    if isinstance(subtitle_style, dict) and subtitle_style.get("font_size"):
+                        font_size = max(16, int(subtitle_style["font_size"]))
+                    ass_content = self._generate_ass(
+                        srt_content,
+                        alignment,
+                        margin_v,
+                        font_size,
+                        target_w,
+                        target_h,
+                        subtitle_style=subtitle_style,
+                    )
+                    sub_path = os.path.join(self.upload_folder, f"temp_{uuid.uuid4().hex[:6]}.ass")
+                    with open(sub_path, "w", encoding="utf-8") as handle:
+                        handle.write(ass_content)
+                    safe_sub_path = sub_path.replace(":", "\\:").replace("'", "'\\\\''")
+                    filters.append(f"[composed]ass='{safe_sub_path}'[vout]")
+                    output_label = "vout"
+
+            ffmpeg = self._ffmpeg_executable()
+            command = [
+                ffmpeg, "-y",
+                "-loop", "1", "-t", str(audio_duration), "-i", background_image,
+                "-stream_loop", "-1", "-t", str(audio_duration), "-i", content_video,
+                "-i", audio_file,
+                "-filter_complex", ";".join(filters),
+                "-map", f"[{output_label}]",
+                "-map", "2:a:0",
+                "-r", str(fps),
+                "-c:v", self.video_codec,
+                "-b:v", bitrate,
+                "-c:a", "aac",
+                "-shortest",
+                working_output_path,
+            ]
+            try:
+                subprocess.run(command, check=True, capture_output=True)
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr.decode(errors="ignore") if exc.stderr else ""
+                if self.video_codec == "h264_videotoolbox" and "h264_videotoolbox" in stderr:
+                    fallback = list(command)
+                    codec_index = fallback.index("h264_videotoolbox")
+                    fallback[codec_index:codec_index + 1] = ["libx264", "-preset", "medium"]
+                    subprocess.run(fallback, check=True, capture_output=True)
+                else:
+                    raise RuntimeError(f"方案三 FFmpeg 合成失败: {stderr.splitlines()[-1] if stderr else exc}") from exc
+            self._assert_playable_video(working_output_path)
+            os.replace(working_output_path, output_path)
+            return output_path
+        finally:
+            if sub_path and os.path.exists(sub_path):
+                os.remove(sub_path)
+            if os.path.exists(working_output_path):
+                os.remove(working_output_path)
+
     def process_mixed_content(self, video_file, image_file, audio_file, video_c_path=None, audio_c_path=None, audio_start=7.0, audio_end_offset=10.0, output_filename=None, cta_config=None, subtitles=None, transform=None, subtitle_position=None, subtitle_size='normal', export_params=None):
         """Synthesize horizontal video with intro/outro and sequential subtitles."""
         logger.info(f"🎥 [VIDEO_EDITOR] Starting Horizontal Production: {os.path.basename(image_file)}")

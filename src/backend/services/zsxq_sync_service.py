@@ -29,8 +29,13 @@ from models.zsxq_sync import (
     ZsxqTopic,
     ZsxqTopicComment,
     ZsxqTopicFavorite,
+    jsonb_payload_md5,
 )
-from services.runtime_guard import is_retryable_db_error, maybe_guarded_apply_async
+from services.runtime_guard import (
+    end_db_transaction_before_external_io,
+    is_retryable_db_error,
+    maybe_guarded_apply_async,
+)
 from services.zsxq_service import zsxq_service
 from services.zsxq_yiren_award_cleanup_service import is_yiren_award_comment
 
@@ -154,14 +159,25 @@ TOPIC_UPDATE_SNAPSHOT_FIELDS = (
     "tab_label",
     "topic_id",
     "topic_uid",
+    "raw_json_path",
+    "raw_payload_hash",
+    "first_sync_run_id",
+    "first_synced_at",
+)
+TOPIC_STRUCTURED_UPDATE_FIELDS = (
+    "tab_id",
+    "tab_label",
     "title",
     "author_name",
     "content",
+    "topic_type",
+    "question_text",
+    "answer_text",
+    "article_title",
+    "article_excerpt",
+    "files_count",
+    "images_count",
     "create_time",
-    "first_sync_run_id",
-    "last_sync_run_id",
-    "first_synced_at",
-    "last_synced_at",
 )
 AUTO_VIDEO_DISPATCH_SOURCE = "zsxq_auto_video_dispatch"
 AUTO_SCRIPT_MATERIAL_DISPATCH_SOURCE = "zsxq_auto_script_material_dispatch"
@@ -1691,6 +1707,11 @@ class ZsxqSyncService:
 
     def _normalize_auto_script_material_dispatch(self, value):
         value = value if isinstance(value, dict) else {}
+        visual_scheme_keys = []
+        for item in value.get("visual_scheme_keys") if isinstance(value.get("visual_scheme_keys"), list) else []:
+            key = str(item or "").strip().lower()
+            if key in {"stick_figure", "doraemon"} and key not in visual_scheme_keys:
+                visual_scheme_keys.append(key)
         return {
             "enabled": self._truthy_text(value.get("enabled", False)),
             "pdf_min_download_count": self._bounded_int(
@@ -1699,6 +1720,7 @@ class ZsxqSyncService:
                 lower=0,
                 upper=1_000_000,
             ),
+            "visual_scheme_keys": visual_scheme_keys,
             "wait_for_completion": False,
         }
 
@@ -1928,6 +1950,35 @@ class ZsxqSyncService:
                         "reason": "existing_material_task",
                         "existing_task": self._auto_video_task_summary(existing_task),
                     })
+                    visual_scheme_keys = config.get("visual_scheme_keys")
+                    if existing_task.status == "completed" and visual_scheme_keys:
+                        try:
+                            from tasks.report_audio_workflow import _dispatch_requested_visual_workflows
+
+                            item["visual_workflows"] = _dispatch_requested_visual_workflows(
+                                str(existing_task.id),
+                                {"visual_scheme_keys": visual_scheme_keys},
+                            )
+                            item["reason"] = "existing_material_task_visuals_dispatched"
+                        except Exception as exc:
+                            db.session.rollback()
+                            logger.exception(
+                                "[ZSXQ_SYNC] existing material visual dispatch failed | task=%s attachment=%s",
+                                existing_task.id,
+                                attachment.id,
+                            )
+                            item["visual_workflows"] = {
+                                "requested": list(visual_scheme_keys),
+                                "items": [],
+                                "status": "failed",
+                                "error": str(exc),
+                            }
+                            summary["errors"].append({
+                                "kind": kind,
+                                "attachment_id": attachment.id,
+                                "task_id": str(existing_task.id),
+                                "message": f"视觉方案投递失败: {exc}",
+                            })
                     bucket["items"].append(item)
                     continue
 
@@ -1938,6 +1989,7 @@ class ZsxqSyncService:
                         attachment=attachment,
                         threshold=threshold,
                         workflow_run_id=workflow_run_id,
+                        visual_scheme_keys=config.get("visual_scheme_keys"),
                     )
                 except Exception as exc:
                     db.session.rollback()
@@ -2303,7 +2355,15 @@ class ZsxqSyncService:
             "admission": submit_result.get("admission"),
         }
 
-    def _create_auto_report_script_material_task(self, *, run, attachment, threshold, workflow_run_id=None):
+    def _create_auto_report_script_material_task(
+        self,
+        *,
+        run,
+        attachment,
+        threshold,
+        workflow_run_id=None,
+        visual_scheme_keys=None,
+    ):
         from services.report_script_material_workflow import (
             DEFAULT_INITIAL_PROMPT,
             DEFAULT_REVIEW_PROMPT,
@@ -2326,6 +2386,7 @@ class ZsxqSyncService:
             threshold=threshold,
             workflow_run_id=workflow_run_id,
             title=title,
+            visual_scheme_keys=visual_scheme_keys,
         )
         video_options = {
             "enabled": False,
@@ -2551,10 +2612,25 @@ class ZsxqSyncService:
             },
         }
 
-    def _auto_script_material_dispatch_metadata(self, *, run, attachment, threshold, workflow_run_id=None, title=None):
+    def _auto_script_material_dispatch_metadata(
+        self,
+        *,
+        run,
+        attachment,
+        threshold,
+        workflow_run_id=None,
+        title=None,
+        visual_scheme_keys=None,
+    ):
+        normalized_visual_schemes = []
+        for item in visual_scheme_keys if isinstance(visual_scheme_keys, list) else []:
+            key = str(item or "").strip().lower()
+            if key in {"stick_figure", "doraemon"} and key not in normalized_visual_schemes:
+                normalized_visual_schemes.append(key)
         return {
             "title": title or attachment.name,
             "source": AUTO_SCRIPT_MATERIAL_DISPATCH_SOURCE,
+            "visual_scheme_keys": normalized_visual_schemes,
             "auto_script_material_dispatch": {
                 "sync_run_id": run.id,
                 "workflow_run_id": workflow_run_id,
@@ -2565,6 +2641,7 @@ class ZsxqSyncService:
                 "tab_id": attachment.tab_id,
                 "download_count": attachment.download_count,
                 "threshold": threshold,
+                "visual_scheme_keys": normalized_visual_schemes,
                 "queued_at": datetime.utcnow().isoformat() + "Z",
             },
         }
@@ -3931,14 +4008,16 @@ class ZsxqSyncService:
     def _apply_publish_context_to_attachments(self, context):
         status = context.get("status") or {}
         outcomes = context.get("outcomes") or {"by_path": {}, "by_name": {}}
+        source_refs = context.get("source_refs") or []
+        attachment_candidates = self._attachment_records_for_source_refs(source_refs)
         seen_ids = set()
         matched = 0
         updated = 0
-        for source_ref in context.get("source_refs") or []:
+        for source_ref, attachments in zip(source_refs, attachment_candidates):
             source_status = self._status_for_source_ref(source_ref, status, outcomes)
             if not source_status:
                 continue
-            for attachment in self._attachment_records_for_source_ref(source_ref):
+            for attachment in attachments:
                 if attachment.id in seen_ids:
                     continue
                 seen_ids.add(attachment.id)
@@ -3947,10 +4026,39 @@ class ZsxqSyncService:
                     updated += 1
         return {"updated": updated, "matched": matched}
 
-    def _attachment_records_for_source_ref(self, source_ref):
-        attachment_id = str(source_ref.get("attachment_id") or "").strip()
-        if attachment_id:
-            record = ZsxqAttachment.query.options(
+    def _attachment_records_for_source_refs(self, source_refs):
+        source_refs = list(source_refs or [])
+        if not source_refs:
+            return []
+
+        attachment_ids = set()
+        fallback_conditions = {}
+        for source_ref in source_refs:
+            attachment_id = str(source_ref.get("attachment_id") or "").strip()
+            if attachment_id:
+                attachment_ids.add(attachment_id)
+
+            group_id = str(source_ref.get("group_id") or "").strip()
+            tab_id = str(source_ref.get("tab_id") or "").strip()
+            topic_id = str(source_ref.get("topic_id") or "").strip()
+            name = str(source_ref.get("name") or "").strip()
+            if group_id and tab_id and topic_id:
+                key = (group_id, tab_id, topic_id, name)
+                fallback_conditions[key] = and_(
+                    ZsxqAttachment.group_id == group_id,
+                    ZsxqAttachment.tab_id == tab_id,
+                    ZsxqAttachment.topic_id == topic_id,
+                    *([ZsxqAttachment.name == name] if name else []),
+                )
+
+        conditions = list(fallback_conditions.values())
+        if attachment_ids:
+            conditions.append(ZsxqAttachment.id.in_(attachment_ids))
+        if not conditions:
+            return [[] for _source_ref in source_refs]
+
+        records = (
+            ZsxqAttachment.query.options(
                 load_only(
                     ZsxqAttachment.id,
                     ZsxqAttachment.group_id,
@@ -3968,53 +4076,48 @@ class ZsxqSyncService:
                     ZsxqAttachment.publish_failed_count,
                     ZsxqAttachment.publish_updated_at,
                 )
-            ).filter(ZsxqAttachment.id == attachment_id).first()
-            if record:
-                return [record]
-
-        group_id = str(source_ref.get("group_id") or "").strip()
-        tab_id = str(source_ref.get("tab_id") or "").strip()
-        topic_id = str(source_ref.get("topic_id") or "").strip()
-        name = str(source_ref.get("name") or "").strip()
-        source_path = source_ref.get("source_path")
-        if not group_id or not tab_id or not topic_id:
-            return []
-
-        query = ZsxqAttachment.query.filter_by(
-            group_id=group_id,
-            tab_id=tab_id,
-            topic_id=topic_id,
-        )
-        if name:
-            query = query.filter(ZsxqAttachment.name == name)
-        records = query.options(
-            load_only(
-                ZsxqAttachment.id,
-                ZsxqAttachment.group_id,
-                ZsxqAttachment.tab_id,
-                ZsxqAttachment.topic_id,
-                ZsxqAttachment.attachment_key,
-                ZsxqAttachment.name,
-                ZsxqAttachment.local_path,
-                ZsxqAttachment.publish_status,
-                ZsxqAttachment.publish_task_id,
-                ZsxqAttachment.publish_source_task_id,
-                ZsxqAttachment.publish_topic_id,
-                ZsxqAttachment.publish_submitted_count,
-                ZsxqAttachment.publish_verified_count,
-                ZsxqAttachment.publish_failed_count,
-                ZsxqAttachment.publish_updated_at,
             )
-        ).limit(20).all()
-        if source_path:
-            exact = [
-                record
-                for record in records
-                if self._path_key(record.local_path) == source_path
-            ]
-            if exact:
-                return exact
-        return records
+            .filter(or_(*conditions))
+            .all()
+        )
+        by_id = {str(record.id): record for record in records}
+        by_topic = {}
+        for record in records:
+            key = (
+                str(record.group_id or ""),
+                str(record.tab_id or ""),
+                str(record.topic_id or ""),
+            )
+            by_topic.setdefault(key, []).append(record)
+
+        matches = []
+        for source_ref in source_refs:
+            attachment_id = str(source_ref.get("attachment_id") or "").strip()
+            if attachment_id and attachment_id in by_id:
+                matches.append([by_id[attachment_id]])
+                continue
+
+            topic_key = (
+                str(source_ref.get("group_id") or "").strip(),
+                str(source_ref.get("tab_id") or "").strip(),
+                str(source_ref.get("topic_id") or "").strip(),
+            )
+            candidates = by_topic.get(topic_key, [])
+            name = str(source_ref.get("name") or "").strip()
+            if name:
+                candidates = [record for record in candidates if record.name == name]
+            candidates = candidates[:20]
+            source_path = source_ref.get("source_path")
+            if source_path:
+                exact = [
+                    record
+                    for record in candidates
+                    if self._path_key(record.local_path) == source_path
+                ]
+                if exact:
+                    candidates = exact
+            matches.append(candidates)
+        return matches
 
     def _apply_publish_status_to_attachment(self, attachment, status):
         incoming = str(status.get("publish_status") or "")
@@ -4923,7 +5026,12 @@ class ZsxqSyncService:
                 break
             if tab_result["pages"] > 0:
                 self._human_pause()
-            page_count = min(max(remaining_topic_slots, 1), 50)
+            # ZSXQ topic-list endpoints reject a per-request count above 20
+            # (code 14001). Larger per-tab targets are fulfilled by paging.
+            page_count = min(
+                max(remaining_topic_slots, 1),
+                TOPIC_PAGE_SIZE_HINT,
+            )
             response = self._get_topics_with_retry(
                 cookie=cookie,
                 group_id=group_id,
@@ -4977,6 +5085,9 @@ class ZsxqSyncService:
                 topics,
                 existing_attachment_snapshots,
             )
+            # Page snapshots are detached projections. Persist their refresh and
+            # return the connection before per-topic CPU and file processing.
+            db.session.commit()
 
             for topic in topics:
                 topic_id = self._topic_id(topic)
@@ -5107,6 +5218,7 @@ class ZsxqSyncService:
         topic_id = self._topic_id(topic)
         if not topic_id:
             return topic
+        end_db_transaction_before_external_io("ZSXQ comment hydration")
 
         merged = {}
 
@@ -5213,6 +5325,17 @@ class ZsxqSyncService:
             load_only(
                 ZsxqTopicComment.id,
                 ZsxqTopicComment.comment_id,
+                ZsxqTopicComment.tab_id,
+                ZsxqTopicComment.parent_comment_id,
+                ZsxqTopicComment.owner_user_id,
+                ZsxqTopicComment.owner_name,
+                ZsxqTopicComment.text,
+                ZsxqTopicComment.create_time,
+                ZsxqTopicComment.likes_count,
+                ZsxqTopicComment.replies_count,
+                ZsxqTopicComment.rewards_count,
+                ZsxqTopicComment.sticky,
+                ZsxqTopicComment.raw_payload_hash,
             )
         ).all()
         by_comment_id = {str(item.comment_id): item for item in existing}
@@ -5221,6 +5344,7 @@ class ZsxqSyncService:
         for payload in comments:
             comment_id = str(payload.get("comment_id") or "").strip()
             owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
+            payload_hash = jsonb_payload_md5(payload)
             values = {
                 "tab_id": str(tab.get("id") or "") or None,
                 "parent_comment_id": self._text_or_none(payload.get("parent_comment_id"), 64),
@@ -5232,8 +5356,6 @@ class ZsxqSyncService:
                 "replies_count": self._int_or_zero(payload.get("replies_count")),
                 "rewards_count": self._int_or_zero(payload.get("rewards_count")),
                 "sticky": self._truthy_text(payload.get("sticky")),
-                "raw_payload": payload,
-                "last_synced_at": now,
             }
             record = by_comment_id.get(comment_id)
             if record is None:
@@ -5241,19 +5363,47 @@ class ZsxqSyncService:
                     group_id=str(group_id),
                     topic_id=str(topic_id),
                     comment_id=comment_id,
+                    raw_payload=payload,
+                    raw_payload_hash=payload_hash,
+                    last_synced_at=now,
                     **values,
                 )
                 db.session.add(record)
                 by_comment_id[comment_id] = record
                 stats["comments_new"] += 1
                 continue
-            for key, value in values.items():
+            changed_values = {
+                key: value
+                for key, value, current in (
+                    ("tab_id", values["tab_id"], record.tab_id),
+                    ("parent_comment_id", values["parent_comment_id"], record.parent_comment_id),
+                    ("owner_user_id", values["owner_user_id"], record.owner_user_id),
+                    ("owner_name", values["owner_name"], record.owner_name),
+                    ("text", values["text"], record.text),
+                    ("create_time", values["create_time"], record.create_time),
+                    ("likes_count", values["likes_count"], record.likes_count),
+                    ("replies_count", values["replies_count"], record.replies_count),
+                    ("rewards_count", values["rewards_count"], record.rewards_count),
+                    ("sticky", values["sticky"], record.sticky),
+                )
+                if current != value
+            }
+            for key, value in changed_values.items():
                 setattr(record, key, value)
-            stats["comments_updated"] += 1
+            changed = bool(changed_values)
+            if record.raw_payload_hash != payload_hash:
+                record.raw_payload = payload
+                record.raw_payload_hash = payload_hash
+                changed = True
+            if changed:
+                record.last_synced_at = now
+                stats["comments_updated"] += 1
         yiren_awarded = any(
             is_yiren_award_comment(
                 (item.get("owner") or {}).get("name") or (item.get("owner") or {}).get("alias"),
                 item.get("text"),
+                owner_user_id=(item.get("owner") or {}).get("user_id"),
+                group_id=group_id,
             )
             for item in comments
             if isinstance(item.get("owner"), dict)
@@ -5514,7 +5664,13 @@ class ZsxqSyncService:
             last_sync_run_id=run_id,
         )
 
-    def _load_existing_topic_snapshots(self, group_id, tab_id, topics):
+    def _load_existing_topic_snapshots(
+        self,
+        group_id,
+        tab_id,
+        topics,
+        payload_hash_column_available=True,
+    ):
         topic_ids = [
             str(topic_id)
             for topic_id in (self._topic_id(topic) for topic in topics)
@@ -5522,7 +5678,12 @@ class ZsxqSyncService:
         ]
         if not topic_ids:
             return {}
-        columns = tuple(getattr(ZsxqTopic, field) for field in TOPIC_UPDATE_SNAPSHOT_FIELDS)
+        snapshot_fields = tuple(
+            field
+            for field in TOPIC_UPDATE_SNAPSHOT_FIELDS
+            if payload_hash_column_available or field != "raw_payload_hash"
+        )
+        columns = tuple(getattr(ZsxqTopic, field) for field in snapshot_fields)
         rows = (
             db.session.query(*columns)
             .filter(
@@ -5534,63 +5695,92 @@ class ZsxqSyncService:
         )
         return {
             str(row.topic_id): {
-                field: getattr(row, field)
-                for field in TOPIC_UPDATE_SNAPSHOT_FIELDS
+                **{
+                    field: getattr(row, field)
+                    for field in snapshot_fields
+                },
+                "raw_payload_hash": (
+                    getattr(row, "raw_payload_hash")
+                    if payload_hash_column_available
+                    else None
+                ),
             }
             for row in rows
         }
 
-    def _update_existing_topic(self, record, topic, tab, run, previous=None):
+    def _update_existing_topic(
+        self,
+        record,
+        topic,
+        tab,
+        run,
+        previous=None,
+        payload_hash_column_available=True,
+    ):
         meta = self._topic_meta(topic)
         run_id = self._cached_sync_run_id(run)
-        changed = False
         if previous is None:
             previous = {
                 field: self._loaded_model_attr(record, field)
                 for field in TOPIC_UPDATE_SNAPSHOT_FIELDS
             }
-        updates = {
-            "tab_id": tab["id"],
-            "tab_label": tab["label"],
-            "title": meta["title"],
-            "author_name": meta["author_name"],
-            "content": meta["content"],
-            "create_time": meta["create_time"],
-            "last_sync_run_id": run_id,
-        }
-        for key, value in updates.items():
-            if previous.get(key) != value:
-                changed = True
-        raw_json_path = self._write_topic_json(
-            previous.get("group_id"),
-            tab,
-            previous.get("topic_id"),
-            topic,
-        )
+        payload_hash = jsonb_payload_md5(topic)
+        payload_changed = previous.get("raw_payload_hash") != payload_hash
+        raw_json_path = previous.get("raw_json_path")
+        if payload_changed or not raw_json_path:
+            raw_json_path = self._write_topic_json(
+                previous.get("group_id"),
+                tab,
+                previous.get("topic_id"),
+                topic,
+            )
         projected = ZsxqTopic(
             id=previous.get("id"),
             group_id=previous.get("group_id"),
             group_name=previous.get("group_name"),
-            tab_id=updates["tab_id"],
-            tab_label=updates["tab_label"],
+            tab_id=tab["id"],
+            tab_label=tab["label"],
             topic_id=previous.get("topic_id"),
             topic_uid=previous.get("topic_uid"),
-            title=updates["title"],
-            author_name=updates["author_name"],
-            content=updates["content"],
-            create_time=updates["create_time"],
+            title=meta["title"],
+            author_name=meta["author_name"],
+            content=meta["content"],
+            create_time=meta["create_time"],
             raw_json_path=raw_json_path,
             raw_payload=topic,
+            raw_payload_hash=payload_hash,
             first_sync_run_id=previous.get("first_sync_run_id"),
             last_sync_run_id=run_id,
             first_synced_at=previous.get("first_synced_at"),
             last_synced_at=datetime.utcnow(),
         )
-        values = {
-            column.name: getattr(projected, column.name)
-            for column in ZsxqTopic.__table__.columns
-            if column.name != "id"
+        changed_fields = {
+            field: getattr(projected, field)
+            for field in ("tab_id", "tab_label")
+            if previous.get(field) != getattr(projected, field)
         }
+        if payload_changed:
+            # All structured values are deterministic projections of the new
+            # payload. Avoid fetching the old large text columns merely to
+            # compare them; a changed payload hash means the new projection is
+            # the authoritative snapshot.
+            changed_fields.update({
+                field: getattr(projected, field)
+                for field in TOPIC_STRUCTURED_UPDATE_FIELDS
+            })
+        changed = bool(changed_fields)
+        values = {
+            **changed_fields,
+            "last_sync_run_id": run_id,
+            "last_synced_at": projected.last_synced_at,
+        }
+        if payload_changed:
+            values.update({
+                "raw_json_path": raw_json_path,
+                "raw_payload": topic,
+            })
+            if payload_hash_column_available:
+                values["raw_payload_hash"] = payload_hash
         db.session.execute(
             update(ZsxqTopic)
             .where(ZsxqTopic.id == str(previous.get("id")))
@@ -6051,6 +6241,7 @@ class ZsxqSyncService:
         return stats
 
     def _download_attachment_file(self, cookie, group_id, tab, topic_id, payload, name):
+        end_db_transaction_before_external_io("ZSXQ attachment download")
         filename = self._safe_filename(name or self._attachment_name(payload, "file"))
         target_dir = self._tab_directory(group_id, tab) / "files"
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -6391,6 +6582,7 @@ class ZsxqSyncService:
         attempts = self._sync_retry_attempts()
         for attempt in range(1, attempts + 1):
             try:
+                end_db_transaction_before_external_io("ZSXQ topic-list request")
                 response = zsxq_service.get_topics(
                     cookie=cookie,
                     group_id=group_id,
@@ -6436,6 +6628,7 @@ class ZsxqSyncService:
                     delay,
                     exc,
                 )
+                end_db_transaction_before_external_io("ZSXQ upstream retry wait")
                 time.sleep(delay)
 
         raise RuntimeError("ZSXQ_SYNC_RETRY_LOOP_UNREACHABLE")
@@ -7022,6 +7215,7 @@ class ZsxqSyncService:
         return self._attachment_file_type(record) == "pdf"
 
     def _human_pause(self, min_seconds=4.5, max_seconds=7.0):
+        end_db_transaction_before_external_io("ZSXQ pacing wait")
         seconds = min_seconds + random.random() * (max_seconds - min_seconds)
         logger.info("[ZSXQ_SYNC] pacing wait %.1fs", seconds)
         time.sleep(seconds)

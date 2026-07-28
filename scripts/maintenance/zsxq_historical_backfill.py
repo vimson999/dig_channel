@@ -38,6 +38,29 @@ DEFAULT_TARGET_START = "2024-01-01T00:00:00+08:00"
 DEFAULT_TARGET_END = "2024-08-11T21:45:37.743+08:00"
 DEFAULT_STATE_PATH = PROJECT_ROOT / "runtime" / "zsxq_shengcai_history_backfill.json"
 TAB = {"id": "preset:all", "label": "最新", "scope": "all"}
+LEGACY_TOPIC_INSERT_FIELDS = (
+    "group_id",
+    "group_name",
+    "tab_id",
+    "tab_label",
+    "topic_id",
+    "topic_uid",
+    "title",
+    "author_name",
+    "content",
+    "topic_type",
+    "question_text",
+    "answer_text",
+    "article_title",
+    "article_excerpt",
+    "files_count",
+    "images_count",
+    "create_time",
+    "raw_json_path",
+    "raw_payload",
+    "first_sync_run_id",
+    "last_sync_run_id",
+)
 
 
 def now_iso() -> str:
@@ -203,6 +226,18 @@ class HistoricalBackfillRunner:
         self.sleep_max = max(self.sleep_min, float(sleep_max))
         self.credential_id = str(credential_id or "").strip()
         self.credential_name = str(credential_name or "").strip()
+        self.payload_hash_column_available = True
+
+    def detect_payload_hash_column(self) -> bool:
+        return bool(db.session.execute(text("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'zsxq_topics'
+                  AND column_name = 'raw_payload_hash'
+            )
+        """)).scalar())
 
     def initial_cursor(self) -> Optional[str]:
         value = db.session.execute(
@@ -221,6 +256,7 @@ class HistoricalBackfillRunner:
         state = read_state(self.state_path)
         if state.get("status") == "complete":
             return state
+        self.payload_hash_column_available = self.detect_payload_hash_column()
 
         cursor = str(state.get("cursor_end_time") or self.initial_cursor() or format_zsxq_time(self.target_end))
         self.seek_jump_from = (
@@ -289,6 +325,7 @@ class HistoricalBackfillRunner:
                     self.group_id,
                     TAB["id"],
                     topics,
+                    payload_hash_column_available=self.payload_hash_column_available,
                 )
                 for topic in topics:
                     classification = classify_topic_window(topic_time(topic), self.target_start, self.target_end)
@@ -391,6 +428,7 @@ class HistoricalBackfillRunner:
                 TAB,
                 run,
                 previous=previous,
+                payload_hash_column_available=self.payload_hash_column_available,
             )
             existing_topics[str(topic_id)] = {
                 field: getattr(projected, field)
@@ -407,7 +445,15 @@ class HistoricalBackfillRunner:
                 topic,
                 run,
             )
-            db.session.add(created)
+            if self.payload_hash_column_available:
+                db.session.add(created)
+            else:
+                db.session.execute(
+                    ZsxqTopic.__table__.insert().values(**{
+                        field: getattr(created, field)
+                        for field in LEGACY_TOPIC_INSERT_FIELDS
+                    })
+                )
             batch["new"] += 1
             totals["new"] += 1
         batch["stored"] += 1

@@ -224,6 +224,7 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                 config = {
                     "enabled": True,
                     "pdf_min_download_count": 40,
+                    "visual_scheme_keys": ["stick_figure"],
                     "wait_for_completion": False,
                 }
                 statements = []
@@ -274,6 +275,10 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                 self.assertEqual(
                     task.result["auto_script_material_dispatch"]["threshold"],
                     40,
+                )
+                self.assertEqual(
+                    workflow["metadata"]["visual_scheme_keys"],
+                    ["stick_figure"],
                 )
 
                 db.session.remove()

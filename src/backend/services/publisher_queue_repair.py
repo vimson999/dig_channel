@@ -16,7 +16,7 @@ from models import db
 from models.bilibili_publish import PublicationTaskBilibiliUpload
 from models.task import PublicationTask
 from services.platform_publish_dispatch import task_for_unique_feature
-from services.runtime_guard import maybe_guarded_apply_async
+from services.runtime_guard import apply_async_after_db_release, maybe_guarded_apply_async
 from tasks.publisher import PLATFORM_UPLOAD_QUEUE, run_publication_pipeline
 
 
@@ -404,7 +404,12 @@ def maybe_requeue_stale_publisher_child(
         return child, False
 
     try:
-        async_result = requeue_target.apply_async(args=[child.id], queue=target_queue, retry=False)
+        async_result = apply_async_after_db_release(
+            requeue_target,
+            args=[child.id],
+            queue=target_queue,
+            retry=False,
+        )
     except Exception as exc:
         active_logger.warning(
             "Publisher child queue repair publish failed: child=%s previous_celery_id=%s error=%s",
@@ -761,7 +766,12 @@ def maybe_repair_stale_publisher_processing_task(
     previous_status = task.status
     previous_step = task.current_step
     try:
-        async_result = requeue_target.apply_async(args=[task.id], queue=target_queue, retry=False)
+        async_result = apply_async_after_db_release(
+            requeue_target,
+            args=[task.id],
+            queue=target_queue,
+            retry=False,
+        )
     except Exception as exc:
         active_logger.warning(
             "Publisher processing orphan requeue failed: task=%s previous_celery_id=%s error=%s",

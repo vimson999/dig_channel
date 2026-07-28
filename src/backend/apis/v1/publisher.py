@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from models.task import PublicationTask
 from models import db
+from services.runtime_guard import apply_async_after_db_release
 from sqlalchemy import or_
 from sqlalchemy.orm import load_only
 from datetime import datetime, timedelta
@@ -194,7 +195,8 @@ def _enqueue_publication_task(task):
         raise ValueError(asset_error)
 
     try:
-        celery_task = run_publication_pipeline.apply_async(
+        celery_task = apply_async_after_db_release(
+            run_publication_pipeline,
             args=[task.id],
             queue='render',
             retry=False,

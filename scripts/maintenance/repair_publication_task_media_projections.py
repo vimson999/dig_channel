@@ -13,6 +13,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_COLUMNS_SQL = """
     LEFT(NULLIF(result::jsonb #>> '{video,video_path}', ''), 600) AS expected_video,
     LEFT(NULLIF(result::jsonb #>> '{video,cover_path}', ''), 600) AS expected_cover,
+    LEFT(NULLIF(
+        result::jsonb #>> '{video,keyframes,landscape_cover,path}', ''
+    ), 600) AS expected_landscape,
     LEFT(COALESCE(
         NULLIF(result::jsonb #>> '{video,vertical_cover_path}', ''),
         NULLIF(result::jsonb #>> '{video,keyframes,vertical_cover,path}', '')
@@ -38,6 +41,7 @@ MISMATCH_SQL = f"""
         updated_at,
         report_audio_video_path,
         report_audio_cover_path,
+        report_audio_landscape_keyframe_path,
         report_audio_vertical_cover_path,
         report_audio_podcast_cover_path,
         report_audio_bilibili_cover_path,
@@ -52,6 +56,9 @@ MISMATCH_SQL = f"""
                 )
                 OR report_audio_cover_path IS DISTINCT FROM LEFT(
                     NULLIF(result::jsonb #>> '{{video,cover_path}}', ''), 600
+                )
+                OR report_audio_landscape_keyframe_path IS DISTINCT FROM LEFT(
+                    NULLIF(result::jsonb #>> '{{video,keyframes,landscape_cover,path}}', ''), 600
                 )
                 OR report_audio_vertical_cover_path IS DISTINCT FROM LEFT(COALESCE(
                     NULLIF(result::jsonb #>> '{{video,vertical_cover_path}}', ''),
@@ -89,6 +96,13 @@ REPAIR_SQL = """
             WHEN feature IN ('report_pdf_audio_workflow', 'report_audio_workflow')
             THEN LEFT(NULLIF(result::jsonb #>> '{video,cover_path}', ''), 600)
             ELSE report_audio_cover_path
+        END,
+        report_audio_landscape_keyframe_path = CASE
+            WHEN feature IN ('report_pdf_audio_workflow', 'report_audio_workflow')
+            THEN LEFT(NULLIF(
+                result::jsonb #>> '{video,keyframes,landscape_cover,path}', ''
+            ), 600)
+            ELSE report_audio_landscape_keyframe_path
         END,
         report_audio_vertical_cover_path = CASE
             WHEN feature IN ('report_pdf_audio_workflow', 'report_audio_workflow')
@@ -150,12 +164,13 @@ def _print_rows(rows):
     for row in rows:
         mismatches = []
         names = (
-            ("video", 6, 12),
-            ("cover", 7, 13),
-            ("vertical", 8, 14),
-            ("podcast", 9, 15),
-            ("bilibili", 10, 16),
-            ("publisher", 11, 17),
+            ("video", 6, 13),
+            ("cover", 7, 14),
+            ("landscape", 8, 15),
+            ("vertical", 9, 16),
+            ("podcast", 10, 17),
+            ("bilibili", 11, 18),
+            ("publisher", 12, 19),
         )
         for label, actual_index, expected_index in names:
             if row[actual_index] != row[expected_index]:

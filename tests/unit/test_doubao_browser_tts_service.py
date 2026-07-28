@@ -2,6 +2,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -11,6 +13,7 @@ if str(BACKEND_DIR) not in sys.path:
 from services.doubao_browser_tts import (  # noqa: E402
     DOUBAO_REPEAT_PROMPT_PREFIX,
     DoubaoBrowserTTSWorker,
+    DoubaoBrowserTTSAutomationError,
     DoubaoBrowserTTSError,
     DoubaoBrowserTTSOptions,
     build_repeat_prompt,
@@ -20,6 +23,31 @@ from services.report_audio_workflow import split_tts_text  # noqa: E402
 
 
 class DoubaoBrowserTTSServiceTest(unittest.TestCase):
+    def test_login_loss_sends_human_intervention_email(self):
+        worker = DoubaoBrowserTTSWorker.__new__(DoubaoBrowserTTSWorker)
+        worker.options = DoubaoBrowserTTSOptions(
+            user_data_dir="/tmp/doubao-profile",
+            extension_path="/tmp/extension",
+        )
+        page = SimpleNamespace(url="https://www.doubao.com/chat/")
+        with patch.object(worker, "_captcha_error", return_value=None), patch.object(
+            worker,
+            "_first_visible",
+            return_value=object(),
+        ), patch.object(
+            worker,
+            "_save_failure_screenshot",
+            return_value="/tmp/doubao-login.png",
+        ), patch(
+            "services.doubao_browser_tts.workflow_notification_service.send_browser_human_intervention"
+        ) as notify:
+            with self.assertRaisesRegex(DoubaoBrowserTTSAutomationError, "登录态失效"):
+                worker._raise_if_login_or_captcha(page, "doubao-job")
+
+        notify.assert_called_once()
+        self.assertEqual("login", notify.call_args.kwargs["reason"])
+        self.assertEqual("doubao-job", notify.call_args.kwargs["job_id"])
+
     def test_login_selectors_do_not_match_narration_containing_login_word(self):
         options = DoubaoBrowserTTSOptions(
             user_data_dir="/tmp/profile",

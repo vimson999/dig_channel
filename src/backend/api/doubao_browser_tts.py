@@ -14,6 +14,7 @@ from services.doubao_browser_tts import (
     QUEUE_NAME,
     status_payload as browser_status_payload,
 )
+from services.runtime_guard import apply_async_after_db_release
 from tasks.doubao_browser_tts import process_doubao_browser_tts_job
 from utils.auth_utils import require_login
 
@@ -122,7 +123,12 @@ def create_job(current_user):
     db.session.commit()
 
     try:
-        celery_task = process_doubao_browser_tts_job.apply_async(args=[task.id], queue=_queue_name(), retry=False)
+        celery_task = apply_async_after_db_release(
+            process_doubao_browser_tts_job,
+            args=[task.id],
+            queue=_queue_name(),
+            retry=False,
+        )
     except Exception as exc:
         task.status = "failed"
         task.current_step = "failed"
@@ -271,7 +277,12 @@ def retry_job(current_user, job_id):
     db.session.commit()
 
     try:
-        celery_task = process_doubao_browser_tts_job.apply_async(args=[task.id], queue=_queue_name(), retry=False)
+        celery_task = apply_async_after_db_release(
+            process_doubao_browser_tts_job,
+            args=[task.id],
+            queue=_queue_name(),
+            retry=False,
+        )
     except Exception as exc:
         task.status = "failed"
         task.current_step = "failed"

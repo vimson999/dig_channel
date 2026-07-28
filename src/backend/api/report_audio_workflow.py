@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
 
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, has_request_context, jsonify, request, send_file
 from sqlalchemy import and_, func, inspect as sqlalchemy_inspect, or_, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import load_only
@@ -18,6 +18,8 @@ from werkzeug.utils import secure_filename
 
 from celery_config import celery_app
 from models import db
+from models.report_stick_figure_asset import ReportStickFigureSceneAsset
+from models.report_visual_plan import ReportVisualPlanSegment
 from models.task import PublicationTask
 from models.zsxq_sync import ZsxqAttachment, ZsxqTopic
 from services import doubao_browser_tts, gemini_browser
@@ -33,7 +35,7 @@ from services.report_audio_workflow import (
     structured_result_quality_issue,
 )
 from services.report_visual_scheme import visual_scheme
-from services.runtime_guard import maybe_guarded_apply_async
+from services.runtime_guard import apply_async_after_db_release, maybe_guarded_apply_async
 from services.bilibili_publish import (
     bilibili_upload_child_payload,
     bilibili_upload_children,
@@ -148,7 +150,7 @@ VISUAL_VIDEO_RENDER_FEATURE = "report_stick_figure_video_render"
 SCRIPT_MATERIAL_FEATURE_NAME = "report_script_material_workflow"
 MATERIAL_STATUS_FEATURES = (SCRIPT_MATERIAL_FEATURE_NAME, FEATURE_NAME, "report_audio_workflow")
 VERTICAL_VIDEO_SCHEME_DEFAULT = "scheme1"
-VERTICAL_VIDEO_SCHEMES = {"scheme1", "scheme2"}
+VERTICAL_VIDEO_SCHEMES = {"scheme1", "scheme2", "scheme3"}
 VERTICAL_PREVIEW_SECONDS_DEFAULT = 10
 TTS_PROVIDER_DEFAULT = "doubao_browser"
 TTS_PROVIDERS = {"doubao_browser", "doubao_api"}
@@ -178,6 +180,7 @@ OWNED_TASK_REFERENCE_COLUMNS = (
     PublicationTask.report_audio_wav_path,
     PublicationTask.report_audio_video_path,
     PublicationTask.report_audio_cover_path,
+    PublicationTask.report_audio_landscape_keyframe_path,
     PublicationTask.report_audio_vertical_cover_path,
     PublicationTask.report_audio_podcast_cover_path,
     PublicationTask.report_audio_bilibili_cover_path,
@@ -487,6 +490,12 @@ def create_job(current_user):
     review_prompt = (data.get("review_prompt") or DEFAULT_REVIEW_PROMPT).strip()
     followups = _parse_followups(data)
     video_options = _parse_video_options(data)
+    if len(video_options.get("vertical_video_schemes") or []) > 2:
+        return jsonify({"success": False, "message": "竖屏方案一次最多选择两个"}), 400
+    try:
+        visual_scheme_keys = _parse_visual_scheme_keys(data)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
     script_material_only = _parse_script_material_only(data)
     manual_gemini = _parse_manual_gemini_result(data)
     tts_provider = str(data.get("tts_provider") or TTS_PROVIDER_DEFAULT).strip().lower()
@@ -543,6 +552,7 @@ def create_job(current_user):
                 "script_material_only": script_material_only,
                 "tts_provider": tts_provider,
                 "tts_voice": tts_voice if tts_provider == "doubao_api" else None,
+                "visual_scheme_keys": visual_scheme_keys,
                 "video": video_options,
                 "pdf": None,
                 "pdf_path": None,
@@ -580,7 +590,12 @@ def create_job(current_user):
     db.session.commit()
 
     try:
-        celery_task = process_report_audio_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+        celery_task = apply_async_after_db_release(
+            process_report_audio_workflow_job,
+            args=[task.id],
+            queue=QUEUE_NAME,
+            retry=False,
+        )
     except Exception as exc:
         task.status = "failed"
         task.current_step = "failed"
@@ -614,16 +629,14 @@ def _query_jobs_page(query, *, page, per_page, include_detail):
         return items, pagination.total, pagination.pages
 
     offset = (page - 1) * per_page
-    total = int(
+    total_query = (
         query.order_by(None)
         .with_entities(func.count(PublicationTask.id))
-        .scalar()
-        or 0
+        .scalar_subquery()
     )
-    rows = []
-    if offset < total:
-        rows = (
-            ordered.with_entities(
+    rows = (
+        ordered.with_entities(
+                total_query.label("total_count"),
                 PublicationTask.id.label("id"),
                 PublicationTask.status.label("status"),
                 PublicationTask.current_step.label("current_step"),
@@ -655,11 +668,22 @@ def _query_jobs_page(query, *, page, per_page, include_detail):
                 PublicationTask.report_audio_video_message.label("video_message"),
                 PublicationTask.report_audio_video_path.label("video_path"),
                 PublicationTask.report_audio_cover_path.label("cover_path"),
-            )
-            .offset(offset)
-            .limit(per_page)
-            .all()
         )
+        .offset(offset)
+        .limit(per_page)
+        .all()
+    )
+    if rows:
+        total = int(rows[0].total_count or 0)
+    elif offset:
+        total = int(
+            query.order_by(None)
+            .with_entities(func.count(PublicationTask.id))
+            .scalar()
+            or 0
+        )
+    else:
+        total = 0
     child_summaries = _child_summaries_for_parent_ids([row.id for row in rows])
     items = [_job_summary_payload(row, child_summaries.get(row.id)) for row in rows]
     pages = ((total + per_page - 1) // per_page) if total else 0
@@ -1041,24 +1065,36 @@ def download_cover(current_user, job_id):
 def download_keyframe(current_user, job_id, key):
     safe_key = re.sub(r"[^a-zA-Z0-9_-]", "", str(key or ""))[:80]
 
-    def resolve_keyframe(task):
-        video = (task.result or {}).get("video") or {}
-        keyframes = video.get("keyframes") if isinstance(video.get("keyframes"), dict) else {}
-        artifact = keyframes.get(safe_key) if isinstance(keyframes.get(safe_key), dict) else {}
-        return artifact.get("path")
+    loader, resolver = _keyframe_media_accessors(safe_key)
 
     task, path = _cached_owned_media_path(
         current_user,
         job_id,
         f"keyframe:{safe_key}",
-        _get_owned_keyframe_task,
-        resolve_keyframe,
+        loader,
+        resolver,
     )
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
     if not path or not os.path.exists(path):
         return jsonify({"success": False, "message": "关键帧文件不存在"}), 404
     return _send_previewable_file(path, "image/jpeg", f"{task.id}-{safe_key}.jpg")
+
+
+def _keyframe_media_accessors(safe_key):
+    if safe_key == "landscape_cover":
+        return (
+            _get_owned_media_task,
+            lambda task: task.report_audio_landscape_keyframe_path,
+        )
+
+    def resolve_legacy_keyframe(task):
+        video = (task.result or {}).get("video") or {}
+        keyframes = video.get("keyframes") if isinstance(video.get("keyframes"), dict) else {}
+        artifact = keyframes.get(safe_key) if isinstance(keyframes.get(safe_key), dict) else {}
+        return artifact.get("path")
+
+    return _get_owned_keyframe_task, resolve_legacy_keyframe
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/bilibili-upload", methods=["POST"])
@@ -1563,6 +1599,8 @@ def generate_vertical_video(current_user, job_id):
             _task_vertical_video_scheme(task),
         )
     )
+    if len(schemes) > 2:
+        return jsonify({"success": False, "message": "竖屏方案一次最多选择两个"}), 400
     scheme = _primary_vertical_video_scheme(schemes) if schemes else _normalize_vertical_video_scheme(_task_vertical_video_scheme(task))
     preview_seconds = _bounded_int(
         data.get("preview_seconds") or data.get("duration_seconds") or 0,
@@ -1572,6 +1610,33 @@ def generate_vertical_video(current_user, job_id):
     )
     force = _truthy(data.get("force"), False)
     include_landscape = _truthy(data.get("include_landscape"), False)
+    visual_workflow_id = str(data.get("visual_workflow_id") or "").strip()
+    visual_video_path = None
+    visual_scene_timeline = None
+    if "scheme3" in schemes:
+        if not visual_workflow_id:
+            visual_workflow_id = _ready_linked_visual_workflow_id(
+                current_user,
+                task,
+                str(data.get("visual_scheme_key") or "stick_figure"),
+            )
+        if not visual_workflow_id:
+            return jsonify({
+                "success": False,
+                "message": "方案三未找到同一 PDF 且正文图片完整的视觉方案",
+            }), 400
+        visual_scene_timeline = _linked_visual_scene_timeline(
+            current_user,
+            task,
+            visual_workflow_id,
+            audio_seconds=float((((task.result if isinstance(task.result, dict) else {}).get("audio") or {}).get("seconds")) or 0),
+        )
+        visual_video_path = _linked_visual_video_path(current_user, task, visual_workflow_id)
+        if not visual_scene_timeline and not visual_video_path:
+            return jsonify({
+                "success": False,
+                "message": "方案三所选视觉方案的正文分镜图片尚未全部完成，或不属于同一 PDF",
+            }), 400
     if not include_landscape and not schemes:
         return jsonify({"success": False, "message": "请至少选择一个成片版本"}), 400
     if include_landscape and preview_seconds > 0:
@@ -1607,6 +1672,9 @@ def generate_vertical_video(current_user, job_id):
             schemes=schemes,
             preview_seconds=preview_seconds,
             include_landscape=include_landscape,
+            visual_workflow_id=visual_workflow_id,
+            visual_video_path=visual_video_path,
+            visual_scene_timeline=visual_scene_timeline,
         )
     except ValueError as exc:
         return jsonify({"success": False, "message": str(exc)}), 400
@@ -1686,17 +1754,63 @@ def retry_job(current_user, job_id):
         payload = _job_payload(task)
         return jsonify({"success": False, "message": "任务已完成，无需续跑", **payload, "data": payload}), 400
 
+    retry_options = request.get_json(silent=True) if has_request_context() else {}
+    retry_options = retry_options if isinstance(retry_options, dict) else {}
+    requested_tts_provider = str(retry_options.get("tts_provider") or "").strip().lower()
+    requested_tts_voice = str(retry_options.get("tts_voice") or TTS_VOICE_DEFAULT).strip()
+    if requested_tts_provider and requested_tts_provider not in TTS_PROVIDERS:
+        return jsonify({"success": False, "message": "tts_provider 仅支持 doubao_browser 或 doubao_api"}), 400
+    if requested_tts_provider == "doubao_api":
+        if requested_tts_voice not in TTS_VOICES:
+            return jsonify({"success": False, "message": "不支持所选豆包 API 音色"}), 400
+        if not is_doubao_api_configured():
+            return jsonify({"success": False, "message": "豆包 API TTS 未配置，请设置 DOUBAO_TTS_API_KEY"}), 400
+    elif requested_tts_provider == "doubao_browser" and not doubao_browser_tts.status_payload().get("configured"):
+        return jsonify({"success": False, "message": "豆包浏览器朗读未配置"}), 400
+
     result = dict(task.result or {})
     retry_requested_at = datetime.utcnow().isoformat() + "Z"
     logs = list(result.get("logs") or [])
+    provider_changed = False
+    previous_tts_provider = ""
+    if requested_tts_provider:
+        params = deepcopy(task.params) if isinstance(task.params, dict) else {}
+        workflow_key = (
+            FEATURE_NAME
+            if isinstance(params.get(FEATURE_NAME), dict)
+            else "report_audio_workflow"
+        )
+        workflow = dict(params.get(workflow_key) or {})
+        previous_tts_provider = str(workflow.get("tts_provider") or TTS_PROVIDER_DEFAULT).strip().lower()
+        provider_changed = previous_tts_provider != requested_tts_provider or (
+            requested_tts_provider == "doubao_api"
+            and str(workflow.get("tts_voice") or "") != requested_tts_voice
+        )
+        workflow["tts_provider"] = requested_tts_provider
+        workflow["tts_voice"] = requested_tts_voice if requested_tts_provider == "doubao_api" else None
+        params[workflow_key] = workflow
+        task.params = params
+        flag_modified(task, "params")
     logs.append({
         "step": "retry_requested",
-        "message": "用户请求从失败处续跑编排",
+        "message": (
+            f"用户将 TTS 从 {previous_tts_provider or '原方案'} 切换为 {requested_tts_provider} 后续跑"
+            if provider_changed
+            else "用户请求从失败处续跑编排"
+        ),
         "progress": task.progress or 0,
         "updated_at": retry_requested_at,
     })
     result["logs"] = logs[-120:]
     result["retry_requested_at"] = retry_requested_at
+    if requested_tts_provider:
+        result["retry_tts_override"] = {
+            "previous_provider": previous_tts_provider or None,
+            "provider": requested_tts_provider,
+            "voice": requested_tts_voice if requested_tts_provider == "doubao_api" else None,
+            "changed": provider_changed,
+            "updated_at": retry_requested_at,
+        }
     result["error"] = None
     result.pop("error_type", None)
     result.pop("completed_at", None)
@@ -1923,6 +2037,12 @@ def _normalize_vertical_video_scheme(value):
         "workbench": "scheme2",
         "thumbnail_workbench": "scheme2",
         "thumbnail-workbench": "scheme2",
+        "3": "scheme3",
+        "方案三": "scheme3",
+        "visual_frame": "scheme3",
+        "visual-frame": "scheme3",
+        "video_bg": "scheme3",
+        "video-bg": "scheme3",
     }
     normalized = aliases.get(text, text)
     return normalized if normalized in VERTICAL_VIDEO_SCHEMES else VERTICAL_VIDEO_SCHEME_DEFAULT
@@ -1955,13 +2075,16 @@ def _normalize_vertical_video_schemes(value, fallback=None):
 
 def _primary_vertical_video_scheme(schemes):
     normalized = _normalize_vertical_video_schemes(schemes, VERTICAL_VIDEO_SCHEME_DEFAULT)
+    if "scheme3" in normalized:
+        return "scheme3"
     if "scheme1" in normalized and "scheme2" in normalized:
         return "scheme2"
     return normalized[0]
 
 
 def _vertical_video_scheme_label(scheme):
-    return "方案二" if _normalize_vertical_video_scheme(scheme) == "scheme2" else "方案一"
+    normalized = _normalize_vertical_video_scheme(scheme)
+    return {"scheme1": "方案一", "scheme2": "方案二", "scheme3": "方案三"}[normalized]
 
 
 def _task_vertical_video_scheme(task):
@@ -2221,7 +2344,16 @@ def _generate_vertical_background_for_task(task, *, scheme=None, title, subtitle
     }
     timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
     filename = f"vertical_background_{scheme}_{task_id[:8]}_{timestamp}.jpg"
-    if scheme == "scheme2":
+    if scheme == "scheme3":
+        background_path = thumbnail_service.generate_workbench_video_background(
+            main_title=title,
+            sub_title=subtitle,
+            output_filename=filename,
+            institution=_workbench_institution(structured, pdf, video_options),
+            emotion="bull",
+            footer_text=str(video_options.get("vertical_footer_text") or "听见资本").strip() or "听见资本",
+        )
+    elif scheme == "scheme2":
         background_path = thumbnail_service.generate_workbench_vertical_thumbnail(
             main_title=title,
             sub_title=subtitle,
@@ -2262,6 +2394,8 @@ def _generate_vertical_background_for_task(task, *, scheme=None, title, subtitle
         "path": background_path,
         "label": label,
         "ratio": "9:16",
+        "width": 1080,
+        "height": 1920,
         "bytes": os.path.getsize(background_path),
         "title": title,
         "subtitle": subtitle,
@@ -2308,6 +2442,8 @@ def _generate_vertical_background_for_task(task, *, scheme=None, title, subtitle
         "scheme": scheme,
         "label": label,
         "ratio": "9:16",
+        "width": 1080,
+        "height": 1920,
     }
 
 
@@ -2459,7 +2595,17 @@ def _generate_bilibili_cover_for_task(task, *, title=None, subtitle=None):
     }
 
 
-def _create_vertical_video_backfill_task(parent, *, scheme=None, schemes=None, preview_seconds=0, include_landscape=False):
+def _create_vertical_video_backfill_task(
+    parent,
+    *,
+    scheme=None,
+    schemes=None,
+    preview_seconds=0,
+    include_landscape=False,
+    visual_workflow_id=None,
+    visual_video_path=None,
+    visual_scene_timeline=None,
+):
     result = parent.result if isinstance(parent.result, dict) else {}
     params = parent.params if isinstance(parent.params, dict) else {}
     payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
@@ -2512,7 +2658,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, schemes=None, p
     vertical_subtitle_position = (
         video_options.get("vertical_subtitle_position")
         if isinstance(video_options.get("vertical_subtitle_position"), dict)
-        else ({"y_pct": 0.80} if scheme == "scheme2" else None)
+        else ({"y_pct": 0.80} if scheme in {"scheme2", "scheme3"} else None)
     )
     vertical_subtitle_style = (
         video_options.get("vertical_subtitle_style")
@@ -2530,7 +2676,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, schemes=None, p
                 "font_size": 50,
                 "wrap_style": 0,
             }
-            if scheme == "scheme2"
+            if scheme in {"scheme2", "scheme3"}
             else None
         )
     )
@@ -2545,6 +2691,7 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, schemes=None, p
         "preview_seconds": preview_seconds,
         "is_preview": preview_seconds > 0,
         "include_landscape": bool(include_landscape),
+        **({"visual_workflow_id": str(visual_workflow_id)} if visual_workflow_id else {}),
     }
     task_params = {
         "feature": "publisher",
@@ -2578,6 +2725,8 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, schemes=None, p
             "image_path": existing_vertical_background or screenshot_path,
             "subtitles": [],
             "scheme": scheme,
+            **({"visual_scene_timeline": visual_scene_timeline} if scheme == "scheme3" and visual_scene_timeline else {}),
+            **({"visual_video_path": visual_video_path} if scheme == "scheme3" and visual_video_path else {}),
             "preview_seconds": preview_seconds,
             **({"subtitle_position": vertical_subtitle_position} if vertical_subtitle_position else {}),
             **({"subtitle_style": vertical_subtitle_style} if vertical_subtitle_style else {}),
@@ -2585,6 +2734,8 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, schemes=None, p
         "vertical_video_2": {
             "enabled": bool(secondary_scheme),
             "scheme": secondary_scheme,
+            **({"visual_scene_timeline": visual_scene_timeline} if secondary_scheme == "scheme3" and visual_scene_timeline else {}),
+            **({"visual_video_path": visual_video_path} if secondary_scheme == "scheme3" and visual_video_path else {}),
             "asr_model": str(video_options.get("asr_model") or "base"),
             "image_path": screenshot_path,
             "screenshot_path": screenshot_path,
@@ -2704,7 +2855,12 @@ def _create_vertical_video_backfill_task(parent, *, scheme=None, schemes=None, p
     db.session.commit()
 
     try:
-        async_result = run_publication_pipeline.apply_async(args=[child_id], queue="render", retry=False)
+        async_result = apply_async_after_db_release(
+            run_publication_pipeline,
+            args=[child_id],
+            queue="render",
+            retry=False,
+        )
     except Exception:
         child = db.session.get(PublicationTask, child_id)
         if child:
@@ -3146,11 +3302,9 @@ def _report_bilibili_cover_path(task, video_key, requested_key=""):
         path = cover_map.get(requested_key)
         return (path, requested_key) if _path_exists(path) else (None, requested_key)
 
-    candidates = (
-        ["bilibili_cover", "vertical_cover", "podcast_cover", "cover"]
-        if video_key == "vertical"
-        else ["cover", "bilibili_cover", "vertical_cover", "podcast_cover"]
-    )
+    # Bilibili derives both 4:3 and 16:9 displays from one uploaded cover.
+    # Prefer the dedicated dual-ratio-safe artifact for every video variant.
+    candidates = ["bilibili_cover", "cover", "vertical_cover", "podcast_cover"]
     for key in candidates:
         path = cover_map.get(key)
         if _path_exists(path):
@@ -3229,6 +3383,20 @@ def _cover_title_with_institution(task, title):
         institution = "机构"
 
     normalized = _normalize_cover_text(title, 160)
+    has_generic_prefix = bool(re.match(r"^\s*(?:机构|机构研报|深度研报)\s*[:：]", normalized))
+    explicit_full_alias = next(
+        (
+            alias for alias, label in BANK_ALIASES
+            if label == institution
+            and alias != institution
+            and alias != "盛博"
+            and re.match(rf"^\s*{re.escape(alias)}\s*[:：]", normalized, flags=re.I)
+        ),
+        None,
+    )
+    if explicit_full_alias and not has_generic_prefix:
+        return normalized
+
     prefixes = [institution, "机构", "机构研报"]
     prefixes.extend(alias for alias, label in BANK_ALIASES if label == institution)
     prefix_pattern = "|".join(re.escape(item) for item in sorted({item for item in prefixes if item}, key=len, reverse=True))
@@ -3462,6 +3630,144 @@ def _job_payload(task, include_raw=False, *, visual_videos=None):
     return payload
 
 
+def _build_scheme3_scene_timeline(rows, audio_seconds):
+    """Build a complete scene timeline, falling back to script-weighted timing."""
+    try:
+        audio_seconds = float(audio_seconds or 0)
+    except (TypeError, ValueError):
+        audio_seconds = 0
+    if audio_seconds < 0.1:
+        return None
+
+    scenes = []
+    for row in sorted(rows or [], key=lambda item: int(getattr(item, "sequence", 0) or 0)):
+        sequence = int(getattr(row, "sequence", 0) or 0)
+        if sequence < 1:
+            continue
+        image_path = str(getattr(row, "image_path", None) or "").strip()
+        if (
+            str(getattr(row, "image_status", "") or "").lower() != "completed"
+            or not _path_exists(image_path)
+        ):
+            return None
+        scenes.append({
+            "asset_id": str(getattr(row, "asset_id", None) or getattr(row, "id", None) or ""),
+            "sequence": sequence,
+            "image_path": str(Path(image_path).resolve()),
+            "script_text": str(getattr(row, "script_text", None) or "").strip(),
+            "stored_start": getattr(row, "timeline_start_seconds", None),
+            "stored_end": getattr(row, "timeline_end_seconds", None),
+        })
+    if not scenes:
+        return None
+
+    stored_timeline = []
+    previous_end = 0.0
+    stored_valid = True
+    for scene in scenes:
+        try:
+            start = float(scene["stored_start"])
+            end = float(scene["stored_end"])
+        except (TypeError, ValueError):
+            stored_valid = False
+            break
+        if end - start < 0.1 or abs(start - previous_end) > 0.25:
+            stored_valid = False
+            break
+        stored_timeline.append((start, end))
+        previous_end = end
+    if stored_valid and abs(previous_end - audio_seconds) <= 0.5:
+        for scene, (start, end) in zip(scenes, stored_timeline):
+            scene["start_seconds"] = round(start, 6)
+            scene["end_seconds"] = round(end, 6)
+            scene["duration_seconds"] = round(end - start, 6)
+        timing_source = "aligned_timeline"
+    else:
+        weights = []
+        for scene in scenes:
+            compact_chars = len(re.sub(r"\s+", "", scene.get("script_text") or ""))
+            weights.append(max(1.0, float(compact_chars)))
+        total_weight = sum(weights)
+        cursor = 0.0
+        for index, (scene, weight) in enumerate(zip(scenes, weights)):
+            end = audio_seconds if index == len(scenes) - 1 else audio_seconds * sum(weights[:index + 1]) / total_weight
+            scene["start_seconds"] = round(cursor, 6)
+            scene["end_seconds"] = round(end, 6)
+            scene["duration_seconds"] = round(end - cursor, 6)
+            cursor = end
+        timing_source = "script_weight"
+
+    for scene in scenes:
+        scene.pop("script_text", None)
+        scene.pop("stored_start", None)
+        scene.pop("stored_end", None)
+    return {
+        "version": 1,
+        "timing_source": timing_source,
+        "audio_seconds": round(audio_seconds, 6),
+        "scene_count": len(scenes),
+        "scenes": scenes,
+    }
+
+
+def _linked_visual_scene_timeline(current_user, audio_task, workflow_id, *, audio_seconds):
+    """Resolve same-PDF completed scene images without requiring an intermediate MP4."""
+    workflow_id = str(workflow_id or "").strip()
+    if not workflow_id:
+        return None
+    attachment_id = str(
+        getattr(audio_task, "report_audio_pdf_attachment_id", None) or ""
+    ).strip()
+    filename = str(getattr(audio_task, "report_audio_pdf_filename", None) or "").strip()
+    try:
+        pdf_bytes = int(getattr(audio_task, "report_audio_pdf_bytes", None) or 0)
+    except (TypeError, ValueError):
+        pdf_bytes = 0
+    if not attachment_id and (not filename or pdf_bytes <= 0):
+        return None
+
+    parent_query = (
+        db.session.query(PublicationTask.id)
+        .filter(
+            PublicationTask.id == workflow_id,
+            PublicationTask.feature == VISUAL_VIDEO_WORKFLOW_FEATURE,
+            PublicationTask.user_id.in_(_visible_user_ids(current_user)),
+        )
+    )
+    if attachment_id:
+        parent_query = parent_query.filter(PublicationTask.report_audio_pdf_attachment_id == attachment_id)
+    else:
+        parent_query = parent_query.filter(
+            PublicationTask.report_audio_pdf_filename == filename,
+            PublicationTask.report_audio_pdf_bytes == pdf_bytes,
+        )
+    if not parent_query.one_or_none():
+        return None
+
+    rows = (
+        db.session.query(
+            ReportStickFigureSceneAsset.id.label("asset_id"),
+            ReportStickFigureSceneAsset.sequence,
+            ReportStickFigureSceneAsset.image_status,
+            ReportStickFigureSceneAsset.image_path,
+            ReportStickFigureSceneAsset.timeline_start_seconds,
+            ReportStickFigureSceneAsset.timeline_end_seconds,
+            ReportVisualPlanSegment.script_text,
+        )
+        .join(
+            ReportVisualPlanSegment,
+            ReportVisualPlanSegment.id == ReportStickFigureSceneAsset.segment_id,
+        )
+        .filter(
+            ReportStickFigureSceneAsset.workflow_task_id == workflow_id,
+            ReportStickFigureSceneAsset.sequence >= 1,
+        )
+        .order_by(ReportStickFigureSceneAsset.sequence.asc())
+        .all()
+    )
+    return _build_scheme3_scene_timeline(rows, audio_seconds)
+
+
 def _linked_visual_video_path(current_user, audio_task, workflow_id):
     """Resolve one same-PDF visual video without trusting a client file path."""
     workflow_id = str(workflow_id or "").strip()
@@ -3569,6 +3875,39 @@ def _linked_visual_video_payloads(current_user, audio_task):
         return []
 
     workflow_ids = [str(row.id) for row in parents]
+    scene_rows = (
+        db.session.query(
+            ReportStickFigureSceneAsset.workflow_task_id,
+            ReportStickFigureSceneAsset.sequence,
+            ReportStickFigureSceneAsset.image_status,
+            ReportStickFigureSceneAsset.image_path,
+        )
+        .filter(
+            ReportStickFigureSceneAsset.workflow_task_id.in_(workflow_ids),
+            ReportStickFigureSceneAsset.sequence >= 1,
+        )
+        .all()
+    )
+    scene_summaries = {}
+    for row in scene_rows:
+        summary = scene_summaries.setdefault(str(row.workflow_task_id), {
+            "body_total": 0,
+            "images_completed": 0,
+            "direct_render_ready": True,
+        })
+        summary["body_total"] += 1
+        image_ready = (
+            str(row.image_status or "").lower() == "completed"
+            and _path_exists(row.image_path)
+        )
+        if image_ready:
+            summary["images_completed"] += 1
+        else:
+            summary["direct_render_ready"] = False
+    for summary in scene_summaries.values():
+        if summary["body_total"] <= 0:
+            summary["direct_render_ready"] = False
+
     child_rows = (
         db.session.query(
             PublicationTask.id,
@@ -3602,12 +3941,22 @@ def _linked_visual_video_payloads(current_user, audio_task):
             or (getattr(child, "task_video_path", None) or "")
         ).strip()
         video_ready = _path_exists(video_path)
+        scene_summary = scene_summaries.get(workflow_id, {
+            "body_total": 0,
+            "images_completed": 0,
+            "direct_render_ready": False,
+        })
         state_row = child or parent
         status = "succeeded" if video_ready else STATUS_MAP.get(
             str(state_row.status or ""),
             str(state_row.status or "queued"),
         )
         if not video_ready and not child and status == "queued":
+            status = "ready"
+        if not video_ready and not child and scene_summary["direct_render_ready"]:
+            # Scene-image tasks finish independently from the visual parent.
+            # Treat the live asset projection as authoritative even when an
+            # older parent row still says images_queued/65%.
             status = "ready"
         scheme_key = str(parent.report_visual_scheme_key or "stick_figure")
         try:
@@ -3623,9 +3972,19 @@ def _linked_visual_video_payloads(current_user, audio_task):
             "workflow_job_id": workflow_id,
             "visual_scheme": scheme_payload,
             "status": status,
-            "step": "done" if video_ready else str(state_row.current_step or status),
-            "progress": 100 if video_ready else max(0, min(100, int(state_row.progress or 0))),
-            "error": None if video_ready else state_row.error_message,
+            "step": (
+                "done" if video_ready
+                else ("images_done" if scene_summary["direct_render_ready"] else str(state_row.current_step or status))
+            ),
+            "progress": (
+                100 if video_ready
+                else (
+                    max(75, min(99, int(state_row.progress or 0)))
+                    if scene_summary["direct_render_ready"]
+                    else max(0, min(100, int(state_row.progress or 0)))
+                )
+            ),
+            "error": None if video_ready or scene_summary["direct_render_ready"] else state_row.error_message,
             "source": "report_audio" if (
                 str(parent.source_feature or "") == FEATURE_NAME
                 and str(parent.source_task_id or "") == audio_task_id
@@ -3643,6 +4002,8 @@ def _linked_visual_video_payloads(current_user, audio_task):
                 "/report-stick-figure-video-workflow-detail.html"
                 f"?workflow_job_id={workflow_id}"
             ),
+            "scheme3_ready": bool(video_ready or scene_summary["direct_render_ready"]),
+            "scene_assets": scene_summary,
             "video": {
                 "url": (
                     "/api/report-stick-figure-video-workflows/jobs/"
@@ -3652,6 +4013,18 @@ def _linked_visual_video_payloads(current_user, audio_task):
             } if video_ready else None,
         })
     return result
+
+
+def _ready_linked_visual_workflow_id(current_user, audio_task, visual_scheme_key):
+    """Resolve readiness from live same-PDF scene assets, not client cache."""
+    requested_key = str(visual_scheme_key or "stick_figure").strip().lower()
+    for item in _linked_visual_video_payloads(current_user, audio_task):
+        scheme = item.get("visual_scheme") if isinstance(item.get("visual_scheme"), dict) else {}
+        if str(scheme.get("key") or "").strip().lower() != requested_key:
+            continue
+        if item.get("scheme3_ready") is True:
+            return str(item.get("workflow_job_id") or "").strip()
+    return ""
 
 
 def _job_status_payload(task):
@@ -4322,6 +4695,41 @@ def _parse_video_options(data):
     }
 
 
+def _parse_visual_scheme_keys(data):
+    raw = data.get("visual_scheme_keys")
+    if raw is None:
+        raw = data.get("visual_schemes")
+    if raw is None:
+        items = []
+        if _truthy(data.get("stick_figure_enabled"), False):
+            items.append("stick_figure")
+        if _truthy(data.get("doraemon_enabled"), False):
+            items.append("doraemon")
+    elif isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, str):
+        value = raw.strip()
+        if not value:
+            items = []
+        else:
+            try:
+                parsed = json.loads(value)
+                items = parsed if isinstance(parsed, list) else [parsed]
+            except (TypeError, ValueError):
+                items = [part.strip() for part in value.split(",")]
+    else:
+        items = [raw]
+
+    normalized = []
+    for item in items:
+        key = str(item or "").strip().lower()
+        if not key or key in normalized:
+            continue
+        scheme = visual_scheme(key)
+        normalized.append(scheme.key)
+    return normalized
+
+
 def _normalize_video_render_mode(value):
     text = str(value or "").strip().lower()
     if text in {"keyframe", "keyframes", "frames", "preview_keyframes"}:
@@ -4463,8 +4871,20 @@ def _validate_pdf_asset_id(asset_id):
 
 
 def _pdf_meta_from_zsxq_attachment(asset_id, job_id):
-    attachment = ZsxqAttachment.query.get(str(asset_id))
-    if not attachment:
+    attachment = (
+        db.session.query(
+            ZsxqAttachment.id,
+            ZsxqAttachment.group_id,
+            ZsxqAttachment.tab_id,
+            ZsxqAttachment.topic_id,
+            ZsxqAttachment.name,
+            ZsxqAttachment.local_path,
+            ZsxqAttachment.download_status,
+        )
+        .filter(ZsxqAttachment.id == str(asset_id))
+        .one_or_none()
+    )
+    if attachment is None:
         raise ValueError("选择的同步 PDF 不存在")
     if attachment.download_status != "downloaded":
         raise ValueError("选择的同步 PDF 还没有下载完成")
@@ -4478,11 +4898,15 @@ def _pdf_meta_from_zsxq_attachment(asset_id, job_id):
     if size > _max_pdf_bytes():
         raise ValueError(f"PDF 超过 {_max_pdf_mb()}MB 限制")
 
-    topic = ZsxqTopic.query.filter_by(
-        group_id=attachment.group_id,
-        tab_id=attachment.tab_id,
-        topic_id=attachment.topic_id,
-    ).first()
+    topic = (
+        db.session.query(ZsxqTopic.title, ZsxqTopic.tab_label)
+        .filter(
+            ZsxqTopic.group_id == attachment.group_id,
+            ZsxqTopic.tab_id == attachment.tab_id,
+            ZsxqTopic.topic_id == attachment.topic_id,
+        )
+        .one_or_none()
+    )
     return {
         "filename": attachment.name or path.name,
         "path": str(path),

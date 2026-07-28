@@ -8,6 +8,7 @@ from datetime import datetime
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
@@ -21,6 +22,7 @@ from models.external_document import ExternalDocument, ZsxqTopicExternalDocument
 from models.task import PublicationTask
 from models.zsxq_sync import ZsxqTopic
 from services import platform_credential_service as credential_service
+from services.runtime_guard import apply_async_after_db_release, release_db_session_quietly
 
 
 logger = logging.getLogger(__name__)
@@ -189,6 +191,19 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(_normalize_text(text).encode("utf-8")).hexdigest()
 
 
+def _document_remote_snapshot(document: ExternalDocument) -> SimpleNamespace:
+    """Materialize all fields needed after the DB session is released."""
+
+    return SimpleNamespace(
+        id=str(document.id),
+        provider=str(document.provider or ""),
+        canonical_url=str(document.canonical_url or ""),
+        title=document.title,
+        content_text=document.content_text or "",
+        content_hash=document.content_hash,
+    )
+
+
 def _validate_feishu_document_response(*, title: str, content_text: str) -> None:
     """Reject Feishu application shells that return HTTP 200 without a document."""
     normalized_content = _normalize_text(content_text)
@@ -222,15 +237,30 @@ class ExternalDocumentService:
         if not links:
             return []
 
+        links_by_hash = {
+            link["url_hash"]: link
+            for link in links
+        }
+        links = list(links_by_hash.values())
+        url_hashes = tuple(links_by_hash)
+        documents = self._upsert_document_shells(links)
+        relations = {
+            relation.url_hash: relation
+            for relation in (
+                ZsxqTopicExternalDocument.query
+                .filter(
+                    ZsxqTopicExternalDocument.group_id == topic.group_id,
+                    ZsxqTopicExternalDocument.tab_id == topic.tab_id,
+                    ZsxqTopicExternalDocument.topic_id == topic.topic_id,
+                    ZsxqTopicExternalDocument.url_hash.in_(url_hashes),
+                )
+                .all()
+            )
+        }
         created: List[ZsxqTopicExternalDocument] = []
         for link in links:
-            document = self._upsert_document_shell(link)
-            relation = ZsxqTopicExternalDocument.query.filter_by(
-                group_id=topic.group_id,
-                tab_id=topic.tab_id,
-                topic_id=topic.topic_id,
-                url_hash=link["url_hash"],
-            ).first()
+            document = documents[link["url_hash"]]
+            relation = relations.get(link["url_hash"])
             if not relation:
                 relation = ZsxqTopicExternalDocument(
                     group_id=topic.group_id,
@@ -550,20 +580,26 @@ class ExternalDocumentService:
         if document.provider not in {"feishu", "zsxq", "wechat"}:
             raise ExternalDocumentError(f"暂不支持抓取 {document.provider}")
 
+        remote_document = _document_remote_snapshot(document)
+        credential = {}
+        if remote_document.provider == "feishu":
+            credential = _resolve_feishu_cookie(account_id=credential_id, required=True)
         document.fetch_status = "fetching"
         document.fetch_error = None
         db.session.commit()
+        release_db_session_quietly()
 
-        credential = {}
         try:
-            if document.provider == "feishu":
-                credential = _resolve_feishu_cookie(account_id=credential_id, required=True)
-                fetched = self._fetch_feishu_document(document, credential["cookie"])
-            elif document.provider == "zsxq":
-                fetched = self._fetch_zsxq_document(document, credential_id=credential_id)
+            if remote_document.provider == "feishu":
+                fetched = self._fetch_feishu_document(remote_document, credential["cookie"])
+            elif remote_document.provider == "zsxq":
+                fetched = self._fetch_zsxq_document(remote_document, credential_id=credential_id)
                 credential = fetched.pop("credential", {})
             else:
-                fetched = self._fetch_wechat_document(document)
+                fetched = self._fetch_wechat_document(remote_document)
+            document = ExternalDocument.query.get(remote_document.id)
+            if not document:
+                raise ExternalDocumentError("外链文档在抓取期间已被删除")
             now = datetime.utcnow()
             document.title = fetched.get("title") or document.title
             document.author_name = fetched.get("author_name") or document.author_name
@@ -585,7 +621,7 @@ class ExternalDocumentService:
             return document
         except Exception as exc:
             db.session.rollback()
-            document = ExternalDocument.query.get(document_id)
+            document = ExternalDocument.query.get(remote_document.id)
             if document:
                 document.fetch_status = "failed"
                 document.fetch_error = str(exc)[:2000]
@@ -601,25 +637,30 @@ class ExternalDocumentService:
         if not document.content_text:
             raise ExternalDocumentError("关联内容正文尚未抓取，无法总结")
 
+        remote_document = _document_remote_snapshot(document)
         document.summary_status = "summarizing"
         document.summary_error = None
         db.session.commit()
+        release_db_session_quietly()
         try:
-            summary = self._deepseek_summary(document)
+            summary = self._deepseek_summary(remote_document)
+            document = ExternalDocument.query.get(remote_document.id)
+            if not document:
+                raise ExternalDocumentError("外链文档在总结期间已被删除")
             document.summary_text = summary
             document.summary_model = _summary_model()
             document.summary_status = "completed"
             document.summary_error = None
             document.summarized_at = datetime.utcnow()
             raw_payload = dict(document.raw_payload or {})
-            raw_payload["summarized_content_hash"] = document.content_hash
+            raw_payload["summarized_content_hash"] = remote_document.content_hash
             document.raw_payload = raw_payload
             flag_modified(document, "raw_payload")
             db.session.commit()
             return document
         except Exception as exc:
             db.session.rollback()
-            document = ExternalDocument.query.get(document_id)
+            document = ExternalDocument.query.get(remote_document.id)
             if document:
                 document.summary_status = "failed"
                 document.summary_error = str(exc)[:2000]
@@ -675,27 +716,42 @@ class ExternalDocumentService:
         )
         db.session.add(task)
         db.session.flush()
-        try:
-            celery_task = process_doubao_browser_tts_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
-            task.celery_task_id = celery_task.id
-        except Exception as exc:
-            task.status = "failed"
-            task.current_step = "failed"
-            task.error_message = f"任务入队失败: {exc}"
-            task.completed_at = datetime.utcnow()
-            document.tts_status = "failed"
-            document.tts_error = task.error_message
-            db.session.commit()
-            raise ExternalDocumentError(task.error_message) from exc
-
-        document.tts_task_id = task.id
+        task_id = str(task.id)
+        document_id = str(document.id)
+        document.tts_task_id = task_id
         document.tts_status = "queued"
         document.tts_error = None
         document.tts_audio_path = None
         document.tts_submitted_at = datetime.utcnow()
         document.tts_completed_at = None
         db.session.commit()
-        return document
+        try:
+            celery_task = apply_async_after_db_release(
+                process_doubao_browser_tts_job,
+                args=[task_id],
+                queue=QUEUE_NAME,
+                retry=False,
+            )
+        except Exception as exc:
+            error_message = f"任务入队失败: {exc}"
+            PublicationTask.query.filter(PublicationTask.id == task_id).update({
+                PublicationTask.status: "failed",
+                PublicationTask.current_step: "failed",
+                PublicationTask.error_message: error_message,
+                PublicationTask.completed_at: datetime.utcnow(),
+            }, synchronize_session=False)
+            ExternalDocument.query.filter(ExternalDocument.id == document_id).update({
+                ExternalDocument.tts_status: "failed",
+                ExternalDocument.tts_error: error_message,
+            }, synchronize_session=False)
+            db.session.commit()
+            raise ExternalDocumentError(error_message) from exc
+
+        PublicationTask.query.filter(PublicationTask.id == task_id).update({
+            PublicationTask.celery_task_id: celery_task.id,
+        }, synchronize_session=False)
+        db.session.commit()
+        return ExternalDocument.query.get(document_id)
 
     def backfill(
         self,
@@ -757,32 +813,68 @@ class ExternalDocumentService:
         result["documents"] = processed
         return result
 
-    def _upsert_document_shell(self, link: Dict[str, str]) -> ExternalDocument:
-        document = ExternalDocument.query.filter_by(url_hash=link["url_hash"]).first()
-        if not document:
-            initial_payload = {}
-            if link["provider"] == "zsxq":
-                initial_payload["target_topic_id"] = topic_id_for_zsxq_url(link["canonical_url"])
-            document = ExternalDocument(
-                provider=link["provider"],
-                document_type=link.get("document_type"),
-                source_url=link["source_url"],
-                canonical_url=link["canonical_url"],
-                url_hash=link["url_hash"],
-                fetch_status="registered" if link["provider"] == "generic_web" else "pending",
-                summary_status="pending",
-                tts_status="not_submitted",
-                raw_payload=initial_payload,
+    def _upsert_document_shells(
+        self,
+        links: Iterable[Dict[str, str]],
+    ) -> Dict[str, ExternalDocument]:
+        links_by_hash = {
+            link["url_hash"]: link
+            for link in links
+        }
+        url_hashes = tuple(links_by_hash)
+        documents = {
+            document.url_hash: document
+            for document in (
+                ExternalDocument.query
+                .options(load_only(
+                    ExternalDocument.id,
+                    ExternalDocument.provider,
+                    ExternalDocument.document_type,
+                    ExternalDocument.source_url,
+                    ExternalDocument.canonical_url,
+                    ExternalDocument.url_hash,
+                ))
+                .filter(ExternalDocument.url_hash.in_(url_hashes))
+                .all()
             )
-            db.session.add(document)
+        }
+        new_documents = []
+        for hash_value, link in links_by_hash.items():
+            document = documents.get(hash_value)
+            if not document:
+                initial_payload = {}
+                if link["provider"] == "zsxq":
+                    initial_payload["target_topic_id"] = topic_id_for_zsxq_url(link["canonical_url"])
+                document = ExternalDocument(
+                    provider=link["provider"],
+                    document_type=link.get("document_type"),
+                    source_url=link["source_url"],
+                    canonical_url=link["canonical_url"],
+                    url_hash=link["url_hash"],
+                    fetch_status="registered" if link["provider"] == "generic_web" else "pending",
+                    summary_status="pending",
+                    tts_status="not_submitted",
+                    raw_payload=initial_payload,
+                )
+                db.session.add(document)
+                documents[hash_value] = document
+                new_documents.append(document)
+                continue
+            values = {
+                "provider": link["provider"],
+                "document_type": link.get("document_type") or document.document_type,
+                "source_url": link["source_url"] or document.source_url,
+                "canonical_url": link["canonical_url"] or document.canonical_url,
+            }
+            for field, value in values.items():
+                if getattr(document, field) != value:
+                    setattr(document, field, value)
+        if new_documents:
             db.session.flush()
-            return document
-        document.provider = link["provider"]
-        document.document_type = link.get("document_type") or document.document_type
-        document.source_url = link["source_url"] or document.source_url
-        document.canonical_url = link["canonical_url"] or document.canonical_url
-        document.updated_at = datetime.utcnow()
-        return document
+        return documents
+
+    def _upsert_document_shell(self, link: Dict[str, str]) -> ExternalDocument:
+        return self._upsert_document_shells((link,))[link["url_hash"]]
 
     def _documents_by_id(self, document_ids: Iterable[str]) -> Dict[str, ExternalDocument]:
         ids = [item for item in set(document_ids or []) if item]
@@ -892,6 +984,7 @@ class ExternalDocumentService:
         if not cookie:
             credential = credential_service.resolve_zsxq_cookie(account_id=credential_id, required=True)
             cookie = credential["cookie"]
+        release_db_session_quietly()
         response = zsxq_service.get_topic(cookie, target_topic_id)
         topic_payload = _zsxq_topic_payload(response)
         if not topic_payload:

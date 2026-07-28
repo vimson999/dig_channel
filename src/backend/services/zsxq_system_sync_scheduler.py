@@ -24,13 +24,19 @@ LOCK_TTL_SECONDS = 8
 
 def start_scheduler(cookie_override=None):
     status = config_status()
-    if not status.get("exists"):
+    try:
+        from services.zsxq_all_tabs_auto_sync_service import all_tabs_auto_sync_enabled
+
+        all_tabs_enabled = all_tabs_auto_sync_enabled()
+    except Exception:
+        all_tabs_enabled = False
+    if not status.get("exists") and not all_tabs_enabled:
         return {
             "started": False,
             "running": False,
             "message": "未找到系统计划配置，请先保存系统计划配置。",
         }
-    if status.get("group_validation_error"):
+    if status.get("group_validation_error") and not all_tabs_enabled:
         return {
             "started": False,
             "running": False,
@@ -106,7 +112,11 @@ def start_scheduler(cookie_override=None):
     return {
         "started": True,
         "running": True,
-        "message": "计划任务已启动，当前使用 DB 平台凭据。" if has_db_cookie else (
+        "message": (
+            "计划任务已启动；生财有术/洪灝全部 Tab 将每 3 小时同步。"
+            if all_tabs_enabled
+            else "计划任务已启动，当前使用 DB 平台凭据。"
+        ) if has_db_cookie else (
             "计划任务已启动，按配置每隔一定间隔执行。" if not has_cookie_override else "计划任务已启动，当前使用页面里选择的 Cookie。"
         ),
         "scheduler": scheduler_status(),
@@ -352,6 +362,16 @@ def scheduler_status():
     if not cookie_source and isinstance(pid_info, dict):
         cookie_source = pid_info.get("cookie_source")
 
+    try:
+        from services.zsxq_all_tabs_auto_sync_service import all_tabs_auto_sync_status
+
+        all_tabs_status = all_tabs_auto_sync_status()
+    except Exception as exc:
+        all_tabs_status = {
+            "enabled": None,
+            "error": str(exc),
+        }
+
     return {
         "exists": bool(running or config.get("exists")),
         "running": running,
@@ -369,6 +389,7 @@ def scheduler_status():
         "testing_complete": config.get("testing_complete"),
         "continuous": config.get("continuous"),
         "max_rounds": config.get("max_rounds"),
+        "all_tabs_auto_sync": all_tabs_status,
         "message": "运行中" if running else "未运行",
     }
 
@@ -425,6 +446,19 @@ def _safe_unlink(path):
 
 def _is_pid_running(pid):
     try:
+        import psutil
+    except ImportError:
+        psutil = None
+    if psutil is not None:
+        try:
+            process = psutil.Process(int(pid))
+            if process.status() == psutil.STATUS_ZOMBIE:
+                return False
+        except (psutil.NoSuchProcess, psutil.ZombieProcess, ValueError, TypeError):
+            return False
+        except psutil.AccessDenied:
+            pass
+    try:
         os.kill(pid, 0)
     except PermissionError:
         return True
@@ -442,6 +476,11 @@ def _discover_scheduler_process():
 
         for process in psutil.process_iter(["pid", "cmdline", "create_time"]):
             info = process.info or {}
+            try:
+                if process.status() == psutil.STATUS_ZOMBIE:
+                    continue
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
             cmdline = info.get("cmdline") or []
             if not cmdline:
                 continue

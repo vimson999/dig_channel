@@ -49,7 +49,20 @@ class ZsxqService:
             except json.JSONDecodeError as exc:
                 raise ValueError("Cookie JSON 格式不正确") from exc
 
-            items = parsed if isinstance(parsed, list) else [parsed]
+            if isinstance(parsed, dict) and not (
+                parsed.get("name") and parsed.get("value") is not None
+            ):
+                nested = parsed.get("cookies")
+                if isinstance(nested, list):
+                    items = nested
+                else:
+                    items = [
+                        {"name": key, "value": value}
+                        for key, value in parsed.items()
+                        if isinstance(value, (str, int, float))
+                    ]
+            else:
+                items = parsed if isinstance(parsed, list) else [parsed]
             pairs = []
             for item in items:
                 if not isinstance(item, dict):

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from flask import Flask
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import load_only
@@ -25,6 +25,7 @@ from models.zsxq_sync import (  # noqa: E402
     ZsxqSyncRun,
     ZsxqSyncRunDownload,
     ZsxqTopic,
+    ZsxqTopicComment,
 )
 from services.zsxq_sync_service import TOPIC_UPDATE_SNAPSHOT_FIELDS, ZsxqSyncService  # noqa: E402
 
@@ -78,6 +79,71 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         )
         db.session.add(attachment)
         return attachment
+
+    @staticmethod
+    def _comment_topic(text="内容未变化"):
+        return {
+            "topic_id": "topic-comment-1",
+            "show_comments": [{
+                "comment_id": "comment-1",
+                "owner": {"user_id": "user-1", "name": "测试用户"},
+                "text": text,
+                "create_time": "2026-07-24T12:00:00+08:00",
+                "likes_count": 3,
+                "replies_count": 0,
+                "rewards_count": 0,
+                "sticky": False,
+            }],
+        }
+
+    def test_unchanged_topic_comment_does_not_issue_update(self):
+        service = ZsxqSyncService()
+        tab = {"id": "tab-1", "label": "外资研报"}
+        service._upsert_topic_comments("group-1", tab, self._comment_topic())
+        db.session.commit()
+        db.session.remove()
+
+        with self._capture_sql() as statements:
+            stats = service._upsert_topic_comments(
+                "group-1",
+                tab,
+                self._comment_topic(),
+            )
+            db.session.flush()
+
+        updates = [
+            sql for sql in statements
+            if sql.startswith("update zsxq_topic_comments set")
+        ]
+        self.assertEqual(0, stats["comments_updated"])
+        self.assertEqual([], updates)
+        record = ZsxqTopicComment.query.filter_by(comment_id="comment-1").one()
+        self.assertIsNotNone(record.raw_payload_hash)
+
+    def test_changed_topic_comment_updates_payload_and_hash_once(self):
+        service = ZsxqSyncService()
+        tab = {"id": "tab-1", "label": "外资研报"}
+        service._upsert_topic_comments("group-1", tab, self._comment_topic())
+        db.session.commit()
+        db.session.remove()
+
+        with self._capture_sql() as statements:
+            stats = service._upsert_topic_comments(
+                "group-1",
+                tab,
+                self._comment_topic("内容发生变化"),
+            )
+            db.session.flush()
+
+        updates = [
+            sql for sql in statements
+            if sql.startswith("update zsxq_topic_comments set")
+        ]
+        self.assertEqual(1, stats["comments_updated"])
+        self.assertEqual(1, len(updates), updates)
+        self.assertIn("raw_payload", updates[0])
+        self.assertIn("raw_payload_hash", updates[0])
+        self.assertIn("text=", updates[0])
 
     def test_postgres_schema_contract_uses_one_compact_catalog_query(self):
         service = ZsxqSyncService()
@@ -173,6 +239,58 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         self.assertLess(identity_offset, first_commit_offset)
         self.assertGreater(dispatch_offset, first_commit_offset)
 
+    def test_remote_io_and_waits_release_database_transaction_first(self):
+        boundaries = (
+            (
+                ZsxqSyncService._get_topics_with_retry,
+                'end_db_transaction_before_external_io("ZSXQ topic-list request")',
+                "zsxq_service.get_topics(",
+            ),
+            (
+                ZsxqSyncService._hydrate_truncated_topic_comments,
+                'end_db_transaction_before_external_io("ZSXQ comment hydration")',
+                "zsxq_service.get_topic_comments(",
+            ),
+            (
+                ZsxqSyncService._download_attachment_file,
+                'end_db_transaction_before_external_io("ZSXQ attachment download")',
+                "zsxq_service.fetch_topic_file(",
+            ),
+            (
+                ZsxqSyncService._human_pause,
+                'end_db_transaction_before_external_io("ZSXQ pacing wait")',
+                "time.sleep(",
+            ),
+        )
+
+        for method, boundary, external_io in boundaries:
+            with self.subTest(method=method.__name__):
+                source = python_inspect.getsource(method)
+                self.assertIn(boundary, source)
+                self.assertLess(source.index(boundary), source.index(external_io))
+
+    def test_page_snapshot_transaction_ends_before_topic_processing(self):
+        source = python_inspect.getsource(ZsxqSyncService._sync_one_tab)
+        refresh_offset = source.index(
+            "self._refresh_existing_attachment_snapshots_for_page("
+        )
+        commit_offset = source.index("db.session.commit()", refresh_offset)
+        topic_loop_offset = source.index("for topic in topics:", commit_offset)
+
+        self.assertLess(refresh_offset, commit_offset)
+        self.assertLess(commit_offset, topic_loop_offset)
+
+    def test_pacing_wait_ends_live_read_transaction_before_sleep(self):
+        service = ZsxqSyncService()
+        db.session.execute(text("SELECT 1"))
+        self.assertTrue(db.session().in_transaction())
+
+        with patch("services.zsxq_sync_service.time.sleep") as sleep:
+            service._human_pause(0, 0)
+
+        self.assertFalse(db.session().in_transaction())
+        sleep.assert_called_once_with(0.0)
+
     def test_embedded_publish_source_refs_skip_clean_task_payload_query(self):
         service = ZsxqSyncService()
         snapshot = SimpleNamespace(
@@ -218,6 +336,61 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
             context["source_refs"][0]["output_paths"],
             [str(Path("/tmp/clean/report.pdf").resolve())],
         )
+
+    def test_publish_attachment_status_loads_all_source_refs_in_one_query(self):
+        for index in range(9):
+            attachment = self._add_downloaded_attachment(
+                f"publish-attachment-{index}",
+                f"publish-topic-{index}",
+                Path(self.temp_dir.name) / f"publish-{index}.pdf",
+            )
+            attachment.name = f"publish-{index}.pdf"
+        db.session.commit()
+        db.session.remove()
+
+        source_refs = [
+            {
+                "attachment_id": f"publish-attachment-{index}",
+                "group_id": "group-1",
+                "tab_id": "tab-1",
+                "topic_id": f"publish-topic-{index}",
+                "name": f"publish-{index}.pdf",
+            }
+            for index in range(9)
+        ]
+        context = {
+            "status": {
+                "publish_status": "submitted",
+                "publish_task_id": "publish-task-1",
+                "publish_source_task_id": "clean-task-1",
+                "publish_submitted_count": 9,
+            },
+            "outcomes": {"by_path": {}, "by_name": {}},
+            "source_refs": source_refs,
+        }
+
+        service = ZsxqSyncService()
+        with patch.object(
+            service,
+            "_status_for_source_ref",
+            return_value=context["status"],
+        ):
+            with self._capture_sql() as statements:
+                result = service._apply_publish_context_to_attachments(context)
+                db.session.commit()
+
+        attachment_selects = [
+            sql for sql in statements
+            if sql.startswith("select") and " from zsxq_attachments " in sql
+        ]
+        attachment_updates = [
+            sql for sql in statements
+            if sql.startswith("update zsxq_attachments ")
+        ]
+        self.assertEqual({"updated": 9, "matched": 9}, result)
+        self.assertEqual(1, len(attachment_selects), attachment_selects)
+        self.assertNotIn("raw_payload", attachment_selects[0])
+        self.assertEqual(1, len(attachment_updates), attachment_updates)
 
     def test_reusable_downloads_never_read_raw_payload_or_refresh_rows_after_commit(self):
         for index in range(2):
@@ -665,7 +838,7 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         self.assertEqual(2, refreshed_count)
         self.assertEqual(1, len(attachment_updates), attachment_updates)
 
-    def test_existing_topics_are_loaded_once_per_page_as_detached_snapshots(self):
+    def test_existing_topics_are_loaded_once_per_page_as_lightweight_snapshots(self):
         for index in range(2):
             db.session.add(ZsxqTopic(
                 id=f"topic-row-{index}",
@@ -688,15 +861,18 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
                 [{"topic_id": "topic-0"}, {"topic_id": "topic-1"}],
             )
             db.session.commit()
-            titles = [snapshots[f"topic-{index}"]["title"] for index in range(2)]
 
-        self.assertEqual(titles, ["标题 0", "标题 1"])
+        self.assertEqual(set(snapshots), {"topic-0", "topic-1"})
         topic_selects = [
             sql for sql in statements
             if sql.startswith("select") and " from zsxq_topics " in sql
         ]
         self.assertEqual(len(topic_selects), 1, topic_selects)
-        self.assertNotIn("raw_payload", topic_selects[0])
+        self.assertNotIn("zsxq_topics.raw_payload as", topic_selects[0])
+        self.assertNotIn("zsxq_topics.content as", topic_selects[0])
+        self.assertNotIn("zsxq_topics.question_text as", topic_selects[0])
+        self.assertNotIn("zsxq_topics.answer_text as", topic_selects[0])
+        self.assertNotIn("zsxq_topics.article_excerpt as", topic_selects[0])
 
     def test_topic_snapshot_survives_attachment_commits_without_full_row_refresh(self):
         db.session.add(
@@ -750,6 +926,170 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
             any(sql.startswith("select") and " from zsxq_topics " in sql for sql in statements),
             statements,
         )
+
+    def test_unchanged_topic_payload_skips_json_rewrite(self):
+        payload = {
+            "topic_id": "topic-unchanged",
+            "talk": {
+                "text": "内容不变",
+                "create_time": "2026-07-22T10:00:00+08:00",
+                "owner": {"name": "作者"},
+            },
+        }
+        service = ZsxqSyncService()
+        meta = service._topic_meta(payload)
+        db.session.add(ZsxqTopic(
+            id="topic-row-unchanged",
+            group_id="group-1",
+            group_name="前沿信息收录",
+            tab_id="tab-1",
+            tab_label="外资研报",
+            topic_id="topic-unchanged",
+            title=meta["title"],
+            author_name=meta["author_name"],
+            content=meta["content"],
+            create_time=meta["create_time"],
+            raw_json_path="data/raw/topic-unchanged.json",
+            raw_payload=payload,
+            last_sync_run_id="run-1",
+        ))
+        db.session.commit()
+
+        snapshots = service._load_existing_topic_snapshots(
+            "group-1",
+            "tab-1",
+            [payload],
+        )
+        with patch.object(service, "_write_topic_json") as write_json:
+            with self._capture_sql() as statements:
+                changed, _topic = service._update_existing_topic(
+                    None,
+                    payload,
+                    {"id": "tab-1", "label": "外资研报"},
+                    SimpleNamespace(id="run-2"),
+                    previous=snapshots["topic-unchanged"],
+                )
+                db.session.flush()
+
+        updates = [
+            sql for sql in statements
+            if sql.startswith("update zsxq_topics set")
+        ]
+        self.assertFalse(changed)
+        write_json.assert_not_called()
+        self.assertEqual(1, len(updates), updates)
+        self.assertNotIn("raw_payload", updates[0])
+        self.assertNotIn("content=", updates[0])
+        self.assertIn("last_sync_run_id", updates[0])
+
+    def test_changed_topic_payload_keeps_full_json_and_projection(self):
+        original = {
+            "topic_id": "topic-changed",
+            "talk": {"text": "旧内容", "owner": {"name": "作者"}},
+        }
+        db.session.add(ZsxqTopic(
+            id="topic-row-changed",
+            group_id="group-1",
+            group_name="前沿信息收录",
+            tab_id="tab-1",
+            tab_label="外资研报",
+            topic_id="topic-changed",
+            raw_json_path="data/raw/topic-changed.json",
+            raw_payload=original,
+            last_sync_run_id="run-1",
+        ))
+        db.session.commit()
+        service = ZsxqSyncService()
+        snapshots = service._load_existing_topic_snapshots(
+            "group-1",
+            "tab-1",
+            [original],
+        )
+        changed_payload = {
+            "topic_id": "topic-changed",
+            "talk": {"text": "新内容", "owner": {"name": "作者"}},
+        }
+
+        with patch.object(
+            service,
+            "_write_topic_json",
+            return_value="data/raw/topic-changed.json",
+        ) as write_json:
+            with self._capture_sql() as statements:
+                changed, _topic = service._update_existing_topic(
+                    None,
+                    changed_payload,
+                    {"id": "tab-1", "label": "外资研报"},
+                    SimpleNamespace(id="run-2"),
+                    previous=snapshots["topic-changed"],
+                )
+                db.session.flush()
+
+        updates = [
+            sql for sql in statements
+            if sql.startswith("update zsxq_topics set")
+        ]
+        self.assertTrue(changed)
+        write_json.assert_called_once()
+        self.assertEqual(1, len(updates), updates)
+        self.assertIn("raw_payload", updates[0])
+        self.assertIn("raw_payload_hash", updates[0])
+        self.assertIn("content=", updates[0])
+
+    def test_legacy_topic_schema_omits_payload_hash_from_select_and_update(self):
+        payload = {
+            "topic_id": "topic-legacy-schema",
+            "talk": {"text": "兼容旧表", "owner": {"name": "作者"}},
+        }
+        db.session.add(ZsxqTopic(
+            id="topic-row-legacy-schema",
+            group_id="group-1",
+            group_name="前沿信息收录",
+            tab_id="tab-1",
+            tab_label="外资研报",
+            topic_id="topic-legacy-schema",
+            raw_json_path="data/raw/topic-legacy-schema.json",
+            raw_payload=payload,
+            last_sync_run_id="run-1",
+        ))
+        db.session.commit()
+        service = ZsxqSyncService()
+
+        with self._capture_sql() as statements:
+            snapshots = service._load_existing_topic_snapshots(
+                "group-1",
+                "tab-1",
+                [payload],
+                payload_hash_column_available=False,
+            )
+        topic_selects = [
+            sql for sql in statements
+            if sql.startswith("select") and " from zsxq_topics " in sql
+        ]
+        self.assertEqual(1, len(topic_selects), topic_selects)
+        self.assertNotIn("raw_payload_hash", topic_selects[0])
+
+        with patch.object(
+            service,
+            "_write_topic_json",
+            return_value="data/raw/topic-legacy-schema.json",
+        ):
+            with self._capture_sql() as statements:
+                changed, _topic = service._update_existing_topic(
+                    None,
+                    payload,
+                    {"id": "tab-1", "label": "外资研报"},
+                    SimpleNamespace(id="run-2"),
+                    previous=snapshots["topic-legacy-schema"],
+                    payload_hash_column_available=False,
+                )
+                db.session.flush()
+
+        updates = [sql for sql in statements if sql.startswith("update zsxq_topics set")]
+        self.assertTrue(changed)
+        self.assertEqual(1, len(updates), updates)
+        self.assertNotIn("raw_payload_hash", updates[0])
+        self.assertIn("raw_payload", updates[0])
 
     def test_progress_heartbeat_throttles_result_json_but_keeps_structured_columns_current(self):
         run = ZsxqSyncRun(

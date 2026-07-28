@@ -35,6 +35,7 @@ from services.report_video_auto_service import (
     load_auto_scan_config_from_dict,
 )
 from services.report_video_asset_service import create_zsxq_report_asset_batch
+from services.runtime_guard import apply_async_after_db_release
 
 
 logger = logging.getLogger(__name__)
@@ -1505,7 +1506,11 @@ def scan_report_video_folder_task(self, config_override=None, dry_run=False, tri
                     trigger=trigger,
                 )
                 db.session.commit()
-                celery_task = auto_process_report_task.apply_async(args=[report.id], queue="report_video")
+                celery_task = apply_async_after_db_release(
+                    auto_process_report_task,
+                    args=[report.id],
+                    queue="report_video",
+                )
                 created.append({"task_id": task.id, "report_id": report.id, "file_name": report.file_name})
                 queued.append({"task_id": task.id, "report_id": report.id, "celery_id": celery_task.id})
             except Exception as exc:

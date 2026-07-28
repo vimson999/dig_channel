@@ -115,7 +115,17 @@ class RuntimeInitializationIdempotencyTest(unittest.TestCase):
             middleware.init_app(app)
             middleware.init_app(app)
 
-        self.assertEqual(event_listen.call_count, 3)
+        self.assertEqual(event_listen.call_count, 5)
+        self.assertEqual(
+            {event_name for event_name, _callback in registered},
+            {
+                "before_cursor_execute",
+                "after_cursor_execute",
+                "handle_error",
+                "checkout",
+                "checkin",
+            },
+        )
 
     def test_database_error_diagnostic_tolerates_invalidated_connection_info(self):
         from middleware import database_logger as module

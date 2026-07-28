@@ -141,7 +141,23 @@ def seasons_payload(credential_id):
         dedeuserid=auth.get("dedeuserid"),
     )
 
-    async def _fetch():
+    def _creator_seasons():
+        seasons = []
+        for item in uploader.creator_seasons():
+            meta = item.get("season") if isinstance(item.get("season"), dict) else item
+            season_id = meta.get("id") or meta.get("season_id")
+            title = meta.get("title") or meta.get("name")
+            if not season_id or not title:
+                continue
+            seasons.append({
+                "id": str(season_id),
+                "title": str(title),
+                "name": str(meta.get("name") or title),
+                "episode_count": int(meta.get("ep_num") or 0),
+            })
+        return seasons
+
+    async def _public_seasons():
         uid = int(auth.get("dedeuserid") or 0)
         if not uid:
             info = await user.get_self_info(uploader.credential)
@@ -163,7 +179,12 @@ def seasons_payload(credential_id):
             })
         return seasons
 
-    return asyncio.run(_fetch())
+    try:
+        return _creator_seasons()
+    except Exception:
+        # Compatibility fallback for accounts or older Bilibili deployments
+        # where the creator-center endpoint is temporarily unavailable.
+        return asyncio.run(_public_seasons())
 
 
 def charging_pay_from_payload(data):

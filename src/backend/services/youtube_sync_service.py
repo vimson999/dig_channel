@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional
 from utils.youtube_api import YouTubeAPI, YouTubeAPIError
 from models import db, Channel, ChannelData
 from .channel_service import ChannelService
+from .runtime_guard import release_db_session_quietly
 
 class YouTubeSyncService:
     """YouTube数据同步服务类"""
@@ -124,38 +125,44 @@ class YouTubeSyncService:
                     'message': 'YouTube API未初始化'
                 }
             
-            # 获取频道信息
-            channel = Channel.query.get(db_channel_id)
-            if not channel:
+            # 第一阶段仅读取远端请求所需字段，随后释放数据库连接。
+            channel_row = (
+                db.session.query(Channel.id, Channel.channel_id, Channel.is_active)
+                .filter(Channel.id == db_channel_id)
+                .one_or_none()
+            )
+            if not channel_row:
                 return {
                     'success': False,
                     'message': '频道不存在'
                 }
             
-            if not channel.is_active:
+            if not channel_row.is_active:
                 return {
                     'success': False,
                     'message': '频道已停用'
                 }
+            youtube_channel_id = channel_row.channel_id
+            release_db_session_quietly()
             
             # 设置目标日期
             if not target_date:
                 target_date = date.today()
             
-            # 检查当日数据是否已存在
-            existing_data = ChannelData.query.filter_by(
-                channel_id=db_channel_id,
-                date=target_date
-            ).first()
-            
-            # 获取YouTube统计数据
-            stats = self.youtube_api.get_channel_statistics(channel.channel_id)
+            # 第二阶段在数据库事务外请求 YouTube。
+            stats = self.youtube_api.get_channel_statistics(youtube_channel_id)
             if not stats:
                 return {
                     'success': False,
                     'message': '无法获取频道统计数据'
                 }
-            
+
+            # 第三阶段重新加载数据并在短事务内写入结果。
+            existing_data = ChannelData.query.filter_by(
+                channel_id=db_channel_id,
+                date=target_date
+            ).first()
+
             # 获取最近的一条数据用于计算变化量（不限于前一天）
             previous_data = ChannelData.query.filter(
                 ChannelData.channel_id == db_channel_id,
@@ -170,13 +177,15 @@ class YouTubeSyncService:
                 existing_data.total_views = stats['view_count']
                 existing_data.video_count = stats['video_count']
                 existing_data.calculate_changes(previous_data)
-                
+
+                db.session.flush()
+                response_data = existing_data.to_dict()
                 db.session.commit()
                 
                 return {
                     'success': True,
                     'message': '频道数据更新成功',
-                    'data': existing_data.to_dict()
+                    'data': response_data
                 }
             else:
                 # 创建新数据记录
@@ -192,12 +201,14 @@ class YouTubeSyncService:
                 new_data.calculate_changes(previous_data)
                 
                 db.session.add(new_data)
+                db.session.flush()
+                response_data = new_data.to_dict()
                 db.session.commit()
                 
                 return {
                     'success': True,
                     'message': '频道数据同步成功',
-                    'data': new_data.to_dict()
+                    'data': response_data
                 }
                 
         except Exception as e:

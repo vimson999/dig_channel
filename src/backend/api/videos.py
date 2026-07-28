@@ -1,6 +1,5 @@
 # 视频管理API
 from flask import Blueprint, request, jsonify
-from flask_cors import cross_origin
 from datetime import datetime, timedelta
 import logging
 
@@ -16,7 +15,6 @@ logger = setup_colored_logger("VIDEO_API")
 videos_bp = Blueprint('videos', __name__, url_prefix='/api/v1/videos')
 
 @videos_bp.route('', methods=['GET'])
-@cross_origin()
 @require_login
 def get_videos(current_user):
     """获取视频列表"""
@@ -106,7 +104,6 @@ def get_videos(current_user):
         return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/search', methods=['GET'])
-@cross_origin()
 @require_login
 def search_videos(current_user):
     """搜索视频"""
@@ -173,7 +170,6 @@ def search_videos(current_user):
         return handle_api_error(500, f"搜索视频失败: {str(e)}")
 
 @videos_bp.route('/<int:video_id>', methods=['GET'])
-@cross_origin()
 def get_video_detail(video_id):
     """获取视频详情"""
     try:
@@ -206,7 +202,6 @@ def get_video_detail(video_id):
         return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/sync', methods=['POST'])
-@cross_origin()
 @require_login
 def sync_videos(current_user):
     """同步所有频道的视频（优化版本）"""
@@ -268,7 +263,6 @@ def sync_videos(current_user):
         return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/sync/<int:channel_id>', methods=['POST'])
-@cross_origin()
 def sync_channel_videos(channel_id):
     """同步单个频道的视频"""
     try:
@@ -314,7 +308,6 @@ def sync_channel_videos(channel_id):
         return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/categories', methods=['GET'])
-@cross_origin()
 def get_video_categories():
     """获取视频分类统计"""
     try:
@@ -339,7 +332,6 @@ def get_video_categories():
         return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/stats', methods=['GET'])
-@cross_origin()
 def get_videos_stats():
     """获取视频统计信息"""
     try:
@@ -364,7 +356,6 @@ def get_videos_stats():
         return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/clean-shorts', methods=['POST'])
-@cross_origin()
 def clean_short_videos():
     """清理数据库中的短视频记录"""
     try:
@@ -389,7 +380,6 @@ def clean_short_videos():
         return handle_api_error(500, f"操作失败: {str(e)}")
 
 @videos_bp.route('/channels', methods=['GET'])
-@cross_origin()
 def get_channels_with_video_count():
     """获取频道列表及其视频数量"""
     try:

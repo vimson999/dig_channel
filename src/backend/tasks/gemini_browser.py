@@ -15,6 +15,7 @@ from services.gemini_browser import (
     GeminiBrowserWorker,
     storage_path_for_job,
 )
+from services.runtime_guard import release_db_session_quietly
 
 
 logger = logging.getLogger("REPORT_PDF_GEMINI_TASK")
@@ -121,6 +122,7 @@ def _process_job(task_id):
     flag_modified(task, "result")
     db.session.commit()
     db.session.expunge_all()
+    release_db_session_quietly()
     progress_result = result
 
     def update_progress(event):

@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 import uuid
+from difflib import SequenceMatcher
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,6 +30,8 @@ def storyboard_prompt(material: Dict[str, Any]) -> str:
         raise ValueError("基础文案为空，无法生成分镜")
     return (
         "请按照这个 Gem 已配置的规则，把下面这篇完整口播文案逐段转换为分镜画面提示词。"
+        "本阶段只允许输出分镜文字和 AI 提示词，严禁调用任何图片生成、绘图或图片编辑工具，"
+        "不得在回复中生成、插入或展示图片；图片将由下游独立任务生成。"
         "在正文分镜之前，必须先单独输出一个‘标题镜头’，标题镜头只表现研报标题，"
         "并且必须包含一条可直接用于生成图片的完整提示词；不得省略标题镜头。"
         "必须覆盖原文全部内容，保持原文顺序，不得省略、概括或改写原文。"
@@ -39,12 +42,75 @@ def storyboard_prompt(material: Dict[str, Any]) -> str:
     )
 
 
+def storyboard_response_covers_script(material: Dict[str, Any], gemini_text: str) -> bool:
+    """Check exact ordered coverage before allowing Gemini browser to close."""
+    script = _script_from_material(material)
+    if not script:
+        return False
+    response_text = str(gemini_text or "")
+    # The text-only storyboard Gem emits this marker only after it has finished
+    # the title scene and all正文 scenes. Continuing after the marker causes the
+    # Gem to repeat the full storyboard and makes normalization less reliable.
+    if "【全文分镜完成】" in response_text:
+        parsed = _parse_labeled_gemini_storyboard(response_text)
+        if (
+            parsed
+            and str(parsed.get("title_scene", {}).get("visual_prompt") or "").strip()
+            and parsed.get("segments")
+        ):
+            return True
+    fragments = re.findall(
+        r"【文案原句】\s*[:：]\s*(.*?)(?=【(?:画面动作|视觉隐喻|AI\s*提示词)】|分镜\s*\d+|$)",
+        response_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not fragments:
+        return False
+    expected = re.sub(r"\s+", "", script)
+    actual = re.sub(r"\s+", "", "".join(fragment.strip() for fragment in fragments))
+    # The title scene may legitimately expose ``标题：...`` as a labeled source
+    # fragment, and Gemini can repeat the previous tail when continuing a long
+    # answer. Stop browser continuations once the authoritative script is either
+    # exact or nearly complete in one contiguous window. The normalizer below
+    # remains fail-closed and reconstructs script_text from the authoritative
+    # source, so this tolerance only prevents an unfixable one-character model
+    # rewrite (for example ``五`` -> ``5``) from causing endless browser turns.
+    if not expected:
+        return False
+    if expected in actual:
+        return True
+    anchor = expected[: min(24, len(expected))]
+    for match in re.finditer(re.escape(anchor), actual):
+        candidate = actual[match.start():match.start() + len(expected)]
+        if len(candidate) != len(expected):
+            continue
+        if SequenceMatcher(None, expected, candidate, autojunk=False).ratio() >= 0.995:
+            return True
+    return False
+
+
 def normalize_storyboard_response(material: Dict[str, Any], gemini_text: str) -> Dict[str, Any]:
     script = _script_from_material(material)
     if not script:
         raise ValueError("基础文案为空，无法梳理分镜")
     if not str(gemini_text or "").strip():
         raise ValueError("分镜 Gem 未返回内容")
+    deterministic = _parse_labeled_gemini_storyboard(str(gemini_text))
+    if deterministic:
+        deterministic = _repair_labeled_gemini_script_gaps(script, deterministic)
+        try:
+            return _build_normalized_storyboard(
+                material,
+                script,
+                str(gemini_text),
+                deterministic["title_scene"],
+                deterministic["segments"],
+                provider="deterministic_parser",
+                model="labeled_gemini_storyboard_v1",
+            )
+        except ValueError:
+            # Older or irregular Gem responses can still be repaired by DS.
+            pass
     payload = _deepseek_json(
         "你是分镜数据整理器，只输出严格 JSON。不得删减、概括、改写输入的原始口播文案。",
         f"""
@@ -78,10 +144,69 @@ def normalize_storyboard_response(material: Dict[str, Any], gemini_text: str) ->
     raw_title_scene = payload.get("title_scene") if isinstance(payload, dict) else None
     if not isinstance(raw_title_scene, dict):
         raise ValueError("DS 未返回标题镜头 title_scene")
+    raw_title_scene, raw_segments = _restore_exact_labeled_gemini_prompts(
+        deterministic,
+        raw_title_scene,
+        raw_segments,
+    )
+    return _build_normalized_storyboard(
+        material,
+        script,
+        str(gemini_text),
+        raw_title_scene,
+        raw_segments,
+        provider=payload.get("provider") or "deepseek",
+        model=payload.get("model") or _model_name(),
+    )
+
+
+def _restore_exact_labeled_gemini_prompts(
+    deterministic: Optional[Dict[str, Any]],
+    raw_title_scene: Dict[str, Any],
+    raw_segments: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Let DS repair script coverage while Gem remains the prompt authority."""
+    if not deterministic:
+        return raw_title_scene, raw_segments
+    exact_title = deterministic.get("title_scene")
+    exact_segments = deterministic.get("segments")
+    if (
+        not isinstance(exact_title, dict)
+        or not isinstance(exact_segments, list)
+        or len(exact_segments) != len(raw_segments)
+        or any(not isinstance(item, dict) for item in raw_segments)
+    ):
+        return raw_title_scene, raw_segments
+    title_prompt = str(exact_title.get("visual_prompt") or "").strip()
+    exact_prompts = [
+        str(item.get("visual_prompt") or "").strip()
+        for item in exact_segments
+        if isinstance(item, dict)
+    ]
+    if not title_prompt or len(exact_prompts) != len(raw_segments) or any(not value for value in exact_prompts):
+        return raw_title_scene, raw_segments
+    restored_title = {**raw_title_scene, "visual_prompt": title_prompt}
+    restored_segments = [
+        {**item, "visual_prompt": exact_prompts[index]}
+        for index, item in enumerate(raw_segments)
+    ]
+    return restored_title, restored_segments
+
+
+def _build_normalized_storyboard(
+    material: Dict[str, Any],
+    script: str,
+    gemini_text: str,
+    raw_title_scene: Dict[str, Any],
+    raw_segments: List[Dict[str, Any]],
+    *,
+    provider: str,
+    model: str,
+) -> Dict[str, Any]:
     title_prompt = str(raw_title_scene.get("visual_prompt") or "").strip()
     if not title_prompt:
         raise ValueError("DS 未返回标题镜头提示词")
-    exact_title_prompt, prompt_offset = _extract_exact_gemini_prompt(str(gemini_text), title_prompt)
+    exact_title_prompt, prompt_offset = _extract_exact_gemini_prompt(gemini_text, title_prompt)
     title_scene = {
         "sequence": 0,
         "scene_title": _trim(raw_title_scene.get("scene_title") or "标题镜头", 120),
@@ -89,17 +214,143 @@ def normalize_storyboard_response(material: Dict[str, Any], gemini_text: str) ->
         "visual_prompt": exact_title_prompt,
         "estimated_seconds": _safe_seconds(raw_title_scene.get("estimated_seconds")) or 3.0,
     }
-    segments = _align_storyboard_segments(script, raw_segments, str(gemini_text), prompt_offset=prompt_offset)
+    segments = _align_storyboard_segments(script, raw_segments, gemini_text, prompt_offset=prompt_offset)
     return {
         "schema_version": STORYBOARD_SCHEMA_VERSION,
         "source_script_hash": hashlib.sha256(script.encode("utf-8")).hexdigest(),
         "source_script_chars": len(script),
         "covered_script_chars": sum(len(item["script_text"]) for item in segments),
         "segment_count": len(segments) + 1,
-        "provider": payload.get("provider") or "deepseek",
-        "model": payload.get("model") or _model_name(),
+        "provider": provider,
+        "model": model,
         "title_scene": title_scene,
         "segments": segments,
+    }
+
+
+def _parse_labeled_gemini_storyboard(gemini_text: str) -> Optional[Dict[str, Any]]:
+    block_pattern = re.compile(
+        r"(?P<header>标题镜头|分镜\s*\d+(?:\s*[（(]\s*标题镜头\s*[）)])?)\s*"
+        r"【文案原句】\s*[：:]\s*(?P<script>.*?)\s*"
+        r"【画面(?:动作|观察)】\s*[：:]\s*.*?\s*"
+        r"【视觉隐喻】\s*[：:]\s*.*?\s*"
+        r"【AI\s*提示词】\s*[：:]\s*(?P<prompt>.*?)"
+        r"(?=\s*(?:(?:标题镜头|分镜\s*\d+(?:\s*[（(]\s*标题镜头\s*[）)])?)\s*【文案原句】|$))",
+        re.DOTALL,
+    )
+    matches = list(block_pattern.finditer(str(gemini_text or "")))
+    if len(matches) < 2:
+        return None
+    title_scene = None
+    segments = []
+    for match in matches:
+        header = re.sub(r"\s+", " ", match.group("header")).strip()
+        item = {
+            "scene_title": header,
+            "script_text": match.group("script").strip(),
+            "visual_prompt": match.group("prompt").strip(),
+        }
+        if header == "标题镜头" or "标题镜头" in header or re.fullmatch(r"分镜\s*0", header):
+            title_scene = item
+        else:
+            segments.append(item)
+    if not title_scene or not segments:
+        return None
+    return {"title_scene": title_scene, "segments": segments}
+
+
+def _repair_labeled_gemini_script_gaps(
+    script: str,
+    deterministic: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Fill Gem omissions from the authoritative source script without changing prompts."""
+    raw_segments = deterministic.get("segments")
+    if not isinstance(raw_segments, list) or not raw_segments:
+        return deterministic
+    compact_source, source_positions = _compact_with_positions(script)
+    cursor = 0
+    matched_ends = []
+    compact_parts = []
+    exact_alignment = True
+    for item in raw_segments:
+        if not isinstance(item, dict):
+            return deterministic
+        compact_part, _ = _compact_with_positions(item.get("script_text") or "")
+        if not compact_part:
+            return deterministic
+        compact_parts.append(compact_part)
+        match_start = compact_source.find(compact_part, cursor)
+        if match_start < 0:
+            exact_alignment = False
+            break
+        match_end = match_start + len(compact_part)
+        matched_ends.append(source_positions[match_end - 1] + 1)
+        cursor = match_end
+    if not exact_alignment:
+        # Gemini occasionally drops or rewrites a single character even when
+        # explicitly told to copy verbatim. Map the model's segment boundaries
+        # back onto the authoritative script while keeping every visual prompt
+        # untouched. Fail closed when the response is not a near-copy.
+        compact_parts = [
+            _compact_with_positions(item.get("script_text") or "")[0]
+            for item in raw_segments
+            if isinstance(item, dict)
+        ]
+        combined = "".join(compact_parts)
+        matcher = SequenceMatcher(None, compact_source, combined, autojunk=False)
+        near_copy = matcher.ratio() >= 0.985 or (
+            abs(len(compact_source) - len(combined)) <= 2
+            and matcher.ratio() >= 0.95
+        )
+        if (
+            len(compact_parts) != len(raw_segments)
+            or not combined
+            or not near_copy
+        ):
+            return deterministic
+        boundary_map: List[Optional[int]] = [None] * (len(combined) + 1)
+        for _tag, source_start, source_end, model_start, model_end in matcher.get_opcodes():
+            model_span = model_end - model_start
+            source_span = source_end - source_start
+            if model_span == 0:
+                boundary_map[model_start] = source_end
+                continue
+            for offset in range(model_span + 1):
+                boundary_map[model_start + offset] = (
+                    source_start + round(source_span * offset / model_span)
+                )
+        boundary_map[0] = 0
+        boundary_map[-1] = len(compact_source)
+        last_boundary = 0
+        for index, value in enumerate(boundary_map):
+            if value is None:
+                boundary_map[index] = last_boundary
+            else:
+                last_boundary = value
+        matched_ends = []
+        model_cursor = 0
+        for compact_part in compact_parts:
+            model_cursor += len(compact_part)
+            source_boundary = int(boundary_map[model_cursor] or 0)
+            if source_boundary <= 0:
+                return deterministic
+            matched_ends.append(
+                source_positions[source_boundary - 1] + 1
+            )
+    repaired = []
+    previous_end = 0
+    for index, item in enumerate(raw_segments):
+        current_end = len(script) if index == len(raw_segments) - 1 else matched_ends[index]
+        if current_end <= previous_end:
+            return deterministic
+        repaired.append({
+            **item,
+            "script_text": script[previous_end:current_end],
+        })
+        previous_end = current_end
+    return {
+        **deterministic,
+        "segments": repaired,
     }
 
 

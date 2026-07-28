@@ -18,5 +18,5 @@ fi
 export PYTHONPATH=$PROJECT_ROOT/src/backend
 export DATABASE_TYPE=${DATABASE_TYPE:-postgresql}
 
-cd "$PROJECT_ROOT/src/backend"
-python run_scheduler.py
+cd "$PROJECT_ROOT"
+python src/backend/run_youtube_channel_sync_scheduler.py start

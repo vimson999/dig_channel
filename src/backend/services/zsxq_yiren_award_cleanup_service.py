@@ -1,6 +1,7 @@
 """Detect Yiren award replies and backfill their local topic favorites."""
 
 from datetime import datetime, timezone
+import re
 
 from sqlalchemy.orm import load_only
 
@@ -8,8 +9,15 @@ from models import db
 from models.zsxq_sync import ZsxqTopic, ZsxqTopicComment, ZsxqTopicFavorite
 
 
+SHENGCAI_GROUP_ID = "1824528822"
 YIREN_NAME = "亦仁"
-AWARD_MARKERS = ("中标", "入选")
+YIREN_AWARD_NOTIFICATION_USER_ID = "844145551241182"
+YIREN_PERSONAL_USER_ID = "552158581144"
+TRUSTED_YIREN_USER_IDS = {
+    YIREN_AWARD_NOTIFICATION_USER_ID,
+    YIREN_PERSONAL_USER_ID,
+}
+AWARD_MARKERS = ("中标", "入选", "获选", "被选中", "选上", "收录")
 NEGATED_AWARD_MARKERS = (
     "未中标",
     "没中标",
@@ -21,6 +29,52 @@ NEGATED_AWARD_MARKERS = (
     "没有入选",
     "不入选",
     "未能入选",
+    "未获选",
+    "没获选",
+    "没有获选",
+    "未被选中",
+    "没被选中",
+    "没有被选中",
+    "还没中标",
+    "尚未中标",
+    "还没入选",
+    "尚未入选",
+)
+UNCERTAIN_OR_DISCUSSION_MARKERS = (
+    "可能中标",
+    "有望中标",
+    "希望中标",
+    "争取中标",
+    "期待中标",
+    "如果中标",
+    "是否中标",
+    "能否中标",
+    "怎么中标",
+    "如何中标",
+    "中标标准",
+    "中标规则",
+    "中标方法",
+    "中标案例",
+    "可能入选",
+    "有望入选",
+    "希望入选",
+    "争取入选",
+    "期待入选",
+    "如果入选",
+    "是否入选",
+    "能否入选",
+    "怎么入选",
+    "如何入选",
+    "入选标准",
+    "入选规则",
+    "入选名单",
+    "候选",
+    "待定",
+)
+EXPLICIT_AWARD_PATTERNS = (
+    re.compile(r"(?:已|成功|正式|确认|确定|恭喜|祝贺).{0,10}(?:中标|入选|获选|被选中|选上|收录)"),
+    re.compile(r"(?:感谢分享|这篇|此帖|该帖|这个帖子).{0,12}(?:中标|入选|获选|被选中|选上|收录)"),
+    re.compile(r"(?:中标|入选|获选|被选中|选上|收录)(?:了|啦|成功|通知)$"),
 )
 
 
@@ -28,14 +82,35 @@ def _compact_text(value):
     return "".join(str(value or "").split())
 
 
-def is_yiren_award_comment(owner_name, text):
-    """Return true only for an explicit, non-negated award reply by Yiren."""
+def is_yiren_award_comment(
+    owner_name,
+    text,
+    owner_user_id=None,
+    group_id=None,
+):
+    """Return true for a confident, non-negated Yiren award notification."""
+    if group_id not in (None, "") and str(group_id).strip() != SHENGCAI_GROUP_ID:
+        return False
     if _compact_text(owner_name) != YIREN_NAME:
         return False
-    normalized = _compact_text(text)
-    if not normalized or any(marker in normalized for marker in NEGATED_AWARD_MARKERS):
+    normalized_user_id = str(owner_user_id or "").strip()
+    if normalized_user_id and normalized_user_id not in TRUSTED_YIREN_USER_IDS:
         return False
-    return any(marker in normalized for marker in AWARD_MARKERS)
+    normalized = _compact_text(text)
+    if (
+        not normalized
+        or not any(marker in normalized for marker in AWARD_MARKERS)
+        or any(marker in normalized for marker in NEGATED_AWARD_MARKERS)
+        or any(marker in normalized for marker in UNCERTAIN_OR_DISCUSSION_MARKERS)
+    ):
+        return False
+    if normalized_user_id == YIREN_AWARD_NOTIFICATION_USER_ID:
+        return True
+    if any(pattern.search(normalized) for pattern in EXPLICIT_AWARD_PATTERNS):
+        return True
+    # Very short standalone confirmations such as “中标了” are explicit,
+    # while longer conversational uses require one of the patterns above.
+    return len(normalized) <= 8
 
 
 def _topic_titles(group_id, topic_ids):
@@ -55,13 +130,14 @@ def _topic_titles(group_id, topic_ids):
     return titles
 
 
-def cleanup_yiren_award_favorites(group_id="1824528822", since=None, dry_run=False):
+def cleanup_yiren_award_favorites(group_id=SHENGCAI_GROUP_ID, since=None, dry_run=False):
     """Add missing local favorites for topics with explicit Yiren award replies."""
     group_id = str(group_id).strip()
     query = ZsxqTopicComment.query.options(
         load_only(
             ZsxqTopicComment.comment_id,
             ZsxqTopicComment.topic_id,
+            ZsxqTopicComment.owner_user_id,
             ZsxqTopicComment.owner_name,
             ZsxqTopicComment.text,
             ZsxqTopicComment.create_time,
@@ -74,7 +150,16 @@ def cleanup_yiren_award_favorites(group_id="1824528822", since=None, dry_run=Fal
         query = query.filter(ZsxqTopicComment.create_time >= str(since))
 
     comments = query.order_by(ZsxqTopicComment.create_time.desc()).all()
-    matched = [comment for comment in comments if is_yiren_award_comment(comment.owner_name, comment.text)]
+    matched = [
+        comment
+        for comment in comments
+        if is_yiren_award_comment(
+            comment.owner_name,
+            comment.text,
+            owner_user_id=comment.owner_user_id,
+            group_id=group_id,
+        )
+    ]
     evidence_by_topic = {}
     for comment in matched:
         evidence_by_topic.setdefault(str(comment.topic_id), {

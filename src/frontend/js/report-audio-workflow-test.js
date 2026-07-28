@@ -52,6 +52,7 @@ class ReportAudioWorkflowPage {
             manualGeminiResultInput: document.getElementById('manual-gemini-result-input'),
             landscapeVideoEnabled: document.getElementById('landscape-video-enabled'),
             verticalVideoEnabled: document.getElementById('vertical-video-enabled'),
+            visualSchemeKeys: Array.from(document.querySelectorAll('input[name="visual_scheme_keys"]')),
             ttsProvider: document.getElementById('tts-provider'),
             ttsVoicePanel: document.getElementById('tts-voice-panel'),
             ttsVoice: document.getElementById('tts-voice'),
@@ -293,6 +294,9 @@ class ReportAudioWorkflowPage {
 
     normalizeVerticalScheme(value) {
         const text = String(value || '').trim().toLowerCase();
+        if (['scheme3', '3', '方案三', 'visual_frame', 'visual-frame', 'video_bg', 'video-bg'].includes(text)) {
+            return 'scheme3';
+        }
         if (['scheme2', '2', '方案二', 'workbench', 'thumbnail_workbench', 'thumbnail-workbench'].includes(text)) {
             return 'scheme2';
         }
@@ -300,7 +304,7 @@ class ReportAudioWorkflowPage {
     }
 
     verticalSchemeLabel(value) {
-        return this.normalizeVerticalScheme(value) === 'scheme2' ? '方案二' : '方案一';
+        return { scheme1: '方案一', scheme2: '方案二', scheme3: '方案三' }[this.normalizeVerticalScheme(value)];
     }
 
     selectedVerticalSchemes() {
@@ -312,6 +316,7 @@ class ReportAudioWorkflowPage {
 
     primarySelectedVerticalScheme() {
         const schemes = this.selectedVerticalSchemes();
+        if (schemes.includes('scheme3')) return 'scheme3';
         if (schemes.includes('scheme1') && schemes.includes('scheme2')) return 'scheme2';
         return schemes[0] || 'scheme1';
     }
@@ -767,11 +772,20 @@ class ReportAudioWorkflowPage {
             return;
         }
         const verticalSchemes = this.selectedVerticalSchemes();
-        if (this.els.verticalVideoEnabled.checked && !verticalSchemes.length) {
+        const verticalVideoRequested = this.els.verticalVideoEnabled.checked
+            || verticalSchemes.some((scheme) => scheme === 'scheme2' || scheme === 'scheme3');
+        if (verticalVideoRequested && !verticalSchemes.length) {
             this.setNotice('生成竖屏视频时，请至少勾选一个竖屏方案。', 'error');
             return;
         }
+        if (verticalSchemes.length > 2) {
+            this.setNotice('竖屏方案一次最多选择两个，请取消一个后重试。', 'error');
+            return;
+        }
         const primaryVerticalScheme = this.primarySelectedVerticalScheme();
+        const visualSchemeKeys = this.els.visualSchemeKeys
+            .filter((input) => input.checked)
+            .map((input) => input.value);
         const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const pdfSummary = selectedAsset
             ? { filename: selectedAsset.filename, bytes: selectedAsset.bytes, source: 'zsxq_attachment', attachment_id: selectedAsset.id, topic_title: selectedAsset.topic_title, tab_label: selectedAsset.tab_label }
@@ -787,8 +801,10 @@ class ReportAudioWorkflowPage {
                 review_prompt: this.els.reviewPromptInput.value.trim(),
                 tts_provider: this.els.ttsProvider?.value || 'doubao_browser',
                 tts_voice: this.els.ttsProvider?.value === 'doubao_api' ? (this.els.ttsVoice?.value || '') : '',
+                visual_scheme_keys: visualSchemeKeys,
                 video_render_mode: this.normalizeVideoRenderMode(this.els.videoRenderMode?.value),
                 video: {
+                    vertical_enabled: verticalVideoRequested,
                     vertical_video_scheme: primaryVerticalScheme,
                     vertical_video_schemes: verticalSchemes,
                 },
@@ -825,9 +841,10 @@ class ReportAudioWorkflowPage {
                 form.append('tts_voice', this.els.ttsVoice?.value || 'zh_female_mizai_uranus_bigtts');
             }
             form.append('landscape_video_enabled', this.els.landscapeVideoEnabled.checked ? '1' : '0');
-            form.append('vertical_video_enabled', this.els.verticalVideoEnabled.checked ? '1' : '0');
+            form.append('vertical_video_enabled', verticalVideoRequested ? '1' : '0');
             form.append('vertical_video_scheme', primaryVerticalScheme);
             form.append('vertical_video_schemes', JSON.stringify(verticalSchemes));
+            form.append('visual_scheme_keys', JSON.stringify(visualSchemeKeys));
             form.append('video_render_mode', this.normalizeVideoRenderMode(this.els.videoRenderMode?.value));
             form.append('preview_seconds', '10');
             form.append('bilibili_enabled', this.els.bilibiliEnabled.checked ? '1' : '0');
@@ -1130,7 +1147,11 @@ class ReportAudioWorkflowPage {
             return;
         }
         if (action === 'refresh') this.refreshJob(jobId);
-        if (action === 'retry') this.retryJob(jobId);
+        if (action === 'retry') {
+            const retryValue = button.closest('[data-job-card]')?.querySelector('[data-retry-tts-option]')?.value || '';
+            const [ttsProvider = '', ttsVoice = ''] = retryValue.split('|');
+            this.retryJob(jobId, { ttsProvider, ttsVoice });
+        }
         if (action === 'generate-vertical' || action === 'generate-vertical-preview' || action === 'generate-vertical-full') {
             this.generateVerticalVideo(jobId, this.verticalGenerateOptionsFromButton(button, action));
         }
@@ -1170,9 +1191,13 @@ class ReportAudioWorkflowPage {
         }
     }
 
-    async retryJob(jobId) {
+    async retryJob(jobId, { ttsProvider = '', ttsVoice = '' } = {}) {
         if (!jobId) return;
-        if (!window.confirm('从失败处续跑这个编排？已完成的 Gemini 和豆包浏览器朗读分段会尽量复用。')) return;
+        const switchingToApi = ttsProvider === 'doubao_api';
+        const confirmText = switchingToApi
+            ? '改用豆包 API TTS 从失败处续跑？已完成的基础文案会直接复用，不会重新解析 PDF。'
+            : '从失败处续跑这个编排？已完成的 Gemini 和朗读分段会尽量复用。';
+        if (!window.confirm(confirmText)) return;
         const job = this.jobs.find((item) => item.job_id === jobId);
         if (job) {
             job.status = 'running';
@@ -1184,6 +1209,10 @@ class ReportAudioWorkflowPage {
         try {
             const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/retry`, {
                 method: 'POST',
+                body: JSON.stringify({
+                    ...(ttsProvider ? { tts_provider: ttsProvider } : {}),
+                    ...(switchingToApi && ttsVoice ? { tts_voice: ttsVoice } : {}),
+                }),
                 timeoutMs: 20000,
             });
             const payload = result.data || result;
@@ -1771,7 +1800,16 @@ class ReportAudioWorkflowPage {
                     <div class="flex items-center gap-1.5">
                         <span class="rounded-full px-2.5 py-1 text-xs font-bold ${status.className}">${status.label}</span>
                         ${job.job_id ? `<a href="report-audio-workflow-detail.html?job_id=${encodeURIComponent(job.job_id)}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-indigo-200 bg-white px-2 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50" title="打开详情页"><i class="fas fa-up-right-from-square mr-1"></i>详情新页</a>` : ''}
-                        ${job.job_id && job.status === 'failed' ? `<button data-job-action="retry" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-emerald-300 bg-emerald-50 px-2 py-1.5 text-xs text-emerald-700 hover:bg-emerald-100" title="从失败处续跑"><i class="fas fa-play"></i></button>` : ''}
+                        ${job.job_id && job.status === 'failed' ? `
+                            <select data-retry-tts-option class="max-w-[190px] rounded-md border border-emerald-200 bg-white px-2 py-1.5 text-xs font-bold text-emerald-800" title="选择失败续跑的朗读方案">
+                                <option value="">沿用原朗读方案</option>
+                                <option value="doubao_api|zh_female_mizai_uranus_bigtts">改用豆包 API · 黑猫</option>
+                                <option value="doubao_api|zh_female_qingchezizi_uranus_bigtts">改用豆包 API · 清澈</option>
+                                <option value="doubao_api|zh_male_liufei_uranus_bigtts">改用豆包 API · 刘飞</option>
+                                <option value="doubao_api|zh_male_dayi_uranus_bigtts">改用豆包 API · 大台</option>
+                            </select>
+                            <button data-job-action="retry" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-emerald-300 bg-emerald-50 px-2 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100" title="按所选朗读方案从失败处续跑"><i class="fas fa-play mr-1"></i>续跑</button>
+                        ` : ''}
                         ${job.job_id ? `<button data-job-action="refresh" data-job-id="${this.escape(job.job_id)}" class="rounded-md border border-slate-300 px-2 py-1.5 text-xs text-slate-600 hover:bg-slate-50" title="刷新"><i class="fas fa-rotate"></i></button>` : ''}
                         <button data-job-action="remove" data-job-id="${this.escape(job.job_id || job.local_id || '')}" class="rounded-md border border-slate-300 px-2 py-1.5 text-xs text-slate-500 hover:bg-slate-50" title="移除"><i class="fas fa-xmark"></i></button>
                     </div>

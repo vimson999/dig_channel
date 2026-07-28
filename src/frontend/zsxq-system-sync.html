@@ -257,6 +257,10 @@
                                         <input id="system-sync-pdf-script-material-threshold-input" type="number" min="0" max="100000" step="1" value="40" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
                                     </label>
                                 </div>
+                                <label class="zsxq-inline-check mt-3">
+                                    <input id="system-sync-auto-stick-figure-visual-checkbox" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600">
+                                    <span>基础文案完成后自动生成白板火柴人分镜与图片</span>
+                                </label>
                             </div>
 
                             <div class="grid grid-cols-1 gap-2 md:grid-cols-2">
@@ -314,6 +318,22 @@
                                 </button>
 
                                 <pre id="system-sync-scheduler-logs" class="mt-2 hidden zsxq-log-panel rounded-lg border border-slate-200 bg-slate-50 p-3 text-slate-500"></pre>
+                            </section>
+
+                            <section class="zsxq-console-card">
+                                <div class="zsxq-card-head">
+                                    <div>
+                                        <h4 class="zsxq-card-title">洪灝 / 生财全部 Tab 计划</h4>
+                                        <p class="zsxq-card-subtitle">独立配置两条轻量同步计划；保存后调度器会自动热加载。</p>
+                                    </div>
+                                    <button id="all-tabs-config-refresh-btn" class="rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-100">
+                                        <i class="fas fa-rotate mr-1"></i>刷新
+                                    </button>
+                                </div>
+                                <div id="all-tabs-config-message" class="mb-3 hidden rounded-lg border px-3 py-2 text-xs"></div>
+                                <div id="all-tabs-config-panel" class="space-y-3">
+                                    <div class="rounded-lg border border-dashed border-slate-300 px-3 py-5 text-center text-xs text-slate-400">正在读取两条计划...</div>
+                                </div>
                             </section>
 
                             <section class="zsxq-console-card">

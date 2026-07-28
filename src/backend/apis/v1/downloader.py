@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from models import db, DownloadTask
+from services.runtime_guard import apply_async_after_db_release
 from tasks.downloader import download_video_task
 import logging
 from datetime import datetime
@@ -23,7 +24,11 @@ def submit_download():
         db.session.commit()
         
         # Trigger Celery task
-        celery_task = download_video_task.apply_async(args=[task.id, url], queue='render')
+        celery_task = apply_async_after_db_release(
+            download_video_task,
+            args=[task.id, url],
+            queue='render',
+        )
         
         # Update with Celery ID
         task.celery_task_id = celery_task.id

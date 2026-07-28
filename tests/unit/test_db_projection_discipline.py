@@ -13,6 +13,148 @@ def _python_files(root):
 
 
 class DbProjectionDisciplineTest(unittest.TestCase):
+    def test_db_aware_functions_never_publish_directly_to_celery(self):
+        offenders = []
+        db_names = {"db", "PublicationTask", "ZsxqWorkflowRun", "ZsxqSyncRun"}
+        for path in _python_files(BACKEND_DIR):
+            if "migrations" in path.parts:
+                continue
+            try:
+                tree = ast.parse(
+                    path.read_text(encoding="utf-8", errors="ignore"),
+                    filename=str(path),
+                )
+            except SyntaxError:
+                continue
+            functions = (
+                node for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            )
+            for function in functions:
+                names = {
+                    node.id for node in ast.walk(function)
+                    if isinstance(node, ast.Name)
+                }
+                if not names.intersection(db_names):
+                    continue
+                for node in ast.walk(function):
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "apply_async"
+                    ):
+                        offenders.append(
+                            f"{path.relative_to(PROJECT_ROOT)}:{node.lineno} ({function.name})"
+                        )
+
+        self.assertEqual([], offenders)
+
+    def test_celery_publish_never_follows_uncommitted_session_mutation(self):
+        offenders = []
+        mutation_methods = {
+            "add",
+            "add_all",
+            "flush",
+            "bulk_save_objects",
+            "bulk_insert_mappings",
+            "bulk_update_mappings",
+            "execute",
+        }
+        for path in _python_files(BACKEND_DIR):
+            if "migrations" in path.parts:
+                continue
+            try:
+                tree = ast.parse(
+                    path.read_text(encoding="utf-8", errors="ignore"),
+                    filename=str(path),
+                )
+            except SyntaxError:
+                continue
+            functions = (
+                node for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            )
+            for function in functions:
+                mutations = []
+                commits = []
+                publishes = []
+                for node in ast.walk(function):
+                    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                        continue
+                    owner = node.func.value
+                    if (
+                        isinstance(owner, ast.Attribute)
+                        and isinstance(owner.value, ast.Name)
+                        and owner.value.id == "db"
+                        and owner.attr == "session"
+                    ):
+                        if node.func.attr in mutation_methods:
+                            mutations.append(node.lineno)
+                        elif node.func.attr == "commit":
+                            commits.append(node.lineno)
+                    if node.func.attr == "apply_async":
+                        publishes.append(node.lineno)
+
+                for publish_line in publishes:
+                    last_mutation = max(
+                        (line for line in mutations if line < publish_line),
+                        default=-1,
+                    )
+                    last_commit = max(
+                        (line for line in commits if line < publish_line),
+                        default=-1,
+                    )
+                    if last_mutation > last_commit:
+                        offenders.append(
+                            f"{path.relative_to(PROJECT_ROOT)}:{publish_line} "
+                            f"({function.name}, mutation={last_mutation}, commit={last_commit})"
+                        )
+
+        self.assertEqual([], offenders)
+
+    def test_external_document_remote_io_uses_detached_snapshots(self):
+        service = (
+            BACKEND_DIR / "services" / "external_document_service.py"
+        ).read_text(encoding="utf-8")
+        fetch = service.split("def fetch_document(", 1)[1].split(
+            "\n    def summarize_document",
+            1,
+        )[0]
+        summarize = service.split("def summarize_document(", 1)[1].split(
+            "\n    def submit_tts",
+            1,
+        )[0]
+        submit_tts = service.split("def submit_tts(", 1)[1].split(
+            "\n    def backfill",
+            1,
+        )[0]
+
+        self.assertIn("remote_document = _document_remote_snapshot(document)", fetch)
+        self.assertLess(
+            fetch.index("release_db_session_quietly()"),
+            fetch.index("self._fetch_feishu_document(remote_document"),
+        )
+        self.assertIn("remote_document = _document_remote_snapshot(document)", summarize)
+        self.assertLess(
+            summarize.index("release_db_session_quietly()"),
+            summarize.index("self._deepseek_summary(remote_document)"),
+        )
+        self.assertIn("apply_async_after_db_release(", submit_tts)
+        self.assertNotIn(".apply_async(", submit_tts)
+
+        api = (
+            BACKEND_DIR / "apis" / "v1" / "external_documents.py"
+        ).read_text(encoding="utf-8")
+        submit_backfill = api.split("def submit_external_document_backfill(", 1)[1].split(
+            "\n\n@bp.route(\"/backfill/tasks/<task_id>\"",
+            1,
+        )[0]
+        self.assertLess(
+            submit_backfill.index("db.session.commit()"),
+            submit_backfill.index("apply_async_after_db_release("),
+        )
+        self.assertNotIn(".apply_async(", submit_backfill)
+
     def test_publication_task_hot_paths_do_not_scan_params_json_text(self):
         offenders = []
         for path in _python_files(BACKEND_DIR):
@@ -34,6 +176,47 @@ class DbProjectionDisciplineTest(unittest.TestCase):
                 offenders.append(str(path.relative_to(PROJECT_ROOT)))
 
         self.assertEqual([], offenders)
+
+    def test_external_document_shell_lookup_stays_narrow_and_idempotent(self):
+        service_path = BACKEND_DIR / "services" / "external_document_service.py"
+        model_path = BACKEND_DIR / "models" / "external_document.py"
+        service = service_path.read_text(encoding="utf-8")
+        model = model_path.read_text(encoding="utf-8")
+        body = service.split("def _upsert_document_shells(", 1)[1].split(
+            "\n    def _upsert_document_shell(", 1
+        )[0]
+        scan = service.split("def scan_topic_record(", 1)[1].split(
+            "\n    def scan_existing_topics", 1
+        )[0]
+        lookup = body.split("new_documents = []", 1)[0]
+
+        self.assertIn(".options(load_only(", lookup)
+        self.assertIn("ExternalDocument.url_hash.in_(url_hashes)", lookup)
+        self.assertIn("ZsxqTopicExternalDocument.url_hash.in_(url_hashes)", scan)
+        self.assertNotIn(".filter_by(", scan)
+        self.assertNotIn("_upsert_document_shell(link)", scan)
+        self.assertIn("if new_documents:", body)
+        self.assertIn("db.session.flush()", body)
+        self.assertNotIn("document.updated_at =", body)
+        self.assertNotIn("content_text", lookup)
+        self.assertNotIn("raw_payload", lookup)
+        self.assertIn(
+            'db.UniqueConstraint("url_hash", name="uq_external_documents_url_hash")',
+            model,
+        )
+        self.assertNotIn(
+            "url_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)",
+            model,
+        )
+
+    def test_external_document_single_shell_wrapper_reuses_batch_lookup(self):
+        service_path = BACKEND_DIR / "services" / "external_document_service.py"
+        service = service_path.read_text(encoding="utf-8")
+        body = service.split("def _upsert_document_shell(", 1)[1].split(
+            "\n    def _documents_by_id", 1
+        )[0]
+
+        self.assertIn("self._upsert_document_shells((link,))", body)
 
     def test_publication_task_load_only_does_not_use_legacy_query_get(self):
         offenders = []
@@ -1185,6 +1368,45 @@ class DbProjectionDisciplineTest(unittest.TestCase):
         self.assertNotIn("%s::uuid[]", text)
         self.assertIn("report_audio_video_path", text)
         self.assertIn("report_audio_cover_path", text)
+        self.assertIn("report_audio_landscape_keyframe_path", text)
+
+    def test_optimized_video_sync_uses_configured_redis_and_db_side_snapshot_insert(self):
+        base = (BACKEND_DIR / "config" / "base.py").read_text(encoding="utf-8")
+        path = BACKEND_DIR / "services" / "optimized_video_sync_service.py"
+        text = path.read_text(encoding="utf-8")
+        snapshot = text.split(
+            "def _create_video_data_records_batch(",
+            1,
+        )[1].split("\n    def _is_recent_sync", 1)[0]
+
+        self.assertIn("os.environ.get('REDIS_URL')", base)
+        self.assertIn("redis.Redis.from_url(", text)
+        self.assertIn("BaseConfig.REDIS_URL", text)
+        self.assertIn("pg_advisory_xact_lock", snapshot)
+        self.assertIn("INSERT INTO public.video_data", snapshot)
+        self.assertIn("NOT EXISTS", snapshot)
+        self.assertNotIn("VideoData.query", snapshot)
+        self.assertNotIn("bulk_insert_mappings", snapshot)
+        self.assertIn("_sync_state_lock = threading.Lock()", text)
+        self.assertIn("OPTIMIZED_VIDEO_SYNC_MAX_WORKERS", text)
+
+    def test_report_audio_core_writers_project_landscape_keyframe(self):
+        path = BACKEND_DIR / "tasks" / "report_audio_workflow.py"
+        text = path.read_text(encoding="utf-8")
+        update_body = text.split("def _update_result(", 1)[1].split(
+            "\ndef _record_child",
+            1,
+        )[0]
+
+        self.assertIn("report_audio_landscape_keyframe_path", update_body)
+        self.assertIn(
+            "{video,keyframes,landscape_cover,path}",
+            update_body,
+        )
+        self.assertIn(
+            "PublicationTask.report_audio_landscape_keyframe_path",
+            text,
+        )
 
     def test_stick_figure_latest_video_lookup_never_reads_result_json(self):
         path = BACKEND_DIR / "api" / "report_stick_figure_video_workflow.py"

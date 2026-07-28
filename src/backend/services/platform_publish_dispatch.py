@@ -196,6 +196,8 @@ def dispatch_platform_publish(
             retry=retry,
         )
     else:
+        from services.runtime_guard import apply_async_after_db_release
+
         apply_options = dict(
             args=[task_key],
             queue=route.queue,
@@ -203,7 +205,7 @@ def dispatch_platform_publish(
         )
         if broker_task_id:
             apply_options["task_id"] = str(broker_task_id)
-        async_result = celery_callable.apply_async(**apply_options)
+        async_result = apply_async_after_db_release(celery_callable, **apply_options)
         submission = {
             "async_result": async_result,
             "admission": None,

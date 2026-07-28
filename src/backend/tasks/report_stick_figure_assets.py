@@ -151,6 +151,7 @@ def _generate_scene_image(task_id: str) -> bool:
             ReportStickFigureSceneAsset.updated_at: datetime.utcnow(),
         }, synchronize_session=False)
         db.session.commit()
+        _refresh_parent_image_state(workflow_task_id)
         return True
     except Exception as exc:
         logger.error("Stick figure scene image failed: %s", exc, exc_info=True)
@@ -202,6 +203,40 @@ def _mark_failed(task_id: str, asset_id: str, error: str) -> None:
         ReportStickFigureSceneAsset.image_progress: 0,
         ReportStickFigureSceneAsset.image_error: str(error)[:4000],
         ReportStickFigureSceneAsset.updated_at: datetime.utcnow(),
+    }, synchronize_session=False)
+    db.session.commit()
+
+
+def _refresh_parent_image_state(workflow_task_id: str) -> None:
+    """Project aggregate scene-image completion back onto the visual parent."""
+    status_counts = (
+        db.session.query(
+            ReportStickFigureSceneAsset.image_status,
+            db.func.count(ReportStickFigureSceneAsset.id),
+        )
+        .filter(ReportStickFigureSceneAsset.workflow_task_id == str(workflow_task_id))
+        .group_by(ReportStickFigureSceneAsset.image_status)
+        .all()
+    )
+    counts = {str(status or ""): int(count or 0) for status, count in status_counts}
+    total = sum(counts.values())
+    if total <= 0 or counts.get("completed", 0) < total:
+        return
+    now = datetime.utcnow()
+    PublicationTask.query.filter(
+        PublicationTask.id == str(workflow_task_id),
+        PublicationTask.feature == "report_stick_figure_video_workflow",
+        PublicationTask.status != "canceled",
+    ).update({
+        PublicationTask.status: "processing",
+        PublicationTask.current_step: "images_done",
+        PublicationTask.progress: 75,
+        PublicationTask.waiting_child_label: "分镜图片",
+        PublicationTask.waiting_child_status: "completed",
+        PublicationTask.waiting_child_step: "done",
+        PublicationTask.waiting_child_updated_at: now.isoformat() + "Z",
+        PublicationTask.error_message: None,
+        PublicationTask.updated_at: now,
     }, synchronize_session=False)
     db.session.commit()
 

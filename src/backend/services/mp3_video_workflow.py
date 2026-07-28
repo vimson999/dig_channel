@@ -34,6 +34,7 @@ from services.gemini_browser import (
     is_configured as gemini_is_configured,
 )
 from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
+from services.runtime_guard import apply_async_after_db_release
 from services.workflow_notification_service import workflow_notification_service
 from tasks.publisher import run_publication_pipeline
 
@@ -3226,7 +3227,12 @@ def create_publisher_video_task(
     db.session.flush()
     child_id = str(child.id)
     db.session.commit()
-    async_result = run_publication_pipeline.apply_async(args=[child_id], queue="render", retry=False)
+    async_result = apply_async_after_db_release(
+        run_publication_pipeline,
+        args=[child_id],
+        queue="render",
+        retry=False,
+    )
     PublicationTask.query.filter(PublicationTask.id == child_id).update(
         {PublicationTask.celery_task_id: async_result.id},
         synchronize_session=False,

@@ -309,6 +309,84 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertEqual(child.params["vertical_video_2"]["scheme"], "scheme1")
         self.assertEqual(child.params["metadata"]["vertical_video_schemes"], ["scheme1", "scheme2"])
 
+    def test_scheme3_keyframe_uses_workbench_video_frame_without_visual_video(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            screenshot_path = Path(tmpdir) / "page.jpg"
+            background_path = Path(tmpdir) / "scheme3.jpg"
+            screenshot_path.write_bytes(b"page")
+            background_path.write_bytes(b"background")
+            with patch.object(report_audio_workflow, "_latest_report_audio_keyframe", return_value=None), \
+                patch.object(
+                    report_audio_workflow.thumbnail_service,
+                    "generate_workbench_video_background",
+                    return_value=str(background_path),
+                ) as generate_background, \
+                patch.object(
+                    report_audio_workflow.thumbnail_service,
+                    "generate_workbench_bilibili_cover",
+                    return_value=str(background_path),
+                ):
+                result = report_audio_workflow._generate_report_audio_keyframes(
+                    "parent-scheme3",
+                    datetime.utcnow(),
+                    structured={
+                        "vertical_title": "方案三标题",
+                        "vertical_subtitle": "方案三副标题",
+                    },
+                    pdf={"filename": "J.P. Morgan-report.pdf"},
+                    audio={"seconds": 12},
+                    pdf_screenshot={"path": str(screenshot_path)},
+                    payload={
+                        "video": {
+                            "enabled": False,
+                            "vertical_enabled": True,
+                            "vertical_video_scheme": "scheme3",
+                            "vertical_video_schemes": ["scheme3"],
+                        }
+                    },
+                )
+
+        self.assertEqual(result["vertical_video_scheme"], "scheme3")
+        self.assertEqual(result["vertical_background_path"], str(background_path))
+        self.assertIn("方案三", result["keyframes"]["vertical_background"]["label"])
+        generate_background.assert_called_once()
+
+    def test_scheme3_keyframe_selection_repairs_missing_vertical_enabled_flag(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            background_path = Path(tmpdir) / "scheme3.jpg"
+            background_path.write_bytes(b"background")
+            with patch.object(report_audio_workflow, "_latest_report_audio_keyframe", return_value=None), \
+                patch.object(
+                    report_audio_workflow.thumbnail_service,
+                    "generate_workbench_video_background",
+                    return_value=str(background_path),
+                ) as generate_background, \
+                patch.object(
+                    report_audio_workflow.thumbnail_service,
+                    "generate_workbench_bilibili_cover",
+                    return_value=str(background_path),
+                ):
+                result = report_audio_workflow._generate_report_audio_keyframes(
+                    "parent-scheme3",
+                    datetime.utcnow(),
+                    structured={"vertical_title": "方案三标题"},
+                    pdf={"filename": "J.P. Morgan-report.pdf"},
+                    audio={"seconds": 12},
+                    pdf_screenshot={"path": "/tmp/source-page.jpg"},
+                    payload={
+                        "video": {
+                            "enabled": False,
+                            "vertical_enabled": False,
+                            "vertical_video_scheme": "scheme3",
+                            "vertical_video_schemes": ["scheme3"],
+                        }
+                    },
+                )
+
+        self.assertTrue(result["vertical_enabled"])
+        self.assertIn("vertical_background", result["keyframes"])
+        generate_background.assert_called_once()
+
     def test_scheme2_publisher_generates_bilibili_cover_without_footer(self):
         with patch.object(
             publisher.thumbnail_service,
@@ -368,7 +446,7 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
 
         generate_bilibili.assert_called_once()
         self.assertFalse(generate_bilibili.call_args.kwargs["show_footer"])
-        self.assertEqual(generate_bilibili.call_args.kwargs["main_title"], "机构：核心大牛 集体出走")
+        self.assertEqual(generate_bilibili.call_args.kwargs["main_title"], "机构：核心大牛\n集体出走")
         self.assertEqual(result["bilibili_cover_path"], str(bilibili_path))
         self.assertIn("bilibili_cover", result["keyframes"])
         self.assertEqual(result["keyframes"]["bilibili_cover"]["label"], "B站封皮关键帧")
@@ -757,6 +835,7 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
                 "video_path": "/tmp/video.mp4",
                 "cover_path": "/tmp/cover.jpg",
                 "keyframes": {
+                    "landscape_cover": {"path": "/tmp/landscape.jpg"},
                     "vertical_cover": {"path": "/tmp/vertical.jpg"},
                     "podcast_cover": {"path": "/tmp/podcast.jpg"},
                     "bilibili_cover": {"path": "/tmp/bilibili.jpg"},
@@ -773,6 +852,10 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         self.assertEqual(task.report_audio_video_status, "completed")
         self.assertEqual(task.report_audio_video_path, "/tmp/video.mp4")
         self.assertEqual(task.report_audio_cover_path, "/tmp/cover.jpg")
+        self.assertEqual(
+            task.report_audio_landscape_keyframe_path,
+            "/tmp/landscape.jpg",
+        )
         self.assertEqual(task.report_audio_vertical_cover_path, "/tmp/vertical.jpg")
         self.assertEqual(task.report_audio_podcast_cover_path, "/tmp/podcast.jpg")
         self.assertEqual(task.report_audio_bilibili_cover_path, "/tmp/bilibili.jpg")

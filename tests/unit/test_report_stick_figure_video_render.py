@@ -86,7 +86,14 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
         self.assertIn("000 标题镜头不参与", api_text)
         self.assertIn("data-video-submit", frontend_text)
         self.assertIn("data-video-speed", frontend_text)
+        self.assertIn("1,1.1,1.15,1.25", frontend_text)
         self.assertIn("data-video-subtitles", frontend_text)
+        self.assertIn("data-video-subtitle-background", frontend_text)
+        self.assertIn("data-video-audio-preview", frontend_text)
+        self.assertIn("data-audio-preview-box", frontend_text)
+        self.assertIn("previewBox.innerHTML=this.audioPreviewMarkup(source)", frontend_text)
+        self.assertIn("previewBox.innerHTML=this.audioPreviewMarkup('')", frontend_text)
+        self.assertIn("syncAudioPreview", frontend_text)
         self.assertIn("data-video-watermark", frontend_text)
         self.assertIn("watermark_opacity", frontend_text)
         self.assertIn("subtitle_font_color", frontend_text)
@@ -96,6 +103,8 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
         self.assertIn("data-video-audio-mode", frontend_text)
         self.assertIn("复用整篇语音并对齐", frontend_text)
         self.assertIn("整篇 WAV 连续时间轴", frontend_text)
+        self.assertIn('payload["video"] = _video_payload(parent_snapshot)', api_text)
+        self.assertIn('/jobs/<job_id>/audio-preview', api_text)
 
         task_text = (BACKEND_DIR / "tasks" / "report_stick_figure_video.py").read_text(encoding="utf-8")
         self.assertIn('params.get("source_task_id")', task_text)
@@ -145,7 +154,11 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
             "publish-center",
         ):
             self.assertIn(f'data-quick-nav="{section_id}"', html)
-            self.assertIn(f"this.navSection('{section_id}'", frontend_text)
+            self.assertIn(f"['{section_id}',", frontend_text)
+        self.assertIn(
+            ".map(([id, html]) => ({ id, markup: this.navSection(id, html) }))",
+            frontend_text,
+        )
         self.assertIn("scrollIntoView({ behavior: 'smooth'", frontend_text)
         self.assertIn("new IntersectionObserver", frontend_text)
         self.assertIn("setupQuickNavigation", frontend_text)
@@ -183,6 +196,9 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
                 "subtitle_outline_color": "#000000",
                 "subtitle_outline": 2,
                 "subtitle_position": "bottom",
+                "subtitle_background_enabled": True,
+                "subtitle_background_color": "#111827",
+                "subtitle_background_opacity": 28,
                 "watermark_enabled": True,
                 "watermark_text": "Shioa研报",
                 "watermark_font_size": 26,
@@ -217,6 +233,8 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
             self.assertGreaterEqual(result["subtitle_entry_count"], 1)
             self.assertIn("Hiragino Sans GB,40", subtitle_text)
             self.assertIn("&H0000FFFF", subtitle_text)
+            self.assertIn("&HB8271811", subtitle_text)
+            self.assertIn(",3,7,0,2,", subtitle_text)
             self.assertIn("这是第一句字幕", subtitle_text)
             self.assertIn("Style: Watermark", subtitle_text)
             self.assertIn("Shioa研报", subtitle_text)
@@ -334,6 +352,21 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("visual_workflow_id: selectedVideo?.visualWorkflowId", publish_panel_text)
         self.assertIn("_linked_visual_video_path(current_user, task, visual_workflow_id)", api_text)
+
+    def test_report_audio_detail_polling_only_renders_changed_sections(self):
+        frontend_text = (
+            PROJECT_ROOT / "src" / "frontend" / "js" / "report-audio-workflow-detail.js"
+        ).read_text(encoding="utf-8")
+        schedule_body = frontend_text.split("scheduleAutoRefresh() {", 1)[1].split(
+            "\n    async refreshBilibiliUploads()", 1
+        )[0]
+
+        self.assertIn("this.sectionRenderCache = new Map()", frontend_text)
+        self.assertIn("if (background) this.renderChangedSections();", frontend_text)
+        self.assertIn("this.load({ background: true });", schedule_body)
+        self.assertNotIn("this.els.root.innerHTML", schedule_body)
+        self.assertIn("if (this.sectionRenderCache.get(id) === markup) continue;", frontend_text)
+        self.assertIn("if (id === 'publish-center'", frontend_text)
 
 
 if __name__ == "__main__":

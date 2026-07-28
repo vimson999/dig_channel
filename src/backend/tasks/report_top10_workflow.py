@@ -35,7 +35,11 @@ from services.report_top10_workflow import (
     valid_single_report_script,
     write_result_file,
 )
-from services.runtime_guard import guard_publication_task_start, retry_exception_types
+from services.runtime_guard import (
+    apply_async_after_db_release,
+    guard_publication_task_start,
+    retry_exception_types,
+)
 from tasks.gemini_browser import process_report_pdf_gemini_job
 
 
@@ -558,7 +562,12 @@ def _create_single_gemini_task(parent, pdf: Dict[str, Any], index: int, payload:
     db.session.flush()
     child_id = child.id
     db.session.commit()
-    async_result = process_report_pdf_gemini_job.apply_async(args=[child_id], queue=gemini_service.QUEUE_NAME, retry=False)
+    async_result = apply_async_after_db_release(
+        process_report_pdf_gemini_job,
+        args=[child_id],
+        queue=gemini_service.QUEUE_NAME,
+        retry=False,
+    )
     child = _load_task(child_id, *TASK_CHILD_COLUMNS)
     child.celery_task_id = async_result.id
     db.session.commit()
@@ -606,7 +615,12 @@ def _create_editor_gemini_task(parent, editor_input: str, payload: Dict[str, Any
     db.session.flush()
     child_id = child.id
     db.session.commit()
-    async_result = process_report_pdf_gemini_job.apply_async(args=[child_id], queue=gemini_service.QUEUE_NAME, retry=False)
+    async_result = apply_async_after_db_release(
+        process_report_pdf_gemini_job,
+        args=[child_id],
+        queue=gemini_service.QUEUE_NAME,
+        retry=False,
+    )
     child = _load_task(child_id, *TASK_CHILD_COLUMNS)
     child.celery_task_id = async_result.id
     db.session.commit()

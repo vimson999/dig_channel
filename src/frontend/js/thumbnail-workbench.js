@@ -905,9 +905,12 @@ function initThumbnailWorkbench() {
             }
         } else if (format === 'wx_cover' || format === 'bilibili_wx_cover') {
             const isBiliWxCover = format === 'bilibili_wx_cover';
-            const margin = isBiliWxCover ? 64 : 80;
+            // 1146×717 is cropped by Bilibili into centered 4:3 and 16:9
+            // variants. Keep all text inside their shared safe rectangle:
+            // x=95..1051 for 4:3 and y=36..681 for 16:9, plus padding.
+            const margin = isBiliWxCover ? 150 : 80;
             const maxW = w - margin * 2;
-            const labelY = isBiliWxCover ? Math.round(h * 0.47) : 700;
+            const labelY = isBiliWxCover ? Math.round(h * 0.43) : 700;
             const labelFont = isBiliWxCover ? 24 : 36;
             const labelBarW = isBiliWxCover ? 7 : 10;
             const labelBarH = isBiliWxCover ? 30 : 40;
@@ -917,10 +920,10 @@ function initThumbnailWorkbench() {
             ctx.fillText(instText + " · 研报解构", margin + labelGap, labelY + Math.round(labelBarH * 0.8));
             ctx.fillStyle = colors.main;
             ctx.shadowColor = colors.glow; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
-            const titleResult = drawFittedWrappedText(ctx, mainText, margin, isBiliWxCover ? Math.round(h * 0.67) : 870, maxW, {
+            const titleResult = drawFittedWrappedText(ctx, mainText, margin, isBiliWxCover ? Math.round(h * 0.60) : 870, maxW, {
                 maxLines: Number(workflowRenderOptions.titleMaxLines || 2),
-                startSize: Number(workflowRenderOptions.titleStartSize || (isBiliWxCover ? 68 : 110)),
-                minSize: Number(workflowRenderOptions.titleMinSize || (isBiliWxCover ? 44 : 72)),
+                startSize: Number(workflowRenderOptions.titleStartSize || (isBiliWxCover ? 62 : 110)),
+                minSize: Number(workflowRenderOptions.titleMinSize || (isBiliWxCover ? 40 : 72)),
                 weight: '900',
                 lineHeightRatio: isBiliWxCover ? 1.08 : 1.18
             });
@@ -929,17 +932,17 @@ function initThumbnailWorkbench() {
             if (subText) {
                 ctx.fillStyle = '#ffffff';
                 ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 5;
-                drawFittedWrappedText(ctx, subText, margin, nextY + (isBiliWxCover ? 20 : 50), maxW, {
+                drawFittedWrappedText(ctx, subText, margin, nextY + (isBiliWxCover ? 10 : 50), maxW, {
                     maxLines: Number(workflowRenderOptions.subtitleMaxLines || 1),
-                    startSize: Number(workflowRenderOptions.subtitleStartSize || (isBiliWxCover ? 34 : 56)),
-                    minSize: Number(workflowRenderOptions.subtitleMinSize || (isBiliWxCover ? 26 : 40)),
+                    startSize: Number(workflowRenderOptions.subtitleStartSize || (isBiliWxCover ? 30 : 56)),
+                    minSize: Number(workflowRenderOptions.subtitleMinSize || (isBiliWxCover ? 24 : 40)),
                     weight: 'bold',
                     lineHeightRatio: isBiliWxCover ? 1.18 : 1.24
                 });
                 ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             }
             if (showFooter) {
-                const by = isBiliWxCover ? h - 42 : 1300; ctx.fillStyle = colors.main;
+                const by = isBiliWxCover ? h - 66 : 1300; ctx.fillStyle = colors.main;
                 const barW = isBiliWxCover ? 4 : 6;
                 const barGap = isBiliWxCover ? 9 : 12;
                 const barHeights = isBiliWxCover ? [12, 24, 16, 28, 8] : [15, 30, 20, 35, 10];
@@ -986,13 +989,26 @@ function initThumbnailWorkbench() {
             ctx.font = 'bold 36px "Microsoft YaHei", sans-serif'; ctx.fillStyle = colors.main;
             ctx.fillRect(margin, 120, 10, 40); ctx.fillStyle = '#e2e8f0';
             ctx.fillText(instText + " · 研报解构", margin + 25, 152);
-            ctx.font = '900 90px "Microsoft YaHei", "PingFang SC", sans-serif'; ctx.fillStyle = colors.main;
+            ctx.fillStyle = colors.main;
             ctx.shadowColor = colors.glow; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
-            let nextY = wrapText(ctx, mainText, margin, 260, maxW, 110);
+            const titleResult = drawFittedWrappedText(ctx, mainText, margin, 260, maxW, {
+                maxLines: Number(workflowRenderOptions.titleMaxLines || 2),
+                startSize: Number(workflowRenderOptions.titleStartSize || 90),
+                minSize: Number(workflowRenderOptions.titleMinSize || 46),
+                weight: '900',
+                lineHeightRatio: 1.18
+            });
+            let nextY = titleResult.nextY;
             ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
             if (subText) {
-                ctx.font = 'bold 55px "Microsoft YaHei", sans-serif'; ctx.fillStyle = '#ffffff';
-                wrapText(ctx, subText, margin, nextY + 40, maxW, 75);
+                ctx.fillStyle = '#ffffff';
+                drawFittedWrappedText(ctx, subText, margin, nextY + 40, maxW, {
+                    maxLines: Number(workflowRenderOptions.subtitleMaxLines || 1),
+                    startSize: Number(workflowRenderOptions.subtitleStartSize || 55),
+                    minSize: Number(workflowRenderOptions.subtitleMinSize || 38),
+                    weight: 'bold',
+                    lineHeightRatio: 1.24
+                });
             }
             const videoH = w * (9/16); const videoY = 620;
             ctx.fillStyle = '#000000'; ctx.fillRect(0, videoY, w, videoH);

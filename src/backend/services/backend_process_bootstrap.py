@@ -12,7 +12,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_DIR = PROJECT_ROOT / "runtime"
 LOG_PATH = PROJECT_ROOT / "logs" / "backend_process_bootstrap.log"
 
-DEFAULT_SCHEDULERS = ("zsxq_auto", "content_retention")
+DEFAULT_SCHEDULERS = (
+    "zsxq_auto",
+    "content_retention",
+    "bilibili_charging",
+    "youtube_channel_sync",
+    "youtube_video_sync",
+)
 
 SCHEDULERS = {
     "zsxq_auto": {
@@ -26,6 +32,18 @@ SCHEDULERS = {
     "content_retention": {
         "label": "内容流水线历史清理计划",
         "module": "services.content_pipeline.retention_scheduler_service",
+    },
+    "bilibili_charging": {
+        "label": "B站充电人数采集计划",
+        "module": "services.bilibili_charging_scheduler_service",
+    },
+    "youtube_channel_sync": {
+        "label": "YouTube 频道数据同步计划",
+        "module": "services.youtube_channel_sync_scheduler_service",
+    },
+    "youtube_video_sync": {
+        "label": "YouTube 最近 3 天视频同步计划",
+        "module": "services.youtube_video_sync_scheduler_service",
     },
     "report_video_asset": {
         "label": "研报资产补漏计划",
@@ -65,7 +83,7 @@ def start_backend_process_bootstrap(app=None):
         thread.start()
         return {"started": True, "async": True}
 
-    return run_backend_process_bootstrap(app=app)
+    return _run_with_app_context(app)
 
 
 def run_backend_process_bootstrap(app=None):
@@ -111,11 +129,18 @@ def run_backend_process_bootstrap(app=None):
 
 def _run_and_log(app):
     try:
-        run_backend_process_bootstrap(app=app)
+        _run_with_app_context(app)
     except Exception as exc:
         _log_event(app, "error", {"error": str(exc), "type": type(exc).__name__})
         if app:
             app.logger.exception("[BACKEND_BOOTSTRAP] failed")
+
+
+def _run_with_app_context(app):
+    if app is None:
+        return run_backend_process_bootstrap(app=None)
+    with app.app_context():
+        return run_backend_process_bootstrap(app=app)
 
 
 def _bootstrap_celery_services(app, mode):
@@ -269,6 +294,8 @@ def _current_process_skip_reason():
         "run_content_retention_cleanup_scheduler.py",
         "run_report_video_asset_scheduler.py",
         "run_report_video_auto_scheduler.py",
+        "run_youtube_channel_sync_scheduler.py",
+        "run_youtube_video_sync_scheduler.py",
         "pytest",
         "flask db",
         "alembic",

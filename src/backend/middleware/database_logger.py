@@ -15,6 +15,7 @@ from pathlib import Path
 from flask import g
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import Pool
 from utils.colored_logger import setup_colored_logger, log_database_operation
 
 logger = setup_colored_logger(__name__)
@@ -33,6 +34,40 @@ _query_origin_helper_names = {
     "_load_publication_task",
     "_load_task_with_retries",
 }
+_connection_checkout_key = "dig_ytb_checkout_monotonic"
+
+
+def _connection_hold_warn_seconds():
+    try:
+        return max(
+            0.1,
+            float(os.environ.get("DB_CONNECTION_HOLD_WARN_SECONDS", "5")),
+        )
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def _pool_checkout(dbapi_connection, connection_record, connection_proxy):
+    connection_record.info[_connection_checkout_key] = time.monotonic()
+
+
+def _pool_checkin(dbapi_connection, connection_record):
+    started_at = connection_record.info.pop(_connection_checkout_key, None)
+    if started_at is None:
+        return
+    held_seconds = time.monotonic() - started_at
+    if held_seconds < _connection_hold_warn_seconds():
+        return
+    lifecycle_logger = setup_colored_logger("db_connection_lifecycle")
+    lifecycle_logger.warning(
+        "database connection held too long duration_ms=%s pid=%s role=%s "
+        "process=%s process_started_at=%s",
+        round(held_seconds * 1000, 2),
+        os.getpid(),
+        DatabaseLoggerMiddleware._process_role(),
+        DatabaseLoggerMiddleware._process_name(),
+        _process_started_at,
+    )
 
 class DatabaseLoggerMiddleware:
     def __init__(self, app=None):
@@ -49,6 +84,10 @@ class DatabaseLoggerMiddleware:
                 event.listen(Engine, "after_cursor_execute", self._after_cursor_execute)
             if not event.contains(Engine, "handle_error", self._handle_error):
                 event.listen(Engine, "handle_error", self._handle_error)
+            if not event.contains(Pool, "checkout", _pool_checkout):
+                event.listen(Pool, "checkout", _pool_checkout)
+            if not event.contains(Pool, "checkin", _pool_checkin):
+                event.listen(Pool, "checkin", _pool_checkin)
         
         # 配置SQLAlchemy日志
         self._configure_sqlalchemy_logging(app)

@@ -290,6 +290,8 @@ class StickFigureMediaCacheTest(unittest.TestCase):
             ) as status_rows, patch.object(
                 workflow_api, "_scene_asset_status_bundle", return_value=payload
             ), patch.object(
+                workflow_api, "_video_payload", return_value={"status": "processing"}
+            ), patch.object(
                 workflow_api, "_sync_tts_assets",
                 side_effect=AssertionError("status polling must read the source-maintained scene projection"),
             ), patch.object(

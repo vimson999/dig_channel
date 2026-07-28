@@ -229,6 +229,178 @@ class BiliUploader:
             ),
         }
 
+    def creator_seasons(self) -> List[Dict[str, Any]]:
+        """Return seasons selectable in Bilibili's creator upload form.
+
+        The public space API only exposes seasons which already contain public
+        archives.  Newly-created empty seasons are nevertheless valid upload
+        targets, so the publishing UI must use the creator-center endpoint.
+        """
+        cookies = {
+            "SESSDATA": self.sessdata,
+            "bili_jct": self.bili_jct,
+            "buvid3": self.buvid3,
+            "DedeUserID": self.dedeuserid,
+        }
+        cookies = {key: value for key, value in cookies.items() if value}
+        headers = {
+            "user-agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "referer": "https://member.bilibili.com/platform/upload/video/frame",
+        }
+        page = 1
+        page_size = 30
+        seasons: List[Dict[str, Any]] = []
+        while True:
+            response = requests.get(
+                "https://member.bilibili.com/x2/creative/web/seasons",
+                params={
+                    "pn": page,
+                    "ps": page_size,
+                    "order": "desc",
+                    "sort": "mtime",
+                    "filter": 1,
+                },
+                cookies=cookies,
+                headers=headers,
+                timeout=30,
+            )
+            response.raise_for_status()
+            body = response.json()
+            if int(body.get("code") or 0) != 0:
+                raise RuntimeError(
+                    "Bilibili creator seasons failed: "
+                    f"{body.get('message') or body.get('code')}"
+                )
+            data = body.get("data") or {}
+            batch = data.get("seasons") or []
+            if not isinstance(batch, list):
+                raise RuntimeError("Bilibili creator seasons returned an invalid list")
+            seasons.extend(item for item in batch if isinstance(item, dict))
+
+            total = int(data.get("total") or len(seasons))
+            if not batch or len(seasons) >= total:
+                break
+            page += 1
+        return seasons
+
+    def _resolve_season_section_id(self, season_id: int) -> int:
+        """Resolve the creator-center section required for season association.
+
+        Bilibili's upload form stores both seasonId and sectionId. The upload
+        endpoint accepts season_id in the archive metadata, but a normal
+        collection is actually linked by a second section/episodes request.
+        """
+        normalized_season_id = self._normalize_season_id(season_id)
+        for item in self.creator_seasons():
+            season = item.get("season") if isinstance(item.get("season"), dict) else item
+            item_season_id = season.get("id") or season.get("season_id")
+            if str(item_season_id or "") != str(normalized_season_id):
+                continue
+            sections_payload = item.get("sections") or {}
+            sections = (
+                sections_payload.get("sections")
+                if isinstance(sections_payload, dict)
+                else sections_payload
+            )
+            valid_sections = [
+                section
+                for section in (sections or [])
+                if isinstance(section, dict) and (section.get("id") or section.get("section_id"))
+            ]
+            if not valid_sections:
+                raise RuntimeError(f"B站合集 {normalized_season_id} 没有可用分节，无法加入合集")
+            # Match the creator-center form: it selects the last available
+            # section returned by /x2/creative/web/seasons.
+            section = valid_sections[-1]
+            return int(section.get("id") or section.get("section_id"))
+        raise RuntimeError(f"当前 B站账号找不到合集 {normalized_season_id}，无法加入合集")
+
+    def _add_uploaded_video_to_season(
+        self,
+        *,
+        season_id: int,
+        section_id: int,
+        title: str,
+        aid: int,
+        bvid: str,
+        charging_pay: bool = False,
+    ) -> Dict[str, Any]:
+        """Run the creator-center's required post-upload season association."""
+        cookies = {
+            "SESSDATA": self.sessdata,
+            "bili_jct": self.bili_jct,
+            "buvid3": self.buvid3,
+            "DedeUserID": self.dedeuserid,
+        }
+        cookies = {key: value for key, value in cookies.items() if value}
+        headers = {
+            "user-agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "referer": "https://member.bilibili.com/platform/upload/video/frame",
+        }
+        archive_response = requests.get(
+            "https://member.bilibili.com/x/vupre/web/archive/view",
+            params={"topic_grey": 1, "bvid": str(bvid)},
+            cookies=cookies,
+            headers=headers,
+            timeout=30,
+        )
+        archive_response.raise_for_status()
+        archive_body = archive_response.json()
+        if int(archive_body.get("code") or 0) != 0:
+            raise RuntimeError(
+                "B站投稿已成功，但读取稿件 CID 失败："
+                f"{archive_body.get('message') or archive_body.get('code')}"
+            )
+        archive_data = archive_body.get("data") or {}
+        videos = archive_data.get("videos") or []
+        cid = next(
+            (
+                video.get("cid")
+                for video in videos
+                if isinstance(video, dict) and video.get("cid")
+            ),
+            None,
+        )
+        if not cid:
+            raise RuntimeError("B站投稿已成功，但稿件详情没有返回 CID，无法加入合集")
+
+        payload = {
+            "sectionId": int(section_id),
+            "episodes": [{
+                "title": str(title),
+                "cid": int(cid),
+                "aid": int(aid),
+                "charging_pay": 1 if charging_pay else 0,
+            }],
+        }
+        season_response = requests.post(
+            "https://member.bilibili.com/x2/creative/web/season/section/episodes/add",
+            params={"csrf": self.bili_jct},
+            json=payload,
+            cookies=cookies,
+            headers=headers,
+            timeout=30,
+        )
+        season_response.raise_for_status()
+        season_body = season_response.json()
+        if int(season_body.get("code") or 0) != 0:
+            raise RuntimeError(
+                f"B站投稿已成功，但加入合集 {season_id} 失败："
+                f"{season_body.get('message') or season_body.get('code')}"
+            )
+        return {
+            "season_id": int(season_id),
+            "section_id": int(section_id),
+            "cid": int(cid),
+            "response": season_body.get("data"),
+        }
+
     def _fetch_default_upower_level_id(self) -> str:
         options = self.charging_pay_options()
         level = (options.get("levels") or [{}])[0]
@@ -359,6 +531,7 @@ class BiliUploader:
         charging_pay_fields = self._charging_pay_fields(charging_pay)
         delay_time = self._normalize_delay_time(delay_time)
         season_id = self._normalize_season_id(season_id)
+        season_section_id = self._resolve_season_section_id(season_id) if season_id else None
         is_only_self = 1 if int(is_only_self or 0) else 0
         space_hidden = int(space_hidden) if space_hidden not in (None, "") else None
         if charging_pay_fields and not is_original:
@@ -438,11 +611,11 @@ class BiliUploader:
         
         # Retry logic for network stability
         max_retries = 3
+        result = None
         for attempt in range(max_retries):
             try:
                 result = await uploader.start()
-                logger.info(f"Bilibili upload successful for {title}! Result: {result}")
-                return result
+                break
             except Exception as e:
                 error = self._friendly_upload_error(e)
                 if self._is_non_retryable_upload_error(e):
@@ -459,3 +632,28 @@ class BiliUploader:
                 else:
                     logger.error(f"Bilibili upload failed for {title} after {max_retries} attempts: {error}")
                     raise error
+
+        # Collection association is a separate creator-center request. Keep it
+        # outside the media-upload retry loop: retrying uploader.start() after
+        # this point could create duplicate Bilibili submissions.
+        if season_id:
+            aid = (result or {}).get("aid")
+            bvid = (result or {}).get("bvid")
+            if not aid or not bvid:
+                raise RuntimeError("B站投稿返回缺少 aid/bvid，无法继续加入合集")
+            season_result = self._add_uploaded_video_to_season(
+                season_id=season_id,
+                section_id=season_section_id,
+                title=title,
+                aid=aid,
+                bvid=bvid,
+                charging_pay=bool(charging_pay_fields),
+            )
+            result = {
+                **result,
+                "season_id": season_id,
+                "section_id": season_section_id,
+                "season_result": season_result,
+            }
+        logger.info(f"Bilibili upload successful for {title}! Result: {result}")
+        return result

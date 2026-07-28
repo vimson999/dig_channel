@@ -5,6 +5,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request, send_file
 
 from services.external_document_service import ExternalDocumentError, external_document_service
+from services.runtime_guard import apply_async_after_db_release
 from models import db
 from models.task import PublicationTask
 
@@ -116,19 +117,32 @@ def submit_external_document_backfill():
     )
     db.session.add(task)
     db.session.flush()
+    task_id = str(task.id)
+    db.session.commit()
     try:
         from tasks.external_documents import QUEUE_NAME, run_external_document_backfill
 
-        queued = run_external_document_backfill.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
-        task.celery_task_id = queued.id
-        db.session.commit()
+        queued = apply_async_after_db_release(
+            run_external_document_backfill,
+            args=[task_id],
+            queue=QUEUE_NAME,
+            retry=False,
+        )
     except Exception as exc:
-        task.status = "failed"
-        task.current_step = "failed"
-        task.error_message = f"补抓任务入队失败: {exc}"
-        task.completed_at = datetime.utcnow()
+        error_message = f"补抓任务入队失败: {exc}"
+        PublicationTask.query.filter(PublicationTask.id == task_id).update({
+            PublicationTask.status: "failed",
+            PublicationTask.current_step: "failed",
+            PublicationTask.error_message: error_message,
+            PublicationTask.completed_at: datetime.utcnow(),
+        }, synchronize_session=False)
         db.session.commit()
-        return _json_error(task.error_message, 503)
+        return _json_error(error_message, 503)
+    PublicationTask.query.filter(PublicationTask.id == task_id).update({
+        PublicationTask.celery_task_id: queued.id,
+    }, synchronize_session=False)
+    db.session.commit()
+    task = PublicationTask.query.filter(PublicationTask.id == task_id).first()
     return jsonify({"success": True, "message": "关联内容补抓任务已提交", "data": {"task": _task_payload(task)}}), 202
 
 

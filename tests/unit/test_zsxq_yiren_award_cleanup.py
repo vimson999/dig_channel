@@ -13,6 +13,8 @@ from models import db  # noqa: E402
 from models.zsxq_sync import ZsxqTopic, ZsxqTopicComment, ZsxqTopicFavorite  # noqa: E402
 from services.zsxq_sync_service import ZsxqSyncService  # noqa: E402
 from services.zsxq_yiren_award_cleanup_service import (  # noqa: E402
+    YIREN_AWARD_NOTIFICATION_USER_ID,
+    YIREN_PERSONAL_USER_ID,
     cleanup_yiren_award_favorites,
     is_yiren_award_comment,
 )
@@ -68,6 +70,38 @@ class ZsxqYirenAwardCleanupTest(unittest.TestCase):
         self.assertFalse(is_yiren_award_comment("亦仁", "期待下一次分享"))
         self.assertFalse(is_yiren_award_comment("别人", "已中标"))
 
+    def test_matcher_uses_stable_identity_and_positive_award_semantics(self):
+        self.assertTrue(is_yiren_award_comment(
+            "亦仁",
+            "感谢分享，本期正式入选",
+            owner_user_id=YIREN_AWARD_NOTIFICATION_USER_ID,
+            group_id="1824528822",
+        ))
+        self.assertTrue(is_yiren_award_comment(
+            "亦仁",
+            "恭喜，这篇获选了",
+            owner_user_id=YIREN_PERSONAL_USER_ID,
+            group_id="1824528822",
+        ))
+        self.assertFalse(is_yiren_award_comment(
+            "亦仁",
+            "这篇有望中标",
+            owner_user_id=YIREN_AWARD_NOTIFICATION_USER_ID,
+            group_id="1824528822",
+        ))
+        self.assertFalse(is_yiren_award_comment(
+            "亦仁",
+            "感谢分享，已中标",
+            owner_user_id="untrusted-same-name",
+            group_id="1824528822",
+        ))
+        self.assertFalse(is_yiren_award_comment(
+            "亦仁",
+            "感谢分享，已中标",
+            owner_user_id=YIREN_AWARD_NOTIFICATION_USER_ID,
+            group_id="88885882121542",
+        ))
+
     def test_cleanup_adds_only_missing_award_favorite_and_is_idempotent(self):
         first = cleanup_yiren_award_favorites()
         self.assertEqual(first["candidate_topics"], 1)
@@ -97,8 +131,11 @@ class ZsxqYirenAwardCleanupTest(unittest.TestCase):
             "topic_id": "future-winner",
             "show_comments": [{
                 "comment_id": "sync-winner",
-                "owner": {"name": "亦仁"},
-                "text": "感谢分享，已中标",
+                "owner": {
+                    "name": "亦仁",
+                    "user_id": YIREN_AWARD_NOTIFICATION_USER_ID,
+                },
+                "text": "感谢分享，本期入选",
             }],
         }
 

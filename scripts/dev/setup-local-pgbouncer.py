@@ -16,6 +16,15 @@ PID_PATH = RUNTIME_DIR / "pgbouncer.pid"
 
 LISTEN_HOST = os.environ.get("LOCAL_PGBOUNCER_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("LOCAL_PGBOUNCER_PORT", "6432"))
+MIN_POOL_SIZE = max(6, int(os.environ.get("LOCAL_PGBOUNCER_MIN_POOL_SIZE", "6")))
+SERVER_IDLE_TIMEOUT = max(
+    600,
+    int(os.environ.get("LOCAL_PGBOUNCER_SERVER_IDLE_TIMEOUT", "600")),
+)
+SERVER_LIFETIME = max(
+    21600,
+    int(os.environ.get("LOCAL_PGBOUNCER_SERVER_LIFETIME", "21600")),
+)
 
 
 def main():
@@ -112,16 +121,18 @@ auth_file = {USERLIST_PATH}
 pool_mode = transaction
 max_client_conn = 300
 default_pool_size = 15
-min_pool_size = 2
+min_pool_size = {MIN_POOL_SIZE}
 reserve_pool_size = 5
 reserve_pool_timeout = 5
 
 server_reset_query = DISCARD ALL
 server_connect_timeout = 10
-server_idle_timeout = 120
-server_lifetime = 3600
-query_timeout = 30
-query_wait_timeout = 30
+server_check_query = SELECT 1
+server_check_delay = 5
+server_idle_timeout = {SERVER_IDLE_TIMEOUT}
+server_lifetime = {SERVER_LIFETIME}
+query_timeout = 60
+query_wait_timeout = 15
 client_idle_timeout = 300
 tcp_keepalive = 1
 tcp_keepcnt = 3

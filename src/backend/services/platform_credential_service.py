@@ -419,6 +419,14 @@ def save_credential(data: Dict[str, Any], account_id: Optional[str] = None) -> P
 
     payload_input = data.get("payload")
     payload = normalize_payload(payload_input)
+    if payload and platform == "zsxq":
+        valid, message = validate_payload_structure(
+            platform,
+            credential_type,
+            payload,
+        )
+        if not valid:
+            raise CredentialError(f"知识星球 Cookie 无效：{message}")
 
     account = PlatformCredentialAccount.query.get(account_id) if account_id else None
     if account_id and not account:

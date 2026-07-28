@@ -16,6 +16,9 @@ WORKFLOW_EMAIL_FROM_NAME=内容流水线
 WORKFLOW_EMAIL_RETRY_ATTEMPTS=3
 WORKFLOW_EMAIL_RETRY_DELAY_SECONDS=2
 WORKFLOW_EMAIL_FALLBACK_STARTTLS=true
+
+# Gemini / 豆包登录失效或安全验证告警的同状态冷却时间
+BROWSER_HUMAN_INTERVENTION_EMAIL_COOLDOWN_SECONDS=1800
 ```
 
 `WORKFLOW_EMAIL_PASSWORD` 填 QQ 邮箱生成的 SMTP 授权码，不是 QQ 登录密码。
@@ -27,7 +30,16 @@ WORKFLOW_EMAIL_FALLBACK_STARTTLS=true
 - `failure_only`：只通知整轮失败。
 - `off`：关闭通知。
 
-配置后需要重启后端服务和 `zsxq_workflow` Celery worker。
+洪灝和生财有术的“全部 Tab”轻量计划复用同一套 SMTP 配置：
+
+- `milestone` 会发送任务提交、同步完成和最终失败。
+- `summary` 会发送同步完成和最终失败。
+- `failure_only` 只发送最终失败。
+- 可在 `zsxq-system-sync.html` 的“洪灝 / 生财全部 Tab 计划”中为每条计划单独关闭节点邮件。
+
+配置后需要重启后端服务、调度器、`zsxq_workflow`、`zsxq_sync` 和通知 Celery worker。
+
+Gemini 与豆包真实浏览器 worker 会额外检测“登录状态失效”和“安全验证/验证码”。命中后会立即使用同一套 SMTP 配置发邮件，内容包含任务 ID、Worker、浏览器 Profile、页面地址与失败截图。同一个平台、Profile 和事件类型在冷却期内只发送一次，避免多个并发任务重复轰炸邮箱；冷却期后若问题仍然存在会再次提醒。
 
 测试接口：
 

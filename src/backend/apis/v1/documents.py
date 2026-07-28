@@ -22,6 +22,7 @@ from werkzeug.utils import secure_filename
 import logging
 
 from models.task import PublicationTask
+from services.runtime_guard import apply_async_after_db_release
 
 # 创建蓝图
 bp = Blueprint('documents', __name__, url_prefix='/api/v1/documents')
@@ -88,7 +89,8 @@ def _enqueue_podcast_visualizer_task(task):
     from tasks.podcast_visualizer import run_podcast_visualizer_task
 
     try:
-        celery_task = run_podcast_visualizer_task.apply_async(
+        celery_task = apply_async_after_db_release(
+            run_podcast_visualizer_task,
             args=[task.id],
             queue='podcast_visualizer',
             retry=False,

@@ -4,7 +4,10 @@
 
 echo "🔍 正在查找 Celery Watchdog..."
 
-PIDS=$(ps aux | grep 'celery_watchdog_loop.py' | grep -v grep | awk '{print $2}')
+# Match only a process whose command line ends with the watchdog entrypoint.
+# A plain grep also matches the caller when a compound maintenance command
+# happens to mention the same filename.
+PIDS=$(pgrep -f 'scripts/dev/celery_watchdog_loop[.]py$' || true)
 
 if [ -z "$PIDS" ]; then
     echo "✅ 没有发现正在运行的 Celery Watchdog。"
@@ -13,13 +16,17 @@ fi
 
 echo "⚠️ 发现 Celery Watchdog: $PIDS"
 echo "🚀 正在停止..."
-echo $PIDS | xargs kill
+for pid in $PIDS; do
+    kill "$pid" 2>/dev/null || true
+done
 sleep 1
 
-LEFTOVER=$(ps aux | grep 'celery_watchdog_loop.py' | grep -v grep | awk '{print $2}')
+LEFTOVER=$(pgrep -f 'scripts/dev/celery_watchdog_loop[.]py$' || true)
 if [ ! -z "$LEFTOVER" ]; then
     echo "⚠️ 仍有残留进程: $LEFTOVER，正在强制清理..."
-    echo $LEFTOVER | xargs kill -9
+    for pid in $LEFTOVER; do
+        kill -9 "$pid" 2>/dev/null || true
+    done
 fi
 
 echo "✨ Celery Watchdog 已停止。"

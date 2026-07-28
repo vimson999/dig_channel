@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from flask import Flask
@@ -173,6 +174,66 @@ class RuntimeGuardTest(unittest.TestCase):
         self.assertEqual(count, 2)
         release.assert_called_once_with()
         self.assertEqual(query.scalar.call_count, 2)
+
+    def test_guarded_publish_returns_connection_before_broker_io(self):
+        celery_callable = MagicMock()
+        transaction_states = []
+
+        def apply_async(**_options):
+            transaction_states.append(db.session().in_transaction())
+            return SimpleNamespace(id="broker-task-1")
+
+        celery_callable.apply_async.side_effect = apply_async
+
+        result = runtime_guard.maybe_guarded_apply_async(
+            celery_callable,
+            args=["business-task-1"],
+            queue="fixture",
+            feature="fixture_without_limit",
+            task_id="business-task-1",
+            retry=False,
+        )
+
+        self.assertEqual(result["async_result"].id, "broker-task-1")
+        self.assertEqual(transaction_states, [False])
+
+    def test_guarded_publish_rejects_uncommitted_business_changes(self):
+        task = PublicationTask(
+            status="pending",
+            current_step="queued",
+            progress=0,
+            params={"feature": "fixture_without_limit"},
+            result={},
+        )
+        db.session.add(task)
+        celery_callable = MagicMock()
+
+        with self.assertRaisesRegex(
+            runtime_guard.DatabaseSessionBoundaryError,
+            "uncommitted database changes",
+        ):
+            runtime_guard.maybe_guarded_apply_async(
+                celery_callable,
+                args=["business-task-2"],
+                queue="fixture",
+                feature="fixture_without_limit",
+                task_id="business-task-2",
+                retry=False,
+            )
+
+        celery_callable.apply_async.assert_not_called()
+        db.session.rollback()
+
+    def test_allowed_worker_start_ends_admission_read_transaction(self):
+        admission = runtime_guard.guard_publication_task_start(
+            MagicMock(),
+            "business-task-3",
+            feature="fixture_without_limit",
+            queue="fixture",
+        )
+
+        self.assertTrue(admission["allowed"])
+        self.assertFalse(db.session().in_transaction())
 
     def test_admission_retry_budget_does_not_fall_back_to_celery_default_three(self):
         with patch.dict(os.environ, {}, clear=False):

@@ -4,10 +4,20 @@ import socket
 import smtplib
 import ssl
 import time
+import hashlib
+import threading
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from services.runtime_guard import apply_async_after_db_release
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 
 logger = logging.getLogger(__name__)
@@ -53,6 +63,8 @@ EVENT_LABELS = {
 }
 
 FINAL_EVENTS = {
+    "sync_completed",
+    "sync_failed",
     "workflow_completed",
     "workflow_partial",
     "workflow_failed",
@@ -61,10 +73,11 @@ FINAL_EVENTS = {
     "mp3_video_completed",
     "mp3_video_failed",
 }
-FAILURE_EVENTS = {"workflow_failed", "report_audio_failed", "mp3_video_failed"}
+FAILURE_EVENTS = {"sync_failed", "workflow_failed", "report_audio_failed", "mp3_video_failed"}
 SUPPORTED_EMAIL_PROVIDERS = {"email", "smtp", "qq_email", "qq-mail"}
 TRUTHY = {"1", "true", "yes", "on"}
 FALSY = {"0", "false", "no", "off"}
+_BROWSER_ALERT_LOCK = threading.RLock()
 
 
 class WorkflowNotificationService:
@@ -89,7 +102,8 @@ class WorkflowNotificationService:
                 "workflow": workflow_payload or {},
                 "queued_at": self._now_iso(),
             }
-            result = send_workflow_notification.apply_async(
+            result = apply_async_after_db_release(
+                send_workflow_notification,
                 args=[payload],
                 queue="workflow_notify",
                 retry=False,
@@ -157,6 +171,94 @@ class WorkflowNotificationService:
             return {"sent": False, "reason": "missing_config", "missing": missing}
         self._send_email_with_retry(settings, str(subject or "系统通知"), str(body or ""))
         return {"sent": True, "to": settings["to"]}
+
+    def send_browser_human_intervention(
+        self,
+        *,
+        provider,
+        reason,
+        message,
+        job_id="",
+        page_url="",
+        screenshot_path="",
+        profile="",
+        worker_id="",
+        details=None,
+    ):
+        """Send a deduplicated alert when browser automation needs a human."""
+        settings = self.email_settings()
+        missing = self.missing_email_settings(settings)
+        if self.provider() not in SUPPORTED_EMAIL_PROVIDERS:
+            return {"sent": False, "reason": "disabled"}
+        if missing:
+            return {"sent": False, "reason": "missing_config", "missing": missing}
+
+        provider = str(provider or "浏览器").strip()
+        reason = str(reason or "verification").strip().lower()
+        reason_label = "登录状态失效" if reason == "login" else "需要安全验证"
+        fingerprint = "|".join((provider.lower(), reason, str(profile or ""), str(worker_id or "")))
+        stamp_dir = Path(os.getenv(
+            "BROWSER_HUMAN_INTERVENTION_STATE_DIR",
+            str(Path(__file__).resolve().parents[3] / "runtime" / "browser_alerts"),
+        )).expanduser()
+        stamp_path = stamp_dir / f"{hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()}.sent"
+        lock_path = stamp_path.with_suffix(".lock")
+        cooldown = max(0, self._int_env(
+            ["BROWSER_HUMAN_INTERVENTION_EMAIL_COOLDOWN_SECONDS"],
+            default=1800,
+        ))
+
+        try:
+            stamp_dir.mkdir(parents=True, exist_ok=True)
+            with _BROWSER_ALERT_LOCK, lock_path.open("a+", encoding="utf-8") as lock_file:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                if stamp_path.exists() and cooldown > 0:
+                    elapsed = max(0.0, time.time() - stamp_path.stat().st_mtime)
+                    if elapsed < cooldown:
+                        return {
+                            "sent": False,
+                            "reason": "cooldown",
+                            "retry_after_seconds": int(cooldown - elapsed),
+                        }
+
+                subject = f"[浏览器自动化需处理] {provider} {reason_label}"
+                lines = [
+                    f"平台：{provider}",
+                    f"事件：{reason_label}",
+                    f"任务 ID：{job_id or '-'}",
+                    f"Worker：{worker_id or '-'}",
+                    f"浏览器 Profile：{profile or '-'}",
+                    f"页面：{page_url or '-'}",
+                    f"截图：{screenshot_path or '-'}",
+                    f"原因：{message or '-'}",
+                ]
+                for key, value in (details or {}).items():
+                    lines.append(f"{key}：{value or '-'}")
+                lines.extend([
+                    "",
+                    f"处理方式：请打开对应的 {provider} 浏览器窗口，完成登录或安全验证后重试失败任务。",
+                    "系统处理：当前任务会保留失败/阻塞状态，不会把验证页面当作正常结果保存。",
+                    "",
+                    f"发送时间：{self._now_iso()}",
+                ])
+                self._send_email_with_retry(settings, subject, "\n".join(lines))
+                stamp_path.write_text(self._now_iso(), encoding="utf-8")
+                logger.warning(
+                    "[BROWSER_HUMAN_INTERVENTION] email sent | provider=%s reason=%s job=%s",
+                    provider,
+                    reason,
+                    job_id or "-",
+                )
+                return {"sent": True, "to": settings["to"], "event_type": reason}
+        except Exception as exc:
+            logger.exception(
+                "[BROWSER_HUMAN_INTERVENTION] email failed | provider=%s reason=%s job=%s",
+                provider,
+                reason,
+                job_id or "-",
+            )
+            return {"sent": False, "reason": "send_failed", "error": str(exc)}
 
     def should_send_event(self, event_type):
         provider = self.provider()

@@ -16,7 +16,11 @@ from .download_task import DownloadTask
 from .system_config import SystemConfig
 from .platform_credential import PlatformCredentialAccount, PlatformCredentialBinding
 from .external_document import ExternalDocument, ZsxqTopicExternalDocument
-from .bilibili_intelligence import BilibiliCompetitor, BilibiliCompetitorVideo
+from .bilibili_intelligence import (
+    BilibiliChargingSnapshot,
+    BilibiliCompetitor,
+    BilibiliCompetitorVideo,
+)
 from .bilibili_publish import PublicationTaskBilibiliUpload
 from .tts import TTSArticle, TTSSegment
 from .zsxq_sync import (
@@ -61,6 +65,7 @@ __all__ = [
     'ZsxqTopicExternalDocument',
     'BilibiliCompetitor',
     'BilibiliCompetitorVideo',
+    'BilibiliChargingSnapshot',
     'PublicationTaskBilibiliUpload',
     'TTSArticle',
     'TTSSegment',

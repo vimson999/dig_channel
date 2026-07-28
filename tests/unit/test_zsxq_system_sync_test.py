@@ -50,11 +50,13 @@ class ZsxqSystemSyncTest(unittest.TestCase):
         normalized = system_sync_test._normalize_auto_script_material_dispatch({
             "enabled": True,
             "pdf_min_download_count": "40",
+            "visual_scheme_keys": ["stick_figure", "stick_figure", "invalid"],
             "wait_for_completion": True,
         })
 
         self.assertTrue(normalized["enabled"])
         self.assertEqual(normalized["pdf_min_download_count"], 40)
+        self.assertEqual(normalized["visual_scheme_keys"], ["stick_figure"])
         self.assertFalse(normalized["wait_for_completion"])
 
     def test_sync_service_recovers_auto_dispatch_config_from_sync_meta(self):
@@ -100,6 +102,7 @@ class ZsxqSystemSyncTest(unittest.TestCase):
                 "auto_script_material_dispatch": {
                     "enabled": True,
                     "pdf_min_download_count": 40,
+                    "visual_scheme_keys": ["stick_figure"],
                 },
             },
             trigger="scheduler_start",
@@ -125,6 +128,10 @@ class ZsxqSystemSyncTest(unittest.TestCase):
         self.assertEqual(snapshot["system_sync"]["auto_video_dispatch"]["mp3_min_download_count"], 25)
         self.assertTrue(snapshot["sync"]["auto_video_dispatch"]["enabled"])
         self.assertEqual(snapshot["system_sync"]["auto_script_material_dispatch"]["pdf_min_download_count"], 40)
+        self.assertEqual(
+            snapshot["system_sync"]["auto_script_material_dispatch"]["visual_scheme_keys"],
+            ["stick_figure"],
+        )
         self.assertTrue(snapshot["sync"]["auto_script_material_dispatch"]["enabled"])
 
     def test_runtime_cookie_override_counts_as_configured(self):

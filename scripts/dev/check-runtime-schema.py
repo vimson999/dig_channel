@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Fail closed when the database is only partially migrated for this release."""
+"""Fail closed for runtime-incompatible schema drift.
+
+Administrative cleanup is reported separately so redundant indexes or a delayed
+Alembic stamp cannot keep an otherwise compatible application release offline.
+"""
 
 import os
 import signal
@@ -10,8 +14,14 @@ from urllib.parse import urlparse
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MIGRATION_ID = "20260718_bili_upload_exec"
-MIGRATION_SCRIPT = "docs/sql/bilibili_upload_execution_projection_dbeaver_20260718.sql"
+MIGRATION_ID = "20260724_comment_hash_indexes"
+MIGRATION_SCRIPT = "docs/sql/comment_hash_index_cleanup_dbeaver_20260724.sql"
+MIGRATION_SUCCESSOR_IDS = {
+    "20260727_bilibili_charging",
+    "20260727_bili_charging_daily",
+    "20260728_youtube_channel_sync",
+    "20260728_youtube_video_sync",
+}
 
 REQUIRED_COLUMNS = {
     "publication_tasks": {
@@ -23,11 +33,24 @@ REQUIRED_COLUMNS = {
         "report_audio_vertical_cover_path",
         "report_audio_podcast_cover_path",
         "report_audio_bilibili_cover_path",
+        "report_audio_landscape_keyframe_path",
         "report_audio_video_path",
         "report_audio_cover_path",
         "publisher_bilibili_cover_path",
     },
     "zsxq_sync_runs": {"download_ledger_complete"},
+    "zsxq_topics": {"raw_payload_hash"},
+    "zsxq_topic_comments": {"raw_payload_hash"},
+    "bilibili_charging_snapshots": {
+        "id",
+        "competitor_id",
+        "snapshot_date",
+        "charger_count",
+        "fetched_at",
+        "source",
+        "created_at",
+        "updated_at",
+    },
     "zsxq_sync_run_downloads": {
         "run_id",
         "attachment_id",
@@ -89,6 +112,7 @@ REQUIRED_COLUMNS = {
 REQUIRED_PRIVILEGES = {
     "zsxq_sync_run_downloads": "SELECT, INSERT, UPDATE, DELETE",
     "publication_task_bilibili_uploads": "SELECT, INSERT, UPDATE, DELETE",
+    "bilibili_charging_snapshots": "SELECT, INSERT, UPDATE, DELETE",
 }
 
 REQUIRED_INDEXES = {
@@ -98,12 +122,26 @@ REQUIRED_INDEXES = {
     "ix_zsxq_sync_run_downloads_run_ext",
     "ix_zsxq_sync_run_downloads_attachment",
     "ix_publication_task_bili_uploads_parent_source_created",
+    "ix_bilibili_charging_snapshots_date_competitor",
 }
 
 FORBIDDEN_DUPLICATE_INDEXES = {
+    "ix_external_documents_url_hash",
+    "ix_publication_tasks_feature_status_updated",
+    "ix_publication_tasks_feature_created_at_desc",
+    "ix_publication_tasks_publisher_created_at_desc",
+    "ix_publication_tasks_publisher_pending_updated_at",
     "ix_publication_tasks_parent_created_asc",
     "ix_publication_tasks_source_created_asc",
+    "ix_zsxq_attachments_publish_status",
+    "ix_zsxq_topic_comments_create_time",
+    "ix_zsxq_topic_comments_owner_name",
+    "ix_zsxq_topic_comments_owner_user_id",
+    "ix_zsxq_topic_comments_parent_comment_id",
+    "ix_zsxq_topic_comments_tab_id",
     "ix_zsxq_topics_group_tab_create_synced_desc",
+    "ix_zsxq_topics_group_tab_type_create_desc",
+    "ix_zsxq_topics_group_type_create_desc",
 }
 
 
@@ -157,6 +195,24 @@ def evaluate_schema_snapshot(snapshot):
             f"{media_projection_mismatches} mismatched row(s)"
         )
 
+    topic_payload_hash_mismatches = snapshot.get("topic_payload_hash_mismatches")
+    if topic_payload_hash_mismatches is None:
+        errors.append("ZSXQ topic payload hash validation was not executed")
+    elif topic_payload_hash_mismatches:
+        errors.append(
+            "ZSXQ topic payload hash backfill is incomplete: "
+            f"{topic_payload_hash_mismatches} mismatched row(s)"
+        )
+
+    comment_payload_hash_missing = snapshot.get("comment_payload_hash_missing")
+    if comment_payload_hash_missing is None:
+        errors.append("ZSXQ comment payload hash validation was not executed")
+    elif comment_payload_hash_missing:
+        errors.append(
+            "ZSXQ comment payload hash backfill is incomplete: "
+            f"{comment_payload_hash_missing} row(s) missing a hash"
+        )
+
     bilibili_tasks = snapshot.get("bilibili_tasks")
     projected_bilibili_tasks = snapshot.get("projected_bilibili_tasks")
     if (
@@ -183,13 +239,24 @@ def evaluate_schema_snapshot(snapshot):
     missing_indexes = sorted(REQUIRED_INDEXES - indexes)
     if missing_indexes:
         errors.append(f"missing required indexes: {', '.join(missing_indexes)}")
+    return errors
+
+
+def evaluate_maintenance_warnings(snapshot):
+    warnings = []
+    alembic_versions = set(snapshot.get("alembic_versions") or ())
+    if not ({MIGRATION_ID} | MIGRATION_SUCCESSOR_IDS) & alembic_versions:
+        warnings.append(
+            f"alembic migration {MIGRATION_ID} is not recorded as applied"
+        )
+    indexes = set(snapshot.get("indexes") or ())
     duplicate_indexes = sorted(FORBIDDEN_DUPLICATE_INDEXES & indexes)
     if duplicate_indexes:
-        errors.append(
+        warnings.append(
             "equivalent duplicate indexes still installed: "
             + ", ".join(duplicate_indexes)
         )
-    return errors
+    return warnings
 
 
 def _local_database_url_is_available(database_url):
@@ -230,6 +297,8 @@ def read_schema_snapshot():
     try:
         with connection.cursor() as cursor:
             cursor.execute("SET LOCAL statement_timeout = '10s'")
+            cursor.execute("SELECT version_num FROM public.alembic_version")
+            alembic_versions = {row[0] for row in cursor.fetchall()}
             cursor.execute(
                 """
                 SELECT table_name, column_name
@@ -260,6 +329,8 @@ def read_schema_snapshot():
             projected_bilibili_tasks = None
             executable_bilibili_tasks = None
             media_projection_mismatches = None
+            topic_payload_hash_mismatches = None
+            comment_payload_hash_missing = None
             publication_columns = tables.get("publication_tasks") or set()
             if REQUIRED_COLUMNS["publication_tasks"] <= publication_columns:
                 cursor.execute(
@@ -287,6 +358,10 @@ def read_schema_snapshot():
                                 OR report_audio_cover_path IS DISTINCT FROM LEFT(
                                     NULLIF(result::jsonb #>> '{video,cover_path}', ''), 600
                                 )
+                                OR report_audio_landscape_keyframe_path IS DISTINCT FROM LEFT(
+                                    NULLIF(result::jsonb #>> '{video,keyframes,landscape_cover,path}', ''),
+                                    600
+                                )
                                 OR report_audio_vertical_cover_path IS DISTINCT FROM LEFT(COALESCE(
                                     NULLIF(result::jsonb #>> '{video,vertical_cover_path}', ''),
                                     NULLIF(result::jsonb #>> '{video,keyframes,vertical_cover,path}', '')
@@ -311,6 +386,30 @@ def read_schema_snapshot():
                     """
                 )
                 media_projection_mismatches = cursor.fetchone()[0]
+
+            topic_columns = tables.get("zsxq_topics") or set()
+            if REQUIRED_COLUMNS["zsxq_topics"] <= topic_columns:
+                cursor.execute(
+                    """
+                    SELECT count(*)
+                    FROM public.zsxq_topics
+                    WHERE raw_payload IS NOT NULL
+                      AND raw_payload_hash IS DISTINCT FROM md5(raw_payload::jsonb::text)
+                    """
+                )
+                topic_payload_hash_mismatches = cursor.fetchone()[0]
+
+            comment_columns = tables.get("zsxq_topic_comments") or set()
+            if REQUIRED_COLUMNS["zsxq_topic_comments"] <= comment_columns:
+                cursor.execute(
+                    """
+                    SELECT count(*)
+                    FROM public.zsxq_topic_comments
+                    WHERE raw_payload IS NOT NULL
+                      AND raw_payload_hash IS NULL
+                    """
+                )
+                comment_payload_hash_missing = cursor.fetchone()[0]
 
             bilibili_columns = tables.get("publication_task_bilibili_uploads") or set()
             if REQUIRED_COLUMNS["publication_task_bilibili_uploads"] <= bilibili_columns:
@@ -356,11 +455,14 @@ def read_schema_snapshot():
             indexes = {row[0] for row in cursor.fetchall()}
         connection.rollback()
         return {
+            "alembic_versions": alembic_versions,
             "tables": tables,
             "privileges": privileges,
             "clean_tasks": clean_tasks,
             "projected_clean_tasks": projected_clean_tasks,
             "media_projection_mismatches": media_projection_mismatches,
+            "topic_payload_hash_mismatches": topic_payload_hash_mismatches,
+            "comment_payload_hash_missing": comment_payload_hash_missing,
             "bilibili_tasks": bilibili_tasks,
             "projected_bilibili_tasks": projected_bilibili_tasks,
             "executable_bilibili_tasks": executable_bilibili_tasks,
@@ -380,15 +482,25 @@ def main():
     try:
         snapshot = read_schema_snapshot()
         errors = evaluate_schema_snapshot(snapshot)
+        warnings = evaluate_maintenance_warnings(snapshot)
     except Exception as exc:
         print(f"ERROR: runtime schema check failed: {exc}", file=sys.stderr)
-        print(f"Required migration: {MIGRATION_SCRIPT}", file=sys.stderr)
+        print(f"Required admin migration: {MIGRATION_SCRIPT}", file=sys.stderr)
         return 3
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous_handler)
 
     if not errors:
+        if warnings:
+            print(
+                f"OK: runtime schema is compatible; admin maintenance for "
+                f"{MIGRATION_ID} remains:"
+            )
+            for warning in warnings:
+                print(f"  - {warning}")
+            print(f"Complete admin maintenance with: {MIGRATION_SCRIPT}")
+            return 0
         print(f"OK: runtime schema contract {MIGRATION_ID} is complete.")
         return 0
 

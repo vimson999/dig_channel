@@ -14,6 +14,11 @@ from services.bilibili_intelligence_service import (
     sync_competitor,
     update_decision,
 )
+from services.bilibili_charging_dashboard_service import (
+    BilibiliChargingDashboardError,
+    charging_dashboard_payload,
+    collect_charging_snapshots,
+)
 from services.runtime_guard import release_db_session_quietly
 from utils.auth_utils import require_login
 
@@ -128,6 +133,29 @@ def list_competitors(_current_user):
     payload = [row.compact_dict() for row in rows]
     release_db_session_quietly()
     return jsonify({"success": True, "data": {"items": payload}})
+
+
+@bp.get("/charging-dashboard")
+@require_login
+def charging_dashboard(_current_user):
+    try:
+        days = _bounded_int(request.args.get("days"), 31, 2, 366)
+        return jsonify({"success": True, "data": charging_dashboard_payload(days=days)})
+    except Exception as exc:
+        return _error(f"读取 B站充电看板失败: {exc}", 500)
+
+
+@bp.post("/charging-dashboard/sync")
+@require_login
+def sync_charging_dashboard(_current_user):
+    try:
+        result = collect_charging_snapshots(trigger="dashboard_manual")
+        status = 200 if not result.get("failed") else 207
+        return jsonify({"success": True, "data": result}), status
+    except BilibiliChargingDashboardError as exc:
+        return _error(exc, 502)
+    except Exception as exc:
+        return _error(f"同步 B站充电人数失败: {exc}", 502)
 
 
 @bp.post("/competitors")

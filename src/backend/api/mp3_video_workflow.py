@@ -60,6 +60,7 @@ from services.mp3_video_workflow import (
     regenerate_visual_artifact,
     status_payload as workflow_status_payload,
 )
+from services.runtime_guard import apply_async_after_db_release
 from tasks.mp3_video_workflow import process_mp3_video_workflow_job
 from utils.auth_utils import require_login
 from utils.date_filters import submission_date_utc_range
@@ -424,7 +425,12 @@ def create_job(current_user):
     db.session.commit()
 
     try:
-        celery_task = process_mp3_video_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+        celery_task = apply_async_after_db_release(
+            process_mp3_video_workflow_job,
+            args=[task.id],
+            queue=QUEUE_NAME,
+            retry=False,
+        )
     except Exception as exc:
         task.status = "failed"
         task.current_step = "failed"
@@ -941,7 +947,12 @@ def retry_job(current_user, job_id):
     flag_modified(task, "result")
     db.session.commit()
     try:
-        celery_task = process_mp3_video_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+        celery_task = apply_async_after_db_release(
+            process_mp3_video_workflow_job,
+            args=[task.id],
+            queue=QUEUE_NAME,
+            retry=False,
+        )
     except Exception as exc:
         task.status = "failed"
         task.current_step = "failed"
@@ -973,7 +984,12 @@ def continue_full_video(current_user, job_id):
 
     db.session.commit()
     try:
-        celery_task = process_mp3_video_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+        celery_task = apply_async_after_db_release(
+            process_mp3_video_workflow_job,
+            args=[task.id],
+            queue=QUEUE_NAME,
+            retry=False,
+        )
     except Exception as exc:
         task.status = "failed"
         task.current_step = "failed"
@@ -1005,7 +1021,12 @@ def regenerate_videos(current_user, job_id):
 
     db.session.commit()
     try:
-        celery_task = process_mp3_video_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+        celery_task = apply_async_after_db_release(
+            process_mp3_video_workflow_job,
+            args=[task.id],
+            queue=QUEUE_NAME,
+            retry=False,
+        )
     except Exception as exc:
         task.status = "failed"
         task.current_step = "failed"

@@ -34,6 +34,7 @@ from services.report_top10_workflow import (
     status_payload as workflow_status_payload,
     storage_path_for_job,
 )
+from services.runtime_guard import apply_async_after_db_release
 from tasks.report_top10_workflow import process_report_top10_workflow_job
 from utils.auth_utils import require_login
 from services.report_video_service import rel_path, task_dir
@@ -285,7 +286,12 @@ def create_job(current_user):
     db.session.commit()
 
     try:
-        celery_task = process_report_top10_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+        celery_task = apply_async_after_db_release(
+            process_report_top10_workflow_job,
+            args=[task.id],
+            queue=QUEUE_NAME,
+            retry=False,
+        )
     except Exception as exc:
         task.status = "failed"
         task.current_step = "failed"
@@ -417,7 +423,12 @@ def retry_job(current_user, job_id):
     db.session.commit()
 
     try:
-        celery_task = process_report_top10_workflow_job.apply_async(args=[task.id], queue=QUEUE_NAME, retry=False)
+        celery_task = apply_async_after_db_release(
+            process_report_top10_workflow_job,
+            args=[task.id],
+            queue=QUEUE_NAME,
+            retry=False,
+        )
     except Exception as exc:
         task.status = "failed"
         task.current_step = "failed"

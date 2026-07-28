@@ -26,7 +26,12 @@ from services.report_audio_workflow import (
     structured_result_quality_issue,
 )
 from services.report_script_material_workflow import FEATURE_NAME, QUEUE_NAME, write_result_file
-from services.runtime_guard import guard_publication_task_start, release_db_session_quietly, retry_exception_types
+from services.runtime_guard import (
+    apply_async_after_db_release,
+    guard_publication_task_start,
+    release_db_session_quietly,
+    retry_exception_types,
+)
 from tasks.gemini_browser import process_report_pdf_gemini_job
 
 
@@ -332,7 +337,43 @@ def _dispatch_auto_storyboard(material_task_id: str) -> None:
         return
     payload = _workflow_payload(material)
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    if str(metadata.get("source") or "") != "report-stick-figure-video-workflow":
+    metadata_source = str(metadata.get("source") or "")
+    if metadata_source == "zsxq_auto_script_material_dispatch":
+        visual_scheme_keys = metadata.get("visual_scheme_keys")
+        if not isinstance(visual_scheme_keys, list) or not visual_scheme_keys:
+            return
+        try:
+            from tasks.report_audio_workflow import _dispatch_requested_visual_workflows
+
+            dispatch = _dispatch_requested_visual_workflows(
+                material_task_id,
+                {"visual_scheme_keys": visual_scheme_keys},
+            )
+            _update_result(material_task_id, {"visual_workflows": dispatch})
+            logger.info(
+                "Auto visual workflows dispatched: material=%s schemes=%s",
+                material_task_id,
+                visual_scheme_keys,
+            )
+        except Exception as exc:
+            db.session.rollback()
+            _update_result(material_task_id, {
+                "visual_workflows": {
+                    "requested": visual_scheme_keys,
+                    "items": [],
+                    "status": "failed",
+                    "error": str(exc),
+                },
+            })
+            logger.error(
+                "Auto visual workflows dispatch failed: material=%s schemes=%s error=%s",
+                material_task_id,
+                visual_scheme_keys,
+                exc,
+                exc_info=True,
+            )
+        return
+    if metadata_source != "report-stick-figure-video-workflow":
         return
     workflow_task_id = str(metadata.get("workflow_job_id") or "").strip()
     if not workflow_task_id:
@@ -514,7 +555,12 @@ def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload, *, at
     child_id = child.id
     child_snapshot = _task_snapshot(child)
     db.session.commit()
-    async_result = process_report_pdf_gemini_job.apply_async(args=[child_id], queue=gemini_service.QUEUE_NAME, retry=False)
+    async_result = apply_async_after_db_release(
+        process_report_pdf_gemini_job,
+        args=[child_id],
+        queue=gemini_service.QUEUE_NAME,
+        retry=False,
+    )
     _persist_child_celery_task_id(child_id, async_result.id)
     child_snapshot.celery_task_id = async_result.id
     return child_snapshot

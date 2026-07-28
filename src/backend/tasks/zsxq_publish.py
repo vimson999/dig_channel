@@ -20,6 +20,7 @@ from services.platform_publish_dispatch import ZSXQ_PUBLISH_QUEUE
 from services.runtime_guard import (
     guard_publication_task_start,
     is_retryable_db_error,
+    release_db_session_quietly,
     retry_exception_types,
 )
 
@@ -197,6 +198,7 @@ def _run_publish_clean_output_task_impl(task_id, celery_task=None):
                 completed_at=None,
                 result=task_result,
             )
+            release_db_session_quietly()
 
             publish_result = publish_clean_output(
                 file_type=publish_params.get("file_type"),

@@ -34,6 +34,7 @@ from services.report_audio_workflow import (
     normalize_for_tts,
     pdf_first_page_image_path_for_job,
     render_pdf_first_page_image,
+    review_report_cover_titles,
     split_tts_text,
     storage_path_for_job,
     structured_result_quality_issue,
@@ -42,6 +43,7 @@ from services.report_audio_workflow import (
 from services.thumbnail_service import thumbnail_service
 from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
 from services.runtime_guard import (
+    apply_async_after_db_release,
     guard_publication_task_start,
     is_retryable_db_error,
     release_db_session_quietly,
@@ -357,6 +359,7 @@ def _persist_parent_result_fallback(parent_id, result, **fields):
         "report_audio_video_message",
         "report_audio_video_path",
         "report_audio_cover_path",
+        "report_audio_landscape_keyframe_path",
         "report_audio_vertical_cover_path",
         "report_audio_podcast_cover_path",
         "report_audio_bilibili_cover_path",
@@ -476,6 +479,185 @@ PUBLISHER_STEP_ALIASES = {
     "failed": "failed",
     "canceled": "canceled",
 }
+
+
+def _dispatch_requested_visual_workflows(source_task_id, payload):
+    requested = []
+    for value in (payload or {}).get("visual_scheme_keys") or []:
+        key = str(value or "").strip().lower()
+        if key and key not in requested:
+            requested.append(key)
+    if not requested:
+        return {"requested": [], "items": []}
+
+    from services.report_visual_scheme import visual_scheme
+    from tasks.report_visual_plan import (
+        _dispatch_auto_scene_images,
+        enqueue_report_visual_plan_for_material,
+    )
+
+    source = (
+        PublicationTask.query.options(load_only(
+            PublicationTask.id,
+            PublicationTask.feature,
+            PublicationTask.user_id,
+            PublicationTask.task_title,
+            PublicationTask.final_script_chars,
+            PublicationTask.report_audio_pdf_attachment_id,
+            PublicationTask.report_audio_pdf_filename,
+            PublicationTask.report_audio_pdf_bytes,
+            PublicationTask.report_audio_pdf_topic_title,
+        ))
+        .filter(PublicationTask.id == str(source_task_id))
+        .one_or_none()
+    )
+    if not source or int(source.final_script_chars or 0) <= 0:
+        raise RuntimeError("基础文案尚未投影完成，不能投递视觉方案")
+
+    source_snapshot = SimpleNamespace(
+        id=str(source.id),
+        feature=str(source.feature or FEATURE_NAME),
+        user_id=str(source.user_id or ""),
+        task_title=source.task_title,
+        report_audio_pdf_attachment_id=source.report_audio_pdf_attachment_id,
+        report_audio_pdf_filename=source.report_audio_pdf_filename,
+        report_audio_pdf_bytes=source.report_audio_pdf_bytes,
+        report_audio_pdf_topic_title=source.report_audio_pdf_topic_title,
+    )
+    summaries = []
+    for key in requested:
+        parent = None
+        try:
+            scheme = visual_scheme(key)
+            parent = (
+                PublicationTask.query.options(load_only(
+                    PublicationTask.id,
+                    PublicationTask.status,
+                    PublicationTask.current_step,
+                ))
+                .filter(
+                    PublicationTask.feature == "report_stick_figure_video_workflow",
+                    PublicationTask.source_feature == source_snapshot.feature,
+                    PublicationTask.source_task_id == source_snapshot.id,
+                    PublicationTask.report_visual_scheme_key == scheme.key,
+                    PublicationTask.status.in_(["pending", "processing", "completed"]),
+                )
+                .order_by(PublicationTask.created_at.desc())
+                .first()
+            )
+            reused_parent = parent is not None
+            if parent and parent.status == "completed":
+                summaries.append({
+                    "visual_scheme_key": scheme.key,
+                    "workflow_job_id": str(parent.id),
+                    "storyboard_job_id": "",
+                    "status": "completed",
+                    "reused_workflow": True,
+                    "reused_storyboard": True,
+                    "image_dispatch": None,
+                })
+                continue
+            if not parent:
+                parent = PublicationTask(
+                    status="processing",
+                    current_step="storyboard_queued",
+                    progress=35,
+                    params={
+                        "feature": "report_stick_figure_video_workflow",
+                        "user_id": source_snapshot.user_id,
+                        "source_task_id": source_snapshot.id,
+                        "source_feature": source_snapshot.feature,
+                        "visual_scheme_key": scheme.key,
+                        "report_stick_figure_video_workflow": {
+                            "schema_version": "20260723_audio_shared_script_v1",
+                            "input_mode": "report_audio_shared_script",
+                            "visual_scheme_key": scheme.key,
+                            "pdf": {
+                                "attachment_id": source_snapshot.report_audio_pdf_attachment_id,
+                                "filename": source_snapshot.report_audio_pdf_filename,
+                                "bytes": source_snapshot.report_audio_pdf_bytes,
+                                "topic_title": source_snapshot.report_audio_pdf_topic_title,
+                            },
+                        },
+                    },
+                    result={"schema_version": "20260723_audio_shared_script_v1"},
+                )
+                parent.task_title = (
+                    source_snapshot.task_title
+                    or source_snapshot.report_audio_pdf_topic_title
+                    or source_snapshot.report_audio_pdf_filename
+                    or f"研报 PDF 转{scheme.name}视频"
+                )
+                parent.report_visual_scheme_key = scheme.key
+                parent.source_task_id = source_snapshot.id
+                parent.source_feature = source_snapshot.feature
+                parent.report_audio_pdf_attachment_id = source_snapshot.report_audio_pdf_attachment_id
+                parent.report_audio_pdf_filename = source_snapshot.report_audio_pdf_filename
+                parent.report_audio_pdf_bytes = source_snapshot.report_audio_pdf_bytes
+                parent.report_audio_pdf_topic_title = source_snapshot.report_audio_pdf_topic_title
+                db.session.add(parent)
+                db.session.commit()
+
+            dispatch = enqueue_report_visual_plan_for_material(
+                source_snapshot.id,
+                user_id=source_snapshot.user_id,
+                parent_feature="report_stick_figure_video_workflow",
+                parent_task_id=str(parent.id),
+                visual_scheme_key=scheme.key,
+            )
+            storyboard_done = str(dispatch.get("status") or "pending") == "completed"
+            now = datetime.utcnow()
+            PublicationTask.query.filter(PublicationTask.id == str(parent.id)).update({
+                PublicationTask.status: "processing",
+                PublicationTask.current_step: "storyboard_done" if storyboard_done else "storyboard_queued",
+                PublicationTask.progress: 60 if storyboard_done else 35,
+                PublicationTask.waiting_child_id: dispatch.get("job_id"),
+                PublicationTask.waiting_child_label: "标题与正文分镜",
+                PublicationTask.waiting_child_status: "completed" if storyboard_done else "pending",
+                PublicationTask.waiting_child_step: "done" if storyboard_done else "queued",
+                PublicationTask.waiting_child_updated_at: now.isoformat() + "Z",
+                PublicationTask.error_message: None,
+                PublicationTask.updated_at: now,
+            }, synchronize_session=False)
+            db.session.commit()
+            image_dispatch = None
+            if storyboard_done:
+                image_dispatch = _dispatch_auto_scene_images(
+                    dispatch.get("job_id"),
+                    str(parent.id),
+                )
+            summaries.append({
+                "visual_scheme_key": scheme.key,
+                "workflow_job_id": str(parent.id),
+                "storyboard_job_id": str(dispatch.get("job_id") or ""),
+                "status": "storyboard_done" if storyboard_done else "storyboard_queued",
+                "reused_workflow": reused_parent,
+                "reused_storyboard": bool(dispatch.get("cached")),
+                "image_dispatch": image_dispatch,
+            })
+        except Exception as exc:
+            db.session.rollback()
+            if parent:
+                PublicationTask.query.filter(PublicationTask.id == str(parent.id)).update({
+                    PublicationTask.status: "failed",
+                    PublicationTask.current_step: "storyboard_submit_failed",
+                    PublicationTask.error_message: str(exc)[:4000],
+                    PublicationTask.completed_at: datetime.utcnow(),
+                    PublicationTask.updated_at: datetime.utcnow(),
+                }, synchronize_session=False)
+                db.session.commit()
+            logger.exception(
+                "Failed to dispatch visual workflow source=%s scheme=%s",
+                source_snapshot.id,
+                key,
+            )
+            summaries.append({
+                "visual_scheme_key": key,
+                "workflow_job_id": str(getattr(parent, "id", "") or ""),
+                "status": "failed",
+                "error": str(exc),
+            })
+    return {"requested": requested, "items": summaries}
 
 
 @celery_app.task(bind=True, name="tasks.report_audio_workflow.process_job")
@@ -600,6 +782,8 @@ def _process_job(task_id):
         gemini_result = None
         gemini_public_summary = None
         gemini_task_snapshot = None
+        raw_final = ""
+        initial_text = ""
         manual_gemini_result = _manual_gemini_payload(payload)
         script_material_result = result.get("script_material") if isinstance(result.get("script_material"), dict) else None
         audio_reuse_result = result.get("audio_reuse") if isinstance(result.get("audio_reuse"), dict) else None
@@ -720,6 +904,18 @@ def _process_job(task_id):
                             "pdf_filename": pdf.get("filename"),
                         },
                     )
+        _emit(workflow_task_id, "review_cover_titles", 60, "生成标题候选并进行独立评审")
+        title_source_text = raw_final or "\n".join(filter(None, [
+            str((structured or {}).get("summary") or ""),
+            str((structured or {}).get("final_script_for_tts") or ""),
+        ]))
+        structured = review_report_cover_titles(
+            structured or {},
+            source_text=title_source_text,
+            pdf_filename=pdf.get("filename") or Path(pdf_path).name,
+            pdf_topic_title=pdf.get("topic_title") or "",
+        )
+
         # Always sanitize at the final TTS boundary as well. This also repairs
         # reusable/cached structured material created before a cleaner existed.
         structured = dict(structured or {})
@@ -747,6 +943,34 @@ def _process_job(task_id):
         if script_material_result:
             structured_update["script_material"] = script_material_result
         _update_result(workflow_task_id, structured_update)
+        try:
+            visual_workflows = _dispatch_requested_visual_workflows(
+                workflow_task_id,
+                payload,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to initialize requested visual workflows for audio job %s",
+                workflow_task_id,
+            )
+            visual_workflows = {
+                "requested": list(payload.get("visual_scheme_keys") or []),
+                "items": [],
+                "status": "failed",
+                "error": str(exc),
+            }
+        if visual_workflows.get("requested"):
+            _update_result(workflow_task_id, {"visual_workflows": visual_workflows})
+            queued_count = sum(
+                1
+                for item in visual_workflows.get("items") or []
+                if item.get("status") in {"storyboard_queued", "storyboard_done", "completed"}
+            )
+            _queue_notification(
+                workflow_task_id,
+                "report_audio_visual_workflows_dispatched",
+                f"共享文案已投递 {queued_count}/{len(visual_workflows.get('requested') or [])} 个视觉方案",
+            )
         _queue_notification(
             workflow_task_id,
             "report_audio_normalized",
@@ -946,6 +1170,8 @@ def _process_job(task_id):
         _update_result(workflow_task_id, final_update)
         completed_at = datetime.utcnow()
         video_payload = video_result if isinstance(video_result, dict) else {}
+        keyframes_payload = video_payload.get("keyframes") if isinstance(video_payload.get("keyframes"), dict) else {}
+        landscape_payload = keyframes_payload.get("landscape_cover") if isinstance(keyframes_payload.get("landscape_cover"), dict) else {}
         audio_payload = audio if isinstance(audio, dict) else {}
         structured_payload = structured if isinstance(structured, dict) else {}
         updated = (
@@ -969,6 +1195,7 @@ def _process_job(task_id):
                     PublicationTask.report_audio_video_message: video_payload.get("message"),
                     PublicationTask.report_audio_video_path: video_payload.get("video_path"),
                     PublicationTask.report_audio_cover_path: video_payload.get("cover_path"),
+                    PublicationTask.report_audio_landscape_keyframe_path: landscape_payload.get("path"),
                     PublicationTask.report_audio_cover_title: structured_payload.get("cover_title"),
                     PublicationTask.report_audio_cover_subtitle: structured_payload.get("cover_subtitle") or video_payload.get("cover_subtitle"),
                     PublicationTask.report_audio_structured_title: structured_payload.get("title"),
@@ -1135,7 +1362,12 @@ def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload, *, at
     child_id = child.id
     child_snapshot = SimpleNamespace(**_task_state_snapshot(child))
     db.session.commit()
-    async_result = process_report_pdf_gemini_job.apply_async(args=[child_id], queue=gemini_service.QUEUE_NAME, retry=False)
+    async_result = apply_async_after_db_release(
+        process_report_pdf_gemini_job,
+        args=[child_id],
+        queue=gemini_service.QUEUE_NAME,
+        retry=False,
+    )
     _persist_child_celery_task_id(child_id, async_result.id)
     child_snapshot.celery_task_id = async_result.id
     child_snapshot.celery_id = async_result.id
@@ -2004,7 +2236,12 @@ def _create_doubao_tts_task(parent, text, index, total, payload, *, attempt=1):
     child_id = child.id
     child_snapshot = SimpleNamespace(**_task_state_snapshot(child))
     db.session.commit()
-    async_result = process_doubao_browser_tts_job.apply_async(args=[child_id], queue=_doubao_queue_name(), retry=False)
+    async_result = apply_async_after_db_release(
+        process_doubao_browser_tts_job,
+        args=[child_id],
+        queue=_doubao_queue_name(),
+        retry=False,
+    )
     _persist_child_celery_task_id(child_id, async_result.id)
     child_snapshot.celery_task_id = async_result.id
     child_snapshot.celery_id = async_result.id
@@ -2057,7 +2294,7 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
     vertical_subtitle_position = (
         video_options.get("vertical_subtitle_position")
         if isinstance(video_options.get("vertical_subtitle_position"), dict)
-        else ({"y_pct": 0.80} if vertical_scheme == "scheme2" else None)
+        else ({"y_pct": 0.80} if vertical_scheme in {"scheme2", "scheme3"} else None)
     )
     vertical_subtitle_style = (
         video_options.get("vertical_subtitle_style")
@@ -2075,7 +2312,7 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
                 "font_size": 50,
                 "wrap_style": 0,
             }
-            if vertical_scheme == "scheme2"
+            if vertical_scheme in {"scheme2", "scheme3"}
             else None
         )
     )
@@ -2264,7 +2501,12 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
     child_id = child.id
     child_snapshot = SimpleNamespace(**_task_state_snapshot(child))
     db.session.commit()
-    async_result = run_publication_pipeline.apply_async(args=[child_id], queue="render", retry=False)
+    async_result = apply_async_after_db_release(
+        run_publication_pipeline,
+        args=[child_id],
+        queue="render",
+        retry=False,
+    )
     _persist_child_celery_task_id(child_id, async_result.id)
     child_snapshot.celery_task_id = async_result.id
     child_snapshot.celery_id = async_result.id
@@ -2795,6 +3037,9 @@ def _update_result(parent_id, values):
                 report_audio_cover_path = LEFT(NULLIF(
                     merged.payload #>> '{video,cover_path}', ''
                 ), 600),
+                report_audio_landscape_keyframe_path = LEFT(NULLIF(
+                    merged.payload #>> '{video,keyframes,landscape_cover,path}', ''
+                ), 600),
                 report_audio_vertical_cover_path = LEFT(COALESCE(
                     NULLIF(merged.payload #>> '{video,vertical_cover_path}', ''),
                     NULLIF(merged.payload #>> '{video,keyframes,vertical_cover,path}', '')
@@ -3028,6 +3273,7 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
         video_options.get("vertical_video_scheme") or video_options.get("vertical_scheme") or "scheme1",
     )
     scheme = _primary_vertical_scheme(vertical_schemes)
+    vertical_requested = _vertical_keyframes_requested(video_options, vertical_schemes)
     main_title = _publisher_main_title(structured, video_options, variant="landscape")
     sub_title = _publisher_sub_title(structured, video_options, variant="landscape")
     vertical_main_title = _publisher_main_title(structured, video_options, variant="vertical")
@@ -3072,11 +3318,20 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
             )
         keyframes["landscape_cover"] = _keyframe_artifact(cover_path, "横屏封面关键帧", "16:9")
 
-    if _truthy(video_options.get("vertical_enabled", False)):
+    if vertical_requested:
         for selected_scheme in vertical_schemes:
             asset_name = f"vertical_bg_{selected_scheme}"
             selected_background_path = _latest_report_audio_keyframe(parent_id, asset_name, (1080, 1920))
-            if not selected_background_path and selected_scheme == "scheme2":
+            if not selected_background_path and selected_scheme == "scheme3":
+                selected_background_path = thumbnail_service.generate_workbench_video_background(
+                    main_title=vertical_main_title,
+                    sub_title=vertical_sub_title,
+                    output_filename=f"report_audio_keyframe_{asset_name}_{parent_id[:8]}_{int(time.time())}.jpg",
+                    institution=institution,
+                    emotion="bull",
+                    footer_text=footer_text,
+                )
+            elif not selected_background_path and selected_scheme == "scheme2":
                 selected_background_path = thumbnail_service.generate_workbench_vertical_thumbnail(
                     main_title=vertical_main_title,
                     sub_title=vertical_sub_title,
@@ -3099,7 +3354,7 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
             key = "vertical_background" if selected_scheme == scheme else f"vertical_background_{selected_scheme}"
             keyframes[key] = _keyframe_artifact(
                 selected_background_path,
-                f"{('方案二' if selected_scheme == 'scheme2' else '方案一')}竖屏背景关键帧",
+                f"{'方案三' if selected_scheme == 'scheme3' else ('方案二' if selected_scheme == 'scheme2' else '方案一')}竖屏背景关键帧",
                 "9:16",
             )
 
@@ -3163,7 +3418,7 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
         "render_mode": "keyframes",
         "message": "仅生成关键帧/封皮预览，未合成 MP4",
         "landscape_enabled": _truthy(video_options.get("enabled", False)),
-        "vertical_enabled": _truthy(video_options.get("vertical_enabled", False)),
+        "vertical_enabled": vertical_requested,
         "cover_title": main_title,
         "cover_subtitle": sub_title,
         "landscape_title": main_title,
@@ -3230,6 +3485,8 @@ def _latest_report_audio_keyframe(parent_id, asset_name, expected_size):
 
 def _normalize_vertical_scheme(value):
     text = str(value or "").strip().lower()
+    if text in {"scheme3", "3", "方案三", "visual_frame", "visual-frame", "video_bg", "video-bg"}:
+        return "scheme3"
     if text in {"scheme2", "2", "方案二", "workbench", "thumbnail_workbench", "thumbnail-workbench"}:
         return "scheme2"
     return "scheme1"
@@ -3260,8 +3517,21 @@ def _normalize_vertical_schemes(value, fallback=None):
     return schemes
 
 
+def _vertical_keyframes_requested(video_options, vertical_schemes):
+    if _truthy((video_options or {}).get("vertical_enabled", False)):
+        return True
+    # 方案一在页面上默认选中，不能单独代表用户要求竖版；方案二/三是显式选择。
+    explicitly_selected = _normalize_vertical_schemes(
+        (video_options or {}).get("vertical_video_schemes"),
+        fallback=None,
+    )
+    return any(scheme in {"scheme2", "scheme3"} for scheme in explicitly_selected)
+
+
 def _primary_vertical_scheme(schemes):
     normalized = _normalize_vertical_schemes(schemes, "scheme1")
+    if "scheme3" in normalized:
+        return "scheme3"
     if "scheme1" in normalized and "scheme2" in normalized:
         return "scheme2"
     return normalized[0]
@@ -3417,15 +3687,48 @@ def _publisher_cover_title_with_institution(title, institution):
         "Bernstein": "伯恩斯坦",
         "深度研报": "机构",
     }.get(str(institution or "").strip(), str(institution or "").strip() or "机构")
-    raw_title = re.sub(
+    raw = str(title or "").replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r", "\n")
+    lines = raw.splitlines() or ["研报核心观点解读"]
+    first_line, generic_prefix_count = re.subn(
         r"^\s*(?:(?:机构研报|机构|深度研报)\s*[:：]\s*)+",
         "",
-        _single_line(title),
+        lines[0],
         flags=re.I,
     )
-    _bank, subject = _extract_bank_subject(raw_title)
-    subject = subject.strip(" |｜/：:") or "研报核心观点解读"
-    formatted = _format_cover_title(f"{label}：{subject}")
+    lines[0] = first_line
+    compact = _single_line("\n".join(lines))
+    matched_alias = next(
+        (
+            (alias, short_label)
+            for alias, short_label in BANK_ALIASES
+            if re.search(re.escape(alias), compact, flags=re.I)
+        ),
+        None,
+    )
+    if matched_alias and matched_alias[1] == label:
+        if not generic_prefix_count:
+            return _format_cover_title(raw)
+        normalized = re.sub(
+            re.escape(matched_alias[0]),
+            label,
+            "\n".join(lines),
+            count=1,
+            flags=re.I,
+        )
+        normalized = re.sub(rf"^{re.escape(label)}\s*[:：]\s*", f"{label}：", normalized, count=1)
+        formatted = _format_cover_title(normalized)
+        return re.sub(rf"^{re.escape(label)}:", f"{label}：", formatted, count=1)
+
+    if matched_alias:
+        lines = re.sub(
+            re.escape(matched_alias[0]),
+            "",
+            "\n".join(lines),
+            count=1,
+            flags=re.I,
+        ).splitlines()
+    first_line = lines[0].strip(" |｜/：:") or "研报核心观点解读"
+    formatted = _format_cover_title("\n".join([f"{label}：{first_line}", *lines[1:]]))
     return re.sub(rf"^{re.escape(label)}:", f"{label}：", formatted, count=1)
 
 

@@ -185,6 +185,13 @@ def run_zsxq_sync(self, run_id, payload):
                         logger.exception("[ZSXQ_SYNC_TASK] failed to persist audio clean submit error | run_id=%s", run_id)
             _submit_report_asset_scan_after_sync(run_id, payload, result)
             delivery_result = _compact_sync_delivery_result(result, run_id=run_id)
+            _notify_direct_all_tabs_sync(
+                "sync_completed",
+                payload,
+                run_id=run_id,
+                status="completed",
+                summary=delivery_result.get("summary"),
+            )
             if workflow_run_id:
                 queued_id = _notify_workflow_sync_finished(
                     workflow_run_id,
@@ -252,6 +259,13 @@ def run_zsxq_sync(self, run_id, payload):
                         success=False,
                         error=str(exc),
                     )
+            _notify_direct_all_tabs_sync(
+                "sync_failed",
+                payload,
+                run_id=run_id,
+                status="failed",
+                error=str(exc),
+            )
             raise
         finally:
             db.session.remove()
@@ -618,3 +632,46 @@ def _send_direct_sync_failure_email(*, workflow_run_id, run_id, success, error):
         workflow_notification_service.send_email_message(subject, "\n".join(lines))
     except Exception:
         logger.exception("[ZSXQ_SYNC_TASK] direct sync failure email failed | workflow=%s run_id=%s", workflow_run_id, run_id)
+
+
+def _notify_direct_all_tabs_sync(
+    event_type,
+    payload,
+    *,
+    run_id,
+    status,
+    error=None,
+    summary=None,
+):
+    payload = payload if isinstance(payload, dict) else {}
+    meta = payload.get("auto_all_tabs")
+    if not isinstance(meta, dict):
+        return {"queued": False, "reason": "not_all_tabs"}
+    try:
+        from services.zsxq_all_tabs_auto_sync_service import (
+            _enqueue_all_tabs_notification,
+        )
+
+        target = {
+            "group_id": payload.get("group_id"),
+            "group_name": payload.get("group_name"),
+            "notify_milestones": meta.get("notify_milestones", True),
+        }
+        return _enqueue_all_tabs_notification(
+            event_type,
+            target,
+            trigger=payload.get("trigger") or meta.get("trigger") or "zsxq_sync",
+            attempt_id=meta.get("attempt_id") or run_id,
+            run_id=run_id,
+            status=status,
+            error=error,
+            summary=summary,
+        )
+    except Exception as exc:
+        logger.exception(
+            "[ZSXQ_SYNC_TASK] all-tabs notification failed | event=%s run_id=%s error=%s",
+            event_type,
+            run_id,
+            exc,
+        )
+        return {"queued": False, "reason": "queue_failed", "error": str(exc)}

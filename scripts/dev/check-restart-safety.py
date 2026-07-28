@@ -4,6 +4,7 @@
 import os
 import socket
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -25,6 +26,15 @@ WAITING_STEPS = {
     "deferred_db_pressure",
     "orphaned_processing",
 }
+ZSXQ_ACTIVE_STATUSES = ("running", "retrying")
+
+
+def _zsxq_restart_guard_seconds():
+    try:
+        minutes = int(os.environ.get("CELERY_MONITOR_ZSXQ_RESTART_GUARD_MINUTES", "5"))
+    except (TypeError, ValueError):
+        minutes = 5
+    return max(60, minutes * 60)
 
 
 def _local_database_url_is_available(database_url):
@@ -72,17 +82,28 @@ def is_non_interruptible_step(step):
     return True
 
 
+def is_recent_active_zsxq_run(status, updated_at, *, now=None, guard_seconds=None):
+    if str(status or "").strip().lower() not in ZSXQ_ACTIVE_STATUSES:
+        return False
+    if updated_at is None:
+        return False
+    now = now or datetime.utcnow()
+    guard_seconds = guard_seconds or _zsxq_restart_guard_seconds()
+    return (now - updated_at).total_seconds() <= guard_seconds
+
+
 def main():
     _use_direct_database_url()
 
     from app import create_app
     from models import db
     from models.task import PublicationTask
+    from models.zsxq_sync import ZsxqSyncRun
 
     app = create_app()
     try:
         with app.app_context():
-            rows = (
+            publication_rows = (
                 db.session.query(
                     PublicationTask.id,
                     PublicationTask.feature,
@@ -97,7 +118,49 @@ def main():
                 .limit(100)
                 .all()
             )
-            blocking = [row for row in rows if is_non_interruptible_step(row.current_step)]
+            now = datetime.utcnow()
+            cutoff = now - timedelta(seconds=_zsxq_restart_guard_seconds())
+            zsxq_rows = (
+                db.session.query(
+                    ZsxqSyncRun.id,
+                    ZsxqSyncRun.group_id,
+                    ZsxqSyncRun.group_name,
+                    ZsxqSyncRun.mode,
+                    ZsxqSyncRun.status,
+                    ZsxqSyncRun.updated_at,
+                )
+                .filter(ZsxqSyncRun.status.in_(ZSXQ_ACTIVE_STATUSES))
+                .filter(ZsxqSyncRun.updated_at >= cutoff)
+                .order_by(ZsxqSyncRun.updated_at.desc())
+                .limit(100)
+                .all()
+            )
+            blocking = [
+                {
+                    "source": "publication_tasks",
+                    "id": row.id,
+                    "feature": row.feature,
+                    "step": row.current_step,
+                    "progress": row.progress,
+                    "title": row.task_title,
+                    "updated_at": row.updated_at,
+                }
+                for row in publication_rows
+                if is_non_interruptible_step(row.current_step)
+            ]
+            blocking.extend({
+                "source": "zsxq_sync_runs",
+                "id": row.id,
+                "feature": "zsxq_sync",
+                "step": row.mode,
+                "progress": None,
+                "title": row.group_name or row.group_id,
+                "updated_at": row.updated_at,
+            } for row in zsxq_rows if is_recent_active_zsxq_run(
+                row.status,
+                row.updated_at,
+                now=now,
+            ))
     except Exception as exc:
         print(f"ERROR: restart safety check could not verify active tasks: {exc}", file=sys.stderr)
         print("Refusing the restart. Inspect the database or use FORCE_RESTART_ACTIVE_TASKS=1 explicitly.", file=sys.stderr)
@@ -114,11 +177,16 @@ def main():
 
     print(f"BLOCKED: {len(blocking)} non-interruptible processing task(s) are still running:", file=sys.stderr)
     for row in blocking:
-        updated_at = row.updated_at.isoformat() if row.updated_at else "-"
+        updated_at = (
+            row["updated_at"].isoformat() + "Z"
+            if row["updated_at"]
+            else "-"
+        )
         print(
             "  "
-            f"id={row.id} feature={row.feature or '-'} step={row.current_step or '-'} "
-            f"progress={row.progress or 0}% updated_at={updated_at} title={row.task_title or '-'}",
+            f"source={row['source']} id={row['id']} feature={row['feature'] or '-'} "
+            f"step={row['step'] or '-'} progress={row['progress'] or 0}% "
+            f"updated_at={updated_at} title={row['title'] or '-'}",
             file=sys.stderr,
         )
     print("Wait for these tasks to finish. Override only when interruption is intentional:", file=sys.stderr)

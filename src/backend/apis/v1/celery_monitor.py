@@ -1,12 +1,13 @@
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import threading
 import time
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import redis
@@ -55,7 +56,9 @@ BUSINESS_TASK_FEATURES = {
     "zsxq_publish": ("zsxq_clean_output_publish",),
 }
 ZSXQ_BUSINESS_TASK_SERVICES = ("zsxq_sync", "zsxq_workflow")
-ZSXQ_ACTIVE_STATUSES = ("queued", "running", "pending", "processing")
+ZSXQ_ACTIVE_STATUSES = ("queued", "running", "retrying", "pending", "processing")
+ZSXQ_ALL_TABS_MODES = ("auto_all_tabs_sc", "auto_all_tabs_hh")
+ZSXQ_ORPHANABLE_STATUSES = ("running", "retrying")
 BUSINESS_TASK_ACTIVE_STATUSES = ("pending", "processing")
 BUSINESS_TASK_CONSUMER_GRACE_SECONDS_DEFAULT = 1800
 BUSINESS_TASK_LIMIT_PER_SERVICE = 8
@@ -221,7 +224,7 @@ SCHEDULERS = {
         "pattern": "run_zsxq_auto_scheduler.py",
         "run_script": "scripts/dev/run-zsxq-auto-scheduler.sh",
         "log_file": "zsxq_auto_scheduler.log",
-        "description": "知识星球自动同步调度器",
+        "description": "前沿系统编排，以及生财有术/洪灝每 3 小时全部 Tab 自动同步",
     },
     "zsxq_auto_publish_scheduler": {
         "label": "ZSXQ 自动发帖调度器",
@@ -241,6 +244,17 @@ SCHEDULERS = {
         "log_file": "content_retention_cleanup_scheduler.log",
         "description": "内容流水线历史文件清理调度器",
     },
+    "bilibili_charging_scheduler": {
+        "label": "B站充电人数采集调度器",
+        "pattern": "run_bilibili_charging_scheduler.py",
+        "argv": [
+            "venv/bin/python",
+            "src/backend/run_bilibili_charging_scheduler.py",
+            "start",
+        ],
+        "log_file": "bilibili_charging_scheduler.log",
+        "description": "每天 00:00（Asia/Shanghai）刷新首页 B站 UP 主充电人数并发送节点邮件",
+    },
     "report_video_asset_scheduler": {
         "label": "研报资产扫描调度器",
         "pattern": "run_report_video_asset_scheduler.py",
@@ -256,15 +270,26 @@ SCHEDULERS = {
         "description": "研报视频自动扫描调度器",
     },
     "youtube_data_scheduler": {
-        "label": "YouTube 数据抓取调度器",
-        "pattern": "run_scheduler.py",
+        "label": "YouTube 频道数据同步调度器",
+        "pattern": "run_youtube_channel_sync_scheduler.py",
         "argv": [
             "venv/bin/python",
-            "src/backend/run_scheduler.py",
+            "src/backend/run_youtube_channel_sync_scheduler.py",
             "start",
         ],
-        "log_file": "scheduler.log",
-        "description": "YouTube 数据抓取调度器",
+        "log_file": "youtube_channel_sync_scheduler.log",
+        "description": "每天 00:03（Asia/Shanghai）执行首页全部启用频道同步并发送节点邮件",
+    },
+    "youtube_video_sync_scheduler": {
+        "label": "YouTube 视频数据同步调度器",
+        "pattern": "run_youtube_video_sync_scheduler.py",
+        "argv": [
+            "venv/bin/python",
+            "src/backend/run_youtube_video_sync_scheduler.py",
+            "start",
+        ],
+        "log_file": "youtube_video_sync_scheduler.log",
+        "description": "每天 01:00（Asia/Shanghai）同步全部启用频道最近 3 天视频并发送节点邮件",
     },
 }
 
@@ -310,6 +335,14 @@ BUSINESS_TASKS_AUTO_CLEAN_STALE = _truthy_env("CELERY_MONITOR_AUTO_CLEAN_STALE_B
 BUSINESS_TASKS_STALE_PENDING_SECONDS = max(3600, _int_env("CELERY_MONITOR_STALE_PENDING_MINUTES", 120) * 60)
 BUSINESS_TASKS_STALE_PROCESSING_SECONDS = max(7200, _int_env("CELERY_MONITOR_STALE_PROCESSING_MINUTES", 240) * 60)
 BUSINESS_TASKS_QUEUE_SCAN_LIMIT = max(20, _int_env("CELERY_MONITOR_BUSINESS_TASK_QUEUE_SCAN_LIMIT", 1000))
+ZSXQ_ALL_TABS_ORPHAN_SECONDS = max(
+    300,
+    _int_env("CELERY_MONITOR_ZSXQ_ORPHAN_MINUTES", 10) * 60,
+)
+ZSXQ_SYNC_RESTART_GUARD_SECONDS = max(
+    60,
+    _int_env("CELERY_MONITOR_ZSXQ_RESTART_GUARD_MINUTES", 5) * 60,
+)
 STATUS_CACHE = {
     "key": None,
     "expires_at": 0.0,
@@ -534,7 +567,16 @@ def _scheduler_processes(scheduler):
     pattern = scheduler.get("pattern")
     if not pattern:
         return []
-    return [proc for proc in _list_processes() if pattern in proc.get("command", "")]
+    matched = []
+    for proc in _list_processes():
+        command = proc.get("command", "")
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            argv = command.split()
+        if any(Path(token).name == pattern for token in argv):
+            matched.append(proc)
+    return matched
 
 
 def _terminate_pids(pids, timeout=3):
@@ -890,6 +932,25 @@ def _consumer_stuck(status):
     return bool(status.get("consumer_warning"))
 
 
+def _watchdog_business_activity_probe(service_id):
+    """Narrow fail-closed heartbeat check for a queue suspected to be stuck."""
+    try:
+        tasks = _active_non_interruptible_service_tasks(service_id)
+    except Exception as exc:
+        return [], str(exc)
+    finally:
+        _release_db_session_quietly()
+
+    errors = [
+        str(item.get("error"))
+        for item in tasks
+        if isinstance(item, dict) and item.get("error")
+    ]
+    if errors:
+        return tasks, "；".join(errors)[:1000]
+    return tasks, None
+
+
 def _parse_iso_datetime(value):
     if not value:
         return None
@@ -1054,6 +1115,20 @@ def run_watchdog_once():
             business_task_error=business_task_errors.get(service_id),
             force_refresh=True,
         )
+        if _consumer_stuck(status):
+            heartbeat_tasks, heartbeat_error = _watchdog_business_activity_probe(
+                service_id
+            )
+            status = _service_status(
+                service_id,
+                service,
+                include_logs=False,
+                inspect_data=inspect_data,
+                inspect_error=inspect_error,
+                business_tasks=heartbeat_tasks,
+                business_task_error=heartbeat_error,
+                force_refresh=True,
+            )
         item_state = services_state.setdefault(service_id, {})
         stuck = _consumer_stuck(status)
         result = {
@@ -1105,6 +1180,27 @@ def run_watchdog_once():
         subject = f"[Celery自愈] 正在自动重启 worker · {service['label']}"
         try:
             stop_result = _stop_service(service_id, service)
+            if stop_result.get("skipped"):
+                item_state["stuck_count"] = 0
+                item_state["first_seen_at"] = None
+                item_state["last_seen_at"] = None
+                result.update({
+                    "action": "restart_skipped",
+                    "stop": stop_result,
+                    "warning": None,
+                })
+                _watchdog_event(
+                    state,
+                    service_id,
+                    "restart_skipped",
+                    (
+                        f"{service['label']} 检测到活动业务任务，"
+                        "安全门已跳过自动重启。"
+                    ),
+                    {"result": result},
+                )
+                results.append(result)
+                continue
             time.sleep(0.6)
             start_result = _start_service(service_id, service, clear_pause=False)
             item_state["last_action_ts"] = now
@@ -1229,7 +1325,7 @@ def _uuid_refs_from_value(value):
 def _business_task_runtime_refs():
     refs = set()
     queue_names = []
-    for service_id in BUSINESS_TASK_FEATURES.keys():
+    for service_id in _business_task_service_ids():
         service = SERVICES.get(service_id)
         if not service:
             continue
@@ -1267,11 +1363,19 @@ def _business_task_runtime_refs():
     except Exception as exc:
         return refs, f"Redis 队列扫描失败: {exc}"
 
-    inspect_data, inspect_error = _inspect_tasks_by_queue()
+    celery_refs, inspect_error = _zsxq_celery_runtime_refs()
     if inspect_error:
         return refs, f"Celery 运行态检查失败: {inspect_error}"
+    refs.update(celery_refs)
+    return refs, None
 
-    for service_id in BUSINESS_TASK_FEATURES.keys():
+
+def _zsxq_celery_runtime_refs():
+    refs = set()
+    inspect_data, inspect_error = _inspect_tasks_by_queue()
+    if inspect_error:
+        return refs, inspect_error
+    for service_id in _business_task_service_ids():
         service = SERVICES.get(service_id)
         if not service:
             continue
@@ -1610,6 +1714,9 @@ def _zsxq_business_tasks_snapshot():
             .limit(BUSINESS_TASK_LIMIT_PER_SERVICE)
             .all()
         )
+        sync_rows, cleanup_error = _auto_close_orphaned_zsxq_all_tabs_runs(sync_rows)
+        if cleanup_error:
+            errors["zsxq_sync"] = f"星球同步残留任务自动收口失败: {cleanup_error}"
         buckets["zsxq_sync"] = [_zsxq_sync_task_payload(row) for row in sync_rows]
     except Exception as exc:
         errors["zsxq_sync"] = f"星球同步运行记录读取失败: {exc}"
@@ -1649,13 +1756,86 @@ def _zsxq_business_tasks_snapshot():
     return buckets, errors
 
 
+def _zsxq_all_tabs_orphan_candidates(rows, now=None):
+    now = now or datetime.utcnow()
+    candidates = []
+    for row in rows or []:
+        if str(row.mode or "") not in ZSXQ_ALL_TABS_MODES:
+            continue
+        if str(row.status or "") not in ZSXQ_ORPHANABLE_STATUSES:
+            continue
+        marker = row.updated_at or row.created_at
+        if not marker:
+            continue
+        if (now - marker).total_seconds() >= ZSXQ_ALL_TABS_ORPHAN_SECONDS:
+            candidates.append(row)
+    return candidates
+
+
+def _auto_close_orphaned_zsxq_all_tabs_runs(rows):
+    candidates = _zsxq_all_tabs_orphan_candidates(rows)
+    if not candidates:
+        return rows, None
+
+    # A stale running/retrying row must be backed by a task the worker can
+    # actually report as active, reserved, or scheduled. Redis ``unacked`` can
+    # outlive a force-killed worker until the visibility timeout; treating that
+    # broker residue as live would leave the business row stuck indefinitely.
+    # A later redelivery is harmless because the task rejects terminal runs.
+    runtime_refs, runtime_error = _zsxq_celery_runtime_refs()
+    if runtime_error:
+        return rows, runtime_error
+
+    orphan_ids = [
+        str(row.id)
+        for row in candidates
+        if row.id and str(row.id) not in runtime_refs
+    ]
+    if not orphan_ids:
+        return rows, None
+
+    try:
+        from services.zsxq_sync_service import zsxq_sync_service
+
+        reason = (
+            "同步心跳已超过阈值，且 Redis 队列与 Celery active/reserved/scheduled "
+            "均无对应任务；Celery Monitor 自动收口为 failed。"
+        )
+        for run_id in orphan_ids:
+            zsxq_sync_service.mark_run_failed(
+                run_id,
+                reason,
+                {
+                    "interrupted": True,
+                    "queued": False,
+                    "running": False,
+                    "stale_cleanup": {
+                        "cleaned_at": datetime.utcnow().isoformat() + "Z",
+                        "reason": reason,
+                        "auto_cleaned_by": "celery_monitor",
+                    },
+                },
+            )
+    except Exception as exc:
+        _release_db_session_quietly()
+        return rows, str(exc)
+
+    orphan_id_set = set(orphan_ids)
+    return [row for row in rows if str(row.id) not in orphan_id_set], None
+
+
 def _zsxq_sync_task_payload(row):
     task_id = str(row.id or "")
-    title = f"{row.group_name or row.group_id or '知识星球'} · 同步"
+    mode_labels = {
+        "auto_all_tabs_sc": "全部 Tab 定时同步",
+        "auto_all_tabs_hh": "全部 Tab 定时同步",
+    }
+    mode_label = mode_labels.get(str(row.mode or ""), "同步")
+    title = f"{row.group_name or row.group_id or '知识星球'} · {mode_label}"
     if row.system_batch_id:
         title = f"{title} {row.system_batch_id}"
     details = [
-        row.tab_label or row.mode,
+        row.tab_label or mode_labels.get(str(row.mode or ""), row.mode),
         f"topics {row.topics_fetched or 0}",
         f"下载 {row.attachments_downloaded or 0}",
     ]
@@ -1709,7 +1889,7 @@ def _zsxq_workflow_task_payload(row):
 def _zsxq_business_status(status):
     if status == "queued":
         return "pending"
-    if status in {"running", "processing"}:
+    if status in {"running", "retrying", "processing"}:
         return "processing"
     return status or "pending"
 
@@ -1818,9 +1998,21 @@ def _service_status(
         and scheduled_count == 0
         and not inspect_blocked
     ):
-        if business_recently_active:
-            consumer_note = "队列有积压且业务任务近期有更新；若连续确认未领取任务，看门狗仍会按自愈策略重启 worker。"
-        consumer_warning = "Worker 在线但未领取积压任务，消费连接可能卡住；建议重启该队列 worker。"
+        if business_task_error:
+            consumer_note = (
+                "队列有积压，但业务心跳复核失败；为避免中断活动任务，"
+                "本轮禁止告警和自动重启。"
+            )
+        elif business_recently_active:
+            consumer_note = (
+                "Worker 正在处理业务任务；solo Worker 忙碌时可能无法及时响应 "
+                "Celery inspect，当前不判定为消费卡死。"
+            )
+        else:
+            consumer_warning = (
+                "Worker 在线但未领取积压任务，消费连接可能卡住；"
+                "建议重启该队列 worker。"
+            )
 
     status = {
         "id": service_id,
@@ -1922,6 +2114,9 @@ def _service_stop_guard(service_id, *, rows=None):
 
 
 def _active_non_interruptible_service_tasks(service_id, *, rows=None):
+    if service_id == "zsxq_sync":
+        return _active_zsxq_sync_guard_tasks(rows=rows)
+
     features = BUSINESS_TASK_FEATURES.get(service_id)
     if not features:
         return []
@@ -1961,6 +2156,63 @@ def _active_non_interruptible_service_tasks(service_id, *, rows=None):
             "progress": _row_get(row, "progress"),
             "title": _row_get(row, "task_title"),
             "updated_at": updated_at.isoformat() + "Z" if hasattr(updated_at, "isoformat") else updated_at,
+        })
+    return items
+
+
+def _active_zsxq_sync_guard_tasks(*, rows=None, now=None):
+    now = now or datetime.utcnow()
+    if rows is None:
+        try:
+            from models.zsxq_sync import ZsxqSyncRun
+
+            cutoff = now - timedelta(seconds=ZSXQ_SYNC_RESTART_GUARD_SECONDS)
+            rows = (
+                ZsxqSyncRun.query
+                .with_entities(
+                    ZsxqSyncRun.id.label("id"),
+                    ZsxqSyncRun.group_id.label("group_id"),
+                    ZsxqSyncRun.group_name.label("group_name"),
+                    ZsxqSyncRun.mode.label("mode"),
+                    ZsxqSyncRun.status.label("status"),
+                    ZsxqSyncRun.updated_at.label("updated_at"),
+                )
+                .filter(ZsxqSyncRun.status.in_(ZSXQ_ORPHANABLE_STATUSES))
+                .filter(ZsxqSyncRun.updated_at >= cutoff)
+                .order_by(ZsxqSyncRun.updated_at.desc())
+                .limit(BUSINESS_TASK_LIMIT_PER_SERVICE)
+                .all()
+            )
+        except Exception as exc:
+            _release_db_session_quietly()
+            return [{
+                "id": None,
+                "status": "unknown",
+                "step": "guard_check_failed",
+                "progress": None,
+                "title": None,
+                "updated_at": None,
+                "error": str(exc),
+            }]
+        finally:
+            _release_db_session_quietly()
+
+    items = []
+    for row in rows or []:
+        status = str(_row_get(row, "status") or "").lower()
+        updated_at = _row_get(row, "updated_at")
+        if status not in ZSXQ_ORPHANABLE_STATUSES or not updated_at:
+            continue
+        if (now - updated_at).total_seconds() > ZSXQ_SYNC_RESTART_GUARD_SECONDS:
+            continue
+        group_name = _row_get(row, "group_name") or _row_get(row, "group_id")
+        items.append({
+            "id": _row_get(row, "id"),
+            "status": status,
+            "step": str(_row_get(row, "mode") or "zsxq_sync"),
+            "progress": None,
+            "title": group_name,
+            "updated_at": updated_at.isoformat() + "Z",
         })
     return items
 

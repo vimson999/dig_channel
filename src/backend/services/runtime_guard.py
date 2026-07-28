@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 
 from celery.exceptions import Retry
+from flask import has_app_context
 from sqlalchemy import func, text
 from sqlalchemy.exc import DBAPIError, OperationalError, PendingRollbackError
 from sqlalchemy.orm import load_only
@@ -92,6 +93,10 @@ class TaskAdmissionDenied(RuntimeError):
         super().__init__(admission.get("message") or admission.get("reason") or "task admission denied")
 
 
+class DatabaseSessionBoundaryError(RuntimeError):
+    """Raised when external I/O would cross an uncommitted DB unit of work."""
+
+
 def task_guard_enabled():
     return _truthy_env("TASK_ADMISSION_GUARD_ENABLED", True)
 
@@ -148,6 +153,7 @@ def check_publication_task_admission(feature, *, task_id=None, mode="start"):
 def guard_publication_task_start(celery_task, task_id, *, feature, queue):
     admission = check_publication_task_admission(feature, task_id=task_id, mode="start")
     if admission.get("allowed"):
+        end_db_transaction_before_external_io("celery task execution")
         return admission
 
     countdown = _retry_delay_seconds(admission)
@@ -165,6 +171,7 @@ def guard_publication_task_start(celery_task, task_id, *, feature, queue):
         countdown,
         admission.get("reason"),
     )
+    end_db_transaction_before_external_io("celery retry publish")
     raise celery_task.retry(
         exc=TaskAdmissionDenied(admission),
         countdown=countdown,
@@ -183,6 +190,7 @@ def maybe_guarded_apply_async(
     broker_task_id=None,
     retry=False,
 ):
+    assert_db_session_clean("celery task publish")
     business_task_id = task_id or getattr(task, "id", None)
     admission = check_publication_task_admission(feature, task_id=business_task_id, mode="submit")
     countdown = 0 if admission.get("allowed") else _retry_delay_seconds(admission)
@@ -202,7 +210,7 @@ def maybe_guarded_apply_async(
     }
     if broker_task_id:
         apply_options["task_id"] = str(broker_task_id)
-    async_result = celery_callable.apply_async(**apply_options)
+    async_result = apply_async_after_db_release(celery_callable, **apply_options)
     return {
         "async_result": async_result,
         "admission": admission,
@@ -305,6 +313,55 @@ def release_db_session_quietly():
         db.session.remove()
     except Exception:
         pass
+
+
+def assert_db_session_clean(operation="external I/O"):
+    """Fail before broker/network I/O if the caller forgot to persist DB changes."""
+
+    if not has_app_context():
+        return
+    session = db.session()
+    pending = {
+        "new": len(session.new),
+        "dirty": len(session.dirty),
+        "deleted": len(session.deleted),
+    }
+    if any(pending.values()):
+        raise DatabaseSessionBoundaryError(
+            f"{operation} blocked: uncommitted database changes "
+            f"(new={pending['new']}, dirty={pending['dirty']}, deleted={pending['deleted']})"
+        )
+
+
+def end_db_transaction_before_external_io(operation="external I/O", *, remove=False):
+    """Return the checked-out connection before a broker/network wait.
+
+    The clean read-only transaction is committed with expiration disabled.
+    This returns the connection without expiring loaded projections or causing
+    a full-row refresh after the external operation. ``remove=True`` is for
+    DTO/snapshot paths that intentionally detach every ORM object.
+    """
+
+    if not has_app_context():
+        return
+    assert_db_session_clean(operation)
+    session = db.session()
+    previous_expire_on_commit = session.expire_on_commit
+    session.expire_on_commit = False
+    try:
+        session.commit()
+    except Exception:
+        release_db_session_quietly()
+        raise
+    finally:
+        session.expire_on_commit = previous_expire_on_commit
+    if remove:
+        db.session.remove()
+
+
+def apply_async_after_db_release(celery_callable, **apply_options):
+    end_db_transaction_before_external_io("celery task publish")
+    return celery_callable.apply_async(**apply_options)
 
 
 def retry_exception_types():

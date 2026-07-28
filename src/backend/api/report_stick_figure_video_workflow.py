@@ -296,7 +296,7 @@ def _terminal_workflow_cache_key(current_user, job_id):
 def _terminal_workflow_redis_key(current_user, job_id):
     user_id, job_id = _terminal_workflow_cache_key(current_user, job_id)
     digest = hashlib.sha256(f"{user_id}:{job_id}".encode("utf-8")).hexdigest()
-    return f"shioa:stick_figure:terminal:v2:{digest}"
+    return f"shioa:stick_figure:terminal:v3:{digest}"
 
 
 def _persistent_terminal_workflow_get(current_user, job_id):
@@ -823,12 +823,14 @@ def list_jobs(current_user):
         ))
     parents = query.order_by(PublicationTask.created_at.desc()).all()
     materials = _materials_by_id([item.source_task_id for item in parents if item.source_task_id])
-    storyboards = _storyboards_by_source(list(materials))
-    segment_counts = _segment_counts_by_task([item.id for item in storyboards.values()])
-    board_for = lambda parent: storyboards.get((
+    storyboards = _storyboards_by_workflow(parents)
+    legacy_storyboards = _storyboards_by_source(list(materials))
+    board_for = lambda parent: storyboards.get(parent.id) or legacy_storyboards.get((
         str(parent.source_task_id or ""),
         str(parent.report_visual_scheme_key or DEFAULT_VISUAL_SCHEME_KEY),
     ))
+    selected_storyboards = [board_for(parent) for parent in parents if board_for(parent)]
+    segment_counts = _segment_counts_by_task([item.id for item in selected_storyboards])
     board_by_workflow = {
         parent.id: getattr(board_for(parent), "id", None)
         for parent in parents
@@ -885,7 +887,7 @@ def get_job(current_user, job_id):
     if not parent:
         return jsonify({"success": False, "message": "视觉视频编排任务不存在"}), 404
     material = _materials_by_id([parent.source_task_id]).get(parent.source_task_id)
-    storyboard = _latest_storyboard(parent.source_task_id, parent.report_visual_scheme_key)
+    storyboard = _storyboard_for_workflow(parent)
     summaries = _asset_summaries({parent.id: getattr(storyboard, "id", None)})
     payload = _workflow_payload(parent, material, storyboard, asset_summary=summaries.get(parent.id))
     response_payload = {"success": True, "job_id": parent.id, "status": payload["status"], "data": payload}
@@ -910,9 +912,15 @@ def get_scene_assets(current_user, job_id):
         payload = _scene_asset_status_payload(parent_snapshot, storyboard_id)
         if payload is None:
             return jsonify({"success": False, "message": "分镜素材尚未初始化", "code": "scene_assets_not_ready"}), 409
+        # Scene status bundles are intentionally cached, but video rendering is
+        # completed by another worker process and cannot invalidate this web
+        # process's in-memory cache. Always overlay the narrow durable render
+        # status so a completed video never remains displayed as queued.
+        payload["video"] = _video_payload(parent_snapshot)
         return jsonify({"success": True, "data": payload})
     cached_payload = _cached_legacy_scene_bundle(parent_snapshot)
     if cached_payload is not None:
+        cached_payload["video"] = _video_payload(parent_snapshot)
         return jsonify({"success": True, "data": cached_payload})
     try:
         storyboard, assets = _ensure_scene_assets(parent)
@@ -1109,6 +1117,34 @@ def scene_audio(current_user, job_id, asset_id):
     if not path or not path.is_file():
         return jsonify({"success": False, "message": "分镜语音不存在"}), 404
     return send_file(path, mimetype="audio/wav", as_attachment=False, download_name=_scene_audio_filename(asset.sequence))
+
+
+@report_stick_figure_video_workflow_bp.route("/jobs/<job_id>/audio-preview", methods=["GET"])
+@require_login
+def whole_audio_preview(current_user, job_id):
+    parent = _owned_parent(current_user, job_id)
+    if not parent:
+        return jsonify({"success": False, "message": "视觉视频编排任务不存在"}), 404
+    storyboard = _storyboard_for_workflow(parent)
+    track = _whole_audio_track(parent.id, getattr(storyboard, "id", None))
+    audio_path = str(getattr(track, "audio_path", "") or "").strip()
+    if not audio_path:
+        candidate = find_reusable_audio_candidate(
+            attachment_id=str(parent.report_audio_pdf_attachment_id or ""),
+            material_task_id=str(parent.source_task_id or ""),
+            visible_user_ids=_visible_user_ids(current_user),
+        )
+        audio_path = str(getattr(candidate, "audio_path", "") or "").strip()
+    path = Path(audio_path).resolve() if audio_path else None
+    if not path or not path.is_file():
+        return jsonify({"success": False, "message": "整篇试听音频不存在"}), 404
+    return send_file(
+        path,
+        mimetype="audio/wav",
+        as_attachment=False,
+        conditional=True,
+        download_name=f"{job_id}-preview.wav",
+    )
 
 
 @report_stick_figure_video_workflow_bp.route("/jobs/<job_id>/video", methods=["POST"])
@@ -2561,6 +2597,11 @@ def _audio_strategy_payload(parent, storyboard, body_scene_count):
         "minimum_confidence": track.minimum_confidence if track else None,
         "asr_model": track.asr_model if track else None,
         "error": track.error if track else None,
+        "preview_url": (
+            f"/api/report-stick-figure-video-workflows/jobs/{parent.id}/audio-preview"
+            if track or candidate
+            else None
+        ),
     }
 
 
@@ -2718,6 +2759,11 @@ def _scene_asset_state_item(parent, asset):
             "status": asset.image_status,
             "progress": asset.image_progress,
             "attempt": asset.image_attempt,
+            "source": (
+                "storyboard_gemini"
+                if str(getattr(asset, "image_task_id", None) or "").startswith("storyboard-gemini:")
+                else "image_queue"
+            ),
             "bytes": asset.image_bytes,
             "width": asset.image_width,
             "height": asset.image_height,
@@ -2816,7 +2862,7 @@ def _latest_storyboard(source_task_id, visual_scheme_key=DEFAULT_VISUAL_SCHEME_K
     if not source_task_id:
         return None
     scheme_key = str(visual_scheme_key or DEFAULT_VISUAL_SCHEME_KEY)
-    return (
+    rows = (
         PublicationTask.query.options(load_only(
             PublicationTask.id,
             PublicationTask.status,
@@ -2834,8 +2880,93 @@ def _latest_storyboard(source_task_id, visual_scheme_key=DEFAULT_VISUAL_SCHEME_K
             *([PublicationTask.report_visual_scheme_key.is_(None)] if scheme_key == DEFAULT_VISUAL_SCHEME_KEY else []),
         ))
         .order_by(PublicationTask.created_at.desc())
-        .first()
+        .all()
     )
+    return _preferred_storyboard(rows)
+
+
+def _preferred_storyboard(rows):
+    """Keep the last usable storyboard when a regeneration attempt fails.
+
+    Rows are expected in newest-first order.  An active/new successful attempt
+    still wins immediately, but a failed or canceled retry must not hide an
+    older completed plan (and all media assets attached to that plan).
+    """
+    rows = list(rows or [])
+    if not rows:
+        return None
+    latest = rows[0]
+    if getattr(latest, "status", None) not in {"failed", "canceled"}:
+        return latest
+    return next(
+        (row for row in rows if getattr(row, "status", None) == "completed"),
+        latest,
+    )
+
+
+def _storyboard_for_workflow(parent):
+    if not parent:
+        return None
+    storyboards = (
+        PublicationTask.query.options(load_only(
+            PublicationTask.id,
+            PublicationTask.status,
+            PublicationTask.current_step,
+            PublicationTask.progress,
+            PublicationTask.error_message,
+            PublicationTask.source_task_id,
+            PublicationTask.parent_task_id,
+            PublicationTask.created_at,
+            PublicationTask.completed_at,
+            PublicationTask.report_visual_scheme_key,
+        ))
+        .filter(
+            PublicationTask.feature == STORYBOARD_FEATURE,
+            PublicationTask.parent_task_id == str(parent.id),
+        )
+        .order_by(PublicationTask.created_at.desc())
+        .all()
+    )
+    storyboard = _preferred_storyboard(storyboards)
+    if storyboard and storyboard.status not in {"failed", "canceled"}:
+        return storyboard
+    source_storyboard = _latest_storyboard(parent.source_task_id, parent.report_visual_scheme_key)
+    if source_storyboard and source_storyboard.status == "completed":
+        return source_storyboard
+    return storyboard or source_storyboard
+
+
+def _storyboards_by_workflow(parents):
+    workflow_ids = [str(parent.id) for parent in parents if getattr(parent, "id", None)]
+    if not workflow_ids:
+        return {}
+    rows = (
+        PublicationTask.query.options(load_only(
+            PublicationTask.id,
+            PublicationTask.status,
+            PublicationTask.current_step,
+            PublicationTask.progress,
+            PublicationTask.error_message,
+            PublicationTask.source_task_id,
+            PublicationTask.parent_task_id,
+            PublicationTask.created_at,
+            PublicationTask.completed_at,
+            PublicationTask.report_visual_scheme_key,
+        ))
+        .filter(
+            PublicationTask.feature == STORYBOARD_FEATURE,
+            PublicationTask.parent_task_id.in_(workflow_ids),
+        )
+        .order_by(PublicationTask.created_at.desc())
+        .all()
+    )
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(str(row.parent_task_id), []).append(row)
+    return {
+        workflow_id: _preferred_storyboard(storyboards)
+        for workflow_id, storyboards in grouped.items()
+    }
 
 
 def _storyboards_by_source(source_ids):
@@ -2858,14 +2989,17 @@ def _storyboards_by_source(source_ids):
         .order_by(PublicationTask.created_at.desc())
         .all()
     )
-    result = {}
+    grouped = {}
     for row in rows:
         key = (
             str(row.source_task_id or ""),
             str(row.report_visual_scheme_key or DEFAULT_VISUAL_SCHEME_KEY),
         )
-        result.setdefault(key, row)
-    return result
+        grouped.setdefault(key, []).append(row)
+    return {
+        key: _preferred_storyboard(storyboards)
+        for key, storyboards in grouped.items()
+    }
 
 
 def _segment_counts_by_task(task_ids):
@@ -3014,10 +3148,15 @@ def _workflow_payload(parent, material, storyboard, *, segment_count=None, asset
                 status, progress, stage = "running", 90, f"音画素材完成 · {audio_label} · 等待合成视频"
 
     title = (material.task_title if material else None) or parent.task_title or parent.report_audio_pdf_topic_title or parent.report_audio_pdf_filename or "研报 PDF 视觉视频"
+    parent_error = parent.error_message
+    if board_status == "succeeded" and str(parent.current_step or "").startswith("storyboard_"):
+        # A later failed regeneration may have marked the parent as failed even
+        # though an earlier completed storyboard and its assets remain usable.
+        parent_error = None
     return {
         "job_id": parent.id,
         "workflow_job_id": parent.id,
-        "material_job_id": material.id if material else parent.source_task_id,
+        **_workflow_source_payload(parent, material),
         "storyboard_job_id": storyboard.id if storyboard else None,
         "visual_scheme": scheme.public_payload(),
         "status": status,
@@ -3036,8 +3175,32 @@ def _workflow_payload(parent, material, storyboard, *, segment_count=None, asset
         "asset_summary": asset_summary,
         "created_at": _iso(parent.created_at),
         "updated_at": _iso(parent.updated_at),
-        "error": (storyboard.error_message if storyboard else None) or (material.error_message if material else None) or parent.error_message,
+        "error": (storyboard.error_message if storyboard else None) or (material.error_message if material else None) or parent_error,
     }
+
+
+def _workflow_source_payload(parent, material):
+    """Describe the reusable script source without pretending every source is a material job."""
+    source_feature = str(
+        getattr(parent, "source_feature", None)
+        or getattr(material, "feature", None)
+        or MATERIAL_FEATURE
+    )
+    source_job_id = str(
+        getattr(parent, "source_task_id", None)
+        or getattr(material, "id", None)
+        or ""
+    )
+    payload = {
+        # Kept for storyboard APIs and legacy clients; report-audio tasks are
+        # also valid script-material sources.
+        "material_job_id": source_job_id,
+        "source_feature": source_feature,
+        "source_job_id": source_job_id,
+    }
+    if source_feature == REPORT_AUDIO_FEATURE:
+        payload["report_audio_job_id"] = source_job_id
+    return payload
 
 
 def _status_label(value):

@@ -24,6 +24,11 @@ from services.zsxq_auto_publish_scheduler import (
     stop_scheduler as stop_auto_publish_scheduler,
     trigger_once as trigger_once_auto_publish_scheduler,
 )
+from services.zsxq_all_tabs_auto_sync_service import (
+    load_all_tabs_auto_sync_configs,
+    queue_all_tabs_auto_sync_targets,
+    save_all_tabs_auto_sync_config,
+)
 from services.zsxq_system_sync_test import config_status, save_config
 from services.zsxq_system_sync_scheduler import (
     restart_scheduler as restart_system_sync_scheduler,
@@ -684,6 +689,53 @@ def system_sync_scheduler_status_endpoint():
     try:
         return jsonify({"success": True, "data": {"scheduler": system_sync_scheduler_status()}})
     except Exception as e:
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/all-tabs-auto-sync/configs", methods=["GET"])
+def all_tabs_auto_sync_configs():
+    """List per-group all-tabs schedules from the shared system_configs table."""
+    try:
+        configs = load_all_tabs_auto_sync_configs(include_disabled=True)
+        return jsonify({"success": True, "data": {"configs": configs}})
+    except Exception as e:
+        logger.exception("[ZSXQ_ALL_TABS_AUTO] config list failed")
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/all-tabs-auto-sync/configs/<schedule_key>", methods=["PUT"])
+def update_all_tabs_auto_sync_config(schedule_key):
+    """Update one group schedule; the scheduler hot-reloads DB changes."""
+    try:
+        config = save_all_tabs_auto_sync_config(
+            schedule_key,
+            request.get_json(silent=True) or {},
+        )
+        return jsonify({"success": True, "data": {"config": config}})
+    except ValueError as e:
+        return handle_api_error(400, str(e))
+    except Exception as e:
+        logger.exception(
+            "[ZSXQ_ALL_TABS_AUTO] config update failed | schedule_key=%s",
+            schedule_key,
+        )
+        return handle_api_error(502, _safe_error(e))
+
+
+@bp.route("/all-tabs-auto-sync/run-once", methods=["POST"])
+def run_all_tabs_auto_sync_once():
+    """Run one or all enabled all-tabs schedules immediately."""
+    try:
+        data = request.get_json(silent=True) or {}
+        result = queue_all_tabs_auto_sync_targets(
+            trigger="manual_api",
+            schedule_key=data.get("schedule_key"),
+        )
+        return jsonify({"success": True, "data": {"result": result}})
+    except ValueError as e:
+        return handle_api_error(400, str(e))
+    except Exception as e:
+        logger.exception("[ZSXQ_ALL_TABS_AUTO] manual run failed")
         return handle_api_error(502, _safe_error(e))
 
 

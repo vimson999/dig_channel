@@ -3,6 +3,8 @@ class ReportStickFigureVideoWorkflowDetailPage {
         const params = new URLSearchParams(location.search);
         this.workflowJobId = params.get('workflow_job_id') || '';
         this.materialJobId = params.get('material_job_id') || '';
+        this.sourceFeature = '';
+        this.materialApiPath = '';
         this.material = null;
         this.storyboard = null;
         this.assets = null;
@@ -30,11 +32,37 @@ class ReportStickFigureVideoWorkflowDetailPage {
 
     apiRoot() { const value=window.API_BASE_URL||window.CONFIG?.API_BASE_URL||''; return value ? value.replace(/\/api\/v1\/?$/,'').replace(/\/$/,'') : `${location.protocol}//${location.hostname}:5001`; }
     headers(json=false) { const token=localStorage.getItem('access_token')||localStorage.getItem('token')||''; return {...(json?{'Content-Type':'application/json'}:{}),...(token?{Authorization:`Bearer ${token}`}:{})}; }
-    async request(path, options={}) { const response=await fetch(`${this.apiRoot()}${path}`,{...options,headers:{...this.headers(Boolean(options.body)),...(options.headers||{})}}); const data=await response.json().catch(()=>({})); if(!response.ok||data.success===false)throw new Error(data.message||`HTTP ${response.status}`); return data; }
+    async request(path, options={}) {
+        const method=String(options.method||'GET').toUpperCase();
+        const retryable=method==='GET';
+        const delays=[0,300,900];
+        let lastError=null;
+        for(let attempt=0;attempt<delays.length;attempt+=1){
+            if(delays[attempt])await new Promise(resolve=>setTimeout(resolve,delays[attempt]));
+            try {
+                const response=await fetch(`${this.apiRoot()}${path}`,{
+                    ...options,
+                    headers:{...this.headers(Boolean(options.body)),...(options.headers||{})},
+                });
+                const data=await response.json().catch(()=>({}));
+                if(response.ok&&data.success!==false)return data;
+                const error=new Error(data.message||`HTTP ${response.status}`);
+                error.status=response.status;
+                lastError=error;
+                if(!retryable||![500,502,503,504].includes(response.status))throw error;
+            } catch(error) {
+                lastError=error;
+                if(!retryable||Number(error.status||0)>0)throw error;
+            }
+        }
+        throw lastError||new Error('请求失败');
+    }
 
     bind() {
         this.els.refresh.addEventListener('click',()=>this.load(true));
         this.els.root.addEventListener('click',async event=>{
+            const normalizeRetry=event.target.closest('[data-retry-storyboard-normalize]');
+            if(normalizeRetry){await this.retryStoryboardNormalize(normalizeRetry);return;}
             const storyboard=event.target.closest('[data-generate-storyboard]');
             if(storyboard){await this.generateStoryboard(storyboard);return;}
             const raw=event.target.closest('[data-view-raw]');
@@ -48,7 +76,15 @@ class ReportStickFigureVideoWorkflowDetailPage {
         });
         this.els.root.addEventListener('change',event=>{
             if(event.target.matches('[data-video-subtitles]'))this.toggleSubtitleFields();
+            if(event.target.matches('[data-video-subtitle-background]'))this.toggleSubtitleFields();
             if(event.target.matches('[data-video-watermark]'))this.toggleWatermarkFields();
+            if(event.target.matches('[data-video-speed],[data-video-audio-mode]'))this.syncAudioPreview();
+        });
+        this.els.root.addEventListener('input',event=>{
+            if(event.target.matches('[data-video-subtitle-background-opacity]')){
+                const label=this.els.root.querySelector('[data-subtitle-background-opacity-label]');
+                if(label)label.textContent=`${event.target.value}%`;
+            }
         });
         this.els.modal.addEventListener('click',event=>{if(event.target===this.els.modal||event.target.closest('[data-close-raw]'))this.closeRaw();});
         this.els.copyRaw.addEventListener('click',()=>navigator.clipboard.writeText(this.rawText));
@@ -71,17 +107,41 @@ class ReportStickFigureVideoWorkflowDetailPage {
         if(!this.materialJobId&&!this.workflowJobId){this.els.root.innerHTML='<div class="rounded-lg border border-amber-200 bg-amber-50 p-6">URL 缺少 workflow_job_id。</div>';return;}
         if(manual)this.setNotice('正在刷新。','info');
         try {
-            if(this.workflowJobId){const workflow=await this.request(`/api/report-stick-figure-video-workflows/jobs/${encodeURIComponent(this.workflowJobId)}`);this.materialJobId=workflow.data?.material_job_id||'';this.visualScheme=workflow.data?.visual_scheme||this.visualScheme;}
+            let storyboardJobId='';
+            if(this.workflowJobId){
+                const workflow=await this.request(`/api/report-stick-figure-video-workflows/jobs/${encodeURIComponent(this.workflowJobId)}`);
+                this.materialJobId=workflow.data?.source_job_id||workflow.data?.material_job_id||'';
+                this.sourceFeature=workflow.data?.source_feature||'';
+                this.visualScheme=workflow.data?.visual_scheme||this.visualScheme;
+                storyboardJobId=workflow.data?.storyboard_job_id||'';
+            }
             if(!this.materialJobId)throw new Error('编排任务尚未关联基础文案任务');
-            const materialResult=await this.request(`/api/report-script-material-workflows/jobs/${encodeURIComponent(this.materialJobId)}`);
-            this.material=materialResult.data;
-            const boardResult=await this.request(`/api/report-visual-plans/sources/${encodeURIComponent(this.materialJobId)}/latest?visual_scheme_key=${encodeURIComponent(this.visualScheme.key||'stick_figure')}`);
+            this.materialApiPath=this.sourceFeature==='report_pdf_audio_workflow'
+                ? `/api/report-audio-workflows/jobs/${encodeURIComponent(this.materialJobId)}`
+                : `/api/report-script-material-workflows/jobs/${encodeURIComponent(this.materialJobId)}`;
+            const materialResult=await this.request(this.materialApiPath);
+            this.material=this.normalizeMaterialSource(materialResult.data);
+            const boardPath=storyboardJobId
+                ? `/api/report-visual-plans/jobs/${encodeURIComponent(storyboardJobId)}`
+                : `/api/report-visual-plans/sources/${encodeURIComponent(this.materialJobId)}/latest?visual_scheme_key=${encodeURIComponent(this.visualScheme.key||'stick_figure')}`;
+            const boardResult=await this.request(boardPath);
             this.storyboard=boardResult.data||null;
             if(this.storyboard?.status==='succeeded'&&this.workflowJobId)await this.loadAssets(true);
             this.render();
             this.schedulePolling();
             if(manual)this.setNotice('已刷新。','success');
         } catch(error) { this.setNotice(`加载失败：${error.message}`,'error'); }
+    }
+
+    normalizeMaterialSource(payload) {
+        const material=payload||{};
+        if(this.sourceFeature!=='report_pdf_audio_workflow')return material;
+        const structured=material.structured_result||{};
+        return {
+            ...material,
+            final_script_for_tts:structured.final_script_for_tts||material.audio_script?.text||'',
+            input_pdf_url:material.pdf?.preview_url||'',
+        };
     }
 
     async loadAssets(silent=false,statusOnly=false) {
@@ -150,13 +210,32 @@ class ReportStickFigureVideoWorkflowDetailPage {
         if(force&&!window.confirm('重新生成后会创建一套新的分镜方案。现有图片、语音和视频不会复用，需要按新分镜重新生成。确定继续吗？'))return;
         const old=button.innerHTML; button.disabled=true; button.innerHTML='<i class="fas fa-spinner fa-spin mr-1"></i>投递中';
         try {
-            const result=await this.request('/api/report-visual-plans/jobs',{method:'POST',body:JSON.stringify({material_job_id:this.materialJobId,force,visual_scheme_key:this.visualScheme.key||'stick_figure'})});
+            const result=await this.request('/api/report-visual-plans/jobs',{method:'POST',body:JSON.stringify({material_job_id:this.materialJobId,workflow_job_id:this.workflowJobId,force,visual_scheme_key:this.visualScheme.key||'stick_figure'})});
             this.storyboard={job_id:result.job_id,status:result.status||'queued',progress:0};
             this.assets=null; this.assetsError=''; this.render();
             this.setNotice(force?'新的分镜方案已投递；完成后请按新分镜重新生成图片和语音。':'分镜任务已投递。','success');
             this.schedulePolling();
         } catch(error) { this.setNotice(`投递失败：${error.message}`,'error'); }
         finally { button.disabled=false; button.innerHTML=old; }
+    }
+
+    async retryStoryboardNormalize(button) {
+        if(!this.storyboard?.job_id)return;
+        const old=button.innerHTML;
+        button.disabled=true;
+        button.innerHTML='<i class="fas fa-spinner fa-spin mr-1"></i>续跑中';
+        try {
+            const result=await this.request(`/api/report-visual-plans/jobs/${encodeURIComponent(this.storyboard.job_id)}/retry-normalize`,{method:'POST',body:'{}'});
+            this.storyboard={...this.storyboard,status:result.status||'queued',step:'normalize_queued',progress:70,error:''};
+            this.render();
+            this.setNotice(result.message||'已复用 Gem 原文继续梳理。','success');
+            this.schedulePolling();
+        } catch(error) {
+            this.setNotice(`续跑梳理失败：${error.message}`,'error');
+        } finally {
+            button.disabled=false;
+            button.innerHTML=old;
+        }
     }
 
     async submitAssets(kind,button) {
@@ -217,7 +296,7 @@ class ReportStickFigureVideoWorkflowDetailPage {
         const videoDone=video.status==='completed';
         this.els.title.textContent=title;
         this.els.subtitle.textContent=`${schemeName} · 基础文案 ${material.status||'-'} · ${material.job_id||this.materialJobId}`;
-        this.els.materialJson.href=this.absolute(`/api/report-script-material-workflows/jobs/${encodeURIComponent(this.materialJobId)}`);
+        this.els.materialJson.href=this.absolute(this.materialApiPath||`/api/report-script-material-workflows/jobs/${encodeURIComponent(this.materialJobId)}`);
         this.els.root.innerHTML=`
             <section id="workflow-overview" data-nav-section class="scroll-mt-24 grid grid-cols-2 gap-2 md:grid-cols-5">
                 ${this.stage('1. 基础文案',material.status==='succeeded','PDF、Gem、DS')}
@@ -269,7 +348,7 @@ class ReportStickFigureVideoWorkflowDetailPage {
     storyboardSection(board,segments,hasTitleScene,title) {
         const succeeded=board?.status==='succeeded';
         const failed=board?.status==='failed';
-        const actions=`${succeeded?`<button data-view-raw class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">Gem 原文</button>`:''}${succeeded||failed?`<button data-generate-storyboard data-force="1" class="rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white"><i class="fas fa-rotate mr-1"></i>重新生成分镜方案</button>`:''}${!board?`<button data-generate-storyboard class="rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white">生成分镜</button>`:''}`;
+        const actions=`${succeeded||failed?`<button data-view-raw class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">Gem 原文</button>`:''}${failed?`<button data-retry-storyboard-normalize class="rounded-md bg-emerald-700 px-3 py-2 text-xs font-bold text-white"><i class="fas fa-forward mr-1"></i>复用 Gem 原文继续梳理</button>`:''}${succeeded||failed?`<button data-generate-storyboard data-force="1" class="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700"><i class="fas fa-rotate mr-1"></i>重新请求 Gem</button>`:''}${!board?`<button data-generate-storyboard class="rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white">生成分镜</button>`:''}`;
         return `<section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"><div class="flex flex-wrap items-center justify-between gap-2"><div><h2 class="font-black">标题与正文分镜</h2><p class="mt-1 text-xs text-slate-500">标题镜头独立保存；正文逐字覆盖原始口播文案。</p></div><div class="flex flex-wrap gap-2">${actions}</div></div>${board&&['queued','running'].includes(board.status)?`<div class="mt-4 rounded-md bg-indigo-50 p-3 text-xs font-bold text-indigo-700"><i class="fas fa-spinner fa-spin mr-2"></i>${this.escape(board.step||board.status)} · ${board.progress||0}%</div>`:''}${failed?`<div class="mt-4 rounded-md bg-red-50 p-3 text-xs text-red-700">${this.escape(board.error||'分镜失败')}</div>`:''}${succeeded?`<div class="mt-4 flex items-center justify-between text-xs"><span class="font-black">${segments.length} 个镜头</span><span class="font-bold text-emerald-700">正文覆盖${board.coverage_complete?'完整':'待检查'}</span></div><div class="mt-3 max-h-[36rem] space-y-2 overflow-auto">${!hasTitleScene?this.legacyTitleCard(title):''}${segments.map(item=>this.sceneCard(item)).join('')}</div>`:'<div class="mt-4 rounded-md border border-dashed p-6 text-center text-sm text-slate-500">基础文案完成后可生成分镜。</div>'}</section>`;
     }
 
@@ -317,6 +396,9 @@ class ReportStickFigureVideoWorkflowDetailPage {
             subtitle_outline_color:raw.subtitle_outline_color||'#000000',
             subtitle_outline:Number(raw.subtitle_outline??3),
             subtitle_position:raw.subtitle_position||'bottom',
+            subtitle_background_enabled:raw.subtitle_background_enabled!==false,
+            subtitle_background_color:raw.subtitle_background_color||'#111827',
+            subtitle_background_opacity:Number(raw.subtitle_background_opacity??28),
             watermark_enabled:Boolean(raw.watermark_enabled),
             watermark_text:raw.watermark_text||'Shioa',
             watermark_font_size:Number(raw.watermark_font_size||28),
@@ -326,10 +408,11 @@ class ReportStickFigureVideoWorkflowDetailPage {
     }
 
     videoOptionsPanel(options,disabled,audioMode,audio,summary) {
-        const speeds=[0.5,0.75,1,1.25,1.5,2];
+        const speeds=[0.5,0.75,1,1.1,1.15,1.25,1.5,2];
         const fonts=['Hiragino Sans GB','PingFang SC','Arial Unicode MS'];
         const positions=[['bottom','底部'],['middle','居中'],['top','顶部']];
         const fieldDisabled=disabled||!options.subtitles_enabled;
+        const backgroundDisabled=fieldDisabled||!options.subtitle_background_enabled;
         const watermarkDisabled=disabled||!options.watermark_enabled;
         const wholeDisabled=!audio?.ready; const sceneDisabled=!summary?.scene_tts_ready;
         return `<div class="mt-4 rounded-lg border border-violet-100 bg-violet-50/60 p-4"><div class="grid gap-3 md:grid-cols-3 lg:grid-cols-5"><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">音频方案</span><select data-video-audio-mode ${disabled?'disabled':''} class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 disabled:opacity-50"><option value="auto" ${audioMode==='auto'?'selected':''}>自动选择</option><option value="whole_audio" ${audioMode==='whole_audio'?'selected':''} ${wholeDisabled?'disabled':''}>复用整篇 WAV</option><option value="scene_tts" ${audioMode==='scene_tts'?'selected':''} ${sceneDisabled?'disabled':''}>逐镜头 TTS</option></select></label><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">播放倍速</span><select data-video-speed ${disabled?'disabled':''} class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 disabled:opacity-50">${speeds.map(value=>`<option value="${value}" ${Math.abs(value-options.speed)<0.001?'selected':''}>${value}×</option>`).join('')}</select></label><label class="flex items-center gap-2 rounded-md border border-violet-200 bg-white px-3 py-2 text-xs font-bold text-violet-800"><input data-video-subtitles type="checkbox" ${options.subtitles_enabled?'checked':''} ${disabled?'disabled':''} class="h-4 w-4 rounded border-slate-300"><span>生成并烧录字幕</span></label><div class="md:col-span-3 lg:col-span-2 flex items-center text-[11px] leading-5 text-slate-500">自动模式优先整篇 WAV；不可用时使用分段 TTS。字幕始终取分镜原文。</div></div><div class="mt-3 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6"><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">字体</span><select data-video-subtitle-font data-subtitle-field ${fieldDisabled?'disabled':''} class="w-full rounded-md border border-slate-300 bg-white px-2 py-2 disabled:opacity-50">${fonts.map(value=>`<option value="${value}" ${value===options.subtitle_font_name?'selected':''}>${value}</option>`).join('')}</select></label><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">字号</span><input data-video-subtitle-size data-subtitle-field type="number" min="24" max="72" value="${options.subtitle_font_size}" ${fieldDisabled?'disabled':''} class="w-full rounded-md border border-slate-300 bg-white px-2 py-2 disabled:opacity-50"></label><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">文字颜色</span><input data-video-subtitle-color data-subtitle-field type="color" value="${this.escape(options.subtitle_font_color)}" ${fieldDisabled?'disabled':''} class="h-9 w-full rounded-md border border-slate-300 bg-white p-1 disabled:opacity-50"></label><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">描边颜色</span><input data-video-subtitle-outline-color data-subtitle-field type="color" value="${this.escape(options.subtitle_outline_color)}" ${fieldDisabled?'disabled':''} class="h-9 w-full rounded-md border border-slate-300 bg-white p-1 disabled:opacity-50"></label><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">描边宽度</span><input data-video-subtitle-outline data-subtitle-field type="number" min="0" max="8" value="${options.subtitle_outline}" ${fieldDisabled?'disabled':''} class="w-full rounded-md border border-slate-300 bg-white px-2 py-2 disabled:opacity-50"></label><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">字幕位置</span><select data-video-subtitle-position data-subtitle-field ${fieldDisabled?'disabled':''} class="w-full rounded-md border border-slate-300 bg-white px-2 py-2 disabled:opacity-50">${positions.map(([value,label])=>`<option value="${value}" ${value===options.subtitle_position?'selected':''}>${label}</option>`).join('')}</select></label></div><div class="mt-4 border-t border-violet-100 pt-4"><div class="grid gap-3 md:grid-cols-2 lg:grid-cols-5"><label class="flex items-center gap-2 rounded-md border border-violet-200 bg-white px-3 py-2 text-xs font-bold text-violet-800"><input data-video-watermark type="checkbox" ${options.watermark_enabled?'checked':''} ${disabled?'disabled':''} class="h-4 w-4 rounded border-slate-300"><span>右上角品牌水印</span></label><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">水印文案</span><input data-video-watermark-text data-watermark-field type="text" maxlength="40" value="${this.escape(options.watermark_text)}" ${watermarkDisabled?'disabled':''} class="w-full rounded-md border border-slate-300 bg-white px-2 py-2 disabled:opacity-50"></label><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">字号</span><input data-video-watermark-size data-watermark-field type="number" min="18" max="56" value="${options.watermark_font_size}" ${watermarkDisabled?'disabled':''} class="w-full rounded-md border border-slate-300 bg-white px-2 py-2 disabled:opacity-50"></label><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">颜色</span><input data-video-watermark-color data-watermark-field type="color" value="${this.escape(options.watermark_color)}" ${watermarkDisabled?'disabled':''} class="h-9 w-full rounded-md border border-slate-300 bg-white p-1 disabled:opacity-50"></label><label class="text-xs font-bold text-slate-700"><span class="mb-1 block">不透明度 ${options.watermark_opacity}%</span><input data-video-watermark-opacity data-watermark-field type="range" min="10" max="100" step="5" value="${options.watermark_opacity}" ${watermarkDisabled?'disabled':''} class="h-9 w-full disabled:opacity-50"></label></div><p class="mt-2 text-[11px] text-slate-500">水印固定在右上角并贯穿整片；建议使用品牌名或账号名，保持 35%～50% 不透明度。</p></div></div>`;
@@ -338,11 +421,92 @@ class ReportStickFigureVideoWorkflowDetailPage {
     toggleSubtitleFields() {
         const enabled=Boolean(this.els.root.querySelector('[data-video-subtitles]')?.checked);
         this.els.root.querySelectorAll('[data-subtitle-field]').forEach(field=>{field.disabled=!enabled;});
+        const backgroundEnabled=enabled&&Boolean(this.els.root.querySelector('[data-video-subtitle-background]')?.checked);
+        this.els.root.querySelectorAll('[data-subtitle-background-field]').forEach(field=>{field.disabled=!backgroundEnabled;});
     }
 
     toggleWatermarkFields() {
         const enabled=Boolean(this.els.root.querySelector('[data-video-watermark]')?.checked);
         this.els.root.querySelectorAll('[data-watermark-field]').forEach(field=>{field.disabled=!enabled;});
+    }
+
+    audioPreviewSource(audioMode) {
+        const audio=this.assets?.audio_strategy||{};
+        const sceneItem=(this.assets?.items||[]).find(item=>Number(item.sequence)>=1&&item.tts?.url);
+        const wholeSource=audio.preview_url||'';
+        const sceneSource=sceneItem?.tts?.url||'';
+        if(audioMode==='whole_audio')return wholeSource;
+        if(audioMode==='scene_tts')return sceneSource;
+        return audio.ready&&wholeSource?wholeSource:sceneSource||wholeSource;
+    }
+
+    audioPreviewSourceType(audioMode) {
+        if(audioMode==='scene_tts')return '首段分镜 TTS';
+        return audioMode==='whole_audio'||this.assets?.audio_strategy?.ready?'整篇 WAV':'首段分镜 TTS';
+    }
+
+    audioPreviewMarkup(source) {
+        return source
+            ? `<audio data-video-audio-preview controls preload="metadata" src="${this.absolute(source)}" class="w-full"></audio>`
+            : '<div class="rounded-md border border-dashed border-blue-200 bg-white p-3 text-center text-xs text-blue-700">当前音频方案还没有可试听音轨</div>';
+    }
+
+    videoEnhancementPanels(options,disabled,audioMode) {
+        const source=this.audioPreviewSource(audioMode);
+        const sourceType=this.audioPreviewSourceType(audioMode);
+        return `<div data-video-enhancement-panels class="mt-4 space-y-3 border-t border-violet-100 pt-4">
+            <div class="grid gap-3 md:grid-cols-[220px_180px_minmax(0,1fr)]">
+                <label class="flex items-center gap-2 rounded-md border border-violet-200 bg-white px-3 py-2 text-xs font-bold text-violet-800">
+                    <input data-video-subtitle-background data-subtitle-field type="checkbox" ${options.subtitle_background_enabled?'checked':''} ${disabled||!options.subtitles_enabled?'disabled':''} class="h-4 w-4 rounded border-slate-300">
+                    <span>浅色字幕背景</span>
+                </label>
+                <label class="text-xs font-bold text-slate-700"><span class="mb-1 block">背景颜色</span><input data-video-subtitle-background-color data-subtitle-background-field type="color" value="${this.escape(options.subtitle_background_color)}" ${disabled||!options.subtitles_enabled||!options.subtitle_background_enabled?'disabled':''} class="h-9 w-full rounded-md border border-slate-300 bg-white p-1 disabled:opacity-50"></label>
+                <label class="text-xs font-bold text-slate-700"><span class="mb-1 block">背景不透明度 <span data-subtitle-background-opacity-label>${options.subtitle_background_opacity}%</span></span><input data-video-subtitle-background-opacity data-subtitle-background-field type="range" min="10" max="60" step="2" value="${options.subtitle_background_opacity}" ${disabled||!options.subtitles_enabled||!options.subtitle_background_enabled?'disabled':''} class="h-9 w-full disabled:opacity-50"></label>
+            </div>
+            <p class="text-[11px] text-slate-500">默认使用 28% 深灰半透明底，只包住字幕区域，增强白色画面上的可读性。</p>
+            <div class="rounded-lg border border-blue-200 bg-blue-50 p-3">
+                <div class="mb-2 flex flex-wrap items-center justify-between gap-2"><div><div class="text-xs font-black text-blue-900">倍速试听</div><div class="mt-0.5 text-[11px] text-blue-700"><span data-audio-preview-source-type>${this.escape(sourceType)}</span> · 当前 <span data-audio-preview-rate>${Number(options.speed||1)}×</span></div></div><span class="text-[11px] text-blue-600">切换倍速后直接点播放，无需重新合成</span></div>
+                <div data-audio-preview-box>${this.audioPreviewMarkup(source)}</div>
+            </div>
+        </div>`;
+    }
+
+    enhanceVideoOptions() {
+        const speed=this.els.root.querySelector('[data-video-speed]');
+        const panel=speed?.closest('.rounded-lg');
+        if(!panel||panel.querySelector('[data-video-enhancement-panels]'))return;
+        const options=this.normalizedVideoOptions(this.assets?.video?.render_options);
+        const audioMode=this.els.root.querySelector('[data-video-audio-mode]')?.value||'auto';
+        panel.insertAdjacentHTML('beforeend',this.videoEnhancementPanels(options,Boolean(speed.disabled),audioMode));
+        this.toggleSubtitleFields();
+        this.syncAudioPreview();
+    }
+
+    syncAudioPreview() {
+        let player=this.els.root.querySelector('[data-video-audio-preview]');
+        const previewBox=this.els.root.querySelector('[data-audio-preview-box]');
+        const rate=Math.max(0.5,Math.min(2,Number(this.els.root.querySelector('[data-video-speed]')?.value||1)));
+        const audioMode=this.els.root.querySelector('[data-video-audio-mode]')?.value||'auto';
+        const source=this.audioPreviewSource(audioMode);
+        const label=this.els.root.querySelector('[data-audio-preview-rate]');
+        const sourceTypeLabel=this.els.root.querySelector('[data-audio-preview-source-type]');
+        if(label)label.textContent=`${rate}×`;
+        if(sourceTypeLabel)sourceTypeLabel.textContent=this.audioPreviewSourceType(audioMode);
+        if(previewBox&&source&&!player){
+            previewBox.innerHTML=this.audioPreviewMarkup(source);
+            player=previewBox.querySelector('[data-video-audio-preview]');
+        }else if(previewBox&&!source&&player){
+            previewBox.innerHTML=this.audioPreviewMarkup('');
+            return;
+        }
+        if(!player)return;
+        if(source&&player.getAttribute('src')!==this.absolute(source)){
+            player.setAttribute('src',this.absolute(source));
+            player.load();
+        }
+        player.defaultPlaybackRate=rate;
+        player.playbackRate=rate;
+        if('preservesPitch' in player)player.preservesPitch=true;
     }
 
     readVideoOptions() {
@@ -356,6 +520,9 @@ class ReportStickFigureVideoWorkflowDetailPage {
             subtitle_outline_color:root.querySelector('[data-video-subtitle-outline-color]')?.value||'#000000',
             subtitle_outline:Number(root.querySelector('[data-video-subtitle-outline]')?.value??3),
             subtitle_position:root.querySelector('[data-video-subtitle-position]')?.value||'bottom',
+            subtitle_background_enabled:Boolean(root.querySelector('[data-video-subtitle-background]')?.checked),
+            subtitle_background_color:root.querySelector('[data-video-subtitle-background-color]')?.value||'#111827',
+            subtitle_background_opacity:Number(root.querySelector('[data-video-subtitle-background-opacity]')?.value??28),
             watermark_enabled:Boolean(root.querySelector('[data-video-watermark]')?.checked),
             watermark_text:root.querySelector('[data-video-watermark-text]')?.value||'Shioa',
             watermark_font_size:Number(root.querySelector('[data-video-watermark-size]')?.value||28),
@@ -379,10 +546,11 @@ class ReportStickFigureVideoWorkflowDetailPage {
             : (tts.url
                 ? `<audio data-scene-audio controls preload="metadata" src="${this.absolute(tts.url)}" class="mt-3 w-full"></audio><div data-audio-error class="mt-2 hidden break-words text-[11px] text-red-600"></div><a href="${this.absolute(tts.url)}" target="_blank" class="mt-1 inline-block text-[11px] font-bold text-emerald-700 hover:underline">打开 WAV</a>`
                 : `<div class="mt-2 flex h-16 items-center justify-center rounded-md border border-dashed bg-white text-xs text-slate-400">${ttsActive?'<i class="fas fa-spinner fa-spin mr-2"></i>生成中':isBody?'尚未生成分段 TTS':'标题镜头不参与正片音频'}</div>`);
-        return `<article class="grid gap-3 rounded-lg border border-slate-200 p-4 lg:grid-cols-[minmax(0,1fr)_260px_280px]"><div class="min-w-0"><div class="text-xs font-black text-slate-900">${Number(item.sequence)===0?'000 · 标题镜头':`${String(item.sequence).padStart(3,'0')} · ${this.escape(item.scene_title||'分镜')}`}</div><div class="mt-2 whitespace-pre-wrap text-xs leading-5 text-slate-600">${this.escape(item.script_text||'')}</div><div class="mt-2 rounded-md bg-indigo-50 p-3 text-xs leading-5 text-indigo-900"><span class="font-black">Gem 原始画面提示词：</span>${this.escape(item.visual_prompt||'')}</div><div class="mt-2 text-[11px] font-bold text-emerald-700"><i class="fas fa-wand-magic-sparkles mr-1"></i>生成时绑定${this.escape(styleName)}图片契约与中文标签约束</div></div><div class="rounded-md border border-slate-200 bg-slate-50 p-3"><div class="flex items-center justify-between"><span class="text-xs font-black">图片</span>${this.statusBadge(image.status,image.progress)}</div>${image.url?`<img src="${this.absolute(image.url)}" alt="分镜 ${item.sequence}" class="mt-2 aspect-video w-full rounded-md bg-white object-contain">`:`<div class="mt-2 flex aspect-video items-center justify-center rounded-md border border-dashed bg-white text-xs text-slate-400">${imageActive?'<i class="fas fa-spinner fa-spin mr-2"></i>生成中':'尚未生成'}</div>`}<div class="mt-2 text-[11px] text-slate-500">尝试 ${image.attempt||0} 次${image.width?` · ${image.width}×${image.height}`:''}</div>${image.error?`<div class="mt-2 break-words text-[11px] text-red-600">${this.escape(image.error)}</div>`:''}<button data-asset-retry="image" data-asset-id="${this.escape(item.id)}" ${imageActive?'disabled':''} class="mt-2 w-full rounded-md border bg-white px-2 py-1.5 text-xs font-bold text-indigo-700 disabled:opacity-40">${image.status==='completed'?'重新生成':'生成 / 重试'}</button></div><div class="rounded-md border border-slate-200 bg-slate-50 p-3"><div class="flex items-center justify-between"><span class="text-xs font-black">${hasTimeline?'整篇 WAV 时间轴':'分段 TTS'}</span>${audioBadge}</div>${audioBody}<div class="mt-2 text-[11px] text-slate-500">分段 TTS 尝试 ${tts.attempt||0} 次${tts.seconds?` · ${Number(tts.seconds).toFixed(1)} 秒`:''}</div>${tts.error?`<div class="mt-2 break-words text-[11px] text-red-600">${this.escape(tts.error)}</div>`:''}${isBody?`<button data-asset-retry="tts" data-asset-id="${this.escape(item.id)}" ${ttsActive?'disabled':''} class="mt-2 w-full rounded-md border bg-white px-2 py-1.5 text-xs font-bold text-emerald-700 disabled:opacity-40">${hasTimeline?'另生成分段 TTS':tts.status==='completed'?'重新生成':'生成 / 重试'}</button>`:''}</div></article>`;
+        return `<article class="grid gap-3 rounded-lg border border-slate-200 p-4 lg:grid-cols-[minmax(0,1fr)_260px_280px]"><div class="min-w-0"><div class="text-xs font-black text-slate-900">${Number(item.sequence)===0?'000 · 标题镜头':`${String(item.sequence).padStart(3,'0')} · ${this.escape(item.scene_title||'分镜')}`}</div><div class="mt-2 whitespace-pre-wrap text-xs leading-5 text-slate-600">${this.escape(item.script_text||'')}</div><div class="mt-2 rounded-md bg-indigo-50 p-3 text-xs leading-5 text-indigo-900"><span class="font-black">Gem 原始画面提示词：</span>${this.escape(item.visual_prompt||'')}</div><div class="mt-2 text-[11px] font-bold text-emerald-700"><i class="fas fa-wand-magic-sparkles mr-1"></i>生成时绑定${this.escape(styleName)}图片契约与中文标签约束</div></div><div class="rounded-md border border-slate-200 bg-slate-50 p-3"><div class="flex items-center justify-between"><span class="text-xs font-black">图片${image.source==='storyboard_gemini'?'<span class="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800">Gem 随分镜返回</span>':''}</span>${this.statusBadge(image.status,image.progress)}</div>${image.url?`<img src="${this.absolute(image.url)}" alt="分镜 ${item.sequence}" class="mt-2 aspect-video w-full rounded-md bg-white object-contain">`:`<div class="mt-2 flex aspect-video items-center justify-center rounded-md border border-dashed bg-white text-xs text-slate-400">${imageActive?'<i class="fas fa-spinner fa-spin mr-2"></i>生成中':'尚未生成'}</div>`}<div class="mt-2 text-[11px] text-slate-500">尝试 ${image.attempt||0} 次${image.width?` · ${image.width}×${image.height}`:''}</div>${image.error?`<div class="mt-2 break-words text-[11px] text-red-600">${this.escape(image.error)}</div>`:''}<button data-asset-retry="image" data-asset-id="${this.escape(item.id)}" ${imageActive?'disabled':''} class="mt-2 w-full rounded-md border bg-white px-2 py-1.5 text-xs font-bold text-indigo-700 disabled:opacity-40">${image.status==='completed'?'重新生成':'生成 / 重试'}</button></div><div class="rounded-md border border-slate-200 bg-slate-50 p-3"><div class="flex items-center justify-between"><span class="text-xs font-black">${hasTimeline?'整篇 WAV 时间轴':'分段 TTS'}</span>${audioBadge}</div>${audioBody}<div class="mt-2 text-[11px] text-slate-500">分段 TTS 尝试 ${tts.attempt||0} 次${tts.seconds?` · ${Number(tts.seconds).toFixed(1)} 秒`:''}</div>${tts.error?`<div class="mt-2 break-words text-[11px] text-red-600">${this.escape(tts.error)}</div>`:''}${isBody?`<button data-asset-retry="tts" data-asset-id="${this.escape(item.id)}" ${ttsActive?'disabled':''} class="mt-2 w-full rounded-md border bg-white px-2 py-1.5 text-xs font-bold text-emerald-700 disabled:opacity-40">${hasTimeline?'另生成分段 TTS':tts.status==='completed'?'重新生成':'生成 / 重试'}</button>`:''}</div></article>`;
     }
 
     bindAudioPreviews() {
+        this.enhanceVideoOptions();
         this.els.root.querySelectorAll('[data-scene-audio]').forEach(audio=>{
             const errorBox=audio.parentElement?.querySelector('[data-audio-error]');
             const showError=()=>{

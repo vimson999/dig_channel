@@ -186,7 +186,7 @@ class BaseConfig:
     REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
     REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
     REDIS_DB = int(os.environ.get('REDIS_DB', 0))
-    REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+    REDIS_URL = os.environ.get('REDIS_URL') or f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
     
     # YouTube API配置
     YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY')
