@@ -161,6 +161,7 @@ runtime/browser_profiles/
 
 # Project Data
 data/generated_thumbnails/
+data/cache/
 data/processed/
 data/uploads/
 data/zsxq/
