@@ -175,6 +175,11 @@ class RuntimeGuardTest(unittest.TestCase):
         release.assert_called_once_with()
         self.assertEqual(query.scalar.call_count, 2)
 
+    def test_read_only_transaction_is_retryable(self):
+        error = RuntimeError("cannot execute UPDATE in a read-only transaction")
+
+        self.assertTrue(runtime_guard.is_retryable_db_error(error))
+
     def test_guarded_publish_returns_connection_before_broker_io(self):
         celery_callable = MagicMock()
         transaction_states = []

@@ -3,9 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>知识星球实验台 - Shioa</title>
-    <link href="css/zsxq-lab.css?v=20260715-date-range" rel="stylesheet">
-    <link href="css/three-workspaces.css?v=20260702-zsxq-map-polish" rel="stylesheet">
+    <title>知识星球内容分析 - Shioa</title>
+    <link href="css/zsxq-lab.css?v=20260730-content-workbench" rel="stylesheet">
     <style>
         .line-clamp-2 {
             display: -webkit-box;
@@ -17,114 +16,117 @@
 </head>
 <body class="min-h-screen bg-slate-50 text-slate-900 overflow-x-hidden">
     <main class="zsxq-page-shell max-w-[1440px] mx-auto px-4 sm:px-6 py-8 space-y-6">
-        <section class="zsxq-page-header zsxq-lab-hero flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
-            <div>
-                <h2 class="text-3xl font-black tracking-tight">知识星球实验台</h2>
-                <p class="text-sm text-slate-500 mt-1">低频验证移动端 API，可获取星球列表和主题内容；Cookie 从平台凭据数据库读取并加密保存。</p>
+        <section class="zsxq-page-header zsxq-analysis-header" aria-labelledby="zsxq-page-title">
+            <div class="zsxq-analysis-header-main">
+                <div class="min-w-0">
+                    <p class="zsxq-analysis-eyebrow">CONTENT WORKBENCH</p>
+                    <h2 id="zsxq-page-title">知识星球内容分析</h2>
+                    <p id="zsxq-header-context" class="zsxq-analysis-context">正在读取本地星球数据，选择星球后查看内容覆盖和处理缺口。</p>
+                </div>
+                <div class="zsxq-analysis-actions">
+                    <span class="zsxq-safety-note">
+                        <i class="fas fa-shield-halved" aria-hidden="true"></i>
+                        仅处理个人授权账号
+                    </span>
+                    <button id="header-sync-current-btn" type="button" class="zsxq-header-sync-button" disabled>
+                        <i class="fas fa-cloud-arrow-down" aria-hidden="true"></i>
+                        同步当前 Tab
+                    </button>
+                </div>
             </div>
-            <div class="zsxq-safety-note flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                <i class="fas fa-triangle-exclamation"></i>
-                <span>仅用于个人授权账号验证，不做批量抓取。</span>
-            </div>
-            <div class="zsxq-lab-command-strip" aria-label="实验台操作导览">
-                <a class="zsxq-lab-command-card" href="#lab-cookie-card">
-                    <span class="zsxq-lab-command-index">1</span>
-                    <span>
-                        <strong>先确认账号</strong>
-                        <em>DB Cookie、主题数量、附件范围</em>
-                    </span>
-                    <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
-                </a>
-                <a class="zsxq-lab-command-card" href="#lab-topics-card">
-                    <span class="zsxq-lab-command-index">2</span>
-                    <span>
-                        <strong>再选择星球</strong>
-                        <em>本地缓存优先，必要时远端刷新</em>
-                    </span>
-                    <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
-                </a>
-                <a class="zsxq-lab-command-card" href="#lab-insights-card">
-                    <span class="zsxq-lab-command-index">3</span>
-                    <span>
-                        <strong>最后看辅助</strong>
-                        <em>热度排行、系统任务、发布入口</em>
-                    </span>
-                    <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
-                </a>
+            <div class="zsxq-analysis-metrics" aria-label="当前内容覆盖">
+                <div class="zsxq-analysis-metric">
+                    <span>当前星球</span>
+                    <strong id="zsxq-metric-group">未选择</strong>
+                </div>
+                <div class="zsxq-analysis-metric">
+                    <span>当前 Tab</span>
+                    <strong id="zsxq-metric-tab">—</strong>
+                </div>
+                <div class="zsxq-analysis-metric">
+                    <span>已加载主题</span>
+                    <strong id="zsxq-metric-topics">0</strong>
+                </div>
+                <div class="zsxq-analysis-metric">
+                    <span>附件</span>
+                    <strong id="zsxq-metric-files">0</strong>
+                </div>
+                <div class="zsxq-analysis-metric">
+                    <span>外链</span>
+                    <strong id="zsxq-metric-external">0</strong>
+                </div>
+                <div class="zsxq-analysis-metric">
+                    <span>总结 / 语音</span>
+                    <strong id="zsxq-metric-ai">0 / 0</strong>
+                </div>
             </div>
         </section>
 
         <section id="zsxq-lab-workbench" class="zsxq-workbench grid grid-cols-1 gap-6 min-w-0">
-            <aside id="lab-cookie-card" class="zsxq-left-panel bg-white border border-slate-200 rounded-lg shadow-sm p-5 space-y-5">
-                <div class="zsxq-panel-section">
-                    <div class="zsxq-section-head flex items-center justify-between gap-3">
-                        <label class="text-xs font-bold text-slate-600 uppercase tracking-wider">Cookie</label>
-                        <button id="toggle-cookie-btn" class="rounded-md border border-slate-300 px-2.5 py-1 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors">
-                            修改
-                        </button>
+            <aside id="lab-groups-card" class="zsxq-left-panel bg-white border border-slate-200 rounded-lg shadow-sm p-5 space-y-4">
+                <div class="zsxq-groups-header">
+                    <div>
+                        <h3 class="zsxq-groups-title">星球列表</h3>
+                        <p class="zsxq-groups-caption">默认读取本地已同步数据</p>
                     </div>
-                    <div class="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-                        <select id="cookie-profile-select" class="min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
-                            <option value="">读取 DB Cookie 中...</option>
-                        </select>
-                        <button id="new-cookie-btn" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors">
-                            新增
-                        </button>
-                    </div>
-                    <div id="cookie-summary" class="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
-                        正在读取平台凭据...
-                    </div>
-                    <div id="cookie-editor" class="mt-2 space-y-2">
-                        <input id="cookie-name-input" type="text" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="Cookie 名称，例如：主账号 / 备用账号">
-                        <textarea id="cookie-input" rows="5" class="w-full rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm font-mono outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="粘贴完整 Cookie 请求头，或浏览器导出的 Cookie JSON 数组；保存后会加密写入平台凭据 DB。"></textarea>
-                        <div class="flex gap-2">
-                            <button id="save-cookie-btn" class="flex-1 rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-900 transition-colors">
-                                保存到 DB
-                            </button>
-                            <button id="delete-cookie-btn" class="rounded-lg border border-red-200 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 transition-colors">
-                                删除
-                            </button>
+                    <button id="load-groups-btn" class="zsxq-icon-button" type="button" title="刷新本地星球列表" aria-label="刷新本地星球列表">
+                        <i class="fas fa-rotate" aria-hidden="true"></i>
+                    </button>
+                </div>
+
+                <details id="zsxq-source-settings" class="zsxq-source-settings">
+                    <summary>
+                        <span><i class="fas fa-sliders mr-2" aria-hidden="true"></i>远端刷新与凭据</span>
+                        <i class="fas fa-chevron-down zsxq-source-settings-chevron" aria-hidden="true"></i>
+                    </summary>
+                    <div class="zsxq-source-settings-body space-y-4">
+                        <div class="zsxq-panel-section">
+                            <div class="zsxq-section-head flex items-center justify-between gap-3">
+                                <label class="text-xs font-bold text-slate-600 uppercase tracking-wider">知识星球 Cookie</label>
+                                <button id="toggle-cookie-btn" class="rounded-md border border-slate-300 px-2.5 py-1 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors">
+                                    修改
+                                </button>
+                            </div>
+                            <div class="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                                <select id="cookie-profile-select" class="min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                    <option value="">读取 DB Cookie 中...</option>
+                                </select>
+                                <button id="new-cookie-btn" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors">
+                                    新增
+                                </button>
+                            </div>
+                            <div id="cookie-summary" class="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                                正在读取平台凭据...
+                            </div>
+                            <div id="cookie-editor" class="mt-2 space-y-2">
+                                <input id="cookie-name-input" type="text" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="Cookie 名称，例如：主账号 / 备用账号">
+                                <textarea id="cookie-input" rows="5" class="w-full rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm font-mono outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" placeholder="粘贴完整 Cookie 请求头，或浏览器导出的 Cookie JSON 数组；保存后会加密写入平台凭据 DB。"></textarea>
+                                <div class="flex gap-2">
+                                    <button id="save-cookie-btn" class="flex-1 rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-900 transition-colors">
+                                        保存到 DB
+                                    </button>
+                                    <button id="delete-cookie-btn" class="rounded-lg border border-red-200 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 transition-colors">
+                                        删除
+                                    </button>
+                                </div>
+                            </div>
+                            <p id="cookie-format-hint" class="mt-2 hidden text-xs text-blue-600"></p>
                         </div>
-                    </div>
-                    <p class="mt-2 text-xs text-slate-400">下拉框读取平台凭据数据库中的知识星球 Cookie。新增或更新时才需要粘贴明文。</p>
-                    <p id="cookie-format-hint" class="mt-2 hidden text-xs text-blue-600"></p>
-                </div>
 
-                <div class="zsxq-panel-section grid grid-cols-2 gap-3">
-                    <div>
-                        <label class="text-xs font-bold text-slate-600">主题数量</label>
-                        <input id="count-input" type="number" min="1" max="50" value="20" class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                        <div class="zsxq-panel-section">
+                            <label class="text-xs font-bold text-slate-600">手动同步每页数量</label>
+                            <input id="count-input" type="number" min="1" max="50" value="20" class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                            <p class="mt-2 text-xs text-slate-400">只影响手动刷新、手动同步和列表分页；计划任务使用各星球独立配置。</p>
+                        </div>
+
+                        <button id="load-remote-groups-btn" class="w-full rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs font-bold text-blue-700 hover:bg-blue-100 transition-colors">
+                            <i class="fas fa-cloud-arrow-down mr-2"></i>从远端发现星球
+                        </button>
                     </div>
-                    <div>
-                        <label class="text-xs font-bold text-slate-600">范围</label>
-                        <select id="scope-select" class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
-                            <option value="all">全部</option>
-                            <option value="with_files">文件</option>
-                            <option value="with_images">图片</option>
-                            <option value="digests">精华</option>
-                        </select>
-                    </div>
-                </div>
+                </details>
 
                 <div class="zsxq-panel-section">
-                    <label class="text-xs font-bold text-slate-600">星球来源</label>
-                    <p class="mt-1 text-xs text-slate-400">默认读取本地缓存；需要校验账号或发现新星球时再走远端。</p>
-                    <div class="mt-2 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2">
-                        <button id="load-groups-btn" class="rounded-lg bg-blue-600 px-3 py-2.5 text-xs font-bold text-white hover:bg-blue-700 transition-colors">
-                            <i class="fas fa-database mr-2"></i>本地缓存
-                        </button>
-                        <button id="load-remote-groups-btn" class="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs font-bold text-blue-700 hover:bg-blue-100 transition-colors">
-                            <i class="fas fa-cloud-arrow-down mr-2"></i>远端刷新
-                        </button>
-                        <button id="clear-btn" class="rounded-lg border border-slate-300 px-3 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors">
-                            清空
-                        </button>
-                    </div>
-                </div>
-
-                <div class="zsxq-panel-section">
-                    <label class="zsxq-section-label text-xs font-bold text-slate-600 uppercase tracking-wider">星球列表</label>
-                    <div id="groups-list" class="mt-2 max-h-[420px] overflow-y-auto rounded-lg border border-slate-200 divide-y divide-slate-100 bg-white">
+                    <div id="groups-list" class="max-h-[520px] overflow-y-auto rounded-lg border border-slate-200 divide-y divide-slate-100 bg-white">
                         <div class="p-4 text-sm text-slate-400">正读取本地缓存...</div>
                     </div>
                 </div>
@@ -211,6 +213,13 @@
             </section>
 
             <aside id="lab-insights-card" class="zsxq-right-panel space-y-4">
+                <section id="zsxq-topic-inspector" class="zsxq-topic-inspector" aria-live="polite">
+                    <div class="zsxq-inspector-empty">
+                        <span class="zsxq-inspector-empty-icon"><i class="fas fa-list-check" aria-hidden="true"></i></span>
+                        <strong>选择一条主题查看分析</strong>
+                        <p>这里会解释正文、附件、外链、总结和语音之间的关系，并给出下一步动作。</p>
+                    </div>
+                </section>
                 <div id="hot-rank-panel" class="hidden bg-white border border-slate-200 rounded-lg shadow-sm px-5 py-4">
                     <div class="flex items-start justify-between gap-3">
                         <div>
@@ -284,31 +293,11 @@
                 </div>
             </aside>
         </section>
-
-        <section class="zsxq-lab-map-overview" aria-label="知识对象图谱">
-            <div class="zsxq-lab-map-head">
-                <div>
-                    <p class="zsxq-lab-eyebrow">Knowledge Graph</p>
-                    <h3>知识对象图谱</h3>
-                    <p>图谱用于理解星球、Tab、主题和附件关系；日常验证优先在上方工作台完成。</p>
-                </div>
-                <a href="#zsxq-lab-workbench" class="zsxq-lab-map-jump">
-                    回到实验台
-                    <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
-                </a>
-            </div>
-            <div id="zsxq-knowledge-map" class="three-workspace-panel three-workspace-panel--knowledge">
-                <div class="three-workspace-scene" data-three-scene></div>
-                <aside class="three-workspace-side" data-three-side></aside>
-            </div>
-        </section>
     </main>
 
     <script src="js/env.js"></script>
     <script src="js/config.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-    <script src="js/three-workspace-graph.js?v=20260702-zsxq-map-polish"></script>
-    <script src="js/zsxq-lab.js?v=20260716-comments"></script>
+    <script src="js/zsxq-lab.js?v=20260730-content-workbench"></script>
 </body>
 </html>

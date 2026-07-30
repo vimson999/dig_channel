@@ -106,6 +106,36 @@ class ZsxqAllTabsAutoSyncTest(unittest.TestCase):
         self.assertEqual(result["reason"], "active_run_exists")
         get_menus.assert_not_called()
 
+    def test_menu_discovery_retries_transient_1059_before_failing_round(self):
+        target = service.AUTO_SYNC_TARGETS[0]
+        transient = {
+            "succeeded": False,
+            "code": 1059,
+            "error": "内部错误",
+        }
+        recovered = {
+            "succeeded": True,
+            "resp_data": {"menus": [{"title": "最新", "preset_type": "all"}]},
+        }
+        with patch.object(
+            service.zsxq_service,
+            "get_menus",
+            side_effect=[transient, recovered],
+        ) as get_menus, patch.object(
+            service.zsxq_sync_service,
+            "_sync_retry_attempts",
+            return_value=3,
+        ), patch.object(
+            service.zsxq_sync_service,
+            "_sync_retry_delay_seconds",
+            return_value=0.1,
+        ), patch.object(service.time, "sleep") as sleep:
+            response = service._get_menus_with_retry("cookie", target)
+
+        self.assertTrue(response["succeeded"])
+        self.assertEqual(get_menus.call_count, 2)
+        sleep.assert_called_once_with(0.1)
+
     def test_queue_target_uses_existing_sync_task_and_business_run(self):
         target = service.AUTO_SYNC_TARGETS[1]
         menus_response = {

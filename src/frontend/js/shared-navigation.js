@@ -227,7 +227,7 @@ class SharedNavigation {
             'videos': '视频管理中心',
             'trending-radar': '趋势雷达监控',
             'trending': '爆款视频搜索',
-            'zsxq-lab': '知识星球实验台',
+            'zsxq-lab': '知识星球内容分析',
             'zsxq-insights': '生财情报台',
             'bilibili-intelligence': 'B站内容情报台',
             'zsxq-auto-publish': '知识星球任务策略',
@@ -460,7 +460,7 @@ class SharedNavigation {
                     },
                     {
                         id: 'zsxq-lab',
-                        name: '知识星球实验台',
+                        name: '知识星球内容分析',
                         icon: 'fas fa-circle-nodes',
                         href: 'zsxq-lab.html'
                     },

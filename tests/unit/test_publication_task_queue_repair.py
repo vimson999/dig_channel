@@ -329,6 +329,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
 
     def test_requeues_deferred_publisher_task_after_message_vanishes(self):
         task = self._pending_publisher_task(step="deferred_capacity")
+        task_id = task.id
         dummy = DummyCeleryTask()
 
         with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
@@ -338,11 +339,48 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
 
         self.assertEqual(result["checked"], 1)
         self.assertEqual(result["requeued"], 1)
-        db.session.refresh(task)
+        task = db.session.get(PublicationTask, task_id)
         self.assertEqual(task.status, "pending")
         self.assertEqual(task.current_step, "queued")
         self.assertEqual(task.celery_task_id, "new-celery-id")
         self.assertIsNone(task.error_message)
+
+    def test_publisher_pending_repair_releases_transaction_before_external_checks(self):
+        task = self._pending_publisher_task(step="deferred_capacity")
+        dummy = DummyCeleryTask()
+        transaction_states = []
+
+        def worker_visibility(*_args, **_kwargs):
+            transaction_states.append(("worker", db.session().in_transaction()))
+            return False, True
+
+        def queue_visibility(*_args, **_kwargs):
+            transaction_states.append(("queue", db.session().in_transaction()))
+            return False, True
+
+        with patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_workers",
+            side_effect=worker_visibility,
+        ), patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_queue",
+            side_effect=queue_visibility,
+        ), patch.object(
+            publisher_queue_repair,
+            "run_publication_pipeline",
+            dummy,
+        ):
+            updated, requeued = (
+                publisher_queue_repair.maybe_requeue_stale_publisher_child(task)
+            )
+
+        self.assertTrue(requeued)
+        self.assertEqual("new-celery-id", updated.celery_task_id)
+        self.assertEqual(
+            [("worker", False), ("queue", False)],
+            transaction_states,
+        )
 
     def test_requeues_post_completion_bilibili_upload_to_platform_upload_queue(self):
         _, child = self._parent_with_publisher_child(parent_status="completed")
@@ -372,6 +410,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         )
         db.session.add(projection)
         db.session.commit()
+        projection_task_id = projection.task_id
         dummy = DummyCeleryTask()
 
         with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
@@ -383,7 +422,10 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(updated.celery_task_id, "new-celery-id")
         self.assertEqual(dummy.calls[0]["queue"], "platform_upload")
         self.assertEqual(queue_scan.call_args.kwargs["queue"], "platform_upload")
-        db.session.refresh(projection)
+        projection = db.session.get(
+            PublicationTaskBilibiliUpload,
+            projection_task_id,
+        )
         self.assertEqual(projection.queue_repair_count, 1)
         self.assertEqual(projection.queue_repair_queue, "platform_upload")
         self.assertEqual(projection.queue_repair_current_celery_id, "new-celery-id")
@@ -453,6 +495,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
 
     def test_requeues_deferred_publisher_task_when_message_is_unacked_but_not_active(self):
         task = self._pending_publisher_task(step="deferred_capacity")
+        task_id = task.id
         dummy = DummyCeleryTask()
 
         with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
@@ -462,7 +505,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
 
         self.assertEqual(result["checked"], 1)
         self.assertEqual(result["requeued"], 1)
-        db.session.refresh(task)
+        task = db.session.get(PublicationTask, task_id)
         self.assertEqual(task.celery_task_id, "new-celery-id")
         repair = task.result["queue_repair"]
         self.assertEqual(repair["reason"], "pending_message_not_active_but_queue_visible")

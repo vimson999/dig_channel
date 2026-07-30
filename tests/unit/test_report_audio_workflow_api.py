@@ -61,6 +61,26 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(end, datetime(2026, 7, 14, 16, 0, 0))
         self.assertIsNone(report_audio_api._submission_date_utc_range("2026-02-30"))
 
+    def test_linked_pdf_bytes_identity_matches_varchar_projection(self):
+        self.assertEqual(
+            report_audio_api._linked_pdf_bytes_identity(
+                SimpleNamespace(report_audio_pdf_bytes=495174)
+            ),
+            "495174",
+        )
+        self.assertEqual(
+            report_audio_api._linked_pdf_bytes_identity(
+                SimpleNamespace(report_audio_pdf_bytes="495174")
+            ),
+            "495174",
+        )
+        self.assertEqual(
+            report_audio_api._linked_pdf_bytes_identity(
+                SimpleNamespace(report_audio_pdf_bytes="not-a-number")
+            ),
+            "",
+        )
+
     def test_video_options_accept_both_vertical_schemes(self):
         options = report_audio_api._parse_video_options({
             "vertical_video_enabled": "1",
@@ -89,6 +109,21 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
 
         self.assertEqual(options["vertical_video_schemes"], ["scheme1"])
         self.assertEqual(options["vertical_video_scheme"], "scheme1")
+
+    def test_video_options_normalize_explicit_keyframe_outputs(self):
+        options = report_audio_api._parse_video_options({
+            "video_render_mode": "keyframes",
+            "keyframe_outputs": (
+                '["bilibili_cover", "vertical_keyframe_scheme1", '
+                '"vertical_keyframe_scheme1", "unknown"]'
+            ),
+        })
+
+        self.assertEqual(options["render_mode"], "keyframes")
+        self.assertEqual(
+            options["keyframe_outputs"],
+            ["bilibili_cover", "vertical_keyframe_scheme1"],
+        )
 
     def test_scheme3_scene_timeline_falls_back_to_script_weight(self):
         root = Path(self.tmpdir.name)
@@ -129,6 +164,7 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             timeline["scenes"][1]["duration_seconds"],
             timeline["scenes"][0]["duration_seconds"],
         )
+        self.assertEqual(timeline["scenes"][0]["script_text"], "十个字的短文案")
 
     def test_ready_linked_visual_workflow_uses_live_scene_readiness(self):
         with patch.object(
@@ -1779,6 +1815,75 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertFalse(child.params["vertical_thumbnail"]["enabled"])
         self.assertFalse(child.params["vertical_cover"]["enabled"])
         self.assertEqual(child.result["metadata"]["vertical_video_schemes"], [])
+
+    def test_combined_landscape_and_unready_scheme3_still_queues_landscape(self):
+        root = Path(self.tmpdir.name)
+        audio_path = root / "audio.wav"
+        screenshot_path = root / "page.jpg"
+        pdf_path = root / "sample.pdf"
+        audio_path.write_bytes(b"RIFF----WAVE")
+        screenshot_path.write_bytes(b"jpeg")
+        pdf_path.write_bytes(b"%PDF-1.4")
+
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            user_id="user-1",
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"filename": "sample.pdf", "path": str(pdf_path)},
+                    "video": {"enabled": True},
+                },
+            },
+            result={
+                "audio": {"wav_path": str(audio_path), "seconds": 12.0},
+                "structured_result": {
+                    "final_script_for_tts": "测试口播稿。",
+                    "cover_title": "测试标题",
+                },
+                "pdf_first_page_image": {"path": str(screenshot_path), "bytes": 4},
+                "video": {"render_mode": "keyframes"},
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        with (
+            self.app.test_request_context(
+                json={
+                    "vertical_video_schemes": ["scheme3"],
+                    "include_landscape": True,
+                    "force": True,
+                },
+            ),
+            patch.object(
+                report_audio_api,
+                "_ready_linked_visual_workflow_id",
+                return_value=None,
+            ),
+            patch.object(
+                report_audio_api.run_publication_pipeline,
+                "apply_async",
+                return_value=SimpleNamespace(id="celery-landscape-fallback"),
+            ),
+        ):
+            response = report_audio_api.generate_vertical_video.__wrapped__(
+                SimpleNamespace(id="user-1"),
+                parent.id,
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["success"], payload)
+        child = PublicationTask.query.filter_by(source_task_id=parent.id, feature="publisher").one()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["partial_success"])
+        self.assertEqual(payload["submitted_vertical_video_schemes"], [])
+        self.assertEqual(payload["skipped_outputs"][0]["output"], "scheme3")
+        self.assertTrue(child.params["video"]["enabled"])
+        self.assertFalse(child.params["vertical_video"]["enabled"])
 
     def test_main_publisher_vertical_output_is_reused_as_downloadable_video(self):
         root = Path(self.tmpdir.name)

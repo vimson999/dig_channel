@@ -20,6 +20,8 @@ class LocalPgBouncerConfigTest(unittest.TestCase):
         )
 
         self.assertIn("server_connect_timeout = 10", generator)
+        self.assertIn("server_reset_query = DISCARD ALL", generator)
+        self.assertIn("server_reset_query_always = 1", generator)
         self.assertIn('"LOCAL_PGBOUNCER_MIN_POOL_SIZE", "6"', generator)
         self.assertIn('"LOCAL_PGBOUNCER_SERVER_IDLE_TIMEOUT", "600"', generator)
         self.assertIn('"LOCAL_PGBOUNCER_SERVER_LIFETIME", "21600"', generator)

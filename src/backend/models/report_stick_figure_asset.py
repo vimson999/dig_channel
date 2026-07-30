@@ -24,6 +24,13 @@ class ReportStickFigureSceneAsset(db.Model):
     image_width = db.Column(db.Integer, nullable=True)
     image_height = db.Column(db.Integer, nullable=True)
     image_error = db.Column(db.Text, nullable=True)
+    image_source = db.Column(db.String(32), nullable=False, default="generated")
+    evidence_claim_id = db.Column(
+        db.String(36),
+        db.ForeignKey("report_pdf_evidence_claims.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     tts_task_id = db.Column(db.String(36), nullable=True, index=True)
     tts_status = db.Column(db.String(32), nullable=False, default="pending")

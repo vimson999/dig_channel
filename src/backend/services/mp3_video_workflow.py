@@ -9,7 +9,7 @@ import re
 import subprocess
 import time
 from contextvars import ContextVar
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,7 +34,7 @@ from services.gemini_browser import (
     is_configured as gemini_is_configured,
 )
 from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
-from services.runtime_guard import apply_async_after_db_release
+from services.runtime_guard import apply_async_after_db_release, is_retryable_db_error
 from services.workflow_notification_service import workflow_notification_service
 from tasks.publisher import run_publication_pipeline
 
@@ -266,7 +266,9 @@ def _db_retry(operation, label: str = "db operation", *, attempts: int = 3, dela
     for attempt in range(1, max(1, attempts) + 1):
         try:
             return operation()
-        except OperationalError as exc:
+        except Exception as exc:
+            if not is_retryable_db_error(exc):
+                raise
             last_error = exc
             try:
                 db.session.rollback()
@@ -877,6 +879,9 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                     _validate_ds_response_contract(first_response, source_label="IMA 全文 DS 返回值")
                 plan = plan_from_first_response(first_response, audio=audio)
             _update_result(task_key, {"plan": plan, "audio": audio})
+        plan = _apply_workflow_audio_range_override(plan, workflow)
+        if workflow.get("audio_range_override"):
+            _update_result(task_key, {"plan": plan})
         if _workflow_uses_direct_ds_response(workflow) or _workflow_uses_transcript(workflow):
             _validate_strict_ds_plan(
                 plan,
@@ -985,17 +990,19 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
         existing = _fresh_result(task_key)
         audio_segment = audio_segment_from_plan(audio, plan)
         audio_signature = _audio_segment_signature(audio_segment)
-        force_video_regenerate = _workflow_force_video_regenerate(workflow, existing)
-        if force_video_regenerate:
-            landscape_summary, landscape_task = None, None
-        else:
-            landscape_summary, landscape_task = _reusable_video_summary(
-                existing,
-                "landscape_video",
-                parent_id=task_key,
-                generate_subtitles=generate_subtitles,
-                audio_signature=audio_signature,
-            )
+        force_video_regenerate_at = _workflow_force_video_regenerate_at(
+            workflow,
+            existing,
+        )
+        force_video_regenerate = force_video_regenerate_at is not None
+        landscape_summary, landscape_task = _reusable_video_summary(
+            existing,
+            "landscape_video",
+            parent_id=task_key,
+            generate_subtitles=generate_subtitles,
+            audio_signature=audio_signature,
+            created_not_before=force_video_regenerate_at,
+        )
         if landscape_summary:
             landscape_child_summary = _task_public_summary(landscape_task) if landscape_task else None
             _emit(task_key, "landscape_video_reused", 90, "复用已完成的小君君横屏视频")
@@ -1008,6 +1015,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                 "landscape_video",
                 generate_subtitles=generate_subtitles,
                 audio_signature=audio_signature,
+                created_not_before=force_video_regenerate_at,
             )
             if landscape_task:
                 landscape_task_key = str(landscape_task.id)
@@ -1028,6 +1036,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                     aspect_ratio="16:9",
                     generate_subtitles=generate_subtitles,
                     force_new=force_video_regenerate,
+                    created_not_before=force_video_regenerate_at,
                 )
                 landscape_task_key = str(landscape_task.id)
                 _record_child(task_key, "landscape_video", _task_public_summary(landscape_task))
@@ -1041,16 +1050,14 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
 
         _raise_if_parent_canceled(task_key)
         existing = _fresh_result(task_key)
-        if force_video_regenerate:
-            vertical_summary, vertical_task = None, None
-        else:
-            vertical_summary, vertical_task = _reusable_video_summary(
-                existing,
-                "vertical_video",
-                parent_id=task_key,
-                generate_subtitles=generate_subtitles,
-                audio_signature=audio_signature,
-            )
+        vertical_summary, vertical_task = _reusable_video_summary(
+            existing,
+            "vertical_video",
+            parent_id=task_key,
+            generate_subtitles=generate_subtitles,
+            audio_signature=audio_signature,
+            created_not_before=force_video_regenerate_at,
+        )
         if vertical_summary:
             vertical_child_summary = _task_public_summary(vertical_task) if vertical_task else None
             _emit(task_key, "vertical_video_reused", 99, "复用已完成的此刻此声竖屏视频")
@@ -1063,6 +1070,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                 "vertical_video",
                 generate_subtitles=generate_subtitles,
                 audio_signature=audio_signature,
+                created_not_before=force_video_regenerate_at,
             )
             if vertical_task:
                 vertical_task_key = str(vertical_task.id)
@@ -1083,6 +1091,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                     aspect_ratio="9:16",
                     generate_subtitles=generate_subtitles,
                     force_new=force_video_regenerate,
+                    created_not_before=force_video_regenerate_at,
                 )
                 vertical_task_key = str(vertical_task.id)
                 _record_child(task_key, "vertical_video", _task_public_summary(vertical_task))
@@ -1237,9 +1246,52 @@ def _workflow_render_mode(workflow: Dict[str, Any]) -> str:
 
 
 def _workflow_force_video_regenerate(workflow: Dict[str, Any], result: Optional[Dict[str, Any]] = None) -> bool:
+    return _workflow_force_video_regenerate_at(workflow, result) is not None
+
+
+def _apply_workflow_audio_range_override(
+    plan: Dict[str, Any],
+    workflow: Dict[str, Any],
+) -> Dict[str, Any]:
+    plan = dict(plan or {})
+    workflow = workflow if isinstance(workflow, dict) else {}
+    override = workflow.get("audio_range_override")
+    if not isinstance(override, dict):
+        return plan
+    start = _parse_seconds(override.get("start_seconds"), default=None)
+    end = _parse_seconds(override.get("end_seconds"), default=None)
+    if start is None or start < 0 or end is None or end <= start:
+        raise Mp3VideoWorkflowError("用户重生成音频截取范围无效，请重新设置起止时间")
+    audio_plan = dict(plan.get("audio") or {})
+    audio_plan["start_seconds"] = round(float(start), 3)
+    audio_plan["end_seconds"] = round(float(end), 3)
+    plan["audio"] = audio_plan
+    return plan
+
+
+def _workflow_force_video_regenerate_at(
+    workflow: Dict[str, Any],
+    result: Optional[Dict[str, Any]] = None,
+) -> Optional[datetime]:
     workflow = workflow if isinstance(workflow, dict) else {}
     result = result if isinstance(result, dict) else {}
-    return bool(workflow.get("force_video_regenerate_at") or result.get("force_video_regenerate_at"))
+    raw = workflow.get("force_video_regenerate_at") or result.get(
+        "force_video_regenerate_at"
+    )
+    text_value = str(raw or "").strip()
+    if not text_value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+    except ValueError:
+        logger.error(
+            "Ignore invalid force_video_regenerate_at value: %s",
+            text_value,
+        )
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _truthy(value: Any, default: bool = True) -> bool:
@@ -3148,19 +3200,21 @@ def create_publisher_video_task(
     aspect_ratio: str,
     generate_subtitles: bool = True,
     force_new: bool = False,
+    created_not_before: Optional[datetime] = None,
 ) -> PublicationTask:
     title = _publisher_video_title(plan, role=role)
     generate_subtitles = bool(generate_subtitles)
     audio_segment = audio_segment_from_plan(audio, plan)
     audio_signature = _audio_segment_signature(audio_segment)
     existing = None
-    if not force_new:
+    if not force_new or created_not_before is not None:
         existing = _find_existing_publisher_video_task(
             parent_id,
             role=role,
             aspect_ratio=aspect_ratio,
             generate_subtitles=generate_subtitles,
             audio_signature=audio_signature,
+            created_not_before=created_not_before,
         )
     if existing:
         _sync_publisher_video_task_title(existing, title)
@@ -3298,6 +3352,7 @@ def _find_existing_publisher_video_task(
     aspect_ratio: str,
     generate_subtitles: Optional[bool] = None,
     audio_signature: Optional[str] = None,
+    created_not_before: Optional[datetime] = None,
 ) -> Optional[PublicationTask]:
     query = (
         PublicationTask.query
@@ -3312,6 +3367,8 @@ def _find_existing_publisher_video_task(
         query = query.filter(PublicationTask.publisher_generate_subtitles.is_(bool(generate_subtitles)))
     if audio_signature:
         query = query.filter(PublicationTask.publisher_audio_signature == audio_signature)
+    if created_not_before is not None:
+        query = query.filter(PublicationTask.created_at >= created_not_before)
     matching = query.limit(30).all()
     if not matching:
         return None
@@ -4196,10 +4253,12 @@ def _reusable_video_summary(
     parent_id: Optional[str] = None,
     generate_subtitles: Optional[bool] = None,
     audio_signature: Optional[str] = None,
+    created_not_before: Optional[datetime] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[PublicationTask]]:
     summary = result.get(label) if isinstance(result.get(label), dict) else {}
     if (
-        _video_summary_ready(summary)
+        created_not_before is None
+        and _video_summary_ready(summary)
         and _summary_matches_generate_subtitles(summary, generate_subtitles)
         and _summary_matches_audio_signature(summary, audio_signature)
     ):
@@ -4208,6 +4267,7 @@ def _reusable_video_summary(
     child = _completed_child_from_result(result, label)
     if (
         child
+        and _task_created_not_before(child, created_not_before)
         and _publisher_child_matches_generate_subtitles(child, generate_subtitles)
         and _publisher_child_matches_audio_signature(child, audio_signature)
     ):
@@ -4220,6 +4280,7 @@ def _reusable_video_summary(
         parent_id=parent_id,
         generate_subtitles=generate_subtitles,
         audio_signature=audio_signature,
+        created_not_before=created_not_before,
     )
     if existing and existing.status == "completed":
         existing_summary = _publisher_result_summary(existing)
@@ -4235,6 +4296,7 @@ def _find_existing_publisher_video_task_for_label(
     parent_id: Optional[str] = None,
     generate_subtitles: Optional[bool] = None,
     audio_signature: Optional[str] = None,
+    created_not_before: Optional[datetime] = None,
 ) -> Optional[PublicationTask]:
     resolved_parent_id = str(parent_id or (result or {}).get("workflow_task_id") or "").strip()
     if not resolved_parent_id:
@@ -4247,6 +4309,8 @@ def _find_existing_publisher_video_task_for_label(
         kwargs["generate_subtitles"] = generate_subtitles
     if audio_signature:
         kwargs["audio_signature"] = audio_signature
+    if created_not_before is not None:
+        kwargs["created_not_before"] = created_not_before
     return _find_existing_publisher_video_task(resolved_parent_id, **kwargs)
 
 
@@ -4264,16 +4328,28 @@ def _active_child_from_result(
     *,
     generate_subtitles: Optional[bool] = None,
     audio_signature: Optional[str] = None,
+    created_not_before: Optional[datetime] = None,
 ) -> Optional[PublicationTask]:
     child = _child_from_result(result, label)
     if (
         child
         and child.status not in TERMINAL_STATUSES
+        and _task_created_not_before(child, created_not_before)
         and _publisher_child_matches_generate_subtitles(child, generate_subtitles)
         and _publisher_child_matches_audio_signature(child, audio_signature)
     ):
         return child
     return None
+
+
+def _task_created_not_before(
+    task: Optional[PublicationTask],
+    cutoff: Optional[datetime],
+) -> bool:
+    if cutoff is None:
+        return True
+    created_at = getattr(task, "created_at", None)
+    return bool(created_at and created_at >= cutoff)
 
 
 def _child_from_result(result: Dict[str, Any], label: str) -> Optional[PublicationTask]:

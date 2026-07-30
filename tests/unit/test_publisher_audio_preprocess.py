@@ -67,6 +67,22 @@ class PublisherAudioPreprocessTest(unittest.TestCase):
 
         self.assertNotEqual(_audio_segment_signature(base), _audio_segment_signature(slower))
 
+    def test_forced_alignment_runs_asr_even_when_estimated_subtitles_exist(self):
+        subtitles = [[{"start": 0, "end": 2, "text": "已有但只是估算的字幕"}]]
+
+        self.assertTrue(publisher._should_trigger_asr(
+            asr_enabled=False,
+            sub_burn_enabled=True,
+            subtitles=subtitles,
+            alignment_required=True,
+        ))
+        self.assertFalse(publisher._should_trigger_asr(
+            asr_enabled=False,
+            sub_burn_enabled=True,
+            subtitles=subtitles,
+            alignment_required=False,
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

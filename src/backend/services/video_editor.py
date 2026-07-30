@@ -17,6 +17,18 @@ logger = logging.getLogger(__name__)
 
 VIDEO_MEDIA_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
 
+
+def _scheme3_frame_geometry(target_w, target_h):
+    """让方案三的 16:9 画面铺满模板内容槽，所有尺寸保持偶数。"""
+
+    frame_x = 0
+    frame_w = max(2, target_w)
+    frame_w -= frame_w % 2
+    frame_h = max(2, round((frame_w * 9 / 16) / 2) * 2)
+    frame_y = round(target_h * (620 / 1920))
+    return frame_x, frame_y, frame_w, frame_h
+
+
 class VideoEditorService:
     def __init__(self):
         self.base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -763,8 +775,7 @@ class VideoEditorService:
             "720p": (720, 1280),
             "1080p": (1080, 1920),
         }.get(res_key, (1080, 1920))
-        frame_y = round(target_h * (620 / 1920))
-        frame_h = round(target_w * 9 / 16)
+        frame_x, frame_y, frame_w, frame_h = _scheme3_frame_geometry(target_w, target_h)
         fps = int(export_params.get("fps") or 30)
         bitrate = {
             "low": "1500k",
@@ -838,15 +849,15 @@ class VideoEditorService:
             for index, item in enumerate(normalized_scenes, start=1):
                 duration = float(item["duration_seconds"])
                 filters.append(
-                    f"[{index}:v]scale={target_w}:{frame_h}:force_original_aspect_ratio=increase,"
-                    f"crop={target_w}:{frame_h},setsar=1,fps={fps},format=yuv420p,"
+                    f"[{index}:v]scale={frame_w}:{frame_h}:force_original_aspect_ratio=increase,"
+                    f"crop={frame_w}:{frame_h},setsar=1,fps={fps},format=yuv420p,"
                     f"trim=duration={duration:.6f},setpts=PTS-STARTPTS[scene{index}]"
                 )
                 concat_inputs.append(f"[scene{index}]")
             filters.append(
                 f"{''.join(concat_inputs)}concat=n={len(normalized_scenes)}:v=1:a=0[content]"
             )
-            filters.append(f"[bg][content]overlay=0:{frame_y}:shortest=1[composed]")
+            filters.append(f"[bg][content]overlay={frame_x}:{frame_y}:shortest=1[composed]")
             output_label = "composed"
             if subtitles:
                 srt_content = self._generate_srt(subtitles, 0)
@@ -943,8 +954,7 @@ class VideoEditorService:
             "720p": (720, 1280),
             "1080p": (1080, 1920),
         }.get(res_key, (1080, 1920))
-        frame_y = round(target_h * (620 / 1920))
-        frame_h = round(target_w * 9 / 16)
+        frame_x, frame_y, frame_w, frame_h = _scheme3_frame_geometry(target_w, target_h)
         fps = int(export_params.get("fps") or 30)
         bitrate = {
             "low": "1500k",
@@ -962,10 +972,10 @@ class VideoEditorService:
             filters = [
                 f"[0:v]scale={target_w}:{target_h},setsar=1[bg]",
                 (
-                    f"[1:v]scale={target_w}:{frame_h}:force_original_aspect_ratio=increase,"
-                    f"crop={target_w}:{frame_h},setsar=1[content]"
+                    f"[1:v]scale={frame_w}:{frame_h}:force_original_aspect_ratio=increase,"
+                    f"crop={frame_w}:{frame_h},setsar=1[content]"
                 ),
-                f"[bg][content]overlay=0:{frame_y}:shortest=1[composed]",
+                f"[bg][content]overlay={frame_x}:{frame_y}:shortest=1[composed]",
             ]
             output_label = "composed"
             if subtitles:

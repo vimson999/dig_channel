@@ -51,6 +51,7 @@ from services.doubao_browser_tts import FEATURE_NAME as DOUBAO_TTS_FEATURE, QUEU
 from services.report_stick_figure_assets import (
     FEATURE_NAME as IMAGE_FEATURE,
     QUEUE_NAME as IMAGE_QUEUE,
+    has_browser_overlay_artifact,
     scene_image_prompt_hash,
 )
 from services.report_visual_scheme import (
@@ -917,10 +918,16 @@ def get_scene_assets(current_user, job_id):
         # process's in-memory cache. Always overlay the narrow durable render
         # status so a completed video never remains displayed as queued.
         payload["video"] = _video_payload(parent_snapshot)
+        _overlay_durable_audio_strategy(parent_snapshot, storyboard_id, payload)
         return jsonify({"success": True, "data": payload})
     cached_payload = _cached_legacy_scene_bundle(parent_snapshot)
     if cached_payload is not None:
         cached_payload["video"] = _video_payload(parent_snapshot)
+        _overlay_durable_audio_strategy(
+            parent_snapshot,
+            cached_payload.get("storyboard_job_id"),
+            cached_payload,
+        )
         return jsonify({"success": True, "data": cached_payload})
     try:
         storyboard, assets = _ensure_scene_assets(parent)
@@ -1184,6 +1191,12 @@ def submit_video(current_user, job_id):
     for asset in render_assets:
         if asset.image_status != "completed" or not asset.image_path or not Path(asset.image_path).is_file():
             return jsonify({"success": False, "message": f"第 {asset.sequence} 段图片尚未完成"}), 409
+        if has_browser_overlay_artifact(asset.image_path):
+            return jsonify({
+                "success": False,
+                "message": f"第 {asset.sequence} 段图片包含浏览器浮层，请重新生成该图片",
+                "code": "scene_image_browser_overlay",
+            }), 409
         if (
             audio_mode == "scene_tts"
             and (asset.tts_status != "completed" or not asset.audio_path or not Path(asset.audio_path).is_file())
@@ -1933,7 +1946,11 @@ def _video_payload(parent, task=None, *, include_result=True):
         "height": result.get("height"),
         "fps": result.get("fps"),
         "render_profile": result.get("render_profile") or result.get("schema_version"),
-        "audio_mode": result.get("audio_mode") or task_params.get("audio_mode") or "scene_tts",
+        "audio_mode": (
+            result.get("audio_mode") or task_params.get("audio_mode") or "scene_tts"
+            if task
+            else None
+        ),
         "render_options": render_options,
         "subtitle_entry_count": result.get("subtitle_entry_count"),
         "subtitle_url": (
@@ -2458,6 +2475,42 @@ def _ensure_whole_audio_track(parent, storyboard):
     return _whole_audio_track(parent.id, storyboard.id)
 
 
+def _auto_enqueue_whole_audio_alignment(parent, storyboard):
+    """Bind and align a reusable full WAV without requiring a UI click.
+
+    A missing reusable WAV is a supported workflow mode, so it is reported as
+    unavailable rather than treated as a dispatch failure.  Queue submission
+    remains idempotent in ``_enqueue_whole_audio_alignment``.
+    """
+    try:
+        track = _ensure_whole_audio_track(parent, storyboard)
+    except ValueError as exc:
+        return {
+            "available": False,
+            "queued": False,
+            "message": str(exc),
+        }
+    alignment_task = _enqueue_whole_audio_alignment(
+        parent,
+        storyboard,
+        track,
+        force=False,
+    )
+    return {
+        "available": True,
+        "queued": bool(
+            alignment_task
+            and str(getattr(alignment_task, "status", "") or "") != "completed"
+        ),
+        "audio_track_id": str(track.id),
+        "job_id": (
+            str(getattr(alignment_task, "id", "") or "")
+            or str(track.alignment_task_id or "")
+        ),
+        "status": str(getattr(alignment_task, "status", "") or track.status or ""),
+    }
+
+
 def _enqueue_whole_audio_alignment(parent, storyboard, track, *, force=False):
     if track.status == "completed" and _whole_audio_track_ready(track) and not force:
         return SimpleNamespace(id=track.alignment_task_id, status="completed")
@@ -2660,6 +2713,23 @@ def _scene_asset_status_bundle(parent, storyboard, assets):
         "summary": _scene_asset_summary(items, audio_strategy),
         "items": items,
     }
+
+
+def _overlay_durable_audio_strategy(parent, storyboard_id, payload):
+    """Overlay worker-owned audio alignment state onto cached scene bundles."""
+
+    if not storyboard_id or not isinstance(payload, dict):
+        return payload
+    items = payload.get("items") or []
+    body_count = sum(1 for item in items if int(item.get("sequence") or 0) >= 1)
+    audio_strategy = _audio_strategy_payload(
+        parent,
+        SimpleNamespace(id=str(storyboard_id)),
+        body_count,
+    )
+    payload["audio_strategy"] = audio_strategy
+    payload["summary"] = _scene_asset_summary(items, audio_strategy)
+    return payload
 
 
 def _cache_legacy_scene_bundle(payload):

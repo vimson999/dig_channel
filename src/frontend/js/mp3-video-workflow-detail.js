@@ -36,6 +36,14 @@ class Mp3VideoWorkflowDetailPage {
             notice: document.getElementById('notice'),
             root: document.getElementById('detail-root'),
             quickNav: document.getElementById('quick-nav'),
+            regenerateDialog: document.getElementById('regenerate-video-dialog'),
+            regenerateForm: document.getElementById('regenerate-video-form'),
+            regenerateStart: document.getElementById('regenerate-video-start'),
+            regenerateEnd: document.getElementById('regenerate-video-end'),
+            regenerateSpeed: document.getElementById('regenerate-video-speed'),
+            regenerateError: document.getElementById('regenerate-video-error'),
+            regenerateCancel: document.getElementById('regenerate-video-cancel'),
+            regenerateSubmit: document.getElementById('regenerate-video-submit'),
         };
         this.bind();
         this.load();
@@ -43,6 +51,11 @@ class Mp3VideoWorkflowDetailPage {
 
     bind() {
         this.els.refreshBtn?.addEventListener('click', () => this.load({ manual: true }));
+        this.els.regenerateCancel?.addEventListener('click', () => this.els.regenerateDialog?.close());
+        this.els.regenerateForm?.addEventListener('submit', (event) => {
+            event.preventDefault();
+            this.submitRegenerateVideos();
+        });
         window.addEventListener('beforeunload', () => { this.clearAutoRefresh(); this.quickNavObserver?.disconnect(); this.douyinPanel?.destroy?.(); this.wechatChannelsPanel?.destroy?.(); });
         this.els.quickNav?.addEventListener('click', (event) => {
             const item = event.target.closest('[data-quick-nav]');
@@ -528,6 +541,11 @@ class Mp3VideoWorkflowDetailPage {
             planAudio.end_seconds !== undefined && planAudio.end_seconds !== null ? `终点 ${this.formatDuration(planAudio.end_seconds)}` : '终点自动',
             `倍速 ${planAudio.speed || 1.2}`,
         ].filter(Boolean).join(' · ');
+        const regeneration = job.regeneration || {};
+        const regenerationAudio = regeneration.audio_range || {};
+        const regenerationRange = regeneration.active
+            ? `${this.formatDuration(regenerationAudio.start_seconds ?? planAudio.start_seconds ?? 0)}–${this.formatDuration(regenerationAudio.end_seconds ?? planAudio.end_seconds ?? 0)}`
+            : '';
         return `
             <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -572,6 +590,14 @@ class Mp3VideoWorkflowDetailPage {
                         ${job.error ? `<div class="rounded-md border border-rose-100 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">${this.escape(job.error)}</div>` : ''}
                     </div>
                 </div>
+                ${regeneration.active ? `
+                    <div class="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs">
+                        <div class="font-bold text-amber-900">
+                            <i class="fas fa-spinner fa-spin mr-1.5"></i>正在按新范围 ${this.escape(regenerationRange)}、${this.escape(planAudio.speed || 1.2)}× 重新生成
+                        </div>
+                        <div class="text-amber-700">新视频完成前，页面中的旧视频只代表上一版本。</div>
+                    </div>
+                ` : ''}
                 <div class="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
                     <div class="h-full rounded-full ${status.bar}" style="width:${Math.max(0, Math.min(100, Number(job.progress || 0)))}%"></div>
                 </div>
@@ -1447,27 +1473,87 @@ class Mp3VideoWorkflowDetailPage {
     }
 
     async regenerateVideos(button) {
-        if (!window.confirm('确认重新生成完整横屏和竖屏视频？旧视频不会删除，但本次会强制提交新的合成子任务。')) return;
+        const planAudio = this.job?.plan?.audio || {};
+        const start = Number(planAudio.start_seconds ?? 0);
+        const end = planAudio.end_seconds === undefined || planAudio.end_seconds === null
+            ? null
+            : Number(planAudio.end_seconds);
+        this.regenerateVideosButton = button || null;
+        if (this.els.regenerateStart) {
+            this.els.regenerateStart.value = this.formatDuration(Number.isFinite(start) ? start : 0);
+        }
+        if (this.els.regenerateEnd) {
+            this.els.regenerateEnd.value = Number.isFinite(end) ? this.formatDuration(end) : '';
+        }
+        if (this.els.regenerateSpeed) {
+            this.els.regenerateSpeed.textContent = `${planAudio.speed || 1.2}×`;
+        }
+        if (this.els.regenerateError) {
+            this.els.regenerateError.textContent = '';
+            this.els.regenerateError.classList.add('hidden');
+        }
+        this.els.regenerateDialog?.showModal();
+        window.setTimeout(() => {
+            this.els.regenerateStart?.focus();
+            this.els.regenerateStart?.select();
+        }, 0);
+    }
+
+    async submitRegenerateVideos() {
+        let payload;
+        try {
+            const start = this.parseDurationInput(this.els.regenerateStart?.value, '起点');
+            const end = this.parseDurationInput(this.els.regenerateEnd?.value, '终点');
+            if (start === null) throw new Error('请输入起点时间');
+            if (end === null) throw new Error('请输入终点时间');
+            if (end <= start) throw new Error('终点时间必须大于起点时间');
+            payload = {
+                start_seconds: Math.round(start * 1000) / 1000,
+                end_seconds: Math.round(end * 1000) / 1000,
+            };
+        } catch (error) {
+            if (this.els.regenerateError) {
+                this.els.regenerateError.textContent = error.message;
+                this.els.regenerateError.classList.remove('hidden');
+            }
+            return;
+        }
+        const button = this.regenerateVideosButton;
         const originalHtml = button?.innerHTML || '';
+        const submitHtml = this.els.regenerateSubmit?.innerHTML || '';
         try {
             if (button) {
                 button.disabled = true;
                 button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>投递中...';
             }
+            if (this.els.regenerateSubmit) {
+                this.els.regenerateSubmit.disabled = true;
+                this.els.regenerateSubmit.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>投递中...';
+            }
             const result = await this.request(`/api/mp3-video-workflows/jobs/${encodeURIComponent(this.jobId)}/regenerate-videos`, {
                 method: 'POST',
                 timeoutMs: 30000,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
             });
+            this.els.regenerateDialog?.close();
             this.job = result.data || result;
             this.render();
             this.scheduleAutoRefresh();
             this.setNotice(result.message || '已重新投递完整视频生成任务。', 'success');
         } catch (error) {
-            this.setNotice(`重新生成完整视频失败：${error.message}`, 'error');
+            if (this.els.regenerateError) {
+                this.els.regenerateError.textContent = error.message;
+                this.els.regenerateError.classList.remove('hidden');
+            }
         } finally {
             if (button) {
                 button.disabled = false;
                 button.innerHTML = originalHtml;
+            }
+            if (this.els.regenerateSubmit) {
+                this.els.regenerateSubmit.disabled = false;
+                this.els.regenerateSubmit.innerHTML = submitHtml;
             }
         }
     }

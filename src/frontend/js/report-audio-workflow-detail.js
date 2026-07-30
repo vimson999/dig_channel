@@ -23,6 +23,27 @@ class ReportAudioWorkflowDetailPage {
         this.stickWorkflowRequestIds = new Set();
         this.visualSchemes = [{ key: 'stick_figure', name: '白板火柴人', configured: true }];
         this.selectedVisualSchemeKey = 'stick_figure';
+        this.verticalVideoSchemes = [
+            {
+                key: 'scheme1',
+                label: '方案一',
+                name: '当前竖屏背景',
+                description: '复用当前竖屏模板、标题、字幕和既有背景素材。',
+            },
+            {
+                key: 'scheme2',
+                label: '方案二',
+                name: '封面工具台背景',
+                description: '使用竖版封面工具台生成的视觉背景承载口播。',
+            },
+            {
+                key: 'scheme3',
+                label: '方案三',
+                name: '视觉嵌框',
+                description: '把已完成的火柴人、哆啦A梦等视觉分镜嵌入竖屏模板。',
+            },
+        ];
+        this.lastRefreshedAt = null;
         this.quickNavObserver = null;
         this.sectionRenderCache = new Map();
         this.els = {
@@ -34,6 +55,8 @@ class ReportAudioWorkflowDetailPage {
             notice: document.getElementById('notice'),
             root: document.getElementById('detail-root'),
             quickNav: document.getElementById('quick-nav'),
+            sidebarStatus: document.getElementById('sidebar-task-status'),
+            sidebarRefreshBtn: document.getElementById('sidebar-refresh-btn'),
         };
         this.bind();
         this.loadVisualSchemes();
@@ -42,6 +65,7 @@ class ReportAudioWorkflowDetailPage {
 
     bind() {
         this.els.refreshBtn?.addEventListener('click', () => this.load({ manual: true }));
+        this.els.sidebarRefreshBtn?.addEventListener('click', () => this.load({ manual: true }));
         window.addEventListener('beforeunload', () => { this.clearAutoRefresh(); this.quickNavObserver?.disconnect(); this.douyinPanel?.destroy?.(); this.wechatChannelsPanel?.destroy?.(); });
         this.els.quickNav?.addEventListener('click', (event) => {
             const item = event.target.closest('[data-quick-nav]');
@@ -70,6 +94,7 @@ class ReportAudioWorkflowDetailPage {
         this.els.root?.addEventListener('change', (event) => {
             if (event.target.matches('[data-detail-visual-scheme]')) {
                 this.selectedVisualSchemeKey = String(event.target.value || 'stick_figure');
+                this.render();
                 return;
             }
             if (!event.target.matches('[data-detail-vertical-scheme]')) return;
@@ -141,8 +166,7 @@ class ReportAudioWorkflowDetailPage {
         if (options.manual) this.clearAutoRefresh();
         const background = Boolean(this.job) && !options.manual;
         if (!background) {
-            this.els.refreshBtn.disabled = true;
-            this.els.refreshBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>刷新中';
+            this.setRefreshBusy(true);
         }
         this.els.jobIdLabel.textContent = `任务 ${this.jobId}`;
         this.els.openApiJson.href = this.absoluteUrl(`/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}`);
@@ -164,6 +188,7 @@ class ReportAudioWorkflowDetailPage {
                 const detailResult = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}`, { timeoutMs: 30000 });
                 this.job = detailResult.data || detailResult;
             }
+            this.lastRefreshedAt = new Date();
             if (background) this.renderChangedSections();
             else this.render();
             this.scheduleAutoRefresh();
@@ -171,10 +196,22 @@ class ReportAudioWorkflowDetailPage {
         } catch (error) {
             this.setNotice(`加载失败：${error.message}`, 'error');
         } finally {
-            if (!background) {
-                this.els.refreshBtn.disabled = false;
-                this.els.refreshBtn.innerHTML = '<i class="fas fa-rotate mr-1.5"></i>刷新详情';
-            }
+            if (!background) this.setRefreshBusy(false);
+        }
+    }
+
+    setRefreshBusy(busy) {
+        if (this.els.refreshBtn) {
+            this.els.refreshBtn.disabled = busy;
+            this.els.refreshBtn.innerHTML = busy
+                ? '<i class="fas fa-spinner fa-spin mr-1.5"></i>刷新中'
+                : '<i class="fas fa-rotate mr-1.5"></i>刷新详情';
+        }
+        if (this.els.sidebarRefreshBtn) {
+            this.els.sidebarRefreshBtn.disabled = busy;
+            this.els.sidebarRefreshBtn.innerHTML = busy
+                ? '<i class="fas fa-spinner fa-spin"></i><span>刷新中</span>'
+                : '<i class="fas fa-rotate"></i><span>刷新详情</span>';
         }
     }
 
@@ -277,6 +314,7 @@ class ReportAudioWorkflowDetailPage {
         this.mountDouyinPanel(job, douyinPanelDraft);
         this.mountWechatChannelsPanel(job, wechatChannelsPanelDraft);
         this.mountPublishTabs();
+        this.renderSidebarStatus(job);
         this.setupQuickNavigation();
     }
 
@@ -323,7 +361,58 @@ class ReportAudioWorkflowDetailPage {
             job.completed_at ? `完成 ${this.formatDateTime(job.completed_at)}` : '',
         ].filter(Boolean).join(' · ');
         this.biliPanel?.updateJobData?.(job);
+        this.renderSidebarStatus(job);
         if (structureChanged) this.setupQuickNavigation();
+    }
+
+    renderSidebarStatus(job) {
+        if (!this.els.sidebarStatus) return;
+        const status = this.statusMeta(job?.status);
+        const stages = this.reportWorkflowStages(job);
+        const current = stages.find((stage) => ['active', 'failed', 'canceled'].includes(stage.state))
+            || [...stages].reverse().find((stage) => stage.state === 'completed')
+            || stages[0];
+        const stateMeta = {
+            completed: { icon: 'fa-circle-check', color: 'text-emerald-600', dot: 'bg-emerald-500' },
+            active: { icon: 'fa-spinner fa-spin', color: 'text-blue-600', dot: 'bg-blue-500' },
+            failed: { icon: 'fa-circle-exclamation', color: 'text-red-600', dot: 'bg-red-500' },
+            canceled: { icon: 'fa-circle-stop', color: 'text-amber-600', dot: 'bg-amber-500' },
+            pending: { icon: 'fa-circle', color: 'text-slate-300', dot: 'bg-slate-300' },
+        };
+        const activelyRefreshing = Boolean(this.refreshTimer)
+            || ['queued', 'running', 'submitting'].includes(String(job?.status || '').toLowerCase())
+            || this.hasActiveVideoChild(job);
+        const refreshedAt = this.lastRefreshedAt
+            ? this.lastRefreshedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+            : '--:--:--';
+        this.els.sidebarStatus.innerHTML = `
+            <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] font-black uppercase tracking-wider text-slate-400">任务状态</span>
+                <span class="rounded-full px-2 py-0.5 text-[10px] font-black ${status.className}">${this.escape(status.label)}</span>
+            </div>
+            <div class="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
+                <div class="truncate text-xs font-black text-slate-800">${this.escape(current?.label || '等待任务')}</div>
+                <div class="mt-1 flex items-center justify-between text-[10px] font-bold text-slate-500">
+                    <span>${this.escape(current?.state === 'active' ? '进行中' : (status.label || '等待'))}</span>
+                    <span>${Math.max(0, Math.min(100, Number(job?.progress || 0)))}%</span>
+                </div>
+            </div>
+            <ol class="mt-2 grid grid-cols-2 gap-1" aria-label="左侧任务流程状态">
+                ${stages.map((stage) => {
+                    const meta = stateMeta[stage.state] || stateMeta.pending;
+                    return `
+                        <li class="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] ${stage.state === 'active' ? 'bg-blue-50 font-black text-blue-800' : 'font-bold text-slate-500'}" title="${this.escapeAttr(stage.label)}">
+                            <i class="fas ${meta.icon} ${meta.color} w-3 shrink-0 text-center" aria-hidden="true"></i>
+                            <span class="truncate">${this.escape(stage.label)}</span>
+                        </li>
+                    `;
+                }).join('')}
+            </ol>
+            <div class="mt-2 border-t border-slate-100 pt-2 text-[10px] leading-4 text-slate-400">
+                <div>${activelyRefreshing ? `运行中每 ${Math.round(this.autoRefreshMs / 1000)} 秒自动刷新` : '状态稳定，可手动刷新'}</div>
+                <div>最近刷新 ${this.escape(refreshedAt)}</div>
+            </div>
+        `;
     }
 
     navSection(id, html) {
@@ -417,7 +506,7 @@ class ReportAudioWorkflowDetailPage {
             this.regenerateCoverAsset(jobId, button.dataset.coverKey || '', button);
         }
         if (action === 'open-stick-figure-workflow') {
-            this.openStickFigureWorkflow(jobId);
+            this.openStickFigureWorkflow(jobId, button.dataset.visualSchemeKey || '');
         }
     }
 
@@ -532,6 +621,8 @@ class ReportAudioWorkflowDetailPage {
     renderSummary(job) {
         const status = this.statusMeta(job.status);
         const pdfName = job.pdf?.filename || job.request?.pdf?.filename || 'PDF';
+        const workflowStages = this.reportWorkflowStages(job);
+        const outputSummary = this.reportWorkflowOutputSummary(job);
         return `
             <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -544,8 +635,9 @@ class ReportAudioWorkflowDetailPage {
                         <div class="mt-3 text-sm font-bold text-slate-900">${this.escape(pdfName)}</div>
                         <div class="mt-1 text-xs leading-5 text-slate-500">${this.escape([
                             job.job_id || '',
+                            job.step ? `当前 ${job.step}` : '',
                             job.audio?.seconds ? `音频 ${this.formatDuration(job.audio.seconds)}` : '',
-                            job.video?.vertical_video_scheme ? `竖屏 ${job.video.vertical_video_scheme}` : '',
+                            ...outputSummary,
                         ].filter(Boolean).join(' · '))}</div>
                     </div>
                     <div class="flex flex-wrap gap-2">
@@ -553,11 +645,164 @@ class ReportAudioWorkflowDetailPage {
                         <button type="button" data-copy-text="${this.escapeAttr(this.displayTitle(job))}" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-copy mr-1"></i>复制标题</button>
                     </div>
                 </div>
-                <div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
-                    <div class="h-full rounded-full ${status.bar}" style="width: ${Math.min(100, Math.max(0, Number(job.progress || 0)))}%"></div>
-                </div>
+                <ol class="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6" aria-label="任务流程进度">
+                    ${workflowStages.map((stage) => this.renderWorkflowStage(stage)).join('')}
+                </ol>
                 ${job.error ? `<div class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">${this.escape(job.error)}</div>` : ''}
             </section>
+        `;
+    }
+
+    reportWorkflowRenderMode(job) {
+        const explicitMode = String(
+            job?.video?.render_mode
+            || job?.request?.video?.render_mode
+            || job?.request?.video_render_mode
+            || ''
+        ).trim().toLowerCase();
+        if (explicitMode === 'keyframes' || explicitMode === 'full_video') return explicitMode;
+        return String(job?.video?.status || '').trim().toLowerCase() === 'keyframes_ready'
+            ? 'keyframes'
+            : 'full_video';
+    }
+
+    reportWorkflowOutputSummary(job) {
+        const video = job?.video || {};
+        if (this.reportWorkflowRenderMode(job) === 'keyframes') {
+            const keyframes = Object.entries(video.keyframes || {});
+            const summary = [`关键帧/封皮${keyframes.length ? ` ${keyframes.length} 项` : ''}`];
+            const verticalKeyframe = keyframes.find(([key, item]) => (
+                /vertical_(background|keyframe)/.test(String(key || ''))
+                || /竖.*关键帧/.test(String(item?.label || ''))
+            ));
+            if (verticalKeyframe) {
+                const scheme = verticalKeyframe[1]?.scheme || video.vertical_video_scheme;
+                if (scheme) summary.push(`${this.verticalSchemeLabel(scheme)}竖版关键帧`);
+            }
+            return summary;
+        }
+
+        const summary = ['完整视频'];
+        const verticalRequested = Boolean(
+            video.vertical_enabled
+            || job?.request?.video?.vertical_enabled
+            || video.vertical_video
+            || Object.keys(video.vertical_videos || {}).length
+        );
+        if (verticalRequested && video.vertical_video_scheme) {
+            summary.push(`${this.verticalSchemeLabel(video.vertical_video_scheme)}竖屏`);
+        }
+        return summary;
+    }
+
+    reportWorkflowStages(job) {
+        const keyframeMode = this.reportWorkflowRenderMode(job) === 'keyframes';
+        const stages = [
+            { key: 'pdf', label: 'PDF 准备', icon: 'fa-file-pdf' },
+            { key: 'gemini', label: 'Gemini 解析', icon: 'fa-wand-magic-sparkles' },
+            { key: 'script', label: '文案整理', icon: 'fa-file-lines' },
+            { key: 'tts', label: '语音生成', icon: 'fa-wave-square' },
+            { key: 'video', label: keyframeMode ? '关键帧/封皮' : '视频生成', icon: keyframeMode ? 'fa-images' : 'fa-film' },
+            { key: 'done', label: '任务完成', icon: 'fa-circle-check' },
+        ];
+        const taskStatus = String(job?.status || '').trim().toLowerCase();
+        const step = String(job?.step || '').trim().toLowerCase();
+        const progress = Math.max(0, Math.min(100, Number(job?.progress || 0)));
+        let currentIndex = this.reportWorkflowStageIndex(step, progress);
+        if (['completed', 'success', 'succeeded', 'done'].includes(taskStatus) || step === 'done') {
+            currentIndex = stages.length - 1;
+        }
+        const failed = ['failed', 'error'].includes(taskStatus);
+        const canceled = ['canceled', 'cancelled'].includes(taskStatus);
+        return stages.map((stage, index) => ({
+            ...stage,
+            state: (
+                index < currentIndex || (index === currentIndex && currentIndex === stages.length - 1 && !failed && !canceled)
+                    ? 'completed'
+                    : (index === currentIndex ? (failed ? 'failed' : (canceled ? 'canceled' : 'active')) : 'pending')
+            ),
+        }));
+    }
+
+    reportWorkflowStageIndex(step, progress) {
+        if (step === 'done') return 5;
+        if (
+            step.includes('publisher')
+            || step.includes('video')
+            || step.includes('keyframe')
+            || step.includes('pdf_preview')
+            || step.includes('render_pdf')
+        ) return 4;
+        if (
+            step.includes('doubao')
+            || step.includes('tts')
+            || step.includes('audio')
+            || step.includes('reading')
+            || step.includes('combine')
+        ) return 3;
+        if (
+            step.includes('normalize')
+            || step.includes('review_cover')
+            || step.includes('structured')
+            || step.includes('script_material')
+            || step.includes('manual_gemini')
+        ) return 2;
+        if (step.includes('gemini')) return 1;
+        if (step && !['queued', 'pending', 'start'].includes(step)) {
+            if (progress >= 94) return 4;
+            if (progress >= 61) return 3;
+            if (progress >= 53) return 2;
+            if (progress >= 8) return 1;
+        }
+        return 0;
+    }
+
+    renderWorkflowStage(stage) {
+        const meta = {
+            completed: {
+                card: 'border-emerald-200 bg-emerald-50',
+                icon: 'fa-circle-check text-emerald-600',
+                label: 'text-emerald-950',
+                status: '已完成',
+                statusClass: 'text-emerald-700',
+            },
+            active: {
+                card: 'border-blue-300 bg-blue-50 ring-1 ring-blue-100',
+                icon: 'fa-spinner fa-spin text-blue-600',
+                label: 'text-blue-950',
+                status: '进行中',
+                statusClass: 'text-blue-700',
+            },
+            failed: {
+                card: 'border-red-300 bg-red-50',
+                icon: 'fa-circle-exclamation text-red-600',
+                label: 'text-red-950',
+                status: '失败',
+                statusClass: 'text-red-700',
+            },
+            canceled: {
+                card: 'border-amber-300 bg-amber-50',
+                icon: 'fa-circle-stop text-amber-600',
+                label: 'text-amber-950',
+                status: '已取消',
+                statusClass: 'text-amber-700',
+            },
+            pending: {
+                card: 'border-slate-200 bg-slate-50',
+                icon: `${stage.icon} text-slate-400`,
+                label: 'text-slate-600',
+                status: '待开始',
+                statusClass: 'text-slate-400',
+            },
+        }[stage.state];
+        return `
+            <li class="flex min-w-0 items-center gap-2.5 rounded-lg border px-3 py-2.5 ${meta.card}">
+                <i class="fas ${meta.icon} w-4 shrink-0 text-center" aria-hidden="true"></i>
+                <div class="min-w-0">
+                    <div class="truncate text-xs font-black ${meta.label}">${this.escape(stage.label)}</div>
+                    <div class="mt-0.5 text-[11px] font-bold ${meta.statusClass}">${meta.status}</div>
+                </div>
+            </li>
         `;
     }
 
@@ -594,77 +839,155 @@ class ReportAudioWorkflowDetailPage {
             ? job.request.video.vertical_video_schemes.map((item) => this.normalizeVerticalScheme(item))
             : [scheme];
         const landscapeSelected = job.request?.video?.enabled !== false;
-        const scheme1Selected = requestedSchemes.includes('scheme1');
-        const scheme2Selected = requestedSchemes.includes('scheme2');
-        const scheme3Selected = requestedSchemes.includes('scheme3');
         const canRequestVertical = Boolean(audioUrl || videoUrl);
         const stickWorkflowActive = this.stickWorkflowRequestIds.has(jobId);
         const keyframeMode = String(video.render_mode || job.request?.video?.render_mode || '').toLowerCase() === 'keyframes';
+        const selectedVisualScheme = this.visualSchemes.find(
+            (item) => item.key === this.selectedVisualSchemeKey
+        ) || this.visualSchemes[0];
+        const visualWorkflowEntries = this.visualSchemes
+            .map((item, index) => {
+                const existing = (Array.isArray(job.visual_videos) ? job.visual_videos : []).find(
+                    (workflow) => String(workflow?.visual_scheme?.key || '') === item.key
+                );
+                const selected = item.key === this.selectedVisualSchemeKey;
+                const action = existing?.detail_url
+                    ? `<a href="${this.absoluteUrl(existing.detail_url)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center rounded-md border border-violet-200 bg-white px-3 py-1.5 text-xs font-bold text-violet-700 hover:bg-violet-50"><i class="fas fa-arrow-up-right-from-square mr-1"></i>${this.escape(item.name)}详情</a>`
+                    : `<button type="button" data-detail-action="open-stick-figure-workflow" data-visual-scheme-key="${this.escapeAttr(item.key)}" data-job-id="${this.escapeAttr(jobId)}" ${!item.configured || !audioUrl || stickWorkflowActive ? 'disabled' : ''} class="rounded-md border border-violet-200 bg-white px-3 py-1.5 text-xs font-bold text-violet-700 hover:bg-violet-50 disabled:cursor-wait disabled:opacity-60"><i class="fas ${stickWorkflowActive ? 'fa-spinner fa-spin' : 'fa-folder-open'} mr-1"></i>创建${this.escape(item.name)}详情</button>`;
+                return `
+                    <article class="rounded-lg border p-3 ${selected ? 'border-violet-300 bg-violet-50 ring-1 ring-violet-100' : 'border-slate-200 bg-white'} ${item.configured ? '' : 'opacity-60'}">
+                        <label class="flex cursor-pointer items-start gap-2">
+                            <input type="radio" name="detail_visual_scheme" value="${this.escapeAttr(item.key)}" data-detail-visual-scheme ${selected ? 'checked' : ''} ${item.configured ? '' : 'disabled'} class="mt-0.5 h-4 w-4 border-slate-300 text-violet-700 focus:ring-violet-500">
+                            <span class="min-w-0">
+                                <span class="block text-xs font-black text-slate-900">方案 ${index + 2} · ${this.escape(item.name)}</span>
+                                <span class="mt-1 block text-[11px] leading-4 text-slate-500">${this.escape(item.description || '由视觉方案注册表提供的横屏分镜视频。')}</span>
+                            </span>
+                        </label>
+                        <div class="mt-3 flex flex-wrap items-center gap-2">
+                            ${action}
+                            ${existing ? `<span class="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-bold text-emerald-700">${this.isActiveStatus(existing.status) ? '生成中' : '已有任务'}</span>` : ''}
+                            ${!item.configured ? '<span class="text-[11px] font-bold text-amber-700">待配置 Gem</span>' : ''}
+                        </div>
+                    </article>
+                `;
+            })
+            .join('');
+        const finalVerticalOptions = this.verticalVideoSchemes.map((item) => `
+            <label class="flex cursor-pointer items-start gap-2 rounded-md border border-fuchsia-100 bg-fuchsia-50/60 px-3 py-2 text-xs text-fuchsia-950">
+                <input type="checkbox" value="${this.escapeAttr(item.key)}" data-detail-final-video-option ${requestedSchemes.includes(item.key) ? 'checked' : ''} class="mt-0.5 h-4 w-4 rounded border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500">
+                <span><span class="block font-black">${this.escape(item.label)} · ${this.escape(item.name)}</span><span class="mt-0.5 block text-[11px] font-normal text-fuchsia-700">${this.escape(item.description)}</span></span>
+            </label>
+        `).join('');
+        const verticalSchemeCards = this.verticalVideoSchemes.map((item) => {
+            const selected = item.key === scheme;
+            return `
+                <label class="flex cursor-pointer items-start gap-2 rounded-lg border p-3 ${selected ? 'border-fuchsia-300 bg-fuchsia-50 ring-1 ring-fuchsia-100' : 'border-slate-200 bg-white'}">
+                    <input type="radio" name="detail_vertical_scheme" value="${this.escapeAttr(item.key)}" data-detail-vertical-scheme ${selected ? 'checked' : ''} class="mt-0.5 h-4 w-4 border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500">
+                    <span class="min-w-0">
+                        <span class="block text-xs font-black text-slate-900">${this.escape(item.label)} · ${this.escape(item.name)}</span>
+                        <span class="mt-1 block text-[11px] leading-4 text-slate-500">${this.escape(item.description)}</span>
+                    </span>
+                </label>
+            `;
+        }).join('');
         return `
-            <section class="rounded-lg border border-indigo-100 bg-indigo-50/60 p-4 shadow-sm">
+            <section class="rounded-xl border border-indigo-100 bg-indigo-50/40 p-4 shadow-sm">
                 <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <div>
-                        <div class="text-sm font-black text-indigo-950">视频操作区</div>
-                        <div class="mt-1 text-xs text-indigo-700">复用列表页同一套接口，不重新跑 Gemini 和豆包朗读。</div>
+                        <div class="text-sm font-black text-indigo-950">成片方案中心</div>
+                        <div class="mt-1 text-xs text-indigo-700">先按横屏、竖屏选择方案；所有方案复用现有音频、文案和素材，不重新跑 Gemini 与豆包朗读。</div>
                     </div>
                     ${!canRequestVertical ? `<span class="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-700">需要先有音频或视频文件</span>` : ''}
                 </div>
                 ${keyframeMode && !videoUrl ? `
-                    <div class="mb-3 rounded-lg border border-indigo-200 bg-white p-3">
-                        <div class="text-xs font-black text-indigo-950">关键帧确认完成后</div>
-                        <div class="mt-1 text-xs leading-5 text-slate-600">勾选需要的成片版本，可同时生成多个版本；直接复用现有音频、文案和截图。</div>
-                        <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4" data-detail-final-video-options>
-                            <label class="flex cursor-pointer items-center gap-2 rounded-md border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs font-bold text-indigo-950">
-                                <input type="checkbox" value="landscape" data-detail-final-video-option ${landscapeSelected ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-indigo-700 focus:ring-indigo-500">
-                                横屏成片
-                            </label>
-                            <label class="flex cursor-pointer items-center gap-2 rounded-md border border-fuchsia-100 bg-fuchsia-50/60 px-3 py-2 text-xs font-bold text-fuchsia-950">
-                                <input type="checkbox" value="scheme1" data-detail-final-video-option ${scheme1Selected ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500">
-                                方案一竖屏
-                            </label>
-                            <label class="flex cursor-pointer items-center gap-2 rounded-md border border-fuchsia-100 bg-fuchsia-50/60 px-3 py-2 text-xs font-bold text-fuchsia-950">
-                                <input type="checkbox" value="scheme2" data-detail-final-video-option ${scheme2Selected ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500">
-                                方案二竖屏
-                            </label>
-                            <label class="flex cursor-pointer items-center gap-2 rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-bold text-violet-950">
-                                <input type="checkbox" value="scheme3" data-detail-final-video-option ${scheme3Selected ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-violet-700 focus:ring-violet-500">
-                                方案三·视觉嵌框
-                            </label>
+                    <div class="mb-4 rounded-xl border border-indigo-200 bg-white p-4">
+                        <div class="text-xs font-black text-indigo-950">关键帧确认与批量成片</div>
+                        <div class="mt-1 text-xs leading-5 text-slate-600">横屏和竖屏分别勾选，可一次提交多个成片版本。</div>
+                        <div class="mt-3 grid gap-4 xl:grid-cols-2" data-detail-final-video-options>
+                            <fieldset>
+                                <legend class="mb-2 text-xs font-black text-indigo-900"><i class="fas fa-display mr-1"></i>横屏 · 16:9</legend>
+                                <label class="flex cursor-pointer items-start gap-2 rounded-md border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-950">
+                                    <input type="checkbox" value="landscape" data-detail-final-video-option ${landscapeSelected ? 'checked' : ''} class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-700 focus:ring-indigo-500">
+                                    <span><span class="block font-black">方案 1 · 研报截图成片</span><span class="mt-0.5 block text-[11px] font-normal text-indigo-700">使用已确认的研报截图关键帧生成横屏 MP4。</span></span>
+                                </label>
+                            </fieldset>
+                            <fieldset>
+                                <legend class="mb-2 text-xs font-black text-fuchsia-900"><i class="fas fa-mobile-screen mr-1"></i>竖屏 · 9:16</legend>
+                                <div class="grid gap-2">${finalVerticalOptions}</div>
+                            </fieldset>
                         </div>
                         <button type="button" data-detail-action="confirm-keyframes-generate-final" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive || finalVideoActive ? 'disabled' : ''} class="mt-2 rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-wait disabled:opacity-60">
                             <i class="fas ${finalVideoActive ? 'fa-spinner fa-spin' : 'fa-circle-check'} mr-1"></i>${finalVideoActive ? '所选成片生成中' : '确认关键帧，生成所选成片'}
                         </button>
                     </div>
                 ` : ''}
-                <div class="flex flex-wrap items-center gap-2">
-                    <select data-detail-visual-scheme class="rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1.5 text-xs font-bold text-violet-800" aria-label="视觉方案">
-                        ${this.visualSchemes.map((item) => `<option value="${this.escapeAttr(item.key)}" ${item.key === this.selectedVisualSchemeKey ? 'selected' : ''} ${item.configured ? '' : 'disabled'}>${this.escape(item.name)}${item.configured ? '' : '（待配置 Gem）'}</option>`).join('')}
-                    </select>
-                    <button type="button" data-detail-action="open-stick-figure-workflow" data-job-id="${this.escapeAttr(jobId)}" ${!audioUrl || stickWorkflowActive ? 'disabled' : ''} class="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60">
-                        <i class="fas ${stickWorkflowActive ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${stickWorkflowActive ? '正在创建视觉方案' : '视觉方案横屏视频'}
-                    </button>
-                    ${coverUrl ? `<a href="${this.absoluteUrl(coverUrl)}" download class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50"><i class="fas fa-image mr-1"></i>封面</a>` : ''}
-                    <button type="button" data-detail-action="regenerate-cover" data-job-id="${this.escapeAttr(jobId)}" ${coverRegenerating ? 'disabled' : ''} class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60">
-                        <i class="fas ${coverRegenerating ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${coverRegenerating ? '生成中' : '重做封面'}
-                    </button>
-                    ${videoUrl ? `<a href="${this.absoluteUrl(videoUrl)}" download class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800"><i class="fas fa-film mr-1"></i>横屏 MP4</a>` : ''}
-                    ${verticalVideoItems.length ? verticalVideoItems.map((item) => `<a href="${this.absoluteUrl(item.download_url)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>${this.escape(item.label || this.verticalSchemeLabel(item.scheme))}竖屏 MP4</a>`).join('') : (verticalVideoUrl ? `<a href="${this.absoluteUrl(verticalVideoUrl)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : '')}
-                    ${verticalPreviewItems.length ? verticalPreviewItems.map((item) => `<a href="${this.absoluteUrl(item.download_url)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>${this.escape(item.label || this.verticalSchemeLabel(item.scheme))}10秒预览</a>`).join('') : (verticalPreviewVideoUrl ? `<a href="${this.absoluteUrl(verticalPreviewVideoUrl)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>10秒预览</a>` : '')}
-                    ${verticalCoverUrl ? `<a href="${this.absoluteUrl(verticalCoverUrl)}" download class="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><i class="fas fa-image-portrait mr-1"></i>竖版封皮</a>` : ''}
-                    ${podcastCoverUrl ? `<a href="${this.absoluteUrl(podcastCoverUrl)}" download class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50"><i class="fas fa-record-vinyl mr-1"></i>播客封皮</a>` : ''}
-                    ${bilibiliCoverUrl ? `<a href="${this.absoluteUrl(bilibiliCoverUrl)}" download class="rounded-md border border-pink-200 bg-white px-3 py-1.5 text-xs font-bold text-pink-700 hover:bg-pink-50"><i class="fas fa-tv mr-1"></i>B站封皮</a>` : ''}
-                    ${!podcastCoverUrl ? `<button type="button" data-detail-action="generate-podcast-cover" data-job-id="${this.escapeAttr(jobId)}" ${podcastGenerating ? 'disabled' : ''} class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50 disabled:cursor-wait disabled:opacity-60"><i class="fas ${podcastGenerating ? 'fa-spinner fa-spin' : 'fa-record-vinyl'} mr-1"></i>${podcastGenerating ? '封皮生成中' : '补生成播客封皮'}</button>` : ''}
-                    <select data-detail-vertical-scheme class="rounded-md border border-fuchsia-200 bg-white px-2 py-1.5 text-xs font-bold text-fuchsia-800 focus:border-fuchsia-400 focus:outline-none">
-                        <option value="scheme1" ${scheme === 'scheme1' ? 'selected' : ''}>方案一</option>
-                        <option value="scheme2" ${scheme === 'scheme2' ? 'selected' : ''}>方案二</option>
-                        <option value="scheme3" ${scheme === 'scheme3' ? 'selected' : ''}>方案三·视觉嵌框</option>
-                    </select>
-                    <button type="button" data-detail-action="generate-vertical-preview" data-preview-seconds="10" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive ? 'disabled' : ''} class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50 disabled:cursor-wait disabled:opacity-60">
-                        <i class="fas ${verticalActive ? 'fa-spinner fa-spin' : 'fa-bolt'} mr-1"></i>${verticalActive ? '竖屏生成中' : '10秒预览'}
-                    </button>
-                    <button type="button" data-detail-action="generate-vertical-full" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive ? 'disabled' : ''} class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800 disabled:cursor-wait disabled:opacity-60">
-                        <i class="fas fa-mobile-screen-button mr-1"></i>${verticalVideoUrl ? '完整重合成' : '生成完整竖屏'}
-                    </button>
+                <div class="grid gap-4 xl:grid-cols-2">
+                    <section class="rounded-xl border border-indigo-200 bg-white p-4">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <h3 class="text-sm font-black text-indigo-950"><i class="fas fa-display mr-2 text-indigo-600"></i>横屏方案 <span class="text-xs font-bold text-slate-400">16:9</span></h3>
+                                <p class="mt-1 text-xs text-slate-500">截图成片与视觉方案横屏视频统一在这里管理。</p>
+                            </div>
+                            ${videoUrl ? '<span class="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-bold text-emerald-700">已有横屏成片</span>' : ''}
+                        </div>
+                        <div class="mt-3 space-y-3">
+                            <article class="rounded-lg border border-indigo-200 bg-indigo-50/60 p-3">
+                                <div class="text-xs font-black text-slate-900">方案 1 · 研报截图成片</div>
+                                <div class="mt-1 text-[11px] leading-4 text-slate-500">使用研报页面、标题、字幕和整篇音频生成标准横屏视频。</div>
+                                <div class="mt-3 flex flex-wrap gap-2">
+                                    ${coverUrl ? `<a href="${this.absoluteUrl(coverUrl)}" download class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50"><i class="fas fa-image mr-1"></i>横版封面</a>` : ''}
+                                    <button type="button" data-detail-action="regenerate-cover" data-job-id="${this.escapeAttr(jobId)}" ${coverRegenerating ? 'disabled' : ''} class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60">
+                                        <i class="fas ${coverRegenerating ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${coverRegenerating ? '生成中' : '重做横版封面'}
+                                    </button>
+                                    ${videoUrl ? `<a href="${this.absoluteUrl(videoUrl)}" download class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800"><i class="fas fa-film mr-1"></i>下载横屏 MP4</a>` : ''}
+                                    ${bilibiliCoverUrl ? `<a href="${this.absoluteUrl(bilibiliCoverUrl)}" download class="rounded-md border border-pink-200 bg-white px-3 py-1.5 text-xs font-bold text-pink-700 hover:bg-pink-50"><i class="fas fa-tv mr-1"></i>B站封皮</a>` : ''}
+                                </div>
+                            </article>
+                            <div>
+                                <div class="mb-2 text-[11px] font-black uppercase tracking-wide text-violet-700">视觉方案注册表</div>
+                                <div class="grid gap-2">${visualWorkflowEntries}</div>
+                            </div>
+                        </div>
+                    </section>
+                    <section class="rounded-xl border border-fuchsia-200 bg-white p-4">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <h3 class="text-sm font-black text-fuchsia-950"><i class="fas fa-mobile-screen mr-2 text-fuchsia-600"></i>竖屏方案 <span class="text-xs font-bold text-slate-400">9:16</span></h3>
+                                <p class="mt-1 text-xs text-slate-500">先选择竖屏模板，再生成 10 秒预览或完整成片。</p>
+                            </div>
+                            ${verticalVideoItems.length || verticalVideoUrl ? '<span class="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-bold text-emerald-700">已有竖屏成片</span>' : ''}
+                        </div>
+                        <div class="mt-3 grid gap-2">${verticalSchemeCards}</div>
+                        ${scheme === 'scheme3' ? `
+                            <label class="mt-3 block rounded-lg border border-violet-200 bg-violet-50 p-3 text-xs font-bold text-violet-900">
+                                方案三视觉素材源
+                                <select data-detail-visual-scheme class="mt-2 w-full rounded-md border border-violet-200 bg-white px-2.5 py-2 text-xs font-bold text-violet-800" aria-label="方案三视觉素材源">
+                                    ${this.visualSchemes.map((item) => `<option value="${this.escapeAttr(item.key)}" ${item.key === this.selectedVisualSchemeKey ? 'selected' : ''} ${item.configured ? '' : 'disabled'}>${this.escape(item.name)}${item.configured ? '' : '（待配置 Gem）'}</option>`).join('')}
+                                </select>
+                                <span class="mt-1 block text-[11px] font-normal text-violet-700">当前使用：${this.escape(selectedVisualScheme?.name || '白板火柴人')}。需先在左侧创建并完成对应视觉任务。</span>
+                            </label>
+                        ` : ''}
+                        <div class="mt-3 flex flex-wrap gap-2">
+                            <button type="button" data-detail-action="generate-vertical-preview" data-preview-seconds="10" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive ? 'disabled' : ''} class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50 disabled:cursor-wait disabled:opacity-60">
+                                <i class="fas ${verticalActive ? 'fa-spinner fa-spin' : 'fa-bolt'} mr-1"></i>${verticalActive ? '竖屏生成中' : '生成 10 秒预览'}
+                            </button>
+                            <button type="button" data-detail-action="generate-vertical-full" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive ? 'disabled' : ''} class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800 disabled:cursor-wait disabled:opacity-60">
+                                <i class="fas fa-mobile-screen-button mr-1"></i>${verticalVideoUrl ? '重新生成完整竖屏' : '生成完整竖屏'}
+                            </button>
+                            ${verticalCoverUrl ? `<a href="${this.absoluteUrl(verticalCoverUrl)}" download class="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><i class="fas fa-image-portrait mr-1"></i>竖版封皮</a>` : ''}
+                            ${podcastCoverUrl ? `<a href="${this.absoluteUrl(podcastCoverUrl)}" download class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50"><i class="fas fa-record-vinyl mr-1"></i>播客封皮</a>` : ''}
+                            ${!podcastCoverUrl ? `<button type="button" data-detail-action="generate-podcast-cover" data-job-id="${this.escapeAttr(jobId)}" ${podcastGenerating ? 'disabled' : ''} class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50 disabled:cursor-wait disabled:opacity-60"><i class="fas ${podcastGenerating ? 'fa-spinner fa-spin' : 'fa-record-vinyl'} mr-1"></i>${podcastGenerating ? '封皮生成中' : '补生成播客封皮'}</button>` : ''}
+                        </div>
+                        ${(verticalVideoItems.length || verticalVideoUrl || verticalPreviewItems.length || verticalPreviewVideoUrl) ? `
+                            <div class="mt-3 border-t border-fuchsia-100 pt-3">
+                                <div class="mb-2 text-[11px] font-black text-slate-500">已生成文件</div>
+                                <div class="flex flex-wrap gap-2">
+                                    ${verticalVideoItems.length ? verticalVideoItems.map((item) => `<a href="${this.absoluteUrl(item.download_url)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>${this.escape(item.label || this.verticalSchemeLabel(item.scheme))} MP4</a>`).join('') : (verticalVideoUrl ? `<a href="${this.absoluteUrl(verticalVideoUrl)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : '')}
+                                    ${verticalPreviewItems.length ? verticalPreviewItems.map((item) => `<a href="${this.absoluteUrl(item.download_url)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>${this.escape(item.label || this.verticalSchemeLabel(item.scheme))} 10秒预览</a>`).join('') : (verticalPreviewVideoUrl ? `<a href="${this.absoluteUrl(verticalPreviewVideoUrl)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>10秒预览</a>` : '')}
+                                </div>
+                            </div>
+                        ` : ''}
+                    </section>
                 </div>
                 ${verticalChild?.error ? `<div class="mt-2 rounded border border-red-100 bg-white/80 px-2 py-1 text-xs text-red-700">完整竖屏失败：${this.escape(verticalChild.error)}</div>` : ''}
                 ${previewChild?.error ? `<div class="mt-2 rounded border border-red-100 bg-white/80 px-2 py-1 text-xs text-red-700">10秒预览失败：${this.escape(previewChild.error)}</div>` : ''}
@@ -673,7 +996,10 @@ class ReportAudioWorkflowDetailPage {
     }
 
     currentDetailVerticalScheme() {
-        const select = this.els.root?.querySelector('[data-detail-vertical-scheme]');
+        const select = (
+            this.els.root?.querySelector('[data-detail-vertical-scheme]:checked')
+            || this.els.root?.querySelector('[data-detail-vertical-scheme]')
+        );
         return this.normalizeVerticalScheme(select?.value || this.job?.request?.video?.vertical_video_scheme || this.job?.video?.vertical_video_scheme);
     }
 
@@ -686,8 +1012,10 @@ class ReportAudioWorkflowDetailPage {
         };
     }
 
-    async openStickFigureWorkflow(jobId) {
+    async openStickFigureWorkflow(jobId, visualSchemeKey = '') {
         if (!jobId || this.stickWorkflowRequestIds.has(jobId)) return;
+        const requestedSchemeKey = String(visualSchemeKey || this.selectedVisualSchemeKey || 'stick_figure');
+        this.selectedVisualSchemeKey = requestedSchemeKey;
         const detailWindow = window.open('about:blank', '_blank');
         if (detailWindow) detailWindow.opener = null;
         this.stickWorkflowRequestIds.add(jobId);
@@ -697,7 +1025,7 @@ class ReportAudioWorkflowDetailPage {
                 method: 'POST',
                 timeoutMs: 30000,
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ force_new: false, visual_scheme_key: this.selectedVisualSchemeKey || 'stick_figure' }),
+                body: JSON.stringify({ force_new: false, visual_scheme_key: requestedSchemeKey }),
             });
             const workflowJobId = result.workflow_job_id || result.job_id || result.data?.workflow_job_id || result.data?.job_id;
             if (!workflowJobId) throw new Error('后端未返回视觉编排任务 ID');
@@ -787,6 +1115,7 @@ class ReportAudioWorkflowDetailPage {
                     preview_seconds: previewSeconds,
                     force: options.force !== false,
                     include_landscape: options.includeLandscape === true,
+                    selection_source: options.selectionSource || 'vertical-video-panel',
                     ...(schemes.includes('scheme3')
                         ? {
                             visual_scheme_key: this.selectedVisualSchemeKey || 'stick_figure',
@@ -848,6 +1177,7 @@ class ReportAudioWorkflowDetailPage {
                 previewSeconds: 0,
                 force: true,
                 includeLandscape: selection.includeLandscape,
+                selectionSource: 'keyframe-confirmation',
             });
         } finally {
             this.finalVideoRequestIds.delete(jobId);
@@ -1576,7 +1906,8 @@ class ReportAudioWorkflowDetailPage {
     }
 
     verticalSchemeLabel(value) {
-        return { scheme1: '方案一', scheme2: '方案二', scheme3: '方案三' }[this.normalizeVerticalScheme(value)];
+        const key = this.normalizeVerticalScheme(value);
+        return this.verticalVideoSchemes.find((item) => item.key === key)?.label || key;
     }
 
     selectedCompletedVisualVideo() {

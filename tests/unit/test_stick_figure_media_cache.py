@@ -85,6 +85,49 @@ class StickFigureMediaCacheTest(unittest.TestCase):
         workflow_api._clear_legacy_scene_bundle_cache()
         workflow_api._clear_terminal_workflow_cache()
 
+    def test_auto_whole_audio_alignment_degrades_when_no_reusable_wav_exists(self):
+        with patch.object(
+            workflow_api,
+            "_ensure_whole_audio_track",
+            side_effect=ValueError("没有找到同一研报已完成且文件有效的整篇 WAV"),
+        ), patch.object(
+            workflow_api,
+            "_enqueue_whole_audio_alignment",
+            side_effect=AssertionError("missing WAV must not enqueue alignment"),
+        ):
+            result = workflow_api._auto_enqueue_whole_audio_alignment(
+                SimpleNamespace(id="workflow-1"),
+                SimpleNamespace(id="storyboard-1"),
+            )
+
+        self.assertFalse(result["available"])
+        self.assertFalse(result["queued"])
+
+    def test_auto_whole_audio_alignment_reuses_idempotent_enqueue(self):
+        track = SimpleNamespace(
+            id="track-1",
+            alignment_task_id="alignment-1",
+            status="available",
+        )
+        with patch.object(
+            workflow_api,
+            "_ensure_whole_audio_track",
+            return_value=track,
+        ), patch.object(
+            workflow_api,
+            "_enqueue_whole_audio_alignment",
+            return_value=SimpleNamespace(id="alignment-1", status="pending"),
+        ) as enqueue:
+            result = workflow_api._auto_enqueue_whole_audio_alignment(
+                SimpleNamespace(id="workflow-1"),
+                SimpleNamespace(id="storyboard-1"),
+            )
+
+        enqueue.assert_called_once()
+        self.assertTrue(result["available"])
+        self.assertTrue(result["queued"])
+        self.assertEqual("alignment-1", result["job_id"])
+
     def test_concurrent_media_reads_bulk_load_each_workflow_once(self):
         workflow_id = "workflow-1"
         assets = [
@@ -292,6 +335,19 @@ class StickFigureMediaCacheTest(unittest.TestCase):
             ), patch.object(
                 workflow_api, "_video_payload", return_value={"status": "processing"}
             ), patch.object(
+                workflow_api,
+                "_audio_strategy_payload",
+                return_value={
+                    "recommended_mode": "whole_audio",
+                    "available": True,
+                    "ready": False,
+                    "status": "processing",
+                },
+            ) as audio_strategy, patch.object(
+                workflow_api,
+                "_scene_asset_summary",
+                return_value={"images_active": 1, "tts_active": 0},
+            ), patch.object(
                 workflow_api, "_sync_tts_assets",
                 side_effect=AssertionError("status polling must read the source-maintained scene projection"),
             ), patch.object(
@@ -302,6 +358,7 @@ class StickFigureMediaCacheTest(unittest.TestCase):
 
         self.assertTrue(response.get_json()["success"])
         status_rows.assert_called_once_with("workflow-1", "storyboard-1")
+        audio_strategy.assert_called_once()
 
     def test_status_poll_reuses_cached_payload_and_mutation_invalidates_it(self):
         parent = SimpleNamespace(id="workflow-1")

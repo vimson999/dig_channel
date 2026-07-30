@@ -16,6 +16,19 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-07-30 | [MP3 强制重生成在延迟续跑中重复创建已完成视频](2026-07-30-mp3-force-regenerate-repeated-completed-video.md) | MP3 视频编排 / Publisher / 延迟续跑 / 重启门禁 | 已部署并完成真实幂等验收，父任务已推进竖屏 |
+| 2026-07-30 | [视觉视频端到端流程停在素材就绪并误阻重启](2026-07-30-visual-ready-state-blocked-restart.md) | 火柴人视觉视频 / 自动成片 / 重启安全门禁 / 父子任务状态机 | 已部署，历史任务自动对齐和最终视频补投进行中 |
+| 2026-07-29 | [方案三前置校验连带阻断横屏成片](2026-07-29-report-audio-scheme3-preflight-blocked-landscape.md) | 研报音频详情 / 横屏成片 / 方案三竖屏 / Publisher | 已修复、部署并完成现场任务补投 |
+| 2026-07-29 | [PDF 证据批量选择在截图期间持有数据库事务](2026-07-29-pdf-evidence-bulk-selection-held-db-transaction.md) | PDF 证据映射 / 人工确认 / 证据截图 / 任务详情页 | 已修复、部署并完成真实任务验收 |
+| 2026-07-29 | [PDF 证据输出在必填字段赋值前被自动写入](2026-07-29-pdf-evidence-output-autoflush-before-required-fields.md) | 研报转语音 / 基础文案 / PDF 证据映射 / 任务详情页 | 已修复并完成真实任务回填 |
+| 2026-07-29 | [PDF 证据截图误用带水印原文件](2026-07-29-pdf-evidence-screenshot-used-watermarked-source.md) | PDF 证据映射 / 清洗产物 / 火柴人证据画面 | 已修复、迁移并完成指定真实任务回填验收 |
+| 2026-07-29 | [火柴人分镜图片与整篇 WAV 仍依赖手工续跑](2026-07-29-stick-scene-media-required-manual-recovery.md) | 火柴人视觉视频 / Gemini 分镜图片 / 整篇 WAV 时间轴对齐 | 已修复、部署并完成指定真实任务验收 |
+| 2026-07-29 | [研报关键帧任务被误标为视频生成完成](2026-07-29-report-audio-keyframe-stage-mislabeled-video.md) | 研报转语音详情页 / 任务流程状态 | 已修复 |
+| 2026-07-29 | [ZSXQ 全部 Tab 菜单发现遇到 1059 时未重试](2026-07-29-zsxq-all-tabs-menu-1059-no-retry.md) | 生财/洪灝全部 Tab 同步 / 上游瞬时错误 | 已修复，待真实计划轮次验收 |
+| 2026-07-28 | [整篇音频对齐完成后被 Web 状态缓存隐藏](2026-07-28-stick-audio-worker-state-hidden-by-web-cache.md) | 视觉视频详情 / 整篇 WAV 对齐 / 横屏合成 / 方案三竖屏 | 已修复并完成真实横屏、方案三成片验收 |
+| 2026-07-28 | [PDF 证据契约被旧前端覆盖且旧格式无法验证](2026-07-28-report-pdf-evidence-contract-bypassed.md) | 研报音频 / Gemini 浏览器 / PDF 证据映射 / 视觉分镜 | 已修复并完成两份真实 PDF 横竖成片验收 |
+| 2026-07-28 | [上传 PDF 字节数字段类型不一致阻断方案三](2026-07-28-report-audio-upload-pdf-bytes-type-mismatch.md) | 研报音频详情 / 视觉工作流联动 / 方案三竖屏 | 已修复，运行态验收进行中 |
+| 2026-07-28 | [研报自动成片按字数估算字幕导致语音漂移](2026-07-28-report-audio-publisher-script-weight-subtitle-drift.md) | 研报转语音 / Publisher / 方案三竖屏 / 字幕与分镜 | 已修复并完成指定真实任务重新成片验收 |
 | 2026-07-28 | [YouTube 频道与视频同步跨远端请求持有数据库 Session](2026-07-28-youtube-sync-held-db-session.md) | 首页频道管理 / 视频管理 / YouTube scheduler / PostgreSQL | 已修复，待首次真实执行验收 |
 | 2026-07-27 | [Watchdog 停止脚本误匹配管理命令自身](2026-07-27-watchdog-stop-script-self-match.md) | Celery Watchdog / 本地运行维护脚本 | 已修复并完成进程边界回归 |
 | 2026-07-27 | [Celery solo Worker 被误判卡死且 Watchdog 误报重启](2026-07-27-celery-solo-inspect-false-stuck-watchdog.md) | Celery Monitor / Watchdog / report_pdf_gemini | 已修复并完成真实运行时验收 |
@@ -50,6 +63,7 @@
 | 2026-07-21 | [重启安全门无条件切换公网数据库导致无法验收](2026-07-21-restart-guard-unconditional-direct-db.md) | 完整重启 / 活动任务门禁 / PostgreSQL / PgBouncer | 代码与双分支测试已修，待真实安全重启验收 |
 | 2026-07-21 | [媒体宽字段被批量 JSON 更新绕过并持续漂移](2026-07-21-media-projection-bulk-update-drift.md) | report audio / publisher / publication_tasks / 启动门禁 | 入库已修、现场已回填，待新进程真实任务验收 |
 | 2026-07-21 | [ZSXQ 同步逐条点查放大远端数据库抖动](2026-07-21-zsxq-sync-point-query-amplification.md) | ZSXQ 同步 / 附件入库与下载 / PostgreSQL | 第 138 轮页面级真实负载验收通过 |
+| 2026-07-21 | [Watchdog 修复事务跨外部检查与轮询重叠](2026-07-21-watchdog-repair-idle-transaction-and-poll-overlap.md) | publisher watchdog / PostgreSQL / Celery / Redis | 2026-07-30 再次打开；代码已修复，待运行验收 |
 | 2026-07-19 | [MP3 双封皮标题版本被格式标题覆盖](2026-07-19-mp3-cover-copy-variants-collapsed.md) | mp3_video_workflow / DS 标题规划 / 横屏封皮 | 代码已修复并完成回归，待新任务运行态验收 |
 | 2026-07-19 | [Report audio pending 父任务不在孤儿修复范围](2026-07-19-report-audio-pending-orphan-not-repairable.md) | report_audio_workflow / watchdog / publication_tasks | 已修复并完成历史任务收口与新进程验收 |
 | 2026-07-19 | [内容清洗 processing 孤儿不在自动修复范围](2026-07-19-content-clean-processing-orphan-not-repairable.md) | Content Pipeline / watchdog / 重启安全门 / ZSXQ workflow | 已修复并完成现场恢复与重启验收 |
@@ -73,7 +87,7 @@
 | 2026-07-14 | [MP3 子任务在等待终点完成却被判超时](2026-07-14-mp3-child-completed-at-wait-deadline.md) | MP3 视频编排 / publisher 父子等待 / render | 已修复，现场任务已完成收口 |
 | 2026-07-13 | [MP3 publisher 子任务等待 ID 未定义](2026-07-13-mp3-publisher-child-key-undefined.md) | MP3 视频编排 / publisher 父子等待 | 已修复 |
 | 2026-07-13 | [MP3 publisher 复用查询在 limit 后追加 filter](2026-07-13-mp3-publisher-reuse-filter-after-limit.md) | MP3 视频编排 / publisher 资产复用 | 已修复 |
-| 2026-07-13 | [MP3 数据库瞬时断连被写成父任务永久失败](2026-07-13-mp3-db-disconnect-marked-parent-failed.md) | MP3 视频编排 / runtime guard / publisher | 已修复 |
+| 2026-07-13 | [MP3 数据库瞬时断连被写成父任务永久失败](2026-07-13-mp3-db-disconnect-marked-parent-failed.md) | MP3 视频编排 / runtime guard / publisher | 2026-07-30 再次打开；代码已修复，待运行验收 |
 | 2026-07-13 | [MP3 热路径继续批量读取任务 JSON](2026-07-13-mp3-hot-path-json-payload-regression.md) | MP3 API/worker / publisher reuse / watchdog | 已修复待 SQL 与重启验收 |
 | 2026-07-13 | [基础文案任务缺少 Gemini 阈值函数导致批量失败](2026-07-13-report-script-material-missing-gemini-threshold-helper.md) | report script material / Gemini 缓存 | 已修复 |
 | 2026-07-11 | [后端重启误把旧监听进程判定为启动成功](2026-07-11-backend-restart-accepted-stale-listener.md) | Flask backend / restart scripts / Celery bootstrap | 已修复待真实重启验收 |

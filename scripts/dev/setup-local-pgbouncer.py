@@ -126,6 +126,7 @@ reserve_pool_size = 5
 reserve_pool_timeout = 5
 
 server_reset_query = DISCARD ALL
+server_reset_query_always = 1
 server_connect_timeout = 10
 server_check_query = SELECT 1
 server_check_delay = 5

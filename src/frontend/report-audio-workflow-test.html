@@ -102,87 +102,127 @@
                         <div class="mt-1 text-[11px] font-bold text-emerald-700">适合 Gemini 页面卡住时使用；PDF 仍用于封面、截图和后续视频底图。</div>
                     </label>
 
-                    <div class="mt-4 rounded-md border border-indigo-100 bg-indigo-50/50 p-3">
+                    <div id="mvp-video-stage-panel" class="mt-4 rounded-md border border-indigo-100 bg-indigo-50/50 p-3">
                         <div class="flex items-center justify-between gap-3">
                             <div>
                                 <h3 class="text-sm font-black text-slate-800">MVP 视频阶段</h3>
                                 <p class="mt-0.5 text-xs text-slate-500">复用 publisher 视频工作流，PDF 首屏截图作为横屏/竖屏正文背景和封面底图。</p>
                             </div>
                         </div>
-                        <div class="mt-3 space-y-2">
-                            <label class="flex items-center gap-2 rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
-                                <input id="landscape-video-enabled" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-indigo-600" checked>
-                                生成横屏视频和横屏封面
-                            </label>
-                            <label class="flex items-center gap-2 rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
-                                <input id="vertical-video-enabled" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-indigo-600">
-                                生成竖屏视频
-                            </label>
-                            <fieldset class="block rounded-md border border-violet-100 bg-violet-50/70 px-3 py-2 text-xs font-bold text-slate-700">
-                                <legend class="sr-only">同步投递视觉方案</legend>
-                                <div class="mb-1 flex items-center justify-between gap-2">
-                                    <span class="block text-violet-700">同步投递视觉方案</span>
-                                    <span class="text-[10px] font-medium text-violet-400">可多选 · 复用同一份文案</span>
-                                </div>
+                        <div class="mt-3 space-y-3">
+                            <fieldset class="rounded-md border border-indigo-200 bg-white p-3">
+                                <legend class="px-1 text-xs font-black text-slate-700">1. 选择生成模式</legend>
                                 <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                                    <label class="flex cursor-pointer items-center gap-2 rounded-md border border-violet-100 bg-white px-2.5 py-2 hover:border-violet-300">
-                                        <input id="visual-scheme-stick-figure" name="visual_scheme_keys" value="stick_figure" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-violet-600">
-                                        <span>白板火柴人</span>
+                                    <label id="generation-mode-keyframes-card" class="flex cursor-pointer items-start gap-2 rounded-md border border-slate-200 bg-white px-3 py-2.5 hover:border-indigo-400">
+                                        <input name="video_render_mode" value="keyframes" type="radio" class="mt-0.5 h-4 w-4 border-slate-300 text-indigo-600" checked>
+                                        <span>
+                                            <span class="block text-xs font-black text-slate-800">关键帧 + 封皮</span>
+                                            <span class="mt-0.5 block text-[10px] font-medium leading-4 text-slate-500">只生成勾选的图片，先审样式，不合成 MP4</span>
+                                        </span>
                                     </label>
-                                    <label class="flex cursor-pointer items-center gap-2 rounded-md border border-violet-100 bg-white px-2.5 py-2 hover:border-violet-300">
-                                        <input id="visual-scheme-doraemon" name="visual_scheme_keys" value="doraemon" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-violet-600">
-                                        <span>哆啦A梦复古二次元</span>
+                                    <label id="generation-mode-full-video-card" class="flex cursor-pointer items-start gap-2 rounded-md border border-slate-200 bg-white px-3 py-2.5 hover:border-indigo-400">
+                                        <input name="video_render_mode" value="full_video" type="radio" class="mt-0.5 h-4 w-4 border-slate-300 text-indigo-600">
+                                        <span>
+                                            <span class="block text-xs font-black text-slate-800">完整视频</span>
+                                            <span class="mt-0.5 block text-[10px] font-medium leading-4 text-slate-500">按所选横屏、竖屏版本生成完整成片</span>
+                                        </span>
                                     </label>
                                 </div>
-                                <p class="mt-2 text-[10px] font-medium leading-4 text-violet-500">基础文案生成后自动投递所选分镜和图片任务，不会重复解析 PDF 或生成文案。</p>
                             </fieldset>
-                            <label class="block rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
-                                <span class="mb-1 block text-slate-500">TTS 方案</span>
-                                <select id="tts-provider" class="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 focus:border-slate-400 focus:outline-none">
-                                    <option value="doubao_browser">豆包浏览器 TTS（默认）</option>
-                                    <option value="doubao_api">豆包 API TTS（WebSocket V3）</option>
-                                </select>
-                            </label>
-                            <label id="tts-voice-panel" class="hidden block rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
-                                <span class="mb-1 block text-slate-500">豆包 API 音色</span>
-                                <select id="tts-voice" class="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 focus:border-slate-400 focus:outline-none">
-                                    <option value="zh_female_mizai_uranus_bigtts">黑猫</option>
-                                    <option value="zh_female_qingchezizi_uranus_bigtts">清澈</option>
-                                    <option value="zh_male_liufei_uranus_bigtts">刘飞</option>
-                                    <option value="zh_male_dayi_uranus_bigtts">大台</option>
-                                </select>
-                                <div id="tts-voice-id" class="mt-1 break-all text-[10px] font-medium text-slate-400">zh_female_mizai_uranus_bigtts</div>
-                            </label>
-                            <fieldset class="block rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
-                                <legend class="sr-only">竖屏视频方案</legend>
-                                <div class="mb-1 flex items-center justify-between gap-2">
-                                    <span class="block text-slate-500">竖屏视频方案</span>
-                                    <span class="text-[10px] font-medium text-slate-400">可多选，最多2个</span>
-                                </div>
-                                <div id="vertical-video-schemes" class="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                                    <label class="flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-2 hover:border-indigo-300 hover:bg-indigo-50/50">
-                                        <input id="vertical-video-scheme-1" name="vertical_video_schemes" value="scheme1" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-indigo-600" checked>
-                                        <span>方案一：当前竖屏背景</span>
+
+                            <fieldset id="keyframe-output-panel" class="rounded-md border border-amber-200 bg-amber-50/50 p-3">
+                                <legend class="px-1 text-xs font-black text-amber-800">2. 选择关键帧与封皮</legend>
+                                <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                    <label class="flex cursor-pointer items-start gap-2 rounded-md border border-amber-100 bg-white px-2.5 py-2">
+                                        <input name="keyframe_outputs" value="bilibili_cover" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600" checked>
+                                        <span><span class="block font-bold">横版封皮</span><span class="text-[10px] font-medium text-slate-400">B站封皮 · 1146×717</span></span>
                                     </label>
-                                    <label class="flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-2 hover:border-indigo-300 hover:bg-indigo-50/50">
-                                        <input id="vertical-video-scheme-2" name="vertical_video_schemes" value="scheme2" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-indigo-600">
-                                        <span>方案二：封面工具台竖版背景</span>
+                                    <label class="flex cursor-pointer items-start gap-2 rounded-md border border-amber-100 bg-white px-2.5 py-2">
+                                        <input name="keyframe_outputs" value="vertical_cover" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600">
+                                        <span><span class="block font-bold">竖版封皮</span><span class="text-[10px] font-medium text-slate-400">工具台封皮 · 1080×1440</span></span>
                                     </label>
-                                    <label class="flex cursor-pointer items-center gap-2 rounded-md border border-violet-200 bg-violet-50 px-2.5 py-2 hover:border-violet-400">
-                                        <input id="vertical-video-scheme-3" name="vertical_video_schemes" value="scheme3" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-violet-600">
-                                        <span>方案三：标题框架 + 视觉视频</span>
+                                    <label class="flex cursor-pointer items-start gap-2 rounded-md border border-amber-100 bg-white px-2.5 py-2">
+                                        <input name="keyframe_outputs" value="landscape_keyframe" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600" checked>
+                                        <span><span class="block font-bold">横版关键帧</span><span class="text-[10px] font-medium text-slate-400">PDF 首屏背景 · 1920×1080</span></span>
                                     </label>
                                 </div>
-                                <p class="mt-2 text-[10px] font-medium leading-4 text-slate-500">关键帧阶段只检查标题、副标题、机构与横屏框；正式成片时再嵌入同 PDF 的视觉方案视频。</p>
+                                <div class="mt-3 text-[11px] font-black text-slate-600">竖版关键帧（可多选）</div>
+                                <div class="mt-1.5 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                                    <label class="flex cursor-pointer items-start gap-2 rounded-md border border-amber-100 bg-white px-2.5 py-2">
+                                        <input name="keyframe_outputs" value="vertical_keyframe_scheme1" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600">
+                                        <span><span class="block font-bold">方案一</span><span class="text-[10px] font-medium text-slate-400">PDF 首屏背景</span></span>
+                                    </label>
+                                    <label class="flex cursor-pointer items-start gap-2 rounded-md border border-amber-100 bg-white px-2.5 py-2">
+                                        <input name="keyframe_outputs" value="vertical_keyframe_scheme2" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600">
+                                        <span><span class="block font-bold">方案二</span><span class="text-[10px] font-medium text-slate-400">封面工具台背景</span></span>
+                                    </label>
+                                    <label class="flex cursor-pointer items-start gap-2 rounded-md border border-violet-200 bg-white px-2.5 py-2">
+                                        <input name="keyframe_outputs" value="vertical_keyframe_scheme3" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-violet-600">
+                                        <span><span class="block font-bold">方案三</span><span class="text-[10px] font-medium text-slate-400">标题框架 + 视觉区</span></span>
+                                    </label>
+                                </div>
                             </fieldset>
-                            <label class="block rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-700">
-                                <span class="mb-1 block text-slate-500">生成模式</span>
-                                <select id="video-render-mode" class="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 focus:border-slate-400 focus:outline-none">
-                                    <option value="full_video">生成完整视频</option>
-                                    <option value="keyframes">只生成关键帧/封皮</option>
-                                    <option value="preview_10s">生成 10 秒短视频</option>
-                                </select>
-                            </label>
+
+                            <div id="full-video-options-panel" class="hidden space-y-3">
+                                <fieldset class="rounded-md border border-sky-200 bg-sky-50/50 p-3">
+                                    <legend class="px-1 text-xs font-black text-sky-800">2. 选择横屏视频版本</legend>
+                                    <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                        <label class="flex cursor-pointer items-start gap-2 rounded-md border border-sky-100 bg-white px-2.5 py-2">
+                                            <input id="landscape-video-enabled" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-sky-600" checked>
+                                            <span><span class="block font-bold">PDF 首屏背景横版</span><span class="text-[10px] font-medium text-slate-400">Publisher 标准横屏成片</span></span>
+                                        </label>
+                                        <label class="flex cursor-pointer items-start gap-2 rounded-md border border-violet-100 bg-white px-2.5 py-2">
+                                            <input id="visual-scheme-stick-figure" name="visual_scheme_keys" value="stick_figure" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-violet-600">
+                                            <span><span class="block font-bold">白板火柴人横版</span><span class="text-[10px] font-medium text-slate-400">独立分镜与图片视频</span></span>
+                                        </label>
+                                        <label class="flex cursor-pointer items-start gap-2 rounded-md border border-violet-100 bg-white px-2.5 py-2">
+                                            <input id="visual-scheme-doraemon" name="visual_scheme_keys" value="doraemon" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-violet-600">
+                                            <span><span class="block font-bold">哆啦A梦复古二次元横版</span><span class="text-[10px] font-medium text-slate-400">独立分镜与图片视频</span></span>
+                                        </label>
+                                    </div>
+                                    <p class="mt-2 text-[10px] font-medium leading-4 text-violet-500">视觉横版复用同一份研报文案，不会重复解析 PDF 或生成文案。</p>
+                                </fieldset>
+
+                                <fieldset class="rounded-md border border-emerald-200 bg-emerald-50/50 p-3">
+                                    <legend class="px-1 text-xs font-black text-emerald-800">3. 选择竖屏视频版本</legend>
+                                    <div id="vertical-video-schemes" class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                        <label class="flex cursor-pointer items-start gap-2 rounded-md border border-emerald-100 bg-white px-2.5 py-2">
+                                            <input id="vertical-video-scheme-1" name="vertical_video_schemes" value="scheme1" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-emerald-600">
+                                            <span><span class="block font-bold">方案一</span><span class="text-[10px] font-medium text-slate-400">当前 PDF 竖屏背景</span></span>
+                                        </label>
+                                        <label class="flex cursor-pointer items-start gap-2 rounded-md border border-emerald-100 bg-white px-2.5 py-2">
+                                            <input id="vertical-video-scheme-2" name="vertical_video_schemes" value="scheme2" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-emerald-600">
+                                            <span><span class="block font-bold">方案二</span><span class="text-[10px] font-medium text-slate-400">封面工具台竖版背景</span></span>
+                                        </label>
+                                        <label class="flex cursor-pointer items-start gap-2 rounded-md border border-violet-200 bg-white px-2.5 py-2">
+                                            <input id="vertical-video-scheme-3" name="vertical_video_schemes" value="scheme3" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-violet-600">
+                                            <span><span class="block font-bold">方案三</span><span class="text-[10px] font-medium text-slate-400">标题框架 + 视觉视频</span></span>
+                                        </label>
+                                    </div>
+                                    <p class="mt-2 text-[10px] font-medium leading-4 text-slate-500">竖屏版本可多选，单次最多选择 2 个。</p>
+                                </fieldset>
+                            </div>
+
+                            <div class="rounded-md border border-white bg-white/70 p-3">
+                                <div class="mb-2 text-xs font-black text-slate-700"><span id="tts-step-number">3</span>. 选择声音 TTS 方案</div>
+                                <label class="block text-xs font-bold text-slate-700">
+                                    <span class="mb-1 block text-slate-500">声音来源</span>
+                                    <select id="tts-provider" class="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 focus:border-slate-400 focus:outline-none">
+                                        <option value="doubao_browser">豆包浏览器 TTS（默认）</option>
+                                        <option value="doubao_api">豆包 API TTS（WebSocket V3）</option>
+                                    </select>
+                                </label>
+                                <label id="tts-voice-panel" class="mt-2 hidden block text-xs font-bold text-slate-700">
+                                    <span class="mb-1 block text-slate-500">豆包 API 音色</span>
+                                    <select id="tts-voice" class="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 focus:border-slate-400 focus:outline-none">
+                                        <option value="zh_female_mizai_uranus_bigtts">黑猫</option>
+                                        <option value="zh_female_qingchezizi_uranus_bigtts">清澈</option>
+                                        <option value="zh_male_liufei_uranus_bigtts">刘飞</option>
+                                        <option value="zh_male_dayi_uranus_bigtts">大台</option>
+                                    </select>
+                                    <div id="tts-voice-id" class="mt-1 break-all text-[10px] font-medium text-slate-400">zh_female_mizai_uranus_bigtts</div>
+                                </label>
+                            </div>
                             <label class="flex items-center gap-2 rounded-md border border-white bg-white/70 px-3 py-2 text-xs font-bold text-slate-400">
                                 <input id="bilibili-enabled" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-indigo-600" disabled>
                                 自动发布 B站（MVP 暂不启用）
@@ -256,6 +296,6 @@
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260614-report-audio-workflow"></script>
     <script src="js/download-count-highlight.js?v=20260702"></script>
-    <script src="js/report-audio-workflow-test.js?v=20260724-vertical-scheme3"></script>
+    <script src="js/report-audio-workflow-test.js?v=20260728-pdf-evidence-contract-v2"></script>
 </body>
 </html>

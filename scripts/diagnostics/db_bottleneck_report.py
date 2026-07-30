@@ -24,6 +24,23 @@ from sqlalchemy.exc import SQLAlchemyError
 
 
 ROOT = Path(__file__).resolve().parents[2]
+TARGET_TABLES_SQL = """
+    VALUES
+        ('public.publication_tasks'),
+        ('public.zsxq_sync_runs'),
+        ('public.zsxq_topics'),
+        ('public.zsxq_topic_comments'),
+        ('public.zsxq_attachments'),
+        ('public.external_documents')
+"""
+TARGET_RELNAMES_SQL = """
+    'publication_tasks',
+    'zsxq_sync_runs',
+    'zsxq_topics',
+    'zsxq_topic_comments',
+    'zsxq_attachments',
+    'external_documents'
+"""
 
 
 def parse_args() -> argparse.Namespace:
@@ -163,6 +180,10 @@ def run_snapshot(conn: Connection, args: argparse.Namespace) -> None:
             now() AS checked_at,
             current_database() AS database_name,
             current_user AS current_user,
+            pg_is_in_recovery() AS is_in_recovery,
+            current_setting('transaction_read_only') AS transaction_read_only,
+            current_setting('default_transaction_read_only')
+                AS default_transaction_read_only,
             version() AS postgres_version
         """,
     )
@@ -170,17 +191,18 @@ def run_snapshot(conn: Connection, args: argparse.Namespace) -> None:
     print_query(
         conn,
         "target table sizes",
-        """
+        f"""
         WITH target_tables(relname) AS (
-            VALUES
-                ('public.publication_tasks'),
-                ('public.zsxq_sync_runs'),
-                ('public.zsxq_topics'),
-                ('public.zsxq_attachments')
+            {TARGET_TABLES_SQL}
         )
         SELECT
             relname,
             pg_size_pretty(pg_relation_size(to_regclass(relname))) AS table_size,
+            pg_size_pretty(
+                pg_total_relation_size(to_regclass(relname))
+                - pg_relation_size(to_regclass(relname))
+                - pg_indexes_size(to_regclass(relname))
+            ) AS toast_size,
             pg_size_pretty(pg_indexes_size(to_regclass(relname))) AS indexes_size,
             pg_size_pretty(pg_total_relation_size(to_regclass(relname))) AS total_size
         FROM target_tables
@@ -192,7 +214,7 @@ def run_snapshot(conn: Connection, args: argparse.Namespace) -> None:
     print_query(
         conn,
         "existing indexes",
-        """
+        f"""
         SELECT
             tablename,
             indexname,
@@ -200,10 +222,7 @@ def run_snapshot(conn: Connection, args: argparse.Namespace) -> None:
         FROM pg_indexes
         WHERE schemaname = 'public'
           AND tablename IN (
-              'publication_tasks',
-              'zsxq_sync_runs',
-              'zsxq_topics',
-              'zsxq_attachments'
+              {TARGET_RELNAMES_SQL}
           )
         ORDER BY tablename, indexname
         """,
@@ -213,11 +232,19 @@ def run_snapshot(conn: Connection, args: argparse.Namespace) -> None:
     print_query(
         conn,
         "table scan and vacuum stats",
-        """
+        f"""
         SELECT
             relname,
             n_live_tup,
             n_dead_tup,
+            n_tup_ins,
+            n_tup_upd,
+            n_tup_del,
+            n_tup_hot_upd,
+            CASE
+                WHEN n_tup_upd = 0 THEN NULL
+                ELSE round((n_tup_hot_upd::numeric / n_tup_upd) * 100, 2)
+            END AS hot_update_pct,
             seq_scan,
             idx_scan,
             CASE
@@ -231,12 +258,140 @@ def run_snapshot(conn: Connection, args: argparse.Namespace) -> None:
         FROM pg_stat_user_tables
         WHERE schemaname = 'public'
           AND relname IN (
-              'publication_tasks',
-              'zsxq_sync_runs',
-              'zsxq_topics',
-              'zsxq_attachments'
+              {TARGET_RELNAMES_SQL}
           )
         ORDER BY n_dead_tup DESC
+        """,
+    )
+
+    print_query(
+        conn,
+        "unused or rarely used target indexes",
+        f"""
+        SELECT
+            s.relname AS table_name,
+            s.indexrelname AS index_name,
+            pg_size_pretty(pg_relation_size(s.indexrelid)) AS index_size,
+            s.idx_scan,
+            s.idx_tup_read,
+            s.idx_tup_fetch,
+            i.indisunique AS is_unique,
+            (i.indpred IS NOT NULL) AS is_partial,
+            pg_get_indexdef(s.indexrelid) AS index_definition
+        FROM pg_stat_user_indexes AS s
+        JOIN pg_index AS i ON i.indexrelid = s.indexrelid
+        WHERE s.schemaname = 'public'
+          AND s.relname IN ({TARGET_RELNAMES_SQL})
+          AND NOT i.indisprimary
+          AND s.idx_scan <= 10
+        ORDER BY pg_relation_size(s.indexrelid) DESC, s.relname, s.indexrelname
+        LIMIT :limit
+        """,
+        {"limit": args.top_limit},
+        width=180,
+    )
+
+    print_query(
+        conn,
+        "exact duplicate target indexes",
+        f"""
+        SELECT
+            left_index.relname AS table_name,
+            left_index.indexrelname AS left_index,
+            right_index.indexrelname AS right_index,
+            pg_size_pretty(pg_relation_size(right_index.indexrelid)) AS removable_size
+        FROM pg_stat_user_indexes AS left_index
+        JOIN pg_index AS left_meta ON left_meta.indexrelid = left_index.indexrelid
+        JOIN pg_stat_user_indexes AS right_index
+          ON right_index.relid = left_index.relid
+         AND right_index.indexrelid > left_index.indexrelid
+        JOIN pg_index AS right_meta ON right_meta.indexrelid = right_index.indexrelid
+        WHERE left_index.schemaname = 'public'
+          AND left_index.relname IN ({TARGET_RELNAMES_SQL})
+          AND left_meta.indkey = right_meta.indkey
+          AND left_meta.indclass = right_meta.indclass
+          AND left_meta.indcollation = right_meta.indcollation
+          AND left_meta.indoption = right_meta.indoption
+          AND left_meta.indexprs IS NOT DISTINCT FROM right_meta.indexprs
+          AND left_meta.indpred IS NOT DISTINCT FROM right_meta.indpred
+          AND left_meta.indisunique = right_meta.indisunique
+        ORDER BY left_index.relname, left_index.indexrelname
+        """,
+    )
+
+    print_query(
+        conn,
+        "effective diagnostic-session timeout settings",
+        """
+        SELECT
+            current_setting('statement_timeout') AS statement_timeout,
+            current_setting('lock_timeout') AS lock_timeout,
+            current_setting('idle_in_transaction_session_timeout')
+                AS idle_in_transaction_session_timeout
+        """,
+    )
+
+    print_query(
+        conn,
+        "database and role setting sources",
+        """
+        SELECT
+            COALESCE(database_row.datname, '*') AS database_name,
+            COALESCE(role_row.rolname, '*') AS role_name,
+            setting
+        FROM pg_db_role_setting AS configured
+        LEFT JOIN pg_database AS database_row ON database_row.oid = configured.setdatabase
+        LEFT JOIN pg_roles AS role_row ON role_row.oid = configured.setrole
+        CROSS JOIN LATERAL unnest(configured.setconfig) AS setting
+        WHERE configured.setdatabase IN (
+            0,
+            (SELECT oid FROM pg_database WHERE datname = current_database())
+        )
+          AND configured.setrole IN (
+            0,
+            (SELECT oid FROM pg_roles WHERE rolname = current_user)
+        )
+        ORDER BY database_name, role_name, setting
+        """,
+    )
+
+    print_query(
+        conn,
+        "statistics age",
+        """
+        SELECT
+            pg_postmaster_start_time() AS server_started_at,
+            stats_reset
+        FROM pg_stat_database
+        WHERE datname = current_database()
+        """,
+    )
+
+    print_query(
+        conn,
+        "waiting locks",
+        """
+        SELECT
+            activity.pid,
+            activity.application_name,
+            activity.state,
+            activity.wait_event_type,
+            activity.wait_event,
+            clock_timestamp() - activity.query_start AS query_age,
+            left(activity.query, 300) AS query_sample
+        FROM pg_stat_activity AS activity
+        WHERE activity.datname = current_database()
+          AND activity.pid <> pg_backend_pid()
+          AND (
+              activity.wait_event_type = 'Lock'
+              OR EXISTS (
+                  SELECT 1
+                  FROM pg_locks AS lock_row
+                  WHERE lock_row.pid = activity.pid
+                    AND NOT lock_row.granted
+              )
+          )
+        ORDER BY activity.query_start NULLS LAST
         """,
     )
 
@@ -314,6 +469,68 @@ def run_snapshot(conn: Connection, args: argparse.Namespace) -> None:
 
 
 def run_explains(conn: Connection, args: argparse.Namespace) -> None:
+    recent_task_id = conn.execute(
+        text(
+            """
+            SELECT id
+            FROM public.publication_tasks
+            ORDER BY updated_at DESC NULLS LAST
+            LIMIT 1
+            """
+        )
+    ).scalar()
+    if recent_task_id:
+        print_explain(
+            conn,
+            "watchdog point lookup including result payload",
+            """
+            SELECT
+                id,
+                celery_task_id,
+                status,
+                current_step,
+                progress,
+                result,
+                error_message,
+                feature,
+                parent_task_id,
+                source_task_id,
+                created_at,
+                updated_at,
+                completed_at
+            FROM public.publication_tasks
+            WHERE id = :task_id
+            """,
+            {"task_id": str(recent_task_id)},
+        )
+
+    print_explain(
+        conn,
+        "channel chart data for active channels",
+        """
+        SELECT data.*
+        FROM public.channel_data AS data
+        JOIN public.channels AS channel ON channel.id = data.channel_id
+        WHERE data.date >= current_date - 29
+          AND data.date <= current_date
+          AND channel.is_active = true
+        ORDER BY data.date ASC, channel.name ASC
+        """,
+    )
+
+    print_explain(
+        conn,
+        "all-tabs scheduler configuration",
+        """
+        SELECT key, value, status, updated_at
+        FROM public.system_configs
+        WHERE type = 'zsxq_sync_schedule'
+          AND scope = 'production'
+          AND key LIKE 'zsxq.sync.schedule.%'
+        ORDER BY key ASC
+        """,
+    )
+
     print_explain(
         conn,
         "publisher task list with JSON feature filter",
@@ -410,11 +627,33 @@ def run_explains(conn: Connection, args: argparse.Namespace) -> None:
         SELECT
             id,
             group_id,
+            group_name,
+            tab_id,
+            tab_label,
             mode,
             status,
-            created_at,
+            requested_tabs,
+            error_message,
+            started_at,
             completed_at,
-            result
+            created_at,
+            updated_at,
+            system_batch_id,
+            system_attempt_id,
+            system_round,
+            system_max_rounds,
+            system_trigger,
+            system_queued_at,
+            system_max_download_files,
+            topics_fetched,
+            topics_new,
+            topics_updated,
+            topics_existing,
+            attachments_seen,
+            attachments_downloaded,
+            attachments_failed,
+            attachments_skipped,
+            download_limit_reached
         FROM public.zsxq_sync_runs
         WHERE group_id = :group_id
           AND mode LIKE 'sys%'

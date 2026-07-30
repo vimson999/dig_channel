@@ -11,6 +11,7 @@ class ReportStickFigureVideoWorkflowDetailPage {
         this.assetsError = '';
         this.visualScheme = {key:'stick_figure',name:'白板火柴人'};
         this.timer = null;
+        this.lastRefreshedAt = null;
         this.quickNavObserver = null;
         this.rawText = '';
         this.els = {
@@ -25,6 +26,8 @@ class ReportStickFigureVideoWorkflowDetailPage {
             rawContent: document.getElementById('raw-content'),
             copyRaw: document.getElementById('copy-raw'),
             quickNav: document.getElementById('quick-nav'),
+            sidebarStatus: document.getElementById('sidebar-task-status'),
+            sidebarRefresh: document.getElementById('sidebar-refresh-btn'),
         };
         this.bind();
         this.load();
@@ -60,6 +63,7 @@ class ReportStickFigureVideoWorkflowDetailPage {
 
     bind() {
         this.els.refresh.addEventListener('click',()=>this.load(true));
+        this.els.sidebarRefresh?.addEventListener('click',()=>this.load(true));
         this.els.root.addEventListener('click',async event=>{
             const normalizeRetry=event.target.closest('[data-retry-storyboard-normalize]');
             if(normalizeRetry){await this.retryStoryboardNormalize(normalizeRetry);return;}
@@ -105,6 +109,8 @@ class ReportStickFigureVideoWorkflowDetailPage {
     async load(manual=false) {
         clearTimeout(this.timer);
         if(!this.materialJobId&&!this.workflowJobId){this.els.root.innerHTML='<div class="rounded-lg border border-amber-200 bg-amber-50 p-6">URL 缺少 workflow_job_id。</div>';return;}
+        const blocking=!this.material||manual;
+        if(blocking)this.setRefreshBusy(true);
         if(manual)this.setNotice('正在刷新。','info');
         try {
             let storyboardJobId='';
@@ -127,10 +133,30 @@ class ReportStickFigureVideoWorkflowDetailPage {
             const boardResult=await this.request(boardPath);
             this.storyboard=boardResult.data||null;
             if(this.storyboard?.status==='succeeded'&&this.workflowJobId)await this.loadAssets(true);
+            this.lastRefreshedAt=new Date();
             this.render();
             this.schedulePolling();
             if(manual)this.setNotice('已刷新。','success');
-        } catch(error) { this.setNotice(`加载失败：${error.message}`,'error'); }
+        } catch(error) {
+            this.setNotice(`加载失败：${error.message}`,'error');
+        } finally {
+            if(blocking)this.setRefreshBusy(false);
+        }
+    }
+
+    setRefreshBusy(busy) {
+        if(this.els.refresh){
+            this.els.refresh.disabled=busy;
+            this.els.refresh.innerHTML=busy
+                ? '<i class="fas fa-spinner fa-spin mr-1.5"></i>刷新中'
+                : '<i class="fas fa-rotate mr-1.5"></i>刷新详情';
+        }
+        if(this.els.sidebarRefresh){
+            this.els.sidebarRefresh.disabled=busy;
+            this.els.sidebarRefresh.innerHTML=busy
+                ? '<i class="fas fa-spinner fa-spin"></i><span>刷新中</span>'
+                : '<i class="fas fa-rotate"></i><span>刷新详情</span>';
+        }
     }
 
     normalizeMaterialSource(payload) {
@@ -178,6 +204,7 @@ class ReportStickFigureVideoWorkflowDetailPage {
             const result=await this.request(`/api/report-visual-plans/jobs/${encodeURIComponent(this.storyboard.job_id)}`);
             this.storyboard=result.data;
             if(this.storyboard.status==='succeeded')await this.loadAssets(true);
+            this.lastRefreshedAt=new Date();
             this.render();
             this.schedulePolling();
         } catch(error) { this.setNotice(`刷新分镜失败：${error.message}`,'error'); }
@@ -185,6 +212,7 @@ class ReportStickFigureVideoWorkflowDetailPage {
 
     async pollAssets() {
         await this.loadAssets(true,true);
+        this.lastRefreshedAt=new Date();
         this.render();
         this.schedulePolling();
     }
@@ -294,16 +322,13 @@ class ReportStickFigureVideoWorkflowDetailPage {
             : audioStrategy.available?`${audioStrategy.status||'available'} · 可复用整篇 WAV`:`分段 TTS ${summary.tts_completed||0}/${summary.body_total||0}`;
         const video=this.assets?.video||{};
         const videoDone=video.status==='completed';
+        const workflowStages=this.workflowStageData();
         this.els.title.textContent=title;
         this.els.subtitle.textContent=`${schemeName} · 基础文案 ${material.status||'-'} · ${material.job_id||this.materialJobId}`;
         this.els.materialJson.href=this.absolute(this.materialApiPath||`/api/report-script-material-workflows/jobs/${encodeURIComponent(this.materialJobId)}`);
         this.els.root.innerHTML=`
             <section id="workflow-overview" data-nav-section class="scroll-mt-24 grid grid-cols-2 gap-2 md:grid-cols-5">
-                ${this.stage('1. 基础文案',material.status==='succeeded','PDF、Gem、DS')}
-                ${this.stage('2. 标题与正文分镜',board?.status==='succeeded',board?`${board.segment_count||0} 镜头`:'未开始')}
-                ${this.stage('3. 生成图片',imageDone,summary.total?`${summary.images_completed||0}/${summary.total}`:'未开始')}
-                ${this.stage('4. 语音与时间轴',audioReady,audioDetail)}
-                ${this.stage('5. 合成视频',videoDone,videoDone?`${Number(video.duration_seconds||0).toFixed(1)} 秒`:(['queued','processing'].includes(video.status)?`${video.progress||0}%`:(audioReady&&imageDone?'素材已就绪':'待音画素材')))}
+                ${workflowStages.map(item=>this.stage(item.label,item.state,item.detail)).join('')}
             </section>
             <section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"><div class="flex items-start justify-between gap-3"><div><div class="flex items-center gap-2"><div class="text-xs font-black uppercase tracking-wider text-slate-400">研报标题</div><span class="rounded-full bg-violet-50 px-2 py-1 text-[11px] font-black text-violet-700">${this.escape(schemeName)}</span></div><h2 class="mt-2 text-xl font-black leading-8">${this.escape(title)}</h2><p class="mt-1 text-xs text-slate-500">${this.escape(material.pdf?.filename||'')}</p></div>${material.input_pdf_url?`<a href="${this.absolute(material.input_pdf_url)}" target="_blank" class="rounded-md border px-3 py-2 text-xs font-bold text-slate-700">查看 PDF</a>`:''}</div></section>
             <section id="report-script" data-nav-section class="scroll-mt-24 rounded-xl border border-slate-200 bg-white p-5 shadow-sm"><div class="flex items-center justify-between"><h2 class="font-black">基础口播文案</h2><span class="text-xs font-bold text-slate-400">${script.length} 字</span></div><div class="mt-3 rounded-md border border-amber-100 bg-amber-50 p-3"><div class="text-xs font-black text-amber-800">标题（必须保留）</div><div class="mt-1 font-bold text-amber-950">${this.escape(title)}</div></div><pre class="mt-3 max-h-80 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-4 text-sm leading-7 text-slate-100">${this.escape(script||'等待基础文案生成。')}</pre></section>
@@ -312,7 +337,127 @@ class ReportStickFigureVideoWorkflowDetailPage {
             ${this.withNavSection(this.videoSection(imageDone&&audioReady,video),'video-render')}
             <section id="future-pipeline" data-nav-section class="scroll-mt-24 grid gap-3 md:grid-cols-2">${this.futureCard('生成封面','沿用同一父编排，后续增加横竖封面资产。','image')}${this.futureCard('社媒发布','视频完成后接入 B站、抖音、视频号等投递阶段。','share-nodes')}</section>`;
         this.bindAudioPreviews();
+        this.renderSidebarStatus();
         this.setupQuickNavigation();
+    }
+
+    workflowStageData() {
+        const materialStatus=String(this.material?.status||'').toLowerCase();
+        const boardStatus=String(this.storyboard?.status||'').toLowerCase();
+        const summary=this.assets?.summary||{};
+        const audio=this.assets?.audio_strategy||{};
+        const video=this.assets?.video||{};
+        const total=Math.max(0,Number(summary.total||0));
+        const bodyTotal=Math.max(0,Number(summary.body_total||0));
+        const imageCompleted=Math.max(0,Number(summary.images_completed||0));
+        const imageActive=Math.max(0,Number(summary.images_active||0));
+        const imageFailed=Math.max(0,Number(summary.images_failed||0));
+        const ttsCompleted=Math.max(0,Number(summary.tts_completed||0));
+        const ttsActive=Math.max(0,Number(summary.tts_active||0));
+        const ttsFailed=Math.max(0,Number(summary.tts_failed||0));
+        const materialDone=['succeeded','completed','success','done'].includes(materialStatus);
+        const boardDone=boardStatus==='succeeded';
+        const imageDone=total>0&&imageCompleted===total;
+        const audioDone=Boolean(summary.audio_ready);
+        const videoDone=video.status==='completed';
+        const state=(done,active,failed)=>done?'completed':failed?'failed':active?'active':'pending';
+        return [
+            {
+                key:'material',
+                label:'1. 基础文案',
+                shortLabel:'基础文案',
+                state:state(materialDone,['queued','running','processing'].includes(materialStatus),materialStatus==='failed'),
+                progress:materialDone?100:Number(this.material?.progress||0),
+                detail:'PDF、Gem、DS',
+            },
+            {
+                key:'storyboard',
+                label:'2. 标题与正文分镜',
+                shortLabel:'分镜方案',
+                state:state(boardDone,['queued','running','processing'].includes(boardStatus),boardStatus==='failed'),
+                progress:boardDone?100:Number(this.storyboard?.progress||0),
+                detail:this.storyboard?`${this.storyboard.segment_count||0} 镜头`:'未开始',
+            },
+            {
+                key:'images',
+                label:'3. 生成图片',
+                shortLabel:'生成图片',
+                state:state(imageDone,imageActive>0,imageFailed>0),
+                progress:imageDone?100:(total?Math.round(imageCompleted/total*100):0),
+                detail:total?`${imageCompleted}/${total}`:'未开始',
+            },
+            {
+                key:'audio',
+                label:'4. 语音与时间轴',
+                shortLabel:'音画对齐',
+                state:state(audioDone,ttsActive>0||['pending','processing'].includes(audio.status),ttsFailed>0||audio.status==='failed'),
+                progress:audioDone?100:(bodyTotal?Math.round(ttsCompleted/bodyTotal*100):0),
+                detail:audioDone
+                    ? `已对齐 ${audio.aligned_scene_count||bodyTotal}/${bodyTotal}`
+                    : (audio.available?'整篇语音待对齐':`分段 TTS ${ttsCompleted}/${bodyTotal}`),
+            },
+            {
+                key:'video',
+                label:'5. 合成视频',
+                shortLabel:'视频合成',
+                state:state(videoDone,['queued','processing'].includes(video.status),video.status==='failed'),
+                progress:videoDone?100:Number(video.progress||0),
+                detail:videoDone
+                    ? `${Number(video.duration_seconds||0).toFixed(1)} 秒`
+                    : (['queued','processing'].includes(video.status)?`${video.progress||0}%`:(audioDone&&imageDone?'素材已就绪':'待音画素材')),
+            },
+        ];
+    }
+
+    renderSidebarStatus() {
+        if(!this.els.sidebarStatus)return;
+        const stages=this.workflowStageData();
+        const failed=stages.find(item=>item.state==='failed');
+        const active=stages.find(item=>item.state==='active');
+        const allDone=stages.every(item=>item.state==='completed');
+        const current=failed||active||stages.find(item=>item.state!=='completed')||stages[stages.length-1];
+        const completedCount=stages.filter(item=>item.state==='completed').length;
+        const overall=failed
+            ? {label:'失败',badge:'bg-red-100 text-red-700'}
+            : allDone
+                ? {label:'已完成',badge:'bg-emerald-100 text-emerald-700'}
+                : active
+                    ? {label:'运行中',badge:'bg-blue-100 text-blue-700'}
+                    : completedCount
+                        ? {label:'待继续',badge:'bg-amber-100 text-amber-700'}
+                        : {label:'待开始',badge:'bg-slate-200 text-slate-600'};
+        const progress=Math.round(stages.reduce((sum,item)=>sum+Math.max(0,Math.min(100,Number(item.progress||0))),0)/stages.length);
+        const stateMeta={
+            completed:{icon:'fa-circle-check',color:'text-emerald-600'},
+            active:{icon:'fa-spinner fa-spin',color:'text-blue-600'},
+            failed:{icon:'fa-circle-exclamation',color:'text-red-600'},
+            pending:{icon:'fa-circle',color:'text-slate-300'},
+        };
+        const refreshedAt=this.lastRefreshedAt
+            ? this.lastRefreshedAt.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})
+            : '--:--:--';
+        this.els.sidebarStatus.innerHTML=`
+            <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] font-black uppercase tracking-wider text-slate-400">任务状态</span>
+                <span class="rounded-full px-2 py-0.5 text-[10px] font-black ${overall.badge}">${overall.label}</span>
+            </div>
+            <div class="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
+                <div class="truncate text-xs font-black text-slate-800">${this.escape(current?.shortLabel||'等待任务')}</div>
+                <div class="mt-1 flex items-center justify-between text-[10px] font-bold text-slate-500">
+                    <span>${active?'进行中':failed?'需要处理':allDone?'全部完成':'等待操作'}</span>
+                    <span>${progress}%</span>
+                </div>
+            </div>
+            <ol class="mt-2 grid grid-cols-2 gap-1" aria-label="左侧视觉任务流程状态">
+                ${stages.map(item=>{
+                    const meta=stateMeta[item.state]||stateMeta.pending;
+                    return `<li class="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] ${item.state==='active'?'bg-blue-50 font-black text-blue-800':'font-bold text-slate-500'}" title="${this.escape(item.shortLabel)}"><i class="fas ${meta.icon} ${meta.color} w-3 shrink-0 text-center" aria-hidden="true"></i><span class="truncate">${this.escape(item.shortLabel)}</span></li>`;
+                }).join('')}
+            </ol>
+            <div class="mt-2 border-t border-slate-100 pt-2 text-[10px] leading-4 text-slate-400">
+                <div>${active?'任务运行中，页面自动刷新':'状态稳定，可手动刷新'}</div>
+                <div>最近刷新 ${this.escape(refreshedAt)}</div>
+            </div>`;
     }
 
     withNavSection(html,id) {
@@ -569,7 +714,7 @@ class ReportStickFigureVideoWorkflowDetailPage {
     metric(label,value){return `<div class="rounded-md bg-slate-50 p-3"><div class="text-slate-400">${label}</div><div class="mt-1 font-black text-slate-800">${value??0}</div></div>`;}
     formatBytes(value){const size=Number(value||0);if(!size)return '-';if(size>=1024*1024)return `${(size/1024/1024).toFixed(1)} MB`;if(size>=1024)return `${(size/1024).toFixed(1)} KB`;return `${size} B`;}
     statusBadge(status,progress){const text={pending:'未开始',queued:'排队中',processing:'处理中',completed:'已完成',failed:'失败',blocked:'验证阻塞'}[status]||status||'未开始';const cls=status==='completed'?'bg-emerald-100 text-emerald-700':['queued','processing'].includes(status)?'bg-indigo-100 text-indigo-700':['failed','blocked'].includes(status)?'bg-red-100 text-red-700':'bg-slate-200 text-slate-600';return `<span class="rounded-full px-2 py-1 text-[10px] font-black ${cls}">${text}${['queued','processing'].includes(status)?` · ${progress||0}%`:''}</span>`;}
-    stage(name,done,detail){return `<div class="rounded-lg border ${done?'border-emerald-200 bg-emerald-50':'border-slate-200 bg-white'} p-3"><div class="text-xs font-black ${done?'text-emerald-800':'text-slate-700'}">${name}</div><div class="mt-1 text-[11px] ${done?'text-emerald-700':'text-slate-400'}">${this.escape(detail)}</div></div>`;}
+    stage(name,state,detail){const meta={completed:{card:'border-emerald-200 bg-emerald-50',title:'text-emerald-800',detail:'text-emerald-700'},active:{card:'border-blue-300 bg-blue-50 ring-1 ring-blue-100',title:'text-blue-900',detail:'text-blue-700'},failed:{card:'border-red-300 bg-red-50',title:'text-red-900',detail:'text-red-700'},pending:{card:'border-slate-200 bg-white',title:'text-slate-700',detail:'text-slate-400'}}[state]||{card:'border-slate-200 bg-white',title:'text-slate-700',detail:'text-slate-400'};return `<div class="rounded-lg border ${meta.card} p-3"><div class="text-xs font-black ${meta.title}">${name}</div><div class="mt-1 text-[11px] ${meta.detail}">${this.escape(detail)}</div></div>`;}
     legacyTitleCard(title){return `<article class="rounded-lg border border-amber-200 bg-amber-50 p-4"><div class="text-xs font-black text-amber-900">0. 标题镜头</div><div class="mt-2 font-bold text-amber-950">${this.escape(title)}</div><div class="mt-2 text-xs text-amber-700">这条旧分镜没有单独保存标题提示词；请先点击“重新生成含标题分镜”。</div></article>`;}
     sceneCard(item){const isTitle=Number(item.sequence)===0;return `<article class="rounded-lg border ${isTitle?'border-amber-200 bg-amber-50':'border-slate-200 bg-white'} p-4"><div class="text-xs font-black ${isTitle?'text-amber-900':'text-slate-900'}">${Number(item.sequence)||0}. ${this.escape(item.scene_title||'分镜')}</div><div class="mt-2 whitespace-pre-wrap text-xs leading-5 text-slate-600">${this.escape(item.script_text||'')}</div><div class="mt-2 rounded-md bg-white/80 p-3 text-xs leading-5 text-indigo-800"><span class="font-black">画面提示词：</span>${this.escape(item.visual_prompt||'')}</div></article>`;}
     futureCard(title,text,icon){return `<div class="rounded-xl border border-dashed border-slate-300 bg-white p-5"><i class="fas fa-${icon} text-slate-300"></i><h3 class="mt-3 font-black text-slate-700">${title}</h3><p class="mt-2 text-xs leading-5 text-slate-500">${text}</p><span class="mt-3 inline-block rounded-full bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-500">后续阶段</span></div>`;}

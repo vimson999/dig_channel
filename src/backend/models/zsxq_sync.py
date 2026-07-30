@@ -155,7 +155,7 @@ class ZsxqTopic(db.Model):
     __tablename__ = "zsxq_topics"
     __table_args__ = (
         db.UniqueConstraint("group_id", "tab_id", "topic_id", name="uq_zsxq_topics_group_tab_topic"),
-        db.Index("ix_zsxq_topics_group_tab_create_synced_desc", "group_id", "tab_id", db.text("create_time DESC"), db.text("last_synced_at DESC")),
+        db.Index("ix_zsxq_topics_group_tab_create_time_desc", "group_id", "tab_id", db.text("create_time DESC"), db.text("last_synced_at DESC")),
         db.Index("ix_zsxq_topics_group_create_synced_desc", "group_id", db.text("create_time DESC"), db.text("last_synced_at DESC")),
     )
 
@@ -169,7 +169,7 @@ class ZsxqTopic(db.Model):
     title = db.Column(db.String(500), nullable=True)
     author_name = db.Column(db.String(255), nullable=True)
     content = db.Column(db.Text, nullable=True)
-    topic_type = db.Column(db.String(32), nullable=True, index=True)
+    topic_type = db.Column(db.String(32), nullable=True)
     question_text = db.Column(db.Text, nullable=True)
     answer_text = db.Column(db.Text, nullable=True)
     article_title = db.Column(db.String(500), nullable=True)
@@ -339,6 +339,11 @@ class ZsxqAttachment(db.Model):
         db.Index("ix_zsxq_attachments_group_tab_status_key", "group_id", "tab_id", "download_status", "attachment_key"),
         db.Index("ix_zsxq_attachments_group_topic_tab_created", "group_id", "topic_id", "tab_id", "created_at"),
         db.Index("ix_zsxq_attachments_group_tab_topic_type", "group_id", "tab_id", "topic_id", "attachment_type"),
+        db.Index(
+            "ix_zsxq_attachments_publish_status_updated_at",
+            "publish_status",
+            db.text("publish_updated_at DESC"),
+        ),
     )
 
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -354,7 +359,7 @@ class ZsxqAttachment(db.Model):
     file_ext = db.Column(db.String(20), nullable=True, index=True)
     download_status = db.Column(db.String(20), nullable=False, default="pending", index=True)
     error_message = db.Column(db.Text, nullable=True)
-    publish_status = db.Column(db.String(32), nullable=True, index=True)
+    publish_status = db.Column(db.String(32), nullable=True)
     publish_task_id = db.Column(db.String(36), nullable=True, index=True)
     publish_source_task_id = db.Column(db.String(36), nullable=True, index=True)
     publish_topic_id = db.Column(db.String(64), nullable=True)

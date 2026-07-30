@@ -3,38 +3,88 @@ from datetime import datetime
 from pathlib import Path
 
 from PIL import Image
+from sqlalchemy import case, or_
 from sqlalchemy.orm import load_only
 
 from app import create_app
 from celery_config import celery_app
 from models import ReportStickFigureSceneAsset, ReportVisualPlanOutput, ReportVisualPlanSegment, db
 from models.task import PublicationTask
-from services.gemini_browser import GeminiBrowserWorker
+from services.gemini_browser import GeminiBrowserAutomationError, GeminiBrowserWorker
 from services.report_stick_figure_assets import (
     FEATURE_NAME,
+    has_browser_overlay_artifact,
     image_gemini_url,
     scene_image_path,
     scene_image_prompt,
     scene_image_prompt_hash,
 )
+from services.report_pdf_evidence import evidence_visual_for_segment, render_claim_screenshot
 from services.report_visual_scheme import visual_scheme
 
 
 logger = logging.getLogger("REPORT_STICK_FIGURE_ASSETS_TASK")
+
+PARENT_IMAGE_COMPLETION_STEPS = frozenset({
+    "material_queued",
+    "storyboard_queued",
+    "storyboard_done",
+    "storyboard_submit_failed",
+    "images_queued",
+    "images_done",
+    "image_submit_failed",
+})
 
 
 @celery_app.task(
     bind=True,
     name="tasks.report_stick_figure_assets.generate_scene_image",
     store_errors_even_if_ignored=True,
+    max_retries=2,
 )
 def generate_scene_image(self, task_id):
     app = create_app()
     with app.app_context():
         try:
-            return _generate_scene_image(str(task_id))
+            result = _generate_scene_image(str(task_id))
+            if not result and int(getattr(self.request, "retries", 0) or 0) < int(self.max_retries or 0):
+                task = PublicationTask.query.options(load_only(
+                    PublicationTask.error_message,
+                )).filter(PublicationTask.id == str(task_id)).one_or_none()
+                error = str(getattr(task, "error_message", "") or "")
+                if _is_transient_image_error(error):
+                    logger.warning(
+                        "Retrying transient scene image failure task=%s attempt=%s error=%s",
+                        task_id,
+                        int(getattr(self.request, "retries", 0) or 0) + 1,
+                        error,
+                    )
+                    raise self.retry(
+                        exc=GeminiBrowserAutomationError(error),
+                        countdown=15,
+                    )
+            return result
         finally:
             db.session.remove()
+
+
+def _is_transient_image_error(error: str) -> bool:
+    text = str(error or "").lower()
+    return any(marker in text for marker in (
+        "等待 gemini 生成图片超时",
+        "页面自动化超时",
+        "browser has been closed",
+        "target page, context or browser has been closed",
+        "net::err_",
+        "未找到 gemini 工具/生成图片入口",
+        "gemini 工具入口点击失败",
+        "gemini 工具菜单中没有找到生成图片选项",
+        "未找到 gemini 输入框",
+        "gemini 提示词未成功提交",
+        "无法定位 gemini 生成图片",
+        "gemini 新图片保存为空",
+        "gemini 图片包含浏览器浮层",
+    ))
 
 
 def _generate_scene_image(task_id: str) -> bool:
@@ -81,6 +131,50 @@ def _generate_scene_image(task_id: str) -> bool:
     if not segment:
         _mark_failed(task_id, asset_id, "分镜记录不存在")
         return False
+    evidence_visual = evidence_visual_for_segment(segment_id)
+    if evidence_visual:
+        evidence_output, evidence_claim = evidence_visual
+        try:
+            _update_progress(task_id, asset_id, "prepare_evidence", 8)
+            output_path = scene_image_path(workflow_task_id, sequence)
+            render_claim_screenshot(evidence_output, evidence_claim, output_path)
+            width, height = _normalize_png(Path(output_path))
+            size = Path(output_path).stat().st_size
+            PublicationTask.query.filter(PublicationTask.id == task_id).update({
+                PublicationTask.status: "completed",
+                PublicationTask.current_step: "done",
+                PublicationTask.progress: 100,
+                PublicationTask.error_message: None,
+                PublicationTask.completed_at: datetime.utcnow(),
+                PublicationTask.result: {
+                    "scene_asset_id": asset_id,
+                    "image_path": output_path,
+                    "image_source": "pdf_evidence",
+                    "evidence_claim_id": evidence_claim.id,
+                },
+            }, synchronize_session=False)
+            ReportStickFigureSceneAsset.query.filter(ReportStickFigureSceneAsset.id == asset_id).update({
+                ReportStickFigureSceneAsset.image_status: "completed",
+                ReportStickFigureSceneAsset.image_progress: 100,
+                ReportStickFigureSceneAsset.image_path: output_path,
+                ReportStickFigureSceneAsset.image_bytes: size,
+                ReportStickFigureSceneAsset.image_width: width,
+                ReportStickFigureSceneAsset.image_height: height,
+                ReportStickFigureSceneAsset.image_error: None,
+                ReportStickFigureSceneAsset.image_source: "pdf_evidence",
+                ReportStickFigureSceneAsset.evidence_claim_id: evidence_claim.id,
+                ReportStickFigureSceneAsset.updated_at: datetime.utcnow(),
+            }, synchronize_session=False)
+            db.session.commit()
+            _refresh_parent_image_state(workflow_task_id)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Evidence image unavailable; degrading to generated visual task=%s claim=%s error=%s",
+                task_id,
+                evidence_claim.id,
+                exc,
+            )
     raw_prompt = str(segment.visual_prompt or "").strip()
     script_text = str(segment.script_text or "").strip()
     scheme_output = (
@@ -148,6 +242,8 @@ def _generate_scene_image(task_id: str) -> bool:
             ReportStickFigureSceneAsset.image_width: width,
             ReportStickFigureSceneAsset.image_height: height,
             ReportStickFigureSceneAsset.image_error: None,
+            ReportStickFigureSceneAsset.image_source: "generated",
+            ReportStickFigureSceneAsset.evidence_claim_id: None,
             ReportStickFigureSceneAsset.updated_at: datetime.utcnow(),
         }, synchronize_session=False)
         db.session.commit()
@@ -226,19 +322,49 @@ def _refresh_parent_image_state(workflow_task_id: str) -> None:
     PublicationTask.query.filter(
         PublicationTask.id == str(workflow_task_id),
         PublicationTask.feature == "report_stick_figure_video_workflow",
-        PublicationTask.status != "canceled",
+        PublicationTask.status.notin_(("canceled", "completed")),
+        or_(
+            PublicationTask.current_step.is_(None),
+            PublicationTask.current_step.in_(
+                tuple(PARENT_IMAGE_COMPLETION_STEPS)
+            ),
+        ),
     ).update({
         PublicationTask.status: "processing",
         PublicationTask.current_step: "images_done",
-        PublicationTask.progress: 75,
+        PublicationTask.progress: case(
+            (PublicationTask.progress > 75, PublicationTask.progress),
+            else_=75,
+        ),
         PublicationTask.waiting_child_label: "分镜图片",
         PublicationTask.waiting_child_status: "completed",
         PublicationTask.waiting_child_step: "done",
         PublicationTask.waiting_child_updated_at: now.isoformat() + "Z",
         PublicationTask.error_message: None,
+        PublicationTask.completed_at: None,
         PublicationTask.updated_at: now,
     }, synchronize_session=False)
     db.session.commit()
+    try:
+        from tasks.report_stick_figure_video import (
+            maybe_auto_enqueue_stick_figure_video,
+        )
+
+        continuation = maybe_auto_enqueue_stick_figure_video(
+            str(workflow_task_id)
+        )
+        logger.info(
+            "Scene images auto-render continuation: workflow=%s result=%s",
+            workflow_task_id,
+            continuation,
+        )
+    except Exception as exc:
+        logger.error(
+            "Scene images auto-render continuation failed: workflow=%s error=%s",
+            workflow_task_id,
+            exc,
+            exc_info=True,
+        )
 
 
 def _normalize_png(path: Path):
@@ -250,4 +376,6 @@ def _normalize_png(path: Path):
             raise ValueError(f"Gemini 图片尺寸异常：{width}x{height}")
         converted = image.convert("RGB")
         converted.save(path, format="PNG")
+    if has_browser_overlay_artifact(str(path)):
+        raise ValueError("Gemini 图片包含浏览器浮层，已拒绝入库，请重试该分镜")
     return width, height

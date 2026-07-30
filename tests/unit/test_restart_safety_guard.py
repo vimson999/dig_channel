@@ -74,6 +74,9 @@ class RestartSafetyGuardTest(unittest.TestCase):
             "landscape_video_waiting",
             "storyboard_queued",
             "waiting_child",
+            "images_done",
+            "whole_audio_aligned",
+            "whole_audio_alignment_failed",
         ):
             self.assertFalse(guard.is_non_interruptible_step(step), step)
 

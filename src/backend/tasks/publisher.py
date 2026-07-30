@@ -29,9 +29,14 @@ from services.bilibili.uploader import BiliUploader, DEFAULT_NEUTRAL_MARK
 from services.youtube.uploader import YouTubeUploader
 from services.platform_credential_service import resolve_bilibili_auth
 from services.platform_publish_dispatch import PLATFORM_UPLOAD_QUEUE
+from services.report_stick_figure_audio_alignment import (
+    align_scene_timeline_to_audio,
+    align_subtitles_to_audio,
+)
 from services.runtime_guard import (
     guard_publication_task_start,
     is_retryable_db_error,
+    release_db_session_quietly,
     retry_exception_types,
 )
 from config import get_config
@@ -46,6 +51,10 @@ DEFAULT_DB_RETRIES = 5
 DEFAULT_DB_RETRY_DELAY_SECONDS = 3
 DB_RETRIES_ENV_NAME = "PUBLISHER_DB_RETRIES"
 DB_RETRY_DELAY_ENV_NAME = "PUBLISHER_DB_RETRY_DELAY_SECONDS"
+TASK_DB_RETRIES_ENV_NAME = "PUBLISHER_TASK_DB_RETRIES"
+TASK_DB_RETRY_DELAY_ENV_NAME = "PUBLISHER_TASK_DB_RETRY_DELAY_SECONDS"
+DEFAULT_TASK_DB_RETRIES = 20
+DEFAULT_TASK_DB_RETRY_DELAY_SECONDS = 60
 
 TASK_UPDATE_COLUMNS = (
     PublicationTask.id,
@@ -140,6 +149,43 @@ def _is_retryable_db_error(exc):
 def _db_retry_delay_seconds(retry_index):
     base = _bounded_int(os.environ.get(DB_RETRY_DELAY_ENV_NAME), DEFAULT_DB_RETRY_DELAY_SECONDS, lower=1, upper=60)
     return min(base * max(int(retry_index or 0) + 1, 1), 60)
+
+
+def _retry_initial_task_db_write(celery_task, task_id, exc):
+    """Retry a publisher before media/platform side effects have started."""
+    if not _is_retryable_db_error(exc):
+        return False
+    retry_count = _bounded_int(
+        os.environ.get(TASK_DB_RETRIES_ENV_NAME),
+        DEFAULT_TASK_DB_RETRIES,
+        lower=0,
+        upper=60,
+    )
+    request = getattr(celery_task, "request", None)
+    retries = int(getattr(request, "retries", 0) or 0)
+    if retries >= retry_count:
+        return False
+    countdown = _bounded_int(
+        os.environ.get(TASK_DB_RETRY_DELAY_ENV_NAME),
+        DEFAULT_TASK_DB_RETRY_DELAY_SECONDS,
+        lower=5,
+        upper=300,
+    )
+    logger.warning(
+        "[PUBLISHER] retry transient initial DB write | task=%s retry=%s/%s "
+        "countdown=%ss error=%s",
+        task_id,
+        retries + 1,
+        retry_count,
+        countdown,
+        exc,
+    )
+    release_db_session_quietly()
+    raise celery_task.retry(
+        exc=exc,
+        countdown=countdown,
+        max_retries=retry_count,
+    )
 
 
 def _bounded_int(value, default, *, lower, upper):
@@ -354,6 +400,63 @@ def has_usable_subtitles(value):
         return any(has_usable_subtitles(item) for item in value)
     return False
 
+
+def _subtitle_alignment_options(params):
+    value = params.get("subtitle_alignment") if isinstance(params, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _should_trigger_asr(
+    *,
+    asr_enabled,
+    sub_burn_enabled,
+    subtitles,
+    alignment_required,
+):
+    """精确对齐合同优先于“已有字幕即可跳过 ASR”的兼容行为。"""
+
+    return bool(
+        asr_enabled
+        or alignment_required
+        or (sub_burn_enabled and not has_usable_subtitles(subtitles))
+    )
+
+
+def _subtitle_source_script(value):
+    if isinstance(value, dict):
+        return str(value.get("text") or "")
+    if isinstance(value, list):
+        return "".join(_subtitle_source_script(item) for item in value)
+    return str(value or "")
+
+
+def _align_scheme3_params(
+    video_params,
+    asr_segments,
+    *,
+    audio_seconds,
+    source_script,
+):
+    if not isinstance(video_params, dict):
+        return None
+    scheme = str(
+        video_params.get("scheme")
+        or video_params.get("render_scheme")
+        or ""
+    ).strip().lower()
+    timeline = video_params.get("visual_scene_timeline")
+    if scheme != "scheme3" or not isinstance(timeline, dict):
+        return None
+    aligned = align_scene_timeline_to_audio(
+        timeline,
+        asr_segments,
+        audio_seconds=audio_seconds,
+        source_script=source_script,
+    )
+    video_params["visual_scene_timeline"] = aligned
+    return aligned
+
+
 def _enabled(value, default=False):
     if value is None:
         return default
@@ -554,13 +657,17 @@ def run_publication_pipeline(self, task_id):
             params = task.params
             result_state = dict(task.result or {})
 
-            task = update_task_record(
-                task_id,
-                status='processing',
-                current_step='prepare',
-                progress=max(int(task.progress or 0), 1),
-                result=result_state,
-            )
+            try:
+                task = update_task_record(
+                    task_id,
+                    status='processing',
+                    current_step='prepare',
+                    progress=max(int(task.progress or 0), 1),
+                    result=result_state,
+                )
+            except Exception as exc:
+                _retry_initial_task_db_write(self, task_id, exc)
+                raise
 
             # 🚀 [DEBUG LOG] 记录输入原始参数
             logger.info(f"🔍 [TASK] 任务启动参数详情: {json.dumps(params, ensure_ascii=False, indent=2)}")
@@ -684,17 +791,27 @@ def run_publication_pipeline(self, task_id):
             asr_enabled = vid_params.get('asr_enabled', False)
             sub_burn_enabled = vid_params.get('sub_burn_enabled', False)
             asr_model_size = vid_params.get('asr_model') or params.get('asr_model') or 'base'
+            alignment_options = _subtitle_alignment_options(params)
+            alignment_required = _enabled(alignment_options.get("required"), False)
+            alignment_strict = _enabled(alignment_options.get("strict"), alignment_required)
             
             logger.info(f"  - 初始配置 | ASR开关: {asr_enabled} | 字幕烧录开关: {sub_burn_enabled} | 模型: {asr_model_size}")
             
             # --- 智能 ASR 补偿逻辑 ---
             # 改进：如果开启了字幕烧录 (sub_burn_enabled) 且当前字幕为空，强制触发 ASR
-            should_trigger_asr = asr_enabled or (sub_burn_enabled and not has_usable_subtitles(subtitles))
+            should_trigger_asr = _should_trigger_asr(
+                asr_enabled=asr_enabled,
+                sub_burn_enabled=sub_burn_enabled,
+                subtitles=subtitles,
+                alignment_required=alignment_required,
+            )
             
             if audio_path_abs and should_trigger_asr:
                 from services.asr_cache_service import transcribe_with_cache
                 logger.info(f"🔄 [TASK] 触发自动 ASR 识别 (模型: {asr_model_size})")
                 processed_subs = []
+                alignment_summaries = []
+                aligned_asr_segments = []
                 audio_list = audio_path_abs if isinstance(audio_path_abs, list) else [audio_path_abs]
                 if not asr_request_specs:
                     asr_request_specs = [{'source_path': path} for path in audio_list]
@@ -707,24 +824,98 @@ def run_publication_pipeline(self, task_id):
                 
                 for i, a_p in enumerate(audio_list):
                     s_data = subtitles[i] if i < len(subtitles) else ""
-                    if not s_data or s_data in ["识别中...", "识别失败"]:
+                    detected_segments = None
+                    if alignment_required or not s_data or s_data in ["识别中...", "识别失败"]:
                         try:
                             spec = asr_request_specs[i] if i < len(asr_request_specs) else {'source_path': a_p}
                             logger.info(f"  - 🎙️ 正在读取/生成第 {i+1}/{len(audio_list)} 个片段字幕: {os.path.basename(a_p)}")
-                            s_data = transcribe_with_cache(
-                                spec.get('source_path') or a_p,
-                                model_size=asr_model_size,
-                                start_seconds=spec.get('start_seconds'),
-                                end_seconds=spec.get('end_seconds'),
-                                speed=spec.get('speed', 1.0),
-                                prepared_audio_path=spec.get('prepared_audio_path'),
+                            source_path = spec.get('source_path') or a_p
+                            align_full_source = (
+                                alignment_required
+                                and abs(float(spec.get('start_seconds') or 0)) < 0.001
+                                and abs(float(spec.get('speed') or 1.0) - 1.0) < 0.001
                             )
-                            
+                            # 预览与完整成片共用同一份完整 WAV 对齐缓存，避免
+                            # 10 秒预览只能拿到局部文本而破坏全篇分镜边界。
+                            db.session.remove()
+                            detected_segments = transcribe_with_cache(
+                                source_path,
+                                model_size=asr_model_size,
+                                start_seconds=None if align_full_source else spec.get('start_seconds'),
+                                end_seconds=None if align_full_source else spec.get('end_seconds'),
+                                speed=1.0 if align_full_source else spec.get('speed', 1.0),
+                                prepared_audio_path=None if align_full_source else spec.get('prepared_audio_path'),
+                            )
                         except Exception as e:
                             logger.error(f"❌ [TASK] 第 {i+1} 个片段 ASR 识别失败: {e}")
-                            s_data = ""
+                            if alignment_strict:
+                                raise RuntimeError(f"最终音频字幕精确对齐失败: {e}") from e
+                            detected_segments = None
+                    if alignment_required and not detected_segments and alignment_strict:
+                        raise RuntimeError("最终音频字幕精确对齐失败: ASR 未返回有效时间戳")
+                    if alignment_required and detected_segments:
+                        try:
+                            spec = asr_request_specs[i] if i < len(asr_request_specs) else {'source_path': a_p}
+                            alignment_audio_path = spec.get('source_path') or a_p
+                            alignment_audio_seconds = _probe_audio_duration(alignment_audio_path)
+                            alignment = align_subtitles_to_audio(
+                                s_data if isinstance(s_data, list) else [],
+                                detected_segments,
+                                audio_seconds=alignment_audio_seconds,
+                            )
+                            s_data = alignment["subtitles"]
+                            aligned_asr_segments.append(detected_segments)
+                            alignment_summaries.append({
+                                "timing_source": "asr_forced_alignment",
+                                "audio_seconds": alignment["audio_seconds"],
+                                "subtitle_count": len(alignment["subtitles"]),
+                                "average_confidence": alignment["average_confidence"],
+                                "minimum_confidence": alignment["minimum_confidence"],
+                                "asr_match_ratio": alignment["asr_match_ratio"],
+                            })
+                        except Exception as exc:
+                            logger.error("❌ [TASK] 原文字幕强制对齐失败: %s", exc, exc_info=True)
+                            if alignment_strict:
+                                raise RuntimeError(f"最终音频字幕精确对齐失败: {exc}") from exc
+                    elif detected_segments:
+                        s_data = detected_segments
                     processed_subs.append(s_data)
                 subtitles = processed_subs
+                if alignment_required and alignment_summaries:
+                    source_script = _subtitle_source_script(subtitles)
+                    primary_asr = aligned_asr_segments[0]
+                    primary_seconds = alignment_summaries[0]["audio_seconds"]
+                    aligned_scene_timelines = []
+                    for candidate in (
+                        v_vid_params,
+                        params.get("vertical_video_2"),
+                    ):
+                        try:
+                            aligned_scene = _align_scheme3_params(
+                                candidate,
+                                primary_asr,
+                                audio_seconds=primary_seconds,
+                                source_script=source_script,
+                            )
+                            if aligned_scene:
+                                aligned_scene_timelines.append({
+                                    "timing_source": aligned_scene["timing_source"],
+                                    "scene_count": aligned_scene["scene_count"],
+                                    "average_confidence": aligned_scene["average_confidence"],
+                                    "minimum_confidence": aligned_scene["minimum_confidence"],
+                                    "asr_match_ratio": aligned_scene["asr_match_ratio"],
+                                })
+                        except Exception as exc:
+                            logger.error("❌ [TASK] 方案三分镜强制对齐失败: %s", exc, exc_info=True)
+                            if alignment_strict:
+                                raise RuntimeError(f"方案三分镜精确对齐失败: {exc}") from exc
+                    result_state["subtitle_alignment"] = {
+                        "status": "completed",
+                        "mode": "asr_forced_alignment",
+                        "subtitles": alignment_summaries,
+                        "scheme3_timelines": aligned_scene_timelines,
+                        "completed_at": datetime.utcnow().isoformat() + "Z",
+                    }
                 logger.info(f"✅ [TASK] ASR 流程完成")
             
             # If sub_burn_enabled is False, we clear subtitles so synthesis methods don't render them

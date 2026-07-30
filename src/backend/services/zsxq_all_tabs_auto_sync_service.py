@@ -5,14 +5,21 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import requests
 
 from models import SystemConfig, db
 from models.zsxq_sync import ZsxqSyncRun
 from services.runtime_guard import release_db_session_quietly
 from services.zsxq_service import zsxq_service
-from services.zsxq_sync_service import STALE_SYNC_RUN_STATUSES, zsxq_sync_service
+from services.zsxq_sync_service import (
+    STALE_SYNC_RUN_STATUSES,
+    ZsxqTransientUpstreamError,
+    zsxq_sync_service,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -666,8 +673,7 @@ def _queue_target(target, *, cookie, credential_id, trigger, attempt_id):
 
     # The DB session was released by the active-run snapshot. Menu discovery
     # intentionally happens without an open transaction.
-    response = zsxq_service.get_menus(cookie, target["group_id"])
-    zsxq_sync_service._assert_upstream_success(response)
+    response = _get_menus_with_retry(cookie, target)
     resp_data = response.get("resp_data") if isinstance(response, dict) else {}
     menus = (resp_data or {}).get("menus") or (resp_data or {}).get("menu") or []
     tabs = tabs_from_menus(menus)
@@ -755,6 +761,45 @@ def _queue_target(target, *, cookie, credential_id, trigger, attempt_id):
         "mode": target["mode"],
         "comments_refresh_enabled": not target["stop_on_existing"],
     }
+
+
+def _get_menus_with_retry(cookie, target):
+    """Discover official tabs with the same transient retry policy as topic pages."""
+    attempts = zsxq_sync_service._sync_retry_attempts()
+    for attempt in range(1, attempts + 1):
+        try:
+            response = zsxq_service.get_menus(cookie, target["group_id"])
+            zsxq_sync_service._assert_upstream_success(response)
+            if attempt > 1:
+                logger.info(
+                    "[ZSXQ_ALL_TABS_AUTO] menu retry recovered | group_id=%s attempt=%s/%s",
+                    target["group_id"],
+                    attempt,
+                    attempts,
+                )
+            return response
+        except (ZsxqTransientUpstreamError, requests.RequestException) as exc:
+            if attempt >= attempts:
+                logger.warning(
+                    "[ZSXQ_ALL_TABS_AUTO] menu retry exhausted | group_id=%s attempts=%s error=%s",
+                    target["group_id"],
+                    attempts,
+                    exc,
+                )
+                raise
+            delay = zsxq_sync_service._sync_retry_delay_seconds(attempt)
+            logger.warning(
+                "[ZSXQ_ALL_TABS_AUTO] menu transient failure | group_id=%s attempt=%s/%s retry_in=%.1fs error=%s",
+                target["group_id"],
+                attempt,
+                attempts,
+                delay,
+                exc,
+            )
+            release_db_session_quietly()
+            time.sleep(delay)
+
+    raise RuntimeError("ZSXQ_ALL_TABS_MENU_RETRY_LOOP_UNREACHABLE")
 
 
 def _enqueue_all_tabs_notification(

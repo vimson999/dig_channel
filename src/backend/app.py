@@ -111,7 +111,7 @@ def create_app(config_class=Config):
     cors.init_app(app,
                  origins=app.config.get('CORS_ORIGINS', []),
                  allow_headers=["Content-Type", "Authorization"], 
-                 methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+                 methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
                  supports_credentials=True)
 
     limiter.init_app(app)

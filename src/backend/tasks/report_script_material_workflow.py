@@ -25,6 +25,7 @@ from services.report_audio_workflow import (
     split_tts_text,
     structured_result_quality_issue,
 )
+from services.report_pdf_evidence import build_and_store_evidence
 from services.report_script_material_workflow import FEATURE_NAME, QUEUE_NAME, write_result_file
 from services.runtime_guard import (
     apply_async_after_db_release,
@@ -218,6 +219,7 @@ def _process_job(task_id: str) -> bool:
     source_task_id = workflow_task_id
     gemini_task = None
     gemini_result = None
+    raw_final = ""
 
     if structured:
         _emit(workflow_task_id, "reuse_structured_result", 35, "复用当前任务已有结构化文案")
@@ -311,6 +313,7 @@ def _process_job(task_id: str) -> bool:
     if not structured:
         raise RuntimeError("未能生成基础文案物料")
 
+    gemini_evidence_task_id = str(getattr(gemini_task, "id", "") or "") or None
     _complete_material_task(
         workflow_task_id,
         structured=structured,
@@ -320,6 +323,39 @@ def _process_job(task_id: str) -> bool:
         source=source,
         source_task_id=source_task_id,
     )
+    if raw_final:
+        try:
+            release_db_session_quietly()
+            evidence_output = build_and_store_evidence(
+                source_task_id=workflow_task_id,
+                pdf_path=pdf_path,
+                final_script=structured.get("final_script_for_tts") or "",
+                raw_gemini_text=raw_final,
+                pdf_attachment_id=pdf.get("attachment_id"),
+                pdf_filename=pdf.get("filename"),
+                gemini_task_id=gemini_evidence_task_id,
+            )
+            _update_result(workflow_task_id, {
+                "pdf_evidence": {
+                    "status": evidence_output.status,
+                    "output_id": evidence_output.id,
+                    "claim_count": int(evidence_output.claim_count or 0),
+                    "verified_claim_count": int(evidence_output.verified_claim_count or 0),
+                },
+            })
+        except Exception as exc:
+            db.session.rollback()
+            logger.warning("PDF evidence shadow build failed task=%s error=%s", workflow_task_id, exc)
+            try:
+                _update_result(workflow_task_id, {
+                    "pdf_evidence": {
+                        "status": "failed",
+                        "error": str(exc)[:1000],
+                    },
+                })
+            except Exception:
+                db.session.rollback()
+                logger.exception("Failed to persist PDF evidence failure task=%s", workflow_task_id)
     _dispatch_auto_storyboard(workflow_task_id)
     logger.info("Report script material workflow completed: %s", workflow_task_id)
     return True

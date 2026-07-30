@@ -30,6 +30,7 @@ from services.report_audio_workflow import (
     FEATURE_NAME,
     audio_path_for_job,
     clean_final_script_for_tts,
+    ensure_pdf_evidence_review_contract,
     combine_wav_files,
     normalize_for_tts,
     pdf_first_page_image_path_for_job,
@@ -40,6 +41,7 @@ from services.report_audio_workflow import (
     structured_result_quality_issue,
     synthesize_doubao_api_chunks,
 )
+from services.report_pdf_evidence import build_and_store_evidence
 from services.thumbnail_service import thumbnail_service
 from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
 from services.runtime_guard import (
@@ -76,6 +78,14 @@ DEFAULT_PUBLISHER_PARENT_RETRY_DELAY_SECONDS = 60
 DEFAULT_PARENT_MAX_DEFERS = 144
 DEFAULT_DOUBAO_PARENT_MAX_DEFERS = 240
 DEFAULT_PUBLISHER_PARENT_MAX_DEFERS = 180
+KEYFRAME_OUTPUTS = {
+    "bilibili_cover",
+    "vertical_cover",
+    "landscape_keyframe",
+    "vertical_keyframe_scheme1",
+    "vertical_keyframe_scheme2",
+    "vertical_keyframe_scheme3",
+}
 GENERIC_COVER_TITLE_NORMALIZED = {
     "pdf",
     "mp3",
@@ -733,7 +743,9 @@ def _process_job(task_id):
         return False
 
     prompt = (payload.get("prompt") or DEFAULT_INITIAL_PROMPT).strip()
-    review_prompt = (payload.get("review_prompt") or DEFAULT_REVIEW_PROMPT).strip()
+    review_prompt = ensure_pdf_evidence_review_contract(
+        payload.get("review_prompt") or DEFAULT_REVIEW_PROMPT
+    )
     followups = [str(item).strip() for item in (payload.get("followups") or []) if str(item).strip()]
     if review_prompt and review_prompt not in followups:
         followups.append(review_prompt)
@@ -922,6 +934,44 @@ def _process_job(task_id):
         structured["final_script_for_tts"] = clean_final_script_for_tts(
             structured.get("final_script_for_tts") or ""
         )
+        resolved_gemini_summary = (
+            gemini_public_summary
+            or _task_public_summary(gemini_task)
+            or result.get("gemini")
+        )
+        if raw_final:
+            try:
+                release_db_session_quietly()
+                evidence_output = build_and_store_evidence(
+                    source_task_id=workflow_task_id,
+                    pdf_path=pdf_path,
+                    final_script=structured.get("final_script_for_tts") or "",
+                    raw_gemini_text=raw_final,
+                    pdf_attachment_id=pdf.get("attachment_id"),
+                    pdf_filename=pdf.get("filename"),
+                    gemini_task_id=gemini_task_id,
+                )
+                _update_result(workflow_task_id, {
+                    "pdf_evidence": {
+                        "status": evidence_output.status,
+                        "output_id": evidence_output.id,
+                        "claim_count": int(evidence_output.claim_count or 0),
+                        "verified_claim_count": int(evidence_output.verified_claim_count or 0),
+                    },
+                })
+            except Exception as exc:
+                db.session.rollback()
+                logger.warning("PDF evidence shadow build failed task=%s error=%s", workflow_task_id, exc)
+                try:
+                    _update_result(workflow_task_id, {
+                        "pdf_evidence": {
+                            "status": "failed",
+                            "error": str(exc)[:1000],
+                        },
+                    })
+                except Exception:
+                    db.session.rollback()
+                    logger.exception("Failed to persist PDF evidence failure task=%s", workflow_task_id)
         chunks = split_tts_text(structured.get("final_script_for_tts") or "")
         if not chunks:
             raise RuntimeError("结构化结果没有可朗读正文")
@@ -933,7 +983,7 @@ def _process_job(task_id):
             )
 
         structured_update = {
-            "gemini": gemini_public_summary or _task_public_summary(gemini_task) or result.get("gemini"),
+            "gemini": resolved_gemini_summary,
             "structured_result": structured,
             "tts_text": {
                 "chars": len(structured.get("final_script_for_tts") or ""),
@@ -2294,7 +2344,7 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
     vertical_subtitle_position = (
         video_options.get("vertical_subtitle_position")
         if isinstance(video_options.get("vertical_subtitle_position"), dict)
-        else ({"y_pct": 0.80} if vertical_scheme in {"scheme2", "scheme3"} else None)
+        else ({"y_pct": 0.73} if vertical_scheme in {"scheme2", "scheme3"} else None)
     )
     vertical_subtitle_style = (
         video_options.get("vertical_subtitle_style")
@@ -2321,6 +2371,12 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
         "feature": "publisher",
         "source_feature": FEATURE_NAME,
         "source_task_id": parent.id,
+        "subtitle_alignment": {
+            "required": True,
+            "strict": True,
+            "mode": "asr_forced_alignment",
+            "source": "report_audio_final_wav",
+        },
         "audio_segments": [
             {
                 "path": audio_path,
@@ -3234,7 +3290,15 @@ def _vertical_video_enabled(payload):
 
 
 def _video_stage_enabled(payload):
-    return _landscape_video_enabled(payload) or _vertical_video_enabled(payload)
+    video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+    return (
+        _landscape_video_enabled(payload)
+        or _vertical_video_enabled(payload)
+        or (
+            _video_render_mode(payload) == "keyframes"
+            and bool(_normalize_keyframe_outputs(video_options.get("keyframe_outputs")))
+        )
+    )
 
 
 def _video_render_mode(payload):
@@ -3266,14 +3330,71 @@ def _video_preview_seconds(video_options):
     return max(3, min(value, 60))
 
 
+def _normalize_keyframe_outputs(value):
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            items = []
+        else:
+            try:
+                parsed = json.loads(text)
+                items = parsed if isinstance(parsed, list) else [parsed]
+            except (TypeError, ValueError):
+                items = re.split(r"[,;，；\s]+", text)
+    elif isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = [] if value is None else [value]
+
+    outputs = []
+    for item in items:
+        key = str(item or "").strip().lower()
+        if key in KEYFRAME_OUTPUTS and key not in outputs:
+            outputs.append(key)
+    return outputs
+
+
 def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, audio, pdf_screenshot, payload):
     video_options = payload.get("video") if isinstance(payload.get("video"), dict) else {}
-    vertical_schemes = _normalize_vertical_schemes(
-        video_options.get("vertical_video_schemes"),
-        video_options.get("vertical_video_scheme") or video_options.get("vertical_scheme") or "scheme1",
-    )
+    requested_outputs = _normalize_keyframe_outputs(video_options.get("keyframe_outputs"))
+    explicit_output_selection = bool(requested_outputs)
+    if explicit_output_selection:
+        vertical_schemes = [
+            scheme
+            for scheme in ("scheme1", "scheme2", "scheme3")
+            if f"vertical_keyframe_{scheme}" in requested_outputs
+        ]
+    else:
+        vertical_schemes = _normalize_vertical_schemes(
+            video_options.get("vertical_video_schemes"),
+            video_options.get("vertical_video_scheme") or video_options.get("vertical_scheme") or "scheme1",
+        )
     scheme = _primary_vertical_scheme(vertical_schemes)
-    vertical_requested = _vertical_keyframes_requested(video_options, vertical_schemes)
+    landscape_keyframe_requested = (
+        "landscape_keyframe" in requested_outputs
+        if explicit_output_selection
+        else _truthy(video_options.get("enabled", False))
+    )
+    vertical_keyframes_requested = (
+        bool(vertical_schemes)
+        if explicit_output_selection
+        else _vertical_keyframes_requested(video_options, vertical_schemes)
+    )
+    vertical_cover_requested = (
+        "vertical_cover" in requested_outputs
+        if explicit_output_selection
+        else vertical_keyframes_requested and "scheme2" in vertical_schemes
+    )
+    podcast_cover_requested = (
+        False
+        if explicit_output_selection
+        else vertical_keyframes_requested and "scheme2" in vertical_schemes
+    )
+    bilibili_cover_requested = (
+        "bilibili_cover" in requested_outputs
+        if explicit_output_selection
+        else True
+    )
     main_title = _publisher_main_title(structured, video_options, variant="landscape")
     sub_title = _publisher_sub_title(structured, video_options, variant="landscape")
     vertical_main_title = _publisher_main_title(structured, video_options, variant="vertical")
@@ -3300,7 +3421,7 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
     podcast_cover_path = None
     bilibili_cover_path = None
 
-    if _truthy(video_options.get("enabled", False)):
+    if landscape_keyframe_requested:
         cover_path = _latest_report_audio_keyframe(parent_id, "landscape", (1920, 1080))
         if not cover_path:
             cover_path = thumbnail_service.generate_thumbnail(
@@ -3316,9 +3437,9 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
                 transform=video_options.get("cover_transform") or {"x": 0, "y": 0, "scale": 1},
                 mode="screenshot",
             )
-        keyframes["landscape_cover"] = _keyframe_artifact(cover_path, "横屏封面关键帧", "16:9")
+        keyframes["landscape_cover"] = _keyframe_artifact(cover_path, "横版视频关键帧", "16:9")
 
-    if vertical_requested:
+    if vertical_keyframes_requested:
         for selected_scheme in vertical_schemes:
             asset_name = f"vertical_bg_{selected_scheme}"
             selected_background_path = _latest_report_audio_keyframe(parent_id, asset_name, (1080, 1920))
@@ -3359,35 +3480,36 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
             )
 
         vertical_background_path = vertical_background_paths.get(scheme)
-        if "scheme2" in vertical_schemes:
-            vertical_cover_path = _latest_report_audio_keyframe(parent_id, "vertical_cover", (1080, 1440))
-            if not vertical_cover_path:
-                vertical_cover_path = thumbnail_service.generate_workbench_vertical_cover(
-                    main_title=vertical_main_title,
-                    sub_title=vertical_sub_title,
-                    screenshot_path=screenshot_path,
-                    output_filename=f"report_audio_keyframe_vertical_cover_{parent_id[:8]}_{int(time.time())}.jpg",
-                    institution=institution,
-                    emotion="bull",
-                    footer_text=footer_text,
-                    image_transform=transform,
-                )
-            podcast_cover_path = _latest_report_audio_keyframe(parent_id, "podcast_cover", (1400, 1400))
-            if not podcast_cover_path:
-                podcast_cover_path = thumbnail_service.generate_workbench_podcast_cover(
-                    main_title=vertical_main_title,
-                    sub_title=vertical_sub_title,
-                    screenshot_path=screenshot_path,
-                    output_filename=f"report_audio_keyframe_podcast_cover_{parent_id[:8]}_{int(time.time())}.jpg",
-                    institution=institution,
-                    emotion="bull",
-                    footer_text=footer_text,
-                    image_transform=transform,
-                )
-        if vertical_cover_path:
-            keyframes["vertical_cover"] = _keyframe_artifact(vertical_cover_path, "竖版封皮关键帧", "3:4")
-        if podcast_cover_path:
-            keyframes["podcast_cover"] = _keyframe_artifact(podcast_cover_path, "播客封皮关键帧", "1:1")
+
+    if vertical_cover_requested:
+        vertical_cover_path = _latest_report_audio_keyframe(parent_id, "vertical_cover", (1080, 1440))
+        if not vertical_cover_path:
+            vertical_cover_path = thumbnail_service.generate_workbench_vertical_cover(
+                main_title=vertical_main_title,
+                sub_title=vertical_sub_title,
+                screenshot_path=screenshot_path,
+                output_filename=f"report_audio_keyframe_vertical_cover_{parent_id[:8]}_{int(time.time())}.jpg",
+                institution=institution,
+                emotion="bull",
+                footer_text=footer_text,
+                image_transform=transform,
+            )
+        keyframes["vertical_cover"] = _keyframe_artifact(vertical_cover_path, "竖版封皮", "3:4")
+
+    if podcast_cover_requested:
+        podcast_cover_path = _latest_report_audio_keyframe(parent_id, "podcast_cover", (1400, 1400))
+        if not podcast_cover_path:
+            podcast_cover_path = thumbnail_service.generate_workbench_podcast_cover(
+                main_title=vertical_main_title,
+                sub_title=vertical_sub_title,
+                screenshot_path=screenshot_path,
+                output_filename=f"report_audio_keyframe_podcast_cover_{parent_id[:8]}_{int(time.time())}.jpg",
+                institution=institution,
+                emotion="bull",
+                footer_text=footer_text,
+                image_transform=transform,
+            )
+        keyframes["podcast_cover"] = _keyframe_artifact(podcast_cover_path, "播客封皮关键帧", "1:1")
 
     bilibili_transform = {
         **transform,
@@ -3397,28 +3519,30 @@ def _generate_report_audio_keyframes(parent_id, created_at, *, structured, pdf, 
             else {}
         ),
     }
-    bilibili_cover_path = _latest_report_audio_keyframe(parent_id, "bilibili_cover", (1146, 717))
-    if not bilibili_cover_path:
-        bilibili_cover_path = thumbnail_service.generate_workbench_bilibili_cover(
-            main_title=vertical_main_title,
-            sub_title=vertical_sub_title,
-            screenshot_path=screenshot_path,
-            output_filename=f"report_audio_keyframe_bilibili_cover_{parent_id[:8]}_{int(time.time())}.jpg",
-            institution=institution,
-            emotion="bull",
-            footer_text=footer_text,
-            image_transform=bilibili_transform,
-            show_footer=False,
-        )
-    keyframes["bilibili_cover"] = _keyframe_artifact(bilibili_cover_path, "B站封皮关键帧", "1146:717")
+    if bilibili_cover_requested:
+        bilibili_cover_path = _latest_report_audio_keyframe(parent_id, "bilibili_cover", (1146, 717))
+        if not bilibili_cover_path:
+            bilibili_cover_path = thumbnail_service.generate_workbench_bilibili_cover(
+                main_title=vertical_main_title,
+                sub_title=vertical_sub_title,
+                screenshot_path=screenshot_path,
+                output_filename=f"report_audio_keyframe_bilibili_cover_{parent_id[:8]}_{int(time.time())}.jpg",
+                institution=institution,
+                emotion="bull",
+                footer_text=footer_text,
+                image_transform=bilibili_transform,
+                show_footer=False,
+            )
+        keyframes["bilibili_cover"] = _keyframe_artifact(bilibili_cover_path, "横版封皮", "1146:717")
 
     return {
         "enabled": True,
         "status": "keyframes_ready",
         "render_mode": "keyframes",
         "message": "仅生成关键帧/封皮预览，未合成 MP4",
-        "landscape_enabled": _truthy(video_options.get("enabled", False)),
-        "vertical_enabled": vertical_requested,
+        "landscape_enabled": landscape_keyframe_requested,
+        "vertical_enabled": vertical_keyframes_requested or vertical_cover_requested,
+        "keyframe_outputs": requested_outputs,
         "cover_title": main_title,
         "cover_subtitle": sub_title,
         "landscape_title": main_title,

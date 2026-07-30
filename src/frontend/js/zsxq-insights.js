@@ -13,9 +13,97 @@
         overviewController: null,
         detailController: null,
         followedThemes: new Set(),
+        experimentStage: 'all',
     };
 
     const palette = ['#2563eb', '#14b8a6', '#f59e0b', '#8b5cf6', '#7dd3fc'];
+    const experimentScoreGuide = [
+        ['来源信号', 15, '精华、中标、收藏与代表样本'],
+        ['结果证据', 20, '客户、采用、订单等结果仅作线索'],
+        ['过程完整度', 20, '步骤、交付物、复盘与限制条件'],
+        ['验证速度', 15, '能否在一到两周得到反馈'],
+        ['能力匹配', 15, '复用现有内容、自动化与知识库能力'],
+        ['获客路径', 10, '第一批客户是否可触达'],
+        ['新鲜度', 5, '近期是否仍有需求与讨论'],
+        ['风险扣分', -20, '平台、版权、资金和交付风险'],
+    ];
+    const experimentProjects = [
+        {
+            id: 'project-radar',
+            rank: 1,
+            stage: 'now',
+            score: 89,
+            title: '垂直项目情报雷达',
+            label: '最匹配',
+            themeIds: ['tools', 'resources', 'ai-coding'],
+            match: '你已经具备本地数据同步、清洗、研究解读和知识库能力，最小实验不需要重新建设技术底座。',
+            customer: '正在寻找项目方向的独立开发者、内容创业者和小型业务团队。',
+            experiment: '连续两周各发布一期人工加半自动情报简报；每期只保留 10 个机会，并为前三个机会写出最小实验和停止条件。',
+            metrics: ['20 名种子用户', '阅读完成率 ≥ 40%', '有效回复 ≥ 5 条', '付费或深聊意向 ≥ 2 个'],
+            risks: '“信息很多”不等于“替用户做了判断”；需验证筛选质量、更新频率和用户是否愿意持续付费。',
+            stop: '两期后没有获得 3 条以上明确使用反馈，先调整目标人群和输出颗粒度。',
+            evidence: [
+                { topic_id: '22255282111444581', title: 'BERTopic 分析 971 篇 AI 副业内容', author: '澜·森蒂', date: '2026-06-06', tab: '中标', signal: '结果案例' },
+                { topic_id: '14422488485482112', title: 'Vibe Coding 项目雷达案例', author: 'Link', date: '2026-07-02', tab: '风向标', signal: '明确需求' },
+            ],
+        },
+        {
+            id: 'knowledge-assets',
+            rank: 2,
+            stage: 'now',
+            score: 86,
+            title: '音视频 / 资料到知识资产服务',
+            label: '最快交付',
+            themeIds: ['ai-content', 'content', 'agent-workflow'],
+            match: '直接复用现有音视频自动化、内容提炼和本地知识库能力，交付物可在短周期内被客户检查。',
+            customer: '播客主、课程主理人、知识社群和有大量历史内容的中文创作者。',
+            experiment: '找一位真实客户，将 5–10 小时音视频或一批历史资料加工为可检索知识库、专题索引、10 个选题和 3 份成稿。',
+            metrics: ['首版交付 ≤ 7 天', '人工校对 ≤ 总工时 25%', '客户采用内容 ≥ 3 条', '续做或转介绍意向 ≥ 1 个'],
+            risks: '转录准确并不等于内容可用；需重点验证观点归属、事实校对、隐私和客户日常工作流是否真的接得进去。',
+            stop: '客户未采用任何产出，或人工校对超过总工时一半时，暂停扩量并重做交付标准。',
+            evidence: [
+                { topic_id: '55522511854582284', title: '飞书音视频转录 Agent', author: '亦仁', date: '2026-06-03', tab: '精华', signal: '结果案例' },
+                { topic_id: '22255482852154551', title: '音频自动整理到本地 Obsidian', author: '子澄', date: '2026-07-13', tab: '最新', signal: '明确需求' },
+            ],
+        },
+        {
+            id: 'content-workflow',
+            rank: 3,
+            stage: 'now',
+            score: 82,
+            title: '内容团队 AI 工作流小型交付',
+            label: '服务切入',
+            themeIds: ['ai-sales', 'agent-workflow', 'ai-content'],
+            match: '你的优势不是泛泛讲 AI，而是把研究、内容、音视频和自动化连接成一个可验收的具体流程。',
+            customer: '3–20 人的内容团队、知识服务团队，以及有稳定素材但生产和复盘效率低的小企业。',
+            experiment: '访谈 5 家团队，完成 2 次流程诊断，从一个窄环节交付付费试点，例如竞品周报、播客拆稿或历史内容选题库。',
+            metrics: ['有效访谈 5 家', '确认重复痛点 ≥ 3 家', '付费试点 ≥ 1 个', '单次流程节省工时 ≥ 30%'],
+            risks: '定制化容易失控；必须限定输入、输出、异常处理和人工责任，避免承诺笼统的“企业 AI 转型”。',
+            stop: '5 次访谈没有出现重复痛点，或试点无法量化节省时间时，不继续开发通用方案。',
+            evidence: [
+                { topic_id: '82255512528118552', title: '从基础服务进入企业 AI 定制需求', author: '悟空', date: '2026-04-07', tab: '精华', signal: '结果案例' },
+                { topic_id: '45544582454181488', title: 'AI Native 内容 Agent 工厂实践', author: '坤汀', date: '2026-06-07', tab: '精华', signal: '结果案例' },
+            ],
+        },
+        {
+            id: 'vertical-database',
+            rank: 4,
+            stage: 'later',
+            score: 74,
+            title: '垂直数据库微工具',
+            label: '后续产品化',
+            themeIds: ['tools', 'ai-coding'],
+            match: '适合把前三类服务中反复出现的数据、筛选和查询需求沉淀成产品，但不应先闭门开发完整 SaaS。',
+            customer: '有明确地点、行业、项目或资料筛选需求的垂直兴趣人群和专业从业者。',
+            experiment: '先用表格或轻量网页服务 10 名用户；只实现一个高频筛选动作，再根据真实使用记录决定是否开发。',
+            metrics: ['目标用户访谈 10 人', '重复查询场景 ≥ 1 个', '一周回访使用 ≥ 3 人', '愿意提供数据或付费 ≥ 2 人'],
+            risks: '公开数据清洗成本、数据授权与持续更新常被低估，产品流量也不等于商业需求。',
+            stop: '用户只浏览不复访，或没有人愿意提交真实数据时，不进入正式产品开发。',
+            evidence: [
+                { topic_id: '14422112282255452', title: '垂直兴趣数据库网站案例', author: 'Link', date: '2026-07-24', tab: '中标', signal: '明确需求' },
+            ],
+        },
+    ];
     const elements = {};
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -35,7 +123,8 @@
             'platform-list', 'author-list', 'loading-layer', 'follow-theme-btn',
             'show-method-btn', 'topic-dialog', 'dialog-signal', 'dialog-title',
             'dialog-meta', 'dialog-content', 'close-dialog-btn', 'insights-toast',
-            'page-context',
+            'page-context', 'experiment-workspace', 'experiment-list',
+            'experiment-signal-summary', 'experiment-score-guide',
         ].forEach((id) => { elements[id] = document.getElementById(id); });
     }
 
@@ -107,6 +196,23 @@
         document.querySelectorAll('[data-view]').forEach((button) => {
             button.addEventListener('click', () => switchView(button.dataset.view));
         });
+        document.querySelectorAll('[data-experiment-stage]').forEach((button) => {
+            button.addEventListener('click', () => {
+                state.experimentStage = button.dataset.experimentStage;
+                document.querySelectorAll('[data-experiment-stage]').forEach((item) => {
+                    item.classList.toggle('is-active', item === button);
+                });
+                renderExperiments();
+            });
+        });
+        elements['experiment-list'].addEventListener('click', (event) => {
+            const button = event.target.closest('[data-evidence-topic-id]');
+            if (!button) return;
+            const evidence = experimentProjects
+                .flatMap((project) => project.evidence)
+                .find((item) => item.topic_id === button.dataset.evidenceTopicId);
+            if (evidence) openTopicDialog(evidence);
+        });
         document.querySelectorAll('[data-scroll-target]').forEach((button) => {
             button.addEventListener('click', () => {
                 document.getElementById(button.dataset.scrollTarget)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -172,6 +278,8 @@
         renderSubtopics();
         renderTopicFeed();
         renderInterpretation();
+        renderExperiments();
+        syncViewVisibility();
     }
 
     function renderThemeNavigation() {
@@ -349,9 +457,110 @@
         `).join('') : '<div class="empty-feed">暂无作者数据</div>';
     }
 
+    function renderExperiments() {
+        if (!elements['experiment-list']) return;
+        const themeMetrics = flattenThemeMetrics();
+        const visible = experimentProjects.filter((project) => {
+            return state.experimentStage === 'all' || project.stage === state.experimentStage;
+        });
+
+        elements['experiment-list'].innerHTML = visible.map((project) => {
+            const evidenceMetrics = combineThemeMetrics(project.themeIds, themeMetrics);
+            const metricText = evidenceMetrics
+                ? `${formatNumber(evidenceMetrics.topics)} 次主题标签命中 · ${formatNumber(evidenceMetrics.demand)} 次需求信号 · ${formatNumber(evidenceMetrics.proof)} 次结果信号（分类可重叠）`
+                : '实时主题指标暂不可用';
+            const growthText = evidenceMetrics
+                ? `${evidenceMetrics.growth >= 0 ? '+' : ''}${evidenceMetrics.growth}%`
+                : '--';
+            return `
+                <article class="experiment-card">
+                    <div class="experiment-card-header">
+                        <div class="experiment-rank">${project.rank}</div>
+                        <div class="experiment-card-title">
+                            <div><h5>${escapeHtml(project.title)}</h5><span>${escapeHtml(project.label)}</span></div>
+                            <p>${escapeHtml(project.match)}</p>
+                        </div>
+                        <div class="experiment-score">
+                            <strong>${project.score}</strong><span>初版建议</span>
+                        </div>
+                    </div>
+                    <div class="experiment-live-signal">
+                        <span><i class="fa-solid fa-database"></i>${metricText}</span>
+                        <span class="${evidenceMetrics?.growth < 0 ? 'trend-down' : 'trend-up'}"><i class="fa-solid fa-arrow-trend-up"></i>近 30 天 ${growthText}</span>
+                    </div>
+                    <div class="experiment-detail-grid">
+                        <div><span>目标客户</span><p>${escapeHtml(project.customer)}</p></div>
+                        <div><span>最小实验 · 1–2 周</span><p>${escapeHtml(project.experiment)}</p></div>
+                    </div>
+                    <div class="experiment-detail-grid experiment-detail-grid-bottom">
+                        <div>
+                            <span>正反馈指标</span>
+                            <ul>${project.metrics.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+                        </div>
+                        <div>
+                            <span>风险与待验证</span>
+                            <p>${escapeHtml(project.risks)}</p>
+                            <p class="experiment-stop"><i class="fa-solid fa-stop"></i><strong>停止条件：</strong>${escapeHtml(project.stop)}</p>
+                        </div>
+                    </div>
+                    <footer class="experiment-evidence">
+                        <span>数据依据</span>
+                        <div>${project.evidence.map((item) => `
+                            <button type="button" data-evidence-topic-id="${escapeHtml(item.topic_id)}" title="读取本地原文">
+                                <i class="fa-regular fa-file-lines"></i>${escapeHtml(item.title)}
+                            </button>
+                        `).join('')}</div>
+                        <small>原帖中的收入、订单或增长均为作者陈述，仅作为需求和结果线索。</small>
+                    </footer>
+                </article>
+            `;
+        }).join('');
+
+        elements['experiment-signal-summary'].innerHTML = [
+            ['候选实验', experimentProjects.length],
+            ['本周可测', experimentProjects.filter((item) => item.stage === 'now').length],
+            ['数据更新', state.data?.updated_at || '暂不可用'],
+        ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
+
+        elements['experiment-score-guide'].innerHTML = experimentScoreGuide.map(([label, points, description]) => `
+            <div class="score-guide-row">
+                <span>${escapeHtml(label)}</span>
+                <strong class="${points < 0 ? 'is-penalty' : ''}">${points > 0 ? '+' : ''}${points}</strong>
+                <small>${escapeHtml(description)}</small>
+            </div>
+        `).join('');
+    }
+
+    function flattenThemeMetrics() {
+        if (!state.data?.themes) return new Map();
+        const rows = state.data.themes.flatMap((theme) => [theme, ...(theme.children || [])]);
+        return new Map(rows.map((item) => [item.id, item]));
+    }
+
+    function combineThemeMetrics(themeIds, metrics) {
+        const rows = themeIds.map((id) => metrics.get(id)).filter(Boolean);
+        if (!rows.length) return null;
+        return {
+            topics: rows.reduce((sum, item) => sum + Number(item.topics || 0), 0),
+            demand: rows.reduce((sum, item) => sum + Number(item.demand || 0), 0),
+            proof: rows.reduce((sum, item) => sum + Number(item.proof || 0), 0),
+            growth: Math.round(rows.reduce((sum, item) => sum + Number(item.growth || 0), 0) / rows.length),
+        };
+    }
+
     function switchView(view) {
         state.view = view;
-        document.querySelectorAll('[data-view]').forEach((button) => button.classList.toggle('is-active', button.dataset.view === view));
+        document.querySelectorAll('[data-view]').forEach((button) => {
+            const active = button.dataset.view === view;
+            button.classList.toggle('is-active', active);
+            if (active) button.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+        });
+        syncViewVisibility();
+        if (view === 'experiment') {
+            renderExperiments();
+            showToast('项目实验：评分是初版决策建议，不代表收益预测');
+            return;
+        }
         const mapping = {
             overview: { theme: 'ai', message: '全景模式：从最大主题方向开始浏览' },
             trend: { theme: 'ai-content', message: '趋势模式：聚焦近期高频交叉主题' },
@@ -364,6 +573,18 @@
             state.theme = next.theme;
             state.visibleLimit = 6;
             loadInsights();
+        } else if (state.data) {
+            renderSelectedHeader();
+        }
+    }
+
+    function syncViewVisibility() {
+        const researchWorkspace = document.querySelector('.research-workspace');
+        const experimentMode = state.view === 'experiment';
+        researchWorkspace.classList.toggle('is-hidden', experimentMode);
+        elements['experiment-workspace'].classList.toggle('is-hidden', !experimentMode);
+        if (experimentMode) {
+            elements['page-context'].textContent = '将趋势与结果信号收敛为一到两周可验证的项目';
         }
     }
 
@@ -377,8 +598,8 @@
             <span><i class="fa-regular fa-user"></i> ${escapeHtml(topic.author)}</span>
             <span><i class="fa-regular fa-calendar"></i> ${escapeHtml(topic.date)}</span>
             <span><i class="fa-solid fa-layer-group"></i> ${escapeHtml(topic.tab)}</span>
-            <span><i class="fa-regular fa-image"></i> ${topic.images_count} 图片</span>
-            <span><i class="fa-regular fa-file"></i> ${topic.files_count} 文件</span>
+            <span><i class="fa-regular fa-image"></i> ${topic.images_count || 0} 图片</span>
+            <span><i class="fa-regular fa-file"></i> ${topic.files_count || 0} 文件</span>
             <span>主题 ID ${escapeHtml(topic.topic_id)}</span>
         `;
         elements['dialog-content'].innerHTML = '<div class="empty-feed"><i class="fa-solid fa-circle-notch fa-spin"></i><p>正在读取本地原文...</p></div>';

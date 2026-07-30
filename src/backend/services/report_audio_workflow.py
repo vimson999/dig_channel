@@ -18,10 +18,17 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_INITIAL_PROMPT = (
     "请解析上传的研报 PDF，提取核心观点、关键数据、风险提示和可用于口播的摘要。"
 )
+PDF_EVIDENCE_REVIEW_CONTRACT = (
+    "最后另起一段输出以 PDF_EVIDENCE_V1_JSON: 开头的单行严格 JSON，"
+    "格式为 {\"schema_version\":\"report_pdf_evidence_v1\",\"claims\":[...]}; 每条 claims 必须包含"
+    "claim_text、script_quote、pdf_page、pdf_quote、claim_type、evidence_kind、confidence、"
+    "use_as_visual，可选 crop={x,y,width,height}（均为0到1）。只填写能从 PDF 明确定位的内容，"
+    "不要使用 Markdown 代码围栏；无法定位的主张不要伪造证据。"
+)
 DEFAULT_REVIEW_PROMPT = (
     "担任首席责任主编，利用提供的PDF材料和可查网络信息，对上文内容逐条复核与勘误，"
     "确认事实准确、逻辑清晰、表达规范，列出每条修正点及依据，并给出最终优化后的信息版本，"
-    "附上核对过程说明和参考来源。"
+    f"附上核对过程说明和参考来源。{PDF_EVIDENCE_REVIEW_CONTRACT}"
 )
 GEMINI_CAPTURE_ARTIFACT_MARKERS = (
     "自定义 Gem",
@@ -42,6 +49,21 @@ TITLE_REVIEW_SCHEMA_VERSION = "report_audio_title_review_20260724_v1"
 
 class ReportAudioWorkflowError(RuntimeError):
     pass
+
+
+def ensure_pdf_evidence_review_contract(value: Any) -> str:
+    """Append the server-owned evidence contract to legacy/custom review prompts.
+
+    The exact contract is idempotent and cannot be removed by a stale frontend,
+    cached form value, or a task-level prompt override.
+    """
+
+    prompt = str(value or "").strip()
+    if not prompt:
+        return DEFAULT_REVIEW_PROMPT
+    if PDF_EVIDENCE_REVIEW_CONTRACT in prompt:
+        return prompt
+    return f"{prompt}\n\n{PDF_EVIDENCE_REVIEW_CONTRACT}"
 
 
 def storage_path_for_job(job_id: str, created_at: Optional[datetime] = None) -> str:
@@ -155,10 +177,40 @@ def clean_final_script_for_tts(value: Any) -> str:
     return _strip_trailing_section_stub(text)
 
 
+def assert_final_tts_text_clean(value: Any) -> str:
+    """Fail closed when non-spoken artifacts survive deterministic cleaning."""
+
+    text = str(value or "").strip()
+    if not text:
+        raise ReportAudioWorkflowError("TTS 正文为空")
+    checks = (
+        (r"```|~~~", "包含 Markdown 代码围栏"),
+        (r"https?://|www\.", "包含 URL"),
+        (r"\[[^\]\n]{1,120}\]\s*\([^)]+\)", "包含 Markdown 链接"),
+        (
+            r"(?i)(?<![A-Za-z0-9_])(?:cite|citation|source|reference)\s*(?:[:：#]?\s*\d+|\[|\()",
+            "包含引用标记",
+        ),
+        (r"(?:参考|资料|数据|信息)?来源\s*[:：]", "包含来源说明"),
+        (r"[\[【]\s*\d{1,4}\s*[\]】]", "包含数字脚注"),
+        (
+            r"(?i)(?:PDF_EVIDENCE|evidence_map|evidence_mapping|pdf_quote|script_quote|schema_version)"
+            r"\s*[\"']?\s*[:：]",
+            "包含证据结构字段",
+        ),
+        (r"^\s*[\{\[]\s*\"[A-Za-z_\u4e00-\u9fff][^\"\\]{0,80}\"\s*:", "包含结构 JSON"),
+    )
+    for pattern, reason in checks:
+        if re.search(pattern, text):
+            raise ReportAudioWorkflowError(f"TTS 正文终检失败: {reason}")
+    return text
+
+
 def split_tts_text(text: str, max_chars: Optional[int] = None) -> List[str]:
     text = _clean_text(text)
     if not text:
         return []
+    assert_final_tts_text_clean(text)
     max_chars = max_chars or _int_env("REPORT_AUDIO_TTS_CHUNK_CHARS", 500)
     max_chars = max(200, min(max_chars, 5000))
     if len(text) <= max_chars:
@@ -906,6 +958,7 @@ def _validate_structured_result(payload: Dict[str, Any], raw_text: str) -> Dict[
         script = clean_final_script_for_tts(_extract_final_script(raw_text))
     if not script:
         raise ReportAudioWorkflowError("结构化结果缺少 final_script_for_tts")
+    assert_final_tts_text_clean(script)
     quality_issue = _tts_script_quality_issue(script)
     if quality_issue:
         raise ReportAudioWorkflowError(f"结构化结果不可用于朗读: {quality_issue}")

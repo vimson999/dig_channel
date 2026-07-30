@@ -1014,7 +1014,8 @@ def regenerate_videos(current_user, job_id):
         payload = _job_payload(task)
         return jsonify({"success": False, "message": "任务仍在运行中，请先等待或取消后再重生成", **payload, "data": payload}), 409
 
-    ok, message = _prepare_job_for_video_regeneration(task)
+    payload = request.get_json(silent=True) or {}
+    ok, message = _prepare_job_for_video_regeneration(task, payload)
     if not ok:
         payload = _job_payload(task)
         return jsonify({"success": False, "message": message, **payload, "data": payload}), 400
@@ -1038,7 +1039,18 @@ def regenerate_videos(current_user, job_id):
     db.session.commit()
     _clear_job_detail_cache(task.id)
     payload = _job_payload(task)
-    return jsonify({"success": True, "message": "已重新投递横屏和竖屏视频生成任务", **payload, "data": payload})
+    plan_audio = (payload.get("plan") or {}).get("audio") or {}
+    range_text = (
+        f"（{_format_audio_time(plan_audio.get('start_seconds'))}"
+        f"-{_format_audio_time(plan_audio.get('end_seconds'))}，"
+        f"{plan_audio.get('speed') or 1.2}×）"
+    )
+    return jsonify({
+        "success": True,
+        "message": f"已按新时间重新投递横屏和竖屏视频生成任务{range_text}",
+        **payload,
+        "data": payload,
+    })
 
 
 @mp3_video_workflow_bp.route("/jobs/<job_id>/artifacts/<artifact_key>/regenerate", methods=["POST"])
@@ -1591,6 +1603,15 @@ def _job_payload(task, include_raw=False):
         "children": result.get("children") or {},
         "retry_attempts": result.get("retry_attempts") or {},
         "retry_state": result.get("retry_state") or {},
+        "regeneration": {
+            "requested_at": request_payload.get("force_video_regenerate_at") or result.get("force_video_regenerate_at"),
+            "audio_range": request_payload.get("audio_range_override") or result.get("continue_full_video_audio_range"),
+            "active": bool(
+                (request_payload.get("force_video_regenerate_at") or result.get("force_video_regenerate_at"))
+                and task.status in {"pending", "processing"}
+            ),
+            "history_count": len(result.get("regenerated_video_history") or []),
+        },
         "bilibili_uploads": _bilibili_upload_children(task.id),
         "landscape_video": result.get("landscape_video"),
         "vertical_video": result.get("vertical_video"),
@@ -1793,7 +1814,7 @@ def _prepare_keyframe_job_for_full_video(task, payload=None):
     return True, "ok"
 
 
-def _prepare_job_for_video_regeneration(task):
+def _prepare_job_for_video_regeneration(task, payload=None):
     params = dict(task.params or {})
     workflow = dict(params.get(FEATURE_NAME) or {})
     result = dict(task.result or {})
@@ -1805,6 +1826,10 @@ def _prepare_job_for_video_regeneration(task):
         return False, "当前任务缺少小君君横屏背景图，不能重生成视频"
     if not _path_exists((artifacts.get("audio_background") or {}).get("path")):
         return False, "当前任务缺少此刻此声竖屏背景图，不能重生成视频"
+
+    ok, message, audio_range = _apply_continue_audio_range_override(result, workflow, payload)
+    if not ok:
+        return False, message
 
     requested_at = datetime.utcnow().isoformat() + "Z"
     workflow["render_mode"] = "full_video"
@@ -1842,7 +1867,15 @@ def _prepare_job_for_video_regeneration(task):
     logs = list(result.get("logs") or [])
     logs.append({
         "step": "regenerate_videos_requested",
-        "message": "用户要求重新生成横屏和竖屏视频，强制跳过旧视频复用",
+        "message": (
+            "用户要求重新生成横屏和竖屏视频，强制跳过旧视频复用"
+            + (
+                f"（音频 {_format_audio_time(audio_range.get('start_seconds'))}"
+                f"-{_format_audio_time(audio_range.get('end_seconds'))}）"
+                if audio_range
+                else ""
+            )
+        ),
         "progress": max(int(task.progress or 0), 68),
         "updated_at": requested_at,
     })

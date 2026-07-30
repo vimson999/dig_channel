@@ -24,6 +24,7 @@ from services.report_visual_plan_service import (
     storyboard_prompt,
 )
 from services.report_audio_workflow import FEATURE_NAME as REPORT_AUDIO_WORKFLOW_FEATURE
+from services.report_pdf_evidence import link_storyboard_evidence
 from services.report_stick_figure_assets import scene_image_path
 from services.report_visual_scheme import DEFAULT_VISUAL_SCHEME_KEY, visual_scheme
 from services.runtime_guard import maybe_guarded_apply_async, release_db_session_quietly
@@ -482,6 +483,8 @@ def _persist_success(task_id, *, source_task_id, title, gemini_path, normalized_
             visual_prompt=item["visual_prompt"],
             estimated_seconds=item.get("estimated_seconds"),
         ))
+    db.session.flush()
+    evidence_link_count = link_storyboard_evidence(task_id, commit=False)
     summary = {
         "schema_version": STORYBOARD_SCHEMA_VERSION,
         "segment_count": len(segments),
@@ -493,6 +496,8 @@ def _persist_success(task_id, *, source_task_id, title, gemini_path, normalized_
         "normalizer_model": normalized.get("model"),
         "visual_scheme_key": scheme.key,
         "visual_scheme_name": scheme.name,
+        "evidence_status": output.evidence_status or "legacy_unavailable",
+        "evidence_link_count": evidence_link_count,
     }
     PublicationTask.query.filter(PublicationTask.id == task_id).update({
         PublicationTask.status: "completed",
@@ -534,6 +539,7 @@ def _dispatch_auto_scene_images(storyboard_task_id, workflow_job_id=None):
     # Flask app is bootstrapping.  At execution time the API module is complete.
     from api.report_stick_figure_video_workflow import (
         SCENE_PARENT_COLUMNS,
+        _auto_enqueue_whole_audio_alignment,
         _enqueue_image_asset,
         _ensure_scene_assets,
         _scene_asset_enqueue_snapshot,
@@ -626,14 +632,36 @@ def _dispatch_auto_scene_images(storyboard_task_id, workflow_job_id=None):
         PublicationTask.updated_at: now,
     }, synchronize_session=False)
     db.session.commit()
+    audio_alignment = None
+    audio_alignment_error = None
+    try:
+        audio_alignment = _auto_enqueue_whole_audio_alignment(
+            parent_snapshot,
+            storyboard,
+        )
+    except Exception as exc:
+        # Image generation remains useful when a reusable WAV is temporarily
+        # unavailable or its alignment queue cannot be reached.  The durable
+        # audio-track/task state keeps the failure visible and the existing UI
+        # action remains an explicit recovery path.
+        audio_alignment_error = str(exc)[:500]
+        logger.error(
+            "Auto whole-audio alignment dispatch failed: workflow=%s storyboard=%s error=%s",
+            workflow_id,
+            storyboard_task_id,
+            exc,
+            exc_info=True,
+        )
     logger.info(
-        "Auto scene images dispatched: workflow=%s storyboard=%s adopted=%s queued=%s skipped=%s errors=%s",
+        "Auto scene media dispatched: workflow=%s storyboard=%s adopted=%s queued=%s skipped=%s errors=%s audio=%s audio_error=%s",
         workflow_id,
         storyboard_task_id,
         adopted,
         len(queued),
         len(skipped),
         len(errors),
+        audio_alignment,
+        audio_alignment_error,
     )
     return {
         "workflow_job_id": workflow_id,
@@ -641,6 +669,8 @@ def _dispatch_auto_scene_images(storyboard_task_id, workflow_job_id=None):
         "queued": len(queued),
         "skipped": len(skipped),
         "errors": errors,
+        "audio_alignment": audio_alignment,
+        "audio_alignment_error": audio_alignment_error,
     }
 
 

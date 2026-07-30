@@ -26,6 +26,13 @@ WAITING_STEPS = {
     "deferred_db_pressure",
     "orphaned_processing",
 }
+READY_STEPS = {
+    # These visual-workflow parent states have no running worker of their own.
+    # They wait for an explicit video-render request and must not block a restart.
+    "images_done",
+    "whole_audio_aligned",
+    "whole_audio_alignment_failed",
+}
 ZSXQ_ACTIVE_STATUSES = ("running", "retrying")
 
 
@@ -73,7 +80,7 @@ def is_non_interruptible_step(step):
     normalized = str(step or "").strip().lower()
     if not normalized:
         return True
-    if normalized in WAITING_STEPS:
+    if normalized in WAITING_STEPS or normalized in READY_STEPS:
         return False
     if normalized.startswith("deferred_") or normalized.startswith("waiting_"):
         return False

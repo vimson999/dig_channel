@@ -242,6 +242,113 @@ def align_storyboard_to_audio(
     }
 
 
+def align_subtitles_to_audio(
+    subtitles: Sequence[Mapping],
+    asr_segments: Sequence[Mapping],
+    *,
+    audio_seconds: float,
+) -> dict:
+    """使用 ASR 时间戳对齐原始字幕文字，避免把识别误差写进成片。"""
+
+    source_entries = []
+    leading_punctuation = ""
+    for item in subtitles or []:
+        if not isinstance(item, Mapping):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        if not normalize_alignment_text(text):
+            if source_entries:
+                source_entries[-1]["script_text"] += text
+            else:
+                leading_punctuation += text
+            continue
+        sequence = len(source_entries) + 1
+        source_entries.append({
+            "asset_id": f"subtitle-{sequence}",
+            "segment_id": f"subtitle-{sequence}",
+            "sequence": sequence,
+            "script_text": f"{leading_punctuation}{text}",
+        })
+        leading_punctuation = ""
+    if leading_punctuation and source_entries:
+        source_entries[-1]["script_text"] += leading_punctuation
+    if not source_entries:
+        raise ValueError("没有可用于强制对齐的原始字幕")
+    source_script = "".join(item["script_text"] for item in source_entries)
+    alignment = align_storyboard_to_audio(
+        source_entries,
+        asr_segments,
+        audio_seconds=audio_seconds,
+        source_script=source_script,
+    )
+    return {
+        **alignment,
+        "subtitles": [
+            {
+                "start": entry["start_seconds"],
+                "end": entry["end_seconds"],
+                "text": entry["script_text"],
+            }
+            for entry in alignment["timeline"]
+        ],
+    }
+
+
+def align_scene_timeline_to_audio(
+    scene_timeline: Mapping,
+    asr_segments: Sequence[Mapping],
+    *,
+    audio_seconds: float,
+    source_script: str,
+) -> dict:
+    """把方案三分镜映射到同一份精确语音时间轴。"""
+
+    raw_scenes = (
+        scene_timeline.get("scenes")
+        if isinstance(scene_timeline, Mapping)
+        and isinstance(scene_timeline.get("scenes"), list)
+        else []
+    )
+    if not raw_scenes:
+        raise ValueError("方案三缺少可对齐的分镜时间轴")
+    if any(not str(item.get("script_text") or "").strip() for item in raw_scenes):
+        raise ValueError("方案三分镜缺少原始文案，不能进行精确语音对齐")
+
+    alignment = align_storyboard_to_audio(
+        raw_scenes,
+        asr_segments,
+        audio_seconds=audio_seconds,
+        source_script=source_script,
+    )
+    aligned_by_sequence = {
+        int(item["sequence"]): item
+        for item in alignment["timeline"]
+    }
+    aligned_scenes = []
+    for raw in raw_scenes:
+        aligned = aligned_by_sequence[int(raw["sequence"])]
+        aligned_scenes.append({
+            **dict(raw),
+            "start_seconds": aligned["start_seconds"],
+            "end_seconds": aligned["end_seconds"],
+            "duration_seconds": aligned["duration_seconds"],
+            "alignment_confidence": aligned["confidence"],
+        })
+    return {
+        **dict(scene_timeline),
+        "schema_version": ALIGNMENT_SCHEMA_VERSION,
+        "timing_source": "asr_forced_alignment",
+        "audio_seconds": alignment["audio_seconds"],
+        "scene_count": alignment["scene_count"],
+        "average_confidence": alignment["average_confidence"],
+        "minimum_confidence": alignment["minimum_confidence"],
+        "asr_match_ratio": alignment["asr_match_ratio"],
+        "scenes": aligned_scenes,
+    }
+
+
 def write_alignment_manifest(workflow_task_id: str, payload: Mapping) -> str:
     root = workflow_output_root(str(workflow_task_id))
     root.mkdir(parents=True, exist_ok=True)

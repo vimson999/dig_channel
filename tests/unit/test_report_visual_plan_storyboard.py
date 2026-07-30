@@ -22,7 +22,13 @@ from services.gemini_browser import (
     _write_generation_checkpoint,
     _strip_gemini_page_suffix,
 )
-from services.report_stick_figure_assets import IMAGE_STYLE_SUFFIX, scene_image_path, scene_image_prompt, scene_image_prompt_hash
+from services.report_stick_figure_assets import (
+    IMAGE_STYLE_SUFFIX,
+    has_browser_overlay_artifact,
+    scene_image_path,
+    scene_image_prompt,
+    scene_image_prompt_hash,
+)
 from services.report_visual_scheme import visual_scheme, visual_scheme_payloads
 from api.report_stick_figure_video_workflow import (
     _completed_image_asset_can_adopt_prompt_hash,
@@ -36,9 +42,53 @@ from tasks.report_visual_plan import (
     _preserve_completed_video_state,
     _storyboard_gemini_worker,
 )
+from tasks.report_stick_figure_assets import (
+    PARENT_IMAGE_COMPLETION_STEPS,
+    _is_transient_image_error,
+)
 
 
 class ReportVisualPlanStoryboardTest(unittest.TestCase):
+    def test_image_completion_cannot_regress_audio_or_video_parent_stage(self):
+        for step in (
+            "material_queued",
+            "storyboard_done",
+            "images_queued",
+            "images_done",
+        ):
+            self.assertIn(step, PARENT_IMAGE_COMPLETION_STEPS)
+        for step in (
+            "whole_audio_alignment_queued",
+            "transcribe_whole_audio",
+            "whole_audio_aligned",
+            "video_queued",
+            "render_video",
+            "video_done",
+        ):
+            self.assertNotIn(step, PARENT_IMAGE_COMPLETION_STEPS)
+
+    def test_scene_image_retry_only_accepts_transient_browser_failures(self):
+        self.assertTrue(_is_transient_image_error("等待 Gemini 生成图片超时"))
+        self.assertTrue(_is_transient_image_error("net::ERR_CONNECTION_RESET"))
+        self.assertTrue(_is_transient_image_error("未找到 Gemini 工具/生成图片入口"))
+        self.assertTrue(_is_transient_image_error("Gemini 图片包含浏览器浮层"))
+        self.assertFalse(_is_transient_image_error("分镜提示词契约已变化"))
+        self.assertFalse(_is_transient_image_error("视觉方案版本已变化"))
+
+    def test_browser_overlay_detector_rejects_dark_top_right_popover(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            contaminated = Path(tempdir) / "contaminated.png"
+            clean = Path(tempdir) / "clean.png"
+            image = Image.new("RGB", (708, 396), "white")
+            for x in range(500, 708):
+                for y in range(0, 135):
+                    image.putpixel((x, y), (32, 32, 32))
+            image.save(contaminated)
+            Image.new("RGB", (708, 396), "white").save(clean)
+
+            self.assertTrue(has_browser_overlay_artifact(str(contaminated)))
+            self.assertFalse(has_browser_overlay_artifact(str(clean)))
+
     def test_auto_image_replay_does_not_downgrade_completed_video_workflow(self):
         with tempfile.TemporaryDirectory() as tempdir:
             video_path = Path(tempdir) / "completed.mp4"
@@ -572,6 +622,10 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
         )[0]
         self.assertIn("_ensure_scene_assets(parent_snapshot, force_refresh=True)", auto_images_body)
         self.assertIn("_enqueue_image_asset(parent_snapshot, asset)", auto_images_body)
+        self.assertIn(
+            "_auto_enqueue_whole_audio_alignment(",
+            auto_images_body,
+        )
         self.assertNotIn("PublicationTask.params", auto_images_body)
         self.assertNotIn("PublicationTask.result", auto_images_body)
         self.assertIn('request.files.get("pdf")', api)

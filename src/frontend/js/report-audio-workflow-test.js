@@ -51,14 +51,19 @@ class ReportAudioWorkflowPage {
             geminiUrlCurrent: document.getElementById('gemini-url-current'),
             manualGeminiResultInput: document.getElementById('manual-gemini-result-input'),
             landscapeVideoEnabled: document.getElementById('landscape-video-enabled'),
-            verticalVideoEnabled: document.getElementById('vertical-video-enabled'),
             visualSchemeKeys: Array.from(document.querySelectorAll('input[name="visual_scheme_keys"]')),
             ttsProvider: document.getElementById('tts-provider'),
             ttsVoicePanel: document.getElementById('tts-voice-panel'),
             ttsVoice: document.getElementById('tts-voice'),
             ttsVoiceId: document.getElementById('tts-voice-id'),
             verticalVideoSchemes: Array.from(document.querySelectorAll('input[name="vertical_video_schemes"]')),
-            videoRenderMode: document.getElementById('video-render-mode'),
+            videoRenderModes: Array.from(document.querySelectorAll('input[name="video_render_mode"]')),
+            generationModeKeyframesCard: document.getElementById('generation-mode-keyframes-card'),
+            generationModeFullVideoCard: document.getElementById('generation-mode-full-video-card'),
+            keyframeOutputs: Array.from(document.querySelectorAll('input[name="keyframe_outputs"]')),
+            keyframeOutputPanel: document.getElementById('keyframe-output-panel'),
+            fullVideoOptionsPanel: document.getElementById('full-video-options-panel'),
+            ttsStepNumber: document.getElementById('tts-step-number'),
             bilibiliEnabled: document.getElementById('bilibili-enabled'),
             videoTitleInput: document.getElementById('video-title-input'),
             videoSubtitleInput: document.getElementById('video-subtitle-input'),
@@ -82,6 +87,7 @@ class ReportAudioWorkflowPage {
         this.syncJobDateInput();
         this.updatePdfSourceUi();
         this.updateTtsProviderUi();
+        this.updateGenerationModeUi();
         this.refreshStatus();
         this.loadPdfAssets({ silent: true });
         this.loadHistory({ silent: true });
@@ -164,7 +170,7 @@ class ReportAudioWorkflowPage {
 
     defaults() {
         this.els.promptInput.value = '请解析上传的研报 PDF，提取核心观点、关键数据、风险提示和可用于口播的摘要。';
-        this.els.reviewPromptInput.value = '担任首席责任主编，利用提供的PDF材料和可查网络信息，对上文内容逐条复核与勘误，确认事实准确、逻辑清晰、表达规范，列出每条修正点及依据，并给出最终优化后的信息版本，附上核对过程说明和参考来源。';
+        this.els.reviewPromptInput.value = '担任首席责任主编，利用提供的PDF材料和可查网络信息，对上文内容逐条复核与勘误，确认事实准确、逻辑清晰、表达规范，列出每条修正点及依据，并给出最终优化后的信息版本，附上核对过程说明和参考来源。最后另起一段输出以 PDF_EVIDENCE_V1_JSON: 开头的单行严格 JSON，格式为 {"schema_version":"report_pdf_evidence_v1","claims":[...]}; 每条 claims 必须包含 claim_text、script_quote、pdf_page、pdf_quote、claim_type、evidence_kind、confidence、use_as_visual，可选 crop={x,y,width,height}（均为0到1）。只填写能从 PDF 明确定位的内容，不要使用 Markdown 代码围栏；无法定位的主张不要伪造证据。';
     }
 
     defaultGeminiUrlPresets() {
@@ -228,6 +234,53 @@ class ReportAudioWorkflowPage {
         if (this.els.ttsVoiceId) {
             this.els.ttsVoiceId.textContent = this.els.ttsVoice?.value || '';
         }
+    }
+
+    selectedVideoRenderMode() {
+        const selected = (this.els.videoRenderModes || []).find((input) => input.checked);
+        return this.normalizeVideoRenderMode(selected?.value);
+    }
+
+    selectedKeyframeOutputs() {
+        return [...new Set(
+            (this.els.keyframeOutputs || [])
+                .filter((input) => input.checked)
+                .map((input) => String(input.value || '').trim())
+                .filter(Boolean),
+        )];
+    }
+
+    keyframeVerticalSchemes(outputs = this.selectedKeyframeOutputs()) {
+        return ['scheme1', 'scheme2', 'scheme3'].filter(
+            (scheme) => outputs.includes(`vertical_keyframe_${scheme}`),
+        );
+    }
+
+    updateGenerationModeUi() {
+        const keyframesMode = this.selectedVideoRenderMode() === 'keyframes';
+        [
+            [this.els.generationModeKeyframesCard, keyframesMode],
+            [this.els.generationModeFullVideoCard, !keyframesMode],
+        ].forEach(([card, active]) => {
+            card?.classList.toggle('border-indigo-400', active);
+            card?.classList.toggle('bg-indigo-50/60', active);
+            card?.classList.toggle('border-slate-200', !active);
+            card?.classList.toggle('bg-white', !active);
+        });
+        this.els.keyframeOutputPanel?.classList.toggle('hidden', !keyframesMode);
+        this.els.fullVideoOptionsPanel?.classList.toggle('hidden', keyframesMode);
+        if (this.els.ttsStepNumber) this.els.ttsStepNumber.textContent = keyframesMode ? '3' : '4';
+
+        (this.els.keyframeOutputs || []).forEach((input) => {
+            input.disabled = !keyframesMode;
+        });
+        [
+            this.els.landscapeVideoEnabled,
+            ...(this.els.visualSchemeKeys || []),
+            ...(this.els.verticalVideoSchemes || []),
+        ].filter(Boolean).forEach((input) => {
+            input.disabled = keyframesMode;
+        });
     }
 
     initialJobPage() {
@@ -372,6 +425,9 @@ class ReportAudioWorkflowPage {
         this.els.pdfAssetPagination.addEventListener('click', (event) => this.handlePdfAssetPageClick(event));
         this.els.pdfAssetPagination.addEventListener('submit', (event) => this.handlePdfAssetPageJump(event));
         this.els.geminiUrlSelect?.addEventListener('change', () => this.updateGeminiUrlUi());
+        (this.els.videoRenderModes || []).forEach((input) => {
+            input.addEventListener('change', () => this.updateGenerationModeUi());
+        });
         this.els.ttsProvider?.addEventListener('change', () => this.updateTtsProviderUi());
         this.els.ttsVoice?.addEventListener('change', () => this.updateTtsProviderUi());
         this.els.submitBtn.addEventListener('click', () => this.submit());
@@ -771,21 +827,37 @@ class ReportAudioWorkflowPage {
             this.setNotice(useAsset ? '请先选择一个已同步 PDF。' : '请先上传 PDF。', 'error');
             return;
         }
-        const verticalSchemes = this.selectedVerticalSchemes();
-        const verticalVideoRequested = this.els.verticalVideoEnabled.checked
-            || verticalSchemes.some((scheme) => scheme === 'scheme2' || scheme === 'scheme3');
-        if (verticalVideoRequested && !verticalSchemes.length) {
-            this.setNotice('生成竖屏视频时，请至少勾选一个竖屏方案。', 'error');
+        const renderMode = this.selectedVideoRenderMode();
+        const keyframeOutputs = renderMode === 'keyframes' ? this.selectedKeyframeOutputs() : [];
+        const verticalSchemes = renderMode === 'keyframes'
+            ? this.keyframeVerticalSchemes(keyframeOutputs)
+            : this.selectedVerticalSchemes();
+        const verticalVideoRequested = renderMode === 'full_video' && verticalSchemes.length > 0;
+        const landscapeVideoRequested = renderMode === 'full_video' && Boolean(this.els.landscapeVideoEnabled?.checked);
+        const visualSchemeKeys = renderMode === 'full_video'
+            ? this.els.visualSchemeKeys.filter((input) => input.checked).map((input) => input.value)
+            : [];
+        if (renderMode === 'keyframes' && !keyframeOutputs.length) {
+            this.setNotice('请至少选择一个需要生成的关键帧或封皮。', 'error');
             return;
         }
-        if (verticalSchemes.length > 2) {
+        if (renderMode === 'full_video' && verticalSchemes.length > 2) {
             this.setNotice('竖屏方案一次最多选择两个，请取消一个后重试。', 'error');
             return;
         }
+        if (
+            renderMode === 'full_video'
+            && !landscapeVideoRequested
+            && !verticalVideoRequested
+            && !visualSchemeKeys.length
+        ) {
+            this.setNotice('请至少选择一个横屏或竖屏完整视频版本。', 'error');
+            return;
+        }
         const primaryVerticalScheme = this.primarySelectedVerticalScheme();
-        const visualSchemeKeys = this.els.visualSchemeKeys
-            .filter((input) => input.checked)
-            .map((input) => input.value);
+        const effectivePrimaryVerticalScheme = verticalSchemes.includes('scheme3')
+            ? 'scheme3'
+            : (verticalSchemes.includes('scheme1') && verticalSchemes.includes('scheme2') ? 'scheme2' : (verticalSchemes[0] || primaryVerticalScheme));
         const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const pdfSummary = selectedAsset
             ? { filename: selectedAsset.filename, bytes: selectedAsset.bytes, source: 'zsxq_attachment', attachment_id: selectedAsset.id, topic_title: selectedAsset.topic_title, tab_label: selectedAsset.tab_label }
@@ -802,10 +874,12 @@ class ReportAudioWorkflowPage {
                 tts_provider: this.els.ttsProvider?.value || 'doubao_browser',
                 tts_voice: this.els.ttsProvider?.value === 'doubao_api' ? (this.els.ttsVoice?.value || '') : '',
                 visual_scheme_keys: visualSchemeKeys,
-                video_render_mode: this.normalizeVideoRenderMode(this.els.videoRenderMode?.value),
+                video_render_mode: renderMode,
+                keyframe_outputs: keyframeOutputs,
                 video: {
+                    landscape_enabled: landscapeVideoRequested,
                     vertical_enabled: verticalVideoRequested,
-                    vertical_video_scheme: primaryVerticalScheme,
+                    vertical_video_scheme: effectivePrimaryVerticalScheme,
                     vertical_video_schemes: verticalSchemes,
                 },
             },
@@ -840,12 +914,13 @@ class ReportAudioWorkflowPage {
             if (this.els.ttsProvider?.value === 'doubao_api') {
                 form.append('tts_voice', this.els.ttsVoice?.value || 'zh_female_mizai_uranus_bigtts');
             }
-            form.append('landscape_video_enabled', this.els.landscapeVideoEnabled.checked ? '1' : '0');
+            form.append('landscape_video_enabled', landscapeVideoRequested ? '1' : '0');
             form.append('vertical_video_enabled', verticalVideoRequested ? '1' : '0');
-            form.append('vertical_video_scheme', primaryVerticalScheme);
+            form.append('vertical_video_scheme', effectivePrimaryVerticalScheme);
             form.append('vertical_video_schemes', JSON.stringify(verticalSchemes));
             form.append('visual_scheme_keys', JSON.stringify(visualSchemeKeys));
-            form.append('video_render_mode', this.normalizeVideoRenderMode(this.els.videoRenderMode?.value));
+            form.append('video_render_mode', renderMode);
+            form.append('keyframe_outputs', JSON.stringify(keyframeOutputs));
             form.append('preview_seconds', '10');
             form.append('bilibili_enabled', this.els.bilibiliEnabled.checked ? '1' : '0');
             form.append('video_title', this.els.videoTitleInput.value.trim());

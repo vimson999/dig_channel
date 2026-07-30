@@ -39,6 +39,10 @@ def register_all_apis(app):
     from api.report_script_material_workflow import report_script_material_workflow_bp
     app.register_blueprint(report_script_material_workflow_bp)
 
+    # PDF 证据映射：独立于 Gemini 传输和 TTS 文本，供所有视觉方案复用
+    from api.report_pdf_evidence import report_pdf_evidence_bp
+    app.register_blueprint(report_pdf_evidence_bp)
+
     # 注册研报视觉编排预览模块
     from api.report_visual_plan import report_visual_plan_bp
     app.register_blueprint(report_visual_plan_bp)
@@ -79,6 +83,7 @@ def register_all_apis(app):
         endpoints['report_audio_workflows'] = '/api/report-audio-workflows'
         endpoints['report_top10_workflows'] = '/api/report-top10-workflows'
         endpoints['report_script_material_workflows'] = '/api/report-script-material-workflows'
+        endpoints['report_pdf_evidence'] = '/api/report-pdf-evidence'
         endpoints['report_visual_plans'] = '/api/report-visual-plans'
         endpoints['report_stick_figure_video_workflows'] = '/api/report-stick-figure-video-workflows'
         endpoints['mp3_video_workflows'] = '/api/mp3-video-workflows'

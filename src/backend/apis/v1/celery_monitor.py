@@ -1006,6 +1006,9 @@ def _watchdog_repair_stale_business_tasks(config):
             repair_stale_publisher_pending_tasks_once,
             repair_stale_publisher_processing_tasks_once,
         )
+        from tasks.report_stick_figure_video import (
+            repair_ready_stick_figure_video_workflows_once,
+        )
 
         excluded_features = _paused_business_features()
         publisher_repair_paused = "publisher" in excluded_features
@@ -1029,14 +1032,27 @@ def _watchdog_repair_stale_business_tasks(config):
         business_processing_repair_result = repair_stale_business_processing_tasks_once(
             excluded_features=excluded_features,
         )
+        if "report_stick_figure_video_render" in excluded_features:
+            visual_video_repair_result = {
+                "enabled": False,
+                "skipped": "render_paused",
+                "enqueued": 0,
+                "items": [],
+            }
+        else:
+            visual_video_repair_result = (
+                repair_ready_stick_figure_video_workflows_once()
+            )
         repair_result["publisher_pending_repair"] = publisher_pending_repair_result
         repair_result["processing_repair"] = processing_repair_result
         repair_result["business_processing_repair"] = business_processing_repair_result
+        repair_result["visual_video_repair"] = visual_video_repair_result
         repair_result["requeued"] = (
             (repair_result.get("requeued") or 0)
             + (publisher_pending_repair_result.get("requeued") or 0)
             + (processing_repair_result.get("requeued") or 0)
             + (business_processing_repair_result.get("requeued") or 0)
+            + (visual_video_repair_result.get("enqueued") or 0)
         )
         repair_result["demoted"] = (
             (processing_repair_result.get("demoted") or 0)

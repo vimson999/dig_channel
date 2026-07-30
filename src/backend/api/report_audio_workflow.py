@@ -29,11 +29,13 @@ from services.report_audio_workflow import (
     DEFAULT_REVIEW_PROMPT,
     FEATURE_NAME,
     QUEUE_NAME,
+    ensure_pdf_evidence_review_contract,
     pdf_first_page_image_path_for_job,
     render_pdf_first_page_image,
     status_payload as workflow_status_payload,
     structured_result_quality_issue,
 )
+from services.report_stick_figure_assets import has_browser_overlay_artifact
 from services.report_visual_scheme import visual_scheme
 from services.runtime_guard import apply_async_after_db_release, maybe_guarded_apply_async
 from services.bilibili_publish import (
@@ -151,6 +153,14 @@ SCRIPT_MATERIAL_FEATURE_NAME = "report_script_material_workflow"
 MATERIAL_STATUS_FEATURES = (SCRIPT_MATERIAL_FEATURE_NAME, FEATURE_NAME, "report_audio_workflow")
 VERTICAL_VIDEO_SCHEME_DEFAULT = "scheme1"
 VERTICAL_VIDEO_SCHEMES = {"scheme1", "scheme2", "scheme3"}
+KEYFRAME_OUTPUTS = {
+    "bilibili_cover",
+    "vertical_cover",
+    "landscape_keyframe",
+    "vertical_keyframe_scheme1",
+    "vertical_keyframe_scheme2",
+    "vertical_keyframe_scheme3",
+}
 VERTICAL_PREVIEW_SECONDS_DEFAULT = 10
 TTS_PROVIDER_DEFAULT = "doubao_browser"
 TTS_PROVIDERS = {"doubao_browser", "doubao_api"}
@@ -487,11 +497,22 @@ def create_job(current_user):
         return jsonify({"success": False, "message": "metadata 必须是对象"}), 400
 
     prompt = (data.get("prompt") or DEFAULT_INITIAL_PROMPT).strip()
-    review_prompt = (data.get("review_prompt") or DEFAULT_REVIEW_PROMPT).strip()
+    review_prompt = ensure_pdf_evidence_review_contract(
+        data.get("review_prompt") or DEFAULT_REVIEW_PROMPT
+    )
     followups = _parse_followups(data)
     video_options = _parse_video_options(data)
-    if len(video_options.get("vertical_video_schemes") or []) > 2:
+    if (
+        video_options.get("render_mode") == "full_video"
+        and len(video_options.get("vertical_video_schemes") or []) > 2
+    ):
         return jsonify({"success": False, "message": "竖屏方案一次最多选择两个"}), 400
+    if (
+        video_options.get("render_mode") == "keyframes"
+        and _has_explicit_keyframe_outputs(data)
+        and not video_options.get("keyframe_outputs")
+    ):
+        return jsonify({"success": False, "message": "请至少选择一个需要生成的关键帧或封皮"}), 400
     try:
         visual_scheme_keys = _parse_visual_scheme_keys(data)
     except ValueError as exc:
@@ -1591,7 +1612,7 @@ def generate_vertical_video(current_user, job_id):
         for key in ("scheme", "vertical_scheme", "vertical_video_scheme", "vertical_video_schemes", "preview_seconds", "duration_seconds", "force", "include_landscape")
     )
     explicit_schemes = "vertical_video_schemes" in data
-    schemes = (
+    requested_schemes = (
         _normalize_vertical_video_schemes(data.get("vertical_video_schemes"))
         if explicit_schemes
         else _normalize_vertical_video_schemes(
@@ -1599,8 +1620,9 @@ def generate_vertical_video(current_user, job_id):
             _task_vertical_video_scheme(task),
         )
     )
-    if len(schemes) > 2:
+    if len(requested_schemes) > 2:
         return jsonify({"success": False, "message": "竖屏方案一次最多选择两个"}), 400
+    schemes = list(requested_schemes)
     scheme = _primary_vertical_video_scheme(schemes) if schemes else _normalize_vertical_video_scheme(_task_vertical_video_scheme(task))
     preview_seconds = _bounded_int(
         data.get("preview_seconds") or data.get("duration_seconds") or 0,
@@ -1613,6 +1635,7 @@ def generate_vertical_video(current_user, job_id):
     visual_workflow_id = str(data.get("visual_workflow_id") or "").strip()
     visual_video_path = None
     visual_scene_timeline = None
+    skipped_outputs = []
     if "scheme3" in schemes:
         if not visual_workflow_id:
             visual_workflow_id = _ready_linked_visual_workflow_id(
@@ -1621,22 +1644,25 @@ def generate_vertical_video(current_user, job_id):
                 str(data.get("visual_scheme_key") or "stick_figure"),
             )
         if not visual_workflow_id:
-            return jsonify({
-                "success": False,
-                "message": "方案三未找到同一 PDF 且正文图片完整的视觉方案",
-            }), 400
-        visual_scene_timeline = _linked_visual_scene_timeline(
-            current_user,
-            task,
-            visual_workflow_id,
-            audio_seconds=float((((task.result if isinstance(task.result, dict) else {}).get("audio") or {}).get("seconds")) or 0),
-        )
-        visual_video_path = _linked_visual_video_path(current_user, task, visual_workflow_id)
-        if not visual_scene_timeline and not visual_video_path:
-            return jsonify({
-                "success": False,
-                "message": "方案三所选视觉方案的正文分镜图片尚未全部完成，或不属于同一 PDF",
-            }), 400
+            reason = "方案三未找到同一 PDF 且正文图片完整的视觉方案"
+            if not include_landscape:
+                return jsonify({"success": False, "message": reason}), 400
+            schemes = [item for item in schemes if item != "scheme3"]
+            skipped_outputs.append({"output": "scheme3", "reason": reason})
+        else:
+            visual_scene_timeline = _linked_visual_scene_timeline(
+                current_user,
+                task,
+                visual_workflow_id,
+                audio_seconds=float((((task.result if isinstance(task.result, dict) else {}).get("audio") or {}).get("seconds")) or 0),
+            )
+            visual_video_path = _linked_visual_video_path(current_user, task, visual_workflow_id)
+            if not visual_scene_timeline and not visual_video_path:
+                reason = "方案三所选视觉方案的正文分镜图片尚未全部完成，或不属于同一 PDF"
+                if not include_landscape:
+                    return jsonify({"success": False, "message": reason}), 400
+                schemes = [item for item in schemes if item != "scheme3"]
+                skipped_outputs.append({"output": "scheme3", "reason": reason})
     if not include_landscape and not schemes:
         return jsonify({"success": False, "message": "请至少选择一个成片版本"}), 400
     if include_landscape and preview_seconds > 0:
@@ -1705,9 +1731,16 @@ def generate_vertical_video(current_user, job_id):
         f"{_vertical_video_scheme_label(item)}竖屏" for item in schemes
     ]
     output_label = " + ".join(selected_labels)
+    message = f"{output_label}已提交生成（{preview_label}）"
+    if skipped_outputs:
+        message += "；方案三竖屏因视觉方案未就绪暂未提交"
     return jsonify({
         "success": True,
-        "message": f"{output_label}已提交生成（{preview_label}）",
+        "message": message,
+        "partial_success": bool(skipped_outputs),
+        "skipped_outputs": skipped_outputs,
+        "requested_vertical_video_schemes": requested_schemes,
+        "submitted_vertical_video_schemes": schemes,
         "vertical_video_task": child_summary,
         **payload,
         "data": payload,
@@ -2658,7 +2691,7 @@ def _create_vertical_video_backfill_task(
     vertical_subtitle_position = (
         video_options.get("vertical_subtitle_position")
         if isinstance(video_options.get("vertical_subtitle_position"), dict)
-        else ({"y_pct": 0.80} if scheme in {"scheme2", "scheme3"} else None)
+        else ({"y_pct": 0.73} if scheme in {"scheme2", "scheme3"} else None)
     )
     vertical_subtitle_style = (
         video_options.get("vertical_subtitle_style")
@@ -2697,6 +2730,12 @@ def _create_vertical_video_backfill_task(
         "feature": "publisher",
         "source_feature": FEATURE_NAME,
         "source_task_id": parent.id,
+        "subtitle_alignment": {
+            "required": True,
+            "strict": True,
+            "mode": "asr_forced_alignment",
+            "source": "report_audio_final_wav",
+        },
         "audio_segments": [
             {
                 "path": audio_path,
@@ -3648,6 +3687,7 @@ def _build_scheme3_scene_timeline(rows, audio_seconds):
         if (
             str(getattr(row, "image_status", "") or "").lower() != "completed"
             or not _path_exists(image_path)
+            or has_browser_overlay_artifact(image_path)
         ):
             return None
         scenes.append({
@@ -3698,7 +3738,6 @@ def _build_scheme3_scene_timeline(rows, audio_seconds):
         timing_source = "script_weight"
 
     for scene in scenes:
-        scene.pop("script_text", None)
         scene.pop("stored_start", None)
         scene.pop("stored_end", None)
     return {
@@ -3719,11 +3758,8 @@ def _linked_visual_scene_timeline(current_user, audio_task, workflow_id, *, audi
         getattr(audio_task, "report_audio_pdf_attachment_id", None) or ""
     ).strip()
     filename = str(getattr(audio_task, "report_audio_pdf_filename", None) or "").strip()
-    try:
-        pdf_bytes = int(getattr(audio_task, "report_audio_pdf_bytes", None) or 0)
-    except (TypeError, ValueError):
-        pdf_bytes = 0
-    if not attachment_id and (not filename or pdf_bytes <= 0):
+    pdf_bytes = _linked_pdf_bytes_identity(audio_task)
+    if not attachment_id and (not filename or not pdf_bytes):
         return None
 
     parent_query = (
@@ -3777,11 +3813,8 @@ def _linked_visual_video_path(current_user, audio_task, workflow_id):
         getattr(audio_task, "report_audio_pdf_attachment_id", None) or ""
     ).strip()
     filename = str(getattr(audio_task, "report_audio_pdf_filename", None) or "").strip()
-    try:
-        pdf_bytes = int(getattr(audio_task, "report_audio_pdf_bytes", None) or 0)
-    except (TypeError, ValueError):
-        pdf_bytes = 0
-    if not attachment_id and (not filename or pdf_bytes <= 0):
+    pdf_bytes = _linked_pdf_bytes_identity(audio_task)
+    if not attachment_id and (not filename or not pdf_bytes):
         return None
 
     query = (
@@ -3834,11 +3867,8 @@ def _linked_visual_video_payloads(current_user, audio_task):
         getattr(audio_task, "report_audio_pdf_attachment_id", None) or ""
     ).strip()
     filename = str(getattr(audio_task, "report_audio_pdf_filename", None) or "").strip()
-    try:
-        pdf_bytes = int(getattr(audio_task, "report_audio_pdf_bytes", None) or 0)
-    except (TypeError, ValueError):
-        pdf_bytes = 0
-    if not attachment_id and (not filename or pdf_bytes <= 0):
+    pdf_bytes = _linked_pdf_bytes_identity(audio_task)
+    if not attachment_id and (not filename or not pdf_bytes):
         return []
 
     query = (
@@ -4013,6 +4043,16 @@ def _linked_visual_video_payloads(current_user, audio_task):
             } if video_ready else None,
         })
     return result
+
+
+def _linked_pdf_bytes_identity(audio_task):
+    """Canonical string identity matching PublicationTask's varchar projection."""
+
+    try:
+        value = int(getattr(audio_task, "report_audio_pdf_bytes", None) or 0)
+    except (TypeError, ValueError):
+        return ""
+    return str(value) if value > 0 else ""
 
 
 def _ready_linked_visual_workflow_id(current_user, audio_task, visual_scheme_key):
@@ -4684,6 +4724,9 @@ def _parse_video_options(data):
         "render_mode": _normalize_video_render_mode(
             pick("video_render_mode", "render_mode", "output_mode", default="full_video")
         ),
+        "keyframe_outputs": _normalize_keyframe_outputs(
+            pick("keyframe_outputs", "keyframe_output_keys", default=None)
+        ),
         "preview_seconds": _bounded_int(
             pick("preview_seconds", "duration_seconds", "short_video_seconds", default=VERTICAL_PREVIEW_SECONDS_DEFAULT),
             VERTICAL_PREVIEW_SECONDS_DEFAULT,
@@ -4693,6 +4736,47 @@ def _parse_video_options(data):
         "bilibili_enabled": _truthy(pick("bilibili_enabled", "publish_bilibili_enabled", default=False)),
         "sub_burn_enabled": _truthy(pick("sub_burn_enabled", default=True), default=True),
     }
+
+
+def _has_explicit_keyframe_outputs(data):
+    if "keyframe_outputs" in data or "keyframe_output_keys" in data:
+        return True
+    raw_video = data.get("video")
+    if isinstance(raw_video, dict):
+        return "keyframe_outputs" in raw_video or "keyframe_output_keys" in raw_video
+    if isinstance(raw_video, str) and raw_video.strip():
+        try:
+            parsed = json.loads(raw_video)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(parsed, dict) and (
+            "keyframe_outputs" in parsed or "keyframe_output_keys" in parsed
+        )
+    return False
+
+
+def _normalize_keyframe_outputs(value):
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            items = []
+        else:
+            try:
+                parsed = json.loads(text)
+                items = parsed if isinstance(parsed, list) else [parsed]
+            except (TypeError, ValueError):
+                items = re.split(r"[,;，；\s]+", text)
+    elif isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = [] if value is None else [value]
+
+    outputs = []
+    for item in items:
+        key = str(item or "").strip().lower()
+        if key in KEYFRAME_OUTPUTS and key not in outputs:
+            outputs.append(key)
+    return outputs
 
 
 def _parse_visual_scheme_keys(data):

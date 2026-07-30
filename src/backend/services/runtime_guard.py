@@ -387,6 +387,8 @@ def is_retryable_db_error(exc):
         "terminating connection",
         "connection not open",
         "can't reconnect until invalid transaction is rolled back",
+        "read-only transaction",
+        "read only transaction",
     )
     return any(fragment in text_value for fragment in retryable_fragments)
 

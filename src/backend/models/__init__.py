@@ -12,6 +12,11 @@ from .indie_navigator import OpportunitySignal, UserOpportunityInteraction, Coll
 from .task import PublicationTask
 from .report_visual_plan import ReportVisualPlanOutput, ReportVisualPlanSegment
 from .report_stick_figure_asset import ReportStickFigureAudioTrack, ReportStickFigureSceneAsset
+from .report_pdf_evidence import (
+    ReportPdfEvidenceClaim,
+    ReportPdfEvidenceOutput,
+    ReportVisualPlanSegmentEvidence,
+)
 from .download_task import DownloadTask
 from .system_config import SystemConfig
 from .platform_credential import PlatformCredentialAccount, PlatformCredentialBinding
@@ -57,6 +62,9 @@ __all__ = [
     'ReportVisualPlanSegment',
     'ReportStickFigureSceneAsset',
     'ReportStickFigureAudioTrack',
+    'ReportPdfEvidenceOutput',
+    'ReportPdfEvidenceClaim',
+    'ReportVisualPlanSegmentEvidence',
     'DownloadTask',
     'SystemConfig',
     'PlatformCredentialAccount',

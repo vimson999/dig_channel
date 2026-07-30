@@ -250,6 +250,12 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertTrue(child.params["podcast_cover"]["enabled"])
         self.assertTrue(child.params["bilibili_cover"]["enabled"])
         self.assertFalse(child.params["bilibili_cover"]["show_footer"])
+        self.assertTrue(child.params["subtitle_alignment"]["required"])
+        self.assertTrue(child.params["subtitle_alignment"]["strict"])
+        self.assertEqual(
+            child.params["vertical_video"]["subtitle_position"]["y_pct"],
+            0.73,
+        )
         for asset_key in (
             "thumbnail",
             "vertical_thumbnail",
@@ -449,8 +455,60 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertEqual(generate_bilibili.call_args.kwargs["main_title"], "机构：核心大牛\n集体出走")
         self.assertEqual(result["bilibili_cover_path"], str(bilibili_path))
         self.assertIn("bilibili_cover", result["keyframes"])
-        self.assertEqual(result["keyframes"]["bilibili_cover"]["label"], "B站封皮关键帧")
+        self.assertEqual(result["keyframes"]["bilibili_cover"]["label"], "横版封皮")
         self.assertEqual(result["keyframes"]["bilibili_cover"]["ratio"], "1146:717")
+
+    def test_explicit_keyframe_outputs_generate_only_selected_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bilibili_path = Path(tmpdir) / "bilibili.jpg"
+            bilibili_path.write_bytes(b"bilibili")
+
+            with patch.object(report_audio_workflow, "_latest_report_audio_keyframe", return_value=None), \
+                patch.object(report_audio_workflow.thumbnail_service, "generate_thumbnail") as generate_landscape, \
+                patch.object(
+                    report_audio_workflow.thumbnail_service,
+                    "generate_workbench_vertical_cover",
+                ) as generate_vertical_cover, \
+                patch.object(
+                    report_audio_workflow.thumbnail_service,
+                    "generate_workbench_bilibili_cover",
+                    return_value=str(bilibili_path),
+                ) as generate_bilibili:
+                result = report_audio_workflow._generate_report_audio_keyframes(
+                    "parent-explicit",
+                    datetime(2026, 7, 28, 12, 0, 0),
+                    structured={"cover_title": "测试标题", "cover_subtitle": "测试副标题"},
+                    pdf={"filename": "source.pdf"},
+                    audio={"seconds": 60},
+                    pdf_screenshot={"path": "/tmp/source-page.jpg"},
+                    payload={
+                        "video": {
+                            "enabled": False,
+                            "vertical_enabled": False,
+                            "keyframe_outputs": ["bilibili_cover"],
+                        }
+                    },
+                )
+
+        generate_bilibili.assert_called_once()
+        generate_landscape.assert_not_called()
+        generate_vertical_cover.assert_not_called()
+        self.assertEqual(list(result["keyframes"]), ["bilibili_cover"])
+        self.assertEqual(result["keyframe_outputs"], ["bilibili_cover"])
+        self.assertFalse(result["landscape_enabled"])
+        self.assertFalse(result["vertical_enabled"])
+
+    def test_keyframe_outputs_enable_video_stage_without_video_versions(self):
+        payload = {
+            "video": {
+                "enabled": False,
+                "vertical_enabled": False,
+                "render_mode": "keyframes",
+                "keyframe_outputs": ["vertical_cover"],
+            }
+        }
+
+        self.assertTrue(_video_stage_enabled(payload))
 
     def test_keyframe_mode_reuses_valid_files_after_partial_failure(self):
         from PIL import Image

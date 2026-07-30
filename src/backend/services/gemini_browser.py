@@ -91,6 +91,14 @@ def is_configured(options: Optional[GeminiBrowserOptions] = None) -> bool:
     return bool(options.user_data_dir)
 
 
+def _looks_like_image_bytes(value: bytes) -> bool:
+    return bool(
+        value.startswith(b"\x89PNG\r\n\x1a\n")
+        or value.startswith(b"\xff\xd8\xff")
+        or value.startswith((b"GIF87a", b"GIF89a", b"RIFF"))
+    )
+
+
 def status_payload(options: Optional[GeminiBrowserOptions] = None) -> Dict[str, Any]:
     options = options or GeminiBrowserOptions.from_env()
     user_data_dir = Path(options.user_data_dir).expanduser() if options.user_data_dir else None
@@ -1332,6 +1340,7 @@ class GeminiBrowserWorker:
         last_resubmit_at = 0.0
         image_only_since = None
         idle_empty_since = None
+        evidence_contract_expected = _expects_pdf_evidence_contract(prompt)
 
         while time.monotonic() < deadline:
             self._guard_total_timeout(started_at)
@@ -1346,6 +1355,14 @@ class GeminiBrowserWorker:
                     time.monotonic() - stable_since >= self.options.response_stable_seconds
                     and not self._is_generating(page)
                 ):
+                    if (
+                        evidence_contract_expected
+                        and not _has_complete_pdf_evidence_payload(candidate)
+                    ):
+                        if incomplete_since is None:
+                            incomplete_since = time.monotonic()
+                        time.sleep(1)
+                        continue
                     if _looks_like_incomplete_response(candidate):
                         if incomplete_since is None:
                             incomplete_since = time.monotonic()
@@ -1416,6 +1433,15 @@ class GeminiBrowserWorker:
                         continue
             time.sleep(1)
 
+        if (
+            last_text
+            and evidence_contract_expected
+            and not _has_complete_pdf_evidence_payload(last_text)
+        ):
+            raise GeminiBrowserAutomationError(
+                "等待 Gemini 回复超时：证据契约已请求，但未捕获到完整的 "
+                "PDF_EVIDENCE_V1_JSON/claims 或兼容 evidence_map JSON"
+            )
         if last_text:
             return {"text": last_text}
         debug = _submit_state_summary(self._composer_submit_state(page, ""), self._composer_text(page))
@@ -1527,6 +1553,16 @@ class GeminiBrowserWorker:
         saved_by = "screenshot"
         if src:
             try:
+                response = page.context.request.get(src, timeout=30_000)
+                content_type = str(response.headers.get("content-type") or "").lower()
+                body = response.body() if response.ok else b""
+                if body and (content_type.startswith("image/") or _looks_like_image_bytes(body)):
+                    pending.write_bytes(body)
+                    saved_by = "context_request"
+            except Exception:
+                saved_by = "screenshot"
+        if src and (not pending.exists() or pending.stat().st_size <= 0):
+            try:
                 data_url = page.evaluate(
                     """async (src) => {
                         const response = await fetch(src);
@@ -1551,8 +1587,11 @@ class GeminiBrowserWorker:
             dom_index = record.get("dom_index")
             if dom_index is None:
                 raise GeminiBrowserAutomationError("无法定位 Gemini 生成图片")
-            page.locator("img").nth(int(dom_index)).screenshot(path=str(pending))
-            saved_by = "screenshot"
+            saved_by = self._save_isolated_image_screenshot(
+                page,
+                int(dom_index),
+                pending,
+            )
 
         if not pending.exists() or pending.stat().st_size <= 0:
             raise GeminiBrowserAutomationError("Gemini 新图片保存为空")
@@ -1566,6 +1605,75 @@ class GeminiBrowserWorker:
             "width": record.get("naturalWidth") or record.get("width"),
             "height": record.get("naturalHeight") or record.get("height"),
         }
+
+    def _save_isolated_image_screenshot(self, page, dom_index: int, output: Path) -> str:
+        """Screenshot a cloned image above page overlays.
+
+        Gemini occasionally shows a privacy/help popover over the generated
+        image. Locator screenshots include that popover, so the fallback must
+        isolate the image before capture.
+        """
+
+        marker = f"gemini-image-capture-{int(time.time() * 1000)}-{dom_index}"
+        try:
+            created = page.evaluate(
+                """({ index, marker }) => {
+                    const source = document.querySelectorAll("img")[index];
+                    if (!source) return false;
+                    const rect = source.getBoundingClientRect();
+                    const host = document.createElement("div");
+                    host.dataset.geminiIsolatedCapture = marker;
+                    Object.assign(host.style, {
+                        position: "fixed",
+                        left: "0",
+                        top: "0",
+                        zIndex: "2147483647",
+                        width: `${Math.max(1, Math.round(rect.width))}px`,
+                        height: `${Math.max(1, Math.round(rect.height))}px`,
+                        overflow: "hidden",
+                        background: "transparent",
+                        isolation: "isolate",
+                    });
+                    const clone = source.cloneNode(true);
+                    Object.assign(clone.style, {
+                        display: "block",
+                        width: "100%",
+                        height: "100%",
+                        maxWidth: "none",
+                        maxHeight: "none",
+                        margin: "0",
+                        objectFit: getComputedStyle(source).objectFit || "fill",
+                    });
+                    host.appendChild(clone);
+                    document.body.appendChild(host);
+                    return true;
+                }""",
+                {"index": dom_index, "marker": marker},
+            )
+            if created:
+                page.locator(f'[data-gemini-isolated-capture="{marker}"] img').screenshot(path=str(output))
+                return "isolated_screenshot"
+        except Exception:
+            logger.warning(
+                "Gemini isolated image capture failed for job %s; using locator fallback",
+                getattr(self, "_current_job_id", ""),
+                exc_info=True,
+            )
+        finally:
+            try:
+                page.evaluate(
+                    """(marker) => {
+                        document.querySelectorAll("[data-gemini-isolated-capture]").forEach((node) => {
+                            if (node.dataset.geminiIsolatedCapture === marker) node.remove();
+                        });
+                    }""",
+                    marker,
+                )
+            except Exception:
+                pass
+
+        page.locator("img").nth(dom_index).screenshot(path=str(output))
+        return "screenshot"
 
     def _save_embedded_response_images(
         self,
@@ -2251,6 +2359,55 @@ def _looks_like_incomplete_response(text: Any) -> bool:
         r")\s*[:：]?\s*$"
     )
     return bool(dangling_re.search(clean))
+
+
+def _expects_pdf_evidence_contract(prompt: Any) -> bool:
+    value = str(prompt or "").lower()
+    return (
+        "pdf_evidence_v1_json" in value
+        or "report_pdf_evidence_v1" in value
+    )
+
+
+def _has_complete_pdf_evidence_payload(text: Any) -> bool:
+    """Require a decodable final evidence block, not a partially streamed prefix."""
+
+    raw = str(text or "")
+    decoder = json.JSONDecoder()
+    index = 0
+    decoded = 0
+    while index < len(raw) and decoded < 200:
+        match = re.search(r"[\{\[]", raw[index:])
+        if not match:
+            return False
+        start = index + match.start()
+        try:
+            payload, consumed = decoder.raw_decode(raw[start:])
+        except ValueError:
+            index = start + 1
+            continue
+        decoded += 1
+        if _contains_pdf_evidence_envelope(payload):
+            return True
+        index = start + max(1, consumed)
+    return False
+
+
+def _contains_pdf_evidence_envelope(value: Any) -> bool:
+    if isinstance(value, dict):
+        schema = str(value.get("schema_version") or "").strip().lower()
+        if schema == "report_pdf_evidence_v1" and isinstance(value.get("claims"), list):
+            return True
+        if isinstance(value.get("evidence_map"), list):
+            return True
+        return any(
+            _contains_pdf_evidence_envelope(item)
+            for item in value.values()
+            if isinstance(item, (dict, list))
+        )
+    if isinstance(value, list):
+        return any(_contains_pdf_evidence_envelope(item) for item in value)
+    return False
 
 
 def _promptless_submit_confirmed(state: Any, composer_text: str, generating: bool = False, *, clicked_send: bool = False) -> bool:

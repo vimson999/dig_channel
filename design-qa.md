@@ -1,3 +1,49 @@
+# Design QA: 知识星球内容分析工作台
+
+## Visual truth
+
+- Selected design direction: `/Users/v9/.codex/generated_images/019faf40-cced-7853-9ecf-71b1f5f7d146/call_nEda2IkB8bnsvZuaKfZ80UNn.png`
+- Browser implementation: `/private/tmp/zsxq-lab-content-workbench-1440x1024.png`
+- Side-by-side comparison: `/private/tmp/zsxq-lab-content-workbench-comparison.png`
+- Desktop viewport: `1440x1024`; live state uses `前沿信息收录 / 调研纪要` with 20 loaded topics and 168 attachments.
+- Mobile viewport: `390x844`; live local group list loaded.
+
+## Comparison
+
+The selected direction and browser implementation were reviewed together in one side-by-side visual comparison input.
+
+- Information architecture: passed. The generic three-step hero and abstract 3D graph are gone. The first screen now exposes active group, active Tab, topic coverage, search and filters, a selected-topic inspector, and actual next actions.
+- Header: passed. The implementation keeps the selected direction's compact title, current-context line, coverage metrics, and primary sync action while preserving Shioa's existing navigation.
+- Main workspace: passed. Desktop uses a `285px / minmax(0, 1fr) / 350px` three-column workbench. Existing topic cards and attachment controls remain operational instead of being replaced with mock table interactions.
+- Topic inspector: passed. It explains正文、附件、外链、总结、语音 coverage, identifies the current gap, shows the processing path, and offers only real actions: locate topic, open source when available, and sync current Tab.
+
+## Iteration history
+
+1. Initial P1: the original hero repeated obvious operating steps and consumed the first screen without showing live state.
+2. Initial P1: the Three.js graph visualized object types but did not explain what was missing, why it mattered, or what to do next.
+3. Fix: replaced both areas with live coverage metrics and a contextual topic inspector driven by existing topic, attachment, external-document, summary, and TTS fields.
+4. Post-fix: switched between `生财有术` and `前沿信息收录`, loaded real topics, selected multiple topic inspectors, and confirmed the UI updates without console errors.
+
+## Fidelity surfaces
+
+- Typography and color: passed. Existing Shioa system fonts, slate/blue palette, borders, radii, and Font Awesome icon system are retained.
+- Spacing and density: passed. The first screen is materially denser but keeps readable labels and clear separation between navigation, filters, content, and analysis.
+- Copy and content: passed. Metrics and inspector states use live local data; no placeholder counts or fabricated processing results are shown.
+- Responsive behavior: passed. At `390x844`, `body.scrollWidth`, document width, and viewport width all equal `390`; the header, metrics, and workbench stack without horizontal overflow.
+
+## Functional checks
+
+- Local star list loaded four real groups.
+- Selecting `生财有术` loaded 16 topics and 17 official Tabs; selecting another topic changed the inspector title and explanation.
+- Selecting `前沿信息收录` loaded 20 topics and 168 attachments; the first inspector showed 9 attachments and the attachment-processing recommendation.
+- Header sync delegates to the existing current-Tab synchronization action.
+- Inspector “定位主题” and conditional “查看原文” use existing topic data and page behavior.
+- JavaScript syntax checks, duplicate-ID check, console error check, responsive overflow check, and `git diff --check` passed.
+
+final result: passed
+
+---
+
 # Design QA: 生财情报台
 
 ## Visual truth
@@ -46,6 +92,145 @@ The source and implementation screenshots were reviewed together in the same vis
 - Real-data checks: AI + 销售私域 returned all `247` matching 90-day summaries; Ozon search returned `22` matching 730-day records; topic detail returned cached full text; invalid pagination returned structured HTTP 400.
 - Automated tests: `10` unittest cases passed, covering classifiers, parameter bounds, cross-year trend keys, compact topic payloads, API parameter forwarding, API validation, and 404 detail behavior.
 - Static checks: Python compilation, JavaScript syntax, and `git diff --check` passed.
+
+final result: passed
+
+---
+
+# Design QA: 任务概览模块化进度
+
+## Visual truth
+
+- Source visual truth: `/var/folders/dd/51s7f6gs6vz30qy285xd_b_80000gn/T/codex-clipboard-f3ccaf1b-0cfc-413c-b710-a2e698c4228d.png`
+- Browser-rendered implementation: `/tmp/report-audio-workflow-stages-v4.png`
+- Responsive implementation: `/tmp/report-audio-workflow-stages-v4-1024.png`
+- Side-by-side comparison: `/tmp/report-audio-workflow-stages-v4-comparison.png`
+- Viewport: source and desktop implementation both `1589 × 382` CSS px at device scale factor `1`; responsive check `1024 × 768`.
+- Pixel dimensions: source `1589 × 382`, implementation `1589 × 382`; no density normalization was required.
+- State: source shows `review_cover_titles · 60%`; the live task had completed before the final capture and therefore shows all six stages completed.
+
+## Comparison evidence
+
+- Full view: passed. The summary card keeps the existing status badge, title, metadata, action buttons, surface, radius, and density while replacing only the opaque percentage bar.
+- Focused progress region: passed. The old bar and the six-stage implementation were placed side by side. The new cards expose PDF preparation, Gemini parsing, script cleanup, speech generation, video generation, and final completion as separate states.
+- Responsive region: passed. At `1589px` the stages use one six-column row; at `1024px` they use a readable two-row, three-column layout without clipping the summary card.
+
+## Findings and iteration history
+
+1. Initial P1: a numeric percentage did not explain which workflow module had finished or where the task was currently blocked.
+2. Fix: replaced the bar with six semantic stage cards and mapped backend step names plus progress fallback values to completed, active, pending, failed, and canceled states.
+3. Post-fix: green completed stages and the blue active stage are immediately distinguishable; future stages stay neutral. No remaining P0/P1/P2 findings in the changed region.
+
+## Fidelity surfaces
+
+- Fonts and typography: passed. Existing system font, small-label scale, bold hierarchy, and compact metadata are preserved.
+- Spacing and layout rhythm: passed. The stage cards use the existing `gap-2`, compact padding, rounded borders, and responsive grid rhythm.
+- Colors and visual tokens: passed. Emerald is used only for completed stages, blue for the active stage, slate for pending, red for failed, and amber for canceled.
+- Image quality and assets: passed. The component has no raster imagery; existing Font Awesome icons are reused.
+- Copy and content: passed. Every card has a concise module name and an explicit state label rather than relying on color alone.
+
+## Functional checks
+
+- The live completed task rendered six green `已完成` modules.
+- `review_cover_titles` maps to `文案整理`, so the first two modules are complete, the third is active, and later modules remain pending.
+- The legacy horizontal percentage bar is no longer rendered.
+- The current backend step remains visible in the summary metadata for diagnosis.
+- Browser DOM exposed the ordered list with `aria-label="任务流程进度"`.
+- Automated regression: `60 passed`, `4 subtests passed`.
+- JavaScript syntax and `git diff --check` passed.
+
+final result: passed
+
+---
+
+# Design QA: PDF 证据卡片回归主内容流
+
+## Visual truth
+
+- Source screenshot: `/var/folders/dd/51s7f6gs6vz30qy285xd_b_80000gn/T/codex-clipboard-462fe5f8-63bf-40b6-b03e-05807d9111b9.png`
+- Implementation screenshot: `/tmp/report-pdf-evidence-layout-v3-viewport.png`
+- Focused implementation screenshot: `/tmp/report-pdf-evidence-layout-v3-focused.png`
+- Combined comparison: `/tmp/report-pdf-evidence-layout-v3-comparison.png`
+- Source and implementation pixels: `1604x903`; CSS viewport `1604x903`, device scale `1`.
+- State: source shows the evidence card incorrectly outside the two-column detail grid; implementation shows the same evidence pending state inside the right-hand task flow. Dynamic report content differs because the local task advanced independently.
+
+## Comparison evidence
+
+- Full view: passed after fix. The evidence card is now a child of `#detail-root`, has exactly the same width as adjacent task cards, and no longer spans beneath the sticky quick navigation.
+- Focused region: passed. Quick navigation scrolls to the evidence card, then the normal order continues with child tasks and the publishing center.
+- Responsive check: passed at `1024x768`; panel width equals the right content width (`780px`) and `body.scrollWidth` equals viewport width.
+
+## Findings and iteration history
+
+1. Initial P1: `#pdf-evidence-panel` was placed after the entire two-column grid, making it span the full page and disconnecting it from the task-detail hierarchy.
+2. Initial P2: a static out-of-grid mount could not survive full detail rerenders without either disappearing or remaining in the wrong order.
+3. Fix: removed the static page-level section; the evidence controller now mounts the card after 文案内容, or after 素材预览 while content is unavailable, and remounts after detail DOM replacement.
+4. Post-fix: no remaining P0/P1/P2 findings.
+
+## Fidelity surfaces
+
+- Typography: passed; existing detail-page font family, scale, weights, and helper-text hierarchy are unchanged.
+- Spacing and layout: passed; evidence uses the same right-column width, `space-y-4` rhythm, radius, border, padding, and elevation as neighboring cards.
+- Colors and tokens: passed; existing slate surfaces and blue pending state are retained.
+- Images and icons: passed; no new raster assets were required and the existing Font Awesome icon family is preserved.
+- Copy and content: passed; the pending state remains explicit and truthful.
+
+## Functional checks
+
+- Evidence quick-navigation target resolves uniquely and scrolls to the mounted card.
+- Full detail rerenders remount the card in the correct position.
+- Pending evidence data remains visible after remount.
+- Desktop `1604x903` and narrower `1024x768` checks have no horizontal overflow.
+- Browser console has no application errors.
+- JavaScript syntax, `10` relevant tests, `5` subtests, and `git diff --check` passed.
+
+final result: passed
+
+---
+
+# Design QA: 研报视频生成配置分层
+
+## Visual truth
+
+- Source screenshot: `/var/folders/dd/51s7f6gs6vz30qy285xd_b_80000gn/T/codex-clipboard-4cafe5c7-d061-485b-9b33-1e397f7ee0ff.png`
+- Keyframe implementation screenshot: `/tmp/report-audio-output-mode-keyframes-final.png`
+- Full-video implementation screenshot: `/tmp/report-audio-output-mode-full-video-final.png`
+- Combined keyframe comparison: `/tmp/report-audio-output-mode-keyframes-comparison.png`
+- Combined full-video comparison: `/tmp/report-audio-output-mode-full-video-comparison.png`
+- Source pixels: `470x809`.
+- Implementation viewport and pixels: `1280x720`, desktop CSS viewport at device scale `1`.
+- State: the same MVP video-stage form, checked once in “关键帧 + 封皮” state and once in “完整视频” state.
+
+## Comparison evidence
+
+- Full view: passed. The existing Shioa sidebar card, typography, radii, neutral surfaces, and compact density are preserved.
+- Focused region: passed. The original video-stage card and both revised mode states were combined side by side before review. The new hierarchy makes generation mode the first decision and removes inactive settings from view.
+- Interaction state: passed. Selecting “关键帧 + 封皮” shows only six image outputs and TTS step 3; selecting “完整视频” shows horizontal versions, vertical versions, and TTS step 4.
+
+## Findings and iteration history
+
+1. Initial P2: the keyframe card remained visually highlighted after selecting full video. Added active-card token switching so border and background follow the checked radio.
+2. Initial P2: three vertical-video cards were cramped in the narrow sidebar. Changed the responsive grid to two columns so names and descriptions remain readable.
+3. Post-fix: no remaining P0/P1/P2 findings.
+
+## Fidelity surfaces
+
+- Fonts and typography: passed. Existing Chinese system-font stack, size scale, weights, and compact helper text are retained.
+- Spacing and layout rhythm: passed. The card keeps the existing padding and radius while adding numbered sections and consistent `gap-2`/`gap-3` grouping.
+- Colors and visual tokens: passed. Indigo marks the selected mode; amber identifies image outputs; sky and emerald distinguish horizontal and vertical video choices without changing the product palette.
+- Image quality and assets: passed. This form contains no raster assets; existing browser-native inputs and product icon resources are retained.
+- Copy and content: passed. Every selectable output names its orientation, purpose, scheme, and dimensions where applicable.
+
+## Functional checks
+
+- Inactive mode controls are disabled and excluded from submitted parameters.
+- Keyframe mode requires at least one selected image output.
+- Complete-video mode requires at least one horizontal, vertical, or independent visual-video version.
+- Up to three vertical keyframes may be selected; full vertical videos retain the existing maximum of two.
+- Backend accepts explicit keyframe output keys, generates only selected artifacts, and preserves legacy requests without the new field.
+- Browser console showed no application errors; the existing Tailwind CDN development warning remains unchanged.
+- Automated regression: `186 passed`, `33 subtests passed`.
+- JavaScript syntax, Python compilation, and `git diff --check` passed.
 
 final result: passed
 
