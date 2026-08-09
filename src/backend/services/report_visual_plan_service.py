@@ -48,6 +48,13 @@ def storyboard_response_covers_script(material: Dict[str, Any], gemini_text: str
     if not script:
         return False
     response_text = str(gemini_text or "")
+    # A response is not complete merely because all source fragments are
+    # present.  Every fragment must also carry its own Gem prompt.  Gemini can
+    # otherwise emit a final marker after dropping prompt labels from the tail
+    # of a long, multi-turn answer; letting the browser close there produces an
+    # unrecoverable normalization failure later.
+    if not _storyboard_fragments_have_prompts(response_text):
+        return False
     # The text-only storyboard Gem emits this marker only after it has finished
     # the title scene and all正文 scenes. Continuing after the marker causes the
     # Gem to repeat the full storyboard and makes normalization less reliable.
@@ -87,6 +94,22 @@ def storyboard_response_covers_script(material: Dict[str, Any], gemini_text: str
         if SequenceMatcher(None, expected, candidate, autojunk=False).ratio() >= 0.995:
             return True
     return False
+
+
+def _storyboard_fragments_have_prompts(response_text: str) -> bool:
+    """Return whether each labeled source fragment has a following Gem prompt."""
+    fragment_starts = [
+        match.start()
+        for match in re.finditer(r"【文案原句】\s*[:：]", str(response_text or ""))
+    ]
+    if not fragment_starts:
+        return False
+    prompt_pattern = re.compile(r"【AI\s*提示词】\s*[:：]", flags=re.IGNORECASE)
+    for index, start in enumerate(fragment_starts):
+        end = fragment_starts[index + 1] if index + 1 < len(fragment_starts) else len(response_text)
+        if not prompt_pattern.search(str(response_text)[start:end]):
+            return False
+    return True
 
 
 def normalize_storyboard_response(material: Dict[str, Any], gemini_text: str) -> Dict[str, Any]:
@@ -149,6 +172,11 @@ def normalize_storyboard_response(material: Dict[str, Any], gemini_text: str) ->
         raw_title_scene,
         raw_segments,
     )
+    raw_title_scene, raw_segments = _restore_exact_prompt_sequence(
+        str(gemini_text),
+        raw_title_scene,
+        raw_segments,
+    )
     return _build_normalized_storyboard(
         material,
         script,
@@ -188,6 +216,44 @@ def _restore_exact_labeled_gemini_prompts(
     restored_title = {**raw_title_scene, "visual_prompt": title_prompt}
     restored_segments = [
         {**item, "visual_prompt": exact_prompts[index]}
+        for index, item in enumerate(raw_segments)
+    ]
+    return restored_title, restored_segments
+
+
+def _restore_exact_prompt_sequence(
+    gemini_text: str,
+    raw_title_scene: Dict[str, Any],
+    raw_segments: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Restore labeled Gem prompts even when DS had to repair irregular blocks.
+
+    DS may return useful source-script boundaries while changing the prompt
+    wording.  When Gem supplied explicit prompt labels, the labels are the
+    authority and are restored in order.  A non-empty but incomplete labeled
+    sequence is rejected with a precise recovery message; inventing the missing
+    prompts would make downstream images silently diverge from the Gem output.
+    """
+    prompt_pattern = re.compile(
+        r"【AI\s*提示词】\s*[:：]\s*(.*?)"
+        r"(?=\s*(?:标题镜头|分镜\s*\d+(?:\s*[（(]\s*标题镜头\s*[）)])?)\s*【文案原句】|【全文分镜完成】|$)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    exact_prompts = [match.group(1).strip() for match in prompt_pattern.finditer(str(gemini_text or ""))]
+    exact_prompts = [value for value in exact_prompts if value]
+    if not exact_prompts:
+        return raw_title_scene, raw_segments
+    expected = 1 + len(raw_segments)
+    if len(exact_prompts) != expected:
+        raise ValueError(
+            "Gem 原始分镜缺少完整 AI 提示词："
+            f"需要 {expected} 条，实际 {len(exact_prompts)} 条；请重新请求 Gem"
+        )
+    if not isinstance(raw_title_scene, dict) or any(not isinstance(item, dict) for item in raw_segments):
+        return raw_title_scene, raw_segments
+    restored_title = {**raw_title_scene, "visual_prompt": exact_prompts[0]}
+    restored_segments = [
+        {**item, "visual_prompt": exact_prompts[index + 1]}
         for index, item in enumerate(raw_segments)
     ]
     return restored_title, restored_segments
@@ -376,7 +442,10 @@ def _align_storyboard_segments(
             compact_prompt, _ = _compact_with_positions(prompt)
             prompt_start = compact_gemini.find(compact_prompt, prompt_offset)
             if prompt_start < 0:
-                raise ValueError("DS 改写或翻译了 Gem 提示词，已拒绝保存")
+                raise ValueError(
+                    "Gem 原文中未找到对应的原始 AI 提示词（可能是 DS 改写或翻译，"
+                    "或 Gem 多轮回复未完整合并），已拒绝保存"
+                )
             prompt_end = prompt_start + len(compact_prompt)
             exact_start = gemini_positions[prompt_start]
             exact_end = gemini_positions[prompt_end - 1] + 1
@@ -419,7 +488,10 @@ def _extract_exact_gemini_prompt(gemini_text: str, prompt: str, offset: int = 0)
     compact_prompt, _ = _compact_with_positions(prompt)
     prompt_start = compact_gemini.find(compact_prompt, max(0, int(offset or 0)))
     if prompt_start < 0:
-        raise ValueError("DS 改写或翻译了 Gem 提示词，已拒绝保存")
+        raise ValueError(
+            "Gem 原文中未找到对应的原始 AI 提示词（可能是 DS 改写或翻译，"
+            "或 Gem 多轮回复未完整合并），已拒绝保存"
+        )
     prompt_end = prompt_start + len(compact_prompt)
     exact_start = gemini_positions[prompt_start]
     exact_end = gemini_positions[prompt_end - 1] + 1

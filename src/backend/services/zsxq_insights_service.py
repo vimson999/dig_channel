@@ -2,20 +2,32 @@
 
 from __future__ import annotations
 
+import os
 import re
-from collections import Counter, defaultdict
+import time
+from collections import Counter, OrderedDict, defaultdict
 from datetime import datetime, timedelta
+from threading import RLock
+from urllib.parse import unquote
 
 from sqlalchemy import text
 
 from models import db
+from services.zsxq_yiren_award_cleanup_service import YIREN_NAME, is_yiren_award_comment
 
 
 GROUP_ID_SHENGCAI = "1824528822"
 MIN_RANGE_DAYS = 30
 MAX_RANGE_DAYS = 730
 DEFAULT_PAGE_SIZE = 30
-MAX_PAGE_SIZE = 5000
+MAX_PAGE_SIZE = 100
+MAX_PAGE = 10_000
+DEFAULT_CACHE_TTL_SECONDS = 1800
+DEFAULT_AGGREGATE_CACHE_TTL_SECONDS = 3600
+MAX_CACHE_ENTRIES = 64
+
+_cache_lock = RLock()
+_insights_cache = OrderedDict()
 
 AI_PATTERN = r"人工智能|大模型|智能体|提示词|chatgpt|claude|deepseek|cursor|coze|扣子|mcp|工作流|自动化|aigc|(?<![a-z])ai(?![a-z])"
 CONTENT_PATTERN = r"小红书|抖音|视频号|公众号|短视频|自媒体|内容创作|个人IP|起号|直播|播客|流量"
@@ -30,6 +42,8 @@ PROOF_RE = re.compile(
     r"收入|营收|利润|净利|变现|成交|订单|单量|gmv|月入|赚了|赚钱|复盘|实操|跑通|中标|案例|增长|从0到1",
     re.I,
 )
+RICH_TEXT_TOKEN_RE = re.compile(r"<e\b(?P<attrs>[^>]*?)(?:/?>|>\s*</e>)", re.I | re.S)
+RICH_TEXT_TITLE_RE = re.compile(r"""title=(["'])(?P<title>.*?)\1""", re.I | re.S)
 
 
 def _both(first: str, second: str) -> str:
@@ -191,11 +205,60 @@ def _normalize_page_size(value) -> int:
     return min(size, MAX_PAGE_SIZE)
 
 
+def _normalize_page(value) -> int:
+    raw_value = 1 if value is None or value == "" else value
+    try:
+        page = int(raw_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("page 必须是整数") from error
+    if page < 1:
+        raise ValueError("page 必须大于 0")
+    return min(page, MAX_PAGE)
+
+
 def _normalize_sort(value) -> str:
     sort = str(value or "latest").strip().lower()
     if sort not in {"latest", "signal"}:
         raise ValueError("sort 仅支持 latest 或 signal")
     return sort
+
+
+def _cache_ttl(env_name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(env_name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(0, min(value, 3600))
+
+
+def _cache_get(key):
+    with _cache_lock:
+        cached = _insights_cache.get(key)
+        if not cached:
+            return None
+        expires_at, value = cached
+        if expires_at <= time.monotonic():
+            _insights_cache.pop(key, None)
+            return None
+        _insights_cache.move_to_end(key)
+        return value
+
+
+def _cache_set(key, value, ttl_seconds: int):
+    if ttl_seconds <= 0:
+        return value
+    with _cache_lock:
+        _insights_cache[key] = (time.monotonic() + ttl_seconds, value)
+        _insights_cache.move_to_end(key)
+        while len(_insights_cache) > MAX_CACHE_ENTRIES:
+            _insights_cache.popitem(last=False)
+    return value
+
+
+def clear_insights_cache():
+    """Clear process-local analytics snapshots after a sync or in tests."""
+    with _cache_lock:
+        _insights_cache.clear()
 
 
 def matches_theme(body: str, theme_id: str) -> bool:
@@ -282,6 +345,11 @@ def _category_parameters():
 
 
 def _aggregate_themes(group_id: str):
+    cache_key = ("aggregates", str(group_id))
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     categories = _category_parameters()
     category_sql = " UNION ALL ".join(
         f"SELECT :id_{index} AS id, :pattern_{index} AS pattern, :required_{index} AS required"
@@ -296,7 +364,9 @@ def _aggregate_themes(group_id: str):
     statement = text(
         f"""
         WITH ranked AS (
-            SELECT *, row_number() OVER (
+            SELECT topic_id, author_name, tab_label, create_time, title, content,
+                   question_text, answer_text, article_title, article_excerpt,
+                   row_number() OVER (
                 PARTITION BY topic_id
                 ORDER BY CASE tab_label
                     WHEN '精华' THEN 0 WHEN '中标' THEN 1 WHEN '生财好事' THEN 2 ELSE 3 END,
@@ -347,17 +417,47 @@ def _aggregate_themes(group_id: str):
         for key in ("topics", "authors", "recent", "demand", "proof", "total_topics"):
             row[key] = int(row.get(key) or 0)
         result[row["id"]] = row
-    return result
+    return _cache_set(
+        cache_key,
+        result,
+        _cache_ttl(
+            "ZSXQ_INSIGHTS_AGGREGATE_CACHE_TTL_SECONDS",
+            DEFAULT_AGGREGATE_CACHE_TTL_SECONDS,
+        ),
+    )
 
 
 def _load_selected_topics(group_id: str, theme_id: str, range_days: int, newest: datetime, query: str = ""):
+    cache_key = (
+        "selected",
+        str(group_id),
+        str(theme_id),
+        int(range_days),
+        newest.date().isoformat(),
+        str(query or ""),
+    )
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     config = THEME_LOOKUP[theme_id]
     required = AI_PATTERN if theme_id in {"ai-content", "ai-sales", "ai-ecommerce"} else None
+    subtopic_definitions = SUBTOPICS.get(theme_id) or SUBTOPICS.get("ai") or []
+    subtopic_columns = ",\n               ".join(
+        f"body ~* :subtopic_pattern_{index} AS subtopic_match_{index}"
+        for index in range(len(subtopic_definitions))
+    )
+    if subtopic_columns:
+        subtopic_columns = ",\n               " + subtopic_columns
     start_date = (newest - timedelta(days=range_days - 1)).date()
+    start_date_text = start_date.isoformat()
     statement = text(
-        """
+        f"""
         WITH ranked AS (
-            SELECT *, row_number() OVER (
+            SELECT topic_id, title, author_name, content, question_text, answer_text,
+                   article_title, article_excerpt, tab_id, tab_label, topic_type,
+                   create_time, files_count, images_count, last_synced_at,
+                   row_number() OVER (
                 PARTITION BY topic_id
                 ORDER BY CASE tab_label
                     WHEN '精华' THEN 0 WHEN '中标' THEN 1 WHEN '生财好事' THEN 2 ELSE 3 END,
@@ -365,6 +465,7 @@ def _load_selected_topics(group_id: str, theme_id: str, range_days: int, newest:
             ) AS rn
             FROM zsxq_topics
             WHERE group_id = :group_id
+              AND create_time >= :start_date_text
         ), base AS (
             SELECT topic_id, title, author_name, content, question_text, answer_text,
                    article_title, article_excerpt, tab_id, tab_label, topic_type,
@@ -372,13 +473,13 @@ def _load_selected_topics(group_id: str, theme_id: str, range_days: int, newest:
                    concat_ws(' ', title, content, question_text, answer_text, article_title, article_excerpt) AS body
             FROM ranked WHERE rn = 1
         )
-        SELECT topic_id, title, author_name, left(content, 1600) AS content,
-               left(question_text, 800) AS question_text, left(answer_text, 800) AS answer_text,
-               article_title, left(article_excerpt, 800) AS article_excerpt,
-               tab_id, tab_label, topic_type, create_time, files_count, images_count, last_synced_at
+        SELECT topic_id, author_name, create_time,
+               body ~* :demand_pattern AS has_demand,
+               body ~* :proof_pattern AS has_proof
+               {subtopic_columns}
         FROM base
         WHERE CASE
-                  WHEN substring(create_time from 1 for 10) ~ '^\\d{4}-\\d{2}-\\d{2}$'
+                  WHEN substring(create_time from 1 for 10) ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}$'
                   THEN substring(create_time from 1 for 10)::date
               END >= :start_date
           AND body ~* :pattern
@@ -391,26 +492,71 @@ def _load_selected_topics(group_id: str, theme_id: str, range_days: int, newest:
         ORDER BY create_time DESC
         """
     )
-    rows = db.session.execute(
-        statement,
-        {
-            "group_id": group_id,
-            "start_date": start_date,
-            "pattern": config["pattern"],
-            "required": required,
-            "query": query,
-            "query_like": f"%{query.lower()}%",
-        },
-    ).mappings().all()
+    params = {
+        "group_id": group_id,
+        "start_date": start_date,
+        "start_date_text": start_date_text,
+        "pattern": config["pattern"],
+        "required": required,
+        "query": query,
+        "query_like": f"%{query.lower()}%",
+        "demand_pattern": DEMAND_RE.pattern,
+        "proof_pattern": PROOF_RE.pattern,
+    }
+    for index, (_label, pattern) in enumerate(subtopic_definitions):
+        params[f"subtopic_pattern_{index}"] = pattern
+    rows = db.session.execute(statement, params).mappings().all()
     topics = []
     for raw in rows:
         topic = dict(raw)
-        topic["body"] = _topic_body(topic)
         topic["created_at"] = _parse_time(topic.get("create_time"))
-        topic["has_demand"] = bool(DEMAND_RE.search(topic["body"]))
-        topic["has_proof"] = bool(PROOF_RE.search(topic["body"]))
+        topic["has_demand"] = bool(topic.get("has_demand"))
+        topic["has_proof"] = bool(topic.get("has_proof"))
+        topic["subtopic_matches"] = {
+            label
+            for index, (label, _pattern) in enumerate(subtopic_definitions)
+            if topic.pop(f"subtopic_match_{index}", False)
+        }
         topics.append(topic)
-    return topics
+    return _cache_set(
+        cache_key,
+        topics,
+        _cache_ttl("ZSXQ_INSIGHTS_CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL_SECONDS),
+    )
+
+
+def _load_topic_page_details(group_id: str, topic_ids):
+    normalized_ids = list(dict.fromkeys(str(topic_id) for topic_id in topic_ids if topic_id))
+    if not normalized_ids:
+        return {}
+    rows = db.session.execute(
+        text(
+            """
+            WITH ranked AS (
+                SELECT topic_id, title, author_name, content, question_text, answer_text,
+                       article_title, article_excerpt, tab_id, tab_label, topic_type,
+                       create_time, files_count, images_count, last_synced_at,
+                       row_number() OVER (
+                    PARTITION BY topic_id
+                    ORDER BY CASE tab_label
+                        WHEN '精华' THEN 0 WHEN '中标' THEN 1 WHEN '生财好事' THEN 2 ELSE 3 END,
+                        last_synced_at DESC
+                ) AS rn
+                FROM zsxq_topics
+                WHERE group_id = :group_id
+                  AND topic_id = ANY(:topic_ids)
+            )
+            SELECT topic_id, title, author_name, left(content, 1600) AS content,
+                   left(question_text, 800) AS question_text, left(answer_text, 800) AS answer_text,
+                   article_title, left(article_excerpt, 800) AS article_excerpt,
+                   tab_id, tab_label, topic_type, create_time, files_count, images_count, last_synced_at
+            FROM ranked
+            WHERE rn = 1
+            """
+        ),
+        {"group_id": str(group_id), "topic_ids": normalized_ids},
+    ).mappings().all()
+    return {str(row["topic_id"]): dict(row) for row in rows}
 
 
 def get_topic_detail(group_id: str, topic_id: str):
@@ -431,6 +577,10 @@ def get_topic_detail(group_id: str, topic_id: str):
         return None
     item = dict(row)
     content = item.get("content") or item.get("answer_text") or item.get("question_text") or item.get("article_excerpt") or ""
+    recognition = _load_yiren_recognition(group_id, [topic_id]).get(
+        str(topic_id),
+        _empty_yiren_recognition(),
+    )
     return {
         "topic_id": item.get("topic_id"),
         "title": item.get("title") or item.get("article_title") or "未命名主题",
@@ -440,6 +590,7 @@ def get_topic_detail(group_id: str, topic_id: str):
         "tab": item.get("tab_label") or "未分类",
         "files_count": int(item.get("files_count") or 0),
         "images_count": int(item.get("images_count") or 0),
+        **recognition,
     }
 
 
@@ -494,7 +645,17 @@ def _subtopic_breakdown(theme_id: str, topics):
     raw_counts = []
     for label, pattern in definitions:
         matcher = re.compile(pattern, re.I | re.S)
-        raw_counts.append((label, sum(bool(matcher.search(item["body"])) for item in topics)))
+        raw_counts.append(
+            (
+                label,
+                sum(
+                    label in item.get("subtopic_matches", set())
+                    if "subtopic_matches" in item
+                    else bool(matcher.search(item.get("body") or ""))
+                    for item in topics
+                ),
+            )
+        )
     total = sum(count for _, count in raw_counts) or 1
     result = []
     allocated = 0
@@ -511,7 +672,7 @@ def _topic_item(item):
     has_proof = item["has_proof"]
     has_demand = item["has_demand"]
     signal = "结果案例" if has_proof else ("明确需求" if has_demand else "普通讨论")
-    content = str(item.get("content") or item.get("article_excerpt") or "").strip()
+    content = _plain_topic_text(item.get("content") or item.get("article_excerpt") or "")
     return {
         "topic_id": item.get("topic_id"),
         "title": item.get("title") or item.get("article_title") or "未命名主题",
@@ -522,7 +683,84 @@ def _topic_item(item):
         "signal": signal,
         "files_count": int(item.get("files_count") or 0),
         "images_count": int(item.get("images_count") or 0),
+        "yiren_recognition": item.get("yiren_recognition") or "not_found",
+        "yiren_label": item.get("yiren_label") or "未见亦仁认可",
+        "yiren_evidence": item.get("yiren_evidence"),
     }
+
+
+def _plain_topic_text(value):
+    def replace_token(match):
+        title_match = RICH_TEXT_TITLE_RE.search(match.group("attrs") or "")
+        if not title_match:
+            return ""
+        try:
+            return unquote(title_match.group("title"))
+        except Exception:
+            return title_match.group("title")
+
+    cleaned = RICH_TEXT_TOKEN_RE.sub(replace_token, str(value or ""))
+    cleaned = re.sub(r"</?e\b[^>]*>", "", cleaned, flags=re.I)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _empty_yiren_recognition():
+    return {
+        "yiren_recognition": "not_found",
+        "yiren_label": "未见亦仁认可",
+        "yiren_evidence": None,
+    }
+
+
+def _load_yiren_recognition(group_id: str, topic_ids):
+    normalized_ids = list(dict.fromkeys(str(topic_id) for topic_id in topic_ids if topic_id))
+    if not normalized_ids:
+        return {}
+    rows = db.session.execute(
+        text(
+            """
+            SELECT topic_id, owner_user_id, text, create_time
+            FROM zsxq_topic_comments
+            WHERE group_id = :group_id
+              AND owner_name = :owner_name
+              AND topic_id = ANY(:topic_ids)
+            ORDER BY create_time DESC
+            """
+        ),
+        {
+            "group_id": str(group_id),
+            "owner_name": YIREN_NAME,
+            "topic_ids": normalized_ids,
+        },
+    ).mappings().all()
+    result = {topic_id: _empty_yiren_recognition() for topic_id in normalized_ids}
+    for raw in rows:
+        row = dict(raw)
+        topic_id = str(row.get("topic_id") or "")
+        if topic_id not in result:
+            continue
+        evidence = {
+            "text": str(row.get("text") or "")[:240],
+            "date": str(row.get("create_time") or "")[:10],
+        }
+        if is_yiren_award_comment(
+            YIREN_NAME,
+            row.get("text"),
+            owner_user_id=row.get("owner_user_id"),
+            group_id=group_id,
+        ):
+            result[topic_id] = {
+                "yiren_recognition": "recognized",
+                "yiren_label": "亦仁认可",
+                "yiren_evidence": evidence,
+            }
+        elif result[topic_id]["yiren_recognition"] == "not_found":
+            result[topic_id] = {
+                "yiren_recognition": "responded",
+                "yiren_label": "亦仁有回应",
+                "yiren_evidence": evidence,
+            }
+    return result
 
 
 def _active_authors(topics):
@@ -556,11 +794,13 @@ def build_insights(
     theme_id="ai-sales",
     range_days=90,
     query="",
+    page=1,
     page_size=DEFAULT_PAGE_SIZE,
     sort="latest",
 ):
     group_id = str(group_id)
     range_days = _normalize_range_days(range_days)
+    page = _normalize_page(page)
     page_size = _normalize_page_size(page_size)
     sort = _normalize_sort(sort)
     query = str(query or "").strip().lower()
@@ -585,6 +825,30 @@ def build_insights(
         theme_id = "ai-sales"
     selected_topics = _load_selected_topics(group_id, theme_id, range_days, newest, query=query)
     visible_topics = _sort_topics(selected_topics, sort)
+    offset = (page - 1) * page_size
+    page_topics = visible_topics[offset:offset + page_size]
+    page_details = _load_topic_page_details(
+        group_id,
+        [item.get("topic_id") for item in page_topics],
+    )
+    page_topics = [
+        {**item, **page_details.get(str(item.get("topic_id")), {})}
+        for item in page_topics
+    ]
+    yiren_recognition = _load_yiren_recognition(
+        group_id,
+        [item.get("topic_id") for item in page_topics],
+    )
+    page_topics = [
+        {
+            **item,
+            **yiren_recognition.get(
+                str(item.get("topic_id")),
+                _empty_yiren_recognition(),
+            ),
+        }
+        for item in page_topics
+    ]
 
     selected_config = THEME_LOOKUP[theme_id]
     fallback = THEME_LOOKUP["ai"]
@@ -614,14 +878,14 @@ def build_insights(
         },
         "query": query,
         "sort": sort,
-        "topics": [_topic_item(item) for item in visible_topics[:page_size]],
+        "topics": [_topic_item(item) for item in page_topics],
         "topic_matches": len(visible_topics),
         "pagination": {
-            "page": 1,
+            "page": page,
             "page_size": page_size,
-            "returned": min(len(visible_topics), page_size),
+            "returned": len(page_topics),
             "total": len(visible_topics),
-            "has_more": len(visible_topics) > page_size,
+            "has_more": offset + len(page_topics) < len(visible_topics),
         },
     }
 

@@ -18,6 +18,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_INITIAL_PROMPT = (
     "请解析上传的研报 PDF，提取核心观点、关键数据、风险提示和可用于口播的摘要。"
 )
+DEFAULT_SCRIPT_REGENERATION_MIN_CHARS = 1500
 PDF_EVIDENCE_REVIEW_CONTRACT = (
     "最后另起一段输出以 PDF_EVIDENCE_V1_JSON: 开头的单行严格 JSON，"
     "格式为 {\"schema_version\":\"report_pdf_evidence_v1\",\"claims\":[...]}; 每条 claims 必须包含"
@@ -25,11 +26,12 @@ PDF_EVIDENCE_REVIEW_CONTRACT = (
     "use_as_visual，可选 crop={x,y,width,height}（均为0到1）。只填写能从 PDF 明确定位的内容，"
     "不要使用 Markdown 代码围栏；无法定位的主张不要伪造证据。"
 )
-DEFAULT_REVIEW_PROMPT = (
+DEFAULT_REVIEW_PROMPT_BASE = (
     "担任首席责任主编，利用提供的PDF材料和可查网络信息，对上文内容逐条复核与勘误，"
     "确认事实准确、逻辑清晰、表达规范，列出每条修正点及依据，并给出最终优化后的信息版本，"
-    f"附上核对过程说明和参考来源。{PDF_EVIDENCE_REVIEW_CONTRACT}"
+    "附上核对过程说明和参考来源。"
 )
+DEFAULT_REVIEW_PROMPT = f"{DEFAULT_REVIEW_PROMPT_BASE}{PDF_EVIDENCE_REVIEW_CONTRACT}"
 GEMINI_CAPTURE_ARTIFACT_MARKERS = (
     "自定义 Gem",
     "研报pdf解析视频文案说",
@@ -63,7 +65,95 @@ def ensure_pdf_evidence_review_contract(value: Any) -> str:
         return DEFAULT_REVIEW_PROMPT
     if PDF_EVIDENCE_REVIEW_CONTRACT in prompt:
         return prompt
+    prompt = _strip_pdf_evidence_review_contract(prompt)
     return f"{prompt}\n\n{PDF_EVIDENCE_REVIEW_CONTRACT}"
+
+
+def review_prompt_for_pdf_evidence(value: Any, *, enabled: bool) -> str:
+    """Return a review prompt with the server-owned evidence contract toggled.
+
+    New tasks can disable evidence generation without relying on a possibly
+    stale browser form.  Current and cached legacy variants of the server-owned
+    suffix are removed while unrelated custom review instructions remain.
+    """
+
+    prompt = str(value or "").strip()
+    if not prompt:
+        prompt = DEFAULT_REVIEW_PROMPT_BASE
+    prompt = _strip_pdf_evidence_review_contract(prompt)
+    if enabled:
+        return ensure_pdf_evidence_review_contract(prompt)
+    return prompt
+
+
+def _strip_pdf_evidence_review_contract(value: Any) -> str:
+    """Remove current and cached legacy variants of our evidence suffix.
+
+    Older frontend bundles inserted one optional space after ``必须包含``.
+    Exact string replacement therefore left the entire evidence contract in
+    new evidence-disabled jobs.  Match the server-owned opening and closing
+    sentences instead, while preserving unrelated custom review instructions.
+    """
+
+    prompt = str(value or "").strip()
+    if not prompt:
+        return ""
+    prompt = prompt.replace(PDF_EVIDENCE_REVIEW_CONTRACT, "").strip()
+    if "PDF_EVIDENCE_V1_JSON" not in prompt and "report_pdf_evidence_v1" not in prompt:
+        return prompt
+
+    pattern = re.compile(
+        r"(?:\s*\n*)?最后另起一段输出以\s*PDF_EVIDENCE_V1_JSON:\s*开头的单行严格\s*JSON，"
+        r".*?无法定位的主张不要伪造证据。",
+        re.DOTALL,
+    )
+    cleaned = pattern.sub("", prompt).strip()
+    if "PDF_EVIDENCE_V1_JSON" not in cleaned and "report_pdf_evidence_v1" not in cleaned:
+        return cleaned
+
+    # Last-resort compatibility for punctuation/whitespace-only legacy edits.
+    marker_positions = [
+        position
+        for marker in ("PDF_EVIDENCE_V1_JSON", "report_pdf_evidence_v1")
+        if (position := cleaned.find(marker)) >= 0
+    ]
+    if not marker_positions:
+        return cleaned
+    marker_position = min(marker_positions)
+    start = cleaned.rfind("最后另起一段", 0, marker_position + 1)
+    closing = "无法定位的主张不要伪造证据。"
+    end = cleaned.find(closing, marker_position)
+    if start >= 0 and end >= 0:
+        cleaned = f"{cleaned[:start]}{cleaned[end + len(closing):]}".strip()
+    return cleaned
+
+
+def script_regeneration_prompts(
+    initial_prompt: Any,
+    review_prompt: Any,
+    *,
+    minimum_chars: int = DEFAULT_SCRIPT_REGENERATION_MIN_CHARS,
+) -> Dict[str, str]:
+    """Build a fresh-script request without inheriting the evidence contract."""
+
+    try:
+        minimum = max(DEFAULT_SCRIPT_REGENERATION_MIN_CHARS, min(20000, int(minimum_chars)))
+    except (TypeError, ValueError):
+        minimum = DEFAULT_SCRIPT_REGENERATION_MIN_CHARS
+    initial = str(initial_prompt or DEFAULT_INITIAL_PROMPT).strip()
+    review = review_prompt_for_pdf_evidence(review_prompt, enabled=False)
+    rewrite_directive = (
+        "这是一次全新重写，请重新独立理解 PDF，不要复用或缩写上一版文案。"
+        f"最终可直接口播的中文正文必须不少于 {minimum} 字。"
+    )
+    final_directive = (
+        f"请只交付一份完整、连贯、可直接朗读的最终中文口播文案；正文不少于 {minimum} 字，"
+        "字数不包含标题、过程说明、引用清单或 Markdown 标记。不得用‘略’、‘同上’或提纲代替正文。"
+    )
+    return {
+        "prompt": f"{initial}\n\n{rewrite_directive}",
+        "review_prompt": f"{review}\n\n{final_directive}",
+    }
 
 
 def storage_path_for_job(job_id: str, created_at: Optional[datetime] = None) -> str:

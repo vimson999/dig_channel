@@ -148,10 +148,10 @@
                             </div>
                         </fieldset>
                         <label class="local-topic-filter-field local-topic-filter-field--keyword">
-                            <span class="local-topic-filter-label">关键词</span>
+                            <span class="local-topic-filter-label">关键词或帖子 ID</span>
                             <span class="local-topic-keyword-box">
                                 <i class="fas fa-magnifying-glass" aria-hidden="true"></i>
-                                <input id="local-topic-keyword-input" type="search" maxlength="200" autocomplete="off" class="local-topic-filter-input" placeholder="匹配标题、作者或正文">
+                                <input id="local-topic-keyword-input" type="search" maxlength="200" autocomplete="off" class="local-topic-filter-input" placeholder="输入标题、作者、正文或完整帖子 ID">
                             </span>
                         </label>
                         <button id="local-topic-search-btn" type="button" class="local-topic-search-button" title="搜索本地主题">
@@ -191,7 +191,7 @@
                             <span>清洗后自动发布</span>
                         </label>
                         <button id="favorite-topics-filter-btn" type="button" class="hidden rounded-lg border border-amber-200 bg-white px-4 py-2 text-sm font-bold text-amber-700 hover:bg-amber-50 transition-colors" aria-pressed="false">
-                            <i class="fa-regular fa-bookmark mr-2" aria-hidden="true"></i><span>只看收藏</span><span id="favorite-topics-count" class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs">0</span>
+                            <i class="fa-regular fa-bookmark mr-2" aria-hidden="true"></i><span data-favorite-filter-label>只看收藏</span><span id="favorite-topics-count" class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs">0</span>
                         </button>
                         <button id="refresh-topics-btn" class="hidden rounded-lg border border-slate-300 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50 transition-colors">
                             <i class="fas fa-rotate mr-2"></i>刷新本地列表
@@ -298,6 +298,6 @@
     <script src="js/env.js"></script>
     <script src="js/config.js"></script>
     <script src="js/shared-navigation.js"></script>
-    <script src="js/zsxq-lab.js?v=20260730-content-workbench"></script>
+    <script src="js/zsxq-lab.js?v=20260804-topic-id-search"></script>
 </body>
 </html>

@@ -49,15 +49,22 @@
         <div id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm"></div>
         <div class="lg:grid lg:grid-cols-[11rem_minmax(0,1fr)] lg:items-start lg:gap-5">
             <aside id="quick-nav" class="hidden lg:sticky lg:top-24 lg:block" aria-label="详情快速导航">
-                <nav class="rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
+                <nav class="max-h-[calc(100vh-7rem)] overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
                     <div class="px-3 pb-2 pt-1 text-[11px] font-black uppercase tracking-wider text-slate-400">快速导航</div>
                     <button data-quick-nav="task-overview" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-list-check w-4 text-center"></i><span>任务概览</span></button>
                     <button data-quick-nav="content-extract" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-file-lines w-4 text-center"></i><span>文案提取</span></button>
                     <button data-quick-nav="downloads" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-download w-4 text-center"></i><span>下载入口</span></button>
+                    <button data-quick-nav="keyframes" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-images w-4 text-center"></i><span>关键帧预览</span></button>
                     <button data-quick-nav="visual-assets" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-images w-4 text-center"></i><span>视觉素材</span></button>
                     <button data-quick-nav="video-files" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-film w-4 text-center"></i><span>视频文件</span></button>
                     <button data-quick-nav="publish-center" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-share-nodes w-4 text-center"></i><span>发布投递</span></button>
                     <button data-quick-nav="run-logs" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-terminal w-4 text-center"></i><span>运行日志</span></button>
+                    <div id="sidebar-task-status" class="mt-2 border-t border-slate-100 px-2 pt-3" aria-live="polite">
+                        <div class="rounded-lg bg-slate-50 px-2.5 py-3 text-[11px] text-slate-400">任务状态加载中...</div>
+                    </div>
+                    <button id="sidebar-refresh-btn" type="button" class="mt-2 flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-3 py-2.5 text-xs font-black text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-wait disabled:opacity-60">
+                        <i class="fas fa-rotate"></i><span>刷新详情</span>
+                    </button>
                     <button data-scroll-top class="mt-2 flex w-full items-center justify-center gap-2 border-t border-slate-100 px-3 pt-3 text-[11px] font-bold text-slate-400 hover:text-indigo-700"><i class="fas fa-arrow-up"></i>回到顶部</button>
                 </nav>
             </aside>
@@ -105,6 +112,6 @@
     <script src="js/shared-navigation.js?v=20260720-local-auth-bypass"></script>
     <script src="js/bilibili-publish-panel.js?v=20260708-bili-empty-draft-fallback"></script>
     <script src="js/platform-browser-publish-panel.js?v=20260721-douyin-verify"></script>
-    <script src="js/mp3-video-workflow-detail.js?v=20260730-regenerate-range-v3"></script>
+    <script src="js/mp3-video-workflow-detail.js?v=20260806-account-media-defaults-v1-poll-pressure-v2"></script>
 </body>
 </html>

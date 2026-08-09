@@ -31,6 +31,16 @@ _IMAGE_ONLY_STORYBOARD_RECOVERY_PROMPT = """你刚才只生成了图片，没有
 请停止继续生图，现在只输出完整分镜文本，不要再次调用图片工具。
 必须逐个分镜包含【文案原句】【画面动作】【视觉隐喻】【AI 提示词】；保留刚才使用的英文 AI 提示词原文，不得翻译、改写、缩写或遗漏。
 所有【文案原句】合并后必须 100% 覆盖用户提供的正文。"""
+_IMAGE_QUOTA_MARKERS = (
+    "i can create more images as soon as your limit resets",
+    "image generation limit reached",
+    "you've reached your image generation limit",
+    "you have reached your image generation limit",
+    "图片生成额度已用尽",
+    "图片生成已达上限",
+    "图片生成次数已达上限",
+    "达到图片生成限额",
+)
 
 
 class GeminiBrowserError(RuntimeError):
@@ -43,6 +53,11 @@ class GeminiBrowserConfigError(GeminiBrowserError):
 
 class GeminiBrowserAutomationError(GeminiBrowserError):
     pass
+
+
+def _is_image_quota_text(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    return any(marker in normalized for marker in _IMAGE_QUOTA_MARKERS)
 
 
 @dataclass
@@ -59,7 +74,13 @@ class GeminiBrowserOptions:
     total_timeout_seconds: int = 900
     ready_timeout_seconds: int = 90
     upload_timeout_seconds: int = 300
+    # Playwright's persistent-context launch defaults to no timeout.  A
+    # browser/profile startup failure must not hold a Celery worker forever.
+    browser_launch_timeout_seconds: int = 90
     min_response_chars: int = 120
+    prefer_pro_model: bool = True
+    require_pro_model: bool = False
+    model_switch_timeout_seconds: int = 12
     selectors: Dict[str, List[str]] = field(default_factory=dict)
 
     @classmethod
@@ -81,7 +102,19 @@ class GeminiBrowserOptions:
             total_timeout_seconds=_int_env("REPORT_PDF_GEMINI_TOTAL_TIMEOUT", _int_env("GEMINI_BROWSER_TOTAL_TIMEOUT", 900)),
             ready_timeout_seconds=_int_env("REPORT_PDF_GEMINI_READY_TIMEOUT", _int_env("GEMINI_BROWSER_READY_TIMEOUT", 90)),
             upload_timeout_seconds=_int_env("REPORT_PDF_GEMINI_UPLOAD_TIMEOUT", _int_env("GEMINI_BROWSER_UPLOAD_TIMEOUT", 300)),
+            browser_launch_timeout_seconds=_int_env(
+                "REPORT_PDF_GEMINI_BROWSER_LAUNCH_TIMEOUT_SECONDS",
+                _int_env("GEMINI_BROWSER_LAUNCH_TIMEOUT_SECONDS", 90),
+            ),
             min_response_chars=_int_env("REPORT_PDF_GEMINI_MIN_RESPONSE_CHARS", _int_env("GEMINI_BROWSER_MIN_RESPONSE_CHARS", 120)),
+            prefer_pro_model=_truthy_env(
+                "REPORT_PDF_GEMINI_PREFER_PRO",
+                _truthy_env("GEMINI_BROWSER_PREFER_PRO", True),
+            ),
+            model_switch_timeout_seconds=_int_env(
+                "REPORT_PDF_GEMINI_MODEL_SWITCH_TIMEOUT_SECONDS",
+                _int_env("GEMINI_BROWSER_MODEL_SWITCH_TIMEOUT_SECONDS", 12),
+            ),
             selectors=_load_selectors_from_env(),
         )
 
@@ -119,6 +152,7 @@ def status_payload(options: Optional[GeminiBrowserOptions] = None) -> Dict[str, 
         "chrome_path_exists": bool(chrome_path and chrome_path.exists()),
         "chrome_channel": options.chrome_channel,
         "upload_timeout_seconds": options.upload_timeout_seconds,
+        "browser_launch_timeout_seconds": options.browser_launch_timeout_seconds,
         "mode": "real_browser",
         "business_feature": FEATURE_NAME,
         "automation_engine": "gemini_browser",
@@ -187,6 +221,17 @@ class GeminiBrowserWorker:
                     self._wait_for_interactive_page(page, started)
                     self._raise_if_login_or_captcha(page)
                     self._guard_total_timeout(started)
+
+                    self._emit(progress_callback, "select_pro_model", 18, "尝试切换 Gemini Pro 模型")
+                    pro_model_selection = self._try_select_pro_model(page)
+                    self._emit(
+                        progress_callback,
+                        "pro_model_ready",
+                        20,
+                        _pro_model_selection_message(pro_model_selection),
+                        result={"gemini_model_selection": pro_model_selection},
+                    )
+                    self._ensure_required_pro_model(pro_model_selection)
 
                     baseline_text = self._body_text(page)
                     baseline_image_keys = self._visible_image_keys(page)
@@ -341,6 +386,12 @@ class GeminiBrowserWorker:
                             embedded_images=embedded_images,
                         )
                     response = {"text": combined_response_text}
+                    # The incomplete-storyboard path may have several turns.
+                    # Keep the merged text as the result unless an explicit
+                    # generic follow-up later replaces it; returning
+                    # ``turns[-1]`` here silently discarded the title and all
+                    # earlier continuation scenes.
+                    final_response_text = combined_response_text
 
                     for followup_number, followup in enumerate(followups, start=1):
                         index = len(turns) + 1
@@ -370,6 +421,7 @@ class GeminiBrowserWorker:
                             "page_url": page.url,
                             "completed_at": datetime.utcnow().isoformat() + "Z",
                         })
+                        final_response_text = str(turns[-1]["response_text"] or "")
                         _write_generation_checkpoint(
                             output,
                             prompt=prompt,
@@ -416,11 +468,12 @@ class GeminiBrowserWorker:
                             "bytes": pdf_file.stat().st_size if pdf_file else None,
                         } if pdf_file else None,
                         "initial_response_text": initial_response_text,
-                        "response_text": turns[-1]["response_text"],
-                        "final_response_text": turns[-1]["response_text"],
+                        "response_text": final_response_text,
+                        "final_response_text": final_response_text,
                         "turns": turns,
                         "page_url": page.url,
                         "target_url": url,
+                        "gemini_model_selection": pro_model_selection,
                         "embedded_images": embedded_images,
                         "completed_at": datetime.utcnow().isoformat() + "Z",
                     }
@@ -567,6 +620,17 @@ class GeminiBrowserWorker:
                 self._raise_if_login_or_captcha(page)
                 self._guard_total_timeout(started)
 
+                self._emit(progress_callback, "select_pro_model", 12, "尝试切换 Gemini Pro 模型")
+                pro_model_selection = self._try_select_pro_model(page)
+                self._emit(
+                    progress_callback,
+                    "pro_model_ready",
+                    15,
+                    _pro_model_selection_message(pro_model_selection),
+                    result={"gemini_model_selection": pro_model_selection},
+                )
+                self._ensure_required_pro_model(pro_model_selection)
+
                 baseline_text = self._body_text(page)
                 self._emit(progress_callback, "upload_file", 18, f"上传文件到 Gemini：{source_file.name}")
                 self._upload_file(page, str(source_file), started)
@@ -687,6 +751,7 @@ class GeminiBrowserWorker:
                     "turns": turns,
                     "page_url": page.url,
                     "target_url": url,
+                    "gemini_model_selection": pro_model_selection,
                     "completed_at": datetime.utcnow().isoformat() + "Z",
                 }
                 output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -745,6 +810,9 @@ class GeminiBrowserWorker:
             "headless": False,
             "accept_downloads": True,
             "args": args,
+            # Playwright treats None as unlimited here.  Keep this bounded so
+            # a broken Chrome/profile launch fails and releases the worker lock.
+            "timeout": max(5, int(self.options.browser_launch_timeout_seconds or 0)) * 1000,
         }
         if self.options.chrome_executable_path:
             kwargs["executable_path"] = self.options.chrome_executable_path
@@ -755,7 +823,18 @@ class GeminiBrowserWorker:
         profile_lock.__enter__()
         try:
             self._wait_for_profile_singleton_release()
-            context = self._launch_persistent_context_with_singleton_retry(playwright, user_data_dir, kwargs)
+            try:
+                context = self._launch_persistent_context_with_singleton_retry(playwright, user_data_dir, kwargs)
+            except Exception as exc:
+                # Playwright's persistent-context launch has no default
+                # timeout.  Convert its bounded timeout into a domain error so
+                # the task records a useful failure and releases the lock.
+                if exc.__class__.__name__ == "TimeoutError":
+                    raise GeminiBrowserAutomationError(
+                        "Gemini 浏览器启动超时（"
+                        f"{max(5, int(self.options.browser_launch_timeout_seconds or 0))} 秒）: {exc}"
+                    ) from exc
+                raise
             return _LockedBrowserContext(context, profile_lock)
         except Exception:
             profile_lock.__exit__(None, None, None)
@@ -830,6 +909,116 @@ class GeminiBrowserWorker:
         sample = _clean_text(last_text)[:200]
         raise GeminiBrowserAutomationError(
             f"Gemini 页面未加载完成，未找到输入区; text_sample={sample}"
+        )
+
+    def _try_select_pro_model(self, page) -> Dict[str, Any]:
+        """Attempt Pro selection before an uploaded file reaches Gemini.
+
+        Gemini renders the composer before its mode picker.  Wait for the
+        picker separately so strict Pro jobs do not fail during that short UI
+        race.  Missing/unsupported pickers are still recorded for the caller;
+        strict jobs can then stop before uploading any user content.
+        """
+        if not self.options.prefer_pro_model:
+            return {"requested": False, "selected": False, "confirmed": False, "status": "disabled"}
+
+        try:
+            picker_wait_seconds = max(
+                0.0,
+                min(30.0, float(self.options.model_switch_timeout_seconds or 0)),
+            )
+            picker_deadline = time.monotonic() + picker_wait_seconds
+            picker = None
+            while picker is None:
+                picker = self._first_visible(page, self._selectors("model_picker"))
+                if picker is not None or time.monotonic() >= picker_deadline:
+                    break
+                time.sleep(0.25)
+            if picker is None:
+                return {"requested": True, "selected": False, "confirmed": False, "status": "picker_not_found"}
+
+            before = _locator_control_text(picker)
+            if _looks_like_pro_model_label(before):
+                return {
+                    "requested": True,
+                    "selected": True,
+                    "confirmed": True,
+                    "status": "already_pro",
+                    "before": before,
+                    "after": before,
+                }
+
+            picker.click(timeout=8_000)
+            timeout_seconds = max(2, min(30, int(self.options.model_switch_timeout_seconds or 12)))
+            deadline = time.monotonic() + timeout_seconds
+            option = None
+            while time.monotonic() < deadline:
+                option = self._first_visible(page, self._selectors("pro_model_option"))
+                if option is not None and _looks_like_pro_model_label(_locator_control_text(option)):
+                    break
+                option = None
+                time.sleep(0.25)
+
+            if option is None:
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                return {
+                    "requested": True,
+                    "selected": False,
+                    "confirmed": False,
+                    "status": "pro_option_not_found",
+                    "before": before,
+                }
+
+            option_label = _locator_control_text(option)
+            option.click(timeout=8_000)
+
+            confirm_deadline = time.monotonic() + min(5, timeout_seconds)
+            after = ""
+            while time.monotonic() < confirm_deadline:
+                current_picker = self._first_visible(page, self._selectors("model_picker"))
+                after = _locator_control_text(current_picker) if current_picker is not None else ""
+                if _looks_like_pro_model_label(after):
+                    return {
+                        "requested": True,
+                        "selected": True,
+                        "confirmed": True,
+                        "status": "selected_pro",
+                        "before": before,
+                        "option": option_label,
+                        "after": after,
+                    }
+                time.sleep(0.25)
+
+            return {
+                "requested": True,
+                "selected": True,
+                "confirmed": False,
+                "status": "selected_unconfirmed",
+                "before": before,
+                "option": option_label,
+                "after": after,
+            }
+        except Exception as exc:
+            logger.warning("Gemini Pro model selection skipped after recoverable error: %s", exc)
+            return {
+                "requested": True,
+                "selected": False,
+                "confirmed": False,
+                "status": "selection_error",
+                "error": str(exc)[:500],
+            }
+
+    def _ensure_required_pro_model(self, selection: Dict[str, Any]) -> None:
+        if not self.options.require_pro_model:
+            return
+        if isinstance(selection, dict) and selection.get("confirmed") is True:
+            return
+        status = str((selection or {}).get("status") or "unknown")
+        raise GeminiBrowserAutomationError(
+            f"未能确认 Gemini Pro 模型，已停止提交内容请求（模型切换状态: {status}）"
         )
 
     def _upload_pdf(self, page, pdf_path: str, started_at: float) -> None:
@@ -908,6 +1097,7 @@ class GeminiBrowserWorker:
         )
 
     def _select_image_generation_mode(self, page, started_at: float) -> None:
+        self._raise_if_image_quota_exhausted(page)
         image_labels = (
             "制作图片", "制作图像", "生成图片", "生成图像", "创建图片", "创建图像",
             "Create image", "Create images", "Generate image", "Generate images",
@@ -953,6 +1143,7 @@ class GeminiBrowserWorker:
         while time.monotonic() < deadline:
             self._guard_total_timeout(started_at)
             self._raise_if_login_or_captcha(page)
+            self._raise_if_image_quota_exhausted(page)
             if self._click_first_visible(page, direct_selectors):
                 time.sleep(0.8)
                 return
@@ -1515,6 +1706,7 @@ class GeminiBrowserWorker:
         while time.monotonic() < deadline:
             self._guard_total_timeout(started_at)
             self._raise_if_login_or_captcha(page)
+            self._raise_if_image_quota_exhausted(page)
             records = self._visible_image_records(page)
             candidates = []
             for record in records:
@@ -1929,6 +2121,41 @@ class GeminiBrowserWorker:
                 "mat-option:has-text('上传文件')",
                 "mat-option:has-text('Upload files')",
             ],
+            "model_picker": [
+                "button[data-test-id='bard-mode-menu-button']",
+                "bard-mode-switcher button[aria-haspopup='true']",
+                "input-area-v2 .model-picker-container button",
+                "button.input-area-switch[aria-haspopup='true']",
+                "button[aria-label*='模式选择器']",
+                "button[aria-label*='当前模式']",
+                "button[aria-label*='model' i]",
+                "[role='button'][aria-label*='model' i]",
+                "button[aria-label*='mode' i]",
+                "[role='button'][aria-label*='mode' i]",
+                "button[aria-label*='模型']",
+                "[role='button'][aria-label*='模型']",
+                "button[title*='model' i]",
+                "button[title*='模型']",
+                "button[data-test-id*='model' i]",
+                "button[data-testid*='model' i]",
+                "button[class*='model-selector']",
+                "button[aria-haspopup='menu']:has-text('Pro')",
+                "button[aria-haspopup='menu']:has-text('Fast')",
+                "button[aria-haspopup='menu']:has-text('Thinking')",
+                "button[aria-haspopup='listbox']:has-text('Pro')",
+                "button[aria-haspopup='listbox']:has-text('Fast')",
+                "button[aria-haspopup='listbox']:has-text('Thinking')",
+            ],
+            "pro_model_option": [
+                "[data-test-id='gem-mode-menu'] [role='menuitem']:has-text('Pro')",
+                "[data-test-id^='bard-mode-option-']:has-text('Pro')",
+                "[role='menuitemradio']:has-text('Pro')",
+                "[role='option']:has-text('Pro')",
+                "[role='menuitem']:has-text('Pro')",
+                "mat-option:has-text('Pro')",
+                ".mat-mdc-menu-item:has-text('Pro')",
+                "button[role='menuitem']:has-text('Pro')",
+            ],
             "response": [
                 "message-content",
                 "model-response",
@@ -2043,6 +2270,16 @@ class GeminiBrowserWorker:
             message = "Gemini 登录态失效，需要先在浏览器 profile 中登录"
             self._notify_human_intervention(page, reason="login", message=message)
             raise GeminiBrowserAutomationError(message)
+
+    def _raise_if_image_quota_exhausted(self, page) -> None:
+        try:
+            text = page.locator("body").inner_text(timeout=1_000)
+        except Exception:
+            return
+        if _is_image_quota_text(text):
+            raise GeminiBrowserAutomationError(
+                "Gemini 图片生成额度已耗尽，请等待额度重置后再继续"
+            )
 
     def _save_failure_screenshot(self, page, job_id: str) -> str:
         try:
@@ -2466,6 +2703,54 @@ def _looks_like_page_shell_text(value: str) -> bool:
     )
     hits = sum(1 for marker in shell_markers if marker in text)
     return hits >= 3 and "gemini" in text
+
+
+def _locator_control_text(locator) -> str:
+    if locator is None:
+        return ""
+    values = []
+    try:
+        values.append(locator.inner_text(timeout=2_000))
+    except Exception:
+        pass
+    for name in ("aria-label", "title", "data-test-id", "data-testid"):
+        try:
+            values.append(locator.get_attribute(name, timeout=2_000))
+        except Exception:
+            continue
+    return " | ".join(
+        value
+        for value in (_clean_text(str(item or "")) for item in values)
+        if value
+    )[:300]
+
+
+def _looks_like_pro_model_label(value: Any) -> bool:
+    text = _clean_text(str(value or ""))
+    if not text or len(text) > 300:
+        return False
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("upgrade", "get pro", "try pro", "升级", "订阅")):
+        return False
+    return bool(re.search(r"(?:^|[^a-z])pro(?:$|[^a-z])", lowered))
+
+
+def _pro_model_selection_message(result: Any) -> str:
+    data = result if isinstance(result, dict) else {}
+    status = str(data.get("status") or "")
+    if status == "already_pro":
+        return "Gemini 当前已是 Pro 模型"
+    if status == "selected_pro":
+        return "已切换并确认 Gemini Pro 模型"
+    if status == "selected_unconfirmed":
+        return "已点击 Gemini Pro 模型，页面未提供可确认的模型标签，继续上传"
+    if status == "disabled":
+        return "Gemini Pro 模型优先已关闭，继续使用当前模型"
+    if status == "picker_not_found":
+        return "当前 Gemini 页面没有模型切换入口，继续使用页面默认模型"
+    if status == "pro_option_not_found":
+        return "Gemini 模型菜单没有可用的 Pro 选项，继续使用当前模型"
+    return "Gemini Pro 模型切换未成功，继续使用当前模型"
 
 
 def _truthy_env(name: str, default: bool = False) -> bool:

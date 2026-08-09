@@ -1,6 +1,7 @@
 """Schedule the existing ZSXQ "sync all official tabs" behavior for fixed groups."""
 
 import fcntl
+from copy import deepcopy
 import json
 import logging
 import os
@@ -33,6 +34,8 @@ DEFAULT_TOPIC_COUNT = 20
 CONFIG_TYPE = "zsxq_sync_schedule"
 CONFIG_SCOPE = "production"
 CONFIG_KEY_PREFIX = "zsxq.sync.schedule."
+CONFIG_CACHE_TTL_SECONDS = 60.0
+_config_cache = {"expires_at": 0.0, "configs": None}
 
 DEFAULT_AUTO_SYNC_TARGETS = (
     {
@@ -84,6 +87,14 @@ def all_tabs_auto_sync_enabled():
 
 def load_all_tabs_auto_sync_configs(*, include_disabled=True, ensure_defaults=True):
     """Materialize per-group schedules from the shared system_configs table."""
+    now = time.monotonic()
+    cached = _config_cache.get("configs")
+    if cached is not None and now < float(_config_cache.get("expires_at") or 0.0):
+        return [
+            deepcopy(config)
+            for config in cached
+            if include_disabled or config["enabled"]
+        ]
     try:
         rows = _db_config_rows()
         existing_keys = {str(row.config_key) for row in rows}
@@ -102,10 +113,17 @@ def load_all_tabs_auto_sync_configs(*, include_disabled=True, ensure_defaults=Tr
                 updated_at=row.updated_at,
             )
             for row in rows
-            if include_disabled or int(row.status or 0) == 1
         ]
+        _config_cache.update({
+            "expires_at": time.monotonic() + CONFIG_CACHE_TTL_SECONDS,
+            "configs": deepcopy(configs),
+        })
         release_db_session_quietly()
-        return configs
+        return [
+            deepcopy(config)
+            for config in configs
+            if include_disabled or config["enabled"]
+        ]
     except Exception as exc:
         try:
             db.session.rollback()
@@ -146,6 +164,10 @@ def _db_config_rows():
         .order_by(SystemConfig.key.asc())
         .all()
     )
+
+
+def _invalidate_config_cache():
+    _config_cache.update({"expires_at": 0.0, "configs": None})
 
 
 def ensure_default_auto_sync_configs():
@@ -189,6 +211,7 @@ def ensure_default_auto_sync_configs():
         inserted.append(target["key"])
     if inserted:
         db.session.commit()
+        _invalidate_config_cache()
         logger.info(
             "[ZSXQ_ALL_TABS_AUTO] default DB configs inserted | schedules=%s credential_id=%s",
             inserted,
@@ -261,6 +284,7 @@ def save_all_tabs_auto_sync_config(schedule_key, updates):
     updated_at = datetime.utcnow()
     row.updated_at = updated_at
     db.session.commit()
+    _invalidate_config_cache()
     result = _normalize_stored_config(
         schedule_key,
         payload,

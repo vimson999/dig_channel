@@ -67,6 +67,11 @@ class DoubaoBrowserTTSTaskTest(unittest.TestCase):
         db.session.commit()
         return task
 
+    def test_missing_pcm_audio_is_retryable(self):
+        error = RuntimeError("朗读已触发但未捕获到 PCM 音频")
+
+        self.assertTrue(doubao_browser_tts._is_retryable_error(error))
+
     def _attach_scene_asset(self, task):
         payload = dict(task.params["doubao_browser_tts"])
         metadata = dict(payload.get("metadata") or {})

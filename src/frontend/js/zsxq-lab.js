@@ -55,6 +55,7 @@ const state = {
     attachmentViewFilter: 'all',
     favoriteTotal: 0,
     favoriteOnly: false,
+    favoriteFilterPending: false,
     inspectorTopicKey: '',
     lastTopicRequestAt: 0,
     topicCooldownUntil: 0,
@@ -502,11 +503,7 @@ function bindEvents() {
         }
         renderSyncIntro();
     });
-    els.favoriteTopicsFilterBtn?.addEventListener('click', () => {
-        state.favoriteOnly = !state.favoriteOnly;
-        renderFavoriteFilterControl();
-        if (state.selectedGroup) loadActiveTabPage({ reset: true });
-    });
+    els.favoriteTopicsFilterBtn?.addEventListener('click', requestFavoriteFilterChange);
     els.copyTopicsJsonBtn?.addEventListener('click', copyLastTopicsJson);
     els.headerSyncCurrentBtn?.addEventListener('click', () => els.syncCurrentTabBtn?.click());
     els.syncCurrentTabBtn?.addEventListener('click', () => syncTabs('current'));
@@ -1078,27 +1075,32 @@ async function loadLocalCachedTabs(groupId) {
 async function loadActiveTabPage(options = {}) {
     if (!state.selectedGroup || state.isLoadingMore) return;
 
-    const tab = getActiveTabConfig();
-    const tabState = getTabState(tab.id);
+    const tab = options.tab || getActiveTabConfig();
+    const tabState = options.tabState || getTabState(tab.id);
+    const shouldRender = options.render !== false;
     const reset = Boolean(options.reset);
     if (!reset && !tabState.hasMore) return;
 
     if (reset) {
         resetTabState(tabState);
-        els.topicsList.innerHTML = loadingCard(`正在读取本地${tab.label}...`);
+        if (shouldRender) {
+            els.topicsList.innerHTML = loadingCard(`正在读取本地${tab.label}...`);
+        }
     }
 
     state.isLoadingMore = true;
     tabState.loading = true;
     tabState.error = null;
-    renderActiveTab();
+    if (shouldRender) renderActiveTab();
 
     try {
         let pagesLoaded = 0;
         const maxAutoPages = 1;
 
         do {
-            const requestPayload = buildLocalTopicsRequest(tab, tabState);
+            const requestPayload = buildLocalTopicsRequest(tab, tabState, {
+                favoriteOnlyOverride: options.favoriteOnlyOverride,
+            });
             const result = await apiPost('/zsxq/topics/local', requestPayload);
             state.lastTopicsRequest = withoutSensitiveCookie(requestPayload);
             state.lastTopicsResponse = result;
@@ -1120,16 +1122,18 @@ async function loadActiveTabPage(options = {}) {
         } while (
             pagesLoaded < maxAutoPages
         );
+        return true;
     } catch (error) {
         tabState.error = error.message;
         if (tabState.topics.length > 0) {
             tabState.hasMore = false;
         }
         state.lastTopicsResponse = null;
+        return false;
     } finally {
         tabState.loading = false;
         state.isLoadingMore = false;
-        renderActiveTab();
+        if (shouldRender) renderActiveTab();
     }
 }
 
@@ -2354,8 +2358,19 @@ function buildTopicsRequest(tab, tabState) {
     };
 }
 
-function buildLocalTopicsRequest(tab, tabState) {
+function buildLocalTopicsRequest(tab, tabState, options = {}) {
     const publishFilter = currentAttachmentViewFilter() === 'publish_attention' ? 'attention' : '';
+    const favoriteOnly = options.favoriteOnlyOverride === undefined
+        ? state.favoriteOnly
+        : Boolean(options.favoriteOnlyOverride);
+    const topicId = localTopicIdQuery();
+    if (topicId) {
+        return {
+            group_id: state.selectedGroup.group_id,
+            topic_id: topicId,
+            count: 1,
+        };
+    }
     return {
         group_id: state.selectedGroup.group_id,
         tab_id: tab.id,
@@ -2367,8 +2382,13 @@ function buildLocalTopicsRequest(tab, tabState) {
         publish_date_start: els.localTopicDateStartInput?.value || '',
         publish_date_end: els.localTopicDateEndInput?.value || '',
         keyword: els.localTopicKeywordInput?.value.trim() || '',
-        favorite_only: state.favoriteOnly && isSelectedFavoritesGroup(),
+        favorite_only: favoriteOnly && isSelectedFavoritesGroup(),
     };
+}
+
+function localTopicIdQuery() {
+    const value = els.localTopicKeywordInput?.value.trim() || '';
+    return /^\d{8,64}$/.test(value) ? value : '';
 }
 
 function localDateInputValue(date) {
@@ -2412,10 +2432,18 @@ function normalizeLocalTopicDateRange(changedBoundary = '') {
 
 async function applyLocalTopicFilters() {
     if (!state.selectedGroup || state.isLoadingMore) return;
+    const topicId = localTopicIdQuery();
     state.tabStates.clear();
     state.selectedTopicKeys.clear();
     state.selectedAttachmentKeys.clear();
-    await loadActiveTabPage({ reset: true });
+    const succeeded = await loadActiveTabPage({ reset: true });
+    if (!succeeded || !topicId) return;
+
+    const topic = state.currentTopics.find(item => String(item.topic_id || '') === topicId);
+    if (!topic) return;
+    state.inspectorTopicKey = topicKeyForRender(topic);
+    renderTopicInspector(state.currentTopics);
+    requestAnimationFrame(locateInspectorTopic);
 }
 
 function withoutSensitiveCookie(payload) {
@@ -2426,23 +2454,31 @@ function withoutSensitiveCookie(payload) {
     };
 }
 
+function tabStateKey(tabId) {
+    return `${state.selectedGroup?.group_id || 'none'}:${tabId}`;
+}
+
+function createTabState(tabId) {
+    return {
+        id: tabId,
+        topics: [],
+        rawCount: 0,
+        total: null,
+        source: 'local_db',
+        topicIds: new Set(),
+        endTime: null,
+        hasMore: true,
+        loading: false,
+        loaded: false,
+        error: null,
+        emptyMessage: '',
+    };
+}
+
 function getTabState(tabId) {
-    const key = `${state.selectedGroup?.group_id || 'none'}:${tabId}`;
+    const key = tabStateKey(tabId);
     if (!state.tabStates.has(key)) {
-        state.tabStates.set(key, {
-            id: tabId,
-            topics: [],
-            rawCount: 0,
-            total: null,
-            source: 'local_db',
-            topicIds: new Set(),
-            endTime: null,
-            hasMore: true,
-            loading: false,
-            loaded: false,
-            error: null,
-            emptyMessage: '',
-        });
+        state.tabStates.set(key, createTabState(tabId));
     }
     return state.tabStates.get(key);
 }
@@ -2479,17 +2515,24 @@ function renderActiveTab() {
     state.currentTopics = tabState.topics;
 
     if (state.selectedGroup) {
+        const topicId = localTopicIdQuery();
         const sourceLabel = tabState.source === 'local_db' ? '本地库' : '接口';
         const totalText = tabState.total === null || tabState.total === undefined
             ? `${sourceLabel} ${tabState.rawCount} 条`
             : `${sourceLabel} ${tabState.total} 条`;
-        els.topicsSubtitle.textContent = [
-            `Group ID: ${state.selectedGroup.group_id}`,
-            tab.hashtagId ? `hashtag ${tab.hashtagId}` : `scope ${tab.scope || 'all'}`,
-            totalText,
-            `当前 tab ${tabState.topics.length} 条`,
-            tabState.hasMore ? '可继续下滑' : '已到底',
-        ].join(' · ');
+        els.topicsSubtitle.textContent = topicId
+            ? [
+                `Group ID: ${state.selectedGroup.group_id}`,
+                `帖子 ID: ${topicId}`,
+                tabState.topics.length ? '已精确定位' : '未找到',
+            ].join(' · ')
+            : [
+                `Group ID: ${state.selectedGroup.group_id}`,
+                tab.hashtagId ? `hashtag ${tab.hashtagId}` : `scope ${tab.scope || 'all'}`,
+                totalText,
+                `当前 tab ${tabState.topics.length} 条`,
+                tabState.hasMore ? '可继续下滑' : '已到底',
+            ].join(' · ');
     }
 
     renderTopicTabs();
@@ -2964,14 +3007,65 @@ function renderFavoriteFilterControl() {
     if (!visible) return;
 
     const count = Number(state.favoriteTotal || 0);
+    const pending = Boolean(state.favoriteFilterPending);
+    const active = state.favoriteOnly && !pending;
     if (els.favoriteTopicsCount) els.favoriteTopicsCount.textContent = String(count);
-    els.favoriteTopicsFilterBtn.setAttribute('aria-pressed', String(state.favoriteOnly));
-    els.favoriteTopicsFilterBtn.classList.toggle('bg-amber-100', state.favoriteOnly);
-    els.favoriteTopicsFilterBtn.classList.toggle('ring-2', state.favoriteOnly);
-    els.favoriteTopicsFilterBtn.classList.toggle('ring-amber-200', state.favoriteOnly);
+    els.favoriteTopicsFilterBtn.setAttribute('aria-pressed', String(active));
+    els.favoriteTopicsFilterBtn.setAttribute('aria-busy', String(pending));
+    els.favoriteTopicsFilterBtn.disabled = pending || state.isLoadingMore;
+    els.favoriteTopicsFilterBtn.classList.toggle('bg-amber-100', active);
+    els.favoriteTopicsFilterBtn.classList.toggle('ring-2', active);
+    els.favoriteTopicsFilterBtn.classList.toggle('ring-amber-200', active);
+    els.favoriteTopicsFilterBtn.classList.toggle('cursor-wait', pending);
+    els.favoriteTopicsFilterBtn.classList.toggle('opacity-60', pending || state.isLoadingMore);
     const icon = els.favoriteTopicsFilterBtn.querySelector('i');
-    icon?.classList.toggle('fa-regular', !state.favoriteOnly);
-    icon?.classList.toggle('fa-solid', state.favoriteOnly);
+    icon?.classList.toggle('fa-regular', !active);
+    icon?.classList.toggle('fa-solid', active);
+    const label = els.favoriteTopicsFilterBtn.querySelector('[data-favorite-filter-label]');
+    if (label) label.textContent = pending ? '筛选收藏中…' : '只看收藏';
+    els.favoriteTopicsFilterBtn.title = pending
+        ? '正在加载收藏内容，完成后才会切换筛选状态'
+        : '仅显示本地收藏的主题';
+}
+
+async function requestFavoriteFilterChange() {
+    if (!state.selectedGroup || state.isLoadingMore || state.favoriteFilterPending) return;
+
+    const groupId = String(state.selectedGroup.group_id || '');
+    const tab = getActiveTabConfig();
+    if (!groupId || !tab) return;
+
+    const nextFavoriteOnly = !state.favoriteOnly;
+    const candidateTabState = createTabState(tab.id);
+    state.favoriteFilterPending = true;
+    renderFavoriteFilterControl();
+
+    const succeeded = await loadActiveTabPage({
+        tab,
+        tabState: candidateTabState,
+        reset: true,
+        render: false,
+        favoriteOnlyOverride: nextFavoriteOnly,
+    });
+
+    state.favoriteFilterPending = false;
+    const stillViewingSameTab = String(state.selectedGroup?.group_id || '') === groupId
+        && state.activeTab === tab.id;
+    if (!succeeded || !stillViewingSameTab) {
+        if (stillViewingSameTab) {
+            renderFavoriteFilterControl();
+            renderSyncStatus({
+                type: 'error',
+                title: '收藏筛选未生效',
+                message: '列表加载失败，已保留原来的筛选状态和列表。请稍后重试。',
+            });
+        }
+        return;
+    }
+
+    state.favoriteOnly = nextFavoriteOnly;
+    state.tabStates.set(tabStateKey(tab.id), candidateTabState);
+    renderActiveTab();
 }
 
 function renderFavoriteTopicButton(topic, topicKey) {

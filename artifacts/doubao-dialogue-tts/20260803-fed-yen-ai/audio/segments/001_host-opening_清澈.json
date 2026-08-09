@@ -1,0 +1,16 @@
+{
+  "id": "001",
+  "slug": "host-opening",
+  "role": "host",
+  "kind": "opening",
+  "voice_label": "清澈",
+  "voice_id": "zh_female_qingchezizi_uranus_bigtts",
+  "hash": "b0d4d6a21b956fb41bc47db05971ae8fa41976d62923f81d9a00fb3729d2e24f",
+  "characters": 338,
+  "chunks": 1,
+  "pause_after_ms": 650,
+  "wav_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/001_host-opening_清澈.wav",
+  "mp3_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/001_host-opening_清澈.mp3",
+  "duration_seconds": 64.92,
+  "status": "generated"
+}

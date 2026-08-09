@@ -9,7 +9,7 @@
 - 修复提交：待提交
 - 根因分类：数据库事务跨外部 I/O
 - 复发键：`DB-SESSION-LIFECYCLE`
-- 是否复发：第 2 次
+- 是否复发：第 4 次
 - 防线层级：local_patch / contract_test / observability
 
 ## 现象
@@ -67,3 +67,43 @@
 - 已把 pending publisher 任务转换成标量快照并在外部检查前 `remove()` Session；消息投递后使用窄字段 CAS 更新任务及 Bilibili 投影，CAS 失败时撤销新消息。
 - 新增契约测试，明确断言 Celery/Redis 可见性检查期间 `db.session().in_transaction()` 为 `False`。
 - 状态保持 `code_changed`；只有新 watchdog PID 运行并跨过真实扫描窗口后，才可改为运行验收通过。
+
+## 2026-07-31 复发
+
+- 新 Watchdog PID 已加载 7 月 30 日的候选扫描修复，但消息发布后的竞争失败分支仍按
+  “数据库 CAS 失败 -> Celery revoke -> Session remove”执行。
+- 现场 `05:26:01` 的 publisher CAS 更新返回 0 行；随后直到 `05:27:03`
+  才归还连接，持有 `60.70s`。同一秒 PgBouncer 记录 query timeout，且期间没有
+  匹配的慢 SQL，证明连接跨越了 Celery control I/O，而不是 PostgreSQL executor 慢。
+- 通用 pending repair 的 CAS 失败和 processing repair 的状态竞争失败分支也有相同
+  顺序问题，属于同一复发键的横向遗漏。
+- 新增统一 `_release_then_revoke_published_repair_message` 边界，三个分支都先
+  `rollback/remove`，再撤销已发布消息；运行测试在 revoke 回调内断言
+  `db.session().in_transaction()` 为 `False`，结构契约拒绝旧顺序重新出现。
+- `2026-07-31 08:17` 重启安全门禁确认没有不可中断任务，`08:18–08:19`
+  完整重启成功；新 Watchdog PID `32805`、17 类 Celery 服务和 5 个 scheduler
+  均已加载本轮代码，bootstrap `errors=[]`。
+- 当前验收阶段为 `runtime_replaced`；仍需跨过真实 Watchdog CAS 竞争窗口，确认
+  不再出现无匹配慢 SQL 的约 60 秒连接持有后，才能标记运行验收完成。
+
+## 2026-08-01 第四次复发
+
+- `08:18–08:19` 替换后的 Watchdog PID `32805` 已加载上一轮
+  release-then-revoke 修复，但真实扫描仍出现无匹配慢 SQL 的连接持有：终态父任务
+  清理 `67.36s/42.21s`、publisher upload processing 收口 `37.46s`，以及
+  processing 可见性检查最大 `80.21s`。
+- 现场 SQL 仅约 `0.1–0.8s`，长持有发生在 Celery inspect/queue scan/revoke；
+  其中 `14:01:29` 的 `37.46s` 持有结束后立即记录
+  `Closed orphan publisher upload task`，把调用链与生命周期告警直接对齐。
+- 根因是上一轮只覆盖“消息发布后的 CAS 失败”分支，未覆盖消息发布前的
+  publisher processing worker/queue 可见性检查，也未覆盖终态父任务清理中的
+  `_revoke_celery_task`。这两条路径仍把 ORM 对象和事务带过 Celery control I/O。
+- processing 修复现先复制 DTO 并 `rollback/remove`，再执行 worker/queue
+  可见性检查；外部检查后按 ID 重载并校验 status/step/celery id，写入前后发生
+  状态竞争时安全退出或撤销新消息。
+- 终态父任务清理现先冻结父子标量快照并释放 Session，再 revoke，随后重载子任务
+  校验状态并在新短事务中收口。上传收口的 revoke 也在无事务状态执行。
+- 新增三条运行态合同测试，分别在 worker inspect、queue scan、upload revoke 和
+  terminal-parent revoke 回调内断言 `db.session().in_transaction()` 为 `False`。
+- 当前验收阶段再次回退到 `code_changed`；必须通过重启门禁替换 Watchdog 运行时，
+  再跨真实 processing/terminal cleanup 扫描窗口验证后才能进入 `runtime_accepted`。

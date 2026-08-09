@@ -1,0 +1,16 @@
+{
+  "id": "006",
+  "slug": "source-03-ai-fund-clearing",
+  "role": "source",
+  "kind": "source",
+  "voice_label": "刘飞",
+  "voice_id": "zh_male_liufei_uranus_bigtts",
+  "hash": "b30044210fd9e5a8983ba981df85749daf91ecb7764f7ccc573163a4cffa26c9",
+  "characters": 1113,
+  "chunks": 3,
+  "pause_after_ms": 650,
+  "wav_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/006_source-03-ai-fund-clearing_刘飞.wav",
+  "mp3_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/006_source-03-ai-fund-clearing_刘飞.mp3",
+  "duration_seconds": 193.104,
+  "status": "generated"
+}

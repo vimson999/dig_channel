@@ -139,9 +139,9 @@ SERVICES = {
         "label": "研报分镜梳理",
         "queue": "report_visual_plan",
         "hostname_prefix": "report_visual_plan@",
-        "run_script": "scripts/dev/run-celery-report-visual-plan.sh",
+        "run_script": "scripts/dev/run-celery-report-visual-plan-pool.sh",
         "log_file": "report_visual_plan.log",
-        "description": "消费已有基础文案，经分镜 Gem 与 DS v4 Flash 生成完整覆盖的结构化分镜列表",
+        "description": "多个独立 Gemini profile 并行消费分镜任务；单个 profile 内保持串行，生成完整覆盖的结构化分镜列表",
     },
     "report_top10_workflow": {
         "label": "今日研报 Top10 编排",
@@ -992,6 +992,21 @@ def _paused_business_features():
     return features
 
 
+def _isolated_watchdog_repair(name, callback, *, fallback, args=(), kwargs=None):
+    """Run one repairer without allowing it to starve the remaining repairs."""
+
+    try:
+        return callback(*(args or ()), **(kwargs or {}))
+    except Exception as exc:
+        # Each repairer owns an independent idempotent claim.  A broken DB
+        # session or an optional dependency in one repairer must not prevent
+        # the watchdog from healing unrelated queues during the same tick.
+        _release_db_session_quietly()
+        result = dict(fallback or {})
+        result.update({"error": str(exc), "failed_repair": str(name)})
+        return result
+
+
 def _watchdog_repair_stale_business_tasks(config):
     if not config.get("enabled"):
         return {"enabled": False, "skipped": "auto_heal_disabled"}
@@ -1009,8 +1024,30 @@ def _watchdog_repair_stale_business_tasks(config):
         from tasks.report_stick_figure_video import (
             repair_ready_stick_figure_video_workflows_once,
         )
+        from services.report_audio_finalization import (
+            repair_pending_finalizations_once,
+        )
+        from services.report_audio_recovery import (
+            repair_failed_report_audio_workflows_once,
+        )
 
         excluded_features = _paused_business_features()
+        if {"report_audio_workflow", "report_pdf_audio_workflow"} & excluded_features:
+            report_audio_failed_recovery = {
+                "enabled": False,
+                "skipped": "report_audio_paused",
+                "requeued": 0,
+                "items": [],
+            }
+        else:
+            # Claim retryable failed parents before terminal-parent cleanup so
+            # a still-useful child is not canceled merely because the parent
+            # hit a transient terminal state between watchdog ticks.
+            report_audio_failed_recovery = _isolated_watchdog_repair(
+                "report_audio_failed_recovery",
+                repair_failed_report_audio_workflows_once,
+                fallback={"enabled": True, "requeued": 0, "items": []},
+            )
         publisher_repair_paused = "publisher" in excluded_features
         if publisher_repair_paused:
             cleanup_result = {"enabled": False, "skipped": "publisher_paused", "cleaned": 0}
@@ -1023,14 +1060,44 @@ def _watchdog_repair_stale_business_tasks(config):
                 "closed": 0,
             }
         else:
-            cleanup_result = cleanup_publisher_children_of_terminal_parents_once()
-            publisher_pending_repair_result = repair_stale_publisher_pending_tasks_once()
-            processing_repair_result = repair_stale_publisher_processing_tasks_once()
-        repair_result = repair_stale_publication_tasks_once(
-            excluded_features=excluded_features,
+            cleanup_result = _isolated_watchdog_repair(
+                "publisher_terminal_child_cleanup",
+                cleanup_publisher_children_of_terminal_parents_once,
+                fallback={"enabled": True, "cleaned": 0, "items": []},
+            )
+            publisher_pending_repair_result = _isolated_watchdog_repair(
+                "publisher_pending_repair",
+                repair_stale_publisher_pending_tasks_once,
+                fallback={"enabled": True, "requeued": 0, "items": []},
+            )
+            processing_repair_result = _isolated_watchdog_repair(
+                "publisher_processing_repair",
+                repair_stale_publisher_processing_tasks_once,
+                fallback={
+                    "enabled": True,
+                    "requeued": 0,
+                    "demoted": 0,
+                    "closed": 0,
+                    "items": [],
+                },
+            )
+        repair_result = _isolated_watchdog_repair(
+            "publication_pending_repair",
+            repair_stale_publication_tasks_once,
+            fallback={"enabled": True, "requeued": 0, "items": []},
+            kwargs={"excluded_features": excluded_features},
         )
-        business_processing_repair_result = repair_stale_business_processing_tasks_once(
-            excluded_features=excluded_features,
+        business_processing_repair_result = _isolated_watchdog_repair(
+            "business_processing_repair",
+            repair_stale_business_processing_tasks_once,
+            fallback={
+                "enabled": True,
+                "requeued": 0,
+                "demoted": 0,
+                "closed": 0,
+                "items": [],
+            },
+            kwargs={"excluded_features": excluded_features},
         )
         if "report_stick_figure_video_render" in excluded_features:
             visual_video_repair_result = {
@@ -1040,19 +1107,37 @@ def _watchdog_repair_stale_business_tasks(config):
                 "items": [],
             }
         else:
-            visual_video_repair_result = (
-                repair_ready_stick_figure_video_workflows_once()
+            visual_video_repair_result = _isolated_watchdog_repair(
+                "visual_video_repair",
+                repair_ready_stick_figure_video_workflows_once,
+                fallback={"enabled": True, "enqueued": 0, "items": []},
+            )
+        if "publisher" in excluded_features or "report_stick_figure_video_render" in excluded_features:
+            finalization_repair_result = {
+                "enabled": False,
+                "skipped": "dependency_paused",
+                "reconciled": 0,
+                "items": [],
+            }
+        else:
+            finalization_repair_result = _isolated_watchdog_repair(
+                "report_audio_finalization_repair",
+                repair_pending_finalizations_once,
+                fallback={"enabled": True, "reconciled": 0, "items": []},
             )
         repair_result["publisher_pending_repair"] = publisher_pending_repair_result
         repair_result["processing_repair"] = processing_repair_result
         repair_result["business_processing_repair"] = business_processing_repair_result
         repair_result["visual_video_repair"] = visual_video_repair_result
+        repair_result["report_audio_finalization_repair"] = finalization_repair_result
+        repair_result["report_audio_failed_recovery"] = report_audio_failed_recovery
         repair_result["requeued"] = (
             (repair_result.get("requeued") or 0)
             + (publisher_pending_repair_result.get("requeued") or 0)
             + (processing_repair_result.get("requeued") or 0)
             + (business_processing_repair_result.get("requeued") or 0)
             + (visual_video_repair_result.get("enqueued") or 0)
+            + (report_audio_failed_recovery.get("requeued") or 0)
         )
         repair_result["demoted"] = (
             (processing_repair_result.get("demoted") or 0)
@@ -2068,15 +2153,17 @@ def _service_status(
 
 def _stop_service(service_id, service, *, pause=False, reason=None, force=False):
     _ensure_dirs()
+    guard = None
     if not force:
         guard = _service_stop_guard(service_id)
-        if guard:
-            return {
-                **guard,
-                "terminated_pids": [],
-                "force_killed_pids": [],
-                "paused": None,
-            }
+    _release_db_session_quietly()
+    if guard:
+        return {
+            **guard,
+            "terminated_pids": [],
+            "force_killed_pids": [],
+            "paused": None,
+        }
 
     pause_state = None
     if pause:

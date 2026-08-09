@@ -1,0 +1,16 @@
+{
+  "id": "012",
+  "slug": "source-06-summary",
+  "role": "source",
+  "kind": "source",
+  "voice_label": "刘飞",
+  "voice_id": "zh_male_liufei_uranus_bigtts",
+  "hash": "95dc5cc0045c1a7068eb03dd5cfd942cbda579f2317bd150f15d88c722b99511",
+  "characters": 481,
+  "chunks": 2,
+  "pause_after_ms": 650,
+  "wav_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/012_source-06-summary_刘飞.wav",
+  "mp3_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/012_source-06-summary_刘飞.mp3",
+  "duration_seconds": 86.544,
+  "status": "generated"
+}

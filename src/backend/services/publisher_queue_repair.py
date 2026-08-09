@@ -76,6 +76,9 @@ REPAIRABLE_FEATURES = {
     "report_audio_workflow": "report_audio_workflow",
     "report_pdf_audio_workflow": "report_audio_workflow",
     "report_script_material_workflow": "report_script_material_workflow",
+    "report_pdf_gemini": "report_pdf_gemini",
+    "gemini_browser": "report_pdf_gemini",
+    "report_visual_plan": "report_visual_plan",
     "report_top10_workflow": "report_top10_workflow",
     "content_pdf_clean": "content_pipeline",
     "content_audio_clean": "content_pipeline",
@@ -84,8 +87,66 @@ REPAIRABLE_FEATURES = {
     "wechat_channels_upload_test": "platform_upload",
     "doubao_browser_tts": "doubao_browser_tts",
     "report_stick_figure_image": "report_pdf_gemini",
+    "report_stick_figure_audio_alignment": "render",
+    "report_stick_figure_video_render": "render",
 }
 BUSINESS_PROCESSING_REPAIRABLE_FEATURES = {
+    "report_audio_workflow": {
+        "queue": "report_audio_workflow",
+        "requeueable_steps": {"", "queued", "init"},
+        "requeueable_prefixes": (
+            "gemini_",
+            "review_",
+            "normalize_",
+            "doubao_",
+            "combine_",
+            "render_pdf_",
+            "generate_video_",
+            "publisher_",
+            "pub_",
+        ),
+    },
+    "report_pdf_audio_workflow": {
+        "queue": "report_audio_workflow",
+        "requeueable_steps": {"", "queued", "init"},
+        "requeueable_prefixes": (
+            "gemini_",
+            "review_",
+            "normalize_",
+            "doubao_",
+            "combine_",
+            "render_pdf_",
+            "generate_video_",
+            "publisher_",
+            "pub_",
+        ),
+    },
+    "report_pdf_gemini": {
+        "queue": "report_pdf_gemini",
+        "requeueable_steps": {
+            "", "queued", "prepare_browser", "open_page", "switch_model",
+            "upload_pdf", "submit_prompt", "wait_response", "initial_response",
+            "save_result",
+        },
+        "requeueable_prefixes": ("followup_", "gemini_"),
+    },
+    "gemini_browser": {
+        "queue": "report_pdf_gemini",
+        "requeueable_steps": {
+            "", "queued", "prepare_browser", "open_page", "switch_model",
+            "upload_pdf", "submit_prompt", "wait_response", "initial_response",
+            "save_result",
+        },
+        "requeueable_prefixes": ("followup_", "gemini_"),
+    },
+    "report_visual_plan": {
+        "queue": "report_visual_plan",
+        "requeueable_steps": {
+            "", "queued", "auto_retry", "gemini_storyboard", "prepare_browser",
+            "open_page", "submit_prompt", "wait_response", "normalize_storyboard",
+        },
+        "requeueable_prefixes": ("followup_", "gemini_"),
+    },
     "mp3_video_workflow": {
         "queue": "mp3_video_workflow",
         "requeueable_steps": {
@@ -190,6 +251,21 @@ BUSINESS_PROCESSING_REPAIRABLE_FEATURES = {
             "generated_image_saved",
         },
         "requeueable_prefixes": (),
+    },
+    "report_stick_figure_audio_alignment": {
+        "queue": "render",
+        "requeueable_steps": {
+            "", "queued", "transcribe_whole_audio", "align_timeline",
+            "save_alignment",
+        },
+        "requeueable_prefixes": ("align_", "transcribe_"),
+    },
+    "report_stick_figure_video_render": {
+        "queue": "render",
+        "requeueable_steps": {
+            "", "queued", "prepare_timeline", "render_video", "save_video",
+        },
+        "requeueable_prefixes": ("prepare_", "render_", "ffmpeg_", "mux_"),
     },
 }
 REPAIRABLE_PENDING_STEPS = {
@@ -301,6 +377,20 @@ def _release_repair_db_session():
         db.session.remove()
 
 
+def _load_matching_processing_publisher_task(snapshot):
+    """Reload a processing publisher row after external visibility checks."""
+    current = _load_repair_task(snapshot.id, *PUBLISHER_REPAIR_SCAN_COLUMNS)
+    if (
+        current is None
+        or current.status != snapshot.status
+        or current.celery_task_id != snapshot.celery_task_id
+        or current.current_step != snapshot.current_step
+    ):
+        _release_repair_db_session()
+        return None
+    return current
+
+
 def _revoke_published_repair_message(async_result, *, task_id, log):
     celery_id = getattr(async_result, "id", None)
     if not celery_id:
@@ -314,6 +404,21 @@ def _revoke_published_repair_message(async_result, *, task_id, log):
             celery_id,
             exc,
         )
+
+
+def _release_then_revoke_published_repair_message(
+    async_result,
+    *,
+    task_id,
+    log,
+):
+    """Never hold a DB checkout while waiting for Celery control I/O."""
+    _release_repair_db_session()
+    _revoke_published_repair_message(
+        async_result,
+        task_id=task_id,
+        log=log,
+    )
 
 
 def maybe_requeue_stale_publisher_child(
@@ -511,13 +616,11 @@ def maybe_requeue_stale_publisher_child(
             }, synchronize_session=False)
         )
     if not task_updated or not projection_updated:
-        db.session.rollback()
-        _revoke_published_repair_message(
+        _release_then_revoke_published_repair_message(
             async_result,
             task_id=snapshot.id,
             log=active_logger,
         )
-        _release_repair_db_session()
         return snapshot, False
     db.session.commit()
 
@@ -701,7 +804,7 @@ def cleanup_publisher_children_of_terminal_parents_once(
             child = publisher_child or child
 
         try:
-            _cancel_orphan_workflow_child(child, parent=parent)
+            updated_child = _cancel_orphan_workflow_child(child, parent=parent)
         except Exception as exc:
             db.session.rollback()
             active_logger.exception(
@@ -718,9 +821,19 @@ def cleanup_publisher_children_of_terminal_parents_once(
             })
             continue
 
+        if updated_child is None:
+            items.append({
+                "task_id": getattr(child, "id", None),
+                "parent_task_id": parent_id,
+                "parent_status": parent_status,
+                "cleaned": False,
+                "reason": "state_changed",
+            })
+            continue
+
         cleaned += 1
         items.append({
-            "task_id": child.id,
+            "task_id": updated_child.id,
             "parent_task_id": parent.id,
             "parent_status": parent_status,
             "cleaned": True,
@@ -748,52 +861,97 @@ def maybe_repair_stale_publisher_processing_task(
     if (task.status or "").lower() != "processing":
         return task, False, "not_processing"
 
-    step = str(task.current_step or "").lower()
+    snapshot = _detached_repair_task_snapshot(task)
+    step = str(snapshot.current_step or "").lower()
     grace_seconds = _publisher_processing_orphan_grace_seconds(step)
-    reference_time = task.updated_at or task.created_at
+    reference_time = snapshot.updated_at or snapshot.created_at
     if _age_seconds(reference_time) < grace_seconds:
-        return task, False, "within_grace"
+        return snapshot, False, "within_grace"
 
-    requeue_target, target_queue = _publisher_child_repair_target(task, default_queue=queue)
-    worker_visible, worker_checked = _message_visible_in_workers(task.celery_task_id, child_id=task.id)
+    requeue_target, target_queue = _publisher_child_repair_target(
+        snapshot,
+        default_queue=queue,
+    )
+    _release_repair_db_session()
+    worker_visible, worker_checked = _message_visible_in_workers(
+        snapshot.celery_task_id,
+        child_id=snapshot.id,
+    )
     if not worker_checked:
-        return task, False, "visibility_unknown"
+        return snapshot, False, "visibility_unknown"
     if worker_visible:
-        return task, False, "visible_in_worker"
+        return snapshot, False, "visible_in_worker"
 
     if step in PUBLISHER_PROCESSING_UPLOAD_STEPS:
-        _mark_processing_publisher_orphan_failed(task, queue=target_queue, reason="upload_step_not_requeued")
+        _revoke_celery_task(snapshot)
+        current = _load_matching_processing_publisher_task(snapshot)
+        if current is None:
+            return snapshot, False, "state_changed"
+        _mark_processing_publisher_orphan_failed(
+            current,
+            queue=target_queue,
+            reason="upload_step_not_requeued",
+            revoke=False,
+        )
+        updated_snapshot = _detached_repair_task_snapshot(current)
+        db.session.remove()
         active_logger.warning(
             "Closed orphan publisher upload task without auto-requeue: task=%s step=%s",
-            task.id,
+            snapshot.id,
             step,
         )
-        return task, True, "closed"
+        return updated_snapshot, True, "closed"
 
-    queue_visible, queue_checked = _message_visible_in_queue(task.celery_task_id, child_id=task.id, queue=target_queue)
+    queue_visible, queue_checked = _message_visible_in_queue(
+        snapshot.celery_task_id,
+        child_id=snapshot.id,
+        queue=target_queue,
+    )
     if not queue_checked:
-        return task, False, "visibility_unknown"
+        return snapshot, False, "visibility_unknown"
+
+    current = _load_matching_processing_publisher_task(snapshot)
+    if current is None:
+        return snapshot, False, "state_changed"
 
     if step not in PUBLISHER_PROCESSING_REQUEUEABLE_STEPS:
-        _mark_processing_publisher_orphan_failed(task, queue=target_queue, reason="unknown_processing_step")
-        active_logger.warning("Closed orphan publisher task with unknown step: task=%s step=%s", task.id, step)
-        return task, True, "closed"
+        _release_repair_db_session()
+        _revoke_celery_task(snapshot)
+        current = _load_matching_processing_publisher_task(snapshot)
+        if current is None:
+            return snapshot, False, "state_changed"
+        _mark_processing_publisher_orphan_failed(
+            current,
+            queue=target_queue,
+            reason="unknown_processing_step",
+            revoke=False,
+        )
+        updated_snapshot = _detached_repair_task_snapshot(current)
+        db.session.remove()
+        active_logger.warning(
+            "Closed orphan publisher task with unknown step: task=%s step=%s",
+            snapshot.id,
+            step,
+        )
+        return updated_snapshot, True, "closed"
 
     if queue_visible:
         _demote_processing_publisher_to_pending(
-            task,
+            current,
             queue=target_queue,
             reason="processing_not_active_but_message_visible",
         )
+        updated_snapshot = _detached_repair_task_snapshot(current)
+        db.session.remove()
         active_logger.warning(
             "Demoted orphan publisher processing task to pending: task=%s celery_id=%s step=%s",
-            task.id,
-            task.celery_task_id,
+            snapshot.id,
+            snapshot.celery_task_id,
             step,
         )
-        return task, True, "demoted"
+        return updated_snapshot, True, "demoted"
 
-    result = dict(task.result or {})
+    result = dict(current.result or snapshot.result or {})
     repair_state = dict(result.get(PROCESSING_REPAIR_RESULT_KEY) or {})
     requeue_limit = _int_env(
         "PUBLISHER_PROCESSING_ORPHAN_REQUEUE_LIMIT",
@@ -802,33 +960,62 @@ def maybe_repair_stale_publisher_processing_task(
     )
     requeue_count = int(repair_state.get("count") or 0)
     if requeue_count >= requeue_limit:
-        _mark_processing_publisher_orphan_failed(task, queue=queue, reason="requeue_limit_reached")
+        _release_repair_db_session()
+        _revoke_celery_task(snapshot)
+        current = _load_matching_processing_publisher_task(snapshot)
+        if current is None:
+            return snapshot, False, "state_changed"
+        _mark_processing_publisher_orphan_failed(
+            current,
+            queue=target_queue,
+            reason="requeue_limit_reached",
+            revoke=False,
+        )
+        updated_snapshot = _detached_repair_task_snapshot(current)
+        db.session.remove()
         active_logger.warning(
             "Closed orphan publisher task after processing repair limit: task=%s count=%s limit=%s",
-            task.id,
+            snapshot.id,
             requeue_count,
             requeue_limit,
         )
-        return task, True, "closed"
+        return updated_snapshot, True, "closed"
 
-    previous_celery_id = task.celery_task_id
-    previous_status = task.status
-    previous_step = task.current_step
+    previous_celery_id = snapshot.celery_task_id
+    previous_status = snapshot.status
+    previous_step = snapshot.current_step
+    _release_repair_db_session()
     try:
         async_result = apply_async_after_db_release(
             requeue_target,
-            args=[task.id],
+            args=[snapshot.id],
             queue=target_queue,
             retry=False,
         )
     except Exception as exc:
         active_logger.warning(
             "Publisher processing orphan requeue failed: task=%s previous_celery_id=%s error=%s",
-            task.id,
+            snapshot.id,
             previous_celery_id,
             exc,
         )
-        return task, False, "publish_failed"
+        return snapshot, False, "publish_failed"
+
+    current = _load_matching_processing_publisher_task(snapshot)
+    if current is None:
+        _release_then_revoke_published_repair_message(
+            async_result,
+            task_id=snapshot.id,
+            log=active_logger,
+        )
+        return snapshot, False, "state_changed"
+
+    latest_result = dict(current.result or {})
+    latest_result[PROCESSING_REPAIR_RESULT_KEY] = repair_state
+    latest_result.pop("error", None)
+    latest_result.pop("error_type", None)
+    latest_result.pop("completed_at", None)
+    result = latest_result
 
     now = datetime.utcnow().isoformat() + "Z"
     repair_state.update({
@@ -855,24 +1042,26 @@ def maybe_repair_stale_publisher_processing_task(
     result.pop("error_type", None)
     result.pop("completed_at", None)
 
-    task.celery_task_id = async_result.id
-    task.status = "pending"
-    task.current_step = "queued"
-    task.progress = 0
-    task.error_message = None
-    task.completed_at = None
-    task.result = result
-    flag_modified(task, "result")
+    current.celery_task_id = async_result.id
+    current.status = "pending"
+    current.current_step = "queued"
+    current.progress = 0
+    current.error_message = None
+    current.completed_at = None
+    current.result = result
+    flag_modified(current, "result")
+    updated_snapshot = _detached_repair_task_snapshot(current)
     db.session.commit()
+    db.session.remove()
 
     active_logger.warning(
         "Requeued orphan publisher processing task: task=%s previous_celery_id=%s new_celery_id=%s step=%s",
-        task.id,
+        snapshot.id,
         previous_celery_id,
         async_result.id,
         previous_step,
     )
-    return task, True, "requeued"
+    return updated_snapshot, True, "requeued"
 
 
 def repair_stale_publisher_processing_tasks_once(
@@ -1126,13 +1315,11 @@ def maybe_requeue_stale_publication_task(
         PublicationTask.updated_at: now_value,
     }, synchronize_session=False)
     if not updated:
-        db.session.rollback()
-        _revoke_published_repair_message(
+        _release_then_revoke_published_repair_message(
             async_result,
             task_id=snapshot.id,
             log=active_logger,
         )
-        _release_repair_db_session()
         return snapshot, False
     db.session.commit()
     db.session.remove()
@@ -1386,8 +1573,11 @@ def maybe_repair_stale_business_processing_task(
         or current.celery_task_id != previous_celery_id
         or current.current_step != previous_step
     ):
-        _revoke_published_repair_message(async_result, task_id=snapshot.id, log=active_logger)
-        _release_repair_db_session()
+        _release_then_revoke_published_repair_message(
+            async_result,
+            task_id=snapshot.id,
+            log=active_logger,
+        )
         return snapshot, False, "state_changed"
 
     now = datetime.utcnow().isoformat() + "Z"
@@ -1726,32 +1916,54 @@ def _publisher_child_repair_target(
     return run_publication_pipeline, default_queue
 
 
-def _cancel_orphan_workflow_child(child: PublicationTask, *, parent: PublicationTask) -> None:
-    _revoke_celery_task(child)
+def _cancel_orphan_workflow_child(child: PublicationTask, *, parent: PublicationTask):
+    child_snapshot = _detached_repair_task_snapshot(child)
+    parent_snapshot = SimpleNamespace(
+        id=str(parent.id),
+        feature=parent.feature,
+        status=parent.status,
+    )
+    _release_repair_db_session()
+    _revoke_celery_task(child_snapshot)
+    current = _load_repair_task(
+        child_snapshot.id,
+        *WORKFLOW_CHILD_CLEANUP_SCAN_COLUMNS,
+    )
+    if (
+        current is None
+        or current.status != child_snapshot.status
+        or current.current_step != child_snapshot.current_step
+        or current.celery_task_id != child_snapshot.celery_task_id
+    ):
+        _release_repair_db_session()
+        return None
     now = datetime.utcnow()
-    previous_result = dict(child.result or {})
+    previous_result = dict(current.result or {})
     cleanup_state = {
         "reason": "parent_workflow_terminal",
-        "parent_task_id": parent.id,
-        "parent_feature": parent.feature,
-        "parent_status": parent.status,
-        "previous_status": child.status,
-        "previous_step": child.current_step,
-        "previous_celery_id": child.celery_task_id,
+        "parent_task_id": parent_snapshot.id,
+        "parent_feature": parent_snapshot.feature,
+        "parent_status": parent_snapshot.status,
+        "previous_status": child_snapshot.status,
+        "previous_step": child_snapshot.current_step,
+        "previous_celery_id": child_snapshot.celery_task_id,
         "cleaned_at": now.isoformat() + "Z",
     }
-    message = f"父编排任务已终止({parent.status})，遗留子任务自动收口。"
-    child.result = {
+    message = f"父编排任务已终止({parent_snapshot.status})，遗留子任务自动收口。"
+    current.result = {
         **previous_result,
         CHILD_CLEANUP_RESULT_KEY: cleanup_state,
         "error": message,
     }
-    child.status = "canceled"
-    child.current_step = "canceled"
-    child.error_message = message
-    child.completed_at = now
-    flag_modified(child, "result")
+    current.status = "canceled"
+    current.current_step = "canceled"
+    current.error_message = message
+    current.completed_at = now
+    flag_modified(current, "result")
+    updated_snapshot = _detached_repair_task_snapshot(current)
     db.session.commit()
+    db.session.remove()
+    return updated_snapshot
 
 
 def _demote_processing_publisher_to_pending(task: PublicationTask, *, queue: str, reason: str) -> None:
@@ -1787,8 +1999,15 @@ def _demote_processing_publisher_to_pending(task: PublicationTask, *, queue: str
     db.session.commit()
 
 
-def _mark_processing_publisher_orphan_failed(task: PublicationTask, *, queue: str, reason: str) -> None:
-    _revoke_celery_task(task)
+def _mark_processing_publisher_orphan_failed(
+    task: PublicationTask,
+    *,
+    queue: str,
+    reason: str,
+    revoke: bool = True,
+) -> None:
+    if revoke:
+        _revoke_celery_task(task)
     now = datetime.utcnow()
     previous_result = dict(task.result or {})
     repair_state = {
@@ -1942,10 +2161,28 @@ def _flatten_strings(value: Any) -> Iterable[str]:
             yield from _flatten_strings(item)
 
 
-def _age_seconds(value: Optional[datetime]) -> float:
+def _age_seconds(
+    value: Optional[datetime],
+    *,
+    now_utc: Optional[datetime] = None,
+    now_local: Optional[datetime] = None,
+) -> float:
     if not value:
         return 0
-    return max(0.0, (datetime.utcnow() - value.replace(tzinfo=None)).total_seconds())
+    now_utc = (now_utc or datetime.utcnow()).replace(tzinfo=None)
+    candidate = value.replace(tzinfo=None)
+    # PostgreSQL NOW() is returned as a naive value in the database session's
+    # local timezone, while older ORM paths wrote naive UTC values.  A local
+    # timestamp therefore appears several hours in the future to utcnow() and
+    # used to keep orphan repairs inside their grace period forever.  Only
+    # normalize timestamps that are clearly future-dated, preserving genuine
+    # naive-UTC rows.
+    if candidate > now_utc + timedelta(minutes=5):
+        local_now = (now_local or datetime.now()).replace(tzinfo=None)
+        local_offset = local_now - now_utc
+        if abs(local_offset.total_seconds()) > 300:
+            candidate -= local_offset
+    return max(0.0, (now_utc - candidate).total_seconds())
 
 
 def _truthy_env(name: str, default: bool) -> bool:
@@ -2002,6 +2239,14 @@ def _repair_target_for_feature(feature: str) -> Optional[Callable[..., Any]]:
         from tasks.report_script_material_workflow import process_report_script_material_workflow_job
 
         return process_report_script_material_workflow_job
+    if feature == "report_visual_plan":
+        from tasks.report_visual_plan import process_report_visual_plan_job
+
+        return process_report_visual_plan_job
+    if feature in {"report_pdf_gemini", "gemini_browser"}:
+        from tasks.gemini_browser import process_report_pdf_gemini_job
+
+        return process_report_pdf_gemini_job
     if feature == "doubao_browser_tts":
         from tasks.doubao_browser_tts import process_doubao_browser_tts_job
 
@@ -2010,4 +2255,12 @@ def _repair_target_for_feature(feature: str) -> Optional[Callable[..., Any]]:
         from tasks.report_stick_figure_assets import generate_scene_image
 
         return generate_scene_image
+    if feature == "report_stick_figure_audio_alignment":
+        from tasks.report_stick_figure_video import align_stick_figure_whole_audio
+
+        return align_stick_figure_whole_audio
+    if feature == "report_stick_figure_video_render":
+        from tasks.report_stick_figure_video import render_stick_figure_video
+
+        return render_stick_figure_video
     return task_for_unique_feature(feature)

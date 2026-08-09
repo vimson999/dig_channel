@@ -12,7 +12,7 @@ import logging
 from functools import wraps
 from threading import RLock
 
-from flask import request, session, current_app
+from flask import request, session, current_app, g, has_request_context
 import jwt
 from sqlalchemy.orm import load_only
 from models import User
@@ -165,6 +165,16 @@ def get_current_user():
     Returns:
         User: 当前用户实例，如果未登录返回None
     """
+    # The project-wide before_request guard resolves authentication first and
+    # stores the result on ``g``. Route-level decorators run afterwards; reuse
+    # that request-scoped decision instead of issuing the same user lookup a
+    # second time. Do not cache a miss here because login/session mutation can
+    # still occur later in the same public request.
+    if has_request_context():
+        cached_user = getattr(g, "current_user", None)
+        if cached_user is not None:
+            return cached_user
+
     # 尝试从JWT token获取用户
     user = get_user_from_token()
     if user:

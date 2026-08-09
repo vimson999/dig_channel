@@ -25,6 +25,9 @@ WAITING_STEPS = {
     "deferred_backlog",
     "deferred_db_pressure",
     "orphaned_processing",
+    "reconcile_retry_wait",
+    "visual_retry_wait",
+    "final_video_retry_wait",
 }
 READY_STEPS = {
     # These visual-workflow parent states have no running worker of their own.
@@ -33,7 +36,12 @@ READY_STEPS = {
     "whole_audio_aligned",
     "whole_audio_alignment_failed",
 }
-ZSXQ_ACTIVE_STATUSES = ("running", "retrying")
+# A retrying run has already published its replacement Celery message and is
+# waiting in the broker.  Treating it as executing makes a quiesced restart
+# deadlock: consumers are frozen, so the retry cannot run, while the restart
+# waits for its database status to change.  Only a worker that is actively
+# executing the run needs the graceful-drain guard.
+ZSXQ_ACTIVE_STATUSES = ("running",)
 
 
 def _zsxq_restart_guard_seconds():

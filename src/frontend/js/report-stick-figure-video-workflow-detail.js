@@ -11,6 +11,7 @@ class ReportStickFigureVideoWorkflowDetailPage {
         this.assetsError = '';
         this.visualScheme = {key:'stick_figure',name:'白板火柴人'};
         this.timer = null;
+        this.pollInFlight = false;
         this.lastRefreshedAt = null;
         this.quickNavObserver = null;
         this.rawText = '';
@@ -104,6 +105,11 @@ class ReportStickFigureVideoWorkflowDetailPage {
             }
             if(event.target.closest('[data-scroll-top]'))window.scrollTo({top:0,behavior:'smooth'});
         });
+        document.addEventListener('visibilitychange',()=>{
+            clearTimeout(this.timer);
+            this.timer=null;
+            if(!document.hidden)this.schedulePolling();
+        });
     }
 
     async load(manual=false) {
@@ -189,32 +195,38 @@ class ReportStickFigureVideoWorkflowDetailPage {
 
     schedulePolling() {
         clearTimeout(this.timer);
+        this.timer=null;
+        if(document.hidden||this.pollInFlight)return;
         const boardActive=this.storyboard&&['queued','running'].includes(this.storyboard.status);
         const summary=this.assets?.summary||{};
         const assetActive=Number(summary.images_active||0)>0||Number(summary.tts_active||0)>0;
         const alignmentActive=['pending','processing'].includes(this.assets?.audio_strategy?.status);
         const videoActive=['queued','processing'].includes(this.assets?.video?.status);
-        if(boardActive)this.timer=setTimeout(()=>this.pollStoryboard(),4000);
+        if(boardActive)this.timer=setTimeout(()=>this.pollStoryboard(),15000);
         else if(assetActive||alignmentActive||videoActive)this.timer=setTimeout(()=>this.pollAssets(),10000);
     }
 
     async pollStoryboard() {
-        if(!this.storyboard?.job_id)return;
+        if(document.hidden||this.pollInFlight||!this.storyboard?.job_id)return;
+        this.pollInFlight=true;
         try {
             const result=await this.request(`/api/report-visual-plans/jobs/${encodeURIComponent(this.storyboard.job_id)}`);
             this.storyboard=result.data;
             if(this.storyboard.status==='succeeded')await this.loadAssets(true);
             this.lastRefreshedAt=new Date();
             this.render();
-            this.schedulePolling();
         } catch(error) { this.setNotice(`刷新分镜失败：${error.message}`,'error'); }
+        finally { this.pollInFlight=false; this.schedulePolling(); }
     }
 
     async pollAssets() {
-        await this.loadAssets(true,true);
-        this.lastRefreshedAt=new Date();
-        this.render();
-        this.schedulePolling();
+        if(document.hidden||this.pollInFlight)return;
+        this.pollInFlight=true;
+        try {
+            await this.loadAssets(true,true);
+            this.lastRefreshedAt=new Date();
+            this.render();
+        } finally { this.pollInFlight=false; this.schedulePolling(); }
     }
 
     canMergeAssetStatus(next) {
@@ -494,10 +506,24 @@ class ReportStickFigureVideoWorkflowDetailPage {
         const succeeded=board?.status==='succeeded';
         const failed=board?.status==='failed';
         const actions=`${succeeded||failed?`<button data-view-raw class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">Gem 原文</button>`:''}${failed?`<button data-retry-storyboard-normalize class="rounded-md bg-emerald-700 px-3 py-2 text-xs font-bold text-white"><i class="fas fa-forward mr-1"></i>复用 Gem 原文继续梳理</button>`:''}${succeeded||failed?`<button data-generate-storyboard data-force="1" class="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700"><i class="fas fa-rotate mr-1"></i>重新请求 Gem</button>`:''}${!board?`<button data-generate-storyboard class="rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white">生成分镜</button>`:''}`;
-        return `<section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"><div class="flex flex-wrap items-center justify-between gap-2"><div><h2 class="font-black">标题与正文分镜</h2><p class="mt-1 text-xs text-slate-500">标题镜头独立保存；正文逐字覆盖原始口播文案。</p></div><div class="flex flex-wrap gap-2">${actions}</div></div>${board&&['queued','running'].includes(board.status)?`<div class="mt-4 rounded-md bg-indigo-50 p-3 text-xs font-bold text-indigo-700"><i class="fas fa-spinner fa-spin mr-2"></i>${this.escape(board.step||board.status)} · ${board.progress||0}%</div>`:''}${failed?`<div class="mt-4 rounded-md bg-red-50 p-3 text-xs text-red-700">${this.escape(board.error||'分镜失败')}</div>`:''}${succeeded?`<div class="mt-4 flex items-center justify-between text-xs"><span class="font-black">${segments.length} 个镜头</span><span class="font-bold text-emerald-700">正文覆盖${board.coverage_complete?'完整':'待检查'}</span></div><div class="mt-3 max-h-[36rem] space-y-2 overflow-auto">${!hasTitleScene?this.legacyTitleCard(title):''}${segments.map(item=>this.sceneCard(item)).join('')}</div>`:'<div class="mt-4 rounded-md border border-dashed p-6 text-center text-sm text-slate-500">基础文案完成后可生成分镜。</div>'}</section>`;
+        const emptyState=failed
+            ? '<div class="mt-4 rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">分镜整理未保存，Gem 原始返回仍已保留。优先点击“复用 Gem 原文继续梳理”；如果原始回复缺少字段，再点击“重新请求 Gem”。</div>'
+            : '<div class="mt-4 rounded-md border border-dashed p-6 text-center text-sm text-slate-500">基础文案已完成，可生成分镜。</div>';
+        return `<section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"><div class="flex flex-wrap items-center justify-between gap-2"><div><h2 class="font-black">标题与正文分镜</h2><p class="mt-1 text-xs text-slate-500">标题镜头独立保存；正文逐字覆盖原始口播文案。</p></div><div class="flex flex-wrap gap-2">${actions}</div></div>${board&&['queued','running'].includes(board.status)?`<div class="mt-4 rounded-md bg-indigo-50 p-3 text-xs font-bold text-indigo-700"><i class="fas fa-spinner fa-spin mr-2"></i>${this.escape(board.step||board.status)} · ${board.progress||0}%</div>`:''}${failed?`<div class="mt-4 rounded-md bg-red-50 p-3 text-xs text-red-700">${this.escape(board.error||'分镜失败')}</div>`:''}${succeeded?`<div class="mt-4 flex items-center justify-between text-xs"><span class="font-black">${segments.length} 个镜头</span><span class="font-bold text-emerald-700">正文覆盖${board.coverage_complete?'完整':'待检查'}</span></div><div class="mt-3 max-h-[36rem] space-y-2 overflow-auto">${!hasTitleScene?this.legacyTitleCard(title):''}${segments.map(item=>this.sceneCard(item)).join('')}</div>`:emptyState}</section>`;
     }
 
     assetSection(imageDone,audioReady) {
+        const storyboardStatus=String(this.storyboard?.status||'').toLowerCase();
+        const storyboardReady=storyboardStatus==='succeeded';
+        if(!storyboardReady){
+            const failed=storyboardStatus==='failed';
+            const message=this.assetsError||(
+                failed
+                    ? '标题与正文分镜失败，暂不能批量生成图片。请先在上方续跑分镜梳理或重新请求 Gem。'
+                    : '标题与正文分镜完成后，这里才可以批量生成图片。'
+            );
+            return `<section class="rounded-xl border ${failed?'border-red-200 bg-red-50':'border-amber-200 bg-amber-50'} p-5"><div class="flex flex-wrap items-start justify-between gap-3"><div><h2 class="font-black ${failed?'text-red-900':'text-amber-900'}">逐镜头音画素材</h2><p class="mt-2 text-sm ${failed?'text-red-700':'text-amber-700'}">${this.escape(message)}</p></div>${failed?'<button data-generate-storyboard data-force="1" class="rounded-md bg-indigo-700 px-4 py-2 text-xs font-bold text-white shadow-sm"><i class="fas fa-clapperboard mr-1"></i>重新生成含标题分镜</button>':''}</div></section>`;
+        }
         if(this.assetsError){
             const needsTitleScene=this.assetsError.includes('缺少标题镜头提示词');
             return `<section class="rounded-xl border border-amber-200 bg-amber-50 p-5"><div class="flex flex-wrap items-start justify-between gap-3"><div><h2 class="font-black text-amber-900">逐镜头音画素材</h2><p class="mt-2 text-sm text-amber-800">${this.escape(this.assetsError)}</p></div>${needsTitleScene?'<button data-generate-storyboard data-force="1" class="rounded-md bg-indigo-700 px-4 py-2 text-xs font-bold text-white shadow-sm"><i class="fas fa-clapperboard mr-1"></i>重新生成含标题分镜</button>':''}</div>${needsTitleScene?'<p class="mt-3 text-xs text-amber-700">新分镜完成后，本区域会自动出现“批量生成图片”和“批量生成语音”入口。</p>':''}</section>`;

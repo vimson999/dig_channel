@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 from services.report_audio_workflow import (
     DEFAULT_INITIAL_PROMPT,
-    DEFAULT_REVIEW_PROMPT,
+    DEFAULT_REVIEW_PROMPT_BASE,
     status_payload as audio_workflow_status_payload,
 )
 
@@ -13,6 +13,7 @@ from services.report_audio_workflow import (
 FEATURE_NAME = "report_script_material_workflow"
 QUEUE_NAME = "report_script_material_workflow"
 RESULT_DETAIL_CACHE_VERSION = 2
+DEFAULT_REVIEW_PROMPT = DEFAULT_REVIEW_PROMPT_BASE
 
 
 def storage_path_for_job(job_id: str, created_at: Optional[datetime] = None) -> str:

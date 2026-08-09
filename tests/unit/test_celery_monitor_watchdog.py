@@ -410,6 +410,59 @@ class CeleryMonitorWatchdogTest(unittest.TestCase):
         self.assertEqual(query.calls, 2)
         release_session.assert_called_once()
 
+    def test_stop_service_releases_db_session_before_process_wait(self):
+        service = {"label": "MP3", "queue": "mp3_video_workflow"}
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            celery_monitor,
+            "_ensure_dirs",
+        ), patch.object(
+            celery_monitor,
+            "_service_stop_guard",
+            return_value=None,
+        ), patch.object(
+            celery_monitor,
+            "_release_db_session_quietly",
+        ) as release_session, patch.object(
+            celery_monitor,
+            "_service_processes",
+            side_effect=lambda _service: (release_session.assert_called_once(), [])[1],
+        ), patch.object(
+            celery_monitor,
+            "_read_pid_file",
+            return_value=None,
+        ), patch.object(
+            celery_monitor,
+            "_pid_file",
+            return_value=Path(tmpdir) / "mp3.pid",
+        ):
+            result = celery_monitor._stop_service("mp3_video", service)
+
+        self.assertEqual(result["terminated_pids"], [])
+
+    def test_guarded_stop_releases_db_session_before_returning(self):
+        guard = {
+            "skipped": True,
+            "reason": "active_non_interruptible_tasks",
+        }
+
+        with patch.object(celery_monitor, "_ensure_dirs"), patch.object(
+            celery_monitor,
+            "_service_stop_guard",
+            return_value=guard,
+        ), patch.object(
+            celery_monitor,
+            "_release_db_session_quietly",
+        ) as release_session, patch.object(
+            celery_monitor,
+            "_service_processes",
+        ) as service_processes:
+            result = celery_monitor._stop_service("mp3_video", {})
+
+        release_session.assert_called_once()
+        service_processes.assert_not_called()
+        self.assertTrue(result["skipped"])
+
     def test_scheduler_start_passes_the_canonical_project_root(self):
         scheduler = {"label": "ZSXQ", "argv": ["python", "scheduler.py"]}
         process = SimpleNamespace(pid=1234, poll=lambda: None)

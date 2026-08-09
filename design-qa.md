@@ -44,6 +44,54 @@ final result: passed
 
 ---
 
+# Design QA: 生财情报台亦仁认可标签与正文可读性
+
+## Visual truth
+
+- Source screenshot: `/var/folders/dd/51s7f6gs6vz30qy285xd_b_80000gn/T/codex-clipboard-e8ff414b-3b08-48ee-b713-b7c2521e7bad.png`
+- Browser-rendered implementation: `/private/tmp/zsxq-insights-yiren-readability-implementation-1564x1139.png`
+- Source pixels: `1564x1140`.
+- Implementation pixels and CSS viewport: `1564x1139`, device scale factor `1`; the one-pixel height difference is non-material.
+- State: search query `我们聊了很多AI工具`, topic `55522445112882414`, detail dialog open, live local data.
+
+## Comparison evidence
+
+- Full-view comparison: passed. Source and implementation were opened together at effectively identical viewport dimensions. The implementation preserves the existing Shioa page and dialog hierarchy while replacing raw platform markup with readable article structure.
+- Focused dialog comparison: passed. Encoded `text_bold` tokens now render as section headings with a restrained blue rule; encoded `mention` tokens render inline as a blue mention. The metadata row adds the bounded `未见亦仁认可` state without competing with the title.
+- Intentional deviation: the implementation uses a narrower `940px` reading column instead of the source's nearly full-width dialog. This improves line length and scanning and is the requested readability change.
+
+## Findings and iteration history
+
+1. Initial P1: raw `<e type="text_bold">` and URL-encoded `title` attributes occupied the article body, making the content effectively unreadable.
+2. Initial P1: the list and dialog had no explicit, evidence-bounded indication of whether 亦仁 recognized the topic.
+3. Fix: added safe parsing for known bold and mention tokens, paragraph/heading typography, and a three-state recognition label: `亦仁认可`, `亦仁有回应`, `未见亦仁认可`.
+4. First browser pass found a P2 residual: list excerpts still exposed raw rich-text tokens because a previous Redis payload remained cached.
+5. Fix: added backend plain-text excerpt normalization and advanced the overview cache namespace to `v4`.
+6. Post-fix evidence: the screenshot topic renders 48 readable paragraphs, multiple section headings, an inline `@Jacky` mention, and no visible `<e type=...>` text in either list excerpt or dialog. No remaining P0/P1/P2 findings.
+
+## Fidelity surfaces
+
+- Fonts and typography: passed. Existing system fonts remain; dialog body is `16px / 1.9`, headings are `18px` with clear hierarchy, and title weight/scale remain consistent with Shioa.
+- Spacing and layout rhythm: passed. The reading column, paragraph spacing, metadata wrapping, dialog padding, and mobile overrides form a consistent vertical rhythm.
+- Colors and visual tokens: passed. Existing slate/blue/green tokens are reused; recognition states use green for confirmed, blue for response-only, and neutral slate for no evidence found.
+- Image quality and assets: passed. No new raster assets were required; existing Font Awesome icons are reused.
+- Copy and content: passed. Recognition copy explicitly distinguishes confirmed recognition, response-only evidence, and absence of captured evidence; it does not infer rejection.
+
+## Functional checks
+
+- Search narrowed the live page to the exact screenshot topic.
+- List excerpt contains decoded Chinese and `@Jacky`; no raw rich-text tag remains.
+- Topic dialog opens, closes, and reopens successfully.
+- Detail parser produced 48 paragraphs and recognized the expected section headings and mention.
+- Screenshot topic truthfully reports `未见亦仁认可`; the API returned `yiren_recognition: not_found`.
+- Browser console contained no errors.
+- Automated regression: `18 passed`.
+- JavaScript syntax, backend health, and `git diff --check` passed.
+
+final result: passed
+
+---
+
 # Design QA: 生财情报台
 
 ## Visual truth
@@ -277,5 +325,91 @@ final result: passed
 - The selected tab survives the detail page's internal rerender because the page controller retains the active platform key.
 - Both pages showed one tablist, no horizontal overflow, and no browser console errors.
 - JavaScript syntax checks, two unit tests, and `git diff --check` passed.
+
+final result: passed
+
+---
+
+# Design QA: MP3 选择列表增高
+
+## Visual truth
+
+- Source screenshot: `/var/folders/dd/51s7f6gs6vz30qy285xd_b_80000gn/T/codex-clipboard-40b13402-3eb2-4c80-8222-9c23df164278.png`
+- Implementation screenshot: `/private/tmp/mp3-audio-list-height-after.png`
+- Combined comparison: `/private/tmp/mp3-audio-list-height-comparison.png`
+- Source pixels: `496x830`.
+- Implementation focused-region pixels: `470x1364`.
+- Desktop viewport: `1280x720` CSS pixels at device scale `1`.
+- Responsive check viewport: `1024x900` CSS pixels at device scale `1`.
+- State: “全部 MP3”第 1 页，10 条音频已加载，未选择音频。
+
+## Comparison evidence
+
+- Full/focused comparison: passed. The source and revised list region were placed side by side. The card styling, typography, spacing, controls, colors, copy, and pagination remain unchanged; only the available vertical list space increases.
+- Desktop behavior: passed. At the `xl` breakpoint the list has a `1152px` maximum height. The loaded list measured `1112px` for both `clientHeight` and `scrollHeight`, so all 10 rows fit without an internal scrollbar.
+- Responsive behavior: passed. At `1024x900`, the list resolves to `630px` (`70vh`) and retains vertical scrolling so the control does not grow beyond a practical small-screen viewport.
+
+## Findings and iteration history
+
+1. Initial P2: the `544px` list viewport displayed about five of ten rows and required a nested vertical scroll.
+2. Fix: changed the responsive list cap to `70vh` below `xl` and `72rem` at `xl` and above.
+3. Post-fix: all ten desktop rows fit in the list without nested scrolling; no remaining P0/P1/P2 findings.
+
+## Fidelity surfaces
+
+- Fonts and typography: passed. Existing system fonts, sizes, weights, truncation, and line heights are unchanged.
+- Spacing and layout rhythm: passed. Existing card gaps, padding, border radii, and pagination spacing are unchanged.
+- Colors and visual tokens: passed. Existing slate, indigo, emerald, border, and surface tokens are unchanged.
+- Image quality and assets: passed. This region contains no raster assets; the existing icon library remains unchanged.
+- Copy and content: passed. Search, tabs, metadata, audio controls, and pagination copy are unchanged.
+
+## Functional checks
+
+- Desktop list: 10 children, `clientHeight=1112`, `scrollHeight=1112`, `max-height=1152px`.
+- Responsive list: `clientHeight=630`, `scrollHeight=1112`, `max-height=630px`, `overflow-y=auto`.
+- Browser console: no application errors; only the existing Tailwind CDN development warning was observed.
+- Source diff is limited to the list height and overflow utility classes.
+
+final result: passed
+
+---
+
+# Design QA: PDF 投递列表完整展开
+
+## Visual truth
+
+- Source screenshot: `/var/folders/dd/51s7f6gs6vz30qy285xd_b_80000gn/T/codex-clipboard-c3880788-e8ec-4ccd-8b0f-78d55b4c5e30.png`
+- Implementation screenshot: `/private/tmp/report-audio-pdf-expanded-viewport.png`
+- Combined comparison: `/private/tmp/report-audio-pdf-height-comparison.png`
+- Source viewport: `583x1013`.
+- Implementation viewport: `583x1013`.
+- State: “选择已同步 PDF”已选中，“全部 PDF”第 1 页，当前页 10 条 PDF 已加载。
+
+## Comparison evidence
+
+- Focused comparison: passed. 参考图与实现图在同一张对比图中检查；PDF 卡片、搜索、标签、元数据、预览入口和分页样式保持原有设计。
+- Height behavior: passed. 列表从固定 `544px` 调整为内容自然高度；10 条数据下 `clientHeight=1112`、`scrollHeight=1112`，列表内部不再出现第二条纵向滚动条。
+- Page behavior: passed. 分页仍紧接第 10 条 PDF 之后显示，页面使用浏览器自身的单一纵向滚动，不再嵌套滚动。
+
+## Findings and iteration history
+
+1. Initial P2: `max-h-[34rem] overflow-auto` 将 10 条 PDF 压在 `544px` 容器内，实际内容高 `1112px`，造成红框区域必须单独上下滚动。
+2. Fix: 移除列表的固定最大高度和内部 overflow，让分页限定的 10 条内容自然撑开区域。
+3. Post-fix: 10 条均完整展开，分页保留，无剩余 P0/P1/P2 问题。
+
+## Fidelity surfaces
+
+- Fonts and typography: passed. 字体、字号、字重、截断和行高未修改。
+- Spacing and layout rhythm: passed. 卡片间距、内边距、边框、圆角、搜索区与分页间距未修改。
+- Colors and visual tokens: passed. 原有 slate、indigo、状态标签和表面颜色未修改。
+- Image quality and assets: passed. 此区域未新增或替换图片资产，继续使用现有图标库。
+- Copy and content: passed. 标签、下载量、状态、文件信息和分页文案未修改。
+
+## Functional checks
+
+- PDF 列表：10 个子项，`clientHeight=1112`，`scrollHeight=1112`，`overflow-y=visible`。
+- 分页：第 10 条之后正常显示，区域高度大于 0。
+- 浏览器控制台：无应用错误；仅有项目原先存在的 Tailwind CDN 开发环境警告。
+- 单元测试：`tests/unit/test_report_audio_workflow_frontend_contract.py` 共 11 项通过。
 
 final result: passed

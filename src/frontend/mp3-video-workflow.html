@@ -62,7 +62,7 @@
                     </div>
 
                     <div id="audio-asset-summary" class="mt-2 text-xs text-slate-500">等待加载已同步 MP3。</div>
-                    <div id="audio-asset-list" class="mt-2 max-h-[34rem] space-y-2 overflow-auto"></div>
+                    <div id="audio-asset-list" class="mt-2 max-h-[70vh] space-y-2 overflow-y-auto xl:max-h-[72rem]"></div>
                     <div id="audio-asset-pagination" class="mt-3"></div>
 
                     <div id="selected-audio-panel" class="mt-4 hidden rounded-md border border-emerald-100 bg-emerald-50/60 p-3">
@@ -91,10 +91,10 @@
                         </select>
                     </label>
                     <label class="mt-4 flex items-start gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5">
-                        <input id="generate-subtitles-checkbox" type="checkbox" checked class="mt-0.5 h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-500">
+                        <input id="generate-subtitles-checkbox" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-500">
                         <span>
-                            <span class="block text-sm font-black text-slate-800">生成字幕</span>
-                            <span class="mt-0.5 block text-xs leading-5 text-slate-500">完整视频时执行 ASR 并烧录字幕；关闭后合成无字幕视频。</span>
+                            <span class="block text-sm font-black text-slate-800">提取并烧录字幕（默认关闭）</span>
+                            <span class="mt-0.5 block text-xs leading-5 text-slate-500">仅明确需要字幕时开启；关闭后跳过 ASR，直接合成无字幕视频。</span>
                         </span>
                     </label>
                     <div id="gemini-config-panel">

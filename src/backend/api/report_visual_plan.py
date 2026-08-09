@@ -58,6 +58,7 @@ _TERMINAL_STORYBOARD_CACHE = {}
 _TERMINAL_STORYBOARD_JOB_CACHE = {}
 _TERMINAL_STORYBOARD_CACHE_LOCK = Lock()
 _TERMINAL_STORYBOARD_CACHE_MAX_ENTRIES = 512
+_STORYBOARD_PARENT_FEATURES = {"storyboard", "report_stick_figure_video_workflow"}
 logger = logging.getLogger(__name__)
 
 
@@ -252,6 +253,15 @@ def create_storyboard_job(current_user):
         )
         if not workflow:
             return jsonify({"success": False, "message": "火柴人视频编排任务不存在或与文案不匹配"}), 400
+        try:
+            from api.report_stick_figure_video_workflow import _clear_scene_structure_cache
+
+            _clear_scene_structure_cache(
+                workflow_id=workflow_id,
+                source_task_id=material_task.id,
+            )
+        except Exception as exc:
+            logger.warning("清理旧分镜结构缓存失败: workflow=%s source=%s error=%s", workflow_id, material_task.id, exc)
     task = PublicationTask(
         status="pending",
         current_step="queued",
@@ -438,7 +448,7 @@ def get_job(current_user, job_id):
     output = _storyboard_output(task.id)
     if output:
         payload = _storyboard_job_payload(task, output, include_segments=True)
-    elif task.parent_feature == "storyboard":
+    elif task.parent_feature in _STORYBOARD_PARENT_FEATURES:
         payload = _storyboard_job_payload(task, None, include_segments=False)
     else:
         task = _get_owned_visual_task(current_user, job_id, include_result=True)

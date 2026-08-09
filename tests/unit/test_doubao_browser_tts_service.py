@@ -12,6 +12,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from services.doubao_browser_tts import (  # noqa: E402
     DOUBAO_REPEAT_PROMPT_PREFIX,
+    DoubaoBrowserTTSCaptchaError,
     DoubaoBrowserTTSWorker,
     DoubaoBrowserTTSAutomationError,
     DoubaoBrowserTTSError,
@@ -58,6 +59,66 @@ class DoubaoBrowserTTSServiceTest(unittest.TestCase):
         selectors = worker._selectors("login")
         self.assertNotIn("text=登录", selectors)
         self.assertIn('button:has-text("登录")', selectors)
+
+    def test_image_selection_captcha_in_iframe_is_detected(self):
+        worker = DoubaoBrowserTTSWorker.__new__(DoubaoBrowserTTSWorker)
+        worker.options = DoubaoBrowserTTSOptions(
+            user_data_dir="/tmp/doubao-profile",
+            extension_path="/tmp/extension",
+        )
+        page = SimpleNamespace(
+            url="https://www.doubao.com/chat/",
+            frames=[
+                SimpleNamespace(url="https://www.doubao.com/chat/"),
+                SimpleNamespace(url="https://verifycenter.example/captcha/index.html"),
+            ],
+        )
+
+        def visible(root, _selectors):
+            return object() if "verifycenter" in root.url else None
+
+        with patch.object(worker, "_first_visible", side_effect=visible), patch.object(
+            worker,
+            "_save_failure_screenshot",
+            return_value="/tmp/doubao-captcha.png",
+        ):
+            error = worker._captcha_error(page, "captcha-job")
+
+        self.assertIsInstance(error, DoubaoBrowserTTSCaptchaError)
+        self.assertEqual(error.screenshot, "/tmp/doubao-captcha.png")
+        self.assertEqual(error.page_url, "https://www.doubao.com/chat/")
+
+    def test_image_selection_captcha_selectors_cover_observed_copy(self):
+        selectors = self._worker()._selectors("captcha")
+
+        self.assertIn("text=请选择符合以下描述的图片", selectors)
+        self.assertIn("text=请将下列图片中符合描述的选项拖动到下方", selectors)
+
+    def test_captcha_wait_keeps_browser_open_until_human_clears_challenge(self):
+        worker = DoubaoBrowserTTSWorker.__new__(DoubaoBrowserTTSWorker)
+        worker.options = DoubaoBrowserTTSOptions(
+            user_data_dir="/tmp/doubao-profile",
+            extension_path="/tmp/extension",
+            captcha_wait_timeout_seconds=60,
+        )
+        captcha = DoubaoBrowserTTSCaptchaError("需要验证", page_url="https://www.doubao.com/chat/")
+
+        with patch.object(worker, "_captcha_error", return_value=captcha), patch.object(
+            worker,
+            "_captcha_visible",
+            side_effect=[True, False],
+        ), patch.object(
+            worker,
+            "_first_visible",
+            return_value=None,
+        ), patch("services.doubao_browser_tts.time.sleep"), patch(
+            "services.doubao_browser_tts.time.monotonic",
+            side_effect=[100.0, 100.0, 101.0, 101.0],
+        ):
+            waited = worker._raise_if_login_or_captcha(SimpleNamespace(), "captcha-job")
+
+        self.assertEqual(waited, 1.0)
+        self.assertEqual(worker._captcha_waited_seconds, 1.0)
 
     def _worker(self):
         return DoubaoBrowserTTSWorker(

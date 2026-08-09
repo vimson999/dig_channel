@@ -26,6 +26,7 @@ from models.zsxq_sync import (  # noqa: E402
     ZsxqSyncRunDownload,
     ZsxqTopic,
     ZsxqTopicComment,
+    jsonb_payload_md5,
 )
 from services.zsxq_sync_service import TOPIC_UPDATE_SNAPSHOT_FIELDS, ZsxqSyncService  # noqa: E402
 
@@ -144,6 +145,95 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         self.assertIn("raw_payload", updates[0])
         self.assertIn("raw_payload_hash", updates[0])
         self.assertIn("text=", updates[0])
+
+    def test_topic_comment_page_snapshot_removes_per_topic_select_n_plus_one(self):
+        service = ZsxqSyncService()
+        tab = {"id": "tab-1", "label": "外资研报"}
+        topics = []
+        for index in range(2):
+            topic = self._comment_topic(text=f"内容 {index}")
+            topic["topic_id"] = f"topic-comment-{index}"
+            topic["show_comments"][0]["comment_id"] = f"comment-{index}"
+            topics.append(topic)
+            service._upsert_topic_comments("group-1", tab, topic)
+        db.session.commit()
+        db.session.remove()
+
+        with self._capture_sql() as statements:
+            snapshots = service._load_existing_topic_comment_snapshots("group-1", topics)
+            for topic in topics:
+                service._upsert_topic_comments(
+                    "group-1",
+                    tab,
+                    topic,
+                    existing_records=snapshots[topic["topic_id"]],
+                )
+            db.session.flush()
+
+        comment_selects = [
+            sql for sql in statements
+            if sql.startswith("select") and " from zsxq_topic_comments " in sql
+        ]
+        self.assertEqual(1, len(comment_selects), comment_selects)
+        self.assertEqual(1, len(snapshots["topic-comment-0"]))
+        self.assertEqual(1, len(snapshots["topic-comment-1"]))
+
+    def test_topic_comment_page_snapshot_keeps_changed_payload_and_hash(self):
+        service = ZsxqSyncService()
+        tab = {"id": "tab-1", "label": "外资研报"}
+        original = self._comment_topic()
+        service._upsert_topic_comments("group-1", tab, original)
+        db.session.commit()
+        db.session.remove()
+
+        changed = self._comment_topic(text="页面批量快照后的变化")
+        snapshots = service._load_existing_topic_comment_snapshots("group-1", [changed])
+        with self._capture_sql() as statements:
+            stats = service._upsert_topic_comments(
+                "group-1",
+                tab,
+                changed,
+                existing_records=snapshots["topic-comment-1"],
+            )
+            db.session.commit()
+
+        updates = [
+            sql for sql in statements
+            if sql.startswith("update zsxq_topic_comments ")
+        ]
+        self.assertEqual(1, stats["comments_updated"])
+        self.assertEqual(1, len(updates), updates)
+        self.assertIn("raw_payload", updates[0])
+        refreshed = ZsxqTopicComment.query.filter_by(comment_id="comment-1").one()
+        self.assertEqual("页面批量快照后的变化", refreshed.text)
+        self.assertEqual(jsonb_payload_md5(changed["show_comments"][0]), refreshed.raw_payload_hash)
+
+    def test_external_scan_snapshot_freezes_links_without_raw_payload(self):
+        service = ZsxqSyncService()
+        record = ZsxqTopic(
+            id="topic-snapshot",
+            group_id="group-1",
+            group_name="测试组",
+            tab_id="tab-1",
+            tab_label="测试页",
+            topic_id="topic-snapshot",
+            raw_payload={
+                "talk": {
+                    "text": "正文",
+                    "images": [],
+                },
+                "article": {
+                    "content": "外链 https://example.com/articles/42",
+                },
+            },
+        )
+
+        snapshot = service._external_document_scan_snapshot(record)
+
+        self.assertEqual("topic-snapshot", snapshot.topic_id)
+        self.assertEqual(1, len(snapshot._external_links))
+        self.assertEqual("generic_web", snapshot._external_links[0]["provider"])
+        self.assertFalse(hasattr(snapshot, "raw_payload"))
 
     def test_postgres_schema_contract_uses_one_compact_catalog_query(self):
         service = ZsxqSyncService()
@@ -279,6 +369,98 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
 
         self.assertLess(refresh_offset, commit_offset)
         self.assertLess(commit_offset, topic_loop_offset)
+
+    def test_attachment_download_projection_commits_before_state_batch(self):
+        sync_source = python_inspect.getsource(ZsxqSyncService._sync_one_tab)
+        call_offsets = []
+        search_from = 0
+        marker = "self._download_topic_attachments("
+        while True:
+            call_offset = sync_source.find(marker, search_from)
+            if call_offset < 0:
+                break
+            call_offsets.append(call_offset)
+            search_from = call_offset + len(marker)
+        self.assertEqual(2, len(call_offsets))
+        for call_offset in call_offsets:
+            # The commit is deliberately before the call expression, so inspect
+            # the surrounding source rather than the split call body itself.
+            prefix = sync_source[max(0, call_offset - 500) : call_offset]
+            self.assertIn("db.session.commit()", prefix)
+
+        download_source = python_inspect.getsource(
+            ZsxqSyncService._download_topic_attachments
+        )
+        self.assertIn("session.flush()", download_source)
+        self.assertIn("with session.no_autoflush:", download_source)
+
+    def test_existing_topic_updates_stay_batched_across_download_commits(self):
+        topics = [
+            {"topic_id": "topic-batch-download-1"},
+            {"topic_id": "topic-batch-download-2"},
+        ]
+        applied = []
+        service = ZsxqSyncService()
+
+        with patch.object(
+            service,
+            "_get_topics_with_retry",
+            return_value={"resp_data": {"topics": topics}},
+        ), patch.object(service, "_hydrate_truncated_topic_comments"), patch.object(
+            service,
+            "_load_existing_topic_snapshots",
+            return_value={
+                topic["topic_id"]: {"id": f"row-{index}"}
+                for index, topic in enumerate(topics, start=1)
+            },
+        ), patch.object(
+            service,
+            "_load_existing_attachment_snapshots",
+            return_value={topic["topic_id"]: () for topic in topics},
+        ), patch.object(
+            service,
+            "_refresh_existing_attachment_snapshots_for_page",
+            return_value=0,
+        ), patch.object(service, "_upsert_topic_comments"), patch.object(
+            service,
+            "_upsert_attachments",
+            return_value=({"attachments_seen": 0}, []),
+        ), patch.object(
+            service,
+            "_download_topic_attachments",
+            return_value={},
+        ), patch.object(
+            service,
+            "_prepare_existing_topic_update",
+            side_effect=lambda *_args, **_kwargs: (
+                True,
+                None,
+                {"last_sync_run_id": "run-batch-download"},
+            ),
+        ), patch.object(service, "_scan_external_document_links"), patch.object(
+            service,
+            "_apply_existing_topic_updates",
+            side_effect=lambda updates: applied.append(list(updates)),
+        ), patch.object(service, "_commit_running_progress"), patch.object(
+            service,
+            "_upsert_cursor",
+        ):
+            result = service._sync_one_tab(
+                cookie="cookie",
+                group_id="group-1",
+                group_name="测试组",
+                tab={"id": "tab-1", "label": "测试页"},
+                run=SimpleNamespace(id="run-batch-download"),
+                count=2,
+                max_pages=1,
+                stop_on_existing=False,
+                download_attachments=True,
+                download_file_types={"pdf"},
+            )
+
+        self.assertEqual(2, result["topics_updated"])
+        self.assertEqual(1, len(applied))
+        self.assertEqual(2, len(applied[0]))
 
     def test_pacing_wait_ends_live_read_transaction_before_sleep(self):
         service = ZsxqSyncService()
@@ -483,8 +665,9 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         )
         db.session.add(attachment)
         db.session.commit()
+        attachment_id = attachment.id
         disconnect = OperationalError(
-            "SELECT zsxq_attachments",
+            "INSERT zsxq_sync_run_downloads",
             {},
             Exception("server closed the connection unexpectedly"),
         )
@@ -496,9 +679,9 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
             return_value=str(target),
         ), patch.object(
             service,
-            "_load_attachment_for_download_update",
+            "_record_sync_run_download",
             side_effect=disconnect,
-        ) as load_for_update:
+        ) as record_download:
             with self.assertRaises(OperationalError):
                 service._download_topic_attachments(
                     cookie="cookie",
@@ -516,9 +699,9 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
                     remaining_downloads=1,
                 )
 
-        load_for_update.assert_called_once_with(attachment.id)
+        record_download.assert_called_once()
         db.session.remove()
-        persisted = db.session.get(ZsxqAttachment, attachment.id)
+        persisted = db.session.get(ZsxqAttachment, attachment_id)
         self.assertEqual(persisted.download_status, "pending")
         self.assertIsNone(persisted.local_path)
 
@@ -764,6 +947,55 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         self.assertEqual(original_updated_at, refreshed.updated_at)
         self.assertEqual(1, len(attachment_updates), statements)
         self.assertIn("download_status is not", attachment_updates[0])
+
+    def test_download_state_transitions_batch_into_one_update(self):
+        attachments = [
+            ZsxqAttachment(
+                id=f"download-state-batch-{index}",
+                group_id="group-1",
+                tab_id="tab-1",
+                topic_id="topic-1",
+                attachment_key=f"download-state-batch-{index}",
+                attachment_type="file",
+                name=f"batch-{index}.pdf",
+                download_status="pending",
+            )
+            for index in range(2)
+        ]
+        db.session.add_all(attachments)
+        db.session.commit()
+        service = ZsxqSyncService()
+
+        with self._capture_sql() as statements:
+            service._apply_attachment_download_state_updates([
+                {
+                    "id": attachments[0].id,
+                    "download_status": "downloaded",
+                    "local_path": "runtime/batch-0.pdf",
+                    "error_message": None,
+                },
+                {
+                    "id": attachments[1].id,
+                    "download_status": "failed",
+                    "local_path": None,
+                    "error_message": "upstream timeout",
+                },
+            ])
+            db.session.commit()
+
+        updates = [
+            sql for sql in statements
+            if sql.startswith("update zsxq_attachments ")
+        ]
+        self.assertEqual(1, len(updates), updates)
+        refreshed = [
+            db.session.get(ZsxqAttachment, attachment.id)
+            for attachment in attachments
+        ]
+        self.assertEqual("downloaded", refreshed[0].download_status)
+        self.assertEqual("runtime/batch-0.pdf", refreshed[0].local_path)
+        self.assertEqual("failed", refreshed[1].download_status)
+        self.assertEqual("upstream timeout", refreshed[1].error_message)
 
     def test_attachment_snapshots_are_loaded_once_per_page_and_survive_commits(self):
         topics = []
@@ -1035,6 +1267,51 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         self.assertIn("raw_payload", updates[0])
         self.assertIn("raw_payload_hash", updates[0])
         self.assertIn("content=", updates[0])
+
+    def test_existing_topic_updates_batch_by_update_shape(self):
+        for index in range(2):
+            db.session.add(ZsxqTopic(
+                id=f"topic-row-batch-{index}",
+                group_id="group-1",
+                tab_id="tab-1",
+                tab_label="旧标签",
+                topic_id=f"topic-batch-{index}",
+                last_sync_run_id="run-1",
+            ))
+        db.session.commit()
+
+        service = ZsxqSyncService()
+        with self._capture_sql() as statements:
+            service._apply_existing_topic_updates([
+                {
+                    "id": "topic-row-batch-0",
+                    "values": {"tab_label": "新标签", "last_sync_run_id": "run-2"},
+                },
+                {
+                    "id": "topic-row-batch-1",
+                    "values": {"tab_label": "新标签", "last_sync_run_id": "run-2"},
+                },
+            ])
+            db.session.commit()
+
+        updates = [
+            sql for sql in statements
+            if sql.startswith("update zsxq_topics set")
+        ]
+        self.assertEqual(1, len(updates), updates)
+        rows = (
+            ZsxqTopic.query
+            .filter(ZsxqTopic.id.in_(["topic-row-batch-0", "topic-row-batch-1"]))
+            .order_by(ZsxqTopic.id)
+            .all()
+        )
+        self.assertEqual(["新标签", "新标签"], [row.tab_label for row in rows])
+        self.assertEqual(["run-2", "run-2"], [row.last_sync_run_id for row in rows])
+
+    def test_sync_progress_commit_interval_is_capped_for_heartbeat_safety(self):
+        service = ZsxqSyncService()
+        with patch.object(service, "_progress_result_persist_seconds", return_value=300):
+            self.assertEqual(30.0, service._sync_progress_commit_interval_seconds())
 
     def test_legacy_topic_schema_omits_payload_hash_from_select_and_update(self):
         payload = {

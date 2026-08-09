@@ -22,10 +22,13 @@ from models import (  # noqa: E402
 )
 from models.task import PublicationTask  # noqa: E402
 from services.report_audio_workflow import (  # noqa: E402
+    DEFAULT_REVIEW_PROMPT_BASE,
     PDF_EVIDENCE_REVIEW_CONTRACT,
     ReportAudioWorkflowError,
     assert_final_tts_text_clean,
     ensure_pdf_evidence_review_contract,
+    review_prompt_for_pdf_evidence,
+    script_regeneration_prompts,
     split_tts_text,
 )
 from services.report_pdf_evidence import (  # noqa: E402
@@ -166,6 +169,51 @@ class ReportPdfEvidenceTest(unittest.TestCase):
         self.assertIn('"schema_version":"report_pdf_evidence_v1"', merged)
         self.assertEqual(merged.count(PDF_EVIDENCE_REVIEW_CONTRACT), 1)
         self.assertEqual(repeated, merged)
+
+    def test_optional_evidence_prompt_defaults_off_without_losing_review_instructions(self):
+        stale_prompt = ensure_pdf_evidence_review_contract("请复核事实并输出最终文案。")
+
+        disabled = review_prompt_for_pdf_evidence(stale_prompt, enabled=False)
+        enabled = review_prompt_for_pdf_evidence(DEFAULT_REVIEW_PROMPT_BASE, enabled=True)
+
+        self.assertEqual(disabled, "请复核事实并输出最终文案。")
+        self.assertNotIn("PDF_EVIDENCE_V1_JSON", disabled)
+        self.assertEqual(enabled.count(PDF_EVIDENCE_REVIEW_CONTRACT), 1)
+
+    def test_optional_evidence_prompt_strips_cached_contract_whitespace_variant(self):
+        cached_contract = PDF_EVIDENCE_REVIEW_CONTRACT.replace("必须包含claim_text", "必须包含 claim_text")
+        stale_prompt = f"请复核事实并输出最终文案。{cached_contract}"
+
+        disabled = review_prompt_for_pdf_evidence(stale_prompt, enabled=False)
+        reenabled = review_prompt_for_pdf_evidence(stale_prompt, enabled=True)
+
+        self.assertEqual(disabled, "请复核事实并输出最终文案。")
+        self.assertNotIn("PDF_EVIDENCE_V1_JSON", disabled)
+        self.assertEqual(reenabled.count("PDF_EVIDENCE_V1_JSON"), 1)
+        self.assertEqual(reenabled.count(PDF_EVIDENCE_REVIEW_CONTRACT), 1)
+
+    def test_script_regeneration_prompt_requires_full_1500_char_body_without_evidence(self):
+        prompts = script_regeneration_prompts(
+            "解析 PDF。",
+            ensure_pdf_evidence_review_contract("复核事实。"),
+            minimum_chars=1200,
+        )
+
+        self.assertIn("全新重写", prompts["prompt"])
+        self.assertIn("不少于 1500 字", prompts["review_prompt"])
+        self.assertNotIn("PDF_EVIDENCE_V1_JSON", prompts["review_prompt"])
+
+    def test_script_regeneration_strips_cached_contract_variant(self):
+        cached_contract = PDF_EVIDENCE_REVIEW_CONTRACT.replace("必须包含claim_text", "必须包含 claim_text")
+
+        prompts = script_regeneration_prompts(
+            "解析 PDF。",
+            f"复核事实。{cached_contract}",
+            minimum_chars=1500,
+        )
+
+        self.assertNotIn("PDF_EVIDENCE_V1_JSON", prompts["review_prompt"])
+        self.assertIn("复核事实。", prompts["review_prompt"])
 
     def test_parser_maps_current_gem_v6_evidence_map_and_verifies_locally(self):
         final_script = "收入增长20%。利润率提升到15%。风险来自需求回落。"

@@ -46,6 +46,7 @@ class ReportAudioWorkflowPage {
             pdfAssetPagination: document.getElementById('pdf-asset-pagination'),
             promptInput: document.getElementById('prompt-input'),
             reviewPromptInput: document.getElementById('review-prompt-input'),
+            pdfEvidenceEnabled: document.getElementById('pdf-evidence-enabled'),
             geminiUrlSelect: document.getElementById('gemini-url-select'),
             geminiUrlInput: document.getElementById('gemini-url-input'),
             geminiUrlCurrent: document.getElementById('gemini-url-current'),
@@ -170,7 +171,8 @@ class ReportAudioWorkflowPage {
 
     defaults() {
         this.els.promptInput.value = '请解析上传的研报 PDF，提取核心观点、关键数据、风险提示和可用于口播的摘要。';
-        this.els.reviewPromptInput.value = '担任首席责任主编，利用提供的PDF材料和可查网络信息，对上文内容逐条复核与勘误，确认事实准确、逻辑清晰、表达规范，列出每条修正点及依据，并给出最终优化后的信息版本，附上核对过程说明和参考来源。最后另起一段输出以 PDF_EVIDENCE_V1_JSON: 开头的单行严格 JSON，格式为 {"schema_version":"report_pdf_evidence_v1","claims":[...]}; 每条 claims 必须包含 claim_text、script_quote、pdf_page、pdf_quote、claim_type、evidence_kind、confidence、use_as_visual，可选 crop={x,y,width,height}（均为0到1）。只填写能从 PDF 明确定位的内容，不要使用 Markdown 代码围栏；无法定位的主张不要伪造证据。';
+        this.els.reviewPromptInput.value = '担任首席责任主编，利用提供的PDF材料和可查网络信息，对上文内容逐条复核与勘误，确认事实准确、逻辑清晰、表达规范，列出每条修正点及依据，并给出最终优化后的信息版本，附上核对过程说明和参考来源。';
+        if (this.els.pdfEvidenceEnabled) this.els.pdfEvidenceEnabled.checked = false;
     }
 
     defaultGeminiUrlPresets() {
@@ -471,6 +473,20 @@ class ReportAudioWorkflowPage {
                 this.closeCoverRegenerateModal();
             }
         });
+        document.addEventListener('visibilitychange', () => this.handleVisibilityChange());
+        window.addEventListener('beforeunload', () => {
+            if (this.pollTimer) window.clearInterval(this.pollTimer);
+        });
+    }
+
+    handleVisibilityChange() {
+        if (document.hidden) {
+            if (this.pollTimer) window.clearInterval(this.pollTimer);
+            this.pollTimer = null;
+            return;
+        }
+        this.resetPollTimer();
+        this.refreshJobs();
     }
 
     apiRoot() {
@@ -871,6 +887,7 @@ class ReportAudioWorkflowPage {
                 pdf: pdfSummary,
                 prompt: this.els.promptInput.value.trim(),
                 review_prompt: this.els.reviewPromptInput.value.trim(),
+                pdf_evidence_enabled: Boolean(this.els.pdfEvidenceEnabled?.checked),
                 tts_provider: this.els.ttsProvider?.value || 'doubao_browser',
                 tts_voice: this.els.ttsProvider?.value === 'doubao_api' ? (this.els.ttsVoice?.value || '') : '',
                 visual_scheme_keys: visualSchemeKeys,
@@ -907,6 +924,7 @@ class ReportAudioWorkflowPage {
             }
             form.append('prompt', this.els.promptInput.value.trim());
             form.append('review_prompt', this.els.reviewPromptInput.value.trim());
+            form.append('pdf_evidence_enabled', this.els.pdfEvidenceEnabled?.checked ? '1' : '0');
             const geminiUrl = this.selectedGeminiUrl();
             if (geminiUrl) form.append('gemini_url', geminiUrl);
             if (manualGeminiResult) form.append('manual_gemini_result', manualGeminiResult);
@@ -1146,10 +1164,13 @@ class ReportAudioWorkflowPage {
     }
 
     async refreshJobs() {
-        if (this.pollInFlight || this.historyLoading) return;
+        if (document.hidden || this.pollInFlight || this.historyLoading) return;
         this.pollInFlight = true;
         try {
-            if (!this.jobs.some((job) => job.job_id && !this.isTerminal(job.status))) {
+            const hasActiveJob = this.jobs.some(
+                (job) => job.job_id && !this.isTerminal(job.status)
+            );
+            if (!hasActiveJob) {
                 const now = new Date();
                 const today = [
                     now.getFullYear(),
@@ -1157,14 +1178,12 @@ class ReportAudioWorkflowPage {
                     String(now.getDate()).padStart(2, '0'),
                 ].join('-');
                 if (this.jobDate && this.jobDate < today) return;
-                await this.loadHistory({ page: this.jobPage, silent: true });
-                return;
             }
-            const active = this.jobs.filter((job) => job.job_id && !this.isTerminal(job.status));
-            await Promise.all(active.map((job) => this.refreshJob(job.job_id).catch(() => null)));
-            if (this.historyLoading) return;
+            // The list endpoint already returns the parent projections and all
+            // child summaries for the current page in bounded batch queries.
+            // Polling every active row first only creates an HTTP/SQL N+1 and
+            // then immediately overwrites those results with the same list.
             await this.loadHistory({ page: this.jobPage, silent: true });
-            this.render();
         } finally {
             this.pollInFlight = false;
         }
@@ -1555,7 +1574,9 @@ class ReportAudioWorkflowPage {
 
     resetPollTimer() {
         if (this.pollTimer) window.clearInterval(this.pollTimer);
-        const delay = Math.max(1000, Number(this.els.pollDelay.value) || 3000);
+        this.pollTimer = null;
+        if (document.hidden) return;
+        const delay = Math.max(5000, Number(this.els.pollDelay.value) || 15000);
         this.pollTimer = window.setInterval(() => this.refreshJobs(), delay);
     }
 

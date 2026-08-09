@@ -47,6 +47,7 @@ RETRYABLE_ERROR_FRAGMENTS = (
     "导出 WAV",
     "WAV 已保存",
     "音频捕获",
+    "未捕获到 PCM 音频",
     "页面自动化超时",
     "Timeout",
     "timed out",
@@ -67,6 +68,7 @@ NON_RETRYABLE_ERROR_FRAGMENTS = (
 
 TASK_UPDATE_COLUMNS = (
     PublicationTask.id,
+    PublicationTask.celery_task_id,
     PublicationTask.status,
     PublicationTask.current_step,
     PublicationTask.progress,
@@ -117,7 +119,22 @@ def _process_job(task_id, celery_task=None):
     if not isinstance(task.params, dict) or task.params.get("feature") != FEATURE_NAME:
         logger.error("Invalid Doubao browser TTS task params: %s", task_id)
         return False
-    if task.status == "canceled":
+    request_id = str(
+        getattr(getattr(celery_task, "request", None), "id", "") or ""
+    )
+    current_celery_id = str(getattr(task, "celery_task_id", "") or "")
+    if request_id and current_celery_id and request_id != current_celery_id:
+        logger.info(
+            "Doubao browser TTS task received stale delivery; task=%s request=%s current=%s",
+            task_id,
+            request_id,
+            current_celery_id,
+        )
+        return False
+    if task.status == "completed":
+        logger.info("Doubao browser TTS task already completed; skip duplicate: %s", task_id)
+        return True
+    if task.status in {"failed", "blocked_by_captcha", "canceled"}:
         return False
 
     job_id = task.id

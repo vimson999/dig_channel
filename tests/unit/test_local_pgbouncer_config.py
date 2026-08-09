@@ -33,9 +33,12 @@ class LocalPgBouncerConfigTest(unittest.TestCase):
         self.assertIn("min_pool_size = {MIN_POOL_SIZE}", generator)
         self.assertIn("server_check_query = SELECT 1", generator)
         self.assertIn("server_check_delay = 5", generator)
-        self.assertIn("query_timeout = 60", generator)
+        self.assertIn('"LOCAL_PGBOUNCER_QUERY_TIMEOUT", "20"', generator)
+        self.assertIn("query_timeout = {QUERY_TIMEOUT}", generator)
         self.assertIn("query_wait_timeout = 15", generator)
         self.assertIn("tcp_keepalive = 1", generator)
+        self.assertIn('"LOCAL_PGBOUNCER_TCP_KEEPIDLE", "10"', generator)
+        self.assertIn('"LOCAL_PGBOUNCER_TCP_KEEPINTVL", "5"', generator)
 
 
 if __name__ == "__main__":

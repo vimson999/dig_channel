@@ -31,13 +31,30 @@ def test_submission_sends_only_the_active_mode_options():
     javascript = (
         PROJECT_ROOT / "src/frontend/js/report-audio-workflow-test.js"
     ).read_text(encoding="utf-8")
+    html = (
+        PROJECT_ROOT / "src/frontend/report-audio-workflow-test.html"
+    ).read_text(encoding="utf-8")
 
     assert "updateGenerationModeUi()" in javascript
     assert "renderMode === 'keyframes' ? this.selectedKeyframeOutputs() : []" in javascript
     assert "renderMode === 'full_video' && Boolean(this.els.landscapeVideoEnabled?.checked)" in javascript
     assert "form.append('keyframe_outputs', JSON.stringify(keyframeOutputs))" in javascript
-    assert "PDF_EVIDENCE_V1_JSON" in javascript
-    assert '"schema_version":"report_pdf_evidence_v1"' in javascript
+    assert "form.append('pdf_evidence_enabled', this.els.pdfEvidenceEnabled?.checked ? '1' : '0')" in javascript
+    assert 'id="pdf-evidence-enabled" type="checkbox"' in html
+    assert 'id="pdf-evidence-enabled" type="checkbox" checked' not in html
+    assert "PDF_EVIDENCE_V1_JSON" not in javascript
+
+
+def test_synced_pdf_page_expands_all_ten_rows_without_nested_scrolling():
+    html = (
+        PROJECT_ROOT / "src/frontend/report-audio-workflow-test.html"
+    ).read_text(encoding="utf-8")
+
+    asset_list = html.split('id="pdf-asset-list"', 1)[1].split("</div>", 1)[0]
+
+    assert 'class="mt-2 space-y-2"' in asset_list
+    assert "max-h-" not in asset_list
+    assert "overflow-" not in asset_list
 
 
 def test_keyframe_confirmation_preserves_landscape_selection_and_busts_cache():
@@ -49,9 +66,66 @@ def test_keyframe_confirmation_preserves_landscape_selection_and_busts_cache():
     ).read_text(encoding="utf-8")
 
     assert "include_landscape: options.includeLandscape === true" in javascript
-    assert "selectionSource: 'keyframe-confirmation'" in javascript
+    assert "/confirm-keyframes" in javascript
+    assert "vertical_video_schemes: selection.schemes" in javascript
+    assert "selection_source: 'keyframe-confirmation'" in javascript
+    assert "schemes: ['scheme3']" in javascript
+    assert "启动白板 + 横屏 + 方案三" in javascript
     assert "selection_source: options.selectionSource || 'vertical-video-panel'" in javascript
-    assert "report-audio-workflow-detail.js?v=20260729-sticky-sidebar-status-v7" in html
+    assert "report-audio-workflow-detail.js?v=20260809-audio-generation-v2" in html
+
+
+def test_bilibili_account_selection_applies_report_media_defaults():
+    detail = (
+        PROJECT_ROOT / "src/frontend/js/report-audio-workflow-detail.js"
+    ).read_text(encoding="utf-8")
+    panel = (
+        PROJECT_ROOT / "src/frontend/js/bilibili-publish-panel.js"
+    ).read_text(encoding="utf-8")
+
+    assert "accountDefaults: (credential) => this.reportBilibiliAccountDefaults(credential)" in detail
+    assert "label.includes('ai研报0709')" in detail
+    assert "{ videoKey: 'vertical', coverKey: 'bilibili_cover' }" in detail
+    assert "label.includes('小君君0708')" in detail
+    assert "{ videoKey: 'landscape', coverKey: 'cover' }" in detail
+    assert "onCredentialChange(credentialId)" in panel
+    assert "this.formDraft = {" in panel
+
+
+def test_report_audio_polling_pauses_for_hidden_tabs_and_uses_safe_defaults():
+    list_javascript = (
+        PROJECT_ROOT / "src/frontend/js/report-audio-workflow-test.js"
+    ).read_text(encoding="utf-8")
+    detail_javascript = (
+        PROJECT_ROOT / "src/frontend/js/report-audio-workflow-detail.js"
+    ).read_text(encoding="utf-8")
+    list_html = (
+        PROJECT_ROOT / "src/frontend/report-audio-workflow-test.html"
+    ).read_text(encoding="utf-8")
+
+    assert "if (document.hidden || this.pollInFlight || this.historyLoading) return" in list_javascript
+    assert "if (document.hidden) return" in list_javascript
+    assert "Math.max(5000, Number(this.els.pollDelay.value) || 15000)" in list_javascript
+    assert 'min="5000" step="1000" value="15000"' in list_html
+    assert "this.autoRefreshMs = 10000" in detail_javascript
+    assert "if (document.hidden) this.clearAutoRefresh()" in detail_javascript
+    assert "if (document.hidden) return" in detail_javascript
+
+
+def test_report_audio_detail_polling_recovers_after_transient_request_failure():
+    javascript = (
+        PROJECT_ROOT / "src/frontend/js/report-audio-workflow-detail.js"
+    ).read_text(encoding="utf-8")
+
+    load_body = javascript.split("async load(options = {}) {", 1)[1].split(
+        "\n    setRefreshBusy(", 1
+    )[0]
+    retry_body = javascript.split("scheduleRetryRefresh() {", 1)[1].split(
+        "\n    async refreshBilibiliUploads()", 1
+    )[0]
+    assert "this.scheduleRetryRefresh();" in load_body
+    assert "this.load({ background: Boolean(this.job) });" in retry_body
+    assert "Math.min(this.autoRefreshMs, 5000)" in retry_body
 
 
 def test_video_actions_are_grouped_by_aspect_and_registry_driven_scheme():
@@ -102,6 +176,73 @@ def test_detail_summary_uses_semantic_workflow_stages_instead_of_a_progress_bar(
     assert 'aria-label="任务流程进度"' in javascript
 
 
+def test_failed_detail_exposes_resume_action_using_existing_retry_endpoint():
+    javascript = (
+        PROJECT_ROOT / "src/frontend/js/report-audio-workflow-detail.js"
+    ).read_text(encoding="utf-8")
+
+    assert "data-detail-action=\"retry-workflow\"" in javascript
+    assert "从失败处续跑" in javascript
+    assert "/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/retry" in javascript
+    assert "this.retryRequestIds.has(jobId)" in javascript
+
+
+def test_audio_script_exposes_independent_pro_regeneration_action():
+    javascript = (
+        PROJECT_ROOT / "src/frontend/js/report-audio-workflow-detail.js"
+    ).read_text(encoding="utf-8")
+    api = (
+        PROJECT_ROOT / "src/backend/api/report_audio_workflow.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'data-detail-action="regenerate-script-pro"' in javascript
+    assert "Pro 重写 · 至少 1500 字" in javascript
+    assert "/regenerate-script" in javascript
+    assert "原文案、音频和已生成视频都不会被覆盖" in javascript
+    assert '"force_gemini_regeneration": True' in api
+    assert '"gemini_require_pro_model": True' in api
+    assert '"gemini_min_final_chars": minimum_chars' in api
+
+
+def test_audio_script_exposes_independent_tts_continuation_action():
+    javascript = (
+        PROJECT_ROOT / "src/frontend/js/report-audio-workflow-detail.js"
+    ).read_text(encoding="utf-8")
+    api = (
+        PROJECT_ROOT / "src/backend/api/report_audio_workflow.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'data-detail-action="generate-audio-from-script"' in javascript
+    assert "用此文案生成语音" in javascript
+    assert "/generate-audio" in javascript
+    assert "不会重新请求 Gemini" in javascript
+    assert 'AUDIO_GENERATION_PARENT_FEATURE = "report_audio_script_tts_generation"' in api
+    assert '"structured_result": structured' in api
+    assert '"script_material_only": False' in api
+    assert '"force_gemini_regeneration": False' in api
+
+
+def test_failed_bilibili_upload_exposes_safe_retry_action():
+    javascript = (
+        PROJECT_ROOT / "src/frontend/js/bilibili-publish-panel.js"
+    ).read_text(encoding="utf-8")
+    detail = (
+        PROJECT_ROOT / "src/frontend/js/report-audio-workflow-detail.js"
+    ).read_text(encoding="utf-8")
+    api = (
+        PROJECT_ROOT / "src/backend/api/report_audio_workflow.py"
+    ).read_text(encoding="utf-8")
+    service = (
+        PROJECT_ROOT / "src/backend/services/bilibili_publish.py"
+    ).read_text(encoding="utf-8")
+
+    assert "data-bili-shared-retry" in javascript
+    assert "只有失败的 B站上传任务可以重投" in service
+    assert "retry_bilibili_upload_child" in api
+    assert "onAfterRetry" in javascript
+    assert "retryPath: (jobId, uploadTaskId)" in detail
+
+
 def test_sticky_sidebar_exposes_shared_status_and_refresh_controls():
     html = (
         PROJECT_ROOT / "src/frontend/report-audio-workflow-detail.html"
@@ -139,10 +280,12 @@ def test_evidence_panel_distinguishes_persistence_failure_from_legacy_task():
     assert "generation_failed" in javascript
     assert "_orphaned_artifact_summary" in api_source
     assert '"legacy_unavailable"' in api_source
+    assert "explicitly_disabled" in api_source
+    assert "本任务未启用 PDF 证据映射" in javascript
     html = (
         PROJECT_ROOT / "src/frontend/report-audio-workflow-detail.html"
     ).read_text(encoding="utf-8")
-    assert "report-pdf-evidence-panel.js?v=20260729-evidence-preview-v6" in html
+    assert "report-pdf-evidence-panel.js?v=20260809-evidence-disabled-v1" in html
     assert 'data-evidence-action="preview-image"' in javascript
     assert 'data-evidence-action="download-image"' in javascript
     assert "showImagePreview" in javascript

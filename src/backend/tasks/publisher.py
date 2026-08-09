@@ -1457,6 +1457,20 @@ def run_publication_pipeline(self, task_id):
                 error_message=None,
                 completed_at=datetime.utcnow(),
             )
+            try:
+                from services.report_audio_finalization import (
+                    reconcile_finalization_for_publisher,
+                )
+
+                reconcile_finalization_for_publisher(task_id)
+            except Exception as continuation_exc:
+                db.session.rollback()
+                logger.error(
+                    "Publisher completed but report-audio finalization wake-up failed: task=%s error=%s",
+                    task_id,
+                    continuation_exc,
+                    exc_info=True,
+                )
             
             total_duration = time.time() - overall_start
             logger.info(f"✨ [TASK] 任务 {task_id} 全部处理完成! 总耗时: {total_duration:.2f}s")
@@ -1472,6 +1486,20 @@ def run_publication_pipeline(self, task_id):
                     error_message=str(e),
                     completed_at=datetime.utcnow(),
                 )
+                try:
+                    from services.report_audio_finalization import (
+                        reconcile_finalization_for_publisher,
+                    )
+
+                    reconcile_finalization_for_publisher(task_id)
+                except Exception as continuation_exc:
+                    db.session.rollback()
+                    logger.error(
+                        "Publisher failure finalization wake-up failed: task=%s error=%s",
+                        task_id,
+                        continuation_exc,
+                        exc_info=True,
+                    )
             except Exception as persist_error:
                 logger.error(
                     "Task %s failed and failed-state persistence also failed: %s",
@@ -1579,7 +1607,7 @@ def run_bilibili_upload_only(self, task_id):
                 current_celery_id,
             )
             return
-        if context.status in {"completed", "canceled"}:
+        if context.status in {"completed", "failed", "canceled"}:
             logger.info("Task %s is terminal (%s) before Bilibili upload; skipping.", task_id, context.status)
             return
         guard_publication_task_start(

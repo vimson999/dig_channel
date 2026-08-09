@@ -33,8 +33,17 @@ if [ "${FORCE_RESTART_ACTIVE_TASKS:-0}" = "1" ]; then
 else
   echo
   echo "2/8 首次检查是否仍有不可中断的业务任务..."
+  set +e
   PYTHONPATH="$PROJECT_ROOT/src/backend" \
     "$PROJECT_ROOT/venv/bin/python" "$SCRIPT_DIR/check-restart-safety.py"
+  precheck_status=$?
+  set -e
+  if [ "$precheck_status" -eq 2 ]; then
+    echo "⏳ 检测到活动任务；继续冻结新消费和 API 入队，随后等待现有任务自然结束。"
+  elif [ "$precheck_status" -ne 0 ]; then
+    echo "❌ 首次重启安全预检失败，拒绝继续。"
+    exit "$precheck_status"
+  fi
 fi
 
 echo
@@ -153,7 +162,7 @@ for _ in $(seq 1 30); do
   listener_pid="$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null || true)"
   if [ -n "$listener_pid" ]; then
     if [ "$listener_pid" != "$backend_pid" ]; then
-      echo "❌ 启动验收失败：本次启动 PID 为 $backend_pid，但端口 $PORT 由 $listener_pid 监听。"
+      echo "❌ 启动验收失败：本次启动 PID 为 ${backend_pid}，但端口 ${PORT} 由 ${listener_pid} 监听。"
       "$SCRIPT_DIR/stop-backend.sh" || true
       exit 1
     fi

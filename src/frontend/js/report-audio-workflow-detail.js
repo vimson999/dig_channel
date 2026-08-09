@@ -3,7 +3,7 @@ class ReportAudioWorkflowDetailPage {
         this.jobId = new URLSearchParams(window.location.search).get('job_id') || '';
         this.job = null;
         this.refreshTimer = null;
-        this.autoRefreshMs = 6000;
+        this.autoRefreshMs = 10000;
         this.biliPanel = null;
         this.biliPanelDraft = null;
         this.biliPanelDraftJobId = '';
@@ -17,10 +17,14 @@ class ReportAudioWorkflowDetailPage {
         this.publishTabs = null;
         this.verticalVideoRequestIds = new Set();
         this.finalVideoRequestIds = new Set();
+        this.finalizationRequestIds = new Set();
         this.selectedVerticalScheme = null;
         this.podcastCoverRequestIds = new Set();
         this.coverRegeneratingIds = new Set();
         this.stickWorkflowRequestIds = new Set();
+        this.retryRequestIds = new Set();
+        this.scriptRegenerationRequestIds = new Set();
+        this.audioGenerationRequestIds = new Set();
         this.visualSchemes = [{ key: 'stick_figure', name: '白板火柴人', configured: true }];
         this.selectedVisualSchemeKey = 'stick_figure';
         this.verticalVideoSchemes = [
@@ -67,6 +71,10 @@ class ReportAudioWorkflowDetailPage {
         this.els.refreshBtn?.addEventListener('click', () => this.load({ manual: true }));
         this.els.sidebarRefreshBtn?.addEventListener('click', () => this.load({ manual: true }));
         window.addEventListener('beforeunload', () => { this.clearAutoRefresh(); this.quickNavObserver?.disconnect(); this.douyinPanel?.destroy?.(); this.wechatChannelsPanel?.destroy?.(); });
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) this.clearAutoRefresh();
+            else this.scheduleAutoRefresh();
+        });
         this.els.quickNav?.addEventListener('click', (event) => {
             const item = event.target.closest('[data-quick-nav]');
             if (item && !item.disabled) {
@@ -195,6 +203,7 @@ class ReportAudioWorkflowDetailPage {
             this.setNotice('', 'info', true);
         } catch (error) {
             this.setNotice(`加载失败：${error.message}`, 'error');
+            this.scheduleRetryRefresh();
         } finally {
             if (!background) this.setRefreshBusy(false);
         }
@@ -224,6 +233,7 @@ class ReportAudioWorkflowDetailPage {
 
     scheduleAutoRefresh() {
         this.clearAutoRefresh();
+        if (document.hidden) return;
         const activeJob = ['queued', 'running', 'submitting'].includes(String(this.job?.status || '').toLowerCase());
         const uploadItems = Array.isArray(this.job?.bilibili_uploads) ? [...this.job.bilibili_uploads] : [];
         const localUpload = this.biliPanel?.lastUpload;
@@ -243,6 +253,15 @@ class ReportAudioWorkflowDetailPage {
                 this.refreshBilibiliUploads();
             }
         }, this.autoRefreshMs);
+    }
+
+    scheduleRetryRefresh() {
+        this.clearAutoRefresh();
+        if (document.hidden) return;
+        this.refreshTimer = setTimeout(() => {
+            this.refreshTimer = null;
+            this.load({ background: Boolean(this.job) });
+        }, Math.min(this.autoRefreshMs, 5000));
     }
 
     async refreshBilibiliUploads() {
@@ -272,9 +291,10 @@ class ReportAudioWorkflowDetailPage {
             ...((job && job.children) || {}),
             ...(payload.children || {}),
         };
-        for (const key of ['publisher_video', 'publisher_vertical_video', 'publisher_vertical_preview_video']) {
+        for (const key of ['publisher_video', 'publisher_vertical_video', 'publisher_vertical_preview_video', 'finalization']) {
             if (next.children[key]) next[key] = next.children[key];
         }
+        if (payload.finalization) next.finalization = payload.finalization;
         if (payload.doubao_browser_tts) next.doubao_browser_tts = payload.doubao_browser_tts;
         if (payload.bilibili_uploads) next.bilibili_uploads = payload.bilibili_uploads;
         if (payload.visual_videos) next.visual_videos = payload.visual_videos;
@@ -290,6 +310,8 @@ class ReportAudioWorkflowDetailPage {
             job?.publisher_video,
             job?.publisher_vertical_video,
             job?.publisher_vertical_preview_video,
+            children.finalization,
+            job?.finalization,
             ...(Array.isArray(job?.visual_videos) ? job.visual_videos : []),
         ].some((item) => this.isActiveStatus(item?.status));
     }
@@ -481,6 +503,15 @@ class ReportAudioWorkflowDetailPage {
     handleDetailAction(button) {
         const jobId = button.dataset.jobId || this.jobId;
         const action = button.dataset.detailAction;
+        if (action === 'retry-workflow') {
+            this.retryWorkflow(jobId);
+        }
+        if (action === 'regenerate-script-pro') {
+            this.regenerateScriptWithPro(jobId);
+        }
+        if (action === 'generate-audio-from-script') {
+            this.generateAudioFromScript(jobId);
+        }
         if (action === 'generate-vertical-preview') {
             this.generateVerticalVideo(jobId, {
                 previewSeconds: Number(button.dataset.previewSeconds || 10),
@@ -510,6 +541,105 @@ class ReportAudioWorkflowDetailPage {
         }
     }
 
+    async retryWorkflow(jobId) {
+        if (!jobId || this.retryRequestIds.has(jobId)) return;
+        if (!window.confirm('从失败处续跑这个任务？已完成的 PDF 准备、Gemini 解析和文案会尽量复用。')) return;
+        this.retryRequestIds.add(jobId);
+        this.renderChangedSections(['task-overview']);
+        try {
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/retry`, {
+                method: 'POST',
+                body: JSON.stringify({}),
+                timeoutMs: 20000,
+            });
+            this.job = this.mergeJobStatus(this.job || {}, result.data || result);
+            this.setNotice(result.message || '任务已从失败处续跑。', 'success');
+            this.render();
+            this.scheduleAutoRefresh();
+        } catch (error) {
+            this.setNotice(`续跑失败：${error.message}`, 'error');
+        } finally {
+            this.retryRequestIds.delete(jobId);
+            this.renderChangedSections(['task-overview']);
+        }
+    }
+
+    async regenerateScriptWithPro(jobId) {
+        if (!jobId || this.scriptRegenerationRequestIds.has(jobId)) return;
+        const confirmed = window.confirm(
+            '将新建一个独立文案任务：原文案、音频和已生成视频都不会被覆盖。\n\n'
+            + '新任务只有在页面确认 Gemini Pro 后才会提交，并要求最终可朗读正文至少 1500 字。继续吗？',
+        );
+        if (!confirmed) return;
+        const pendingWindow = window.open('about:blank', '_blank');
+        if (pendingWindow) {
+            pendingWindow.opener = null;
+            pendingWindow.document.title = '正在创建 Pro 文案重生成任务';
+            pendingWindow.document.body.textContent = '正在创建独立文案重生成任务…';
+        }
+        this.scriptRegenerationRequestIds.add(jobId);
+        this.renderChangedSections(['content-results']);
+        try {
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/regenerate-script`, {
+                method: 'POST',
+                body: JSON.stringify({ minimum_chars: 1500 }),
+                timeoutMs: 30000,
+            });
+            const payload = result.data || result;
+            const detailUrl = new URL(
+                payload.detail_url || `report-audio-workflow-detail.html?job_id=${encodeURIComponent(payload.regeneration_job_id || payload.job_id || '')}`,
+                window.location.href,
+            ).href;
+            this.setNotice(result.message || 'Pro 文案重生成任务已创建。', 'success');
+            if (pendingWindow) pendingWindow.location.replace(detailUrl);
+            else window.location.assign(detailUrl);
+        } catch (error) {
+            pendingWindow?.close();
+            this.setNotice(`文案重生成失败：${error.message}`, 'error');
+        } finally {
+            this.scriptRegenerationRequestIds.delete(jobId);
+            this.renderChangedSections(['content-results']);
+        }
+    }
+
+    async generateAudioFromScript(jobId) {
+        if (!jobId || this.audioGenerationRequestIds.has(jobId)) return;
+        const confirmed = window.confirm(
+            '将新建一个独立语音任务，使用当前页面这版文案直接生成语音。\n\n'
+            + '不会重新请求 Gemini，也不会覆盖旧文案、旧音频或已生成视频。继续吗？',
+        );
+        if (!confirmed) return;
+        const pendingWindow = window.open('about:blank', '_blank');
+        if (pendingWindow) {
+            pendingWindow.opener = null;
+            pendingWindow.document.title = '正在创建语音任务';
+            pendingWindow.document.body.textContent = '正在使用当前文案创建独立语音任务…';
+        }
+        this.audioGenerationRequestIds.add(jobId);
+        this.renderChangedSections(['content-results']);
+        try {
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/generate-audio`, {
+                method: 'POST',
+                body: JSON.stringify({}),
+                timeoutMs: 30000,
+            });
+            const payload = result.data || result;
+            const detailUrl = new URL(
+                payload.detail_url || `report-audio-workflow-detail.html?job_id=${encodeURIComponent(payload.audio_generation_job_id || payload.job_id || '')}`,
+                window.location.href,
+            ).href;
+            this.setNotice(result.message || '语音任务已创建。', 'success');
+            if (pendingWindow) pendingWindow.location.replace(detailUrl);
+            else window.location.assign(detailUrl);
+        } catch (error) {
+            pendingWindow?.close();
+            this.setNotice(`语音任务创建失败：${error.message}`, 'error');
+        } finally {
+            this.audioGenerationRequestIds.delete(jobId);
+            this.renderChangedSections(['content-results']);
+        }
+    }
+
     captureBilibiliPanelDraft(job) {
         const nextJobId = String(job?.job_id || job?.id || this.jobId || '');
         const currentJobId = String(this.biliPanel?.job?.job_id || this.biliPanel?.job?.id || this.biliPanelDraftJobId || '');
@@ -536,15 +666,18 @@ class ReportAudioWorkflowDetailPage {
                 onNotice: (message, type) => this.setNotice(message, type),
                 uploadPath: (jobId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload`,
                 cancelPath: (jobId, uploadTaskId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload/${encodeURIComponent(uploadTaskId)}/cancel`,
+                retryPath: (jobId, uploadTaskId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload/${encodeURIComponent(uploadTaskId)}/retry`,
                 uploads: (payload) => payload.bilibili_uploads || [],
                 videoOptions: (payload) => this.biliUploadVideoOptions(payload),
                 coverOptions: (payload, videoKey) => this.biliCoverOptions(payload, videoKey),
                 defaultCoverKey: (payload, videoKey) => this.defaultBiliCoverKey(payload, videoKey),
+                accountDefaults: (credential) => this.reportBilibiliAccountDefaults(credential),
                 defaultTitle: (payload) => this.defaultBiliTitle(payload),
                 defaultTags: '财经,音频,研报解读',
                 emptyDescription: '当前任务还没有完整视频文件。请先生成横屏或竖屏视频后再投递 B站。',
                 onAfterSubmit: async () => this.refreshBilibiliUploads(),
                 onAfterCancel: async () => this.refreshBilibiliUploads(),
+                onAfterRetry: async () => this.refreshBilibiliUploads(),
             });
         }
         this.biliPanel.setJob(job, { formDraft });
@@ -623,6 +756,10 @@ class ReportAudioWorkflowDetailPage {
         const pdfName = job.pdf?.filename || job.request?.pdf?.filename || 'PDF';
         const workflowStages = this.reportWorkflowStages(job);
         const outputSummary = this.reportWorkflowOutputSummary(job);
+        const jobId = job.job_id || this.jobId || '';
+        const canRetry = ['failed', 'error', 'blocked_by_captcha', 'canceled', 'cancelled']
+            .includes(String(job.status || '').trim().toLowerCase());
+        const retrying = this.retryRequestIds.has(jobId);
         return `
             <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -641,6 +778,7 @@ class ReportAudioWorkflowDetailPage {
                         ].filter(Boolean).join(' · '))}</div>
                     </div>
                     <div class="flex flex-wrap gap-2">
+                        ${canRetry ? `<button type="button" data-detail-action="retry-workflow" data-job-id="${this.escapeAttr(jobId)}" ${retrying ? 'disabled' : ''} class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60"><i class="fas ${retrying ? 'fa-spinner fa-spin' : 'fa-play'} mr-1"></i>${retrying ? '续跑提交中' : '从失败处续跑'}</button>` : ''}
                         ${job.pdf?.preview_url ? `<a href="${this.absoluteUrl(job.pdf.preview_url)}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-file-pdf mr-1"></i>PDF 预览</a>` : ''}
                         <button type="button" data-copy-text="${this.escapeAttr(this.displayTitle(job))}" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-copy mr-1"></i>复制标题</button>
                     </div>
@@ -823,6 +961,9 @@ class ReportAudioWorkflowDetailPage {
         const verticalChild = job.publisher_vertical_video || job.children?.publisher_vertical_video;
         const previewChild = job.publisher_vertical_preview_video || job.children?.publisher_vertical_preview_video;
         const verticalActive = this.isActiveStatus(verticalChild?.status) || this.isActiveStatus(previewChild?.status) || this.verticalVideoRequestIds.has(jobId);
+        const finalization = job.finalization || job.children?.finalization || null;
+        const finalizationActive = this.isActiveStatus(finalization?.status) || this.finalizationRequestIds.has(jobId);
+        const finalizationDone = String(finalization?.status || '').toLowerCase() === 'completed';
         const finalVideoActive = this.finalVideoRequestIds.has(jobId)
             || (this.isActiveStatus(verticalChild?.status) && Boolean(verticalChild?.metadata?.include_landscape));
         const podcastGenerating = this.podcastCoverRequestIds.has(jobId);
@@ -835,13 +976,17 @@ class ReportAudioWorkflowDetailPage {
             || video.vertical_preview_scheme
             || 'scheme1'
         );
-        const requestedSchemes = Array.isArray(job.request?.video?.vertical_video_schemes)
-            ? job.request.video.vertical_video_schemes.map((item) => this.normalizeVerticalScheme(item))
-            : [scheme];
-        const landscapeSelected = job.request?.video?.enabled !== false;
+        const keyframeMode = String(video.render_mode || job.request?.video?.render_mode || '').toLowerCase() === 'keyframes';
+        const requestedSchemes = Array.isArray(finalization?.vertical_video_schemes)
+            ? finalization.vertical_video_schemes.map((item) => this.normalizeVerticalScheme(item))
+            : (keyframeMode
+                ? ['scheme3']
+                : (Array.isArray(job.request?.video?.vertical_video_schemes)
+                    ? job.request.video.vertical_video_schemes.map((item) => this.normalizeVerticalScheme(item))
+                    : [scheme]));
+        const landscapeSelected = finalization ? finalization.include_landscape !== false : true;
         const canRequestVertical = Boolean(audioUrl || videoUrl);
         const stickWorkflowActive = this.stickWorkflowRequestIds.has(jobId);
-        const keyframeMode = String(video.render_mode || job.request?.video?.render_mode || '').toLowerCase() === 'keyframes';
         const selectedVisualScheme = this.visualSchemes.find(
             (item) => item.key === this.selectedVisualSchemeKey
         ) || this.visualSchemes[0];
@@ -872,9 +1017,9 @@ class ReportAudioWorkflowDetailPage {
                 `;
             })
             .join('');
-        const finalVerticalOptions = this.verticalVideoSchemes.map((item) => `
+        const finalVerticalOptions = this.verticalVideoSchemes.filter((item) => item.key === 'scheme3').map((item) => `
             <label class="flex cursor-pointer items-start gap-2 rounded-md border border-fuchsia-100 bg-fuchsia-50/60 px-3 py-2 text-xs text-fuchsia-950">
-                <input type="checkbox" value="${this.escapeAttr(item.key)}" data-detail-final-video-option ${requestedSchemes.includes(item.key) ? 'checked' : ''} class="mt-0.5 h-4 w-4 rounded border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500">
+                <input type="checkbox" value="${this.escapeAttr(item.key)}" data-detail-final-video-option checked disabled class="mt-0.5 h-4 w-4 rounded border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500 disabled:opacity-100">
                 <span><span class="block font-black">${this.escape(item.label)} · ${this.escape(item.name)}</span><span class="mt-0.5 block text-[11px] font-normal text-fuchsia-700">${this.escape(item.description)}</span></span>
             </label>
         `).join('');
@@ -899,15 +1044,15 @@ class ReportAudioWorkflowDetailPage {
                     </div>
                     ${!canRequestVertical ? `<span class="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-700">需要先有音频或视频文件</span>` : ''}
                 </div>
-                ${keyframeMode && !videoUrl ? `
+                ${keyframeMode ? `
                     <div class="mb-4 rounded-xl border border-indigo-200 bg-white p-4">
-                        <div class="text-xs font-black text-indigo-950">关键帧确认与批量成片</div>
-                        <div class="mt-1 text-xs leading-5 text-slate-600">横屏和竖屏分别勾选，可一次提交多个成片版本。</div>
+                        <div class="text-xs font-black text-indigo-950">关键帧确认与端到端成片</div>
+                        <div class="mt-1 text-xs leading-5 text-slate-600">确认一次后，系统会创建/续跑白板任务；白板图片就绪后自动投递横屏 + 方案三竖屏，重复点击不会重复投递。</div>
                         <div class="mt-3 grid gap-4 xl:grid-cols-2" data-detail-final-video-options>
                             <fieldset>
                                 <legend class="mb-2 text-xs font-black text-indigo-900"><i class="fas fa-display mr-1"></i>横屏 · 16:9</legend>
                                 <label class="flex cursor-pointer items-start gap-2 rounded-md border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-950">
-                                    <input type="checkbox" value="landscape" data-detail-final-video-option ${landscapeSelected ? 'checked' : ''} class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-700 focus:ring-indigo-500">
+                                    <input type="checkbox" value="landscape" data-detail-final-video-option checked disabled class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-700 focus:ring-indigo-500 disabled:opacity-100">
                                     <span><span class="block font-black">方案 1 · 研报截图成片</span><span class="mt-0.5 block text-[11px] font-normal text-indigo-700">使用已确认的研报截图关键帧生成横屏 MP4。</span></span>
                                 </label>
                             </fieldset>
@@ -916,8 +1061,9 @@ class ReportAudioWorkflowDetailPage {
                                 <div class="grid gap-2">${finalVerticalOptions}</div>
                             </fieldset>
                         </div>
-                        <button type="button" data-detail-action="confirm-keyframes-generate-final" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive || finalVideoActive ? 'disabled' : ''} class="mt-2 rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-wait disabled:opacity-60">
-                            <i class="fas ${finalVideoActive ? 'fa-spinner fa-spin' : 'fa-circle-check'} mr-1"></i>${finalVideoActive ? '所选成片生成中' : '确认关键帧，生成所选成片'}
+                        ${this.renderFinalizationProgress(job)}
+                        <button type="button" data-detail-action="confirm-keyframes-generate-final" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || finalizationActive || finalizationDone ? 'disabled' : ''} class="mt-3 rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-wait disabled:opacity-60">
+                            <i class="fas ${finalizationActive ? 'fa-spinner fa-spin' : (finalizationDone ? 'fa-circle-check' : 'fa-circle-check')} mr-1"></i>${finalizationActive ? '白板与成片自动续链中' : (finalizationDone ? '白板 + 横屏 + 方案三已完成' : (finalization?.status === 'failed' ? '安全续跑白板 + 横屏 + 方案三' : '确认关键帧，启动白板 + 横屏 + 方案三'))}
                         </button>
                     </div>
                 ` : ''}
@@ -1004,12 +1150,38 @@ class ReportAudioWorkflowDetailPage {
     }
 
     currentFinalVideoSelection() {
-        const selected = Array.from(this.els.root?.querySelectorAll('[data-detail-final-video-option]:checked') || [])
-            .map((input) => String(input.value || '').trim());
         return {
-            includeLandscape: selected.includes('landscape'),
-            schemes: ['scheme1', 'scheme2', 'scheme3'].filter((scheme) => selected.includes(scheme)),
+            includeLandscape: true,
+            schemes: ['scheme3'],
         };
+    }
+
+    renderFinalizationProgress(job) {
+        const finalization = job?.finalization || job?.children?.finalization;
+        if (!finalization) {
+            return '<div class="mt-3 rounded-lg border border-dashed border-indigo-200 bg-indigo-50/40 px-3 py-2 text-xs text-indigo-700">待确认：确认后由系统持续跟进白板、横屏和方案三，不需要守着页面。</div>';
+        }
+        const step = String(finalization.step || '').toLowerCase();
+        const status = String(finalization.status || '').toLowerCase();
+        const stages = [
+            { label: '已确认', ready: true },
+            { label: '白板素材', ready: ['waiting_visual', 'visual_queued', 'visual_retry_wait', 'final_video_queued', 'done'].includes(step) },
+            { label: '横屏 + 方案三', ready: ['final_video_queued', 'done'].includes(step) },
+            { label: '完成', ready: status === 'completed' || step === 'done' },
+        ];
+        const failed = status === 'failed';
+        return `
+            <div class="mt-3 rounded-lg border ${failed ? 'border-rose-200 bg-rose-50' : 'border-indigo-100 bg-indigo-50/50'} p-3" data-finalization-status>
+                <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span class="font-black ${failed ? 'text-rose-800' : 'text-indigo-900'}">${this.escape(finalization.message || (failed ? '全链路需要安全续跑' : '系统正在自动续链'))}</span>
+                    <span class="font-black ${failed ? 'text-rose-700' : 'text-indigo-700'}">${Math.max(0, Math.min(100, Number(finalization.progress || 0)))}%</span>
+                </div>
+                <ol class="mt-2 grid grid-cols-2 gap-1 sm:grid-cols-4">
+                    ${stages.map((item) => `<li class="rounded px-2 py-1 text-[11px] font-bold ${item.ready ? 'bg-emerald-50 text-emerald-700' : 'bg-white text-slate-400'}"><i class="fas ${item.ready ? 'fa-circle-check' : 'fa-circle'} mr-1"></i>${this.escape(item.label)}</li>`).join('')}
+                </ol>
+                ${finalization.error ? `<div class="mt-2 text-xs font-bold leading-5 text-rose-700">${this.escape(finalization.error)}</div>` : ''}
+            </div>
+        `;
     }
 
     async openStickFigureWorkflow(jobId, visualSchemeKey = '') {
@@ -1163,24 +1335,56 @@ class ReportAudioWorkflowDetailPage {
     }
 
     async generateFinalVideos(jobId) {
-        if (!jobId || this.finalVideoRequestIds.has(jobId)) return;
+        if (!jobId || this.finalizationRequestIds.has(jobId)) return;
         const selection = this.currentFinalVideoSelection();
         if (!selection.includeLandscape && selection.schemes.length === 0) {
             this.setNotice('请至少选择一个成片版本。', 'error');
             return;
         }
-        this.finalVideoRequestIds.add(jobId);
+        this.finalizationRequestIds.add(jobId);
+        if (this.job) {
+            this.job.finalization = {
+                ...(this.job.finalization || {}),
+                status: 'processing',
+                step: 'confirmed',
+                progress: Math.max(5, Number(this.job.finalization?.progress || 0)),
+                include_landscape: true,
+                vertical_video_schemes: ['scheme3'],
+                message: '关键帧已确认，正在创建或续跑白板任务',
+            };
+            this.job.children = { ...(this.job.children || {}), finalization: this.job.finalization };
+        }
         this.render();
         try {
-            await this.generateVerticalVideo(jobId, {
-                schemes: selection.schemes,
-                previewSeconds: 0,
-                force: true,
-                includeLandscape: selection.includeLandscape,
-                selectionSource: 'keyframe-confirmation',
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/confirm-keyframes`, {
+                method: 'POST',
+                timeoutMs: 30000,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    include_landscape: selection.includeLandscape,
+                    vertical_video_schemes: selection.schemes,
+                    visual_scheme_key: this.selectedVisualSchemeKey || 'stick_figure',
+                    selection_source: 'keyframe-confirmation',
+                    force: true,
+                }),
             });
+            this.mergeJobPayload(result.data || result);
+            this.setNotice(result.message || '关键帧已确认；白板完成后将自动生成横屏 + 方案三。', 'success');
+            await this.load({ manual: true });
+        } catch (error) {
+            try {
+                await this.load({ manual: true });
+                const persisted = this.job?.finalization || this.job?.children?.finalization;
+                if (persisted && !['failed', 'canceled', 'cancelled'].includes(String(persisted.status || '').toLowerCase())) {
+                    this.setNotice('关键帧确认响应曾中断，但全链路任务已从数据库确认，系统会继续跟进。', 'success');
+                    return;
+                }
+            } catch (_) {
+                // Preserve the original submission error when verification is unavailable.
+            }
+            this.setNotice(`确认关键帧失败：${error.message}`, 'error');
         } finally {
-            this.finalVideoRequestIds.delete(jobId);
+            this.finalizationRequestIds.delete(jobId);
             this.render();
         }
     }
@@ -1449,6 +1653,10 @@ class ReportAudioWorkflowDetailPage {
     renderStructured(job) {
         const structured = job.structured_result || {};
         if (!Object.keys(structured).length) return '';
+        const displayCoverTitle = this.recognizedInstitutionTitle(
+            job,
+            structured.cover_title || job.cover_title,
+        );
         return `
             <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -1457,7 +1665,7 @@ class ReportAudioWorkflowDetailPage {
                 </div>
                 <div class="grid gap-3 md:grid-cols-2">
                     ${this.renderTextBlock('标题', structured.title || job.title)}
-                    ${this.renderTextBlock('封面主标题', structured.cover_title || job.cover_title)}
+                    ${this.renderTextBlock('封面主标题', displayCoverTitle)}
                     ${this.renderTextBlock('封面副标题', structured.cover_subtitle || job.cover_subtitle)}
                     ${this.renderTextBlock('摘要', structured.summary)}
                 </div>
@@ -1556,6 +1764,10 @@ class ReportAudioWorkflowDetailPage {
         const script = this.audioScriptPayload(job);
         if (!script.text) return '';
         const qualityIssue = script.qualityIssue || this.audioScriptQualityIssue(script.text);
+        const jobId = String(job.job_id || job.id || this.jobId || '');
+        const regenerating = this.scriptRegenerationRequestIds.has(jobId);
+        const generatingAudio = this.audioGenerationRequestIds.has(jobId);
+        const hasAudio = Boolean(job?.audio?.wav_path || job?.audio?.download_url);
         return `
             <section class="rounded-lg border border-blue-100 bg-white p-4 shadow-sm">
                 <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
@@ -1568,9 +1780,17 @@ class ReportAudioWorkflowDetailPage {
                             ${script.provider ? ` · ${this.escape(script.provider)}` : ''}
                         </div>
                     </div>
-                    <button type="button" data-copy-text="${this.escapeAttr(script.text)}" class="rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-100">
-                        <i class="fas fa-copy mr-1"></i>复制文案
-                    </button>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <button type="button" data-copy-text="${this.escapeAttr(script.text)}" class="rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-100">
+                            <i class="fas fa-copy mr-1"></i>复制文案
+                        </button>
+                        <button type="button" data-detail-action="generate-audio-from-script" data-job-id="${this.escapeAttr(jobId)}" ${generatingAudio ? 'disabled' : ''} class="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60">
+                            <i class="fas ${generatingAudio ? 'fa-spinner fa-spin' : 'fa-volume-high'} mr-1"></i>${generatingAudio ? '创建中' : (hasAudio ? '重新生成语音' : '用此文案生成语音')}
+                        </button>
+                        <button type="button" data-detail-action="regenerate-script-pro" data-job-id="${this.escapeAttr(jobId)}" ${regenerating ? 'disabled' : ''} class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-wait disabled:opacity-60">
+                            <i class="fas ${regenerating ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${regenerating ? '创建中' : 'Pro 重写 · 至少 1500 字'}
+                        </button>
+                    </div>
                 </div>
                 ${qualityIssue ? `
                     <div class="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold leading-5 text-amber-800">
@@ -1748,6 +1968,31 @@ class ReportAudioWorkflowDetailPage {
         return covers[0]?.key || '';
     }
 
+    reportBilibiliAccountDefaults(credential) {
+        const label = [credential?.owner_label, credential?.name, credential?.masked_summary]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, '')
+            .toLowerCase();
+        if (label.includes('ai研报0709')) {
+            return { videoKey: 'vertical', coverKey: 'bilibili_cover' };
+        }
+        if (label.includes('小君君0708')) {
+            return { videoKey: 'landscape', coverKey: 'cover' };
+        }
+        return null;
+    }
+
+    recognizedInstitutionTitle(job, value) {
+        const text = this.compactMultilineCoverText(value);
+        if (!text) return '';
+        const institution = this.reportInstitution(job, text);
+        if (institution === '机构研报' || !/^\s*(?:机构|机构研报|深度研报)\s*[:：]/.test(text)) {
+            return text;
+        }
+        return this.coverTitleWithInstitution(job, text);
+    }
+
     keyframeOptions(job) {
         const raw = job?.video?.keyframes || {};
         return Object.entries(raw)
@@ -1801,6 +2046,14 @@ class ReportAudioWorkflowDetailPage {
             .map((value) => String(value || ''))
             .join(' ');
         const aliases = [
+            ['GHHK', '香港广发'],
+            ['GF Securities (Hong Kong)', '香港广发'],
+            ['GF Securities Hong Kong', '香港广发'],
+            ['广发证券（香港）', '香港广发'],
+            ['广发证券(香港)', '香港广发'],
+            ['香港广发', '香港广发'],
+            ['GF Securities', '广发证券'],
+            ['广发证券', '广发证券'],
             ['摩根士丹利', '大摩'], ['大摩', '大摩'], ['摩根大通', '摩根大通'], ['小摩', '摩根大通'],
             ['高盛', '高盛'], ['瑞银', '瑞银'], ['野村', '野村'], ['美国银行', '美银'], ['美银', '美银'], ['汇丰', '汇丰'],
             ['Jefferies', '杰富瑞'], ['杰富瑞', '杰富瑞'],
@@ -1812,7 +2065,7 @@ class ReportAudioWorkflowDetailPage {
 
     stripInstitution(title, institution) {
         let text = this.compactTitle(title);
-        const aliases = [institution, '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰', 'Jefferies', '杰富瑞', 'Bernstein', '伯恩斯坦', '盛博'];
+        const aliases = [institution, 'GHHK', 'GF Securities (Hong Kong)', 'GF Securities Hong Kong', '广发证券（香港）', '广发证券(香港)', '香港广发', 'GF Securities', '广发证券', '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰', 'Jefferies', '杰富瑞', 'Bernstein', '伯恩斯坦', '盛博'];
         for (const alias of aliases.filter(Boolean).sort((a, b) => b.length - a.length)) {
             const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             text = text.replace(new RegExp(`^\\s*${escaped}(?:证券)?\\s*[:：]\\s*`, 'i'), '');
@@ -1839,7 +2092,7 @@ class ReportAudioWorkflowDetailPage {
         });
         if (explicitFullInstitution && !genericPrefix) return body;
 
-        const aliases = [institution, '机构', '机构研报', '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰', 'Jefferies', '杰富瑞', 'Bernstein', '伯恩斯坦', '盛博'];
+        const aliases = [institution, '机构', '机构研报', 'GHHK', 'GF Securities (Hong Kong)', 'GF Securities Hong Kong', '广发证券（香港）', '广发证券(香港)', '香港广发', 'GF Securities', '广发证券', '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰', 'Jefferies', '杰富瑞', 'Bernstein', '伯恩斯坦', '盛博'];
         let previousBody = '';
         while (body !== previousBody) {
             previousBody = body;
@@ -1881,9 +2134,10 @@ class ReportAudioWorkflowDetailPage {
         ];
         for (const candidate of candidates) {
             const title = this.compactTitle(candidate);
-            if (title && !this.isGenericTitle(title)) return title;
+            if (title && !this.isGenericTitle(title)) return this.recognizedInstitutionTitle(job, title);
         }
-        return candidates.map((item) => this.compactTitle(item)).find(Boolean) || '';
+        const fallback = candidates.map((item) => this.compactTitle(item)).find(Boolean) || '';
+        return this.recognizedInstitutionTitle(job, fallback);
     }
 
     compactTitle(value) {
@@ -1942,7 +2196,7 @@ class ReportAudioWorkflowDetailPage {
         ];
         for (const value of candidates) {
             const text = this.compactMultilineCoverText(value);
-            if (text) return text;
+            if (text) return this.recognizedInstitutionTitle(job, text);
         }
         return '';
     }

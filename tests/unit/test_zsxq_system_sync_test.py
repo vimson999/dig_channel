@@ -145,6 +145,31 @@ class ZsxqSystemSyncTest(unittest.TestCase):
             self.assertTrue(system_sync_test._runtime_cookie_configured())
             self.assertEqual(system_sync_test._runtime_cookie_source(), "page")
 
+    def test_runtime_db_cookie_check_always_releases_its_read_session(self):
+        with patch.object(system_sync_test, "has_app_context", return_value=True):
+            with patch(
+                "services.platform_credential_service.has_active_credential",
+                return_value=True,
+            ) as has_credential:
+                with patch.object(system_sync_test, "_reset_db_session") as reset_session:
+                    configured = system_sync_test._runtime_db_cookie_configured()
+
+        self.assertTrue(configured)
+        has_credential.assert_called_once_with(platform="zsxq", purpose="zsxq.sync")
+        reset_session.assert_called_once_with("runtime_db_cookie_check_complete")
+
+    def test_config_status_reuses_one_credential_snapshot(self):
+        cookie_state = {"configured": True, "db_configured": True, "source": "db"}
+        with patch.object(system_sync_test, "_runtime_cookie_state", return_value=cookie_state) as state:
+            with patch.object(system_sync_test, "CONFIG_PATH") as config_path:
+                config_path.exists.return_value = False
+                status = system_sync_test.config_status()
+
+        self.assertTrue(status["cookie_env_configured"])
+        self.assertTrue(status["cookie_db_configured"])
+        self.assertEqual(status["cookie_source_mode"], "db")
+        state.assert_called_once_with()
+
     def test_runtime_cookie_info_falls_back_when_configured_credential_was_deleted(self):
         replacement = {
             "cookie": "zsxq_access_token=new-token",

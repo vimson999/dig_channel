@@ -106,6 +106,7 @@ class ReportScriptMaterialWorkflowApiTest(unittest.TestCase):
         self.assertEqual(task.source_task_id, "asset-1")
         self.assertEqual(task.report_audio_pdf_attachment_id, "asset-1")
         self.assertEqual(task.params[FEATURE_NAME]["pdf"]["attachment_id"], "asset-1")
+        self.assertFalse(task.params[FEATURE_NAME]["pdf_evidence_enabled"])
         guarded_apply.assert_called_once()
         _, kwargs = guarded_apply.call_args
         self.assertEqual(kwargs["queue"], QUEUE_NAME)

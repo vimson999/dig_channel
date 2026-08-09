@@ -30,11 +30,11 @@ from services.report_audio_workflow import (
     FEATURE_NAME,
     audio_path_for_job,
     clean_final_script_for_tts,
-    ensure_pdf_evidence_review_contract,
     combine_wav_files,
     normalize_for_tts,
     pdf_first_page_image_path_for_job,
     render_pdf_first_page_image,
+    review_prompt_for_pdf_evidence,
     review_report_cover_titles,
     split_tts_text,
     storage_path_for_job,
@@ -120,9 +120,12 @@ RETRYABLE_CHILD_ERROR_FRAGMENTS = (
     "发送按钮",
     "等待 Gemini",
     "页面自动化超时",
+    "未捕获到 PCM 音频",
     "Locator.click",
     "Target closed",
     "Browser closed",
+    "context or browser has been closed",
+    "page has been closed",
     "Protocol error",
     "net::ERR",
 )
@@ -417,6 +420,17 @@ class ChildTaskStillRunning(RuntimeError):
         super().__init__(f"子任务仍在执行: {label} {child_id} ({status or '-'} / {step or '-'})")
 
 BANK_ALIASES = [
+    # GHHK is the stable filename prefix used by GF Securities Hong Kong
+    # reports.  Keep these aliases before the broader "广发证券" match so a
+    # Hong Kong report is not downgraded to the generic mainland label.
+    ("GHHK", "香港广发"),
+    ("GF Securities (Hong Kong)", "香港广发"),
+    ("GF Securities Hong Kong", "香港广发"),
+    ("广发证券（香港）", "香港广发"),
+    ("广发证券(香港)", "香港广发"),
+    ("香港广发", "香港广发"),
+    ("GF Securities", "广发证券"),
+    ("广发证券", "广发证券"),
     ("Morgan Stanley", "大摩"),
     ("摩根士丹利", "大摩"),
     ("大摩", "大摩"),
@@ -675,6 +689,28 @@ def process_report_audio_workflow_job(self, task_id):
     try:
         app = create_app()
         with app.app_context():
+            start = _load_task(
+                task_id,
+                PublicationTask.celery_task_id,
+                PublicationTask.status,
+            )
+            if not start:
+                logger.error("Report audio workflow task not found before start: %s", task_id)
+                return False
+            request_id = str(getattr(self.request, "id", "") or "")
+            current_celery_id = str(start.celery_task_id or "")
+            if request_id and current_celery_id and request_id != current_celery_id:
+                logger.info(
+                    "Report audio workflow received stale delivery; task=%s request=%s current=%s",
+                    task_id,
+                    request_id,
+                    current_celery_id,
+                )
+                return False
+            if start.status == "completed":
+                return True
+            if start.status in {"failed", "blocked_by_captcha", "canceled"}:
+                return False
             guard_publication_task_start(
                 self,
                 task_id,
@@ -743,8 +779,14 @@ def _process_job(task_id):
         return False
 
     prompt = (payload.get("prompt") or DEFAULT_INITIAL_PROMPT).strip()
-    review_prompt = ensure_pdf_evidence_review_contract(
-        payload.get("review_prompt") or DEFAULT_REVIEW_PROMPT
+    pdf_evidence_enabled = (
+        _truthy(payload.get("pdf_evidence_enabled"), True)
+        if "pdf_evidence_enabled" in payload
+        else True
+    )
+    review_prompt = review_prompt_for_pdf_evidence(
+        payload.get("review_prompt") or DEFAULT_REVIEW_PROMPT,
+        enabled=pdf_evidence_enabled,
     )
     followups = [str(item).strip() for item in (payload.get("followups") or []) if str(item).strip()]
     if review_prompt and review_prompt not in followups:
@@ -799,7 +841,11 @@ def _process_job(task_id):
         manual_gemini_result = _manual_gemini_payload(payload)
         script_material_result = result.get("script_material") if isinstance(result.get("script_material"), dict) else None
         audio_reuse_result = result.get("audio_reuse") if isinstance(result.get("audio_reuse"), dict) else None
-        if not structured and not manual_gemini_result:
+        if (
+            not structured
+            and not manual_gemini_result
+            and not _truthy(payload.get("force_gemini_regeneration"), False)
+        ):
             reused_material = _reusable_material_for_pdf(pdf, exclude_task_id=workflow_task_id)
         if reused_material:
             structured = reused_material["structured_result"]
@@ -837,7 +883,7 @@ def _process_job(task_id):
                     )
                     initial_text = gemini_result.get("initial_response_text") or ""
                     final_chars = len(_plain_text(raw_final))
-                    min_final_chars = _min_gemini_final_chars()
+                    min_final_chars = _required_gemini_final_chars(payload)
                     if final_chars < min_final_chars:
                         raise RuntimeError(
                             f"手动 Gemini 返回内容过短: {final_chars} 字，低于 {min_final_chars} 字，停止进入 DeepSeek 结构化"
@@ -900,7 +946,7 @@ def _process_job(task_id):
                     if not raw_final:
                         raise RuntimeError("Gemini 子任务没有返回 final_response_text")
                     final_chars = len(_plain_text(raw_final))
-                    min_final_chars = _min_gemini_final_chars()
+                    min_final_chars = _required_gemini_final_chars(payload)
                     if final_chars < min_final_chars:
                         raise RuntimeError(
                             f"Gemini 子任务返回内容过短: {final_chars} 字，低于 {min_final_chars} 字，疑似未抓到有效研报解析结果"
@@ -939,7 +985,7 @@ def _process_job(task_id):
             or _task_public_summary(gemini_task)
             or result.get("gemini")
         )
-        if raw_final:
+        if raw_final and pdf_evidence_enabled:
             try:
                 release_db_session_quietly()
                 evidence_output = build_and_store_evidence(
@@ -972,11 +1018,18 @@ def _process_job(task_id):
                 except Exception:
                     db.session.rollback()
                     logger.exception("Failed to persist PDF evidence failure task=%s", workflow_task_id)
+        elif not pdf_evidence_enabled:
+            _update_result(workflow_task_id, {
+                "pdf_evidence": {
+                    "status": "disabled",
+                    "enabled": False,
+                },
+            })
         chunks = split_tts_text(structured.get("final_script_for_tts") or "")
         if not chunks:
             raise RuntimeError("结构化结果没有可朗读正文")
         tts_chars = len(_plain_text(structured.get("final_script_for_tts") or ""))
-        min_final_chars = _min_gemini_final_chars()
+        min_final_chars = _required_gemini_final_chars(payload)
         if tts_chars < min_final_chars:
             raise RuntimeError(
                 f"结构化可朗读正文过短: {tts_chars} 字，低于 {min_final_chars} 字，停止进入豆包浏览器朗读"
@@ -1258,6 +1311,7 @@ def _process_job(task_id):
         if not updated:
             raise RuntimeError("编排任务不存在或已取消")
         db.session.commit()
+        _resume_auto_visual_workflows_after_audio(workflow_task_id)
         _merge_cached_workflow_fields(
             workflow_task_id,
             status="completed",
@@ -1293,6 +1347,84 @@ def _process_job(task_id):
             )
         logger.error("Report audio workflow failed: %s", exc, exc_info=True)
         return False
+
+
+def _resume_auto_visual_workflows_after_audio(audio_task_id: str) -> None:
+    """Bind a newly completed automatic WAV to ready whiteboard workflows.
+
+    Scene-image completion may happen before its material-owned audio handoff
+    finishes.  In that ordering the original image continuation correctly
+    reports ``whole_audio_not_ready`` but has no later wake-up.  Resume only
+    handoff-owned workflows and only when every body image is complete, so a
+    normal/manual audio task can never unexpectedly enqueue a render.
+    """
+    task = _load_task(
+        audio_task_id,
+        PublicationTask.id,
+        PublicationTask.params,
+        PublicationTask.source_task_id,
+    )
+    if not task:
+        return
+    task_params = task.params if isinstance(task.params, dict) else {}
+    payload = (
+        task_params.get("report_audio_workflow")
+        if isinstance(task_params.get("report_audio_workflow"), dict)
+        else {}
+    )
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    if str(metadata.get("source") or "") != "zsxq_auto_script_material_audio_handoff":
+        return
+    material_task_id = str(getattr(task, "source_task_id", "") or "").strip()
+    if not material_task_id:
+        return
+
+    from api.report_stick_figure_video_workflow import (
+        SCENE_PARENT_COLUMNS,
+        _auto_enqueue_whole_audio_alignment,
+        _ensure_scene_assets,
+        _scene_parent_snapshot,
+        _storyboard_for_workflow,
+    )
+
+    parents = (
+        PublicationTask.query.options(load_only(*SCENE_PARENT_COLUMNS))
+        .filter(
+            PublicationTask.feature == "report_stick_figure_video_workflow",
+            PublicationTask.source_feature == "report_script_material_workflow",
+            PublicationTask.source_task_id == material_task_id,
+            PublicationTask.status != "canceled",
+        )
+        .all()
+    )
+    for parent in parents:
+        try:
+            parent_snapshot = _scene_parent_snapshot(parent)
+            storyboard = _storyboard_for_workflow(parent_snapshot)
+            if not storyboard:
+                continue
+            storyboard, assets = _ensure_scene_assets(parent_snapshot, force_refresh=True)
+            body_assets = [asset for asset in assets if int(asset.sequence or 0) >= 1]
+            if not body_assets or any(
+                str(asset.image_status or "") != "completed" or not asset.image_path
+                for asset in body_assets
+            ):
+                continue
+            result = _auto_enqueue_whole_audio_alignment(parent_snapshot, storyboard)
+            logger.info(
+                "Auto visual audio resume: audio=%s workflow=%s result=%s",
+                audio_task_id,
+                parent_snapshot.id,
+                result,
+            )
+        except Exception as exc:
+            db.session.rollback()
+            logger.warning(
+                "Auto visual audio resume skipped: audio=%s workflow=%s error=%s",
+                audio_task_id,
+                getattr(parent, "id", ""),
+                exc,
+            )
 
 
 def _run_gemini_task_with_retries(parent, *, pdf, pdf_path, prompt, followups, payload, start_progress, end_progress):
@@ -1394,6 +1526,9 @@ def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload, *, at
                 "prompt": prompt,
                 "followups": followups,
                 "url": (payload.get("gemini_url") or payload.get("url") or "").strip(),
+                "prefer_pro_model": _truthy(payload.get("gemini_prefer_pro_model"), True),
+                "require_pro_model": _truthy(payload.get("gemini_require_pro_model"), False),
+                "minimum_final_response_chars": _required_gemini_final_chars(payload),
                 "metadata": metadata,
                 "pdf": pdf,
                 "pdf_path": pdf_path,
@@ -2326,6 +2461,18 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
         audio_seconds = float((audio or {}).get("seconds") or 0)
     except (TypeError, ValueError):
         audio_seconds = 0
+    scheme3_visual = None
+    if "scheme3" in vertical_schemes:
+        scheme3_visual = _resolve_scheme3_visual_inputs(parent, audio_seconds=audio_seconds)
+        if not scheme3_visual.get("workflow_id"):
+            raise RuntimeError("方案三未找到同一 PDF 的视觉工作流")
+        if not scheme3_visual.get("scene_timeline") and not scheme3_visual.get("video_path"):
+            raise ChildTaskStillRunning(
+                "scheme3_visual",
+                scheme3_visual["workflow_id"],
+                scheme3_visual.get("status") or "processing",
+                scheme3_visual.get("step") or "images_queued",
+            )
     preview_end_offset = max(0.0, audio_seconds - preview_seconds) if preview_seconds > 0 and audio_seconds > preview_seconds else 0.0
     main_title = _publisher_main_title(structured, video_options, variant="landscape")
     sub_title = _publisher_sub_title(structured, video_options, variant="landscape")
@@ -2404,6 +2551,16 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "image_path": screenshot_path,
             "subtitles": [],
             "scheme": vertical_scheme,
+            **(
+                {"visual_scene_timeline": scheme3_visual["scene_timeline"]}
+                if vertical_scheme == "scheme3" and scheme3_visual and scheme3_visual.get("scene_timeline")
+                else {}
+            ),
+            **(
+                {"visual_video_path": scheme3_visual["video_path"]}
+                if vertical_scheme == "scheme3" and scheme3_visual and scheme3_visual.get("video_path")
+                else {}
+            ),
             **({"preview_seconds": preview_seconds} if preview_seconds > 0 else {}),
             **({"subtitle_position": vertical_subtitle_position} if vertical_subtitle_position else {}),
             **({"subtitle_style": vertical_subtitle_style} if vertical_subtitle_style else {}),
@@ -2411,6 +2568,16 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
         "vertical_video_2": {
             "enabled": _truthy(video_options.get("vertical_enabled", False)) and bool(secondary_vertical_scheme),
             "scheme": secondary_vertical_scheme,
+            **(
+                {"visual_scene_timeline": scheme3_visual["scene_timeline"]}
+                if secondary_vertical_scheme == "scheme3" and scheme3_visual and scheme3_visual.get("scene_timeline")
+                else {}
+            ),
+            **(
+                {"visual_video_path": scheme3_visual["video_path"]}
+                if secondary_vertical_scheme == "scheme3" and scheme3_visual and scheme3_visual.get("video_path")
+                else {}
+            ),
             "asr_model": str(video_options.get("asr_model") or "base"),
             "image_path": screenshot_path,
             "screenshot_path": screenshot_path,
@@ -2531,6 +2698,11 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
             "preview_seconds": preview_seconds,
             "vertical_video_scheme": vertical_scheme,
             "vertical_video_schemes": vertical_schemes,
+            **(
+                {"visual_workflow_id": scheme3_visual["workflow_id"]}
+                if scheme3_visual and scheme3_visual.get("workflow_id")
+                else {}
+            ),
         },
     }
 
@@ -2567,6 +2739,58 @@ def _create_publisher_video_task(parent, *, audio, structured, pdf, pdf_screensh
     child_snapshot.celery_task_id = async_result.id
     child_snapshot.celery_id = async_result.id
     return child_snapshot
+
+
+def _resolve_scheme3_visual_inputs(parent, *, audio_seconds):
+    """Resolve the live same-PDF scene assets before creating a scheme-3 render.
+
+    The visual workflow runs independently from TTS.  Returning its live state
+    lets the parent defer without creating a publisher task that is guaranteed
+    to fail while scene images are still being produced.
+    """
+    parent_id = str(getattr(parent, "id", "") or "").strip()
+    if not parent_id:
+        return {}
+
+    audio_task = PublicationTask.query.filter(PublicationTask.id == parent_id).one_or_none()
+    if not audio_task:
+        return {}
+
+    # Imported lazily to avoid the API/task import cycle during Celery startup.
+    from api.report_audio_workflow import (
+        _linked_visual_scene_timeline,
+        _linked_visual_video_path,
+        _linked_visual_video_payloads,
+    )
+
+    current_user = SimpleNamespace(id=audio_task.user_id)
+    candidates = _linked_visual_video_payloads(current_user, audio_task)
+    selected = next(
+        (
+            item for item in candidates
+            if str(((item.get("visual_scheme") or {}).get("key")) or "").strip().lower()
+            == "stick_figure"
+        ),
+        None,
+    )
+    if not selected:
+        return {}
+
+    workflow_id = str(selected.get("workflow_job_id") or "").strip()
+    scene_timeline = _linked_visual_scene_timeline(
+        current_user,
+        audio_task,
+        workflow_id,
+        audio_seconds=audio_seconds,
+    )
+    video_path = _linked_visual_video_path(current_user, audio_task, workflow_id)
+    return {
+        "workflow_id": workflow_id,
+        "scene_timeline": scene_timeline,
+        "video_path": video_path,
+        "status": selected.get("status"),
+        "step": selected.get("step"),
+    }
 
 
 def _find_existing_publisher_video_task(
@@ -2885,12 +3109,19 @@ def _defer_parent_retry(parent_id, exc):
         error_message=None,
     )
 
-    celery_app.send_task(
-        "tasks.report_audio_workflow.process_job",
+    # Persist the replacement delivery id.  The task entry point rejects stale
+    # Celery deliveries, so leaving the previous request id on the parent would
+    # make every legitimate deferred resume look stale and strand the workflow
+    # after its child has already completed.
+    async_result = apply_async_after_db_release(
+        process_report_audio_workflow_job,
         args=[parent_id],
         queue=WORKFLOW_QUEUE_NAME,
         countdown=delay,
+        retry=False,
     )
+    _persist_child_celery_task_id(str(parent_id), str(async_result.id))
+    _merge_cached_workflow_fields(parent_id, celery_task_id=str(async_result.id))
 
 
 def _clear_waiting_child(parent_id, label):
@@ -3738,7 +3969,11 @@ def _publisher_workbench_institution(structured, pdf, video_options):
         or (video_options or {}).get("vertical_institution")
         or ""
     ).strip()
-    allowed = {"J.P. Morgan", "Goldman Sachs", "Morgan Stanley", "UBS", "Nomura", "BofA", "HSBC", "Jefferies", "Bernstein", "深度研报"}
+    allowed = {
+        "J.P. Morgan", "Goldman Sachs", "Morgan Stanley", "UBS", "Nomura",
+        "BofA", "HSBC", "Jefferies", "Bernstein", "GF Securities",
+        "GF Securities (Hong Kong)", "深度研报",
+    }
     if explicit in allowed:
         return explicit
 
@@ -3784,6 +4019,8 @@ def _publisher_workbench_institution(structured, pdf, video_options):
     for alias, label in BANK_ALIASES:
         if re.search(re.escape(alias), haystack, flags=re.I):
             mapped = {
+                "香港广发": "GF Securities (Hong Kong)",
+                "广发证券": "GF Securities",
                 "大摩": "Morgan Stanley",
                 "摩根大通": "J.P. Morgan",
                 "高盛": "Goldman Sachs",
@@ -3800,6 +4037,8 @@ def _publisher_workbench_institution(structured, pdf, video_options):
 
 def _publisher_cover_title_with_institution(title, institution):
     label = {
+        "GF Securities (Hong Kong)": "香港广发",
+        "GF Securities": "广发证券",
         "Morgan Stanley": "大摩",
         "J.P. Morgan": "摩根大通",
         "Goldman Sachs": "高盛",
@@ -4805,6 +5044,19 @@ def _min_gemini_final_chars():
         "REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS",
         _int_env("REPORT_PDF_GEMINI_MIN_RESPONSE_CHARS", 120),
     ))
+
+
+def _required_gemini_final_chars(payload):
+    configured = _min_gemini_final_chars()
+    if not isinstance(payload, dict):
+        return configured
+    requested = _bounded_int(
+        payload.get("gemini_min_final_chars"),
+        default=configured,
+        lower=0,
+        upper=20000,
+    )
+    return max(configured, requested)
 
 
 def _bounded_int(value, *, default, lower, upper):

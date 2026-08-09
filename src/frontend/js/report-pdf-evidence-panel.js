@@ -80,6 +80,15 @@ class ReportPdfEvidencePanel {
 
     render() {
         const data = this.data || {};
+        if (data.status === 'disabled') {
+            this.root.innerHTML = this.shell(`
+                <div class="rounded-lg border border-slate-200 bg-slate-50 p-5 text-sm text-slate-600">
+                    <div class="font-bold"><i class="fas fa-circle-pause mr-2 text-slate-400"></i>本任务未启用 PDF 证据映射</div>
+                    <div class="mt-1 text-xs text-slate-500">新投递默认关闭；基础文案、语音、分镜和成片流程不受影响。</div>
+                </div>
+            `);
+            return;
+        }
         if (data.status === 'pending_generation') {
             this.root.innerHTML = this.shell(`
                 <div class="rounded-lg border border-blue-200 bg-blue-50 p-5 text-sm text-blue-700">

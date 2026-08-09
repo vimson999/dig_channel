@@ -56,6 +56,11 @@ def parse_args() -> argparse.Namespace:
         help="ZSXQ group_id used for representative ZSXQ EXPLAIN queries.",
     )
     parser.add_argument(
+        "--insights-group-id",
+        default="1824528822",
+        help="ZSXQ group_id used for the Insights canonical-topic EXPLAIN.",
+    )
+    parser.add_argument(
         "--top-limit",
         type=int,
         default=20,
@@ -170,7 +175,10 @@ def pg_stat_statements_installed(conn: Connection) -> bool:
 
 
 def run_snapshot(conn: Connection, args: argparse.Namespace) -> None:
-    conn.exec_driver_sql(f"SET statement_timeout = {int(args.statement_timeout_ms)}")
+    conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+    conn.exec_driver_sql(
+        f"SET LOCAL statement_timeout = {int(args.statement_timeout_ms)}"
+    )
 
     print_query(
         conn,
@@ -289,6 +297,29 @@ def run_snapshot(conn: Connection, args: argparse.Namespace) -> None:
         """,
         {"limit": args.top_limit},
         width=180,
+    )
+
+    print_query(
+        conn,
+        "Insights canonical-topic index usage",
+        """
+        SELECT
+            s.relname AS table_name,
+            s.indexrelname AS index_name,
+            pg_size_pretty(pg_relation_size(s.indexrelid)) AS index_size,
+            s.idx_scan,
+            s.idx_tup_read,
+            s.idx_tup_fetch,
+            stats.last_idx_scan,
+            meta.indisvalid,
+            meta.indisready,
+            meta.indislive
+        FROM pg_stat_user_indexes AS s
+        JOIN pg_index AS meta ON meta.indexrelid = s.indexrelid
+        LEFT JOIN pg_stat_all_indexes AS stats ON stats.indexrelid = s.indexrelid
+        WHERE s.schemaname = 'public'
+          AND s.indexrelname = 'ix_zsxq_topics_group_topic_preferred_synced_desc'
+        """,
     )
 
     print_query(
@@ -533,7 +564,7 @@ def run_explains(conn: Connection, args: argparse.Namespace) -> None:
 
     print_explain(
         conn,
-        "publisher task list with JSON feature filter",
+        "publisher task list with feature projection",
         """
         SELECT
             id,
@@ -548,10 +579,7 @@ def run_explains(conn: Connection, args: argparse.Namespace) -> None:
             updated_at,
             completed_at
         FROM public.publication_tasks
-        WHERE (
-            CAST(params ->> 'feature' AS varchar) IS NULL
-            OR CAST(params ->> 'feature' AS varchar) = 'publisher'
-        )
+        WHERE feature = 'publisher'
         ORDER BY created_at DESC
         LIMIT 20
         """,
@@ -574,7 +602,7 @@ def run_explains(conn: Connection, args: argparse.Namespace) -> None:
             updated_at,
             completed_at
         FROM public.publication_tasks
-        WHERE CAST(params ->> 'feature' AS varchar) IN (
+        WHERE feature IN (
             'content_pdf_clean',
             'content_audio_clean'
         )
@@ -661,6 +689,35 @@ def run_explains(conn: Connection, args: argparse.Namespace) -> None:
         LIMIT 120
         """,
         {"group_id": args.group_id},
+    )
+
+    print_explain(
+        conn,
+        "Insights canonical-topic selection",
+        """
+        WITH ranked AS (
+            SELECT
+                topic_id,
+                tab_label,
+                last_synced_at,
+                row_number() OVER (
+                    PARTITION BY topic_id
+                    ORDER BY CASE tab_label
+                        WHEN '精华' THEN 0
+                        WHEN '中标' THEN 1
+                        WHEN '生财好事' THEN 2
+                        ELSE 3
+                    END,
+                    last_synced_at DESC
+                ) AS rn
+            FROM public.zsxq_topics
+            WHERE group_id = :insights_group_id
+        )
+        SELECT topic_id, tab_label, last_synced_at
+        FROM ranked
+        WHERE rn = 1
+        """,
+        {"insights_group_id": args.insights_group_id},
     )
 
 

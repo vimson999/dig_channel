@@ -16,6 +16,25 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-08-09 | [ZSXQ Insights 冷查询把全量正文跨网络搬到应用](2026-08-09-zsxq-insights-cold-fulltext-transfer.md) | 生财 Insights / zsxq_topics / 网络传输 | 新代码已部署并完成真实冷/热 API 验收，OBSERVING |
+| 2026-08-08 | [PostgreSQL 长连接经代理虚拟隧道反复黑洞超时](2026-08-08-postgres-tunneled-route-query-timeout.md) | 全站数据库链路 / PgBouncer / 本机代理 TUN/Tailscale | 两轮隔离后仍有应用 timeout 与 server crash，OPEN/OBSERVING |
+| 2026-08-07 | [分镜提交成功后断连被误写为失败](2026-08-07-storyboard-ambiguous-commit-false-failure.md) | 火柴人视觉视频 / PostgreSQL / 父子任务状态机 | 指定任务端到端验收完成，RUNTIME_REPLACED/OBSERVING |
+| 2026-08-07 | [火柴人分镜轮询误回读任务大字段并放大网络超时](2026-08-07-visual-storyboard-wide-polling-network-timeout.md) | 火柴人视觉视频详情 / publication_tasks / PgBouncer | 新后端与真实 API 已验收，待完整窗口确认不复发 |
+| 2026-08-06 | [分镜多轮回复丢失前轮内容并误报提示词改写](2026-08-06-visual-plan-multiturn-prompt-loss.md) | 火柴人视觉视频 / 标题与正文分镜 / Gemini / DS | 代码已修复，待 worker 重载及真实任务验收 |
+| 2026-08-06 | [研报音频方案三在视觉资产未就绪时反复创建 Publisher 失败任务](2026-08-06-report-audio-scheme3-publisher-failure-storm.md) | 研报音频 / 方案三 / Publisher / render queue | 前置门禁已加载，待下一条真实方案三任务验收 |
+| 2026-08-06 | [后端进程 bootstrap 在凭据检查后跨进程启动持有数据库 Session](2026-08-06-backend-bootstrap-credential-session-hold.md) | 后端 bootstrap / ZSXQ 配置 / 平台凭据 / Session | 新 PID 已加载并完成长持有验收，持续观察 |
+| 2026-08-06 | [ZSXQ 页内主题更新与同步心跳逐条往返放大](2026-08-06-zsxq-page-update-roundtrip-amplification.md) | ZSXQ 全 tabs / zsxq_topics / zsxq_sync_runs / Session | 主题/评论页级批量已验收，继续观察远端长尾 |
+| 2026-08-06 | [ZSXQ 附件下载状态逐条往返放大](2026-08-06-zsxq-attachment-state-roundtrip-amplification.md) | ZSXQ 同步 / zsxq_attachments / 下载状态 / PgBouncer | 新 worker 边界证据已验收，继续观察新增下载 |
+| 2026-08-06 | [ZSXQ 工作流通知在连续事件间刷新过期 ORM](2026-08-06-zsxq-workflow-notification-expired-session.md) | ZSXQ workflow / workflow notification / zsxq_workflow_runs / Session | 新 worker 连续通知已验收，持续观察 |
+| 2026-08-06 | [ZSXQ 页内评论与外链对账 N+1 持有数据库连接](2026-08-06-zsxq-page-reconciliation-n-plus-one.md) | ZSXQ 同步 / zsxq_topic_comments / external_documents / Session | 评论页级路径已验收，继续观察真实外链样本 |
+| 2026-08-06 | [MP3 媒体下载在全局缓存锁等待时持有数据库 Session](2026-08-06-mp3-download-lock-session-hold.md) | MP3 媒体下载 / 状态轮询 / publication_tasks / PgBouncer | 新后端已加载，待真实并发下载验收 |
+| 2026-08-06 | [火柴人图片生成在浏览器等待期间持有数据库连接](2026-08-06-stick-image-expired-orm-browser-session.md) | 火柴人视觉资产 / Gemini 浏览器 / publication_tasks / SQLAlchemy Session | 新 worker 已加载，待真实图片任务验收 |
+| 2026-08-06 | [DB 巡检漏报任务门禁捕获的 idle-in-transaction 压力](2026-08-06-idle-transaction-pressure-observability-gap.md) | DB 巡检 / runtime guard / Celery / PostgreSQL Session | 分析器与只读诊断已修复，待下一完整窗口归因验收 |
+| 2026-08-05 | [研报音频后台标签页轮询放大为 HTTP/SQL N+1](2026-08-05-report-audio-hidden-tab-polling-n-plus-one.md) | 研报音频列表与详情页 / publication_tasks / PgBouncer | 代码与回归完成，待下一完整窗口验收 |
+| 2026-08-04 | [PostgreSQL 白名单拒绝变化后的出口 IP](2026-08-04-postgres-hba-egress-ip-outage.md) | 全站 / PgBouncer / 远端 PostgreSQL / 重启门禁 | 再次复现，等待管理员恢复 223.80.177.164 白名单 |
+| 2026-08-04 | [DB 巡检遗漏当日 gzip 轮转日志](2026-08-04-db-audit-skipped-gzip-rotations.md) | DB 巡检 / API E2E / PgBouncer 统计 | 已修复并重跑完整窗口 |
+| 2026-08-03 | [ZSXQ 全部 Tab 调度器重复读取远端配置](2026-08-03-zsxq-scheduler-config-polling-roundtrip.md) | ZSXQ 全部 Tab / scheduler / system_configs / PgBouncer | 已部署，待下一完整窗口验收 |
+| 2026-08-02 | [请求鉴权在全局守卫和路由装饰器中重复查询用户](2026-08-02-request-auth-duplicate-user-query.md) | 全站受保护页面/API / 用户鉴权 / PostgreSQL | 已完成进程重载，待真实请求定量验收 |
 | 2026-07-30 | [MP3 强制重生成在延迟续跑中重复创建已完成视频](2026-07-30-mp3-force-regenerate-repeated-completed-video.md) | MP3 视频编排 / Publisher / 延迟续跑 / 重启门禁 | 已部署并完成真实幂等验收，父任务已推进竖屏 |
 | 2026-07-30 | [视觉视频端到端流程停在素材就绪并误阻重启](2026-07-30-visual-ready-state-blocked-restart.md) | 火柴人视觉视频 / 自动成片 / 重启安全门禁 / 父子任务状态机 | 已部署，历史任务自动对齐和最终视频补投进行中 |
 | 2026-07-29 | [方案三前置校验连带阻断横屏成片](2026-07-29-report-audio-scheme3-preflight-blocked-landscape.md) | 研报音频详情 / 横屏成片 / 方案三竖屏 / Publisher | 已修复、部署并完成现场任务补投 |
@@ -63,7 +82,7 @@
 | 2026-07-21 | [重启安全门无条件切换公网数据库导致无法验收](2026-07-21-restart-guard-unconditional-direct-db.md) | 完整重启 / 活动任务门禁 / PostgreSQL / PgBouncer | 代码与双分支测试已修，待真实安全重启验收 |
 | 2026-07-21 | [媒体宽字段被批量 JSON 更新绕过并持续漂移](2026-07-21-media-projection-bulk-update-drift.md) | report audio / publisher / publication_tasks / 启动门禁 | 入库已修、现场已回填，待新进程真实任务验收 |
 | 2026-07-21 | [ZSXQ 同步逐条点查放大远端数据库抖动](2026-07-21-zsxq-sync-point-query-amplification.md) | ZSXQ 同步 / 附件入库与下载 / PostgreSQL | 第 138 轮页面级真实负载验收通过 |
-| 2026-07-21 | [Watchdog 修复事务跨外部检查与轮询重叠](2026-07-21-watchdog-repair-idle-transaction-and-poll-overlap.md) | publisher watchdog / PostgreSQL / Celery / Redis | 2026-07-30 再次打开；代码已修复，待运行验收 |
+| 2026-07-21 | [Watchdog 修复事务跨外部检查与轮询重叠](2026-07-21-watchdog-repair-idle-transaction-and-poll-overlap.md) | publisher watchdog / PostgreSQL / Celery / Redis | 2026-08-01 第四次打开；processing/terminal cleanup 已修，待安全重启与真实窗口验收 |
 | 2026-07-19 | [MP3 双封皮标题版本被格式标题覆盖](2026-07-19-mp3-cover-copy-variants-collapsed.md) | mp3_video_workflow / DS 标题规划 / 横屏封皮 | 代码已修复并完成回归，待新任务运行态验收 |
 | 2026-07-19 | [Report audio pending 父任务不在孤儿修复范围](2026-07-19-report-audio-pending-orphan-not-repairable.md) | report_audio_workflow / watchdog / publication_tasks | 已修复并完成历史任务收口与新进程验收 |
 | 2026-07-19 | [内容清洗 processing 孤儿不在自动修复范围](2026-07-19-content-clean-processing-orphan-not-repairable.md) | Content Pipeline / watchdog / 重启安全门 / ZSXQ workflow | 已修复并完成现场恢复与重启验收 |

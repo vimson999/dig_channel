@@ -1,0 +1,16 @@
+{
+  "id": "010",
+  "slug": "source-05-technical-ai-repricing",
+  "role": "source",
+  "kind": "source",
+  "voice_label": "刘飞",
+  "voice_id": "zh_male_liufei_uranus_bigtts",
+  "hash": "bade1ea7996c5d79f815a5d492c2f92a1734191af2d58d97a274b081bb811436",
+  "characters": 636,
+  "chunks": 2,
+  "pause_after_ms": 650,
+  "wav_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/010_source-05-technical-ai-repricing_刘飞.wav",
+  "mp3_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/010_source-05-technical-ai-repricing_刘飞.mp3",
+  "duration_seconds": 107.976,
+  "status": "generated"
+}

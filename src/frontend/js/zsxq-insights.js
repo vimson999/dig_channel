@@ -14,6 +14,21 @@
         detailController: null,
         followedThemes: new Set(),
         experimentStage: 'all',
+        page: 1,
+        pageSize: 48,
+        sort: 'latest',
+        pageLoading: false,
+        responseCache: new Map(),
+    };
+    const RESPONSE_CACHE_TTL_MS = 60_000;
+    const SESSION_CACHE_MAX_AGE_MS = 6 * 60 * 60_000;
+    const SESSION_CACHE_MAX_ENTRIES = 10;
+    const SESSION_CACHE_KEY = 'zsxq-insights-response-cache-v2';
+    const viewConfig = {
+        overview: { theme: 'ai', sort: 'latest', label: '全景概览', description: '浏览全部 AI 与自动化主题的规模、结构和代表内容' },
+        trend: { theme: 'ai-content', sort: 'latest', label: '趋势追踪', description: '聚焦近期升温的 AI 内容生产方向与周度变化' },
+        opportunity: { theme: 'ai-sales', sort: 'signal', label: '机会筛选', description: '优先展示需求与结果信号更强的 AI 销售私域方向' },
+        library: { theme: null, sort: 'latest', label: '主题下钻', description: '保留当前主题，从分类继续下钻到原始内容' },
     };
 
     const palette = ['#2563eb', '#14b8a6', '#f59e0b', '#8b5cf6', '#7dd3fc'];
@@ -133,13 +148,13 @@
             const button = event.target.closest('[data-theme-id]');
             if (!button) return;
             state.theme = button.dataset.themeId;
-            state.visibleLimit = 6;
-            state.weekFilter = null;
+            resetPagination();
             loadInsights();
         });
 
         elements['range-select'].addEventListener('change', () => {
             state.rangeDays = Number(elements['range-select'].value) || 90;
+            resetPagination();
             loadInsights();
         });
 
@@ -159,10 +174,18 @@
 
         elements['theme-search'].addEventListener('input', filterThemeNavigation);
         elements['global-search'].addEventListener('search', runSearch);
-        elements['topic-sort'].addEventListener('change', renderTopicFeed);
+        elements['topic-sort'].addEventListener('change', () => {
+            state.sort = elements['topic-sort'].value;
+            resetPagination();
+            loadInsights();
+        });
         elements['show-more-btn'].addEventListener('click', () => {
-            state.visibleLimit += 6;
-            renderTopicFeed();
+            if (state.visibleLimit < state.data.topics.length) {
+                state.visibleLimit += 6;
+                renderTopicFeed();
+                return;
+            }
+            if (state.data.pagination?.has_more) loadInsights({ append: true });
         });
         elements['clear-week-filter'].addEventListener('click', () => {
             state.weekFilter = null;
@@ -220,36 +243,134 @@
         });
     }
 
-    async function loadInsights() {
+    async function loadInsights({ append = false } = {}) {
         const requestId = ++state.requestId;
         state.overviewController?.abort();
         state.overviewController = new AbortController();
-        setLoading(true);
+        const page = append ? state.page + 1 : 1;
         const params = new URLSearchParams({
             group_id: GROUP_ID,
             theme: state.theme,
             range_days: String(state.rangeDays),
-            page_size: '5000',
-            sort: 'latest',
+            page: String(page),
+            page_size: String(state.pageSize),
+            sort: state.sort,
         });
         if (state.query) params.set('query', state.query);
+        const url = `${apiBaseUrl()}/zsxq-insights/overview?${params.toString()}`;
+        const cached = getCachedResponse(url);
+        const cachedAge = cached ? Date.now() - cached.savedAt : Infinity;
+        state.pageLoading = append && !cached;
+        if (cached) {
+            applyInsightsPayload(cached.payload, { append, page });
+            if (!append) setLoading(false);
+        } else if (append) {
+            renderShowMoreState();
+        } else {
+            setLoading(true);
+        }
         try {
-            const response = await fetch(`${apiBaseUrl()}/zsxq-insights/overview?${params.toString()}`, {
-                signal: state.overviewController.signal,
-            });
+            if (cachedAge < RESPONSE_CACHE_TTL_MS) return;
+            const response = await fetch(url, { signal: state.overviewController.signal });
             const payload = await readJsonResponse(response);
             if (!response.ok || !payload.success) throw new Error(payload?.error?.message || payload?.message || '情报接口请求失败');
+            storeCachedResponse(url, payload);
             if (requestId !== state.requestId) return;
-            state.data = payload.data;
-            state.theme = payload.data.selected?.id || state.theme;
-            renderAll();
+            applyInsightsPayload(payload, { append, page });
+            if (response.headers.get('X-Insights-Cache') === 'STALE') {
+                refreshInsightsInBackground(url, { append, page, requestId });
+            }
         } catch (error) {
             if (error.name === 'AbortError' || requestId !== state.requestId) return;
+            if (cached) {
+                console.warn('[ZSXQ_INSIGHTS] 后台刷新失败，继续显示缓存快照', error);
+                return;
+            }
             console.error('[ZSXQ_INSIGHTS]', error);
             renderError(error.message);
         } finally {
-            if (requestId === state.requestId) setLoading(false);
+            if (requestId === state.requestId) {
+                state.pageLoading = false;
+                if (append) renderShowMoreState();
+                else setLoading(false);
+            }
         }
+    }
+
+    function applyInsightsPayload(payload, { append, page }) {
+        const previousTopics = append ? (state.data?.topics || []) : [];
+        state.data = append
+            ? { ...payload.data, topics: mergeTopics(previousTopics, payload.data.topics) }
+            : payload.data;
+        state.page = page;
+        state.theme = payload.data.selected?.id || state.theme;
+        if (append) {
+            state.visibleLimit = state.data.topics.length;
+            renderTopicFeed();
+        } else {
+            elements['topic-sort'].value = state.sort;
+            renderAll();
+        }
+    }
+
+    async function refreshInsightsInBackground(url, { append, page, requestId }) {
+        const separator = url.includes('?') ? '&' : '?';
+        try {
+            const response = await fetch(`${url}${separator}_refresh=1`);
+            const payload = await readJsonResponse(response);
+            if (!response.ok || !payload.success) return;
+            storeCachedResponse(url, payload);
+            if (requestId === state.requestId) {
+                applyInsightsPayload(payload, { append, page });
+            }
+        } catch (error) {
+            console.warn('[ZSXQ_INSIGHTS] 静默刷新失败', error);
+        }
+    }
+
+    function getCachedResponse(url) {
+        const memoryCached = state.responseCache.get(url);
+        if (memoryCached && Date.now() - memoryCached.savedAt < SESSION_CACHE_MAX_AGE_MS) {
+            return memoryCached;
+        }
+        try {
+            const entries = JSON.parse(sessionStorage.getItem(SESSION_CACHE_KEY) || '{}');
+            const cached = entries[url];
+            if (!cached || Date.now() - cached.savedAt >= SESSION_CACHE_MAX_AGE_MS) return null;
+            state.responseCache.set(url, cached);
+            return cached;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function storeCachedResponse(url, payload) {
+        const cached = { payload, savedAt: Date.now() };
+        state.responseCache.set(url, cached);
+        try {
+            const entries = JSON.parse(sessionStorage.getItem(SESSION_CACHE_KEY) || '{}');
+            entries[url] = cached;
+            const trimmed = Object.fromEntries(
+                Object.entries(entries)
+                    .sort((left, right) => right[1].savedAt - left[1].savedAt)
+                    .slice(0, SESSION_CACHE_MAX_ENTRIES)
+            );
+            sessionStorage.setItem(SESSION_CACHE_KEY, JSON.stringify(trimmed));
+        } catch (_) {
+            // Storage may be unavailable or full; the in-memory cache still works.
+        }
+    }
+
+    function mergeTopics(existing, incoming) {
+        const rows = new Map(existing.map((item) => [String(item.topic_id), item]));
+        incoming.forEach((item) => rows.set(String(item.topic_id), item));
+        return [...rows.values()];
+    }
+
+    function resetPagination() {
+        state.page = 1;
+        state.visibleLimit = 6;
+        state.weekFilter = null;
     }
 
     function apiBaseUrl() {
@@ -260,7 +381,7 @@
         const nextQuery = elements['global-search'].value.trim();
         if (nextQuery === state.query) return;
         state.query = nextQuery;
-        state.visibleLimit = 6;
+        resetPagination();
         loadInsights();
     }
 
@@ -325,9 +446,11 @@
         const growth = selected.metrics.growth;
         elements['selected-theme-trend'].innerHTML = `<i class="fa-solid ${growth < 0 ? 'fa-arrow-trend-down' : 'fa-arrow-trend-up'}"></i>`;
         elements['selected-theme-trend'].classList.toggle('trend-down', growth < 0);
-        elements['page-context'].textContent = growth >= 0
-            ? `近 30 天增长 ${Math.abs(growth)}%，需求与结果同步上升`
-            : `近 30 天热度回落 ${Math.abs(growth)}%，可继续观察结果密度`;
+        const mode = viewConfig[state.view] || viewConfig.library;
+        const momentum = growth >= 0
+            ? `近 30 天增长 ${Math.abs(growth)}%`
+            : `近 30 天热度回落 ${Math.abs(growth)}%`;
+        elements['page-context'].textContent = `${mode.label} · ${mode.description} · ${momentum}`;
     }
 
     function renderMetrics() {
@@ -415,19 +538,16 @@
             elements['clear-week-filter'].classList.add('is-hidden');
         }
 
-        if (elements['topic-sort'].value === 'signal') {
-            const score = { '结果案例': 2, '明确需求': 1, '普通讨论': 0 };
-            topics.sort((a, b) => score[b.signal] - score[a.signal] || b.date.localeCompare(a.date));
-        } else {
-            topics.sort((a, b) => b.date.localeCompare(a.date));
-        }
-
         elements['topic-match-count'].textContent = `${state.weekFilter ? topics.length : state.data.topic_matches} 条`;
         const visible = topics.slice(0, state.visibleLimit);
         elements['topic-feed'].innerHTML = visible.length ? visible.map((topic) => `
             <button type="button" class="topic-row" data-topic-id="${escapeHtml(topic.topic_id)}">
                 <span class="topic-main">
-                    <span class="topic-title-line"><span class="signal-chip ${signalClass(topic.signal)}">${escapeHtml(topic.signal)}</span><strong>${escapeHtml(topic.title)}</strong></span>
+                    <span class="topic-title-line">
+                        <span class="signal-chip ${signalClass(topic.signal)}">${escapeHtml(topic.signal)}</span>
+                        ${renderYirenChip(topic)}
+                        <strong>${escapeHtml(topic.title)}</strong>
+                    </span>
                     <p>${escapeHtml(topic.excerpt || '该主题暂无摘要，点击查看本地原文。')}</p>
                 </span>
                 <span class="topic-cell">${escapeHtml(topic.author)}</span>
@@ -436,7 +556,20 @@
                 <span class="topic-action">查看原文 <i class="fa-solid fa-arrow-up-right-from-square"></i></span>
             </button>
         `).join('') : '<div class="empty-feed"><i class="fa-regular fa-folder-open"></i><p>当前筛选下没有主题</p></div>';
-        elements['show-more-btn'].hidden = visible.length >= topics.length;
+        renderShowMoreState(visible.length, topics.length);
+    }
+
+    function renderShowMoreState(visibleCount = null, loadedCount = null) {
+        const button = elements['show-more-btn'];
+        const visible = visibleCount ?? Math.min(state.visibleLimit, state.data?.topics?.length || 0);
+        const loaded = loadedCount ?? (state.data?.topics?.length || 0);
+        const hasBuffered = visible < loaded;
+        const hasServerPage = Boolean(state.data?.pagination?.has_more);
+        button.hidden = !hasBuffered && !hasServerPage;
+        button.disabled = state.pageLoading;
+        button.innerHTML = state.pageLoading
+            ? '<i class="fa-solid fa-circle-notch fa-spin"></i>正在加载'
+            : `${hasBuffered ? '查看更多主题' : '加载下一页'}<i class="fa-solid fa-chevron-down"></i>`;
     }
 
     function renderInterpretation() {
@@ -553,6 +686,8 @@
         document.querySelectorAll('[data-view]').forEach((button) => {
             const active = button.dataset.view === view;
             button.classList.toggle('is-active', active);
+            if (active) button.setAttribute('aria-current', 'page');
+            else button.removeAttribute('aria-current');
             if (active) button.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
         });
         syncViewVisibility();
@@ -561,17 +696,14 @@
             showToast('项目实验：评分是初版决策建议，不代表收益预测');
             return;
         }
-        const mapping = {
-            overview: { theme: 'ai', message: '全景模式：从最大主题方向开始浏览' },
-            trend: { theme: 'ai-content', message: '趋势模式：聚焦近期高频交叉主题' },
-            opportunity: { theme: 'ai-sales', message: '机会模式：聚焦需求与结果同时较强的方向' },
-            library: { theme: state.theme, message: '主题库模式：从分类下钻到原始内容' },
-        };
-        const next = mapping[view];
-        showToast(next.message);
-        if (next.theme !== state.theme) {
-            state.theme = next.theme;
-            state.visibleLimit = 6;
+        const next = viewConfig[view];
+        const nextTheme = next.theme || state.theme;
+        const needsReload = nextTheme !== state.theme || next.sort !== state.sort;
+        showToast(`${next.label}：${next.description}`);
+        if (needsReload) {
+            state.theme = nextTheme;
+            state.sort = next.sort;
+            resetPagination();
             loadInsights();
         } else if (state.data) {
             renderSelectedHeader();
@@ -594,14 +726,7 @@
         elements['dialog-signal'].className = `signal-chip ${signalClass(topic.signal)}`;
         elements['dialog-signal'].textContent = topic.signal;
         elements['dialog-title'].textContent = topic.title;
-        elements['dialog-meta'].innerHTML = `
-            <span><i class="fa-regular fa-user"></i> ${escapeHtml(topic.author)}</span>
-            <span><i class="fa-regular fa-calendar"></i> ${escapeHtml(topic.date)}</span>
-            <span><i class="fa-solid fa-layer-group"></i> ${escapeHtml(topic.tab)}</span>
-            <span><i class="fa-regular fa-image"></i> ${topic.images_count || 0} 图片</span>
-            <span><i class="fa-regular fa-file"></i> ${topic.files_count || 0} 文件</span>
-            <span>主题 ID ${escapeHtml(topic.topic_id)}</span>
-        `;
+        renderDialogMeta(topic);
         elements['dialog-content'].innerHTML = '<div class="empty-feed"><i class="fa-solid fa-circle-notch fa-spin"></i><p>正在读取本地原文...</p></div>';
         elements['topic-dialog'].showModal();
         try {
@@ -610,10 +735,84 @@
             });
             const payload = await readJsonResponse(response);
             if (!response.ok || !payload.success) throw new Error('原文读取失败');
-            elements['dialog-content'].textContent = payload.data.content || topic.excerpt || '本地记录暂无正文。';
+            renderDialogMeta({ ...topic, ...payload.data });
+            elements['dialog-content'].innerHTML = renderTopicContent(payload.data.content || topic.excerpt || '本地记录暂无正文。');
         } catch (error) {
             if (error.name === 'AbortError') return;
-            elements['dialog-content'].textContent = topic.excerpt || error.message;
+            elements['dialog-content'].innerHTML = renderTopicContent(topic.excerpt || error.message);
+        }
+    }
+
+    function renderDialogMeta(topic) {
+        const evidence = topic.yiren_evidence;
+        const evidenceTitle = evidence?.text
+            ? `${topic.yiren_label || '亦仁状态'}：${evidence.text}`
+            : (topic.yiren_label || '未见亦仁认可');
+        elements['dialog-meta'].innerHTML = `
+            <span><i class="fa-regular fa-user"></i> ${escapeHtml(topic.author)}</span>
+            <span><i class="fa-regular fa-calendar"></i> ${escapeHtml(topic.date)}</span>
+            <span><i class="fa-solid fa-layer-group"></i> ${escapeHtml(topic.tab)}</span>
+            <span><i class="fa-regular fa-image"></i> ${topic.images_count || 0} 图片</span>
+            <span><i class="fa-regular fa-file"></i> ${topic.files_count || 0} 文件</span>
+            <span class="dialog-yiren-status" title="${escapeAttribute(evidenceTitle)}">${renderYirenChip(topic)}</span>
+            <span class="dialog-topic-id">主题 ID ${escapeHtml(topic.topic_id)}</span>
+        `;
+    }
+
+    function renderYirenChip(topic) {
+        const status = topic.yiren_recognition || 'not_found';
+        const label = topic.yiren_label || '未见亦仁认可';
+        const icon = status === 'recognized'
+            ? 'fa-solid fa-circle-check'
+            : (status === 'responded' ? 'fa-regular fa-comment-dots' : 'fa-regular fa-circle');
+        return `<span class="yiren-chip yiren-${escapeHtml(status)}"><i class="${icon}"></i>${escapeHtml(label)}</span>`;
+    }
+
+    function renderTopicContent(value) {
+        const lines = String(value || '')
+            .replace(/\r\n?/g, '\n')
+            .split(/\n+/)
+            .map((line) => line.trim())
+            .filter(Boolean);
+        if (!lines.length) return '<p class="rich-empty">本地记录暂无正文。</p>';
+        return `<div class="rich-article">${lines.map(renderRichLine).join('')}</div>`;
+    }
+
+    function renderRichLine(line) {
+        const tokenPattern = /<e\b([^>]*?)(?:\/>|>\s*<\/e>)/gi;
+        let cursor = 0;
+        let html = '';
+        let match;
+        while ((match = tokenPattern.exec(line)) !== null) {
+            html += escapeHtml(line.slice(cursor, match.index));
+            const attrs = match[1] || '';
+            const type = readRichAttribute(attrs, 'type');
+            const title = decodeRichText(readRichAttribute(attrs, 'title'));
+            if (type === 'text_bold') {
+                html += `<strong class="rich-emphasis">${escapeHtml(title)}</strong>`;
+            } else if (type === 'mention') {
+                html += `<span class="rich-mention">${escapeHtml(title)}</span>`;
+            } else if (title) {
+                html += escapeHtml(title);
+            }
+            cursor = tokenPattern.lastIndex;
+        }
+        html += escapeHtml(line.slice(cursor).replace(/<\/?e\b[^>]*>/gi, ''));
+        const isHeading = /^<e\b[^>]*type=(["'])text_bold\1[^>]*(?:\/>|>\s*<\/e>)$/i.test(line);
+        return `<p class="${isHeading ? 'rich-heading' : ''}">${html || '&nbsp;'}</p>`;
+    }
+
+    function readRichAttribute(attrs, name) {
+        const match = attrs.match(new RegExp(`${name}=(["'])(.*?)\\1`, 'i'));
+        return match?.[2] || '';
+    }
+
+    function decodeRichText(value) {
+        if (!value) return '';
+        try {
+            return decodeURIComponent(value);
+        } catch (_) {
+            return value;
         }
     }
 
@@ -687,5 +886,13 @@
         const element = document.createElement('span');
         element.textContent = String(value ?? '');
         return element.innerHTML;
+    }
+
+    function escapeAttribute(value) {
+        return String(value ?? '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('"', '&quot;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;');
     }
 })();

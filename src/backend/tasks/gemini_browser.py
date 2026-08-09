@@ -12,6 +12,7 @@ from models.task import PublicationTask
 from services.gemini_browser import (
     FEATURE_NAME,
     LEGACY_FEATURE_NAME,
+    GeminiBrowserOptions,
     GeminiBrowserWorker,
     storage_path_for_job,
 )
@@ -22,6 +23,7 @@ logger = logging.getLogger("REPORT_PDF_GEMINI_TASK")
 
 TASK_UPDATE_COLUMNS = (
     PublicationTask.id,
+    PublicationTask.celery_task_id,
     PublicationTask.status,
     PublicationTask.current_step,
     PublicationTask.progress,
@@ -74,7 +76,9 @@ def _run_with_app_context(task_id):
     retry_kwargs={"max_retries": 3},
 )
 def process_report_pdf_gemini_job(self, task_id):
-    return _run_with_app_context(task_id)
+    app = create_app()
+    with app.app_context():
+        return _process_job(task_id, celery_task=self)
 
 
 @celery_app.task(
@@ -87,10 +91,12 @@ def process_report_pdf_gemini_job(self, task_id):
     retry_kwargs={"max_retries": 3},
 )
 def process_gemini_browser_job(self, task_id):
-    return _run_with_app_context(task_id)
+    app = create_app()
+    with app.app_context():
+        return _process_job(task_id, celery_task=self)
 
 
-def _process_job(task_id):
+def _process_job(task_id, celery_task=None):
     task = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
     if not task:
         logger.error("Report PDF Gemini task not found: %s", task_id)
@@ -98,7 +104,22 @@ def _process_job(task_id):
     if not isinstance(task.params, dict) or (task.feature or task.params.get("feature")) not in {FEATURE_NAME, LEGACY_FEATURE_NAME}:
         logger.error("Invalid report PDF Gemini task params: %s", task_id)
         return False
-    if task.status == "canceled":
+    request_id = str(
+        getattr(getattr(celery_task, "request", None), "id", "") or ""
+    )
+    current_celery_id = str(getattr(task, "celery_task_id", "") or "")
+    if request_id and current_celery_id and request_id != current_celery_id:
+        logger.info(
+            "Report PDF Gemini task received stale delivery; task=%s request=%s current=%s",
+            task_id,
+            request_id,
+            current_celery_id,
+        )
+        return False
+    if task.status == "completed":
+        logger.info("Report PDF Gemini task already completed; skip duplicate: %s", task_id)
+        return True
+    if task.status in {"failed", "blocked_by_captcha", "canceled"}:
         return False
 
     job_id = task.id
@@ -147,7 +168,12 @@ def _process_job(task_id):
 
     try:
         output_path = storage_path_for_job(job_id, job_created_at)
-        worker = GeminiBrowserWorker()
+        options = GeminiBrowserOptions.from_env()
+        if "prefer_pro_model" in payload:
+            options.prefer_pro_model = _truthy(payload.get("prefer_pro_model"), True)
+        options.require_pro_model = _truthy(payload.get("require_pro_model"), False)
+        _apply_total_timeout_budget(options, followups)
+        worker = GeminiBrowserWorker(options)
         gemini_result = worker.generate(
             job_id=job_id,
             prompt=prompt,
@@ -170,8 +196,25 @@ def _process_job(task_id):
             "target_url": gemini_result.get("target_url"),
             "output_path": gemini_result.get("output_path"),
             "completed_at": datetime.utcnow().isoformat() + "Z",
+            "generation_requirements": {
+                "prefer_pro_model": bool(options.prefer_pro_model),
+                "require_pro_model": bool(options.require_pro_model),
+                "minimum_final_response_chars": _bounded_int(
+                    payload.get("minimum_final_response_chars"),
+                    default=0,
+                    lower=0,
+                    upper=20000,
+                ),
+            },
         })
         final_response = final_result.get("final_response_text") or final_result.get("response_text") or ""
+        final_chars = len("".join(str(final_response).split()))
+        progress_result = final_result
+        minimum_final_chars = final_result["generation_requirements"]["minimum_final_response_chars"]
+        if final_chars < minimum_final_chars:
+            raise RuntimeError(
+                f"Gemini 最终文案仅 {final_chars} 字，低于本次要求的 {minimum_final_chars} 字"
+            )
         if not _update_active_task(job_id, {
             PublicationTask.status: "completed",
             PublicationTask.current_step: "done",
@@ -179,7 +222,7 @@ def _process_job(task_id):
             PublicationTask.completed_at: datetime.utcnow(),
             PublicationTask.error_message: None,
             PublicationTask.result: final_result,
-            PublicationTask.gemini_response_chars: len("".join(str(final_response).split())),
+            PublicationTask.gemini_response_chars: final_chars,
         }):
             logger.warning("Report PDF Gemini task was canceled before final update: %s", job_id)
             return False
@@ -214,3 +257,45 @@ def _mark_failed(task, message):
     task.result = result
     flag_modified(task, "result")
     db.session.commit()
+
+
+def _truthy(value, default=False):
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _bounded_int(value, *, default, lower, upper):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = int(default)
+    return max(int(lower), min(int(upper), number))
+
+
+def _apply_total_timeout_budget(options, followups):
+    """Reserve one complete response window for every submitted Gemini turn.
+
+    ``total_timeout_seconds`` starts before the PDF upload and used to default
+    to 900 seconds, while a single response may consume 600 seconds.  A task
+    with one explicit follow-up therefore had less than one full response
+    window left for its second turn and could fail while Gemini was still
+    actively generating.  Size the hard deadline from the actual number of
+    turns, without shortening an operator-provided larger deadline.
+    """
+
+    turn_count = 1 + len(followups or [])
+    response_budget = max(30, int(getattr(options, "response_timeout_seconds", 0) or 0))
+    setup_budget = (
+        max(0, int(getattr(options, "ready_timeout_seconds", 0) or 0))
+        + max(0, int(getattr(options, "upload_timeout_seconds", 0) or 0))
+        + 120
+    )
+    required_total = setup_budget + turn_count * response_budget
+    options.total_timeout_seconds = max(
+        int(getattr(options, "total_timeout_seconds", 0) or 0),
+        required_total,
+    )
+    return options

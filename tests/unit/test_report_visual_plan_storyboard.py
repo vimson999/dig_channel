@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PIL import Image
 
@@ -21,6 +21,7 @@ from services.gemini_browser import (
     GeminiBrowserWorker,
     _write_generation_checkpoint,
     _strip_gemini_page_suffix,
+    _is_image_quota_text,
 )
 from services.report_stick_figure_assets import (
     IMAGE_STYLE_SUFFIX,
@@ -30,6 +31,7 @@ from services.report_stick_figure_assets import (
     scene_image_prompt_hash,
 )
 from services.report_visual_scheme import visual_scheme, visual_scheme_payloads
+from services.report_visual_plan_integrity import storyboard_integrity_from_rows
 from api.report_stick_figure_video_workflow import (
     _completed_image_asset_can_adopt_prompt_hash,
     _preferred_storyboard,
@@ -45,16 +47,63 @@ from tasks.report_visual_plan import (
 from tasks.report_stick_figure_assets import (
     PARENT_IMAGE_COMPLETION_STEPS,
     _is_transient_image_error,
+    _is_image_quota_error,
 )
 
 
 class ReportVisualPlanStoryboardTest(unittest.TestCase):
+    def test_durable_storyboard_integrity_requires_full_contiguous_content(self):
+        output = SimpleNamespace(
+            task_id="storyboard-1",
+            source_task_id="source-1",
+            schema_version="v1",
+            source_script_chars=8,
+            covered_script_chars=8,
+            segment_count=2,
+            visual_scheme_key="stick_figure",
+            visual_scheme_name="白板火柴人",
+            gemini_output_path="raw.json",
+            normalized_output_path="normalized.json",
+            normalizer_model="model",
+            evidence_status=None,
+        )
+        rows = [
+            SimpleNamespace(sequence=0, script_text="标题", visual_prompt="标题画面"),
+            SimpleNamespace(sequence=1, script_text="正文", visual_prompt="正文画面"),
+        ]
+
+        self.assertEqual(2, storyboard_integrity_from_rows(output, rows)["segment_count"])
+        self.assertIsNone(storyboard_integrity_from_rows(output, rows[1:]))
+        self.assertIsNone(storyboard_integrity_from_rows(
+            output,
+            [rows[0], SimpleNamespace(sequence=2, script_text="正文", visual_prompt="正文画面")],
+        ))
+        self.assertIsNone(storyboard_integrity_from_rows(
+            output,
+            [rows[0], SimpleNamespace(sequence=1, script_text="正文", visual_prompt="")],
+        ))
+
+    def test_ambiguous_storyboard_commit_reconciles_before_failure_projection(self):
+        task_path = BACKEND_DIR / "tasks" / "report_visual_plan.py"
+        text = task_path.read_text(encoding="utf-8")
+        process = text.split("def _process_job(", 1)[1].split("\ndef _retry_normalize_job", 1)[0]
+        retry = text.split("def _retry_normalize_job(", 1)[1].split("\ndef _checkpoint_storyboard_text", 1)[0]
+        reconcile = text.split("def _reconcile_durable_storyboard_success(", 1)[1].split(
+            "\ndef _dispatch_auto_scene_images", 1
+        )[0]
+
+        self.assertIn("if not _reconcile_durable_storyboard_success(task_id, persist_exc)", process)
+        self.assertIn("if not _reconcile_durable_storyboard_success(task_id, persist_exc)", retry)
+        self.assertLess(reconcile.index("release_db_session_quietly()"), reconcile.index("durable_storyboard_integrity(task_id)"))
+        self.assertIn('PublicationTask.status: "completed"', reconcile)
+        self.assertIn('PublicationTask.current_step: "storyboard_done"', reconcile)
     def test_image_completion_cannot_regress_audio_or_video_parent_stage(self):
         for step in (
             "material_queued",
             "storyboard_done",
             "images_queued",
             "images_done",
+            "images_failed",
         ):
             self.assertIn(step, PARENT_IMAGE_COMPLETION_STEPS)
         for step in (
@@ -67,6 +116,28 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
         ):
             self.assertNotIn(step, PARENT_IMAGE_COMPLETION_STEPS)
 
+    def test_terminal_image_failures_close_parent_instead_of_leaving_82_percent_stuck(self):
+        text = (
+            BACKEND_DIR / "tasks" / "report_stick_figure_assets.py"
+        ).read_text(encoding="utf-8")
+        refresh = text.split(
+            "def _refresh_parent_image_state(", 1
+        )[1].split("\ndef _normalize_png", 1)[0]
+        mark_failed = text.split("def _mark_failed(", 1)[1].split(
+            "\ndef _refresh_parent_image_for_task", 1
+        )[0]
+        worker = text.split("def generate_scene_image(", 1)[1].split(
+            "\ndef _is_transient_image_error", 1
+        )[0]
+
+        self.assertIn('("completed", "failed", "canceled", "blocked")', refresh)
+        self.assertIn('PublicationTask.current_step: "images_failed"', refresh)
+        self.assertIn('PublicationTask.waiting_child_status: "failed"', refresh)
+        self.assertIn("续跑失败图片", refresh)
+        self.assertNotIn("_refresh_parent_image_state", mark_failed)
+        self.assertIn("_refresh_parent_image_for_task(str(task_id))", worker)
+        self.assertIn("raise self.retry(", worker)
+
     def test_scene_image_retry_only_accepts_transient_browser_failures(self):
         self.assertTrue(_is_transient_image_error("等待 Gemini 生成图片超时"))
         self.assertTrue(_is_transient_image_error("net::ERR_CONNECTION_RESET"))
@@ -74,6 +145,21 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
         self.assertTrue(_is_transient_image_error("Gemini 图片包含浏览器浮层"))
         self.assertFalse(_is_transient_image_error("分镜提示词契约已变化"))
         self.assertFalse(_is_transient_image_error("视觉方案版本已变化"))
+        self.assertFalse(_is_transient_image_error(
+            "Gemini 图片生成额度已耗尽，请等待额度重置后再继续"
+        ))
+
+    def test_gemini_image_quota_message_is_detected_and_not_retried(self):
+        english = (
+            "I can create more images as soon as your limit resets. "
+            "Check your usage in Settings."
+        )
+        self.assertTrue(_is_image_quota_text(english))
+        self.assertTrue(_is_image_quota_text("图片生成已达上限，请稍后再试"))
+        self.assertTrue(_is_image_quota_error(
+            "Gemini 图片生成额度已耗尽，请等待额度重置"
+        ))
+        self.assertFalse(_is_image_quota_text("Create exactly one image"))
 
     def test_browser_overlay_detector_rejects_dark_top_right_popover(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -172,6 +258,66 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
         notify.assert_called_once()
         self.assertEqual("login", notify.call_args.kwargs["reason"])
         self.assertEqual("gemini-job", notify.call_args.kwargs["job_id"])
+
+    def test_pdf_gemini_selects_and_confirms_pro_before_upload(self):
+        worker = GeminiBrowserWorker.__new__(GeminiBrowserWorker)
+        worker.options = GeminiBrowserOptions(
+            user_data_dir="/tmp/gemini-profile",
+            prefer_pro_model=True,
+            model_switch_timeout_seconds=2,
+        )
+        picker_before = MagicMock()
+        picker_before.inner_text.return_value = "Fast"
+        picker_before.get_attribute.return_value = None
+        pro_option = MagicMock()
+        pro_option.inner_text.return_value = "Pro"
+        pro_option.get_attribute.return_value = None
+        picker_after = MagicMock()
+        picker_after.inner_text.return_value = "Gemini 2.5 Pro"
+        picker_after.get_attribute.return_value = None
+
+        with patch.object(
+            worker,
+            "_first_visible",
+            side_effect=[picker_before, pro_option, picker_after],
+        ):
+            result = worker._try_select_pro_model(MagicMock())
+
+        picker_before.click.assert_called_once_with(timeout=8_000)
+        pro_option.click.assert_called_once_with(timeout=8_000)
+        self.assertEqual("selected_pro", result["status"])
+        self.assertTrue(result["confirmed"])
+
+    def test_pdf_gemini_keeps_running_when_pro_picker_is_unavailable(self):
+        worker = GeminiBrowserWorker.__new__(GeminiBrowserWorker)
+        worker.options = GeminiBrowserOptions(
+            user_data_dir="/tmp/gemini-profile",
+            prefer_pro_model=True,
+            model_switch_timeout_seconds=0,
+        )
+
+        with patch.object(worker, "_first_visible", return_value=None):
+            result = worker._try_select_pro_model(MagicMock())
+
+        self.assertEqual("picker_not_found", result["status"])
+        self.assertFalse(result["selected"])
+
+    def test_gemini_pro_selectors_only_target_model_controls_and_menu_options(self):
+        worker = GeminiBrowserWorker.__new__(GeminiBrowserWorker)
+        worker.options = GeminiBrowserOptions(user_data_dir="/tmp/gemini-profile")
+
+        picker_selectors = worker._selectors("model_picker")
+        option_selectors = worker._selectors("pro_model_option")
+
+        self.assertNotIn("text=Pro", picker_selectors)
+        self.assertNotIn("button:has-text('Pro')", option_selectors)
+        self.assertIn("button[data-test-id='bard-mode-menu-button']", picker_selectors)
+        self.assertIn("button[aria-label*='当前模式']", picker_selectors)
+        self.assertIn("[data-test-id^='bard-mode-option-']:has-text('Pro')", option_selectors)
+        self.assertTrue(any("aria-label" in item or "data-test" in item for item in picker_selectors))
+        self.assertTrue(
+            all("role=" in item or "mat-" in item or "data-test-id" in item for item in option_selectors)
+        )
 
     def test_failed_storyboard_regeneration_keeps_previous_completed_plan(self):
         failed_retry = SimpleNamespace(id="retry", status="failed")
@@ -377,8 +523,16 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
 
         self.assertIn("data-retry-storyboard-normalize", frontend_text)
         self.assertIn("复用 Gem 原文继续梳理", frontend_text)
+        self.assertIn("分镜整理未保存，Gem 原始返回仍已保留", frontend_text)
         self.assertIn('/jobs/<job_id>/retry-normalize', api_text)
         self.assertIn("retry_normalize_report_visual_plan_job", task_text)
+
+    def test_storyboard_worker_returns_merged_incomplete_continuation_text(self):
+        worker_text = (BACKEND_DIR / "services" / "gemini_browser.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("final_response_text = combined_response_text", worker_text)
+        self.assertIn('"final_response_text": final_response_text', worker_text)
 
     def test_normalize_retry_prefers_first_self_contained_completed_turn(self):
         stored = {
@@ -398,6 +552,88 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
             stored["turns"][0]["response_text"],
             _checkpoint_storyboard_text(stored),
         )
+
+    def test_normalize_retry_reconstructs_initial_and_continuation_turns(self):
+        stored = {
+            "turns": [
+                {
+                    "kind": "initial",
+                    "response_text": (
+                        "标题镜头\n【文案原句】：标题：测试研报\n"
+                        "【AI 提示词】：title\n分镜 1\n【文案原句】：第一句。\n"
+                        "【AI 提示词】：one"
+                    ),
+                },
+                {
+                    "kind": "incomplete_storyboard_continuation",
+                    "response_text": (
+                        "分镜 2\n【文案原句】：第二句。\n"
+                        "【AI 提示词】：two\n【全文分镜完成】"
+                    ),
+                },
+            ],
+            # Older workers persisted only the last continuation here.
+            "final_response_text": "分镜 2\n【文案原句】：第二句。\n【AI 提示词】：two",
+        }
+
+        reconstructed = _checkpoint_storyboard_text(stored)
+        self.assertIn("标题镜头", reconstructed)
+        self.assertIn("【文案原句】：第一句。", reconstructed)
+        self.assertIn("【文案原句】：第二句。", reconstructed)
+
+    def test_normalizer_restores_labeled_gem_prompts_after_ds_repairs_blocks(self):
+        gemini_text = (
+            "标题镜头\n【文案原句】：标题：测试研报\n"
+            "【AI 提示词】：Gem title prompt\n"
+            "分镜 1\n【文案原句】：第一段讲需求增长。\n"
+            "【AI 提示词】：Gem demand prompt\n"
+            "分镜 2\n【文案原句】：第二段讲产品升级，利润率提升。最后提示客户集中风险。\n"
+            "【AI 提示词】：Gem risk prompt"
+        )
+        ds_payload = {
+            "title_scene": {"scene_title": "标题镜头", "visual_prompt": "DS title rewrite"},
+            "segments": [
+                {
+                    "scene_title": "需求",
+                    "script_text": "第一段讲需求增长。",
+                    "visual_prompt": "DS demand rewrite",
+                },
+                {
+                    "scene_title": "风险",
+                    "script_text": "第二段讲产品升级，利润率提升。最后提示客户集中风险。",
+                    "visual_prompt": "DS risk rewrite",
+                },
+            ],
+        }
+        with patch.object(service, "_deepseek_json", return_value=ds_payload):
+            result = service.normalize_storyboard_response(self.material(), gemini_text)
+
+        self.assertEqual("Gem title prompt", result["title_scene"]["visual_prompt"])
+        self.assertEqual("Gem demand prompt", result["segments"][0]["visual_prompt"])
+        self.assertEqual("Gem risk prompt", result["segments"][1]["visual_prompt"])
+
+    def test_normalizer_reports_incomplete_labeled_gem_prompts_precisely(self):
+        gemini_text = (
+            "标题镜头\n【文案原句】：标题：测试研报\n"
+            "【AI 提示词】：Gem title prompt\n"
+            "分镜 1\n【文案原句】：第一段讲需求增长。\n"
+            "【AI 提示词】：Gem demand prompt\n"
+            "分镜 2\n【文案原句】：第二段讲产品升级，利润率提升。最后提示客户集中风险。"
+        )
+        ds_payload = {
+            "title_scene": {"scene_title": "标题镜头", "visual_prompt": "DS title rewrite"},
+            "segments": [
+                {"scene_title": "需求", "script_text": "第一段讲需求增长。", "visual_prompt": "DS demand"},
+                {
+                    "scene_title": "风险",
+                    "script_text": "第二段讲产品升级，利润率提升。最后提示客户集中风险。",
+                    "visual_prompt": "DS risk",
+                },
+            ],
+        }
+        with patch.object(service, "_deepseek_json", return_value=ds_payload):
+            with self.assertRaisesRegex(ValueError, "Gem 原始分镜缺少完整 AI 提示词"):
+                service.normalize_storyboard_response(self.material(), gemini_text)
 
     def test_incomplete_ds_result_is_rejected(self):
         ds_payload = {
@@ -530,6 +766,14 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
         self.assertIn('data-generate-storyboard data-force="1"', frontend_text)
         self.assertIn("现有图片、语音和视频不会复用", frontend_text)
         self.assertIn("visual_scheme_key:this.visualScheme.key", frontend_text)
+
+    def test_stick_video_detail_hides_asset_batch_actions_until_storyboard_succeeds(self):
+        frontend_path = BACKEND_DIR.parents[0] / "frontend" / "js" / "report-stick-figure-video-workflow-detail.js"
+        frontend_text = frontend_path.read_text(encoding="utf-8")
+
+        self.assertIn("const storyboardReady=storyboardStatus==='succeeded'", frontend_text)
+        self.assertIn("暂不能批量生成图片", frontend_text)
+        self.assertIn("标题与正文分镜完成后，这里才可以批量生成图片", frontend_text)
 
     def test_visual_schemes_bind_storyboard_and_image_contract_together(self):
         schemes = {item["key"]: item for item in visual_scheme_payloads()}
@@ -821,6 +1065,15 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
 
         self.assertEqual(3, len(resets))
 
+    def test_gemini_browser_launch_has_a_bounded_timeout(self):
+        worker_text = (BACKEND_DIR / "services" / "gemini_browser.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("browser_launch_timeout_seconds", worker_text)
+        self.assertIn('"timeout": max(5, int(self.options.browser_launch_timeout_seconds or 0)) * 1000', worker_text)
+        self.assertIn("Gemini 浏览器启动超时", worker_text)
+
     def test_storyboard_worker_serializes_shared_gemini_profile(self):
         runner_text = (
             BACKEND_DIR.parents[1]
@@ -828,11 +1081,36 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
             / "dev"
             / "run-celery-report-visual-plan.sh"
         ).read_text(encoding="utf-8")
+        pool_runner_text = (
+            BACKEND_DIR.parents[1]
+            / "scripts"
+            / "dev"
+            / "run-celery-report-visual-plan-pool.sh"
+        ).read_text(encoding="utf-8")
+        pool_prepare_text = (
+            BACKEND_DIR.parents[1]
+            / "scripts"
+            / "dev"
+            / "prepare-report-visual-plan-gemini-profile-pool.sh"
+        ).read_text(encoding="utf-8")
+        monitor_text = (BACKEND_DIR / "apis" / "v1" / "celery_monitor.py").read_text(
+            encoding="utf-8"
+        )
         worker_text = (BACKEND_DIR / "services" / "gemini_browser.py").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("REPORT_VISUAL_PLAN_CELERY_CONCURRENCY:-1", runner_text)
+        self.assertIn("REPORT_VISUAL_PLAN_WORKER_ID", runner_text)
+        self.assertIn("REPORT_VISUAL_PLAN_PROFILE_ROOT", runner_text)
+        self.assertIn('export REPORT_PDF_GEMINI_USER_DATA_DIR="$PROFILE_POOL_ROOT/$WORKER_ID"', runner_text)
+        self.assertIn("--concurrency=${REPORT_VISUAL_PLAN_CELERY_CONCURRENCY:-1}", runner_text)
+        self.assertIn("REPORT_VISUAL_PLAN_PROFILE_COUNT", pool_runner_text)
+        self.assertIn("REPORT_VISUAL_PLAN_WORKER_ID=\"$slot\"", pool_runner_text)
+        self.assertIn("REPORT_VISUAL_PLAN_TEMPLATE_USER_DATA_DIR", pool_prepare_text)
+        self.assertIn("Default/Cache/***", pool_prepare_text)
+        self.assertNotIn("report_pdf_gemini_pool/worker_4\"", runner_text)
+        self.assertIn('"run_script": "scripts/dev/run-celery-report-visual-plan-pool.sh"', monitor_text)
         self.assertIn("options, \"total_timeout_seconds\"", worker_text)
         self.assertIn("* 3", worker_text)
 
@@ -847,6 +1125,16 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
             "【AI 提示词】：two"
         )
         self.assertFalse(service.storyboard_response_covers_script(material, partial))
+        self.assertTrue(service.storyboard_response_covers_script(material, complete))
+
+    def test_storyboard_coverage_rejects_source_fragment_without_prompt(self):
+        material = {"final_script_for_tts": "第一句。第二句。"}
+        missing_prompt = (
+            "分镜 1【文案原句】：第一句。【画面动作】：新建画面"
+            "【AI 提示词】：one\n分镜 2【文案原句】：第二句。【画面动作】：新建画面"
+        )
+        complete = f"{missing_prompt}【AI 提示词】：two"
+        self.assertFalse(service.storyboard_response_covers_script(material, missing_prompt))
         self.assertTrue(service.storyboard_response_covers_script(material, complete))
 
     def test_storyboard_coverage_allows_title_prefix_and_repeated_tail(self):

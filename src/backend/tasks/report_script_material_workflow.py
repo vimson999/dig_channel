@@ -22,6 +22,7 @@ from services.report_audio_workflow import (
     DEFAULT_INITIAL_PROMPT,
     DEFAULT_REVIEW_PROMPT,
     normalize_for_tts,
+    review_prompt_for_pdf_evidence,
     split_tts_text,
     structured_result_quality_issue,
 )
@@ -30,6 +31,7 @@ from services.report_script_material_workflow import FEATURE_NAME, QUEUE_NAME, w
 from services.runtime_guard import (
     apply_async_after_db_release,
     guard_publication_task_start,
+    maybe_guarded_apply_async,
     release_db_session_quietly,
     retry_exception_types,
 )
@@ -54,6 +56,9 @@ MATERIAL_REUSE_FEATURES = (
     "report_pdf_audio_workflow",
     "report_audio_workflow",
 )
+AUTO_SCRIPT_MATERIAL_SOURCE = "zsxq_auto_script_material_dispatch"
+AUTO_SCRIPT_MATERIAL_AUDIO_SOURCE = "zsxq_auto_script_material_audio_handoff"
+REPORT_AUDIO_WORKFLOW_FEATURE = "report_pdf_audio_workflow"
 
 RETRYABLE_CHILD_ERROR_FRAGMENTS = (
     "超时",
@@ -185,7 +190,15 @@ def _process_job(task_id: str) -> bool:
         return False
 
     prompt = str(payload.get("prompt") or DEFAULT_INITIAL_PROMPT).strip()
-    review_prompt = str(payload.get("review_prompt") or DEFAULT_REVIEW_PROMPT).strip()
+    pdf_evidence_enabled = (
+        _truthy(payload.get("pdf_evidence_enabled"), True)
+        if "pdf_evidence_enabled" in payload
+        else True
+    )
+    review_prompt = review_prompt_for_pdf_evidence(
+        payload.get("review_prompt") or DEFAULT_REVIEW_PROMPT,
+        enabled=pdf_evidence_enabled,
+    )
     followups = [str(item).strip() for item in (payload.get("followups") or []) if str(item).strip()]
     if review_prompt and review_prompt not in followups:
         followups.append(review_prompt)
@@ -323,7 +336,7 @@ def _process_job(task_id: str) -> bool:
         source=source,
         source_task_id=source_task_id,
     )
-    if raw_final:
+    if raw_final and pdf_evidence_enabled:
         try:
             release_db_session_quietly()
             evidence_output = build_and_store_evidence(
@@ -356,6 +369,13 @@ def _process_job(task_id: str) -> bool:
             except Exception:
                 db.session.rollback()
                 logger.exception("Failed to persist PDF evidence failure task=%s", workflow_task_id)
+    elif not pdf_evidence_enabled:
+        _update_result(workflow_task_id, {
+            "pdf_evidence": {
+                "status": "disabled",
+                "enabled": False,
+            },
+        })
     _dispatch_auto_storyboard(workflow_task_id)
     logger.info("Report script material workflow completed: %s", workflow_task_id)
     return True
@@ -366,15 +386,22 @@ def _dispatch_auto_storyboard(material_task_id: str) -> None:
         material_task_id,
         PublicationTask.id,
         PublicationTask.params,
+        PublicationTask.result,
         PublicationTask.user_id,
+        PublicationTask.task_title,
+        PublicationTask.feature,
         PublicationTask.status,
+        PublicationTask.report_audio_pdf_attachment_id,
+        PublicationTask.report_audio_pdf_filename,
+        PublicationTask.report_audio_pdf_bytes,
+        PublicationTask.report_audio_pdf_topic_title,
     )
     if not material or material.status != "completed":
         return
     payload = _workflow_payload(material)
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     metadata_source = str(metadata.get("source") or "")
-    if metadata_source == "zsxq_auto_script_material_dispatch":
+    if metadata_source == AUTO_SCRIPT_MATERIAL_SOURCE:
         visual_scheme_keys = metadata.get("visual_scheme_keys")
         if not isinstance(visual_scheme_keys, list) or not visual_scheme_keys:
             return
@@ -405,6 +432,28 @@ def _dispatch_auto_storyboard(material_task_id: str) -> None:
                 "Auto visual workflows dispatch failed: material=%s schemes=%s error=%s",
                 material_task_id,
                 visual_scheme_keys,
+                exc,
+                exc_info=True,
+            )
+        try:
+            audio_dispatch = _dispatch_auto_audio_for_material(material)
+            _update_result(material_task_id, {"auto_audio_workflow": audio_dispatch})
+            logger.info(
+                "Auto audio workflow handoff: material=%s result=%s",
+                material_task_id,
+                audio_dispatch,
+            )
+        except Exception as exc:
+            db.session.rollback()
+            _update_result(material_task_id, {
+                "auto_audio_workflow": {
+                    "status": "failed",
+                    "error": str(exc)[:1000],
+                },
+            })
+            logger.error(
+                "Auto audio workflow handoff failed: material=%s error=%s",
+                material_task_id,
                 exc,
                 exc_info=True,
             )
@@ -474,6 +523,156 @@ def _dispatch_auto_storyboard(material_task_id: str) -> None:
             exc,
             exc_info=True,
         )
+
+
+def _dispatch_auto_audio_for_material(material: PublicationTask) -> Dict[str, Any]:
+    """Continue an automatic PDF material job into reusable-script audio/video.
+
+    The material branch used to stop after initializing visual assets.  Its
+    images then had no whole WAV to align against unless a separately enabled
+    auto-video dispatch happened to create one.  This handoff is deliberately
+    material-owned and idempotent: it reuses the completed script, never runs
+    Gemini again, and does not replace an existing automatic audio workflow.
+    """
+    material_id = str(getattr(material, "id", "") or "").strip()
+    if not material_id:
+        return {"status": "skipped", "reason": "missing_material_id"}
+    if str(getattr(material, "status", "") or "") != "completed":
+        return {"status": "skipped", "reason": "material_not_completed"}
+
+    existing = (
+        PublicationTask.query.options(load_only(
+            PublicationTask.id,
+            PublicationTask.status,
+            PublicationTask.current_step,
+            PublicationTask.celery_task_id,
+        ))
+        .filter(
+            PublicationTask.feature.in_(MATERIAL_REUSE_FEATURES[1:]),
+            PublicationTask.parent_feature == FEATURE_NAME,
+            PublicationTask.parent_task_id == material_id,
+            PublicationTask.source_task_id == material_id,
+        )
+        .order_by(PublicationTask.created_at.desc())
+        .first()
+    )
+    if existing:
+        return {
+            "status": "existing",
+            "task_id": str(existing.id),
+            "task_status": str(existing.status or ""),
+            "current_step": str(existing.current_step or ""),
+        }
+
+    payload = _workflow_payload(material)
+    pdf = payload.get("pdf") if isinstance(payload.get("pdf"), dict) else {}
+    pdf_path = str(pdf.get("path") or payload.get("pdf_path") or "").strip()
+    attachment_id = str(
+        pdf.get("attachment_id")
+        or getattr(material, "report_audio_pdf_attachment_id", "")
+        or ""
+    ).strip()
+    if not pdf_path or not attachment_id:
+        return {"status": "skipped", "reason": "missing_pdf_identity"}
+
+    from services.report_audio_workflow import QUEUE_NAME as AUDIO_QUEUE_NAME
+    from tasks.report_audio_workflow import process_report_audio_workflow_job
+
+    handoff_metadata = {
+        "source": AUTO_SCRIPT_MATERIAL_AUDIO_SOURCE,
+        "material_task_id": material_id,
+        "attachment_id": attachment_id,
+        "queued_at": datetime.utcnow().isoformat() + "Z",
+    }
+    video_options = {
+        "enabled": True,
+        "vertical_enabled": True,
+        "vertical_video_scheme": "scheme3",
+        "vertical_video_schemes": ["scheme3"],
+        "render_mode": "full_video",
+        "bilibili_enabled": False,
+        "sub_burn_enabled": True,
+        "source": AUTO_SCRIPT_MATERIAL_AUDIO_SOURCE,
+    }
+    task = PublicationTask(
+        status="pending",
+        current_step="queued",
+        progress=0,
+        params={
+            "feature": REPORT_AUDIO_WORKFLOW_FEATURE,
+            "user_id": str(getattr(material, "user_id", "") or "system"),
+            "parent_feature": FEATURE_NAME,
+            "parent_task_id": material_id,
+            "source_feature": FEATURE_NAME,
+            "source_task_id": material_id,
+            "report_audio_workflow": {
+                "metadata": handoff_metadata,
+                "followups": [],
+                "gemini_url": "",
+                "pdf_evidence_enabled": False,
+                "tts_provider": "doubao_browser",
+                "video": video_options,
+                "pdf": dict(pdf),
+                "pdf_path": pdf_path,
+            },
+        },
+        result={
+            "metadata": handoff_metadata,
+            "pdf": dict(pdf),
+            "children": {},
+            "structured_result": None,
+            "audio": None,
+            "video": None,
+            "logs": [],
+            "script_material": {
+                "status": "pending",
+                "mode": "reusable_script_expected",
+                "source_task_id": material_id,
+            },
+        },
+    )
+    task.task_title = getattr(material, "task_title", None) or getattr(
+        material, "report_audio_pdf_topic_title", None
+    ) or getattr(material, "report_audio_pdf_filename", None) or "研报自动语音视频"
+    task.parent_feature = FEATURE_NAME
+    task.parent_task_id = material_id
+    task.source_feature = FEATURE_NAME
+    task.source_task_id = material_id
+    task.report_audio_pdf_attachment_id = attachment_id
+    task.report_audio_pdf_filename = pdf.get("filename") or getattr(material, "report_audio_pdf_filename", None)
+    task.report_audio_pdf_bytes = str(pdf.get("bytes") or getattr(material, "report_audio_pdf_bytes", "") or "")
+    task.report_audio_pdf_topic_title = pdf.get("topic_title") or getattr(material, "report_audio_pdf_topic_title", None)
+    db.session.add(task)
+    db.session.flush()
+    task_id = str(task.id)
+    db.session.commit()
+
+    try:
+        submission = maybe_guarded_apply_async(
+            process_report_audio_workflow_job,
+            args=[task_id],
+            queue=AUDIO_QUEUE_NAME,
+            feature=REPORT_AUDIO_WORKFLOW_FEATURE,
+            task=task,
+            retry=False,
+        )
+        task.celery_task_id = submission["async_result"].id
+        db.session.commit()
+    except Exception as exc:
+        task.status = "failed"
+        task.current_step = "enqueue_failed"
+        task.error_message = f"自动语音任务入队失败: {exc}"[:4000]
+        task.completed_at = datetime.utcnow()
+        db.session.commit()
+        return {"status": "failed", "task_id": task_id, "error": task.error_message}
+
+    return {
+        "status": "deferred" if submission.get("deferred") else "queued",
+        "task_id": task_id,
+        "celery_task_id": task.celery_task_id,
+        "admission": submission.get("admission"),
+        "vertical_video_schemes": ["scheme3"],
+    }
 
 
 def _workflow_payload(task: PublicationTask) -> Dict[str, Any]:
@@ -1524,6 +1723,14 @@ def _min_final_chars() -> int:
         "REPORT_SCRIPT_MATERIAL_MIN_FINAL_CHARS",
         _int_env("REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS", _int_env("REPORT_PDF_GEMINI_MIN_RESPONSE_CHARS", 120)),
     ))
+
+
+def _truthy(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _int_env(name: str, default: int) -> int:

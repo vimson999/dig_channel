@@ -63,6 +63,22 @@ PASSIVE_RUNNING_STEPS = {
     ),
 }
 PASSIVE_RUNNING_STEP_PREFIXES = {
+    # Report-audio parents return after scheduling a delayed retry while their
+    # Gemini, browser-TTS, visual, or publisher child is still running.  These
+    # waiting rows must not occupy the limited parent-worker start capacity,
+    # otherwise two slow children can stall every queued report indefinitely.
+    "report_audio_workflow": (
+        "gemini_",
+        "doubao_browser_",
+        "scheme3_visual_",
+        "publisher_video_",
+    ),
+    "report_pdf_audio_workflow": (
+        "gemini_",
+        "doubao_browser_",
+        "scheme3_visual_",
+        "publisher_video_",
+    ),
     # While a publisher child renders, the parent mirrors child steps as
     # landscape_video_queued, landscape_video_synthesis, and so on. Every one
     # of those states is passive and must not occupy workflow start capacity.
@@ -75,6 +91,10 @@ PASSIVE_RUNNING_STEP_PREFIXES = {
 _DB_PRESSURE_CACHE = {
     "expires_at": 0.0,
     "snapshot": None,
+}
+_IDLE_OFFENDER_LOG_CACHE = {
+    "expires_at": 0.0,
+    "signature": None,
 }
 
 DEFERRED_TASK_COLUMNS = (
@@ -247,7 +267,32 @@ def db_pressure_snapshot(force_refresh=False):
                     )::int AS current_user_connections,
                     count(*) FILTER (
                         WHERE pid <> pg_backend_pid() AND state = 'idle in transaction'
-                    )::int AS idle_in_transaction_connections
+                    )::int AS idle_in_transaction_connections,
+                    COALESCE((
+                        SELECT jsonb_agg(to_jsonb(offender))
+                        FROM (
+                            SELECT
+                                pid,
+                                COALESCE(application_name, '') AS application_name,
+                                COALESCE(client_addr::text, '') AS client_addr,
+                                COALESCE(backend_type, '') AS backend_type,
+                                ROUND(EXTRACT(EPOCH FROM (NOW() - xact_start))::numeric, 3)
+                                    AS xact_age_seconds,
+                                ROUND(EXTRACT(EPOCH FROM (NOW() - state_change))::numeric, 3)
+                                    AS idle_age_seconds,
+                                ROUND(EXTRACT(EPOCH FROM (NOW() - query_start))::numeric, 3)
+                                    AS query_age_seconds,
+                                COALESCE(wait_event_type, '') AS wait_event_type,
+                                COALESCE(wait_event, '') AS wait_event,
+                                md5(regexp_replace(COALESCE(query, ''), E'\\s+', ' ', 'g'))
+                                    AS query_fingerprint
+                            FROM pg_stat_activity
+                            WHERE pid <> pg_backend_pid()
+                              AND state = 'idle in transaction'
+                            ORDER BY xact_start NULLS LAST
+                            LIMIT 5
+                        ) AS offender
+                    ), '[]'::jsonb) AS idle_in_transaction_offenders
                 FROM pg_stat_activity
             """)).mappings().first()
     except Exception as exc:
@@ -271,6 +316,11 @@ def db_pressure_snapshot(force_refresh=False):
     min_free = _int_env("TASK_ADMISSION_DB_MIN_FREE_CONNECTIONS", 10, lower=1, upper=1000)
     max_used_ratio = _float_env("TASK_ADMISSION_DB_MAX_USED_RATIO", 0.85, lower=0.1, upper=1.0)
     max_idle_tx = _int_env("TASK_ADMISSION_DB_MAX_IDLE_IN_TX", 5, lower=0, upper=1000)
+    idle_offenders = _normalize_idle_offenders(
+        row.get("idle_in_transaction_offenders")
+    )
+    if idle_in_transaction:
+        _log_idle_transaction_offenders(idle_offenders)
 
     allowed = True
     reason = "ok"
@@ -302,6 +352,56 @@ def db_pressure_snapshot(force_refresh=False):
     }
     _cache_pressure(snapshot)
     return snapshot
+
+
+def _normalize_idle_offenders(value):
+    if not value:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(value, list):
+        return []
+    allowed_keys = (
+        "pid",
+        "application_name",
+        "client_addr",
+        "backend_type",
+        "xact_age_seconds",
+        "idle_age_seconds",
+        "query_age_seconds",
+        "wait_event_type",
+        "wait_event",
+        "query_fingerprint",
+    )
+    return [
+        {key: item.get(key) for key in allowed_keys}
+        for item in value[:5]
+        if isinstance(item, dict)
+    ]
+
+
+def _log_idle_transaction_offenders(offenders):
+    if not offenders:
+        return
+    signature = json.dumps(offenders, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    now = time.time()
+    if (
+        _IDLE_OFFENDER_LOG_CACHE.get("signature") == signature
+        and float(_IDLE_OFFENDER_LOG_CACHE.get("expires_at") or 0.0) > now
+    ):
+        return
+    _IDLE_OFFENDER_LOG_CACHE.update({
+        "signature": signature,
+        "expires_at": now + 60.0,
+    })
+    logger.warning(
+        "[TASK_GUARD] idle-in-transaction offenders count=%s details=%s",
+        len(offenders),
+        signature,
+    )
 
 
 def release_db_session_quietly():
@@ -654,7 +754,10 @@ def _denied(reason, message, **extra):
 
 
 def _cache_pressure(snapshot):
-    ttl = _float_env("TASK_ADMISSION_DB_PRESSURE_CACHE_SECONDS", 5.0, lower=0.0, upper=60.0)
+    # Admission already has per-feature concurrency limits. A 15-second local
+    # pressure snapshot avoids turning the safety probe itself into a frequent
+    # multi-process round-trip over PgBouncer while still reacting quickly.
+    ttl = _float_env("TASK_ADMISSION_DB_PRESSURE_CACHE_SECONDS", 15.0, lower=0.0, upper=60.0)
     _DB_PRESSURE_CACHE.update({
         "expires_at": time.time() + ttl,
         "snapshot": dict(snapshot),

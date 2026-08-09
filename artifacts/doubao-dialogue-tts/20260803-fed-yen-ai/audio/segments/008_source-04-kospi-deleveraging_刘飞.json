@@ -1,0 +1,16 @@
+{
+  "id": "008",
+  "slug": "source-04-kospi-deleveraging",
+  "role": "source",
+  "kind": "source",
+  "voice_label": "刘飞",
+  "voice_id": "zh_male_liufei_uranus_bigtts",
+  "hash": "56d6f99d44d1299f1bdeea6c69f64348213ef9191254eb4a68eb55c07d6dc8b0",
+  "characters": 782,
+  "chunks": 2,
+  "pause_after_ms": 650,
+  "wav_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/008_source-04-kospi-deleveraging_刘飞.wav",
+  "mp3_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/008_source-04-kospi-deleveraging_刘飞.mp3",
+  "duration_seconds": 140.904,
+  "status": "generated"
+}

@@ -52,21 +52,23 @@ def config_exists():
 
 
 def config_status():
+    cookie_state = _runtime_cookie_state()
     if not CONFIG_PATH.exists():
         return {
             "exists": False,
             "path": str(CONFIG_PATH),
             "cookie_env_name": COOKIE_ENV_NAME,
-            "cookie_env_configured": _runtime_cookie_configured(),
-            "cookie_db_configured": _runtime_db_cookie_configured(),
-            "cookie_source_mode": _runtime_cookie_source(),
+            "cookie_env_configured": cookie_state["configured"],
+            "cookie_db_configured": cookie_state["db_configured"],
+            "cookie_source_mode": cookie_state["source"],
         }
 
     config = load_config()
-    return _snapshot_config(config)
+    return _snapshot_config(config, cookie_state=cookie_state)
 
 
-def _snapshot_config(config):
+def _snapshot_config(config, *, cookie_state=None):
+    cookie_state = cookie_state or _runtime_cookie_state()
     max_rounds = _normalize_max_rounds(config.get("max_rounds"), default=DEFAULT_MAX_ROUNDS, none_means_continuous=True)
     rounds_completed = _bounded_int(config.get("rounds_completed"), default=0, lower=0, upper=1_000_000)
     group_id = str(config.get("group_id") or "").strip()
@@ -85,9 +87,9 @@ def _snapshot_config(config):
         "enabled": enabled,
         "credential_id": config.get("credential_id") or None,
         "cookie_env_name": COOKIE_ENV_NAME,
-        "cookie_env_configured": _runtime_cookie_configured(),
-        "cookie_db_configured": _runtime_db_cookie_configured(),
-        "cookie_source_mode": _runtime_cookie_source(),
+        "cookie_env_configured": cookie_state["configured"],
+        "cookie_db_configured": cookie_state["db_configured"],
+        "cookie_source_mode": cookie_state["source"],
         "interval_minutes": _scheduler_interval_minutes(config.get("interval_minutes")),
         "group_id": group_id,
         "group_validation_error": group_validation_error,
@@ -988,12 +990,23 @@ def runtime_cookie_info(account_id=None, required=True):
 
 
 def _runtime_cookie_configured():
-    return bool(
-        _runtime_db_cookie_configured()
-        or
+    return _runtime_cookie_state()["configured"]
+
+
+def _runtime_cookie_state():
+    db_configured = _runtime_db_cookie_configured()
+    override_configured = bool(
         _strip_wrapped_quotes(os.environ.get(COOKIE_OVERRIDE_ENV_NAME) or "")
-        or _strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME) or "")
     )
+    env_configured = bool(
+        _strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME) or "")
+    )
+    source = "db" if db_configured else "page" if override_configured else "env" if env_configured else None
+    return {
+        "configured": bool(db_configured or override_configured or env_configured),
+        "db_configured": db_configured,
+        "source": source,
+    }
 
 
 def _runtime_db_cookie_configured():
@@ -1004,8 +1017,11 @@ def _runtime_db_cookie_configured():
 
         return bool(has_active_credential(platform="zsxq", purpose="zsxq.sync"))
     except Exception:
-        _reset_db_session("runtime_db_cookie_check")
         return False
+    finally:
+        # This check is frequently followed by process inspection and startup
+        # shell I/O. Never carry its read checkout across that work.
+        _reset_db_session("runtime_db_cookie_check_complete")
 
 
 def _reset_db_session(reason=None):
@@ -1028,13 +1044,7 @@ def _reset_db_session(reason=None):
 
 
 def _runtime_cookie_source():
-    if _runtime_db_cookie_configured():
-        return "db"
-    if _strip_wrapped_quotes(os.environ.get(COOKIE_OVERRIDE_ENV_NAME) or ""):
-        return "page"
-    if _strip_wrapped_quotes(os.environ.get(COOKIE_ENV_NAME) or ""):
-        return "env"
-    return None
+    return _runtime_cookie_state()["source"]
 
 
 def _strip_wrapped_quotes(value):

@@ -60,7 +60,7 @@ from services.mp3_video_workflow import (
     regenerate_visual_artifact,
     status_payload as workflow_status_payload,
 )
-from services.runtime_guard import apply_async_after_db_release
+from services.runtime_guard import apply_async_after_db_release, release_db_session_quietly
 from tasks.mp3_video_workflow import process_mp3_video_workflow_job
 from utils.auth_utils import require_login
 from utils.date_filters import submission_date_utc_range
@@ -352,12 +352,12 @@ def create_job(current_user):
         render_mode = "full_video"
     if render_mode not in {"keyframes", "full_video"}:
         return jsonify({"success": False, "message": "render_mode 只能是 keyframes 或 full_video"}), 400
-    generate_subtitles_value = True
+    generate_subtitles_value = False
     for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
         if key in data:
             generate_subtitles_value = data.get(key)
             break
-    generate_subtitles = _truthy(generate_subtitles_value, default=True)
+    generate_subtitles = _truthy(generate_subtitles_value, default=False)
 
     gemini_url = (data.get("gemini_url") or DEFAULT_GEMINI_URL).strip()
     if gemini_url and not gemini_url.startswith(("http://", "https://")):
@@ -1212,6 +1212,7 @@ def _get_owned_task(
     include_params=True,
     include_result=True,
     db_attempts=3,
+    visible_user_ids=None,
 ):
     def load_task():
         columns = [
@@ -1247,12 +1248,14 @@ def _get_owned_task(
             include_params=True,
             include_result=include_result,
             db_attempts=db_attempts,
+            visible_user_ids=visible_user_ids,
         )
     params = task.params if task and include_params and isinstance(task.params, dict) else {}
     if not task or (task.feature or params.get("feature")) != FEATURE_NAME:
         return None
     task_user_id = str(task.user_id or params.get("user_id") or "").strip()
-    if task_user_id not in _visible_user_ids(current_user):
+    allowed_user_ids = visible_user_ids if visible_user_ids is not None else _visible_user_ids(current_user)
+    if task_user_id not in allowed_user_ids:
         return None
     return task
 
@@ -1388,26 +1391,39 @@ def _download_result_for_owned_task(current_user, job_id):
     if not cache_key:
         return None
     visible_user_ids = _visible_user_ids(current_user)
+    # Authentication may have opened a read transaction. Media requests can
+    # wait on this cache lock and then stream a file for seconds, neither of
+    # which may retain that checkout.
+    release_db_session_quietly()
     with _download_result_cache_lock:
         now = time.monotonic()
         cached = _download_result_cache.get(cache_key)
         if cached and cached["expires_at"] > now and cached["user_id"] in visible_user_ids:
             return cached["result"]
 
-        task = _get_owned_task(current_user, cache_key, include_params=False, include_result=True)
-        if not task:
-            _download_result_cache.pop(cache_key, None)
-            return None
-        result = task.result if isinstance(task.result, dict) else {}
-        owner_user_id = str(task.user_id or "").strip()
-        if DOWNLOAD_RESULT_CACHE_TTL_SECONDS > 0 and owner_user_id:
-            _download_result_cache[cache_key] = {
-                "expires_at": now + DOWNLOAD_RESULT_CACHE_TTL_SECONDS,
-                "user_id": owner_user_id,
-                "result": result,
-            }
-            _trim_download_result_cache(now)
-        return result
+        try:
+            task = _get_owned_task(
+                current_user,
+                cache_key,
+                include_params=False,
+                include_result=True,
+                visible_user_ids=visible_user_ids,
+            )
+            if not task:
+                _download_result_cache.pop(cache_key, None)
+                return None
+            result = copy.deepcopy(task.result) if isinstance(task.result, dict) else {}
+            owner_user_id = str(task.user_id or "").strip()
+            if DOWNLOAD_RESULT_CACHE_TTL_SECONDS > 0 and owner_user_id:
+                _download_result_cache[cache_key] = {
+                    "expires_at": now + DOWNLOAD_RESULT_CACHE_TTL_SECONDS,
+                    "user_id": owner_user_id,
+                    "result": result,
+                }
+                _trim_download_result_cache(now)
+            return result
+        finally:
+            release_db_session_quietly()
 
 
 def _trim_download_result_cache(now=None):
@@ -1584,14 +1600,14 @@ def _job_payload(task, include_raw=False):
             "audio": request_payload.get("audio") or result.get("audio"),
             "input_source": request_payload.get("input_source") or result.get("input_source"),
             "render_mode": request_payload.get("render_mode") or result.get("render_mode"),
-            "generate_subtitles": _truthy(request_payload.get("generate_subtitles", result.get("generate_subtitles")), default=True),
+            "generate_subtitles": _truthy(request_payload.get("generate_subtitles", result.get("generate_subtitles")), default=False),
             "gemini_url": request_payload.get("gemini_url"),
             "transcript_chars": len(str(request_payload.get("transcript_text") or "")) if request_payload.get("input_source") == "ima_transcript" else 0,
             "metadata": request_payload.get("metadata") or {},
         },
         "input_source": result.get("input_source") or request_payload.get("input_source") or "gemini_audio",
         "render_mode": result.get("render_mode") or request_payload.get("render_mode") or "full_video",
-        "generate_subtitles": _truthy(result.get("generate_subtitles", request_payload.get("generate_subtitles")), default=True),
+        "generate_subtitles": _truthy(result.get("generate_subtitles", request_payload.get("generate_subtitles")), default=False),
         "audio": result.get("audio") or request_payload.get("audio"),
         "gemini": result.get("gemini"),
         "source": result.get("source"),

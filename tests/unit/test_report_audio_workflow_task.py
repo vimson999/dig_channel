@@ -150,6 +150,21 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertNotIn("机构", title)
         self.assertNotIn("盛博", title)
 
+    def test_gfhk_filename_is_detected_as_hong_kong_gf_securities(self):
+        institution = _publisher_workbench_institution(
+            {"title": "广发证券：AI资本开支与平台价值转移"},
+            {"filename": "GHHK - AI Capex & Platform Value Shift.pdf"},
+            {},
+        )
+        title = _publisher_cover_title_with_institution(
+            "机构：AI资本开支与平台价值转移\n2028年增速急刹车",
+            institution,
+        )
+
+        self.assertEqual(institution, "GF Securities (Hong Kong)")
+        self.assertTrue(title.startswith("香港广发："))
+        self.assertNotIn("机构：", title)
+
     def test_cover_subtitle_is_single_line_and_bounded(self):
         subtitle = _format_cover_subtitle(
             "本报告解读摩根大通对亚洲被动元件、PCB-CCL、基板及测试行业的研究观点，重点关注需求复苏。"
@@ -314,6 +329,101 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertTrue(child.params["vertical_video_2"]["enabled"])
         self.assertEqual(child.params["vertical_video_2"]["scheme"], "scheme1")
         self.assertEqual(child.params["metadata"]["vertical_video_schemes"], ["scheme1", "scheme2"])
+
+    def test_publisher_video_task_includes_scheme3_scene_timeline(self):
+        class FakePublisherTask:
+            latest = None
+
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+                self.id = "publisher-child-scheme3"
+                FakePublisherTask.latest = self
+
+        timeline = {
+            "version": 1,
+            "scene_count": 1,
+            "scenes": [{"sequence": 1, "image_path": "/tmp/scene-1.png", "start_seconds": 0, "end_seconds": 12}],
+        }
+        fake_session = SimpleNamespace(add=lambda child: None, flush=lambda: None, commit=lambda: None)
+        parent = SimpleNamespace(id="parent-scheme3", created_at=datetime.utcnow())
+
+        with patch.object(report_audio_workflow, "_find_existing_publisher_video_task", return_value=None), \
+            patch.object(
+                report_audio_workflow,
+                "_resolve_scheme3_visual_inputs",
+                return_value={
+                    "workflow_id": "visual-1",
+                    "scene_timeline": timeline,
+                    "video_path": None,
+                    "status": "ready",
+                    "step": "images_done",
+                },
+            ), \
+            patch.object(report_audio_workflow, "PublicationTask", FakePublisherTask), \
+            patch.object(report_audio_workflow, "db", SimpleNamespace(session=fake_session)), \
+            patch.object(
+                report_audio_workflow.run_publication_pipeline,
+                "apply_async",
+                return_value=SimpleNamespace(id="celery-scheme3"),
+            ), \
+            patch.object(report_audio_workflow, "_persist_child_celery_task_id"), \
+            patch.object(report_audio_workflow, "_load_task", side_effect=lambda *args: FakePublisherTask.latest):
+            child = _create_publisher_video_task(
+                parent,
+                audio={"wav_path": "/tmp/audio.wav", "seconds": 12},
+                structured={
+                    "title": "方案三测试",
+                    "cover_title": "方案三测试",
+                    "cover_subtitle": "分镜必须传给渲染器",
+                    "final_script_for_tts": "这是一段用于测试方案三分镜视频的文案。",
+                },
+                pdf={"filename": "source.pdf"},
+                pdf_screenshot={"path": "/tmp/source-page.jpg", "width": 100, "height": 100},
+                payload={
+                    "video": {
+                        "enabled": True,
+                        "vertical_enabled": True,
+                        "vertical_video_schemes": ["scheme3"],
+                        "bilibili_enabled": False,
+                    }
+                },
+            )
+
+        self.assertEqual(child.params["vertical_video"]["visual_scene_timeline"], timeline)
+        self.assertEqual(child.params["metadata"]["visual_workflow_id"], "visual-1")
+
+    def test_publisher_video_task_defers_scheme3_until_visual_assets_are_ready(self):
+        parent = SimpleNamespace(id="parent-scheme3-wait", created_at=datetime.utcnow())
+        with patch.object(report_audio_workflow, "_find_existing_publisher_video_task", return_value=None), \
+            patch.object(
+                report_audio_workflow,
+                "_resolve_scheme3_visual_inputs",
+                return_value={
+                    "workflow_id": "visual-waiting",
+                    "scene_timeline": None,
+                    "video_path": None,
+                    "status": "processing",
+                    "step": "images_queued",
+                },
+            ):
+            with self.assertRaises(report_audio_workflow.ChildTaskStillRunning) as raised:
+                _create_publisher_video_task(
+                    parent,
+                    audio={"wav_path": "/tmp/audio.wav", "seconds": 12},
+                    structured={"final_script_for_tts": "等待视觉素材。"},
+                    pdf={"filename": "source.pdf"},
+                    pdf_screenshot={"path": "/tmp/source-page.jpg"},
+                    payload={
+                        "video": {
+                            "enabled": True,
+                            "vertical_enabled": True,
+                            "vertical_video_schemes": ["scheme3"],
+                        }
+                    },
+                )
+
+        self.assertEqual(raised.exception.label, "scheme3_visual")
+        self.assertEqual(raised.exception.child_id, "visual-waiting")
 
     def test_scheme3_keyframe_uses_workbench_video_frame_without_visual_video(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -592,6 +702,16 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertEqual(_child_id_from_result(result, "publisher_video"), "publisher-child")
         self.assertLessEqual(len(_current_step_code("publisher_video_waiting")), CURRENT_STEP_MAX_LENGTH)
 
+    def test_closed_gemini_browser_is_retryable(self):
+        message = "Page.evaluate: Target page, context or browser has been closed"
+
+        self.assertTrue(_is_retryable_child_error("gemini", message))
+
+    def test_missing_pcm_audio_child_is_retryable(self):
+        self.assertTrue(
+            _is_retryable_child_error("doubao", "朗读已触发但未捕获到 PCM 音频")
+        )
+
     def test_heavy_children_use_short_inline_waits_and_deferred_resume(self):
         env_keys = [
             "REPORT_AUDIO_DOUBAO_INLINE_WAIT_SECONDS",
@@ -843,6 +963,47 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         db.session.remove()
         db.drop_all()
         self.ctx.pop()
+
+    def test_deferred_parent_resume_persists_replacement_delivery_id(self):
+        parent = PublicationTask(
+            status="processing",
+            current_step="doubao_1_waiting",
+            progress=60,
+            celery_task_id="old-delivery-id",
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "report_audio_workflow": {"pdf_path": "/tmp/report.pdf"},
+            },
+            result={"children": {}, "logs": []},
+        )
+        db.session.add(parent)
+        db.session.commit()
+        waiting = report_audio_workflow.ChildTaskStillRunning(
+            "doubao_browser_1",
+            "tts-child-1",
+            "processing",
+            "capture_audio",
+        )
+
+        with patch.object(
+            report_audio_workflow,
+            "apply_async_after_db_release",
+            return_value=SimpleNamespace(id="replacement-delivery-id"),
+        ) as publish:
+            report_audio_workflow._defer_parent_retry(parent.id, waiting)
+
+        db.session.expire_all()
+        refreshed = db.session.get(PublicationTask, parent.id)
+        self.assertEqual(refreshed.status, "processing")
+        self.assertEqual(refreshed.celery_task_id, "replacement-delivery-id")
+        self.assertEqual(refreshed.waiting_child_id, "tts-child-1")
+        publish.assert_called_once_with(
+            report_audio_workflow.process_report_audio_workflow_job,
+            args=[parent.id],
+            queue=report_audio_workflow.WORKFLOW_QUEUE_NAME,
+            countdown=30,
+            retry=False,
+        )
 
     def test_completed_parent_ignores_duplicate_delayed_delivery(self):
         completed = PublicationTask(

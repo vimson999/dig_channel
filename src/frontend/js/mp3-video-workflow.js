@@ -1023,7 +1023,7 @@ class Mp3VideoWorkflowPage {
             ? '手动 DS 返回'
             : (inputSource === 'ima_transcript' ? 'IMA + DS 返回' : 'Gemini 第一轮');
         const renderMode = job.render_mode || job.request?.render_mode || 'full_video';
-        const generateSubtitles = job.generate_subtitles ?? job.request?.generate_subtitles ?? true;
+        const generateSubtitles = job.generate_subtitles ?? job.request?.generate_subtitles ?? false;
         const timeText = [
             audio.start_seconds !== undefined ? `起点 ${this.formatDuration(audio.start_seconds)}` : null,
             audio.end_seconds !== null && audio.end_seconds !== undefined ? `终点 ${this.formatDuration(audio.end_seconds)}` : '终点自动',

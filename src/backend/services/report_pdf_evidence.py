@@ -55,6 +55,27 @@ class VisualPdfBinding:
     source: str
 
 
+@dataclass(frozen=True)
+class EvidenceOutputRenderSnapshot:
+    source_pdf_path: str
+    source_pdf_hash: str
+    visual_pdf_path: str
+    visual_pdf_hash: str
+    page_count: int
+    source_task_id: str
+
+
+@dataclass(frozen=True)
+class EvidenceClaimRenderSnapshot:
+    id: str
+    pdf_page: int
+    pdf_quote: str
+    crop_x: float
+    crop_y: float
+    crop_width: float
+    crop_height: float
+
+
 def build_and_store_evidence(
     *,
     source_task_id: str,
@@ -687,9 +708,25 @@ def relink_source_storyboards(source_task_id: str) -> int:
     return total
 
 
-def evidence_visual_for_segment(segment_id: str) -> tuple[ReportPdfEvidenceOutput, ReportPdfEvidenceClaim] | None:
+def evidence_visual_for_segment(
+    segment_id: str,
+) -> tuple[EvidenceOutputRenderSnapshot, EvidenceClaimRenderSnapshot] | None:
     row = (
-        db.session.query(ReportPdfEvidenceOutput, ReportPdfEvidenceClaim)
+        db.session.query(
+            ReportPdfEvidenceOutput.source_pdf_path.label("source_pdf_path"),
+            ReportPdfEvidenceOutput.source_pdf_hash.label("source_pdf_hash"),
+            ReportPdfEvidenceOutput.visual_pdf_path.label("visual_pdf_path"),
+            ReportPdfEvidenceOutput.visual_pdf_hash.label("visual_pdf_hash"),
+            ReportPdfEvidenceOutput.page_count.label("page_count"),
+            ReportPdfEvidenceOutput.source_task_id.label("source_task_id"),
+            ReportPdfEvidenceClaim.id.label("claim_id"),
+            ReportPdfEvidenceClaim.pdf_page.label("pdf_page"),
+            ReportPdfEvidenceClaim.pdf_quote.label("pdf_quote"),
+            ReportPdfEvidenceClaim.crop_x.label("crop_x"),
+            ReportPdfEvidenceClaim.crop_y.label("crop_y"),
+            ReportPdfEvidenceClaim.crop_width.label("crop_width"),
+            ReportPdfEvidenceClaim.crop_height.label("crop_height"),
+        )
         .join(ReportPdfEvidenceClaim, ReportPdfEvidenceClaim.output_id == ReportPdfEvidenceOutput.id)
         .join(ReportVisualPlanSegmentEvidence, ReportVisualPlanSegmentEvidence.claim_id == ReportPdfEvidenceClaim.id)
         .filter(
@@ -703,12 +740,32 @@ def evidence_visual_for_segment(segment_id: str) -> tuple[ReportPdfEvidenceOutpu
         .order_by(ReportVisualPlanSegmentEvidence.match_score.desc())
         .first()
     )
-    return row if row else None
+    if not row:
+        return None
+    return (
+        EvidenceOutputRenderSnapshot(
+            source_pdf_path=str(row.source_pdf_path or ""),
+            source_pdf_hash=str(row.source_pdf_hash or ""),
+            visual_pdf_path=str(row.visual_pdf_path or ""),
+            visual_pdf_hash=str(row.visual_pdf_hash or ""),
+            page_count=int(row.page_count or 0),
+            source_task_id=str(row.source_task_id or ""),
+        ),
+        EvidenceClaimRenderSnapshot(
+            id=str(row.claim_id),
+            pdf_page=int(row.pdf_page or 0),
+            pdf_quote=str(row.pdf_quote or ""),
+            crop_x=float(row.crop_x or 0.0),
+            crop_y=float(row.crop_y or 0.0),
+            crop_width=float(row.crop_width or 0.0),
+            crop_height=float(row.crop_height or 0.0),
+        ),
+    )
 
 
 def render_claim_screenshot(
-    output: ReportPdfEvidenceOutput,
-    claim: ReportPdfEvidenceClaim,
+    output: ReportPdfEvidenceOutput | EvidenceOutputRenderSnapshot,
+    claim: ReportPdfEvidenceClaim | EvidenceClaimRenderSnapshot,
     output_path: str | None = None,
 ) -> str:
     try:

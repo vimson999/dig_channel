@@ -333,7 +333,10 @@ def align_stick_figure_whole_audio(self, task_id):
     app = create_app()
     with app.app_context():
         try:
-            return _align_whole_audio(str(task_id))
+            return _align_whole_audio(
+                str(task_id),
+                celery_request_id=str(getattr(self.request, "id", "") or ""),
+            )
         except Exception as exc:
             logger.error("Stick figure whole-audio alignment failed: %s", exc, exc_info=True)
             _mark_alignment_failed(str(task_id), str(exc))
@@ -342,18 +345,39 @@ def align_stick_figure_whole_audio(self, task_id):
             db.session.remove()
 
 
-def _align_whole_audio(task_id: str) -> bool:
+def _align_whole_audio(task_id: str, *, celery_request_id: str = "") -> bool:
     task = (
         PublicationTask.query.options(load_only(
             PublicationTask.id,
             PublicationTask.status,
+            PublicationTask.celery_task_id,
             PublicationTask.params,
             PublicationTask.parent_task_id,
         ))
         .filter(PublicationTask.id == task_id, PublicationTask.feature == ALIGNMENT_FEATURE)
         .one_or_none()
     )
-    if not task or task.status == "canceled":
+    if not task:
+        return False
+    current_celery_id = str(task.celery_task_id or "")
+    if celery_request_id and current_celery_id and celery_request_id != current_celery_id:
+        logger.info(
+            "Audio alignment received stale delivery; task=%s request=%s current=%s",
+            task_id,
+            celery_request_id,
+            current_celery_id,
+        )
+        return False
+    if task.status == "completed":
+        workflow_id = str(
+            ((task.params or {}).get("workflow_task_id") if isinstance(task.params, dict) else "")
+            or task.parent_task_id
+            or ""
+        ).strip()
+        if workflow_id:
+            maybe_auto_enqueue_stick_figure_video(workflow_id)
+        return True
+    if task.status in {"failed", "blocked_by_captcha", "canceled"}:
         return False
     params = task.params if isinstance(task.params, dict) else {}
     workflow_id = str(params.get("workflow_task_id") or task.parent_task_id or "").strip()
@@ -586,6 +610,7 @@ def _mark_alignment_failed(task_id: str, error: str) -> None:
             PublicationTask.updated_at: now,
         }, synchronize_session=False)
     db.session.commit()
+    _resume_report_audio_finalization(workflow_id)
 
 
 @celery_app.task(
@@ -597,23 +622,49 @@ def render_stick_figure_video(self, task_id):
     app = create_app()
     with app.app_context():
         try:
-            return _render_video(str(task_id))
+            return _render_video(
+                str(task_id),
+                celery_request_id=str(getattr(self.request, "id", "") or ""),
+            )
         finally:
             db.session.remove()
 
 
-def _render_video(task_id: str) -> bool:
+def _render_video(task_id: str, *, celery_request_id: str = "") -> bool:
     task = (
         PublicationTask.query.options(load_only(
             PublicationTask.id,
             PublicationTask.status,
+            PublicationTask.celery_task_id,
             PublicationTask.params,
             PublicationTask.parent_task_id,
+            PublicationTask.task_video_path,
         ))
         .filter(PublicationTask.id == task_id, PublicationTask.feature == FEATURE_NAME)
         .one_or_none()
     )
-    if not task or task.status == "canceled":
+    if not task:
+        return False
+    current_celery_id = str(task.celery_task_id or "")
+    if celery_request_id and current_celery_id and celery_request_id != current_celery_id:
+        logger.info(
+            "Whiteboard render received stale delivery; task=%s request=%s current=%s",
+            task_id,
+            celery_request_id,
+            current_celery_id,
+        )
+        return False
+    if task.status == "completed":
+        if task.task_video_path and Path(str(task.task_video_path)).is_file():
+            _resume_report_audio_finalization(str(task.parent_task_id or ""))
+            return True
+        _mark_failed(
+            task_id,
+            "白板视频任务已完成但成片文件不存在，系统将创建安全续跑任务",
+            workflow_id=str(task.parent_task_id or ""),
+        )
+        return False
+    if task.status in {"failed", "blocked_by_captcha", "canceled"}:
         return False
     params = task.params if isinstance(task.params, dict) else {}
     workflow_id = str(params.get("workflow_task_id") or task.parent_task_id or "").strip()
@@ -809,6 +860,20 @@ def _render_video(task_id: str) -> bool:
             PublicationTask.updated_at: now,
         }, synchronize_session=False)
         db.session.commit()
+        try:
+            from services.report_audio_finalization import (
+                reconcile_finalizations_for_visual_workflow,
+            )
+
+            reconcile_finalizations_for_visual_workflow(workflow_id)
+        except Exception as continuation_exc:
+            db.session.rollback()
+            logger.error(
+                "Visual render completed but finalization wake-up failed: workflow=%s error=%s",
+                workflow_id,
+                continuation_exc,
+                exc_info=True,
+            )
         return True
     except Exception as exc:
         logger.error("Stick figure video render failed: %s", exc, exc_info=True)
@@ -863,3 +928,26 @@ def _mark_failed(task_id: str, error: str, *, workflow_id: str = "") -> None:
             PublicationTask.updated_at: now,
         }, synchronize_session=False)
     db.session.commit()
+    _resume_report_audio_finalization(workflow_id)
+
+
+def _resume_report_audio_finalization(workflow_id: str) -> None:
+    """Wake the durable coordinator on both render success and failure."""
+
+    workflow_id = str(workflow_id or "").strip()
+    if not workflow_id:
+        return
+    try:
+        from services.report_audio_finalization import (
+            reconcile_finalizations_for_visual_workflow,
+        )
+
+        reconcile_finalizations_for_visual_workflow(workflow_id)
+    except Exception as exc:
+        db.session.rollback()
+        logger.error(
+            "Visual task could not resume report-audio finalization: workflow=%s error=%s",
+            workflow_id,
+            exc,
+            exc_info=True,
+        )

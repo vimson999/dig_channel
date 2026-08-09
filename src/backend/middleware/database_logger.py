@@ -12,6 +12,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from celery import current_task
 from flask import g
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
@@ -35,6 +36,10 @@ _query_origin_helper_names = {
     "_load_task_with_retries",
 }
 _connection_checkout_key = "dig_ytb_checkout_monotonic"
+_connection_context_key = "dig_ytb_checkout_context"
+_connection_sql_count_key = "dig_ytb_checkout_sql_count"
+_connection_sql_total_ms_key = "dig_ytb_checkout_sql_total_ms"
+_connection_sql_max_ms_key = "dig_ytb_checkout_sql_max_ms"
 
 
 def _connection_hold_warn_seconds():
@@ -49,24 +54,55 @@ def _connection_hold_warn_seconds():
 
 def _pool_checkout(dbapi_connection, connection_record, connection_proxy):
     connection_record.info[_connection_checkout_key] = time.monotonic()
+    task_id, task_name = DatabaseLoggerMiddleware._celery_task_context()
+    connection_record.info[_connection_context_key] = {
+        "request_id": DatabaseLoggerMiddleware._request_id(),
+        "task_id": task_id,
+        "task_name": task_name,
+        "origin": DatabaseLoggerMiddleware._query_origin(),
+        "thread": threading.current_thread().name,
+    }
+    connection_record.info[_connection_sql_count_key] = 0
+    connection_record.info[_connection_sql_total_ms_key] = 0.0
+    connection_record.info[_connection_sql_max_ms_key] = 0.0
 
 
 def _pool_checkin(dbapi_connection, connection_record):
     started_at = connection_record.info.pop(_connection_checkout_key, None)
+    context = connection_record.info.pop(_connection_context_key, {}) or {}
+    sql_count = int(connection_record.info.pop(_connection_sql_count_key, 0) or 0)
+    sql_total_ms = float(
+        connection_record.info.pop(_connection_sql_total_ms_key, 0.0) or 0.0
+    )
+    sql_max_ms = float(
+        connection_record.info.pop(_connection_sql_max_ms_key, 0.0) or 0.0
+    )
     if started_at is None:
         return
     held_seconds = time.monotonic() - started_at
     if held_seconds < _connection_hold_warn_seconds():
         return
     lifecycle_logger = setup_colored_logger("db_connection_lifecycle")
+    held_ms = round(held_seconds * 1000, 2)
     lifecycle_logger.warning(
         "database connection held too long duration_ms=%s pid=%s role=%s "
-        "process=%s process_started_at=%s",
-        round(held_seconds * 1000, 2),
+        "process=%s process_started_at=%s request_id=%s task_id=%s task_name=%s "
+        "thread=%s checkout_origin=%s sql_count=%s sql_total_ms=%s "
+        "sql_max_ms=%s non_sql_hold_ms=%s",
+        held_ms,
         os.getpid(),
         DatabaseLoggerMiddleware._process_role(),
         DatabaseLoggerMiddleware._process_name(),
         _process_started_at,
+        context.get("request_id") or "unknown",
+        context.get("task_id") or "unknown",
+        context.get("task_name") or "unknown",
+        context.get("thread") or "unknown",
+        context.get("origin") or "unknown",
+        sql_count,
+        round(sql_total_ms, 2),
+        round(sql_max_ms, 2),
+        round(max(0.0, held_ms - sql_total_ms), 2),
     )
 
 class DatabaseLoggerMiddleware:
@@ -103,7 +139,7 @@ class DatabaseLoggerMiddleware:
         conn.info.setdefault('query_start_time', []).append(time.time())
         
         # 记录查询开始
-        request_id = getattr(g, 'request_id', 'unknown')
+        request_id = self._request_id()
         query_type = self._get_query_type(statement)
         
         logger.debug(f"🔍 [{request_id}] SQL开始: {query_type}")
@@ -123,8 +159,9 @@ class DatabaseLoggerMiddleware:
             logger.debug("SQL query_start_time stack is empty; skipping accurate duration.")
         total_time = time.time() - started_at
         duration_ms = round(total_time * 1000, 2)
+        self._record_checkout_sql_duration(conn, duration_ms)
         
-        request_id = getattr(g, 'request_id', 'unknown')
+        request_id = self._request_id()
         query_type = self._get_query_type(statement)
         
         # 获取影响的行数
@@ -178,6 +215,7 @@ class DatabaseLoggerMiddleware:
             query_start_times = self._query_start_times_quietly(connection)
             started_at = query_start_times.pop(-1) if query_start_times else time.time()
             duration_ms = round((time.time() - started_at) * 1000, 2)
+            self._record_checkout_sql_duration(connection, duration_ms)
             statement = getattr(exception_context, "statement", None) or ""
             error = getattr(exception_context, "original_exception", None)
             diagnostic = self._publication_task_diagnostic(
@@ -206,6 +244,26 @@ class DatabaseLoggerMiddleware:
     def _query_start_times_quietly(connection):
         if connection is None:
             return []
+
+    @staticmethod
+    def _record_checkout_sql_duration(connection, duration_ms):
+        if connection is None:
+            return
+        try:
+            info = connection.info
+            info[_connection_sql_count_key] = int(
+                info.get(_connection_sql_count_key, 0) or 0
+            ) + 1
+            total_ms = float(info.get(_connection_sql_total_ms_key, 0.0) or 0.0)
+            info[_connection_sql_total_ms_key] = total_ms + float(duration_ms or 0.0)
+            current_max = float(info.get(_connection_sql_max_ms_key, 0.0) or 0.0)
+            info[_connection_sql_max_ms_key] = max(
+                current_max,
+                float(duration_ms or 0.0),
+            )
+        except Exception:
+            # Lifecycle telemetry must never affect the database operation.
+            return
         try:
             return connection.info.setdefault('query_start_time', [])
         except Exception:
@@ -455,6 +513,16 @@ class DatabaseLoggerMiddleware:
             return getattr(g, "request_id", "unknown")
         except RuntimeError:
             return "unknown"
+
+    @staticmethod
+    def _celery_task_context():
+        try:
+            request = current_task.request
+            task_id = str(getattr(request, "id", "") or "unknown")
+            task_name = str(getattr(current_task, "name", "") or "unknown")
+            return task_id, task_name
+        except Exception:
+            return "unknown", "unknown"
 
     @staticmethod
     def _query_origin():

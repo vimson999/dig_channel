@@ -3,8 +3,11 @@ from datetime import datetime
 
 from services.zsxq_insights_service import (
     _normalize_page_size,
+    _plain_topic_text,
+    _normalize_page,
     _normalize_range_days,
     _normalize_sort,
+    _subtopic_breakdown,
     _topic_item,
     _weekly_trend,
     matches_theme,
@@ -25,14 +28,25 @@ class ZsxqInsightsClassifierTest(unittest.TestCase):
 
 
 class ZsxqInsightsContractTest(unittest.TestCase):
+    def test_plain_topic_text_decodes_known_zsxq_rich_tokens(self):
+        raw = (
+            '<e type="text_bold" title="%E6%88%91%E4%BB%AC%E8%81%8A%E4%BA%86AI" />'
+            '，参加<e type="mention" uid="1" title="%40Jacky" />交流'
+        )
+        self.assertEqual(_plain_topic_text(raw), "我们聊了AI，参加@Jacky交流")
+
     def test_range_and_page_size_are_bounded(self):
         self.assertEqual(_normalize_range_days(1), 30)
         self.assertEqual(_normalize_range_days(900), 730)
-        self.assertEqual(_normalize_page_size(99999), 5000)
+        self.assertEqual(_normalize_page_size(99999), 100)
         with self.assertRaisesRegex(ValueError, "range_days"):
             _normalize_range_days("abc")
         with self.assertRaisesRegex(ValueError, "page_size"):
             _normalize_page_size(0)
+        self.assertEqual(_normalize_page(None), 1)
+        self.assertEqual(_normalize_page(2), 2)
+        with self.assertRaisesRegex(ValueError, "page"):
+            _normalize_page(0)
 
     def test_sort_rejects_unknown_value(self):
         self.assertEqual(_normalize_sort("signal"), "signal")
@@ -66,6 +80,19 @@ class ZsxqInsightsContractTest(unittest.TestCase):
         summary = _topic_item(item)
         self.assertNotIn("content", summary)
         self.assertLessEqual(len(summary["excerpt"]), 180)
+        self.assertEqual(summary["yiren_recognition"], "not_found")
+        self.assertEqual(summary["yiren_label"], "未见亦仁认可")
+
+    def test_subtopic_breakdown_uses_database_match_flags_without_body(self):
+        topics = [
+            {"subtopic_matches": {"获客", "成交"}},
+            {"subtopic_matches": {"获客"}},
+        ]
+        breakdown = _subtopic_breakdown("ai-sales", topics)
+        counts = {item["label"]: item["count"] for item in breakdown}
+        self.assertEqual(counts["获客"], 2)
+        self.assertEqual(counts["成交"], 1)
+        self.assertEqual(counts["客服"], 0)
 
 
 if __name__ == "__main__":

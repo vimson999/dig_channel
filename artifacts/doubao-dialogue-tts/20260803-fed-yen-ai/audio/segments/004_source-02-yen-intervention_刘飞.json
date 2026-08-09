@@ -1,0 +1,16 @@
+{
+  "id": "004",
+  "slug": "source-02-yen-intervention",
+  "role": "source",
+  "kind": "source",
+  "voice_label": "刘飞",
+  "voice_id": "zh_male_liufei_uranus_bigtts",
+  "hash": "213b267d1ba9d80ca2b2f3f7cdfefd79e8705a721a2a5fbdd9a6d359dafef353",
+  "characters": 719,
+  "chunks": 2,
+  "pause_after_ms": 650,
+  "wav_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/004_source-02-yen-intervention_刘飞.wav",
+  "mp3_path": "/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/artifacts/doubao-dialogue-tts/20260803-fed-yen-ai/audio/segments/004_source-02-yen-intervention_刘飞.mp3",
+  "duration_seconds": 131.304,
+  "status": "generated"
+}

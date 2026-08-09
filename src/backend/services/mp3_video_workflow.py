@@ -12,6 +12,7 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -34,7 +35,11 @@ from services.gemini_browser import (
     is_configured as gemini_is_configured,
 )
 from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
-from services.runtime_guard import apply_async_after_db_release, is_retryable_db_error
+from services.runtime_guard import (
+    apply_async_after_db_release,
+    is_retryable_db_error,
+    release_db_session_quietly,
+)
 from services.workflow_notification_service import workflow_notification_service
 from tasks.publisher import run_publication_pipeline
 
@@ -615,10 +620,17 @@ def _resume_waiting_child_lightweight(task_id: str, wait_hint: Any) -> Optional[
 
     requeued = False
     if child.status not in TERMINAL_STATUSES:
-        disk_video = _publisher_child_disk_video_path(child)
+        child = _publisher_child_wait_snapshot(child)
         repair_due = _publisher_child_repair_due(child)
+        release_db_session_quietly()
+        disk_video = _publisher_child_disk_video_path(child)
         if disk_video:
-            child = _recover_completed_publisher_child_from_disk(child)
+            recovery_child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS)
+            if recovery_child:
+                child = _recover_completed_publisher_child_from_disk(
+                    recovery_child,
+                    video_path=disk_video,
+                )
         if child and child.status not in TERMINAL_STATUSES and repair_due:
             full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
             if full_child:
@@ -630,6 +642,8 @@ def _resume_waiting_child_lightweight(task_id: str, wait_hint: Any) -> Optional[
     if child_status in TERMINAL_STATUSES:
         return None
 
+    child = _publisher_child_wait_snapshot(child)
+    release_db_session_quietly()
     celery_failure = _celery_failure_message(child)
     if celery_failure:
         full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
@@ -862,6 +876,18 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
 
         existing = _fresh_result(task_key)
         plan = _reusable_plan(existing)
+        if plan and (_workflow_uses_direct_ds_response(workflow) or _workflow_uses_transcript(workflow)):
+            try:
+                _validate_strict_ds_plan(
+                    plan,
+                    source_label="手动 DS 返回值" if _workflow_uses_direct_ds_response(workflow) else "IMA 全文 DS 返回值",
+                )
+            except Mp3VideoWorkflowError:
+                # A previous attempt may have persisted a model-rewritten plan
+                # immediately before strict validation rejected it. Never keep
+                # reusing that poisoned intermediate result on every retry.
+                plan = None
+                _emit(task_key, "invalid_ds_plan_rebuild", 58, "旧规划未通过严格校验，按已验收 DS 原文重新解析")
         if plan:
             audio = existing.get("audio") if isinstance(existing.get("audio"), dict) else audio
             _emit(task_key, "deepseek_plan_reused", 58, "复用已完成的 DS v4 flash 标题和音频时间戳规划")
@@ -877,7 +903,14 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
             else:
                 if _workflow_uses_transcript(workflow):
                     _validate_ds_response_contract(first_response, source_label="IMA 全文 DS 返回值")
-                plan = plan_from_first_response(first_response, audio=audio)
+                    # IMA has already returned the seven required DS sections.
+                    # Parse that accepted response deterministically instead of
+                    # asking a second model to rewrite it; the rewrite can drop
+                    # valid cover fields and create a false strict-plan failure.
+                    plan = _local_plan_from_direct_ds_response(first_response, audio=audio)
+                    plan["provider"] = "ima_transcript_local"
+                else:
+                    plan = plan_from_first_response(first_response, audio=audio)
             _update_result(task_key, {"plan": plan, "audio": audio})
         plan = _apply_workflow_audio_range_override(plan, workflow)
         if workflow.get("audio_range_override"):
@@ -1312,20 +1345,20 @@ def _truthy(value: Any, default: bool = True) -> bool:
 def _workflow_generate_subtitles(workflow: Dict[str, Any], result: Optional[Dict[str, Any]] = None) -> bool:
     for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
         if key in workflow:
-            return _truthy(workflow.get(key), default=True)
+            return _truthy(workflow.get(key), default=False)
     metadata = workflow.get("metadata") if isinstance(workflow.get("metadata"), dict) else {}
     for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
         if key in metadata:
-            return _truthy(metadata.get(key), default=True)
+            return _truthy(metadata.get(key), default=False)
     result = result if isinstance(result, dict) else {}
     for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
         if key in result:
-            return _truthy(result.get(key), default=True)
+            return _truthy(result.get(key), default=False)
     result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
         if key in result_metadata:
-            return _truthy(result_metadata.get(key), default=True)
-    return True
+            return _truthy(result_metadata.get(key), default=False)
+    return False
 
 
 def _generate_from_direct_ds_response(
@@ -1721,6 +1754,25 @@ def plan_from_direct_ds_response(first_response: str, *, audio: Dict[str, Any]) 
     first_response = (first_response or "").strip()
     if not first_response:
         raise Mp3VideoWorkflowError("DS 返回值为空，无法规划视频")
+    local_plan = _local_plan_from_direct_ds_response(first_response, audio=audio)
+    try:
+        planner_payload = deepseek_plan(first_response, audio=audio)
+    except Exception as exc:
+        local_plan["planner_error"] = str(exc)
+        _validate_strict_ds_plan(local_plan, source_label="手动 DS 返回值")
+        return local_plan
+    if planner_payload:
+        plan = validate_plan(planner_payload, fallback=local_plan, audio=audio)
+        plan["provider"] = planner_payload.get("provider") or "deepseek"
+        plan["planner_input_source"] = "direct_ds_response"
+    else:
+        plan = local_plan
+    _validate_strict_ds_plan(plan, source_label="手动 DS 返回值")
+    return plan
+
+
+def _local_plan_from_direct_ds_response(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a complete plan from an already accepted seven-section DS response."""
     fallback = fallback_plan(first_response, audio=audio)
     sections = _direct_ds_numbered_sections(first_response)
     title_1 = _direct_ds_title_value(sections.get("1", ""))
@@ -1763,21 +1815,7 @@ def plan_from_direct_ds_response(first_response: str, *, audio: Dict[str, Any]) 
         "audio": audio_plan,
         "provider": "direct_ds_local",
     }
-    local_plan = validate_plan(payload, fallback=fallback, audio=audio)
-    try:
-        planner_payload = deepseek_plan(first_response, audio=audio)
-    except Exception as exc:
-        local_plan["planner_error"] = str(exc)
-        _validate_strict_ds_plan(local_plan, source_label="手动 DS 返回值")
-        return local_plan
-    if planner_payload:
-        plan = validate_plan(planner_payload, fallback=local_plan, audio=audio)
-        plan["provider"] = planner_payload.get("provider") or "deepseek"
-        plan["planner_input_source"] = "direct_ds_response"
-    else:
-        plan = local_plan
-    _validate_strict_ds_plan(plan, source_label="手动 DS 返回值")
-    return plan
+    return validate_plan(payload, fallback=fallback, audio=audio)
 
 
 def _validate_ds_response_contract(first_response: str, *, source_label: str = "DS 返回值") -> None:
@@ -1858,14 +1896,23 @@ def _direct_ds_numbered_sections(text: str) -> Dict[str, str]:
     source = str(text or "").replace("\r", "\n")
     if not source.strip():
         return {}
-    marker_re = re.compile(
-        r"(?:(?<=\n)|^)\s*(?:[-*]\s*)?(?:\*\*)?\s*([1-7])\s*[.．、:：]\s*"
-        r"|(?:\*\*)\s*([1-7])\s*[.．、:：]\s*"
+    # DeepSeek commonly emits top-level sections as Markdown headings such as
+    # ``### 6.`` or ``### 6｜``. Prefer those explicit headings when present so
+    # numbered quotes inside section 5 cannot be mistaken for new sections.
+    markdown_marker_re = re.compile(
+        r"^[ \t]*#{1,6}[ \t]*(?:\*\*)?[ \t]*([1-7])[ \t]*[.．、:：|｜][ \t]*",
+        flags=re.M,
     )
-    matches = list(marker_re.finditer(source))
+    matches = list(markdown_marker_re.finditer(source))
+    if not matches:
+        marker_re = re.compile(
+            r"(?:(?<=\n)|^)\s*(?:[-*]\s*)?(?:\*\*)?\s*([1-7])\s*[.．、:：]\s*"
+            r"|(?:\*\*)\s*([1-7])\s*[.．、:：]\s*"
+        )
+        matches = list(marker_re.finditer(source))
     sections: Dict[str, str] = {}
     for index, match in enumerate(matches):
-        number = match.group(1) or match.group(2)
+        number = next((group for group in match.groups() if group), "")
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
         content = source[start:end].strip()
@@ -1931,7 +1978,14 @@ def _direct_ds_title_value(section: str) -> str:
 
 def _direct_ds_closed_door_title(section: str, *, separator: str) -> str:
     expected = "|" if separator in {"|", "｜"} else "/"
-    for line in _direct_ds_content_lines(section):
+    lines = _direct_ds_content_lines(section)
+    separator_re = r"[|｜]" if expected == "|" else r"/"
+    # Prefer the actual formatted title. A heading such as
+    # "另一个版本（内资闭门会竖线格式）" mentions the format but is not itself
+    # usable cover copy and must not be auto-formatted into a false positive.
+    for line in lines:
+        if not re.search(rf"内资闭门会(?:议)?\s*{separator_re}", line):
+            continue
         title = _clean_closed_door_video_title(line, expected_separator=expected)
         if title:
             return title
@@ -3198,7 +3252,7 @@ def create_publisher_video_task(
     image_path: str,
     role: str,
     aspect_ratio: str,
-    generate_subtitles: bool = True,
+    generate_subtitles: bool = False,
     force_new: bool = False,
     created_not_before: Optional[datetime] = None,
 ) -> PublicationTask:
@@ -3765,9 +3819,18 @@ def transcript_model() -> str:
 
 
 def extract_closed_door_video_titles(text: str) -> Dict[str, str]:
+    # Section-aware extraction is safest for explicit Markdown headings. For
+    # legacy one-line responses ("6. ... 7. ..."), retain the date-bounded
+    # full-text extractor below so the section 6 value cannot absorb section 7.
+    has_markdown_sections = bool(re.search(r"^[ \t]*#{1,6}[ \t]*[1-7][ \t]*[.．、:：|｜]", str(text or ""), flags=re.M))
+    sections = _direct_ds_numbered_sections(text) if has_markdown_sections else {}
+    slash_title = _direct_ds_closed_door_title(sections.get("6", ""), separator="/")
+    pipe_title = _direct_ds_closed_door_title(sections.get("7", ""), separator="|")
     candidates = _closed_door_full_title_candidates(text)
-    slash_title = _select_closed_door_video_title(candidates, separator="/")
-    pipe_title = _select_closed_door_video_title(candidates, separator="|")
+    if not slash_title:
+        slash_title = _select_closed_door_video_title(candidates, separator="/")
+    if not pipe_title:
+        pipe_title = _select_closed_door_video_title(candidates, separator="|")
     return {
         "xiaojunjun_video_title": slash_title,
         "ciketc_video_title": pipe_title,
@@ -4002,20 +4065,10 @@ def _extract_inline_title_after_heading(value: Any) -> str:
 def extract_audio_range(text: str) -> Optional[Tuple[float, float]]:
     normalized = str(text or "").replace("：", ":").replace("–", "-").replace("—", "-")
     token = r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
-    range_re = re.compile(
-        rf"[\[【(（]?\s*(?P<start>{token})\s*[\]】)）]?\s*"
-        rf"(?:-|~|～|至|到)\s*[\[【(（]?\s*(?P<end>{token})\s*[\]】)）]?"
-    )
-    for match in range_re.finditer(normalized):
-        context = normalized[max(0, match.start() - 80): min(len(normalized), match.end() + 80)]
-        if not re.search(r"截取|剪辑|片段|精华|时间戳|时段|时间段|推荐", context):
-            continue
-        start = _parse_seconds(match.group("start"), default=None)
-        end = _parse_seconds(match.group("end"), default=None)
-        if start is None or end is None or end <= start:
-            continue
-        return float(start), float(end)
 
+    # Explicit start/end fields are authoritative. Check them before generic
+    # inline ranges so a later "关键钩子 10:51-11:27" cannot override the
+    # recommended clip's "开始时间 05:43 / 结束时间 20:35".
     start_re = re.compile(rf"(?:开始|起始)(?:时间戳|时间)?[*_\s]*:\s*[\[【(（]?\s*(?P<start>{token})")
     end_re = re.compile(rf"(?:结束|截止|终止)(?:时间戳|时间)?[*_\s]*:\s*[\[【(（]?\s*(?P<end>{token})")
     start_match = start_re.search(normalized)
@@ -4029,6 +4082,32 @@ def extract_audio_range(text: str) -> Optional[Tuple[float, float]]:
             end = _parse_seconds(end_match.group("end"), default=None)
             if start is not None and end is not None and end > start:
                 return float(start), float(end)
+
+    range_re = re.compile(
+        rf"[\[【(（]?\s*(?P<start>{token})\s*[\]】)）]?\s*"
+        rf"(?:-|~|～|至|到)\s*[\[【(（]?\s*(?P<end>{token})\s*[\]】)）]?"
+    )
+    candidates = []
+    for match in range_re.finditer(normalized):
+        context = normalized[max(0, match.start() - 80): min(len(normalized), match.end() + 80)]
+        if not re.search(r"截取|剪辑|片段|精华|时间戳|时段|时间段|推荐", context):
+            continue
+        start = _parse_seconds(match.group("start"), default=None)
+        end = _parse_seconds(match.group("end"), default=None)
+        if start is None or end is None or end <= start:
+            continue
+        before = normalized[max(0, match.start() - 100):match.start()]
+        score = 0
+        if re.search(r"推荐片段|建议精华片段|精华片段时间戳|推荐截取|建议截取|推荐时段", before):
+            score += 20
+        if re.search(r"推荐|精华|片段|截取", context):
+            score += 5
+        if re.search(r"钩子|金句|内部|位置", before):
+            score -= 20
+        candidates.append((score, match.start(), float(start), float(end)))
+    if candidates:
+        _, _, start, end = sorted(candidates, key=lambda item: (-item[0], item[1]))[0]
+        return start, end
     return None
 
 
@@ -4479,10 +4558,14 @@ def _load_json_file(path: Any) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _recover_completed_publisher_child_from_disk(child: PublicationTask) -> PublicationTask:
+def _recover_completed_publisher_child_from_disk(
+    child: PublicationTask,
+    *,
+    video_path: Optional[Path] = None,
+) -> PublicationTask:
     if not child or child.feature != "publisher" or child.status in TERMINAL_STATUSES:
         return child
-    video_path = _publisher_child_disk_video_path(child)
+    video_path = video_path or _publisher_child_disk_video_path(child)
     if not video_path:
         return child
 
@@ -4559,6 +4642,16 @@ def _recover_completed_publisher_child_from_disk(child: PublicationTask) -> Publ
     return child
 
 
+def _publisher_child_wait_snapshot(child: PublicationTask) -> Any:
+    payload = {
+        column.key: getattr(child, column.key, None)
+        for column in TASK_PUBLIC_STATUS_COLUMNS
+    }
+    payload["params"] = {}
+    payload["result"] = {}
+    return SimpleNamespace(**payload)
+
+
 def _publisher_child_disk_video_path(child: PublicationTask) -> Optional[Path]:
     task_id = str(getattr(child, "id", "") or "")
     if not task_id:
@@ -4618,23 +4711,33 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
         now_mono = time.monotonic()
         requeued = False
         if child.status not in TERMINAL_STATUSES and now_mono >= next_full_recovery_check:
-            disk_video = _publisher_child_disk_video_path(child)
+            child = _publisher_child_wait_snapshot(child)
             repair_due = _publisher_child_repair_due(child)
+            release_db_session_quietly()
+            disk_video = _publisher_child_disk_video_path(child)
             if disk_video or repair_due:
-                full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
-                if full_child and disk_video:
-                    full_child = _recover_completed_publisher_child_from_disk(full_child)
-                if full_child and full_child.status not in TERMINAL_STATUSES and repair_due:
-                    full_child, requeued = maybe_requeue_stale_publisher_child(full_child, log=logger)
-                child = full_child or child
-                if requeued:
-                    child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS) or child
+                if disk_video:
+                    recovery_child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS)
+                    if recovery_child:
+                        child = _recover_completed_publisher_child_from_disk(
+                            recovery_child,
+                            video_path=disk_video,
+                        )
+                if child and child.status not in TERMINAL_STATUSES and repair_due:
+                    full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+                    if full_child:
+                        full_child, requeued = maybe_requeue_stale_publisher_child(full_child, log=logger)
+                        child = full_child or child
+                    if requeued:
+                        child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS) or child
             next_full_recovery_check = now_mono + recovery_check_seconds
 
+        child = _publisher_child_wait_snapshot(child)
         child_status = str(child.status or "")
         child_step = str(child.current_step or "")
         child_progress = int(child.progress or 0)
         child_summary = _task_public_summary(child)
+        release_db_session_quietly()
         celery_failure = None if child_status in TERMINAL_STATUSES else _celery_failure_message(child)
 
         if child_step != last_step or requeued:
@@ -4653,8 +4756,8 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+        release_db_session_quietly()
         time.sleep(poll_seconds)
-        db.session.expire_all()
 
     child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS)
     if not child:

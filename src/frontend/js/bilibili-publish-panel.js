@@ -21,6 +21,7 @@ class BilibiliPublishPanel {
         this.seasonsPromises = {};
         this.seasonsLoading = '';
         this.lastUpload = null;
+        this.uploadRetryIds = new Set();
         this.formDraft = null;
         this.localNotice = null;
         this.instanceId = `bili-${Math.random().toString(36).slice(2, 9)}`;
@@ -47,6 +48,12 @@ class BilibiliPublishPanel {
             }
         });
         this.container.addEventListener('click', (event) => {
+            const retryButton = event.target.closest('[data-bili-shared-retry]');
+            if (retryButton) {
+                event.preventDefault();
+                this.retryUpload(retryButton.dataset.biliSharedRetry || '', retryButton);
+                return;
+            }
             const cancelButton = event.target.closest('[data-bili-shared-cancel]');
             if (cancelButton) {
                 event.preventDefault();
@@ -162,6 +169,20 @@ class BilibiliPublishPanel {
         } finally {
             this.credentialsLoaded = true;
             this.credentialsLoading = false;
+            const draftCredentialId = this.formDraft?.credential_id || '';
+            const draftCredentialStillAvailable = this.credentials.some((item) => (
+                String(item?.id || '') === String(draftCredentialId)
+            ));
+            if (!draftCredentialStillAvailable && this.credentials[0]?.id) {
+                // The initial disabled form contains a placeholder video choice.
+                // Clear it so the first real account can apply its media defaults.
+                this.formDraft = {
+                    ...(this.formDraft || {}),
+                    credential_id: String(this.credentials[0].id),
+                    video_key: '',
+                    cover_key: '',
+                };
+            }
             this.render();
             const credentialId = this.field('credential')?.value || this.credentials[0]?.id || '';
             if (credentialId) this.loadSeasons(credentialId);
@@ -240,11 +261,12 @@ class BilibiliPublishPanel {
         this.formDraft = this.readFormDraft();
         const videos = this.videoOptions();
         const hasVideos = videos.length > 0;
-        const selectedVideoKey = this.pickVideoKey(videos);
+        const selectedCredentialId = this.pickCredentialId();
+        const accountDefaults = this.accountDefaults(selectedCredentialId);
+        const selectedVideoKey = this.pickVideoKey(videos, accountDefaults);
         const selectedVideo = videos.find((item) => item.key === selectedVideoKey) || videos[0] || null;
         const covers = this.coverOptions(selectedVideo?.key || '');
-        const selectedCover = this.pickCoverKey(selectedVideo?.key || '', covers);
-        const selectedCredentialId = this.pickCredentialId();
+        const selectedCover = this.pickCoverKey(selectedVideo?.key || '', covers, accountDefaults);
         const disabled = !hasVideos || !this.credentials.length;
         const unavailableMessages = [
             hasVideos ? '' : this.options.emptyDescription,
@@ -446,15 +468,31 @@ class BilibiliPublishPanel {
         return this.container?.querySelector(`[data-bili-field="${name}"]`) || null;
     }
 
-    pickVideoKey(videos) {
+    credentialFor(credentialId) {
+        return this.credentials.find((item) => String(item?.id || '') === String(credentialId || '')) || null;
+    }
+
+    accountDefaults(credentialId) {
+        if (!this.options.accountDefaults) return null;
+        const defaults = this.options.accountDefaults(this.credentialFor(credentialId), this.job);
+        return defaults && typeof defaults === 'object' ? defaults : null;
+    }
+
+    pickVideoKey(videos, accountDefaults = null) {
         const current = this.formDraft?.video_key;
         if (current && videos.some((item) => item.key === current)) return current;
+        if (accountDefaults?.videoKey && videos.some((item) => item.key === accountDefaults.videoKey)) {
+            return accountDefaults.videoKey;
+        }
         return videos[0]?.key || '';
     }
 
-    pickCoverKey(videoKey, covers) {
+    pickCoverKey(videoKey, covers, accountDefaults = null) {
         const current = this.formDraft?.cover_key;
         if (current && covers.some((item) => item.key === current)) return current;
+        if (accountDefaults?.coverKey && covers.some((item) => item.key === accountDefaults.coverKey)) {
+            return accountDefaults.coverKey;
+        }
         if (this.options.defaultCoverKey) return this.options.defaultCoverKey(this.job, videoKey) || '';
         return covers[0]?.key || '';
     }
@@ -494,6 +532,30 @@ class BilibiliPublishPanel {
     }
 
     onCredentialChange(credentialId) {
+        const defaults = this.accountDefaults(credentialId);
+        if (defaults) {
+            const videos = this.videoOptions();
+            const videoKey = videos.some((item) => item.key === defaults.videoKey)
+                ? defaults.videoKey
+                : (this.field('video')?.value || videos[0]?.key || '');
+            const covers = this.coverOptions(videoKey);
+            const coverKey = covers.some((item) => item.key === defaults.coverKey)
+                ? defaults.coverKey
+                : (this.field('cover')?.value || '');
+            const videoSelect = this.field('video');
+            if (videoSelect) videoSelect.value = videoKey;
+            this.applyVideoDefaults(videoKey);
+            const coverSelect = this.field('cover');
+            if (coverSelect && Array.from(coverSelect.options).some((option) => option.value === coverKey)) {
+                coverSelect.value = coverKey;
+            }
+            this.formDraft = {
+                ...(this.readFormDraft() || {}),
+                credential_id: credentialId,
+                video_key: videoKey,
+                cover_key: coverKey,
+            };
+        }
         this.applySeasonOptions(credentialId);
         this.loadSeasons(credentialId);
         if (this.field('charging-enabled')?.checked) {
@@ -751,6 +813,36 @@ class BilibiliPublishPanel {
         }
     }
 
+    async retryUpload(uploadTaskId, button) {
+        const id = String(uploadTaskId || '').trim();
+        if (!id || this.uploadRetryIds.has(id)) return;
+        if (!this.options.retryPath) return;
+        if (!window.confirm('确认重新投递这个失败的 B站上传任务？将复用现有视频、封面和投稿参数，不会重新生成内容。')) return;
+        const originalHtml = button?.innerHTML || '';
+        this.uploadRetryIds.add(id);
+        try {
+            if (button) {
+                button.disabled = true;
+                button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>重投中';
+            }
+            const retryPath = this.options.retryPath?.(this.job?.job_id || this.job?.id || '', id);
+            if (!retryPath) throw new Error('缺少 B站上传重投接口');
+            const result = await this.request(retryPath, { method: 'POST', timeoutMs: 15000 });
+            this.lastUpload = result.data?.upload_task || result.upload_task || this.lastUpload;
+            this.refreshHistory();
+            if (this.options.onAfterRetry) await this.options.onAfterRetry(result);
+            this.notify(`B站上传任务已重新投递：${id}`, 'success');
+        } catch (error) {
+            this.notify(`B站上传重投失败：${error.message}`, 'error');
+        } finally {
+            this.uploadRetryIds.delete(id);
+            if (button) {
+                button.disabled = false;
+                button.innerHTML = originalHtml;
+            }
+        }
+    }
+
     refreshHistory() {
         const target = this.container?.querySelector('[data-bili-history]');
         if (target) target.outerHTML = this.renderHistory(this.uploads());
@@ -765,11 +857,21 @@ class BilibiliPublishPanel {
                     ${items.slice(0, 8).map((item) => {
                         const status = this.statusMeta(item.status);
                         const canCancel = ['queued', 'pending'].includes(String(item?.status || '').toLowerCase());
+                        const canRetry = Boolean(this.options.retryPath)
+                            && ['failed', 'failure'].includes(String(item?.status || '').toLowerCase())
+                            && !item?.result?.aid
+                            && !item?.result?.bvid;
+                        const retrying = this.uploadRetryIds.has(String(item?.task_id || ''));
                         return `
                             <div class="rounded-md border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
                                 <div class="flex flex-wrap items-center justify-between gap-2">
                                     <div class="min-w-0 font-bold text-slate-800">${this.escape(item.title || item.task_id || '')}</div>
                                     <div class="flex items-center gap-2">
+                                        ${canRetry ? `
+                                            <button type="button" data-bili-shared-retry="${this.escapeAttr(item.task_id || '')}" class="rounded-md border border-amber-200 bg-white px-2 py-1 font-bold text-amber-700 hover:bg-amber-50 disabled:cursor-wait disabled:opacity-60" ${retrying ? 'disabled' : ''}>
+                                                <i class="fas ${retrying ? 'fa-spinner fa-spin' : 'fa-rotate-right'} mr-1"></i>${retrying ? '重投中' : '重投'}
+                                            </button>
+                                        ` : ''}
                                         ${canCancel ? `
                                             <button type="button" data-bili-shared-cancel="${this.escapeAttr(item.task_id || '')}" class="rounded-md border border-rose-200 bg-white px-2 py-1 font-bold text-rose-600 hover:bg-rose-50">
                                                 取消

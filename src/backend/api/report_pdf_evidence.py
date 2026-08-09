@@ -39,8 +39,23 @@ def evidence_for_task(current_user, source_task_id):
             if isinstance(source_task.result, dict)
             else None
         )
+        task_params = source_task.params if isinstance(source_task.params, dict) else {}
+        workflow_params = next((
+            task_params.get(key)
+            for key in ("report_audio_workflow", "report_script_material_workflow")
+            if isinstance(task_params.get(key), dict)
+        ), {})
+        explicitly_disabled = (
+            "pdf_evidence_enabled" in workflow_params
+            and not _bool_value(workflow_params.get("pdf_evidence_enabled"), False)
+        ) or (
+            isinstance(evidence_summary, dict)
+            and evidence_summary.get("status") == "disabled"
+        )
         artifact_summary = _orphaned_artifact_summary(source_task_id)
-        if task_status in {"pending", "processing", "queued", "running"}:
+        if explicitly_disabled:
+            evidence_status = "disabled"
+        elif task_status in {"pending", "processing", "queued", "running"}:
             evidence_status = "pending_generation"
         elif artifact_summary:
             evidence_status = "persistence_failed"

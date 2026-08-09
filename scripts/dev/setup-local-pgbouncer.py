@@ -25,6 +25,9 @@ SERVER_LIFETIME = max(
     21600,
     int(os.environ.get("LOCAL_PGBOUNCER_SERVER_LIFETIME", "21600")),
 )
+QUERY_TIMEOUT = max(10, int(os.environ.get("LOCAL_PGBOUNCER_QUERY_TIMEOUT", "20")))
+TCP_KEEPIDLE = max(5, int(os.environ.get("LOCAL_PGBOUNCER_TCP_KEEPIDLE", "10")))
+TCP_KEEPINTVL = max(2, int(os.environ.get("LOCAL_PGBOUNCER_TCP_KEEPINTVL", "5")))
 
 
 def main():
@@ -132,13 +135,13 @@ server_check_query = SELECT 1
 server_check_delay = 5
 server_idle_timeout = {SERVER_IDLE_TIMEOUT}
 server_lifetime = {SERVER_LIFETIME}
-query_timeout = 60
+query_timeout = {QUERY_TIMEOUT}
 query_wait_timeout = 15
 client_idle_timeout = 300
 tcp_keepalive = 1
 tcp_keepcnt = 3
-tcp_keepidle = 30
-tcp_keepintvl = 10
+tcp_keepidle = {TCP_KEEPIDLE}
+tcp_keepintvl = {TCP_KEEPINTVL}
 ignore_startup_parameters = extra_float_digits, options
 
 pidfile = {PID_PATH}

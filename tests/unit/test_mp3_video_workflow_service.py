@@ -23,6 +23,7 @@ from api.mp3_video_workflow import (
 )
 from models.task import PublicationTask
 from services.gemini_browser import (
+    GeminiBrowserAutomationError,
     GeminiBrowserOptions,
     GeminiBrowserWorker,
     _clear_stale_singleton_files,
@@ -52,11 +53,13 @@ from services.mp3_video_workflow import (
     _child_inline_wait_seconds,
     _child_id_from_result,
     _db_retry,
+    _direct_ds_numbered_sections,
     _emit,
     _finance_cover_highlight_text,
     _generate_from_transcript,
     _infographic_bullets,
     _is_retryable_gemini_error,
+    _local_plan_from_direct_ds_response,
     _keyframe_artifacts_ready,
     _parent_max_defers,
     _parent_retry_delay_seconds,
@@ -99,10 +102,23 @@ from services.mp3_video_workflow import (
     transcript_model,
     validate_plan,
     _validate_strict_ds_plan,
+    _validate_ds_response_contract,
 )
 
 
 class Mp3VideoWorkflowServiceTest(unittest.TestCase):
+    def test_strict_pro_request_stops_before_submission_when_model_is_unconfirmed(self):
+        worker = object.__new__(GeminiBrowserWorker)
+        worker.options = GeminiBrowserOptions(
+            user_data_dir="/tmp/gemini-test",
+            require_pro_model=True,
+        )
+
+        with self.assertRaisesRegex(GeminiBrowserAutomationError, "未能确认 Gemini Pro 模型"):
+            worker._ensure_required_pro_model({"status": "picker_not_found", "confirmed": False})
+
+        worker._ensure_required_pro_model({"status": "selected_pro", "confirmed": True})
+
     def test_gemini_login_selectors_target_controls_not_prompt_text(self):
         worker = object.__new__(GeminiBrowserWorker)
         worker.options = GeminiBrowserOptions(user_data_dir="/tmp/gemini-test")
@@ -202,6 +218,120 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         queued_hint = send_task.call_args.kwargs["args"][1]
         self.assertEqual(4, queued_hint["defer_count"])
         self.assertNotEqual(hint["updated_at"], queued_hint["updated_at"])
+
+    def test_wait_continuation_releases_db_before_disk_and_celery_probes(self):
+        parent = SimpleNamespace(
+            status="processing",
+            progress=80,
+            waiting_child_label="landscape_video",
+            waiting_child_id="child-1",
+            waiting_child_updated_at="2026-08-09T02:00:00Z",
+        )
+        child = SimpleNamespace(
+            id="child-1",
+            celery_task_id="celery-child-1",
+            status="processing",
+            current_step="rendering",
+            progress=60,
+            error_message=None,
+            feature="publisher",
+            task_video_path=None,
+            publisher_aspect_ratio="16:9",
+            publisher_generate_subtitles=True,
+            publisher_audio_signature=None,
+            publisher_vertical_video_path=None,
+            publisher_vertical_cover_path=None,
+            publisher_podcast_cover_path=None,
+            publisher_bilibili_cover_path=None,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            completed_at=None,
+            params={},
+            result={},
+        )
+        hint = {
+            "label": "landscape_video",
+            "child_id": "child-1",
+            "updated_at": "2026-08-09T02:00:00Z",
+        }
+        released = {"count": 0}
+
+        def release():
+            released["count"] += 1
+
+        def disk_probe(_child):
+            self.assertGreaterEqual(released["count"], 1)
+            return None
+
+        def celery_probe(_child):
+            self.assertGreaterEqual(released["count"], 2)
+            return None
+
+        with (
+            patch("services.mp3_video_workflow._load_task", side_effect=[parent, child]),
+            patch("services.mp3_video_workflow.release_db_session_quietly", side_effect=release),
+            patch("services.mp3_video_workflow._publisher_child_disk_video_path", side_effect=disk_probe),
+            patch("services.mp3_video_workflow._publisher_child_repair_due", return_value=False),
+            patch("services.mp3_video_workflow._celery_failure_message", side_effect=celery_probe),
+            patch("services.mp3_video_workflow._db_retry", return_value=1),
+            patch("services.mp3_video_workflow.celery_app.send_task"),
+        ):
+            result = _resume_waiting_child_lightweight("parent-1", hint)
+
+        self.assertTrue(result)
+
+    def test_wait_child_releases_db_before_poll_sleep(self):
+        parent = SimpleNamespace(id="parent-1", status="processing")
+        child = SimpleNamespace(
+            id="child-1",
+            celery_task_id=None,
+            status="processing",
+            current_step="rendering",
+            progress=60,
+            error_message=None,
+            feature="publisher",
+            task_video_path=None,
+            publisher_aspect_ratio="16:9",
+            publisher_generate_subtitles=True,
+            publisher_audio_signature=None,
+            publisher_vertical_video_path=None,
+            publisher_vertical_cover_path=None,
+            publisher_podcast_cover_path=None,
+            publisher_bilibili_cover_path=None,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            completed_at=None,
+            params={},
+            result={},
+        )
+        released = {"count": 0}
+
+        def release():
+            released["count"] += 1
+
+        def sleep(_seconds):
+            self.assertGreaterEqual(released["count"], 2)
+
+        with (
+            patch("services.mp3_video_workflow._child_inline_wait_seconds", return_value=1),
+            patch("services.mp3_video_workflow.time.monotonic", side_effect=[0, 0, 0, 2]),
+            patch("services.mp3_video_workflow._load_task", side_effect=[parent, child, child]),
+            patch("services.mp3_video_workflow.release_db_session_quietly", side_effect=release),
+            patch("services.mp3_video_workflow._publisher_child_disk_video_path", return_value=None),
+            patch("services.mp3_video_workflow._publisher_child_repair_due", return_value=False),
+            patch("services.mp3_video_workflow._emit"),
+            patch("services.mp3_video_workflow._record_child"),
+            patch("services.mp3_video_workflow.time.sleep", side_effect=sleep),
+        ):
+            with self.assertRaises(ChildTaskStillRunning):
+                _wait_child(
+                    parent.id,
+                    child.id,
+                    "landscape_video",
+                    start_progress=80,
+                    end_progress=90,
+                )
+
 
     def test_stale_wait_continuation_is_a_noop(self):
         parent = SimpleNamespace(
@@ -641,6 +771,51 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
             "内资闭门会 | Micro-TEC关键材料用量极小 | 复兴科技良品率追赶日系 | 1.6T送样预计50元单价 | 2026-07-07",
         )
 
+    def test_markdown_numbered_sections_ignore_numbered_gold_quotes(self):
+        response = """
+### 1. 投资者视角标题（版本一）
+**AI资本开支中光通信占比将从5%升至15%**
+
+### 2｜投资者视角标题（版本二）
+**ScaleUp光连接从0到1放量**
+
+### 3. 精简短标题
+**光模块高增长刚开始**
+
+### 4｜最精华片段推荐
+**开始时间：05:43**
+**结束时间：20:35**
+片段内部关键钩子位置：
+- 10:51-11:27：光进铜退
+- 13:02-13:50：ScaleUp放量
+
+### 5｜金句提炼
+1. **第一条金句**
+2. **第二条金句**
+
+### 6｜优化标题（内资闭门会格式）
+**内资闭门会 / 光通信占比5%到15% / ScaleUp从0到1 / 龙头高增长 / 2026-08-01**
+
+### 7｜另一个版本（内资闭门会竖线格式）
+**内资闭门会 | 光模块认知差 | 规格持续升级 | 龙头最受益 | 2026-08-01**
+"""
+
+        sections = _direct_ds_numbered_sections(response)
+        titles = extract_closed_door_video_titles(response)
+        plan = _local_plan_from_direct_ds_response(response, audio={"duration_seconds": 1275.0})
+        _validate_ds_response_contract(response, source_label="IMA 全文 DS 返回值")
+        _validate_strict_ds_plan(plan, source_label="IMA 全文 DS 返回值")
+
+        self.assertEqual(list(sections), ["1", "2", "3", "4", "5", "6", "7"])
+        self.assertNotIn("第一条金句", sections["1"])
+        self.assertEqual(extract_audio_range(sections["4"]), (343.0, 1235.0))
+        self.assertEqual(plan["audio"]["start_seconds"], 343.0)
+        self.assertEqual(plan["audio"]["end_seconds"], 1235.0)
+        self.assertEqual(plan["xiaojunjun_video_title"], titles["xiaojunjun_video_title"])
+        self.assertEqual(plan["ciketc_video_title"], titles["ciketc_video_title"])
+        self.assertIn("光通信占比5%到15%", titles["xiaojunjun_video_title"])
+        self.assertIn("光模块认知差", titles["ciketc_video_title"])
+
     def test_direct_ds_response_skips_standalone_section_headings(self):
         response = (
             "1. 标题版本一（信息密度高、点击率强）\n"
@@ -888,6 +1063,18 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         """
 
         self.assertEqual(extract_audio_range(response), (10.0, 1506.5))
+
+    def test_audio_range_prefers_explicit_clip_over_internal_hook_ranges(self):
+        response = """
+        ### 4｜最精华片段推荐
+        **开始时间：05:43**
+        **结束时间：20:35**
+        片段内部关键钩子位置：
+        - 10:51-11:27：光进铜退
+        - 13:02-13:50：ScaleUp光连接放量
+        """
+
+        self.assertEqual(extract_audio_range(response), (343.0, 1235.0))
 
     def test_fallback_plan_extracts_flattened_gemini_version_titles(self):
         response = (
@@ -1216,8 +1403,8 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertEqual(_workflow_render_mode({"output_mode": "preview"}), "keyframes")
         self.assertEqual(_workflow_render_mode({"preview_only": True}), "keyframes")
 
-    def test_workflow_generate_subtitles_defaults_to_true_and_accepts_false(self):
-        self.assertTrue(_workflow_generate_subtitles({}))
+    def test_workflow_generate_subtitles_defaults_to_false_and_accepts_explicit_true(self):
+        self.assertFalse(_workflow_generate_subtitles({}))
         self.assertTrue(_workflow_generate_subtitles({"generate_subtitles": True}))
         self.assertFalse(_workflow_generate_subtitles({"generate_subtitles": False}))
         self.assertFalse(_workflow_generate_subtitles({"generate_subtitles": "off"}))

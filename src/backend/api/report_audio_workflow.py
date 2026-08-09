@@ -5,6 +5,7 @@ import re
 import time
 from copy import deepcopy
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
@@ -27,24 +28,38 @@ from services.doubao_tts_ws import is_configured as is_doubao_api_configured
 from services.report_audio_workflow import (
     DEFAULT_INITIAL_PROMPT,
     DEFAULT_REVIEW_PROMPT,
+    DEFAULT_SCRIPT_REGENERATION_MIN_CHARS,
     FEATURE_NAME,
     QUEUE_NAME,
-    ensure_pdf_evidence_review_contract,
     pdf_first_page_image_path_for_job,
     render_pdf_first_page_image,
+    review_prompt_for_pdf_evidence,
+    script_regeneration_prompts,
     status_payload as workflow_status_payload,
     structured_result_quality_issue,
 )
+from services.report_audio_finalization import (
+    create_or_resume_finalization,
+    finalization_summary,
+    finalization_summary_for_audio,
+)
 from services.report_stick_figure_assets import has_browser_overlay_artifact
 from services.report_visual_scheme import visual_scheme
-from services.runtime_guard import apply_async_after_db_release, maybe_guarded_apply_async
+from services.runtime_guard import (
+    apply_async_after_db_release,
+    is_retryable_db_error,
+    maybe_guarded_apply_async,
+)
 from services.bilibili_publish import (
+    BilibiliUploadRetryConflict,
+    BilibiliUploadRetryEnqueueError,
     bilibili_upload_child_payload,
     bilibili_upload_children,
     cancel_bilibili_upload_child,
     clean_upload_text as clean_bilibili_upload_text,
     create_bilibili_upload_task,
     enqueue_bilibili_upload_task,
+    retry_bilibili_upload_child,
 )
 from services.douyin_publish_jobs import (
     FEATURE_NAME as DOUYIN_FEATURE_NAME,
@@ -82,6 +97,8 @@ from utils.date_filters import submission_date_utc_range as _submission_date_utc
 report_audio_workflow_bp = Blueprint("report_audio_workflow", __name__, url_prefix="/api/report-audio-workflows")
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 logger = logging.getLogger(__name__)
+SCRIPT_REGENERATION_PARENT_FEATURE = "report_audio_script_regeneration"
+AUDIO_GENERATION_PARENT_FEATURE = "report_audio_script_tts_generation"
 
 
 def _float_env(name, default):
@@ -269,6 +286,38 @@ def _stale_success_payload(payload):
     if isinstance(data, dict):
         data["stale"] = True
     return stale
+
+
+def _retry_transient_db_read(operation):
+    """Retry one read request after replacing an invalid DB session.
+
+    ``pool_pre_ping`` only protects checkout.  A PgBouncer/server connection can
+    still disappear after checkout, which previously left detail polling on a
+    one-off 500 and stopped the browser's continuation view.
+    """
+
+    def decorate(callback):
+        @wraps(callback)
+        def wrapped(*args, **kwargs):
+            for attempt in range(2):
+                try:
+                    _set_hot_read_statement_timeout()
+                    return callback(*args, **kwargs)
+                except SQLAlchemyError as exc:
+                    retryable = is_retryable_db_error(exc)
+                    _reset_failed_db_session()
+                    if attempt == 0 and retryable:
+                        logger.warning("%s DB connection invalidated; retrying once", operation)
+                        continue
+                    logger.error("%s DB read failed: %s", operation, type(exc).__name__)
+                    return jsonify({
+                        "success": False,
+                        "message": "数据库连接短暂中断，页面会自动重试",
+                    }), 503
+            raise AssertionError("unreachable")
+
+        return wrapped
+    return decorate
 
 
 def _store_ttl_cache(cache, lock, key, payload, ttl_seconds):
@@ -497,8 +546,10 @@ def create_job(current_user):
         return jsonify({"success": False, "message": "metadata 必须是对象"}), 400
 
     prompt = (data.get("prompt") or DEFAULT_INITIAL_PROMPT).strip()
-    review_prompt = ensure_pdf_evidence_review_contract(
-        data.get("review_prompt") or DEFAULT_REVIEW_PROMPT
+    pdf_evidence_enabled = _parse_pdf_evidence_enabled(data)
+    review_prompt = review_prompt_for_pdf_evidence(
+        data.get("review_prompt") or DEFAULT_REVIEW_PROMPT,
+        enabled=pdf_evidence_enabled,
     )
     followups = _parse_followups(data)
     video_options = _parse_video_options(data)
@@ -566,6 +617,7 @@ def create_job(current_user):
             "report_audio_workflow": {
                 "prompt": prompt,
                 "review_prompt": review_prompt,
+                "pdf_evidence_enabled": pdf_evidence_enabled,
                 "followups": followups,
                 "gemini_url": gemini_url,
                 "manual_gemini": manual_gemini,
@@ -805,6 +857,7 @@ def list_jobs(current_user):
 
 @report_audio_workflow_bp.route("/jobs/<job_id>", methods=["GET"])
 @require_login
+@_retry_transient_db_read("Report audio detail")
 def get_job(current_user, job_id):
     reference = _get_owned_task_reference(current_user, job_id)
     if not reference:
@@ -848,6 +901,7 @@ def get_job(current_user, job_id):
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/status", methods=["GET"])
 @require_login
+@_retry_transient_db_read("Report audio status")
 def get_job_status(current_user, job_id):
     task = _get_owned_task_reference(current_user, job_id)
     if not task:
@@ -1227,6 +1281,43 @@ def cancel_bilibili_upload(current_user, job_id, upload_task_id):
     }), (200 if ok else 409)
 
 
+@report_audio_workflow_bp.route("/jobs/<job_id>/bilibili-upload/<upload_task_id>/retry", methods=["POST"])
+@require_login
+def retry_bilibili_upload(current_user, job_id, upload_task_id):
+    parent = _get_owned_task(current_user, job_id)
+    if not parent:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    try:
+        child = retry_bilibili_upload_child(
+            upload_task_id,
+            parent_task_id=parent.id,
+            parent_feature=FEATURE_NAME,
+            source_label=BILIBILI_UPLOAD_SOURCE,
+        )
+    except LookupError:
+        return jsonify({"success": False, "message": "B站上传任务不存在"}), 404
+    except BilibiliUploadRetryConflict as exc:
+        return jsonify({"success": False, "message": str(exc)}), 409
+    except BilibiliUploadRetryEnqueueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 502
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except Exception as exc:
+        db.session.rollback()
+        logger.exception("B站上传重投失败: %s", exc)
+        return jsonify({"success": False, "message": f"B站上传重投失败: {exc}"}), 502
+
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
+    item = bilibili_upload_child_payload(child, source_label=BILIBILI_UPLOAD_SOURCE)
+    return jsonify({
+        "success": True,
+        "message": "B站上传任务已重新投递",
+        "data": {"upload_task": item},
+        "upload_task": item,
+    })
+
+
 @report_audio_workflow_bp.route("/jobs/<job_id>/douyin-uploads", methods=["GET"])
 @require_login
 def get_douyin_uploads(current_user, job_id):
@@ -1599,6 +1690,60 @@ def download_input_pdf(current_user, job_id):
     )
 
 
+@report_audio_workflow_bp.route("/jobs/<job_id>/confirm-keyframes", methods=["POST"])
+@require_login
+def confirm_keyframes(current_user, job_id):
+    """Persist one complete post-keyframe intent and continue it idempotently."""
+
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    data = _request_payload()
+    schemes = _normalize_vertical_video_schemes(
+        data.get("vertical_video_schemes") or ["scheme3"]
+    )
+    include_landscape = _truthy(data.get("include_landscape"), True)
+    try:
+        finalization = create_or_resume_finalization(
+            task.id,
+            include_landscape=include_landscape,
+            schemes=schemes,
+            visual_scheme_key=str(data.get("visual_scheme_key") or "stick_figure"),
+            selection_source=str(data.get("selection_source") or "keyframe-confirmation"),
+            force=_truthy(data.get("force"), True),
+        )
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    except Exception as exc:
+        db.session.rollback()
+        logger.exception("Keyframe finalization failed to persist job=%s", job_id)
+        return jsonify({"success": False, "message": f"确认关键帧失败：{exc}"}), 502
+
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
+    task = _get_owned_task(current_user, job_id)
+    visual_videos = _linked_visual_video_payloads(current_user, task)
+    payload = _job_payload(task, visual_videos=visual_videos)
+    summary = finalization_summary(finalization)
+    payload["finalization"] = summary
+    payload["children"] = {**(payload.get("children") or {}), "finalization": summary}
+    step = str((summary or {}).get("step") or "")
+    message = {
+        "done": "关键帧已确认；白板、横屏和方案三竖屏均已完成",
+        "final_video_queued": "关键帧已确认；白板已就绪，横屏 + 方案三正在合成",
+        "waiting_visual": "关键帧已确认；白板正在生成，完成后将自动合成横屏 + 方案三",
+        "visual_queued": "关键帧已确认；白板任务已创建，完成后将自动合成横屏 + 方案三",
+    }.get(step, (summary or {}).get("message") or "关键帧已确认，完整成片链路已接管")
+    status_code = 200 if str((summary or {}).get("status") or "") == "completed" else 202
+    return jsonify({
+        "success": True,
+        "message": message,
+        "accepted": status_code == 202,
+        "finalization": summary,
+        **payload,
+        "data": payload,
+    }), status_code
+
+
 @report_audio_workflow_bp.route("/jobs/<job_id>/generate-vertical-video", methods=["POST"])
 @require_login
 def generate_vertical_video(current_user, job_id):
@@ -1806,14 +1951,23 @@ def retry_job(current_user, job_id):
     logs = list(result.get("logs") or [])
     provider_changed = False
     previous_tts_provider = ""
-    if requested_tts_provider:
-        params = deepcopy(task.params) if isinstance(task.params, dict) else {}
-        workflow_key = (
-            FEATURE_NAME
-            if isinstance(params.get(FEATURE_NAME), dict)
-            else "report_audio_workflow"
+    params = deepcopy(task.params) if isinstance(task.params, dict) else {}
+    workflow_key = (
+        FEATURE_NAME
+        if isinstance(params.get(FEATURE_NAME), dict)
+        else "report_audio_workflow"
+    )
+    workflow = dict(params.get(workflow_key) or {})
+    workflow_changed = False
+    if "pdf_evidence_enabled" in workflow and not _truthy(workflow.get("pdf_evidence_enabled"), False):
+        cleaned_review_prompt = review_prompt_for_pdf_evidence(
+            workflow.get("review_prompt") or DEFAULT_REVIEW_PROMPT,
+            enabled=False,
         )
-        workflow = dict(params.get(workflow_key) or {})
+        if cleaned_review_prompt != workflow.get("review_prompt"):
+            workflow["review_prompt"] = cleaned_review_prompt
+            workflow_changed = True
+    if requested_tts_provider:
         previous_tts_provider = str(workflow.get("tts_provider") or TTS_PROVIDER_DEFAULT).strip().lower()
         provider_changed = previous_tts_provider != requested_tts_provider or (
             requested_tts_provider == "doubao_api"
@@ -1821,6 +1975,8 @@ def retry_job(current_user, job_id):
         )
         workflow["tts_provider"] = requested_tts_provider
         workflow["tts_voice"] = requested_tts_voice if requested_tts_provider == "doubao_api" else None
+        workflow_changed = True
+    if workflow_changed:
         params[workflow_key] = workflow
         task.params = params
         flag_modified(task, "params")
@@ -1912,6 +2068,419 @@ def retry_job(current_user, job_id):
     return jsonify({"success": True, "message": "任务已从失败处续跑", **payload, "data": payload})
 
 
+@report_audio_workflow_bp.route("/jobs/<job_id>/regenerate-script", methods=["POST"])
+@require_login
+def regenerate_script(current_user, job_id):
+    """Create an independent Pro-only script revision without mutating source media."""
+
+    source = _get_owned_task(current_user, job_id)
+    if not source:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    source_payload = (
+        (source.params or {}).get("report_audio_workflow")
+        if isinstance(source.params, dict)
+        else {}
+    ) or {}
+    pdf = deepcopy(source_payload.get("pdf") or (source.result or {}).get("pdf") or {})
+    pdf_path = str(source_payload.get("pdf_path") or pdf.get("path") or "").strip()
+    if not pdf_path or not os.path.isfile(pdf_path):
+        return jsonify({"success": False, "message": "原始 PDF 文件不存在，无法重新生成文案"}), 409
+
+    active = (
+        PublicationTask.query
+        .filter(
+            PublicationTask.feature == FEATURE_NAME,
+            PublicationTask.source_task_id == source.id,
+            PublicationTask.parent_feature == SCRIPT_REGENERATION_PARENT_FEATURE,
+            PublicationTask.status.in_(["pending", "processing"]),
+        )
+        .order_by(PublicationTask.created_at.desc())
+        .first()
+    )
+    if active:
+        active_payload = _job_payload(active)
+        detail_url = f"report-audio-workflow-detail.html?job_id={active.id}"
+        return jsonify({
+            "success": True,
+            "message": "已有同一文案重生成任务正在运行，已返回原任务",
+            "regeneration_job_id": active.id,
+            "detail_url": detail_url,
+            **active_payload,
+            "data": {**active_payload, "regeneration_job_id": active.id, "detail_url": detail_url},
+        }), 202
+
+    data = _request_payload()
+    minimum_chars = _bounded_int(
+        data.get("minimum_chars"),
+        DEFAULT_SCRIPT_REGENERATION_MIN_CHARS,
+        DEFAULT_SCRIPT_REGENERATION_MIN_CHARS,
+        20000,
+    )
+    prompts = script_regeneration_prompts(
+        source_payload.get("prompt") or DEFAULT_INITIAL_PROMPT,
+        source_payload.get("review_prompt") or DEFAULT_REVIEW_PROMPT,
+        minimum_chars=minimum_chars,
+    )
+    now = datetime.utcnow().isoformat() + "Z"
+    metadata = deepcopy(source_payload.get("metadata") or {})
+    metadata.update({
+        "source": SCRIPT_REGENERATION_PARENT_FEATURE,
+        "regeneration_source_task_id": source.id,
+        "requested_at": now,
+        "minimum_chars": minimum_chars,
+        "require_pro_model": True,
+    })
+    video_options = deepcopy(source_payload.get("video") or {})
+    video_options.update({
+        "enabled": False,
+        "vertical_enabled": False,
+        "bilibili_enabled": False,
+        "keyframe_outputs": [],
+    })
+    regeneration_payload = {
+        **deepcopy(source_payload),
+        "prompt": prompts["prompt"],
+        "review_prompt": prompts["review_prompt"],
+        "followups": [],
+        "manual_gemini": None,
+        "metadata": metadata,
+        "script_material_only": True,
+        "pdf_evidence_enabled": False,
+        "force_gemini_regeneration": True,
+        "gemini_prefer_pro_model": True,
+        "gemini_require_pro_model": True,
+        "gemini_min_final_chars": minimum_chars,
+        "visual_scheme_keys": [],
+        "video": video_options,
+        "pdf": pdf,
+        "pdf_path": pdf_path,
+    }
+    user_id = str(source.user_id or getattr(current_user, "id", None))
+    task = PublicationTask(
+        status="pending",
+        current_step="queued",
+        progress=0,
+        feature=FEATURE_NAME,
+        user_id=user_id,
+        source_task_id=source.id,
+        source_feature=FEATURE_NAME,
+        parent_feature=SCRIPT_REGENERATION_PARENT_FEATURE,
+        params={
+            "feature": FEATURE_NAME,
+            "user_id": user_id,
+            "source_task_id": source.id,
+            "source_feature": FEATURE_NAME,
+            "parent_feature": SCRIPT_REGENERATION_PARENT_FEATURE,
+            "report_audio_workflow": regeneration_payload,
+        },
+        result={
+            "metadata": metadata,
+            "source_task_id": source.id,
+            "pdf": pdf,
+            "children": {},
+            "structured_result": None,
+            "script_material": {"status": "pending"},
+            "audio": None,
+            "video": None,
+            "logs": [],
+            "regeneration": {
+                "source_task_id": source.id,
+                "minimum_chars": minimum_chars,
+                "require_pro_model": True,
+                "created_at": now,
+            },
+            "pdf_evidence": {"status": "disabled", "enabled": False},
+        },
+    )
+    db.session.add(task)
+    db.session.flush()
+    task_id = str(task.id)
+    db.session.commit()
+
+    try:
+        submit_result = maybe_guarded_apply_async(
+            process_report_audio_workflow_job,
+            args=[task_id],
+            queue=QUEUE_NAME,
+            feature=FEATURE_NAME,
+            task_id=task_id,
+            retry=False,
+        )
+        celery_task = submit_result["async_result"]
+    except Exception as exc:
+        error_message = f"文案重生成任务入队失败: {exc}"
+        PublicationTask.query.filter(PublicationTask.id == task_id).update(
+            {
+                PublicationTask.status: "failed",
+                PublicationTask.current_step: "failed",
+                PublicationTask.error_message: error_message,
+                PublicationTask.completed_at: datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+        db.session.commit()
+        _clear_jobs_summary_cache(getattr(current_user, "id", None))
+        return jsonify({"success": False, "message": error_message}), 502
+
+    PublicationTask.query.filter(PublicationTask.id == task_id).update(
+        {
+            PublicationTask.celery_task_id: celery_task.id,
+            PublicationTask.updated_at: datetime.utcnow(),
+        },
+        synchronize_session=False,
+    )
+    db.session.commit()
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
+    detail_url = f"report-audio-workflow-detail.html?job_id={task_id}"
+    response_payload = {
+        "job_id": task_id,
+        "regeneration_job_id": task_id,
+        "status": "queued",
+        "step": "queued",
+        "progress": 0,
+        "minimum_chars": minimum_chars,
+        "require_pro_model": True,
+        "detail_url": detail_url,
+        "deferred": bool(submit_result.get("deferred")),
+        "admission": submit_result.get("admission"),
+    }
+    return jsonify({
+        "success": True,
+        "message": f"已创建独立文案重生成任务：确认 Pro 后生成至少 {minimum_chars} 字",
+        **response_payload,
+        "data": response_payload,
+    }), 202
+
+
+@report_audio_workflow_bp.route("/jobs/<job_id>/generate-audio", methods=["POST"])
+@require_login
+def generate_audio_from_script(current_user, job_id):
+    """Continue one completed script material into an independent TTS task."""
+
+    source = _get_owned_task(current_user, job_id)
+    if not source:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+    if source.status != "completed":
+        return jsonify({"success": False, "message": "文案任务尚未完成，暂不能生成语音"}), 409
+
+    source_result = source.result if isinstance(source.result, dict) else {}
+    structured = deepcopy(source_result.get("structured_result") or {})
+    script = str(structured.get("final_script_for_tts") or "").strip()
+    if not script:
+        return jsonify({"success": False, "message": "当前任务没有可朗读的最终文案"}), 409
+    quality_issue = structured_result_quality_issue(structured)
+    if quality_issue:
+        return jsonify({"success": False, "message": f"当前文案不适合直接朗读：{quality_issue}"}), 409
+
+    source_payload = (
+        (source.params or {}).get("report_audio_workflow")
+        if isinstance(source.params, dict)
+        else {}
+    ) or {}
+    pdf = deepcopy(source_payload.get("pdf") or source_result.get("pdf") or {})
+    pdf_path = str(source_payload.get("pdf_path") or pdf.get("path") or "").strip()
+    if not pdf_path or not os.path.isfile(pdf_path):
+        return jsonify({"success": False, "message": "原始 PDF 文件不存在，无法生成语音任务"}), 409
+
+    data = _request_payload()
+    tts_provider = str(
+        data.get("tts_provider")
+        or source_payload.get("tts_provider")
+        or TTS_PROVIDER_DEFAULT
+    ).strip().lower()
+    tts_voice = str(
+        data.get("tts_voice")
+        or source_payload.get("tts_voice")
+        or TTS_VOICE_DEFAULT
+    ).strip()
+    if tts_provider not in TTS_PROVIDERS:
+        return jsonify({"success": False, "message": "tts_provider 仅支持 doubao_browser 或 doubao_api"}), 400
+    if tts_provider == "doubao_api":
+        if tts_voice not in TTS_VOICES:
+            return jsonify({"success": False, "message": "不支持所选豆包 API 音色"}), 400
+        if not is_doubao_api_configured():
+            return jsonify({"success": False, "message": "豆包 API TTS 未配置，请设置 DOUBAO_TTS_API_KEY"}), 400
+    elif not doubao_browser_tts.status_payload().get("configured"):
+        return jsonify({"success": False, "message": "豆包浏览器朗读未配置"}), 400
+
+    _lock_audio_generation_source(source.id)
+    active = (
+        PublicationTask.query
+        .filter(
+            PublicationTask.feature == FEATURE_NAME,
+            PublicationTask.source_task_id == source.id,
+            PublicationTask.parent_feature == AUDIO_GENERATION_PARENT_FEATURE,
+            PublicationTask.status.in_(["pending", "processing"]),
+        )
+        .order_by(PublicationTask.created_at.desc())
+        .first()
+    )
+    if active:
+        active_payload = _job_payload(active)
+        detail_url = f"report-audio-workflow-detail.html?job_id={active.id}"
+        response_payload = {
+            **active_payload,
+            "audio_generation_job_id": active.id,
+            "detail_url": detail_url,
+        }
+        return jsonify({
+            "success": True,
+            "message": "已有同一文案的语音任务正在运行，已返回原任务",
+            **response_payload,
+            "data": response_payload,
+        }), 202
+
+    now = datetime.utcnow().isoformat() + "Z"
+    metadata = deepcopy(source_payload.get("metadata") or source_result.get("metadata") or {})
+    metadata.update({
+        "source": AUDIO_GENERATION_PARENT_FEATURE,
+        "audio_source_task_id": source.id,
+        "requested_at": now,
+        "script_chars": len(script),
+        "tts_provider": tts_provider,
+    })
+    video_options = deepcopy(source_payload.get("video") or {})
+    video_options.update({
+        "enabled": False,
+        "vertical_enabled": False,
+        "bilibili_enabled": False,
+        "keyframe_outputs": [],
+    })
+    audio_payload = {
+        **deepcopy(source_payload),
+        "manual_gemini": None,
+        "script_material_only": False,
+        "force_gemini_regeneration": False,
+        "pdf_evidence_enabled": False,
+        "tts_provider": tts_provider,
+        "tts_voice": tts_voice if tts_provider == "doubao_api" else None,
+        "visual_scheme_keys": [],
+        "video": video_options,
+        "pdf": pdf,
+        "pdf_path": pdf_path,
+        "metadata": metadata,
+    }
+    # The script has already passed the material task's quality gate. Do not
+    # inherit a stricter Gemini-generation threshold into this TTS-only hop.
+    audio_payload.pop("gemini_min_final_chars", None)
+
+    script_material = deepcopy(source_result.get("script_material") or {})
+    script_material.update({
+        "status": "completed",
+        "mode": "audio_generation_source",
+        "source_task_id": source.id,
+        "chars": len(script),
+    })
+    user_id = str(source.user_id or getattr(current_user, "id", None))
+    task = PublicationTask(
+        status="pending",
+        current_step="queued",
+        progress=0,
+        feature=FEATURE_NAME,
+        user_id=user_id,
+        source_task_id=source.id,
+        source_feature=FEATURE_NAME,
+        parent_feature=AUDIO_GENERATION_PARENT_FEATURE,
+        params={
+            "feature": FEATURE_NAME,
+            "user_id": user_id,
+            "source_task_id": source.id,
+            "source_feature": FEATURE_NAME,
+            "parent_feature": AUDIO_GENERATION_PARENT_FEATURE,
+            "report_audio_workflow": audio_payload,
+        },
+        result={
+            "metadata": metadata,
+            "source_task_id": source.id,
+            "pdf": pdf,
+            "children": {},
+            "structured_result": structured,
+            "script_material": script_material,
+            "audio": None,
+            "video": None,
+            "logs": [],
+            "audio_generation": {
+                "source_task_id": source.id,
+                "tts_provider": tts_provider,
+                "tts_voice": tts_voice if tts_provider == "doubao_api" else None,
+                "script_chars": len(script),
+                "created_at": now,
+            },
+            "pdf_evidence": {"status": "disabled", "enabled": False},
+        },
+    )
+    db.session.add(task)
+    db.session.flush()
+    task_id = str(task.id)
+    db.session.commit()
+
+    try:
+        submit_result = maybe_guarded_apply_async(
+            process_report_audio_workflow_job,
+            args=[task_id],
+            queue=QUEUE_NAME,
+            feature=FEATURE_NAME,
+            task_id=task_id,
+            retry=False,
+        )
+        celery_task = submit_result["async_result"]
+    except Exception as exc:
+        error_message = f"语音任务入队失败: {exc}"
+        PublicationTask.query.filter(PublicationTask.id == task_id).update(
+            {
+                PublicationTask.status: "failed",
+                PublicationTask.current_step: "failed",
+                PublicationTask.error_message: error_message,
+                PublicationTask.completed_at: datetime.utcnow(),
+                PublicationTask.updated_at: datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+        db.session.commit()
+        _clear_jobs_summary_cache(getattr(current_user, "id", None))
+        return jsonify({"success": False, "message": error_message}), 502
+
+    PublicationTask.query.filter(PublicationTask.id == task_id).update(
+        {
+            PublicationTask.celery_task_id: celery_task.id,
+            PublicationTask.updated_at: datetime.utcnow(),
+        },
+        synchronize_session=False,
+    )
+    db.session.commit()
+    _clear_jobs_summary_cache(getattr(current_user, "id", None))
+    detail_url = f"report-audio-workflow-detail.html?job_id={task_id}"
+    response_payload = {
+        "job_id": task_id,
+        "audio_generation_job_id": task_id,
+        "status": "queued",
+        "step": "queued",
+        "progress": 0,
+        "tts_provider": tts_provider,
+        "tts_voice": tts_voice if tts_provider == "doubao_api" else None,
+        "detail_url": detail_url,
+        "deferred": bool(submit_result.get("deferred")),
+        "admission": submit_result.get("admission"),
+    }
+    return jsonify({
+        "success": True,
+        "message": "已使用当前文案创建独立语音任务，跳过 Gemini 且不覆盖旧产物",
+        **response_payload,
+        "data": response_payload,
+    }), 202
+
+
+def _lock_audio_generation_source(source_task_id):
+    """Serialize creation for one source task on PostgreSQL."""
+
+    bind = db.session.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        db.session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+            {"key": f"report-audio-script-tts:{source_task_id}"},
+        )
+
+
 def _get_owned_task(current_user, job_id):
     task = PublicationTask.query.options(
         load_only(
@@ -1961,28 +2530,32 @@ def _get_owned_asset_reference(current_user, job_id, *, terminal_only=False):
             cached_task = cached["task"]
             if not terminal_only or cached_task.status in TERMINAL_STATUSES:
                 return deepcopy(cached_task)
-        row = (
-            db.session.query(*OWNED_TASK_REFERENCE_COLUMNS)
-            .filter(PublicationTask.id == str(job_id))
-            .one_or_none()
-        )
-        if not row:
-            return None
-        if row.feature != FEATURE_NAME or not row.user_id:
-            # Legacy rows were backfilled, but preserve access for an incomplete old row.
-            return _get_owned_task(current_user, job_id)
-        if str(row.user_id).strip() not in _visible_user_ids(current_user):
-            return None
-        task = SimpleNamespace(**{
-            column.key: getattr(row, column.key)
-            for column in OWNED_TASK_REFERENCE_COLUMNS
-        })
-        if not terminal_only or task.status in TERMINAL_STATUSES:
+    # Never hold the process-wide cache lock while waiting on the remote DB.
+    # A single dead server connection otherwise blocks every status/media
+    # request for this endpoint family until the network timeout expires.
+    row = (
+        db.session.query(*OWNED_TASK_REFERENCE_COLUMNS)
+        .filter(PublicationTask.id == str(job_id))
+        .one_or_none()
+    )
+    if not row:
+        return None
+    if row.feature != FEATURE_NAME or not row.user_id:
+        # Legacy rows were backfilled, but preserve access for an incomplete old row.
+        return _get_owned_task(current_user, job_id)
+    if str(row.user_id).strip() not in _visible_user_ids(current_user):
+        return None
+    task = SimpleNamespace(**{
+        column.key: getattr(row, column.key)
+        for column in OWNED_TASK_REFERENCE_COLUMNS
+    })
+    if not terminal_only or task.status in TERMINAL_STATUSES:
+        with _REPORT_AUDIO_ASSET_REFERENCE_CACHE_LOCK:
             _REPORT_AUDIO_ASSET_REFERENCE_CACHE[cache_key] = {
                 "expires_at": now + REPORT_AUDIO_MEDIA_PATH_CACHE_TTL_SECONDS,
                 "task": deepcopy(task),
             }
-        return task
+    return task
 
 
 def _get_owned_keyframe_task(current_user, job_id):
@@ -1994,31 +2567,32 @@ def _get_owned_keyframe_task(current_user, job_id):
         cached = _REPORT_AUDIO_KEYFRAME_TASK_CACHE.get(cache_key)
         if cached and float(cached.get("expires_at") or 0) > now:
             return deepcopy(cached["task"])
-        row = (
-            db.session.query(
-                PublicationTask.id,
-                PublicationTask.result,
-                PublicationTask.feature,
-                PublicationTask.user_id,
-            )
-            .filter(PublicationTask.id == str(job_id))
-            .one_or_none()
+    row = (
+        db.session.query(
+            PublicationTask.id,
+            PublicationTask.result,
+            PublicationTask.feature,
+            PublicationTask.user_id,
         )
-        if not row or row.feature != FEATURE_NAME or not row.user_id:
-            return None
-        if str(row.user_id).strip() not in _visible_user_ids(current_user):
-            return None
-        task = SimpleNamespace(
-            id=row.id,
-            result=deepcopy(row.result or {}),
-            feature=row.feature,
-            user_id=row.user_id,
-        )
+        .filter(PublicationTask.id == str(job_id))
+        .one_or_none()
+    )
+    if not row or row.feature != FEATURE_NAME or not row.user_id:
+        return None
+    if str(row.user_id).strip() not in _visible_user_ids(current_user):
+        return None
+    task = SimpleNamespace(
+        id=row.id,
+        result=deepcopy(row.result or {}),
+        feature=row.feature,
+        user_id=row.user_id,
+    )
+    with _REPORT_AUDIO_KEYFRAME_TASK_CACHE_LOCK:
         _REPORT_AUDIO_KEYFRAME_TASK_CACHE[cache_key] = {
             "expires_at": now + REPORT_AUDIO_MEDIA_PATH_CACHE_TTL_SECONDS,
             "task": deepcopy(task),
         }
-        return task
+    return task
 
 
 def _job_detail_version(task):
@@ -2133,7 +2707,11 @@ def _workbench_institution(structured, pdf, video_options):
         or (video_options or {}).get("vertical_institution")
         or ""
     ).strip()
-    allowed = {"J.P. Morgan", "Goldman Sachs", "Morgan Stanley", "UBS", "Nomura", "BofA", "HSBC", "Jefferies", "Bernstein", "深度研报"}
+    allowed = {
+        "J.P. Morgan", "Goldman Sachs", "Morgan Stanley", "UBS", "Nomura",
+        "BofA", "HSBC", "Jefferies", "Bernstein", "GF Securities",
+        "GF Securities (Hong Kong)", "深度研报",
+    }
     if explicit in allowed:
         return explicit
 
@@ -2179,6 +2757,8 @@ def _workbench_institution(structured, pdf, video_options):
     for alias, label in BANK_ALIASES:
         if re.search(re.escape(alias), haystack, flags=re.I):
             mapped = {
+                "香港广发": "GF Securities (Hong Kong)",
+                "广发证券": "GF Securities",
                 "大摩": "Morgan Stanley",
                 "摩根大通": "J.P. Morgan",
                 "高盛": "Goldman Sachs",
@@ -2638,6 +3218,7 @@ def _create_vertical_video_backfill_task(
     visual_workflow_id=None,
     visual_video_path=None,
     visual_scene_timeline=None,
+    finalization_task_id=None,
 ):
     result = parent.result if isinstance(parent.result, dict) else {}
     params = parent.params if isinstance(parent.params, dict) else {}
@@ -2725,6 +3306,7 @@ def _create_vertical_video_backfill_task(
         "is_preview": preview_seconds > 0,
         "include_landscape": bool(include_landscape),
         **({"visual_workflow_id": str(visual_workflow_id)} if visual_workflow_id else {}),
+        **({"finalization_task_id": str(finalization_task_id)} if finalization_task_id else {}),
     }
     task_params = {
         "feature": "publisher",
@@ -3589,6 +4171,9 @@ def _job_payload(task, include_raw=False, *, visual_videos=None):
         children["publisher_vertical_video"] = _vertical_child_summary(vertical_child, task.id, lightweight=True)
     if vertical_preview_child:
         children["publisher_vertical_preview_video"] = _vertical_child_summary(vertical_preview_child, task.id, lightweight=True)
+    finalization = finalization_summary_for_audio(task.id)
+    if finalization:
+        children["finalization"] = finalization
     cover_subtitle = (structured_result or {}).get("cover_subtitle") or video_result.get("cover_subtitle") or ""
     public_pdf = _public_pdf(task.id, request_payload.get("pdf") or result.get("pdf"))
     request_metadata = request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
@@ -3599,6 +4184,14 @@ def _job_payload(task, include_raw=False, *, visual_videos=None):
         request_metadata.get("title"),
         (public_pdf or {}).get("filename"),
         (public_pdf or {}).get("topic_title"),
+    )
+    # Older completed jobs may have stored a generic "机构" cover prefix
+    # before a filename alias was added.  Derive the display label at read
+    # time so the detail page is corrected without rewriting finished assets.
+    detail_title = _display_title_with_recognized_institution(task, detail_title)
+    display_cover_title = _display_title_with_recognized_institution(
+        task,
+        (structured_result or {}).get("cover_title") or "",
     )
     audio_script = _audio_script_payload(structured_result, result.get("tts_text"))
     payload = {
@@ -3613,6 +4206,11 @@ def _job_payload(task, include_raw=False, *, visual_videos=None):
         "request": {
             "prompt": request_payload.get("prompt"),
             "review_prompt": request_payload.get("review_prompt"),
+            "pdf_evidence_enabled": (
+                _truthy(request_payload.get("pdf_evidence_enabled"), True)
+                if "pdf_evidence_enabled" in request_payload
+                else True
+            ),
             "followups": request_payload.get("followups") or [],
             "gemini_url": request_payload.get("gemini_url"),
             "manual_gemini": _public_manual_gemini(request_payload.get("manual_gemini")),
@@ -3631,7 +4229,7 @@ def _job_payload(task, include_raw=False, *, visual_videos=None):
         "structured_result": structured_result,
         "script_material": result.get("script_material") if isinstance(result.get("script_material"), dict) else None,
         "title": detail_title,
-        "cover_title": (structured_result or {}).get("cover_title") or "",
+        "cover_title": display_cover_title or (structured_result or {}).get("cover_title") or "",
         "cover_subtitle": cover_subtitle,
         "bilibili_titles": {
             "landscape": _report_bilibili_default_title(task, "landscape"),
@@ -3644,6 +4242,7 @@ def _job_payload(task, include_raw=False, *, visual_videos=None):
         "publisher_video": result.get("publisher_video"),
         "publisher_vertical_video": children.get("publisher_vertical_video"),
         "publisher_vertical_preview_video": children.get("publisher_vertical_preview_video"),
+        "finalization": finalization,
         "bilibili_uploads": bilibili_upload_children(
             task.id,
             parent_feature=FEATURE_NAME,
@@ -4088,6 +4687,9 @@ def _job_status_payload(task):
         children["publisher_vertical_video"] = _vertical_child_summary(vertical_child, task.id, lightweight=True)
     if vertical_preview_child:
         children["publisher_vertical_preview_video"] = _vertical_child_summary(vertical_preview_child, task.id, lightweight=True)
+    finalization = finalization_summary_for_audio(task.id)
+    if finalization:
+        children["finalization"] = finalization
 
     payload = {
         "job_id": task.id,
@@ -4100,6 +4702,7 @@ def _job_status_payload(task):
         "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else None,
         "children": children,
         "doubao_browser_tts": doubao_items,
+        "finalization": finalization,
         "bilibili_uploads": bilibili_upload_children(
             task.id,
             parent_feature=FEATURE_NAME,
@@ -4644,6 +5247,28 @@ def _display_title_from_structured(structured):
     return ""
 
 
+def _display_title_with_recognized_institution(task, value):
+    """Replace a legacy generic cover prefix using the current alias rules.
+
+    This is presentation-only: it deliberately does not write the task's
+    stored result or regenerate a completed cover asset.
+    """
+    text = _normalize_cover_text(value, 160)
+    if not text or not re.match(r"^\s*(?:机构|机构研报|深度研报)\s*[:：]", text):
+        return text
+    result = task.result if isinstance(getattr(task, "result", None), dict) else {}
+    params = task.params if isinstance(getattr(task, "params", None), dict) else {}
+    request_payload = params.get("report_audio_workflow") if isinstance(params.get("report_audio_workflow"), dict) else {}
+    structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
+    public_pdf = request_payload.get("pdf") if isinstance(request_payload.get("pdf"), dict) else {}
+    if not public_pdf and isinstance(result.get("pdf"), dict):
+        public_pdf = result.get("pdf")
+    institution = _report_publish_institution(text, structured, public_pdf)
+    if institution == "机构研报":
+        return text
+    return _cover_title_with_institution(task, text)
+
+
 def _compact_title(value):
     lines = [
         " ".join(line.split())
@@ -4825,6 +5450,15 @@ def _normalize_video_render_mode(value):
 
 def _parse_script_material_only(data):
     for key in ("script_material_only", "material_only", "script_only"):
+        if key in data:
+            return _truthy(data.get(key), False)
+    return False
+
+
+def _parse_pdf_evidence_enabled(data):
+    """New submissions default off; an explicit opt-in remains available."""
+
+    for key in ("pdf_evidence_enabled", "enable_pdf_evidence", "pdf_evidence"):
         if key in data:
             return _truthy(data.get(key), False)
     return False

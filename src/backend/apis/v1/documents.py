@@ -1912,19 +1912,20 @@ def list_podcast_visualizer_tasks():
     per_page = request.args.get('per_page', default=20, type=int) or 20
     per_page = min(50, max(1, per_page))
 
-    tasks = (
-        PublicationTask.query.options(load_only(*PODCAST_TASK_PAYLOAD_COLUMNS))
+    base_query = (
+        PublicationTask.query
         .filter(PublicationTask.feature == 'podcast_visualizer')
-        .order_by(PublicationTask.created_at.desc())
-        .limit(1000)
-        .all()
     )
-    total = len(tasks)
+    total = base_query.count()
     total_pages = max(1, math.ceil(total / per_page))
     page = min(page, total_pages)
-    start = (page - 1) * per_page
-    end = start + per_page
-    page_tasks = tasks[start:end]
+    page_tasks = (
+        base_query.options(load_only(*PODCAST_TASK_PAYLOAD_COLUMNS))
+        .order_by(PublicationTask.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
 
     return jsonify({
         'success': True,

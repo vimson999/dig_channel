@@ -207,7 +207,9 @@ class StickFigureMediaCacheTest(unittest.TestCase):
             )
         ]
 
-        with patch.object(workflow_api, "_scene_structure_redis_client", return_value=fake_redis):
+        with patch.object(workflow_api, "_scene_structure_redis_client", return_value=fake_redis), patch.object(
+            workflow_api, "durable_storyboard_integrity", return_value=None
+        ):
             workflow_api._scene_structure_cache_set(cache_key, "storyboard-1", segments)
             workflow_api._scene_structure_cache.clear()
             workflow_api._scene_segment_cache.clear()
@@ -222,6 +224,60 @@ class StickFigureMediaCacheTest(unittest.TestCase):
             workflow_api.SCENE_STRUCTURE_REDIS_TTL_SECONDS,
             next(iter(fake_redis.ttls.values())),
         )
+
+    def test_failed_storyboard_drops_cached_structure_before_asset_reads(self):
+        fake_redis = _FakeRedis()
+        cache_key = ("workflow-1", "source-1")
+        segments = [
+            SimpleNamespace(
+                id="segment-1",
+                scene_title="第一幕",
+                script_text="正文",
+                visual_prompt="白板火柴人",
+            )
+        ]
+        parent = SimpleNamespace(
+            id="workflow-1",
+            source_task_id="source-1",
+            report_visual_scheme_key="stick_figure",
+            current_step="storyboard_failed",
+            waiting_child_label="标题与正文分镜",
+            waiting_child_status="failed",
+        )
+
+        with patch.object(
+            workflow_api, "_scene_structure_redis_client", return_value=fake_redis
+        ), patch.object(
+            workflow_api, "durable_storyboard_integrity", return_value=None
+        ):
+            workflow_api._scene_structure_cache_set(cache_key, "storyboard-1", segments)
+            with self.assertRaisesRegex(ValueError, "请先完成标题与正文分镜"):
+                workflow_api._ensure_scene_assets(parent)
+
+        self.assertNotIn(cache_key, workflow_api._scene_structure_cache)
+        self.assertNotIn("storyboard-1", workflow_api._scene_segment_cache)
+        self.assertFalse(fake_redis.values)
+
+    def test_failed_projection_keeps_cached_durable_storyboard_available(self):
+        parent = SimpleNamespace(
+            id="workflow-1",
+            source_task_id="source-1",
+            report_visual_scheme_key="stick_figure",
+            current_step="storyboard_failed",
+            waiting_child_label="标题与正文分镜",
+            waiting_child_status="failed",
+        )
+        with patch.object(
+            workflow_api, "_scene_structure_cache_get", return_value="storyboard-1"
+        ), patch.object(
+            workflow_api, "durable_storyboard_integrity", return_value={"segment_count": 2}
+        ), patch.object(
+            workflow_api, "_scene_assets", return_value=[SimpleNamespace(id="asset-1")]
+        ):
+            storyboard, assets = workflow_api._ensure_scene_assets(parent)
+
+        self.assertEqual("storyboard-1", storyboard.id)
+        self.assertEqual("asset-1", assets[0].id)
 
     def test_completed_workflow_cache_skips_database_and_survives_memory_loss(self):
         fake_redis = _FakeRedis()

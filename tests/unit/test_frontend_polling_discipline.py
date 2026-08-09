@@ -70,6 +70,21 @@ class FrontendPollingDisciplineTest(unittest.TestCase):
         self.assertIn("finally", polling)
         self.assertIn("state.syncPollInFlight = false", polling)
 
+    def test_favorite_filter_commits_only_after_the_replacement_list_loads(self):
+        source = (PROJECT_ROOT / "src" / "frontend" / "js" / "zsxq-lab.js").read_text(encoding="utf-8")
+        html = (PROJECT_ROOT / "src" / "frontend" / "zsxq-lab.html").read_text(encoding="utf-8")
+        handler = source.split("async function requestFavoriteFilterChange()", 1)[1].split(
+            "\nfunction topicKey(topic)", 1
+        )[0]
+
+        self.assertIn("favoriteFilterPending", source)
+        self.assertIn("favoriteOnlyOverride: nextFavoriteOnly", handler)
+        self.assertIn("if (!succeeded || !stillViewingSameTab)", handler)
+        self.assertIn("收藏筛选未生效", handler)
+        self.assertIn("state.favoriteOnly = nextFavoriteOnly", handler)
+        self.assertIn("state.tabStates.set(tabStateKey(tab.id), candidateTabState)", handler)
+        self.assertIn('data-favorite-filter-label', html)
+
     def test_zsxq_sync_queue_explains_waiting_and_uses_activity_time(self):
         source = (PROJECT_ROOT / "src" / "frontend" / "js" / "zsxq-lab.js").read_text(encoding="utf-8")
 

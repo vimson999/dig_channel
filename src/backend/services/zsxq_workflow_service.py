@@ -6,9 +6,9 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from sqlalchemy import or_, text
+from sqlalchemy import or_, text, update
 from sqlalchemy.orm import load_only
-from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy.orm.attributes import flag_modified, set_committed_value
 
 from models import db
 from models.task import PublicationTask
@@ -2086,6 +2086,14 @@ class ZsxqWorkflowService:
 
     def _queue_notification(self, workflow, event_type):
         workflow_id = str(workflow.id)
+        session = db.session()
+        previous_expire_on_commit = session.expire_on_commit
+        # A workflow can emit two terminal events back-to-back (for example
+        # sync_failed followed by workflow_failed).  The default commit
+        # expiration would make the second event refresh the full workflow
+        # row before it can inspect stage_results.  Keep the already-loaded
+        # projection alive across this short commit/external-queue boundary.
+        session.expire_on_commit = False
         try:
             stage_results = self._stage_results(workflow)
             notifications = dict(stage_results.get("notifications") or {})
@@ -2093,7 +2101,7 @@ class ZsxqWorkflowService:
                 return
 
             workflow_payload = workflow.to_dict()
-            db.session.commit()
+            session.commit()
             result = workflow_notification_service.enqueue_workflow_event(event_type, workflow_payload)
             if not result.get("queued"):
                 return
@@ -2105,11 +2113,24 @@ class ZsxqWorkflowService:
                 "queued_at": self._now_iso(),
             }
             stage_results["notifications"] = notifications
-            workflow.stage_results = stage_results
-            db.session.commit()
+            update_result = db.session.execute(
+                update(ZsxqWorkflowRun)
+                .where(ZsxqWorkflowRun.id == workflow_id)
+                .values(stage_results=stage_results)
+                .execution_options(synchronize_session=False)
+            )
+            if update_result.rowcount != 1:
+                raise ValueError(f"工作流不存在: {workflow_id}")
+            # Keep the identity-map projection in sync without marking it
+            # dirty again; the Core UPDATE above is the only persistence write
+            # for the notification marker.
+            set_committed_value(workflow, "stage_results", stage_results)
+            session.commit()
         except Exception:
-            db.session.rollback()
+            session.rollback()
             logger.exception("[ZSXQ_WORKFLOW] notification queue failed | workflow=%s event=%s", workflow_id, event_type)
+        finally:
+            session.expire_on_commit = previous_expire_on_commit
 
     def _snapshot(self, workflow):
         return workflow.config_snapshot if isinstance(workflow.config_snapshot, dict) else {}

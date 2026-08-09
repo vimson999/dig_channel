@@ -157,7 +157,7 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
         self.assertIn("renderSidebarStatus()", frontend_text)
         self.assertIn('aria-label="左侧视觉任务流程状态"', frontend_text)
         self.assertIn("最近刷新", frontend_text)
-        self.assertIn("sticky-sidebar-status-v3", html)
+        self.assertIn("sticky-sidebar-status-v4-storyboard-guard", html)
 
     def test_report_audio_detail_exposes_sticky_quick_navigation(self):
         html = (

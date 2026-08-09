@@ -47,6 +47,7 @@ from services.report_visual_plan_service import (
     FEATURE_NAME as STORYBOARD_FEATURE,
     provider_status as storyboard_status_payload,
 )
+from services.report_visual_plan_integrity import durable_storyboard_integrity
 from services.doubao_browser_tts import FEATURE_NAME as DOUBAO_TTS_FEATURE, QUEUE_NAME as DOUBAO_TTS_QUEUE, status_payload as doubao_status_payload
 from services.report_stick_figure_assets import (
     FEATURE_NAME as IMAGE_FEATURE,
@@ -151,12 +152,16 @@ VIDEO_TASK_COLUMNS = (
 )
 SCENE_PARENT_COLUMNS = (
     PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
     PublicationTask.user_id,
     PublicationTask.source_task_id,
     PublicationTask.task_title,
     PublicationTask.task_video_path,
     PublicationTask.report_audio_pdf_attachment_id,
     PublicationTask.report_visual_scheme_key,
+    PublicationTask.waiting_child_label,
+    PublicationTask.waiting_child_status,
 )
 SCENE_ASSET_COLUMNS = (
     ReportStickFigureSceneAsset.id,
@@ -407,6 +412,8 @@ def _clear_terminal_workflow_cache(current_user=None, job_id=None):
     _clear_legacy_scene_bundle_cache(job_id)
     _clear_scene_status_bundle_cache(job_id)
     _clear_active_workflow_cache(current_user, job_id)
+    if job_id:
+        _clear_scene_structure_cache(workflow_id=job_id)
 
 
 @report_stick_figure_video_workflow_bp.route("/status", methods=["GET"])
@@ -1390,12 +1397,16 @@ def _scene_parent_snapshot(parent):
         return None
     return SimpleNamespace(
         id=str(parent.id),
+        status=str(getattr(parent, "status", "") or ""),
+        current_step=str(getattr(parent, "current_step", "") or ""),
         user_id=str(parent.user_id or ""),
         source_task_id=parent.source_task_id,
         task_title=parent.task_title,
         task_video_path=parent.task_video_path,
         report_audio_pdf_attachment_id=parent.report_audio_pdf_attachment_id,
         report_visual_scheme_key=getattr(parent, "report_visual_scheme_key", None) or DEFAULT_VISUAL_SCHEME_KEY,
+        waiting_child_label=str(getattr(parent, "waiting_child_label", "") or ""),
+        waiting_child_status=str(getattr(parent, "waiting_child_status", "") or ""),
     )
 
 
@@ -1433,7 +1444,7 @@ def _scene_asset_tts_snapshot(asset):
 
 def _completed_storyboard(source_task_id, visual_scheme_key=DEFAULT_VISUAL_SCHEME_KEY):
     scheme_key = str(visual_scheme_key or DEFAULT_VISUAL_SCHEME_KEY)
-    return (
+    candidates = (
         PublicationTask.query.options(load_only(
             PublicationTask.id,
             PublicationTask.status,
@@ -1445,15 +1456,20 @@ def _completed_storyboard(source_task_id, visual_scheme_key=DEFAULT_VISUAL_SCHEM
         .filter(
             PublicationTask.feature == STORYBOARD_FEATURE,
             PublicationTask.source_task_id == str(source_task_id),
-            PublicationTask.status == "completed",
+            PublicationTask.status != "canceled",
         )
         .filter(or_(
             PublicationTask.report_visual_scheme_key == scheme_key,
             *([PublicationTask.report_visual_scheme_key.is_(None)] if scheme_key == DEFAULT_VISUAL_SCHEME_KEY else []),
         ))
         .order_by(PublicationTask.created_at.desc())
-        .first()
+        .limit(5)
+        .all()
     )
+    for candidate in candidates:
+        if durable_storyboard_integrity(candidate.id):
+            return candidate
+    return None
 
 
 def _ensure_scene_assets(parent, *, force_refresh=False):
@@ -1462,6 +1478,20 @@ def _ensure_scene_assets(parent, *, force_refresh=False):
     cache_key = (parent_id, source_task_id)
     cached_storyboard_id = None if force_refresh else _scene_structure_cache_get(cache_key)
     if cached_storyboard_id:
+        storyboard_failed = (
+            str(getattr(parent, "current_step", "") or "") == "storyboard_failed"
+            or (
+                str(getattr(parent, "waiting_child_label", "") or "") == "标题与正文分镜"
+                and str(getattr(parent, "waiting_child_status", "") or "").lower() == "failed"
+            )
+        )
+        if storyboard_failed and not durable_storyboard_integrity(cached_storyboard_id):
+            _clear_scene_structure_cache(
+                workflow_id=parent_id,
+                source_task_id=source_task_id,
+                storyboard_id=cached_storyboard_id,
+            )
+            raise ValueError("请先完成标题与正文分镜")
         return (
             SimpleNamespace(id=cached_storyboard_id),
             _scene_assets(parent_id, cached_storyboard_id),
@@ -1579,6 +1609,35 @@ def _completed_image_asset_can_adopt_prompt_hash(asset) -> bool:
         return path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
+
+
+def _clear_scene_structure_cache(*, workflow_id=None, source_task_id=None, storyboard_id=None):
+    """Drop scene structure snapshots when their storyboard is no longer valid."""
+
+    workflow_key = str(workflow_id or "").strip()
+    source_key = str(source_task_id or "").strip()
+    storyboard_key = str(storyboard_id or "").strip()
+    with _scene_structure_cache_lock:
+        stale_structure_keys = []
+        for key in _scene_structure_cache:
+            if key == ("segments", storyboard_key) and storyboard_key:
+                stale_structure_keys.append(key)
+            elif workflow_key and key and str(key[0]) == workflow_key:
+                stale_structure_keys.append(key)
+            elif source_key and len(key) > 1 and str(key[1]) == source_key:
+                stale_structure_keys.append(key)
+        for key in stale_structure_keys:
+            _scene_structure_cache.pop(key, None)
+        if storyboard_key:
+            _scene_segment_cache.pop(storyboard_key, None)
+
+    if source_key:
+        client = _scene_structure_redis_client()
+        if client is not None:
+            try:
+                client.delete(_scene_structure_redis_key((workflow_key, source_key)))
+            except Exception:
+                pass
 
 
 def _scene_structure_cache_get(cache_key):

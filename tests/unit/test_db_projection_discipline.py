@@ -377,6 +377,7 @@ class DbProjectionDisciplineTest(unittest.TestCase):
         body = text.split("def run_bilibili_upload_only(", 1)[1]
 
         self.assertIn("_load_bilibili_upload_context_with_retries", body)
+        self.assertIn('context.status in {"completed", "failed", "canceled"}', body)
         self.assertIn("result_patch=result_patch", body)
         self.assertNotIn("TASK_PAYLOAD_COLUMNS", body)
         self.assertNotIn("task.params", body)
@@ -980,6 +981,9 @@ class DbProjectionDisciplineTest(unittest.TestCase):
         self.assertIn("include_params=False", route_body)
         self.assertIn("include_result=False", route_body)
         self.assertIn("/bilibili-uploads", poll_body)
+        self.assertIn("document.hidden", poll_body)
+        self.assertIn("this.refreshInFlight", poll_body)
+        self.assertIn("this.autoRefreshMs = 15000", frontend_text)
         self.assertNotIn(
             "this.request(`/api/mp3-video-workflows/jobs/${encodeURIComponent(this.jobId)}`,",
             poll_body,
@@ -1194,6 +1198,20 @@ class DbProjectionDisciplineTest(unittest.TestCase):
         self.assertLess(query_index, store_index)
         self.assertIn("RLock", text)
         self.assertIn('_float_env("DEV_FALLBACK_USER_CACHE_TTL", 300)', text)
+
+    def test_route_auth_reuses_project_guard_request_user(self):
+        path = BACKEND_DIR / "utils" / "auth_utils.py"
+        text = path.read_text(encoding="utf-8")
+        body = text.split("def get_current_user():", 1)[1].split(
+            "\ndef get_user_from_token", 1
+        )[0]
+
+        cache_index = body.index('getattr(g, "current_user", None)')
+        token_index = body.index("get_user_from_token()")
+        session_index = body.index("get_user_from_session()")
+        self.assertIn("has_request_context()", body)
+        self.assertLess(cache_index, token_index)
+        self.assertLess(cache_index, session_index)
 
     def test_zsxq_workflow_schema_check_is_one_compact_query(self):
         path = BACKEND_DIR / "services" / "zsxq_workflow_service.py"
@@ -1596,9 +1614,12 @@ class DbProjectionDisciplineTest(unittest.TestCase):
             1,
         )[0]
 
-        self.assertIn("if (this.pollInFlight || this.historyLoading) return", body)
+        self.assertIn("if (document.hidden || this.pollInFlight || this.historyLoading) return", body)
         self.assertIn("this.pollInFlight = true", body)
         self.assertIn("if (this.jobDate && this.jobDate < today) return", body)
+        self.assertIn("await this.loadHistory({ page: this.jobPage, silent: true })", body)
+        self.assertNotIn("Promise.all(active.map", body)
+        self.assertNotIn("this.refreshJob(job.job_id)", body)
         self.assertIn("finally", body)
         self.assertIn("this.pollInFlight = false", body)
 
@@ -1644,15 +1665,21 @@ class DbProjectionDisciplineTest(unittest.TestCase):
             1,
         )[0]
 
+        self.assertIn("document.hidden||this.pollInFlight", schedule)
+        self.assertIn("setTimeout(()=>this.pollStoryboard(),15000)", schedule)
         self.assertIn("setTimeout(()=>this.pollAssets(),10000)", schedule)
+        self.assertIn("document.hidden||this.pollInFlight", poll_assets)
+        self.assertIn("this.pollInFlight=true", poll_assets)
+        self.assertIn("this.pollInFlight=false", poll_assets)
         self.assertIn("await this.loadAssets(true,true)", poll_assets)
         self.assertIn("this.schedulePolling()", poll_assets)
+        self.assertIn("visibilitychange", text)
         self.assertIn("view=status", text)
         self.assertIn("mergeAssetStatus(result.data)", text)
         html = (
             PROJECT_ROOT / "src" / "frontend" / "report-stick-figure-video-workflow-detail.html"
         ).read_text(encoding="utf-8")
-        self.assertIn("lightweight-status-poll-v2", html)
+        self.assertIn("storyboard-poll-pressure-v1", html)
 
     def test_retention_cleanup_filters_structured_candidates_before_payload_reads(self):
         text = (
@@ -1687,6 +1714,14 @@ class DbProjectionDisciplineTest(unittest.TestCase):
         self.assertNotIn("_load_repair_task(", after_publish)
         self.assertIn("PublicationTask.updated_at == snapshot.updated_at", after_publish)
         self.assertIn("compare_and_swap.update({", after_publish)
+        self.assertNotIn(
+            "db.session.rollback()\n        _revoke_published_repair_message(",
+            text,
+        )
+        self.assertNotIn(
+            "_revoke_published_repair_message(async_result, task_id=snapshot.id",
+            text,
+        )
 
     def test_image_queue_repair_uses_long_grace_and_never_loads_params(self):
         text = (BACKEND_DIR / "services" / "publisher_queue_repair.py").read_text(encoding="utf-8")

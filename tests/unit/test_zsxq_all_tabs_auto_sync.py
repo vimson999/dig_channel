@@ -17,6 +17,12 @@ from services.zsxq_sync_service import zsxq_sync_service  # noqa: E402
 
 
 class ZsxqAllTabsAutoSyncTest(unittest.TestCase):
+    def setUp(self):
+        service._invalidate_config_cache()
+
+    def tearDown(self):
+        service._invalidate_config_cache()
+
     def test_targets_are_fixed_to_three_hours_and_use_distinct_modes(self):
         self.assertEqual(service.DEFAULT_INTERVAL_MINUTES, 180)
         self.assertEqual(
@@ -303,6 +309,7 @@ class ZsxqAllTabsAutoSyncTest(unittest.TestCase):
 
 class ZsxqAllTabsAutoSyncDatabaseConfigTest(unittest.TestCase):
     def setUp(self):
+        service._invalidate_config_cache()
         self.app = Flask(__name__)
         self.app.config.update(
             SQLALCHEMY_DATABASE_URI="sqlite:///:memory:",
@@ -314,6 +321,7 @@ class ZsxqAllTabsAutoSyncDatabaseConfigTest(unittest.TestCase):
         db.create_all()
 
     def tearDown(self):
+        service._invalidate_config_cache()
         db.session.remove()
         db.drop_all()
         self.ctx.pop()
@@ -346,6 +354,25 @@ class ZsxqAllTabsAutoSyncDatabaseConfigTest(unittest.TestCase):
         self.assertEqual(by_key["shengcai"]["topic_count"], 40)
         self.assertEqual(by_key["shengcai"]["max_pages"], 2)
         self.assertEqual(by_key["honghao"]["topic_count"], 20)
+
+    def test_reuses_normalized_database_configs_for_one_minute(self):
+        row = SimpleNamespace(
+            config_key="zsxq.sync.schedule.shengcai",
+            value={"group_id": "1824528822", "group_name": "生财有术"},
+            status=1,
+            updated_at=None,
+        )
+        with patch.object(service, "_db_config_rows", return_value=[row]) as rows, patch.object(
+            service.time,
+            "monotonic",
+            side_effect=[100.0, 100.0, 120.0],
+        ):
+            first = service.load_all_tabs_auto_sync_configs(ensure_defaults=False)
+            first[0]["group_name"] = "mutated"
+            second = service.load_all_tabs_auto_sync_configs(ensure_defaults=False)
+
+        self.assertEqual(rows.call_count, 1)
+        self.assertEqual(second[0]["group_name"], "生财有术")
 
     def test_updating_one_group_does_not_change_the_other_group(self):
         with patch.object(
