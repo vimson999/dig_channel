@@ -634,7 +634,7 @@ def create_job_from_report_audio(current_user, audio_job_id):
     )
     if not audio_task:
         return jsonify({"success": False, "message": "研报转语音任务不存在"}), 404
-    if audio_task.status != "completed" or int(audio_task.final_script_chars or 0) <= 0:
+    if audio_task.status not in {"completed", "failed"} or int(audio_task.final_script_chars or 0) <= 0:
         return jsonify({"success": False, "message": "研报转语音任务尚未生成完整文案"}), 409
     audio_path = Path(str(audio_task.report_audio_wav_path or ""))
     if not audio_path.is_file() or audio_path.stat().st_size <= 0:

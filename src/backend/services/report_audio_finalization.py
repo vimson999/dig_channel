@@ -21,6 +21,10 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from models import ReportStickFigureAudioTrack, ReportStickFigureSceneAsset, db
 from models.task import PublicationTask
+from services.report_audio_completion_contract import (
+    evaluate_report_video_completion,
+    probe_report_media,
+)
 
 
 logger = logging.getLogger("REPORT_AUDIO_FINALIZATION")
@@ -38,6 +42,7 @@ MAX_PUBLISHER_RETRIES = 2
 RETRY_DELAY_SECONDS = 60
 COMPLETION_CONTRACT_KEY = "completion_contract_version"
 COMPLETION_CONTRACT_VERSION = 2
+COMPLETION_MEDIA_PROBE = probe_report_media
 
 
 def _normalize_schemes(value):
@@ -153,22 +158,52 @@ def _update_finalization(
     return task
 
 
-def _output_paths_ready(child, *, include_landscape, schemes):
+def _audio_path(task):
+    if not task:
+        return ""
+    projected = str(getattr(task, "report_audio_wav_path", None) or "").strip()
+    if projected:
+        return projected
+    result = _task_result(task)
+    audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
+    return str(audio.get("wav_path") or "").strip()
+
+
+def _output_completion_contract(child, *, include_landscape, schemes, audio_path=""):
     if not child or child.status != "completed":
-        return False
+        return {
+            "schema_version": "report_video_completion_v1",
+            "ready": False,
+            "outputs": {},
+            "missing": ["publisher_child"],
+        }
     result = _task_result(child)
-    if include_landscape:
-        landscape = str(child.task_video_path or result.get("video_path") or "").strip()
-        if not landscape or not Path(landscape).is_file():
-            return False
+    landscape = str(child.task_video_path or result.get("video_path") or "").strip()
     vertical_paths = result.get("vertical_video_paths") if isinstance(result.get("vertical_video_paths"), dict) else {}
-    for scheme in schemes:
+    vertical_paths = dict(vertical_paths)
+    for scheme in _normalize_schemes(schemes):
         path = str(vertical_paths.get(scheme) or "").strip()
         if not path and len(schemes) == 1:
             path = str(result.get("vertical_video_path") or child.publisher_vertical_video_path or "").strip()
-        if not path or not Path(path).is_file():
-            return False
-    return True
+        if path:
+            vertical_paths[scheme] = path
+    return evaluate_report_video_completion(
+        include_landscape=bool(include_landscape),
+        vertical_schemes=_normalize_schemes(schemes),
+        landscape_path=landscape,
+        vertical_paths=vertical_paths,
+        audio_path=str(audio_path or ""),
+        probe=COMPLETION_MEDIA_PROBE,
+    )
+
+
+def _output_paths_ready(child, *, include_landscape, schemes, audio_path=""):
+    return _output_completion_contract(
+        child,
+        include_landscape=include_landscape,
+        schemes=schemes,
+        audio_path=audio_path,
+    )["ready"]
 
 
 def _completion_contract_ready(finalization, audio_task_id, options):
@@ -180,11 +215,17 @@ def _completion_contract_ready(finalization, audio_task_id, options):
         whiteboard_path = str(result.get("whiteboard_video_path") or "").strip()
         if not whiteboard_path or not Path(whiteboard_path).is_file():
             return False
+    audio_task = PublicationTask.query.options(load_only(
+        PublicationTask.id,
+        PublicationTask.result,
+        PublicationTask.report_audio_wav_path,
+    )).filter(PublicationTask.id == str(audio_task_id)).one_or_none()
     child = _matching_publisher_child(finalization, audio_task_id, options)
     return _output_paths_ready(
         child,
         include_landscape=bool(options.get("include_landscape")),
         schemes=schemes,
+        audio_path=_audio_path(audio_task),
     )
 
 
@@ -953,11 +994,13 @@ def reconcile_finalization(finalization_task_id):
             },
         )
         return {"reconciled": True, "reason": "publisher_active", "publisher_task_id": str(child.id)}
-    if child and _output_paths_ready(
+    publisher_completion = _output_completion_contract(
         child,
         include_landscape=bool(options.get("include_landscape")),
         schemes=schemes,
-    ):
+        audio_path=_audio_path(audio_task),
+    )
+    if child and publisher_completion["ready"]:
         if not whiteboard_state.get("ready"):
             _update_finalization(
                 finalization_task_id,
@@ -991,6 +1034,7 @@ def reconcile_finalization(finalization_task_id):
                 "whiteboard_video_path": whiteboard_state.get("video_path"),
                 "landscape_video_path": child_result.get("video_path") or child.task_video_path,
                 "vertical_video_path": child_result.get("vertical_video_path") or child.publisher_vertical_video_path,
+                "completion_contract": publisher_completion,
                 COMPLETION_CONTRACT_KEY: COMPLETION_CONTRACT_VERSION,
                 "message": "白板、横屏和方案三竖屏均已完成",
                 "retryable": False,
@@ -998,6 +1042,28 @@ def reconcile_finalization(finalization_task_id):
             completed=True,
         )
         return {"reconciled": True, "reason": "completed", "publisher_task_id": str(child.id)}
+    if child and child.status == "completed":
+        _update_finalization(
+            finalization_task_id,
+            status="failed",
+            step="completion_contract_failed",
+            progress=max(95, int(child.progress or 0)),
+            error_marker=True,
+            error="成片未通过完整性验收",
+            result_patch={
+                "publisher_task_id": str(child.id),
+                "completion_contract": publisher_completion,
+                "retryable": True,
+                "message": "成片文件不完整或质量检查失败；已保留现有文案、音频和视觉资产",
+            },
+            completed=True,
+        )
+        return {
+            "reconciled": True,
+            "reason": "completion_contract_failed",
+            "publisher_task_id": str(child.id),
+            "missing": list(publisher_completion.get("missing") or []),
+        }
     if child and child.status in {"failed", "canceled"}:
         publisher_attempts = int(state.get("publisher_attempts") or 0)
         if publisher_attempts >= MAX_PUBLISHER_RETRIES or not _next_retry_due(state):
@@ -1091,6 +1157,11 @@ def finalization_summary(task):
         "whiteboard_video_path": result.get("whiteboard_video_path"),
         "whiteboard_attempts": int(result.get("whiteboard_attempts") or 0),
         "publisher_task_id": result.get("publisher_task_id"),
+        "completion_contract": (
+            result.get("completion_contract")
+            if isinstance(result.get("completion_contract"), dict)
+            else None
+        ),
         "message": result.get("message"),
         "retryable": bool(result.get("retryable")),
         "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,

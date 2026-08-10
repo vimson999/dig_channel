@@ -16,6 +16,7 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-08-10 | [研报完整视频编排需要人工恢复与跨页面判断](2026-08-10-report-production-orchestration-manual-recovery.md) | report audio / Publisher / 方案三 / runtime guard / 工作台 | CODE_MODIFIED，等待新三 PDF 批次运行验收 |
 | 2026-08-09 | [ZSXQ Insights 冷查询把全量正文跨网络搬到应用](2026-08-09-zsxq-insights-cold-fulltext-transfer.md) | 生财 Insights / zsxq_topics / 网络传输 | 新代码已部署并完成真实冷/热 API 验收，OBSERVING |
 | 2026-08-08 | [PostgreSQL 长连接经代理虚拟隧道反复黑洞超时](2026-08-08-postgres-tunneled-route-query-timeout.md) | 全站数据库链路 / PgBouncer / 本机代理 TUN/Tailscale | 两轮隔离后仍有应用 timeout 与 server crash，OPEN/OBSERVING |
 | 2026-08-07 | [分镜提交成功后断连被误写为失败](2026-08-07-storyboard-ambiguous-commit-false-failure.md) | 火柴人视觉视频 / PostgreSQL / 父子任务状态机 | 指定任务端到端验收完成，RUNTIME_REPLACED/OBSERVING |

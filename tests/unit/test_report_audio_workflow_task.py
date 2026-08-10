@@ -43,6 +43,7 @@ from tasks.report_audio_workflow import (  # noqa: E402
     _publisher_workbench_institution,
     _publisher_sub_title,
     _publisher_video_transform,
+    _report_video_completion_contract,
     _task_chunk_attempt,
     _tts_text_hash,
     _valid_structured_result,
@@ -64,6 +65,44 @@ def _write_test_wav(path, seconds=1.0, sample_rate=16000):
 
 
 class ReportAudioWorkflowTaskTest(unittest.TestCase):
+    def test_full_video_completion_contract_requires_every_selected_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            landscape = root / "landscape.mp4"
+            wav = root / "final.wav"
+            landscape.write_bytes(b"video")
+            wav.write_bytes(b"audio")
+
+            with patch.object(
+                report_audio_workflow,
+                "COMPLETION_MEDIA_PROBE",
+                side_effect=lambda path: (
+                    {"duration": 30.0, "video_streams": 0, "audio_streams": 1}
+                    if str(path).endswith(".wav")
+                    else {"duration": 30.0, "video_streams": 1, "audio_streams": 1}
+                ),
+            ):
+                result = _report_video_completion_contract(
+                    {
+                        "landscape_enabled": True,
+                        "vertical_enabled": True,
+                        "landscape_video_path": str(landscape),
+                        "vertical_video_schemes": ["scheme3"],
+                        "vertical_video_paths": {},
+                    },
+                    {"wav_path": str(wav)},
+                    {
+                        "video": {
+                            "enabled": True,
+                            "vertical_enabled": True,
+                            "render_mode": "full_video",
+                        }
+                    },
+                )
+
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["missing"], ["vertical_scheme3"])
+
     def test_parent_current_step_codes_fit_publication_task_column(self):
         steps = [
             "submit_gemini",
@@ -958,8 +997,19 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         self.ctx = self.app.app_context()
         self.ctx.push()
         db.create_all()
+        self.completion_probe_patch = patch.object(
+            report_audio_workflow,
+            "COMPLETION_MEDIA_PROBE",
+            side_effect=lambda path: (
+                {"duration": 1.0, "video_streams": 0, "audio_streams": 1}
+                if str(path).endswith(".wav")
+                else {"duration": 1.0, "video_streams": 1, "audio_streams": 1}
+            ),
+        )
+        self.completion_probe_patch.start()
 
     def tearDown(self):
+        self.completion_probe_patch.stop()
         db.session.remove()
         db.drop_all()
         self.ctx.pop()

@@ -59,7 +59,7 @@ def find_reusable_audio_candidate(
     material_task_id: str = "",
     visible_user_ids: Iterable[str] = (),
 ) -> AudioCandidate | None:
-    """按结构化列寻找同一研报已经完成且文件完整的整篇 WAV。"""
+    """Find an intact full WAV, including one preserved after final-video recovery."""
 
     attachment_id = str(attachment_id or "").strip()
     material_task_id = str(material_task_id or "").strip()
@@ -87,7 +87,7 @@ def find_reusable_audio_candidate(
             PublicationTask.created_at,
         ))
         .filter(PublicationTask.feature.in_(REPORT_AUDIO_FEATURES))
-        .filter(PublicationTask.status == "completed")
+        .filter(PublicationTask.status.in_(("completed", "failed")))
         .filter(PublicationTask.report_audio_wav_path.isnot(None))
         .filter(or_(*identity_filters))
     )
@@ -96,6 +96,10 @@ def find_reusable_audio_candidate(
         query = query.filter(or_(PublicationTask.user_id.in_(user_ids), PublicationTask.user_id.is_(None)))
     rows = query.order_by(PublicationTask.completed_at.desc(), PublicationTask.created_at.desc()).limit(10).all()
     for row in rows:
+        # A failed source is only reusable once its final script projection and
+        # combined WAV both survived the later video-stage failure.
+        if row.status == "failed" and int(row.final_script_chars or 0) <= 0:
+            continue
         path = Path(str(row.report_audio_wav_path or "")).expanduser()
         if not path.is_file() or path.stat().st_size <= 0:
             continue

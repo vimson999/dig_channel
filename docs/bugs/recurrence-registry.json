@@ -92,6 +92,7 @@
       "status": "in_progress",
       "systemic_guardrail": "统一父子任务生命周期策略、集中状态迁移 API、reconciler、完整的父 feature × 子 feature × 父状态契约矩阵，以及 fail-closed 重启预检；长生命周期父容器必须区分 active、ready/waiting 和 terminal，重启门禁按阶段是否存在不可中断 worker 工作判定；任何异步子阶段回写必须保持状态与进度单调，较早阶段不得覆盖音频、视频或终态；任何写回 pending 的 queued、deferred 或 auto_retry 状态都必须登记消息可见、消息丢失和重启窗口三类 watchdog 契约，超过宽限期且 broker/worker 不可见时才能 CAS 重排；任何声明端到端的工作流必须以最终业务产物为唯一成功终点，每个自动阶段迁移同时具备 completion hook、幂等 CAS、历史 reconciler 和最终产物契约测试；写产物的 commit 遇到断连或结果不确定时必须先释放失效 Session，再以共享 durable completion contract 对账，禁止直接把成功产物覆盖为业务失败",
       "records": [
+        "2026-08-10-report-production-orchestration-manual-recovery.md",
         "2026-07-30-mp3-force-regenerate-repeated-completed-video.md",
         "2026-07-30-visual-ready-state-blocked-restart.md",
         "2026-07-29-report-audio-scheme3-preflight-blocked-landscape.md",

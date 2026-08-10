@@ -31,8 +31,19 @@ class ReportAudioFinalizationTest(unittest.TestCase):
         self.ctx = self.app.app_context()
         self.ctx.push()
         db.create_all()
+        self.probe_patch = patch.object(
+            finalization_service,
+            "COMPLETION_MEDIA_PROBE",
+            side_effect=lambda path: (
+                {"duration": 12.0, "video_streams": 0, "audio_streams": 1}
+                if str(path).endswith(".wav")
+                else {"duration": 12.0, "video_streams": 1, "audio_streams": 1}
+            ),
+        )
+        self.probe_patch.start()
 
     def tearDown(self):
+        self.probe_patch.stop()
         db.session.remove()
         db.drop_all()
         self.ctx.pop()
@@ -203,6 +214,8 @@ class ReportAudioFinalizationTest(unittest.TestCase):
         self.assertEqual(coordinator.current_step, "done")
         self.assertEqual(coordinator.progress, 100)
         self.assertEqual(coordinator.result["whiteboard_video_path"], str(whiteboard))
+        self.assertTrue(coordinator.result["completion_contract"]["ready"])
+        self.assertEqual(coordinator.result["completion_contract"]["missing"], [])
 
     def test_combined_outputs_do_not_close_intent_before_whiteboard_mp4_exists(self):
         parent = self._audio_parent()

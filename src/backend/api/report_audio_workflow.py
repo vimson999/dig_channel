@@ -4,7 +4,7 @@ import os
 import re
 import time
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from threading import Lock
@@ -211,6 +211,12 @@ OWNED_TASK_REFERENCE_COLUMNS = (
     PublicationTask.report_audio_vertical_cover_path,
     PublicationTask.report_audio_podcast_cover_path,
     PublicationTask.report_audio_bilibili_cover_path,
+    PublicationTask.final_script_chars,
+    PublicationTask.waiting_child_label,
+    PublicationTask.waiting_child_id,
+    PublicationTask.waiting_child_status,
+    PublicationTask.waiting_child_step,
+    PublicationTask.waiting_child_updated_at,
 )
 
 
@@ -569,6 +575,11 @@ def create_job(current_user):
     except ValueError as exc:
         return jsonify({"success": False, "message": str(exc)}), 400
     script_material_only = _parse_script_material_only(data)
+    if not script_material_only:
+        visual_scheme_keys = _ensure_scheme3_visual_workflow(
+            visual_scheme_keys,
+            video_options,
+        )
     manual_gemini = _parse_manual_gemini_result(data)
     tts_provider = str(data.get("tts_provider") or TTS_PROVIDER_DEFAULT).strip().lower()
     if tts_provider not in TTS_PROVIDERS:
@@ -906,8 +917,8 @@ def get_job_status(current_user, job_id):
     task = _get_owned_task_reference(current_user, job_id)
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
-    payload = _job_status_payload(task)
-    payload["visual_videos"] = _linked_visual_video_payloads(current_user, task)
+    visual_videos = _linked_visual_video_payloads(current_user, task)
+    payload = _job_status_payload(task, visual_videos=visual_videos)
     return jsonify({"success": True, **payload, "data": payload})
 
 
@@ -4148,7 +4159,216 @@ def _vertical_child_summary(task, parent_job_id=None, *, lightweight=False):
     return payload
 
 
-def _job_payload(task, include_raw=False, *, visual_videos=None):
+_FINALIZATION_UNSET = object()
+
+
+def _orchestration_payload(
+    task,
+    *,
+    result=None,
+    request_payload=None,
+    finalization=None,
+    visual_videos=None,
+    bilibili_uploads=None,
+):
+    """Build a bounded operator-facing state projection without extra queries."""
+
+    result = result if isinstance(result, dict) else {}
+    request_payload = request_payload if isinstance(request_payload, dict) else {}
+    visual_items = [item for item in (visual_videos or []) if isinstance(item, dict)][:8]
+    uploads = [item for item in (bilibili_uploads or []) if isinstance(item, dict)][:8]
+    waiting_raw = result.get("waiting_child") if isinstance(result.get("waiting_child"), dict) else {}
+    waiting = {
+        "label": str(getattr(task, "waiting_child_label", None) or waiting_raw.get("label") or "")[:80],
+        "child_id": str(getattr(task, "waiting_child_id", None) or waiting_raw.get("child_id") or "")[:36],
+        "status": str(getattr(task, "waiting_child_status", None) or waiting_raw.get("status") or "")[:40],
+        "step": str(getattr(task, "waiting_child_step", None) or waiting_raw.get("step") or "")[:80],
+        "updated_at": str(
+            getattr(task, "waiting_child_updated_at", None) or waiting_raw.get("updated_at") or ""
+        )[:64],
+    }
+    if not waiting["label"] and not waiting["child_id"]:
+        waiting = None
+
+    guard = result.get("runtime_guard") if isinstance(result.get("runtime_guard"), dict) else {}
+    current_step = str(getattr(task, "current_step", None) or "")
+    capacity = _capacity_summary(guard) if current_step.startswith("deferred_") else None
+    completion = _completion_contract_summary(
+        result.get("completion_contract")
+        or ((finalization or {}).get("completion_contract") if isinstance(finalization, dict) else None)
+    )
+    video_request = request_payload.get("video") if isinstance(request_payload.get("video"), dict) else {}
+    stages = _orchestration_stages(
+        task,
+        result=result,
+        video_request=video_request,
+        visual_items=visual_items,
+        uploads=uploads,
+        waiting=waiting,
+        completion=completion,
+        finalization=finalization,
+    )
+    return {
+        "stages": stages,
+        "waiting": waiting,
+        "capacity": capacity,
+        "completion_contract": completion,
+    }
+
+
+def _capacity_summary(value):
+    if not isinstance(value, dict) or not value:
+        return None
+    countdown = _bounded_int(value.get("countdown"), 0, 0, 86400)
+    created_at = str(value.get("created_at") or "")[:64] or None
+    next_retry_at = None
+    if created_at and countdown:
+        try:
+            parsed = datetime.fromisoformat(created_at.rstrip("Z"))
+            next_retry_at = (parsed + timedelta(seconds=countdown)).isoformat() + "Z"
+        except ValueError:
+            next_retry_at = None
+    return {
+        "reason": str(value.get("reason") or "")[:80] or None,
+        "message": str(value.get("message") or "")[:240] or None,
+        "queue": str(value.get("queue") or "")[:80] or None,
+        "active_count": _number_or_none(value.get("active_count"), int),
+        "limit": _number_or_none(value.get("limit"), int),
+        "countdown": countdown,
+        "created_at": created_at,
+        "next_retry_at": next_retry_at,
+    }
+
+
+def _completion_contract_summary(value):
+    if not isinstance(value, dict) or not value:
+        return None
+    outputs = {}
+    raw_outputs = value.get("outputs") if isinstance(value.get("outputs"), dict) else {}
+    for key, item in list(raw_outputs.items())[:8]:
+        if not isinstance(item, dict):
+            continue
+        outputs[str(key)[:80]] = {
+            "ready": bool(item.get("ready")),
+            "path": str(item.get("path") or "")[:600],
+            "reason": str(item.get("reason") or "")[:80] or None,
+            **({"duration": item.get("duration")} if item.get("duration") is not None else {}),
+            **({"audio_duration": item.get("audio_duration")} if item.get("audio_duration") is not None else {}),
+        }
+    return {
+        "schema_version": str(value.get("schema_version") or "")[:80] or None,
+        "ready": bool(value.get("ready")),
+        "outputs": outputs,
+        "missing": [str(item)[:80] for item in (value.get("missing") or [])[:8]],
+    }
+
+
+def _orchestration_stages(
+    task,
+    *,
+    result,
+    video_request,
+    visual_items,
+    uploads,
+    waiting,
+    completion,
+    finalization,
+):
+    task_status = str(getattr(task, "status", None) or "").lower()
+    step = str(getattr(task, "current_step", None) or "").lower()
+    failed = task_status in {"failed", "blocked_by_captcha", "canceled"}
+    structured = result.get("structured_result") if isinstance(result.get("structured_result"), dict) else {}
+    script_material = result.get("script_material") if isinstance(result.get("script_material"), dict) else {}
+    audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
+    audio_reuse = result.get("audio_reuse") if isinstance(result.get("audio_reuse"), dict) else {}
+    script_ready = bool(
+        str(structured.get("final_script_for_tts") or "").strip()
+        or int(getattr(task, "final_script_chars", 0) or 0) > 0
+    )
+    script_reused = bool(script_ready and str(script_material.get("mode") or "").startswith("reused"))
+    audio_ready = bool(str(audio.get("wav_path") or getattr(task, "report_audio_wav_path", None) or "").strip())
+    audio_reused = bool(audio_ready and (audio_reuse.get("source_task_id") or audio_reuse.get("reused")))
+    requested_schemes = video_request.get("vertical_video_schemes") or []
+    if isinstance(requested_schemes, str):
+        requested_schemes = [requested_schemes]
+    visual_requested = "scheme3" in [str(item).lower() for item in requested_schemes]
+    video_requested = _truthy(video_request.get("enabled"), False) or _truthy(
+        video_request.get("vertical_enabled"),
+        False,
+    )
+    visual_ready = any(item.get("scheme3_ready") is True for item in visual_items)
+    visual_active = any(
+        str(item.get("status") or "").lower() in {"queued", "pending", "running", "processing", "ready"}
+        and item.get("scheme3_ready") is not True
+        for item in visual_items
+    )
+    publisher_wait = waiting and waiting.get("label") == "publisher_video"
+    video_ready = bool(completion and completion.get("outputs") and all(
+        item.get("ready") for item in completion["outputs"].values()
+    ))
+    explicit_publish = _truthy(video_request.get("bilibili_enabled"), False)
+    upload_completed = any(str(item.get("status") or "").lower() == "completed" for item in uploads)
+    upload_active = any(
+        str(item.get("status") or "").lower() in {"queued", "pending", "running", "processing", "submitting"}
+        for item in uploads
+    )
+
+    def stage(key, label, state, detail=""):
+        return {"key": key, "label": label, "state": state, "detail": str(detail or "")[:240] or None}
+
+    script_state = "reused" if script_reused else ("completed" if script_ready else (
+        "running" if any(token in step for token in ("gemini", "script", "structured", "review_cover")) else (
+            "needs_attention" if failed and not script_ready else "pending"
+        )
+    ))
+    audio_state = "reused" if audio_reused else ("completed" if audio_ready else (
+        "waiting" if waiting and str(waiting.get("label") or "").startswith("doubao") else (
+            "running" if any(token in step for token in ("doubao", "tts", "audio", "combine")) else (
+                "needs_attention" if failed and script_ready else "pending"
+            )
+        )
+    ))
+    visual_state = "skipped" if not visual_requested else (
+        "completed" if visual_ready else ("running" if visual_active else (
+            "needs_attention" if failed and finalization and finalization.get("error") else "waiting"
+        ))
+    )
+    video_state = "skipped" if not video_requested else ("completed" if video_ready else (
+        "waiting" if publisher_wait else (
+            "running" if any(token in step for token in ("pub_", "publisher", "video")) else (
+                "needs_attention" if completion and completion.get("missing") else "pending"
+            )
+        )
+    ))
+    acceptance_state = "completed" if completion and completion.get("ready") else (
+        "needs_attention" if completion and completion.get("missing") else "pending"
+    )
+    publish_state = "completed" if upload_completed else (
+        "running" if upload_active else ("pending" if explicit_publish else "skipped")
+    )
+    return [
+        stage("input", "输入", "completed"),
+        stage("script", "文案", script_state, "复用已有文案" if script_reused else ""),
+        stage("audio", "音频", audio_state, "复用已有整篇 WAV" if audio_reused else ""),
+        stage("visual", "视觉", visual_state),
+        stage("video", "成片", video_state, "等待 Publisher 子任务" if publisher_wait else ""),
+        stage(
+            "acceptance",
+            "验收",
+            acceptance_state,
+            ", ".join((completion or {}).get("missing") or []),
+        ),
+        stage("publish", "发布", publish_state, "发布保持显式开关" if not explicit_publish else ""),
+    ]
+
+
+def _job_payload(
+    task,
+    include_raw=False,
+    *,
+    visual_videos=None,
+    finalization=_FINALIZATION_UNSET,
+):
     result = task.result or {}
     params = task.params or {}
     request_payload = params.get("report_audio_workflow") or {}
@@ -4171,7 +4391,8 @@ def _job_payload(task, include_raw=False, *, visual_videos=None):
         children["publisher_vertical_video"] = _vertical_child_summary(vertical_child, task.id, lightweight=True)
     if vertical_preview_child:
         children["publisher_vertical_preview_video"] = _vertical_child_summary(vertical_preview_child, task.id, lightweight=True)
-    finalization = finalization_summary_for_audio(task.id)
+    if finalization is _FINALIZATION_UNSET:
+        finalization = finalization_summary_for_audio(task.id)
     if finalization:
         children["finalization"] = finalization
     cover_subtitle = (structured_result or {}).get("cover_subtitle") or video_result.get("cover_subtitle") or ""
@@ -4194,6 +4415,20 @@ def _job_payload(task, include_raw=False, *, visual_videos=None):
         (structured_result or {}).get("cover_title") or "",
     )
     audio_script = _audio_script_payload(structured_result, result.get("tts_text"))
+    visual_items = list(visual_videos or [])
+    bilibili_uploads = bilibili_upload_children(
+        task.id,
+        parent_feature=FEATURE_NAME,
+        source_label=BILIBILI_UPLOAD_SOURCE,
+    )
+    orchestration = _orchestration_payload(
+        task,
+        result=result,
+        request_payload=request_payload,
+        finalization=finalization,
+        visual_videos=visual_items,
+        bilibili_uploads=bilibili_uploads,
+    )
     payload = {
         "job_id": task.id,
         "status": status,
@@ -4243,11 +4478,8 @@ def _job_payload(task, include_raw=False, *, visual_videos=None):
         "publisher_vertical_video": children.get("publisher_vertical_video"),
         "publisher_vertical_preview_video": children.get("publisher_vertical_preview_video"),
         "finalization": finalization,
-        "bilibili_uploads": bilibili_upload_children(
-            task.id,
-            parent_feature=FEATURE_NAME,
-            source_label=BILIBILI_UPLOAD_SOURCE,
-        ),
+        "bilibili_uploads": bilibili_uploads,
+        "orchestration": orchestration,
         "pdf_first_page_image": _public_image(task.id, result.get("pdf_first_page_image")),
         "download_audio_url": f"/api/report-audio-workflows/jobs/{task.id}/download-audio" if audio and audio.get("wav_path") else None,
         "download_result_url": f"/api/report-audio-workflows/jobs/{task.id}/download-result" if result.get("output_path") else None,
@@ -4260,7 +4492,7 @@ def _job_payload(task, include_raw=False, *, visual_videos=None):
         "metadata": result.get("metadata") or request_payload.get("metadata") or {},
         "notifications": result.get("notifications") or {},
         "logs": result.get("logs") or [],
-        "visual_videos": list(visual_videos or []),
+        "visual_videos": visual_items,
     }
     if include_raw:
         payload["raw_params"] = params
@@ -4666,7 +4898,7 @@ def _ready_linked_visual_workflow_id(current_user, audio_task, visual_scheme_key
     return ""
 
 
-def _job_status_payload(task):
+def _job_status_payload(task, *, visual_videos=None):
     status = STATUS_MAP.get(task.status, task.status or "queued")
     live_children = _live_child_tasks(task.id)
     children = {}
@@ -4691,6 +4923,31 @@ def _job_status_payload(task):
     if finalization:
         children["finalization"] = finalization
 
+    bilibili_uploads = bilibili_upload_children(
+        task.id,
+        parent_feature=FEATURE_NAME,
+        source_label=BILIBILI_UPLOAD_SOURCE,
+    )
+    task_result = getattr(task, "result", None)
+    task_params = getattr(task, "params", None)
+    if isinstance(task_result, dict):
+        orchestration_result = task_result
+        request_payload = (
+            task_params.get("report_audio_workflow")
+            if isinstance(task_params, dict) and isinstance(task_params.get("report_audio_workflow"), dict)
+            else {}
+        )
+    else:
+        orchestration_result, request_payload = _status_orchestration_fragments(task.id)
+    orchestration = _orchestration_payload(
+        task,
+        result=orchestration_result,
+        request_payload=request_payload,
+        finalization=finalization,
+        visual_videos=visual_videos,
+        bilibili_uploads=bilibili_uploads,
+    )
+
     payload = {
         "job_id": task.id,
         "status": status,
@@ -4703,13 +4960,34 @@ def _job_status_payload(task):
         "children": children,
         "doubao_browser_tts": doubao_items,
         "finalization": finalization,
-        "bilibili_uploads": bilibili_upload_children(
-            task.id,
-            parent_feature=FEATURE_NAME,
-            source_label=BILIBILI_UPLOAD_SOURCE,
-        ),
+        "bilibili_uploads": bilibili_uploads,
+        "orchestration": orchestration,
+        "visual_videos": list(visual_videos or []),
     }
     return payload
+
+
+def _status_orchestration_fragments(task_id):
+    """Read only the small JSON branches required by status polling."""
+
+    row = db.session.query(
+        PublicationTask.result["runtime_guard"].label("runtime_guard"),
+        PublicationTask.result["completion_contract"].label("completion_contract"),
+        PublicationTask.result["script_material"].label("script_material"),
+        PublicationTask.result["audio_reuse"].label("audio_reuse"),
+        PublicationTask.params["report_audio_workflow"]["video"].label("video_request"),
+    ).filter(PublicationTask.id == str(task_id)).one_or_none()
+    if not row:
+        return {}, {}
+    result = {
+        key: getattr(row, key)
+        for key in ("runtime_guard", "completion_contract", "script_material", "audio_reuse")
+        if isinstance(getattr(row, key), dict)
+    }
+    request_payload = {
+        "video": row.video_request if isinstance(row.video_request, dict) else {}
+    }
+    return result, request_payload
 
 
 def _audio_script_payload(structured_result, tts_text):
@@ -5436,6 +5714,19 @@ def _parse_visual_scheme_keys(data):
             continue
         scheme = visual_scheme(key)
         normalized.append(scheme.key)
+    return normalized
+
+
+def _ensure_scheme3_visual_workflow(visual_scheme_keys, video_options):
+    """Add the visual dependency required by a full scheme-3 vertical render."""
+    normalized = list(visual_scheme_keys or [])
+    needs_scheme3_visual = (
+        (video_options or {}).get("render_mode") == "full_video"
+        and bool((video_options or {}).get("vertical_enabled"))
+        and "scheme3" in ((video_options or {}).get("vertical_video_schemes") or [])
+    )
+    if needs_scheme3_visual and "stick_figure" not in normalized:
+        normalized.append("stick_figure")
     return normalized
 
 

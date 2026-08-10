@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3, Flask, SQLAlchemy, Celery, PostgreSQL/SQLite test database, unittest/pytest, vanilla JavaScript, FFprobe.
 
+**Implementation status (2026-08-10):** Tasks 1–5 are code-complete. Deterministic verification passed with 1,137 unit tests and the 32-test recovery/duplicate-prevention group. Runtime status remains `CODE_MODIFIED` until a fresh three-PDF batch satisfies the acceptance boundary in the linked bug record.
+
 ## Global Constraints
 
 - Preserve the existing `PublicationTask`, Celery queues, structured projection columns, and historical audit JSON.

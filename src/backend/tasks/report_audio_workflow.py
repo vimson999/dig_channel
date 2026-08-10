@@ -42,6 +42,10 @@ from services.report_audio_workflow import (
     synthesize_doubao_api_chunks,
 )
 from services.report_pdf_evidence import build_and_store_evidence
+from services.report_audio_completion_contract import (
+    evaluate_report_video_completion,
+    probe_report_media,
+)
 from services.thumbnail_service import thumbnail_service
 from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
 from services.runtime_guard import (
@@ -58,6 +62,7 @@ from tasks.publisher import run_publication_pipeline
 
 
 logger = logging.getLogger("REPORT_AUDIO_WORKFLOW_TASK")
+COMPLETION_MEDIA_PROBE = probe_report_media
 _active_workflow_state = ContextVar("report_audio_workflow_state", default=None)
 _workflow_resume_cache = OrderedDict()
 _workflow_resume_cache_lock = Lock()
@@ -1237,6 +1242,12 @@ def _process_job(task_id):
             _update_result(workflow_task_id, {"video": video_result})
             _emit(workflow_task_id, "skip_publisher_video", 94, "跳过视频合成")
 
+        completion_contract = _report_video_completion_contract(video_result, audio, payload)
+        _update_result(workflow_task_id, {"completion_contract": completion_contract})
+        if not completion_contract["ready"]:
+            missing = ", ".join(completion_contract.get("missing") or []) or "unknown"
+            raise RuntimeError(f"成片未通过完整性验收，缺失或无效输出: {missing}")
+
         output_path = storage_path_for_job(workflow_task_id, workflow_created_at)
         final_payload = {
             "workflow_task_id": workflow_task_id,
@@ -1248,6 +1259,7 @@ def _process_job(task_id):
             "audio": audio,
             "audio_reuse": audio_reuse_result,
             "video": video_result,
+            "completion_contract": completion_contract,
             "gemini": gemini_result,
             "completed_at": datetime.utcnow().isoformat() + "Z",
         }
@@ -1265,6 +1277,7 @@ def _process_job(task_id):
             "audio": audio,
             "audio_reuse": audio_reuse_result,
             "video": video_result,
+            "completion_contract": completion_contract,
             "output_path": output_path,
             "completed_at": datetime.utcnow().isoformat() + "Z",
         }
@@ -2900,6 +2913,33 @@ def _publisher_video_output_ready(task, pdf_screenshot):
     return not summary.get("vertical_enabled") or not vertical_schemes or all(
         vertical_paths.get(scheme) and os.path.exists(vertical_paths[scheme])
         for scheme in vertical_schemes
+    )
+
+
+def _report_video_completion_contract(video_result, audio, payload):
+    video = _copy_dict(video_result)
+    audio = _copy_dict(audio)
+    render_mode = _video_render_mode(payload)
+    requires_full_video = _video_stage_enabled(payload) and render_mode == "full_video"
+    include_landscape = requires_full_video and _truthy(video.get("landscape_enabled"), False)
+    vertical_schemes = (
+        _normalize_vertical_schemes(video.get("vertical_video_schemes"), video.get("vertical_video_scheme"))
+        if requires_full_video and _truthy(video.get("vertical_enabled"), False)
+        else []
+    )
+    vertical_paths = _copy_dict(video.get("vertical_video_paths"))
+    if len(vertical_schemes) == 1 and video.get("vertical_video_path"):
+        vertical_paths.setdefault(vertical_schemes[0], video.get("vertical_video_path"))
+    landscape_path = str(video.get("landscape_video_path") or "").strip()
+    if include_landscape and not landscape_path:
+        landscape_path = str(video.get("video_path") or "").strip()
+    return evaluate_report_video_completion(
+        include_landscape=include_landscape,
+        vertical_schemes=vertical_schemes,
+        landscape_path=landscape_path,
+        vertical_paths=vertical_paths,
+        audio_path=str(audio.get("wav_path") or ""),
+        probe=COMPLETION_MEDIA_PROBE,
     )
 
 

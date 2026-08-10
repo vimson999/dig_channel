@@ -1635,6 +1635,116 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertNotIn("logs", payload)
         self.assertNotIn("structured_result", payload)
 
+    def test_job_payload_exposes_capacity_wait_with_next_retry_time(self):
+        parent = PublicationTask(
+            status="pending",
+            current_step="deferred_capacity",
+            progress=95,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {"pdf": {"filename": "capacity.pdf"}},
+            },
+            result={
+                "runtime_guard": {
+                    "reason": "feature_capacity",
+                    "message": "系统保护：任务稍后自动重试",
+                    "active_count": 2,
+                    "limit": 2,
+                    "countdown": 180,
+                    "queue": "report_audio_workflow",
+                    "created_at": "2026-08-10T01:00:00Z",
+                }
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        payload = report_audio_api._job_payload(parent)
+
+        capacity = payload["orchestration"]["capacity"]
+        self.assertEqual(capacity["active_count"], 2)
+        self.assertEqual(capacity["limit"], 2)
+        self.assertEqual(capacity["countdown"], 180)
+        self.assertEqual(capacity["next_retry_at"], "2026-08-10T01:03:00Z")
+        fragments, _request = report_audio_api._status_orchestration_fragments(parent.id)
+        self.assertEqual(fragments["runtime_guard"]["active_count"], 2)
+
+    def test_job_payload_exposes_exact_waiting_child_projection(self):
+        parent = PublicationTask(
+            status="processing",
+            current_step="pub_waiting",
+            progress=95,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {"pdf": {"filename": "waiting.pdf"}},
+            },
+            result={
+                "waiting_child": {
+                    "label": "publisher_video",
+                    "child_id": "publisher-child-1",
+                    "status": "processing",
+                    "step": "v_synthesis",
+                    "updated_at": "2026-08-10T01:05:00Z",
+                }
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        payload = report_audio_api._job_payload(parent)
+
+        waiting = payload["orchestration"]["waiting"]
+        self.assertEqual(waiting["label"], "publisher_video")
+        self.assertEqual(waiting["child_id"], "publisher-child-1")
+        self.assertEqual(waiting["status"], "processing")
+        self.assertEqual(waiting["step"], "v_synthesis")
+
+    def test_completed_job_exposes_seven_stages_and_completion_outputs(self):
+        contract = {
+            "schema_version": "report_video_completion_v1",
+            "ready": True,
+            "missing": [],
+            "outputs": {
+                "landscape": {"ready": True, "path": "/tmp/landscape.mp4", "reason": None},
+                "vertical_scheme3": {"ready": True, "path": "/tmp/scheme3.mp4", "reason": None},
+            },
+        }
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"filename": "completed.pdf"},
+                    "video": {
+                        "enabled": True,
+                        "vertical_enabled": True,
+                        "vertical_video_schemes": ["scheme3"],
+                    },
+                },
+            },
+            result={"completion_contract": contract},
+            completed_at=datetime.utcnow(),
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        payload = report_audio_api._job_payload(parent)
+
+        orchestration = payload["orchestration"]
+        self.assertEqual(
+            [stage["label"] for stage in orchestration["stages"]],
+            ["输入", "文案", "音频", "视觉", "成片", "验收", "发布"],
+        )
+        self.assertTrue(orchestration["completion_contract"]["ready"])
+        self.assertTrue(
+            orchestration["completion_contract"]["outputs"]["vertical_scheme3"]["ready"]
+        )
+
     def test_previewable_file_is_inline_only_for_preview_requests(self):
         media_path = Path(self.tmpdir.name) / "cover.jpg"
         media_path.write_bytes(b"jpeg-preview")

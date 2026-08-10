@@ -391,12 +391,17 @@ class ReportAudioWorkflowDetailPage {
         if (!this.els.sidebarStatus) return;
         const status = this.statusMeta(job?.status);
         const stages = this.reportWorkflowStages(job);
-        const current = stages.find((stage) => ['active', 'failed', 'canceled'].includes(stage.state))
+        const current = stages.find((stage) => ['active', 'running', 'waiting', 'needs_attention', 'failed', 'canceled'].includes(stage.state))
             || [...stages].reverse().find((stage) => stage.state === 'completed')
             || stages[0];
         const stateMeta = {
             completed: { icon: 'fa-circle-check', color: 'text-emerald-600', dot: 'bg-emerald-500' },
             active: { icon: 'fa-spinner fa-spin', color: 'text-blue-600', dot: 'bg-blue-500' },
+            running: { icon: 'fa-spinner fa-spin', color: 'text-blue-600', dot: 'bg-blue-500' },
+            reused: { icon: 'fa-recycle', color: 'text-cyan-600', dot: 'bg-cyan-500' },
+            waiting: { icon: 'fa-hourglass-half', color: 'text-amber-600', dot: 'bg-amber-500' },
+            needs_attention: { icon: 'fa-triangle-exclamation', color: 'text-rose-600', dot: 'bg-rose-500' },
+            skipped: { icon: 'fa-minus', color: 'text-slate-300', dot: 'bg-slate-300' },
             failed: { icon: 'fa-circle-exclamation', color: 'text-red-600', dot: 'bg-red-500' },
             canceled: { icon: 'fa-circle-stop', color: 'text-amber-600', dot: 'bg-amber-500' },
             pending: { icon: 'fa-circle', color: 'text-slate-300', dot: 'bg-slate-300' },
@@ -415,7 +420,7 @@ class ReportAudioWorkflowDetailPage {
             <div class="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
                 <div class="truncate text-xs font-black text-slate-800">${this.escape(current?.label || '等待任务')}</div>
                 <div class="mt-1 flex items-center justify-between text-[10px] font-bold text-slate-500">
-                    <span>${this.escape(current?.state === 'active' ? '进行中' : (status.label || '等待'))}</span>
+                    <span>${this.escape(['active', 'running'].includes(current?.state) ? '进行中' : (current?.state === 'needs_attention' ? '需要处理' : (current?.state === 'waiting' ? '等待' : (status.label || '等待'))))}</span>
                     <span>${Math.max(0, Math.min(100, Number(job?.progress || 0)))}%</span>
                 </div>
             </div>
@@ -423,7 +428,7 @@ class ReportAudioWorkflowDetailPage {
                 ${stages.map((stage) => {
                     const meta = stateMeta[stage.state] || stateMeta.pending;
                     return `
-                        <li class="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] ${stage.state === 'active' ? 'bg-blue-50 font-black text-blue-800' : 'font-bold text-slate-500'}" title="${this.escapeAttr(stage.label)}">
+                        <li class="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] ${['active', 'running'].includes(stage.state) ? 'bg-blue-50 font-black text-blue-800' : 'font-bold text-slate-500'}" title="${this.escapeAttr(stage.label)}">
                             <i class="fas ${meta.icon} ${meta.color} w-3 shrink-0 text-center" aria-hidden="true"></i>
                             <span class="truncate">${this.escape(stage.label)}</span>
                         </li>
@@ -783,9 +788,10 @@ class ReportAudioWorkflowDetailPage {
                         <button type="button" data-copy-text="${this.escapeAttr(this.displayTitle(job))}" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-copy mr-1"></i>复制标题</button>
                     </div>
                 </div>
-                <ol class="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6" aria-label="任务流程进度">
+                <ol class="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7" aria-label="任务流程进度">
                     ${workflowStages.map((stage) => this.renderWorkflowStage(stage)).join('')}
                 </ol>
+                ${this.orchestrationNotice(job)}
                 ${job.error ? `<div class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">${this.escape(job.error)}</div>` : ''}
             </section>
         `;
@@ -834,21 +840,42 @@ class ReportAudioWorkflowDetailPage {
     }
 
     reportWorkflowStages(job) {
-        const keyframeMode = this.reportWorkflowRenderMode(job) === 'keyframes';
+        const serverStages = Array.isArray(job?.orchestration?.stages)
+            ? job.orchestration.stages
+            : [];
+        if (serverStages.length) {
+            const icons = {
+                input: 'fa-file-pdf',
+                script: 'fa-file-lines',
+                audio: 'fa-wave-square',
+                visual: 'fa-images',
+                video: 'fa-film',
+                acceptance: 'fa-clipboard-check',
+                publish: 'fa-cloud-arrow-up',
+            };
+            return serverStages.map((stage) => ({
+                key: String(stage?.key || ''),
+                label: String(stage?.label || stage?.key || '阶段'),
+                icon: icons[stage?.key] || 'fa-circle',
+                state: String(stage?.state || 'pending'),
+                detail: String(stage?.detail || ''),
+            }));
+        }
         const stages = [
-            { key: 'pdf', label: 'PDF 准备', icon: 'fa-file-pdf' },
-            { key: 'gemini', label: 'Gemini 解析', icon: 'fa-wand-magic-sparkles' },
-            { key: 'script', label: '文案整理', icon: 'fa-file-lines' },
-            { key: 'tts', label: '语音生成', icon: 'fa-wave-square' },
-            { key: 'video', label: keyframeMode ? '关键帧/封皮' : '视频生成', icon: keyframeMode ? 'fa-images' : 'fa-film' },
-            { key: 'done', label: '任务完成', icon: 'fa-circle-check' },
+            { key: 'input', label: '输入', icon: 'fa-file-pdf' },
+            { key: 'script', label: '文案', icon: 'fa-file-lines' },
+            { key: 'audio', label: '音频', icon: 'fa-wave-square' },
+            { key: 'visual', label: '视觉', icon: 'fa-images' },
+            { key: 'video', label: '成片', icon: 'fa-film' },
+            { key: 'acceptance', label: '验收', icon: 'fa-clipboard-check' },
+            { key: 'publish', label: '发布', icon: 'fa-cloud-arrow-up' },
         ];
         const taskStatus = String(job?.status || '').trim().toLowerCase();
         const step = String(job?.step || '').trim().toLowerCase();
         const progress = Math.max(0, Math.min(100, Number(job?.progress || 0)));
         let currentIndex = this.reportWorkflowStageIndex(step, progress);
         if (['completed', 'success', 'succeeded', 'done'].includes(taskStatus) || step === 'done') {
-            currentIndex = stages.length - 1;
+            currentIndex = 5;
         }
         const failed = ['failed', 'error'].includes(taskStatus);
         const canceled = ['canceled', 'cancelled'].includes(taskStatus);
@@ -864,6 +891,8 @@ class ReportAudioWorkflowDetailPage {
 
     reportWorkflowStageIndex(step, progress) {
         if (step === 'done') return 5;
+        if (step.includes('upload') || step.includes('publish')) return 6;
+        if (step.includes('completion_contract') || step.includes('acceptance')) return 5;
         if (
             step.includes('publisher')
             || step.includes('video')
@@ -871,28 +900,50 @@ class ReportAudioWorkflowDetailPage {
             || step.includes('pdf_preview')
             || step.includes('render_pdf')
         ) return 4;
+        if (step.includes('visual') || step.includes('storyboard') || step.includes('image')) return 3;
         if (
             step.includes('doubao')
             || step.includes('tts')
             || step.includes('audio')
             || step.includes('reading')
             || step.includes('combine')
-        ) return 3;
+        ) return 2;
         if (
             step.includes('normalize')
             || step.includes('review_cover')
             || step.includes('structured')
             || step.includes('script_material')
             || step.includes('manual_gemini')
-        ) return 2;
+        ) return 1;
         if (step.includes('gemini')) return 1;
         if (step && !['queued', 'pending', 'start'].includes(step)) {
             if (progress >= 94) return 4;
-            if (progress >= 61) return 3;
-            if (progress >= 53) return 2;
+            if (progress >= 61) return 2;
+            if (progress >= 53) return 1;
             if (progress >= 8) return 1;
         }
         return 0;
+    }
+
+    orchestrationNotice(job) {
+        const orchestration = job?.orchestration || {};
+        const capacity = orchestration.capacity;
+        const waiting = orchestration.waiting;
+        const completion = orchestration.completion_contract;
+        const notices = [];
+        if (capacity) {
+            const retryAt = capacity.next_retry_at
+                ? ` · 下次重试 ${this.formatDateTime(capacity.next_retry_at)}`
+                : '';
+            notices.push(`<div class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800"><i class="fas fa-gauge-high mr-1"></i>容量保护：当前活动数 ${this.escape(capacity.active_count ?? '-')} / ${this.escape(capacity.limit ?? '-')}${this.escape(retryAt)}</div>`);
+        }
+        if (waiting?.child_id) {
+            notices.push(`<div class="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-800"><i class="fas fa-hourglass-half mr-1"></i>等待 ${this.escape(waiting.label || '子任务')} · ${this.escape(waiting.status || '运行中')} / ${this.escape(waiting.step || '-')}</div>`);
+        }
+        if (completion && !completion.ready && Array.isArray(completion.missing) && completion.missing.length) {
+            notices.push(`<div class="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-800"><i class="fas fa-triangle-exclamation mr-1"></i>验收需要处理：缺少或未通过 ${this.escape(completion.missing.join('、'))}</div>`);
+        }
+        return notices.length ? `<div class="mt-3 space-y-2">${notices.join('')}</div>` : '';
     }
 
     renderWorkflowStage(stage) {
@@ -910,6 +961,41 @@ class ReportAudioWorkflowDetailPage {
                 label: 'text-blue-950',
                 status: '进行中',
                 statusClass: 'text-blue-700',
+            },
+            running: {
+                card: 'border-blue-300 bg-blue-50 ring-1 ring-blue-100',
+                icon: 'fa-spinner fa-spin text-blue-600',
+                label: 'text-blue-950',
+                status: '进行中',
+                statusClass: 'text-blue-700',
+            },
+            reused: {
+                card: 'border-cyan-200 bg-cyan-50',
+                icon: 'fa-recycle text-cyan-600',
+                label: 'text-cyan-950',
+                status: '已复用',
+                statusClass: 'text-cyan-700',
+            },
+            waiting: {
+                card: 'border-amber-200 bg-amber-50',
+                icon: 'fa-hourglass-half text-amber-600',
+                label: 'text-amber-950',
+                status: '等待',
+                statusClass: 'text-amber-700',
+            },
+            needs_attention: {
+                card: 'border-rose-300 bg-rose-50',
+                icon: 'fa-triangle-exclamation text-rose-600',
+                label: 'text-rose-950',
+                status: '需要处理',
+                statusClass: 'text-rose-700',
+            },
+            skipped: {
+                card: 'border-slate-200 bg-white',
+                icon: 'fa-minus text-slate-300',
+                label: 'text-slate-500',
+                status: '未启用',
+                statusClass: 'text-slate-400',
             },
             failed: {
                 card: 'border-red-300 bg-red-50',
@@ -934,11 +1020,12 @@ class ReportAudioWorkflowDetailPage {
             },
         }[stage.state];
         return `
-            <li class="flex min-w-0 items-center gap-2.5 rounded-lg border px-3 py-2.5 ${meta.card}">
+            <li class="flex min-w-0 items-center gap-2.5 rounded-lg border px-3 py-2.5 ${meta.card}" title="${this.escapeAttr(stage.detail || stage.label)}">
                 <i class="fas ${meta.icon} w-4 shrink-0 text-center" aria-hidden="true"></i>
                 <div class="min-w-0">
                     <div class="truncate text-xs font-black ${meta.label}">${this.escape(stage.label)}</div>
                     <div class="mt-0.5 text-[11px] font-bold ${meta.statusClass}">${meta.status}</div>
+                    ${stage.detail ? `<div class="mt-0.5 truncate text-[10px] text-slate-500">${this.escape(stage.detail)}</div>` : ''}
                 </div>
             </li>
         `;

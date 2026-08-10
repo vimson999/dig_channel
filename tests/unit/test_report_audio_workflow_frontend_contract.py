@@ -162,18 +162,35 @@ def test_detail_summary_uses_semantic_workflow_stages_instead_of_a_progress_bar(
 
     assert "reportWorkflowStages(job)" in javascript
     assert "reportWorkflowStageIndex(step, progress)" in javascript
-    assert "PDF 准备" in javascript
-    assert "Gemini 解析" in javascript
-    assert "文案整理" in javascript
-    assert "语音生成" in javascript
-    assert "视频生成" in javascript
-    assert "关键帧/封皮" in javascript
+    assert "job?.orchestration?.stages" in javascript
+    assert "输入" in javascript
+    assert "文案" in javascript
+    assert "音频" in javascript
+    assert "视觉" in javascript
+    assert "成片" in javascript
+    assert "验收" in javascript
+    assert "发布" in javascript
     assert "reportWorkflowRenderMode(job)" in javascript
     assert "reportWorkflowOutputSummary(job)" in javascript
-    assert "keyframeMode ? '关键帧/封皮' : '视频生成'" in javascript
     assert "`${this.verticalSchemeLabel(scheme)}竖版关键帧`" in javascript
-    assert "任务完成" in javascript
     assert 'aria-label="任务流程进度"' in javascript
+
+
+def test_detail_orchestration_status_distinguishes_reuse_waiting_and_attention():
+    javascript = (
+        PROJECT_ROOT / "src/frontend/js/report-audio-workflow-detail.js"
+    ).read_text(encoding="utf-8")
+
+    assert "reused:" in javascript
+    assert "waiting:" in javascript
+    assert "needs_attention:" in javascript
+    assert "已复用" in javascript
+    assert "等待" in javascript
+    assert "需要处理" in javascript
+    assert "orchestrationNotice(job)" in javascript
+    assert "当前活动数" in javascript
+    assert "next_retry_at" in javascript
+    assert "缺少或未通过" in javascript
 
 
 def test_failed_detail_exposes_resume_action_using_existing_retry_endpoint():
