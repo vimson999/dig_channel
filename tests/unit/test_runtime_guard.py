@@ -131,9 +131,14 @@ class RuntimeGuardTest(unittest.TestCase):
     def test_report_audio_waiting_children_do_not_consume_start_capacity(self):
         passive_steps = (
             "gemini_waiting",
+            "gem_waiting",
             "doubao_browser_1_waiting",
+            "doubao_1_waiting",
             "scheme3_visual_waiti",
             "publisher_video_waiting",
+            "pub_queued",
+            "pub_waiting",
+            "pub_v_synthesis",
         )
         for step in passive_steps:
             self._add_task("processing", step=step)

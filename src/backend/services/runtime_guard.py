@@ -69,15 +69,21 @@ PASSIVE_RUNNING_STEP_PREFIXES = {
     # otherwise two slow children can stall every queued report indefinitely.
     "report_audio_workflow": (
         "gemini_",
+        "gem_",
         "doubao_browser_",
+        "doubao_",
         "scheme3_visual_",
         "publisher_video_",
+        "pub_",
     ),
     "report_pdf_audio_workflow": (
         "gemini_",
+        "gem_",
         "doubao_browser_",
+        "doubao_",
         "scheme3_visual_",
         "publisher_video_",
+        "pub_",
     ),
     # While a publisher child renders, the parent mirrors child steps as
     # landscape_video_queued, landscape_video_synthesis, and so on. Every one
