@@ -115,6 +115,40 @@ def _load_task_with_retries(task_id, *columns):
     raise last_error
 
 
+def _notify_terminal_continuations(task_id):
+    """Best-effort terminal notifications; one consumer must not block another."""
+
+    try:
+        from services.report_audio_finalization import (
+            reconcile_finalization_for_publisher,
+        )
+
+        reconcile_finalization_for_publisher(task_id)
+    except Exception as continuation_exc:
+        db.session.rollback()
+        logger.error(
+            "Publisher terminal report-audio finalization failed: task=%s error=%s",
+            task_id,
+            continuation_exc,
+            exc_info=True,
+        )
+
+    try:
+        from services.report_audio_parent_wakeup import (
+            wake_report_audio_parent_for_child,
+        )
+
+        wake_report_audio_parent_for_child(task_id)
+    except Exception as continuation_exc:
+        db.session.rollback()
+        logger.error(
+            "Publisher terminal report-audio parent wake-up failed: task=%s error=%s",
+            task_id,
+            continuation_exc,
+            exc_info=True,
+        )
+
+
 def _load_bilibili_upload_context_with_retries(task_id):
     from services.bilibili_publish import bilibili_upload_execution_context
 
@@ -1457,20 +1491,7 @@ def run_publication_pipeline(self, task_id):
                 error_message=None,
                 completed_at=datetime.utcnow(),
             )
-            try:
-                from services.report_audio_finalization import (
-                    reconcile_finalization_for_publisher,
-                )
-
-                reconcile_finalization_for_publisher(task_id)
-            except Exception as continuation_exc:
-                db.session.rollback()
-                logger.error(
-                    "Publisher completed but report-audio finalization wake-up failed: task=%s error=%s",
-                    task_id,
-                    continuation_exc,
-                    exc_info=True,
-                )
+            _notify_terminal_continuations(task_id)
             
             total_duration = time.time() - overall_start
             logger.info(f"✨ [TASK] 任务 {task_id} 全部处理完成! 总耗时: {total_duration:.2f}s")
@@ -1486,20 +1507,7 @@ def run_publication_pipeline(self, task_id):
                     error_message=str(e),
                     completed_at=datetime.utcnow(),
                 )
-                try:
-                    from services.report_audio_finalization import (
-                        reconcile_finalization_for_publisher,
-                    )
-
-                    reconcile_finalization_for_publisher(task_id)
-                except Exception as continuation_exc:
-                    db.session.rollback()
-                    logger.error(
-                        "Publisher failure finalization wake-up failed: task=%s error=%s",
-                        task_id,
-                        continuation_exc,
-                        exc_info=True,
-                    )
+                _notify_terminal_continuations(task_id)
             except Exception as persist_error:
                 logger.error(
                     "Task %s failed and failed-state persistence also failed: %s",

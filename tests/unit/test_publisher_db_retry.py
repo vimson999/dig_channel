@@ -27,6 +27,29 @@ class FakeCeleryTask:
 
 
 class PublisherDbRetryTest(unittest.TestCase):
+    def test_terminal_continuations_run_finalization_and_parent_wakeup(self):
+        with patch(
+            "services.report_audio_finalization.reconcile_finalization_for_publisher"
+        ) as reconcile, patch(
+            "services.report_audio_parent_wakeup.wake_report_audio_parent_for_child"
+        ) as wake:
+            publisher._notify_terminal_continuations("publisher-1")
+
+        reconcile.assert_called_once_with("publisher-1")
+        wake.assert_called_once_with("publisher-1")
+
+    def test_finalization_failure_does_not_block_parent_wakeup(self):
+        with patch(
+            "services.report_audio_finalization.reconcile_finalization_for_publisher",
+            side_effect=RuntimeError("coordinator unavailable"),
+        ), patch(
+            "services.report_audio_parent_wakeup.wake_report_audio_parent_for_child"
+        ) as wake, patch.object(publisher.db.session, "rollback") as rollback:
+            publisher._notify_terminal_continuations("publisher-1")
+
+        rollback.assert_called_once_with()
+        wake.assert_called_once_with("publisher-1")
+
     def test_read_only_initial_write_retries_without_business_failure(self):
         celery_task = FakeCeleryTask(retries=0)
         error = RuntimeError("cannot execute UPDATE in a read-only transaction")
