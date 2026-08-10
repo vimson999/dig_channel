@@ -13,6 +13,7 @@ from services import report_audio_workflow as report_audio_service  # noqa: E402
 from services.report_audio_workflow import (  # noqa: E402
     ReportAudioWorkflowError,
     _normalizer_model,
+    initial_submission_prompts,
     normalize_for_tts,
     status_payload,
     structured_result_quality_issue,
@@ -20,6 +21,16 @@ from services.report_audio_workflow import (  # noqa: E402
 
 
 class ReportAudioWorkflowServiceTest(unittest.TestCase):
+    def test_initial_submission_prompts_enforce_1500_character_script(self):
+        prompts = initial_submission_prompts(
+            "请解析这份 PDF。",
+            "请复核事实并给出最终稿。",
+        )
+
+        self.assertIn("不少于 1500 字", prompts["prompt"])
+        self.assertIn("不少于 1500 字", prompts["review_prompt"])
+        self.assertNotIn("上一版", prompts["prompt"])
+
     def test_structured_result_preserves_separate_landscape_and_vertical_titles(self):
         payload = report_audio_service._validate_structured_result({
             "title": "列表标题",
@@ -325,6 +336,20 @@ class ReportAudioWorkflowServiceTest(unittest.TestCase):
             normalize_for_tts("原始 Gemini 文本", normalizer_timeout=7)
 
         self.assertEqual(deepseek.call_args.kwargs["timeout_seconds"], 7)
+
+    def test_normalizer_enforces_requested_final_script_length(self):
+        payload = {
+            "final_script_for_tts": "这是一段过短的正文。" * 20,
+        }
+
+        with patch.object(report_audio_service, "_deepseek_normalize", return_value=payload) as deepseek:
+            with self.assertRaisesRegex(ReportAudioWorkflowError, "低于 1500 字"):
+                normalize_for_tts(
+                    "这是 Gemini 审核后的原始结果。" * 200,
+                    minimum_script_chars=1500,
+                )
+
+        self.assertEqual(deepseek.call_args.kwargs["minimum_script_chars"], 1500)
 
     def test_normalizer_strips_section_outline_labels_from_tts_script(self):
         payload = {

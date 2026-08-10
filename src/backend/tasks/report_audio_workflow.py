@@ -784,6 +784,7 @@ def _process_job(task_id):
         return False
 
     prompt = (payload.get("prompt") or DEFAULT_INITIAL_PROMPT).strip()
+    minimum_final_chars = _required_gemini_final_chars(payload)
     pdf_evidence_enabled = (
         _truthy(payload.get("pdf_evidence_enabled"), True)
         if "pdf_evidence_enabled" in payload
@@ -833,7 +834,10 @@ def _process_job(task_id):
     try:
         _queue_notification(workflow_task_id, "report_audio_started", "研报 PDF 到语音编排已启动")
         retry_requested_at = result.get("retry_requested_at")
-        structured = _valid_structured_result(result)
+        structured = _valid_structured_result(
+            result,
+            minimum_chars=minimum_final_chars,
+        )
         reused_material = None
         gemini_task = None
         active_gemini_task = None
@@ -851,7 +855,11 @@ def _process_job(task_id):
             and not manual_gemini_result
             and not _truthy(payload.get("force_gemini_regeneration"), False)
         ):
-            reused_material = _reusable_material_for_pdf(pdf, exclude_task_id=workflow_task_id)
+            reused_material = _reusable_material_for_pdf(
+                pdf,
+                exclude_task_id=workflow_task_id,
+                minimum_chars=minimum_final_chars,
+            )
         if reused_material:
             structured = reused_material["structured_result"]
             script_material_result = _script_material_reuse_payload(reused_material, pdf, structured)
@@ -897,6 +905,7 @@ def _process_job(task_id):
                     structured = normalize_for_tts(
                         raw_final,
                         initial_text=initial_text,
+                        minimum_script_chars=minimum_final_chars,
                         metadata={
                             "workflow_task_id": workflow_task_id,
                             "gemini_source": "manual_input",
@@ -961,6 +970,7 @@ def _process_job(task_id):
                     structured = normalize_for_tts(
                         raw_final,
                         initial_text=initial_text,
+                        minimum_script_chars=minimum_final_chars,
                         metadata={
                             "workflow_task_id": workflow_task_id,
                             "gemini_task_id": gemini_task_id,
@@ -1622,7 +1632,7 @@ def _manual_gemini_public_summary(manual):
     }
 
 
-def _valid_structured_result(result):
+def _valid_structured_result(result, *, minimum_chars=None):
     structured = result.get("structured_result") if isinstance(result, dict) else None
     if not isinstance(structured, dict):
         return None
@@ -1633,12 +1643,22 @@ def _valid_structured_result(result):
     if quality_issue:
         logger.warning("Skip cached structured result with quality issue: %s", quality_issue)
         return None
-    if len(_plain_text(script)) < _min_gemini_final_chars():
+    required_chars = (
+        _min_gemini_final_chars()
+        if minimum_chars is None
+        else max(_min_gemini_final_chars(), _bounded_int(
+            minimum_chars,
+            default=_min_gemini_final_chars(),
+            lower=0,
+            upper=20000,
+        ))
+    )
+    if len(_plain_text(script)) < required_chars:
         return None
     return structured
 
 
-def _reusable_material_for_pdf(pdf, *, exclude_task_id=None):
+def _reusable_material_for_pdf(pdf, *, exclude_task_id=None, minimum_chars=None):
     asset_id = str((pdf or {}).get("attachment_id") or "").strip()
     if not asset_id:
         return None
@@ -1679,7 +1699,10 @@ def _reusable_material_for_pdf(pdf, *, exclude_task_id=None):
     details = _load_task_results(candidate.id for candidate in candidates)
     for candidate in candidates:
         detail = details.get(candidate.id)
-        structured = _valid_structured_result(detail.result if detail else None)
+        structured = _valid_structured_result(
+            detail.result if detail else None,
+            minimum_chars=minimum_chars,
+        )
         if structured:
             return {
                 "source": "reused_script_material",

@@ -27,10 +27,12 @@ from services import doubao_browser_tts, gemini_browser
 from services.doubao_tts_ws import is_configured as is_doubao_api_configured
 from services.report_audio_workflow import (
     DEFAULT_INITIAL_PROMPT,
+    DEFAULT_INITIAL_SCRIPT_MIN_CHARS,
     DEFAULT_REVIEW_PROMPT,
     DEFAULT_SCRIPT_REGENERATION_MIN_CHARS,
     FEATURE_NAME,
     QUEUE_NAME,
+    initial_submission_prompts,
     pdf_first_page_image_path_for_job,
     render_pdf_first_page_image,
     review_prompt_for_pdf_evidence,
@@ -551,12 +553,25 @@ def create_job(current_user):
     if not isinstance(metadata, dict):
         return jsonify({"success": False, "message": "metadata 必须是对象"}), 400
 
+    minimum_script_chars = _bounded_int(
+        data.get("gemini_min_final_chars"),
+        DEFAULT_INITIAL_SCRIPT_MIN_CHARS,
+        DEFAULT_INITIAL_SCRIPT_MIN_CHARS,
+        20000,
+    )
     prompt = (data.get("prompt") or DEFAULT_INITIAL_PROMPT).strip()
     pdf_evidence_enabled = _parse_pdf_evidence_enabled(data)
     review_prompt = review_prompt_for_pdf_evidence(
         data.get("review_prompt") or DEFAULT_REVIEW_PROMPT,
         enabled=pdf_evidence_enabled,
     )
+    submission_prompts = initial_submission_prompts(
+        prompt,
+        review_prompt,
+        minimum_chars=minimum_script_chars,
+    )
+    prompt = submission_prompts["prompt"]
+    review_prompt = submission_prompts["review_prompt"]
     followups = _parse_followups(data)
     video_options = _parse_video_options(data)
     if (
@@ -632,6 +647,9 @@ def create_job(current_user):
                 "followups": followups,
                 "gemini_url": gemini_url,
                 "manual_gemini": manual_gemini,
+                "gemini_prefer_pro_model": _truthy(data.get("gemini_prefer_pro_model"), True),
+                "gemini_require_pro_model": _truthy(data.get("gemini_require_pro_model"), False),
+                "gemini_min_final_chars": minimum_script_chars,
                 "metadata": metadata,
                 "script_material_only": script_material_only,
                 "tts_provider": tts_provider,

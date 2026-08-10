@@ -1,3 +1,4 @@
+import io
 import sys
 import tempfile
 import unittest
@@ -139,6 +140,46 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertFalse(report_audio_api._parse_pdf_evidence_enabled({}))
         self.assertFalse(report_audio_api._parse_pdf_evidence_enabled({"pdf_evidence_enabled": "0"}))
         self.assertTrue(report_audio_api._parse_pdf_evidence_enabled({"pdf_evidence_enabled": "1"}))
+
+    def test_initial_submission_persists_1500_character_contract(self):
+        pdf_path = Path(self.tmpdir.name) / "source.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+        pdf_meta = {
+            "filename": "source.pdf",
+            "path": str(pdf_path),
+            "bytes": pdf_path.stat().st_size,
+        }
+
+        with (
+            self.app.test_request_context(
+                "/api/report-audio-workflows/jobs",
+                method="POST",
+                data={
+                    "pdf": (io.BytesIO(pdf_path.read_bytes()), "source.pdf"),
+                    "prompt": "请解析 PDF 并撰写口播文案。",
+                    "review_prompt": "请复核事实并输出最终稿。",
+                },
+                content_type="multipart/form-data",
+            ),
+            patch.object(report_audio_api.gemini_browser, "status_payload", return_value={"configured": True}),
+            patch.object(report_audio_api.doubao_browser_tts, "status_payload", return_value={"configured": True}),
+            patch.object(report_audio_api, "_save_pdf_upload", return_value=pdf_meta),
+            patch.object(
+                report_audio_api,
+                "apply_async_after_db_release",
+                return_value=SimpleNamespace(id="celery-initial"),
+            ),
+        ):
+            response = report_audio_api.create_job.__wrapped__(SimpleNamespace(id="user-1"))
+
+        payload = response.get_json()
+        task = PublicationTask.query.filter_by(id=payload["job_id"]).one()
+        workflow = task.params["report_audio_workflow"]
+        self.assertEqual(workflow["gemini_min_final_chars"], 1500)
+        self.assertTrue(workflow["gemini_prefer_pro_model"])
+        self.assertFalse(workflow["gemini_require_pro_model"])
+        self.assertIn("不少于 1500 字", workflow["prompt"])
+        self.assertIn("不少于 1500 字", workflow["review_prompt"])
 
     def test_script_regeneration_creates_independent_strict_pro_material_task(self):
         pdf_path = Path(self.tmpdir.name) / "source.pdf"

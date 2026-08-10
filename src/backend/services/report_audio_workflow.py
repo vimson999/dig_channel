@@ -19,6 +19,7 @@ DEFAULT_INITIAL_PROMPT = (
     "请解析上传的研报 PDF，提取核心观点、关键数据、风险提示和可用于口播的摘要。"
 )
 DEFAULT_SCRIPT_REGENERATION_MIN_CHARS = 1500
+DEFAULT_INITIAL_SCRIPT_MIN_CHARS = DEFAULT_SCRIPT_REGENERATION_MIN_CHARS
 PDF_EVIDENCE_REVIEW_CONTRACT = (
     "最后另起一段输出以 PDF_EVIDENCE_V1_JSON: 开头的单行严格 JSON，"
     "格式为 {\"schema_version\":\"report_pdf_evidence_v1\",\"claims\":[...]}; 每条 claims 必须包含"
@@ -156,6 +157,35 @@ def script_regeneration_prompts(
     }
 
 
+def initial_submission_prompts(
+    initial_prompt: Any,
+    review_prompt: Any,
+    *,
+    minimum_chars: int = DEFAULT_INITIAL_SCRIPT_MIN_CHARS,
+) -> Dict[str, str]:
+    """Attach the server-owned spoken-script length contract to a new job."""
+
+    try:
+        minimum = max(DEFAULT_INITIAL_SCRIPT_MIN_CHARS, min(20000, int(minimum_chars)))
+    except (TypeError, ValueError):
+        minimum = DEFAULT_INITIAL_SCRIPT_MIN_CHARS
+    initial = str(initial_prompt or DEFAULT_INITIAL_PROMPT).strip()
+    review = str(review_prompt or DEFAULT_REVIEW_PROMPT).strip()
+    initial_directive = (
+        "首轮解析就要形成完整口播素材，充分保留 PDF 中与结论有关的背景、关键数据、"
+        f"逻辑链条、分歧和风险；最终可直接朗读的中文正文必须不少于 {minimum} 字。"
+    )
+    final_directive = (
+        f"最终优化稿中的可直接朗读中文正文必须不少于 {minimum} 字；"
+        "字数不包含标题、核对过程、修正清单、参考来源、证据 JSON 或 Markdown 标记。"
+        "不得用提纲、重复句或无事实依据的扩写凑字。"
+    )
+    return {
+        "prompt": f"{initial}\n\n{initial_directive}",
+        "review_prompt": f"{review}\n\n{final_directive}",
+    }
+
+
 def storage_path_for_job(job_id: str, created_at: Optional[datetime] = None) -> str:
     created_at = created_at or datetime.utcnow()
     root = Path(_project_root()) / "data" / "processed" / "report_audio_workflow" / created_at.strftime("%Y%m%d")
@@ -218,6 +248,7 @@ def normalize_for_tts(
     metadata: Optional[Dict[str, Any]] = None,
     normalizer_timeout: Optional[int] = None,
     allow_local_fallback: Optional[bool] = None,
+    minimum_script_chars: int = 0,
 ) -> Dict[str, Any]:
     raw_text = (raw_text or "").strip()
     if not raw_text:
@@ -231,6 +262,7 @@ def normalize_for_tts(
             initial_text=initial_text,
             metadata=metadata or {},
             timeout_seconds=normalizer_timeout,
+            minimum_script_chars=minimum_script_chars,
         )
     except ReportAudioWorkflowError as exc:
         normalizer_error = str(exc)
@@ -248,7 +280,11 @@ def normalize_for_tts(
             )
         LOGGER.warning("DeepSeek normalizer unavailable; local fallback explicitly enabled")
         payload = _fallback_normalize(raw_text)
-    return _validate_structured_result(payload, raw_text)
+    return _validate_structured_result(
+        payload,
+        raw_text,
+        minimum_script_chars=minimum_script_chars,
+    )
 
 
 def structured_result_quality_issue(structured: Dict[str, Any]) -> str:
@@ -936,6 +972,7 @@ def _deepseek_normalize(
     initial_text: str,
     metadata: Dict[str, Any],
     timeout_seconds: Optional[int] = None,
+    minimum_script_chars: int = 0,
 ) -> Optional[Dict[str, Any]]:
     api_key = os.environ.get("REPORT_AUDIO_NORMALIZER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
@@ -944,11 +981,23 @@ def _deepseek_normalize(
     base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     model = _normalizer_model()
     timeout = _normalizer_timeout(timeout_seconds)
+    try:
+        minimum = max(0, min(20000, int(minimum_script_chars)))
+    except (TypeError, ValueError):
+        minimum = 0
     system_prompt = (
-        "你是内容流水线的结构化整理器。只做抽取和规整，不新增事实，不扩写观点。"
+        "你是内容流水线的结构化整理器。只做抽取和规整，不新增事实或观点，"
+        "同时不得把已有的关键背景、数据、逻辑链条、分歧和风险压缩丢失。"
         "你必须输出严格 JSON，不要 Markdown，不要解释。"
     )
-    user_prompt = "\n".join([
+    script_length_directive = (
+        f"final_script_for_tts 清理后的中文可朗读正文必须不少于 {minimum} 字。"
+        "如需补足长度，只能从下方 Gemini 结果中完整保留和组织已有事实、数据、解释、分歧与风险，"
+        "禁止重复句凑字或新增材料中不存在的结论。"
+        if minimum > 0
+        else ""
+    )
+    user_prompt = "\n".join(filter(None, [
         "请把下面 Gemini 审核后的研报口播结果整理成严格 JSON。",
         "字段必须包含：",
         "- title: 字符串，最适合最终音频/内容列表展示的标题，优先从 Gemini 返回的标题方案、短标题、标准标题或核心观点中挑选并轻微润色",
@@ -967,6 +1016,7 @@ def _deepseek_normalize(
         "- editor_notes: 字符串，简短说明整理策略",
         "如果原文中没有某字段内容，用空字符串或空数组。",
         "final_script_for_tts 必须适合直接朗读，保留必要的投资风险提示。",
+        script_length_directive,
         "final_script_for_tts 不能包含“第一部分、第二部分、开场与变量切换、产业背景、深度数据支撑、核心观测信号”等结构标签；这些是写作提纲，不是口播正文。",
         "",
         "标题选择规则：",
@@ -984,7 +1034,7 @@ def _deepseek_normalize(
         "",
         "【Gemini 审核后结果】",
         _compact_text(raw_text, _int_env("REPORT_AUDIO_NORMALIZER_INPUT_CHARS", 18000)),
-    ])
+    ]))
 
     response = requests.post(
         f"{base_url.rstrip('/')}/v1/chat/completions",
@@ -1040,7 +1090,12 @@ def _normalizer_timeout(timeout_seconds: Optional[int] = None) -> int:
     return _int_env("REPORT_AUDIO_NORMALIZER_TIMEOUT", 120)
 
 
-def _validate_structured_result(payload: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
+def _validate_structured_result(
+    payload: Dict[str, Any],
+    raw_text: str,
+    *,
+    minimum_script_chars: int = 0,
+) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         payload = {}
     script = clean_final_script_for_tts(payload.get("final_script_for_tts") or "")
@@ -1052,6 +1107,15 @@ def _validate_structured_result(payload: Dict[str, Any], raw_text: str) -> Dict[
     quality_issue = _tts_script_quality_issue(script)
     if quality_issue:
         raise ReportAudioWorkflowError(f"结构化结果不可用于朗读: {quality_issue}")
+    try:
+        minimum = max(0, min(20000, int(minimum_script_chars)))
+    except (TypeError, ValueError):
+        minimum = 0
+    script_chars = len(re.sub(r"\s+", "", script))
+    if script_chars < minimum:
+        raise ReportAudioWorkflowError(
+            f"结构化可朗读正文过短: {script_chars} 字，低于 {minimum} 字"
+        )
 
     landscape_title = _clean_multiline_text(payload.get("landscape_title") or payload.get("cover_title") or "")[:160]
     landscape_subtitle = _clean_text(payload.get("landscape_subtitle") or payload.get("cover_subtitle") or "")[:120]

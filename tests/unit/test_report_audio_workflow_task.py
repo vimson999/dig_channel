@@ -1162,6 +1162,36 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         self.assertEqual(reusable["source_feature"], "report_script_material_workflow")
         self.assertEqual(reusable["structured_result"], structured)
 
+    def test_reusable_material_for_pdf_rejects_script_below_requested_minimum(self):
+        structured = {
+            "title": "旧短文案",
+            "final_script_for_tts": "这是一段不足一千五百字的旧文案。" * 20,
+        }
+        existing = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "report_script_material_workflow",
+                "source_feature": "zsxq_attachment",
+                "source_task_id": "asset-short",
+                "report_script_material_workflow": {
+                    "pdf": {"attachment_id": "asset-short", "filename": "report.pdf"},
+                },
+            },
+            result={"structured_result": structured},
+        )
+        db.session.add(existing)
+        db.session.commit()
+
+        reusable = report_audio_workflow._reusable_material_for_pdf(
+            {"attachment_id": "asset-short", "filename": "report.pdf"},
+            exclude_task_id="new-task",
+            minimum_chars=1500,
+        )
+
+        self.assertIsNone(reusable)
+
     def test_script_material_only_preserves_reused_material_source(self):
         root = Path(self.app.instance_path)
         root.mkdir(parents=True, exist_ok=True)
