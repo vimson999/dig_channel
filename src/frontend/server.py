@@ -16,9 +16,12 @@ import urllib.parse
 import urllib.request
 
 try:
-    from src.frontend.zsxq_sidebar_bridge import ZsxqSidebarHtmlBridge
+    from src.frontend.zsxq_sidebar_bridge import (
+        MAX_FORM_BODY_BYTES,
+        ZsxqSidebarHtmlBridge,
+    )
 except ModuleNotFoundError:
-    from zsxq_sidebar_bridge import ZsxqSidebarHtmlBridge
+    from zsxq_sidebar_bridge import MAX_FORM_BODY_BYTES, ZsxqSidebarHtmlBridge
 
 PORT = 8888
 ZSXQ_CSRF_SECRET = secrets.token_bytes(32)
@@ -46,6 +49,49 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_zsxq_health_page()
             return
         super().do_GET()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path != "/zsxq-sidebar-submit.html":
+            self.send_error(404)
+            return
+        content_type = self.headers.get_content_type()
+        if content_type != "application/x-www-form-urlencoded":
+            self._send_bridge_error(415, "unsupported_media_type")
+            return
+        raw_length = self.headers.get("Content-Length", "")
+        try:
+            content_length = int(raw_length)
+        except ValueError:
+            self._send_bridge_error(400, "invalid_content_length")
+            return
+        if content_length < 1 or content_length > MAX_FORM_BODY_BYTES:
+            self._send_bridge_error(
+                413 if content_length > MAX_FORM_BODY_BYTES else 400,
+                "request_body_too_large" if content_length > MAX_FORM_BODY_BYTES else "empty_request_body",
+            )
+            return
+        try:
+            decoded_body = self.rfile.read(content_length).decode("utf-8")
+        except UnicodeDecodeError:
+            self._send_bridge_error(400, "invalid_utf8")
+            return
+        fields = urllib.parse.parse_qs(decoded_body, keep_blank_values=True)
+        page = self._zsxq_bridge().submit(
+            fields.get("kind", [""])[0],
+            fields.get("csrf_token", [""])[0],
+            fields.get("manifest_json", [""])[0],
+        )
+        self._send_html(page.status_code, page.body)
+
+    def _send_bridge_error(self, status_code, code):
+        body = f"""<!doctype html>
+<html lang=\"zh-CN\">
+<head><meta charset=\"utf-8\"><title>请求失败</title></head>
+<body><main><h1>请求失败</h1><pre>{html.escape(code)}</pre></main></body>
+</html>
+"""
+        self._send_html(status_code, body)
 
     def _zsxq_bridge(self):
         return ZsxqSidebarHtmlBridge(
