@@ -14,20 +14,38 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+try:
+    from src.frontend.zsxq_sidebar_bridge import ZsxqSidebarHtmlBridge
+except ModuleNotFoundError:
+    from zsxq_sidebar_bridge import ZsxqSidebarHtmlBridge
+
 PORT = 8888
+ZSXQ_CSRF_SECRET = os.urandom(32)
 
 class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     zsxq_backend_url = "http://127.0.0.1:5001"
+    zsxq_csrf_secret = ZSXQ_CSRF_SECRET
 
     def do_GET(self):
-        path = urllib.parse.urlsplit(self.path).path
-        if path == "/bridge/zsxq/health":
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/zsxq-sidebar-history.html":
+            query = urllib.parse.parse_qs(parsed.query)
+            page = self._zsxq_bridge().render_history(query.get("kind", [""])[0])
+            self._send_html(page.status_code, page.body)
+            return
+        if parsed.path == "/bridge/zsxq/health":
             self._handle_zsxq_health()
             return
-        if path == "/zsxq-sidebar-bridge.html":
+        if parsed.path == "/zsxq-sidebar-bridge.html":
             self._handle_zsxq_health_page()
             return
         super().do_GET()
+
+    def _zsxq_bridge(self):
+        return ZsxqSidebarHtmlBridge(
+            self.zsxq_backend_url,
+            self.zsxq_csrf_secret,
+        )
 
     def _fetch_zsxq_health(self):
         health_url = f"{self.zsxq_backend_url.rstrip('/')}/health"
