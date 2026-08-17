@@ -181,7 +181,7 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
             },
         )
 
-    def test_history_page_omits_wildcard_cors_while_health_page_retains_it(self):
+    def test_bridge_pages_omit_wildcard_cors_while_unrelated_routes_retain_it(self):
         history_payload = {"success": True, "data": {}}
         with _LocalJsonBackend((200, history_payload)) as backend:
             with self._frontend(backend.base_url) as frontend:
@@ -189,13 +189,13 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
                     f"{frontend.base_url}/zsxq-sidebar-history.html?kind=mp3"
                 ) as history_response:
                     history_response.read()
-                with _proxyless_open(
-                    f"{frontend.base_url}/zsxq-sidebar-bridge.html"
-                ) as health_response:
-                    health_response.read()
+                with self.assertRaises(urllib.error.HTTPError) as unrelated:
+                    _proxyless_open(f"{frontend.base_url}/not-a-zsxq-bridge-route")
 
         self.assertNotIn("Access-Control-Allow-Origin", history_response.headers)
-        self.assertEqual(health_response.headers["Access-Control-Allow-Origin"], "*")
+        self.assertEqual(
+            unrelated.exception.headers["Access-Control-Allow-Origin"], "*"
+        )
 
     def test_history_page_posts_fixed_pdf_scope(self):
         with _LocalJsonBackend((200, {"success": True, "data": {}})) as backend:
@@ -228,6 +228,29 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 400)
         self.assertEqual(raised.exception.headers["Content-Type"], "text/html; charset=utf-8")
         self.assertEqual(backend.received, [])
+
+    def test_submit_page_contains_native_form_fixed_kind_and_csrf(self):
+        with self._frontend("http://127.0.0.1:1") as frontend:
+            with _proxyless_open(
+                f"{frontend.base_url}/zsxq-sidebar-submit.html?kind=pdf"
+            ) as response:
+                body = response.read().decode("utf-8")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn('method="post"', body.lower())
+        self.assertIn('action="/zsxq-sidebar-submit.html"', body)
+        self.assertIn('name="kind" value="pdf"', body)
+        self.assertIn('name="csrf_token"', body)
+        self.assertIn('name="manifest_json"', body)
+        self.assertIn("提交同步编排", body)
+        self.assertNotIn("Access-Control-Allow-Origin", response.headers)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(
+            response.headers["Content-Security-Policy"],
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+        )
+        self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
 
 
 if __name__ == "__main__":

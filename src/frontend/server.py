@@ -8,6 +8,7 @@ import http.server
 import html
 import json
 import os
+import secrets
 import socketserver
 import sys
 import urllib.error
@@ -20,7 +21,7 @@ except ModuleNotFoundError:
     from zsxq_sidebar_bridge import ZsxqSidebarHtmlBridge
 
 PORT = 8888
-ZSXQ_CSRF_SECRET = os.urandom(32)
+ZSXQ_CSRF_SECRET = secrets.token_bytes(32)
 
 class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     zsxq_backend_url = "http://127.0.0.1:5001"
@@ -31,7 +32,12 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/zsxq-sidebar-history.html":
             query = urllib.parse.parse_qs(parsed.query)
             page = self._zsxq_bridge().render_history(query.get("kind", [""])[0])
-            self._send_html(page.status_code, page.body, include_wildcard_cors=False)
+            self._send_html(page.status_code, page.body)
+            return
+        if parsed.path == "/zsxq-sidebar-submit.html":
+            query = urllib.parse.parse_qs(parsed.query)
+            page = self._zsxq_bridge().render_submit_form(query.get("kind", [""])[0])
+            self._send_html(page.status_code, page.body)
             return
         if parsed.path == "/bridge/zsxq/health":
             self._handle_zsxq_health()
@@ -106,23 +112,28 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_html(self, status_code, body, include_wildcard_cors=True):
+    def _send_html(self, status_code, body):
         encoded_body = body.encode("utf-8")
-        previous_cors_setting = getattr(self, "_include_wildcard_cors", True)
-        self._include_wildcard_cors = include_wildcard_cors
-        try:
-            self.send_response(status_code)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(encoded_body)))
-            self.end_headers()
-            self.wfile.write(encoded_body)
-        finally:
-            self._include_wildcard_cors = previous_cors_setting
+        self.send_response(status_code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        if self._is_zsxq_bridge_request():
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+            )
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Length", str(len(encoded_body)))
+        self.end_headers()
+        self.wfile.write(encoded_body)
+
+    def _is_zsxq_bridge_request(self):
+        path = urllib.parse.urlsplit(self.path).path
+        return path.startswith("/zsxq-sidebar-") or path.startswith("/bridge/zsxq/")
 
     def end_headers(self):
-        # 添加CORS头部
-        if getattr(self, "_include_wildcard_cors", True):
+        if not self._is_zsxq_bridge_request():
             self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
             self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')

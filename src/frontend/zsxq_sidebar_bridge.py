@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import hashlib
+import hmac
 import html
 import json
 import urllib.error
@@ -17,6 +19,8 @@ TAB_SCOPES = {
         "tab_label": "外资研报",
     },
 }
+
+MAX_FORM_BODY_BYTES = 512 * 1024
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,44 @@ class ZsxqSidebarHtmlBridge:
             summary=f"历史完整：{complete}",
             pre_id="history-json",
         )
+
+    def render_submit_form(self, kind: str) -> BridgePage:
+        if kind not in TAB_SCOPES:
+            return self._error_page(400, "invalid_kind", "kind 只允许 mp3 或 pdf")
+        escaped_kind = html.escape(kind, quote=True)
+        csrf_token = html.escape(self._csrf_token(kind), quote=True)
+        body = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>提交同步编排</title>
+</head>
+<body>
+  <main>
+    <h1>提交同步编排</h1>
+    <form method="post" action="/zsxq-sidebar-submit.html">
+      <input type="hidden" name="kind" value="{escaped_kind}">
+      <input type="hidden" name="csrf_token" value="{csrf_token}">
+      <label for="manifest-json">同步清单 JSON</label>
+      <textarea id="manifest-json" name="manifest_json" required></textarea>
+      <button type="submit">提交同步编排</button>
+    </form>
+  </main>
+</body>
+</html>
+"""
+        return BridgePage(200, body)
+
+    def valid_csrf(self, kind: str, token: str) -> bool:
+        return hmac.compare_digest(self._csrf_token(kind), str(token or ""))
+
+    def _csrf_token(self, kind: str) -> str:
+        return hmac.new(
+            self.csrf_secret,
+            f"zsxq-sidebar-submit:{kind}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
 
     def _request_json(self, method: str, path: str, payload: dict) -> tuple[int, dict]:
         request = urllib.request.Request(
