@@ -259,10 +259,15 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
                     f"{frontend.base_url}/zsxq-sidebar-history.html?kind=mp3"
                 ) as history_response:
                     history_response.read()
+                with _proxyless_open(
+                    f"{frontend.base_url}/bridge/zsxq/health"
+                ) as health_response:
+                    json.load(health_response)
                 with self.assertRaises(urllib.error.HTTPError) as unrelated:
                     _proxyless_open(f"{frontend.base_url}/not-a-zsxq-bridge-route")
 
         self.assertNotIn("Access-Control-Allow-Origin", history_response.headers)
+        self.assertNotIn("Access-Control-Allow-Origin", health_response.headers)
         self.assertEqual(
             unrelated.exception.headers["Access-Control-Allow-Origin"], "*"
         )
