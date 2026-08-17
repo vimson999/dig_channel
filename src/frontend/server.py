@@ -31,7 +31,7 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/zsxq-sidebar-history.html":
             query = urllib.parse.parse_qs(parsed.query)
             page = self._zsxq_bridge().render_history(query.get("kind", [""])[0])
-            self._send_html(page.status_code, page.body)
+            self._send_html(page.status_code, page.body, include_wildcard_cors=False)
             return
         if parsed.path == "/bridge/zsxq/health":
             self._handle_zsxq_health()
@@ -106,20 +106,26 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_html(self, status_code, body):
+    def _send_html(self, status_code, body, include_wildcard_cors=True):
         encoded_body = body.encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(encoded_body)))
-        self.end_headers()
-        self.wfile.write(encoded_body)
+        previous_cors_setting = getattr(self, "_include_wildcard_cors", True)
+        self._include_wildcard_cors = include_wildcard_cors
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(encoded_body)))
+            self.end_headers()
+            self.wfile.write(encoded_body)
+        finally:
+            self._include_wildcard_cors = previous_cors_setting
 
     def end_headers(self):
         # 添加CORS头部
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        if getattr(self, "_include_wildcard_cors", True):
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
         super().end_headers()
 
 class ReusableThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):

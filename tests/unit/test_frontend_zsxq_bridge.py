@@ -181,6 +181,22 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
             },
         )
 
+    def test_history_page_omits_wildcard_cors_while_health_page_retains_it(self):
+        history_payload = {"success": True, "data": {}}
+        with _LocalJsonBackend((200, history_payload)) as backend:
+            with self._frontend(backend.base_url) as frontend:
+                with _proxyless_open(
+                    f"{frontend.base_url}/zsxq-sidebar-history.html?kind=mp3"
+                ) as history_response:
+                    history_response.read()
+                with _proxyless_open(
+                    f"{frontend.base_url}/zsxq-sidebar-bridge.html"
+                ) as health_response:
+                    health_response.read()
+
+        self.assertNotIn("Access-Control-Allow-Origin", history_response.headers)
+        self.assertEqual(health_response.headers["Access-Control-Allow-Origin"], "*")
+
     def test_history_page_posts_fixed_pdf_scope(self):
         with _LocalJsonBackend((200, {"success": True, "data": {}})) as backend:
             with self._frontend(backend.base_url) as frontend:
