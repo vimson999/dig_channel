@@ -61,12 +61,23 @@ class _LocalJsonBackend:
             }
         )
         if self.responses:
-            status, payload = self.responses.pop(0)
+            response = self.responses.pop(0)
+            if len(response) == 3:
+                status, payload, content_type = response
+            else:
+                status, payload = response
+                content_type = "application/json"
         else:
-            status, payload = 200, {"status": "healthy", "version": "1.0.0"}
-        encoded_payload = json.dumps(payload).encode()
+            status, payload, content_type = (
+                200,
+                {"status": "healthy", "version": "1.0.0"},
+                "application/json",
+            )
+        encoded_payload = (
+            payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        )
         handler.send_response(status)
-        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Type", content_type)
         handler.send_header("Content-Length", str(len(encoded_payload)))
         handler.end_headers()
         handler.wfile.write(encoded_payload)
@@ -116,12 +127,14 @@ def _fetch_csrf(base_url, kind):
     return parser.token
 
 
-def _post_form(base_url, *, kind, csrf_token, manifest):
+def _post_form(base_url, *, kind, csrf_token, manifest=None, manifest_json=None):
+    if manifest_json is None:
+        manifest_json = json.dumps(manifest)
     encoded_body = urllib.parse.urlencode(
         {
             "kind": kind,
             "csrf_token": csrf_token,
-            "manifest_json": json.dumps(manifest),
+            "manifest_json": manifest_json,
         }
     ).encode("utf-8")
     request = urllib.request.Request(
@@ -132,6 +145,16 @@ def _post_form(base_url, *, kind, csrf_token, manifest):
     )
     with _proxyless_open(request) as response:
         return response, response.read().decode("utf-8")
+
+
+def _post_raw_form(base_url, body, content_type="application/x-www-form-urlencoded"):
+    request = urllib.request.Request(
+        f"{base_url}/zsxq-sidebar-submit.html",
+        data=body,
+        headers={"Content-Type": content_type},
+        method="POST",
+    )
+    return _proxyless_open(request)
 
 
 class FrontendZsxqBridgeTest(unittest.TestCase):
@@ -298,6 +321,169 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
         )
         self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+
+    def test_submit_rejects_invalid_manifests_without_contacting_the_backend(self):
+        valid_manifest = {
+            "run_id": "sidebar-mp3-20260817T160000+0800-a1b2",
+            "kind": "mp3",
+            "group_id": "28888112822211",
+            "tab_id": "88844545452542",
+            "tab_label": "调研纪要",
+            "files": [],
+        }
+        cases = [
+            ("malformed-json", "not-json", 400),
+            ("kind-mismatch", {**valid_manifest, "kind": "pdf"}, 400),
+            ("wrong-group", {**valid_manifest, "group_id": "wrong"}, 400),
+            ("wrong-tab", {**valid_manifest, "tab_id": "wrong"}, 400),
+            ("wrong-label", {**valid_manifest, "tab_label": "wrong"}, 400),
+            ("invalid-run-id", {**valid_manifest, "run_id": "bad run id"}, 400),
+            ("non-list-files", {**valid_manifest, "files": {}}, 400),
+            ("too-many-files", {**valid_manifest, "files": [{} for _ in range(41)]}, 400),
+        ]
+        for case_name, manifest, expected_status in cases:
+            with self.subTest(case_name=case_name):
+                with _LocalJsonBackend() as backend:
+                    with self._frontend(backend.base_url) as frontend:
+                        csrf = _fetch_csrf(frontend.base_url, "mp3")
+                        with self.assertRaises(urllib.error.HTTPError) as raised:
+                            _post_form(
+                                frontend.base_url,
+                                kind="mp3",
+                                csrf_token=csrf,
+                                manifest_json=(
+                                    manifest
+                                    if case_name == "malformed-json"
+                                    else json.dumps(manifest)
+                                ),
+                            )
+
+                self.assertEqual(raised.exception.code, expected_status)
+                self.assertEqual(backend.received, [])
+
+    def test_submit_rejects_invalid_csrf_without_contacting_the_backend(self):
+        manifest = {
+            "run_id": "sidebar-mp3-20260817T160000+0800-a1b2",
+            "kind": "mp3",
+            "group_id": "28888112822211",
+            "tab_id": "88844545452542",
+            "tab_label": "调研纪要",
+            "files": [],
+        }
+        with _LocalJsonBackend() as backend:
+            with self._frontend(backend.base_url) as frontend:
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    _post_form(
+                        frontend.base_url,
+                        kind="mp3",
+                        csrf_token="invalid",
+                        manifest=manifest,
+                    )
+
+        self.assertEqual(raised.exception.code, 403)
+        self.assertEqual(backend.received, [])
+
+    def test_submit_rejects_wrong_content_type_without_contacting_the_backend(self):
+        with _LocalJsonBackend() as backend:
+            with self._frontend(backend.base_url) as frontend:
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    _post_raw_form(frontend.base_url, b"{}", "application/json")
+
+        self.assertEqual(raised.exception.code, 415)
+        self.assertEqual(backend.received, [])
+
+    def test_submit_rejects_oversized_form_without_contacting_the_backend(self):
+        with _LocalJsonBackend() as backend:
+            with self._frontend(backend.base_url) as frontend:
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    _post_raw_form(
+                        frontend.base_url,
+                        b"x" * (frontend_server.MAX_FORM_BODY_BYTES + 1),
+                    )
+
+        self.assertEqual(raised.exception.code, 413)
+        self.assertEqual(backend.received, [])
+
+    def test_history_returns_502_html_when_backend_is_unavailable(self):
+        with self._frontend("http://127.0.0.1:1") as frontend:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                _proxyless_open(f"{frontend.base_url}/zsxq-sidebar-history.html?kind=mp3")
+
+        self.assertEqual(raised.exception.code, 502)
+        self.assertEqual(raised.exception.headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertIn(
+            "zsxq_backend_unavailable",
+            raised.exception.read().decode("utf-8"),
+        )
+
+    def test_history_returns_502_html_when_backend_response_is_not_json(self):
+        with _LocalJsonBackend((200, b"not-json", "text/plain")) as backend:
+            with self._frontend(backend.base_url) as frontend:
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    _proxyless_open(
+                        f"{frontend.base_url}/zsxq-sidebar-history.html?kind=mp3"
+                    )
+
+        self.assertEqual(raised.exception.code, 502)
+        self.assertIn(
+            "zsxq_backend_invalid_response",
+            raised.exception.read().decode("utf-8"),
+        )
+        self.assertEqual(len(backend.received), 1)
+
+    def test_submit_preserves_backend_idempotency_conflict_status(self):
+        manifest = {
+            "run_id": "sidebar-mp3-20260817T160000+0800-a1b2",
+            "kind": "mp3",
+            "group_id": "28888112822211",
+            "tab_id": "88844545452542",
+            "tab_label": "调研纪要",
+            "files": [],
+        }
+        with _LocalJsonBackend(
+            (409, {"success": False, "code": "idempotency_conflict"})
+        ) as backend:
+            with self._frontend(backend.base_url) as frontend:
+                csrf = _fetch_csrf(frontend.base_url, "mp3")
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    _post_form(
+                        frontend.base_url,
+                        kind="mp3",
+                        csrf_token=csrf,
+                        manifest=manifest,
+                    )
+
+        self.assertEqual(raised.exception.code, 409)
+        self.assertIn("idempotency_conflict", raised.exception.read().decode("utf-8"))
+        self.assertEqual(len(backend.received), 1)
+
+    def test_history_escapes_backend_strings_as_text(self):
+        script = "<script>alert(1)</script>"
+        with _LocalJsonBackend(
+            (200, {"success": True, "data": {"complete": True, "note": script}})
+        ) as backend:
+            with self._frontend(backend.base_url) as frontend:
+                with _proxyless_open(
+                    f"{frontend.base_url}/zsxq-sidebar-history.html?kind=mp3"
+                ) as response:
+                    body = response.read().decode("utf-8")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
+        self.assertNotIn("<script", body)
+        self.assertEqual(len(backend.received), 1)
+
+    def test_history_keeps_incomplete_state_visible_for_failure_closed_callers(self):
+        with _LocalJsonBackend((200, {"success": True, "data": {"complete": False}})) as backend:
+            with self._frontend(backend.base_url) as frontend:
+                with _proxyless_open(
+                    f"{frontend.base_url}/zsxq-sidebar-history.html?kind=mp3"
+                ) as response:
+                    body = response.read().decode("utf-8")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("历史完整：false", body)
+        self.assertEqual(len(backend.received), 1)
 
     def test_valid_manifest_post_forwards_fixed_payload_and_idempotency_key(self):
         manifest = {
