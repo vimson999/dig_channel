@@ -50,7 +50,7 @@ const state = {
     allTabsConfigError: '',
     batches: [],
     batchesError: null,
-    schedulerPollTimer: null,
+    schedulerPollController: null,
     logsLoaded: false,
     autoPublishConfig: null,
     autoPublishScheduler: null,
@@ -1970,29 +1970,36 @@ async function runSystemSyncOnce() {
 
 function startSchedulerPolling() {
     stopSchedulerPolling();
-    state.schedulerPollTimer = setInterval(() => {
-        loadSystemSyncSchedulerStatus({ render: false }).then(() => {
-            renderSyncSchedulerPanel();
-            renderSyncOverviewCard();
-            renderAutoPublishCurrentGroup();
-            if (state.logsLoaded && !els.logsPanel.classList.contains('hidden')) {
-                loadSchedulerLogs().then((logs) => {
+    state.schedulerPollController = window.VisibilityPolling.create({
+        intervalMs: SYSTEM_SYNC_STATUS_POLL_MS,
+        poll: async () => {
+            await Promise.allSettled([
+                loadSystemSyncSchedulerStatus({ render: false }).then(() => {
+                    renderSyncSchedulerPanel();
+                    renderSyncOverviewCard();
+                    renderAutoPublishCurrentGroup();
                     if (state.logsLoaded && !els.logsPanel.classList.contains('hidden')) {
-                        els.logsPanel.textContent = logs;
+                        return loadSchedulerLogs().then((logs) => {
+                            if (state.logsLoaded && !els.logsPanel.classList.contains('hidden')) {
+                                els.logsPanel.textContent = logs;
+                            }
+                        });
                     }
-                });
-            }
-        });
-        loadSystemSyncBatches(syncContext().selectedGroupId, { render: false }).then(renderBatchesPanel);
-        loadAutoPublishSchedulerStatus({ render: false }).then(renderAutoPublishSchedulerPanel);
-        loadAutoPublishRuns({ render: false }).then(renderAutoPublishRunsPanel);
-    }, SYSTEM_SYNC_STATUS_POLL_MS);
+                    return null;
+                }),
+                loadSystemSyncBatches(syncContext().selectedGroupId, { render: false }).then(renderBatchesPanel),
+                loadAutoPublishSchedulerStatus({ render: false }).then(renderAutoPublishSchedulerPanel),
+                loadAutoPublishRuns({ render: false }).then(renderAutoPublishRunsPanel),
+            ]);
+        },
+    });
+    state.schedulerPollController.start();
 }
 
 function stopSchedulerPolling() {
-    if (state.schedulerPollTimer) {
-        clearInterval(state.schedulerPollTimer);
-        state.schedulerPollTimer = null;
+    if (state.schedulerPollController) {
+        state.schedulerPollController.stop();
+        state.schedulerPollController = null;
     }
 }
 

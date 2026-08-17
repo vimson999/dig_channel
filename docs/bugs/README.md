@@ -16,7 +16,15 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-08-16 | [后台状态页持续轮询并放大 API 与数据库往返](2026-08-16-hidden-status-pages-unbounded-polling.md) | Celery Monitor / ZSXQ 系统同步 / Page Visibility / PgBouncer | CODE_CHANGED/OBSERVING；真实页面已加载，待完整窗口验收 |
+| 2026-08-15 | [DB 巡检未识别 PgBouncer 路由回退与等待错误](2026-08-15-db-audit-missed-pgbouncer-route-fallback.md) | DB 巡检 / PgBouncer / Tailscale / 代理 TUN | 分析器已修复并回放验证；网络根因 OPEN/OBSERVING |
+| 2026-08-14 | [研报音频 DeepSeek 结构化跨外部调用持有数据库 Session](2026-08-14-report-audio-deepseek-session-hold.md) | report audio / DeepSeek / Session / PgBouncer | RUNTIME_REPLACED/OPEN；待真实任务和完整窗口验收 |
+| 2026-08-13 | [工作流通知 SMTP 断连触发同步重试风暴](2026-08-13-workflow-notification-smtp-retry-storm.md) | workflow_notify / SMTP / Celery 重试 | RUNTIME_REPLACED/OPEN；单预算已加载，待真实失败与最终送达 |
+| 2026-08-12 | [ZSXQ 自动发布预览跨远程上传持有数据库 Session](2026-08-12-zsxq-auto-publish-preview-session-hold.md) | ZSXQ 自动发布 / 内容流水线 / 七牛 / Session | CLOSED；29 个真实批次和下一完整窗口确认未复发 |
+| 2026-08-11 | [Celery 状态接口跨 broker inspect 持有鉴权 Session](2026-08-11-celery-status-auth-session-held-across-inspect.md) | Celery 状态页 / 鉴权 / PgBouncer / Session | 并发强刷单飞已运行替换；单次 17.4 秒仍 OBSERVING |
 | 2026-08-10 | [研报完整视频编排需要人工恢复与跨页面判断](2026-08-10-report-production-orchestration-manual-recovery.md) | report audio / Publisher / 方案三 / runtime guard / 工作台 | CODE_MODIFIED，等待新三 PDF 批次运行验收 |
+| 2026-08-10 | [失败 SQL 耗时被错记为非 SQL Session 持有](2026-08-10-failed-sql-lifecycle-duration-misclassified.md) | database logger / Session 生命周期 / PgBouncer 归因 | 新代码已加载，等待真实失败样本校准，OBSERVING |
+| 2026-08-10 | [Report audio finalization 周期 JSON 扫描与详情 N+1](2026-08-10-report-audio-finalization-json-polling-n-plus-one.md) | report audio / publication_tasks / watchdog / 详情列表 | 2026-08-14 单任务路径复发已重新修复并完成真实 API 验收，OBSERVING |
 | 2026-08-09 | [ZSXQ Insights 冷查询把全量正文跨网络搬到应用](2026-08-09-zsxq-insights-cold-fulltext-transfer.md) | 生财 Insights / zsxq_topics / 网络传输 | 新代码已部署并完成真实冷/热 API 验收，OBSERVING |
 | 2026-08-08 | [PostgreSQL 长连接经代理虚拟隧道反复黑洞超时](2026-08-08-postgres-tunneled-route-query-timeout.md) | 全站数据库链路 / PgBouncer / 本机代理 TUN/Tailscale | 两轮隔离后仍有应用 timeout 与 server crash，OPEN/OBSERVING |
 | 2026-08-07 | [分镜提交成功后断连被误写为失败](2026-08-07-storyboard-ambiguous-commit-false-failure.md) | 火柴人视觉视频 / PostgreSQL / 父子任务状态机 | 指定任务端到端验收完成，RUNTIME_REPLACED/OBSERVING |
@@ -140,7 +148,7 @@
 | 2026-07-02 | [历史文件清理重复调度器覆盖执行结果](2026-07-02-content-retention-duplicate-scheduler-overwrote-result.md) | content retention cleanup scheduler / runtime status / email notification | 已修复 |
 | 2026-06-29 | [Celery worker 假活但不消费队列](2026-06-29-celery-worker-fake-alive-backlog-not-consuming.md) | celery watchdog / report audio workflow / Redis broker | 已修复 |
 | 2026-06-29 | [研报音频豆包分段失败记录后访问 detached 子任务](2026-06-29-report-audio-doubao-child-detached-after-failure-record.md) | report audio workflow / doubao browser tts / SQLAlchemy session | 已修复 |
-| 2026-06-29 | [飞书 Cookie 函数已存在但旧 Celery worker 仍导入失败](2026-06-29-feishu-cookie-import-stale-celery-workers.md) | Celery worker / external documents / platform credentials | 已处置 |
+| 2026-06-29 | [飞书 Cookie 函数已存在但旧 Celery worker 仍导入失败](2026-06-29-feishu-cookie-import-stale-celery-workers.md) | Celery worker / external documents / platform credentials | 2026-08-11 同类共享导入混版再次打开，OBSERVING |
 | 2026-06-26 | [独立豆包朗读短音频失败后没有自动重试](2026-06-26-doubao-standalone-short-audio-no-auto-retry.md) | doubao browser tts / 测试页 / Celery worker | 已修复 |
 | 2026-06-26 | [研报音频 publisher 子任务已完成但父任务仍等待](2026-06-26-report-audio-publisher-child-completed-parent-waiting.md) | report audio workflow / publisher child wait / SQLAlchemy session | 已修复 |
 | 2026-06-26 | [豆包朗读 processing 子任务卡死导致父编排无限等待](2026-06-26-doubao-browser-tts-stale-processing-child.md) | report audio workflow / doubao browser tts / celery worker | 已修复 |

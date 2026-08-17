@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import os
@@ -1139,6 +1140,25 @@ def _validate_structured_result(
         "provider": payload.get("provider") or "local_fallback",
         "raw_text_chars": len(raw_text),
     }
+    if payload.get("schema_version") == "report_audio_gem_v2":
+        for key in (
+            "schema_version",
+            "language",
+            "output_mode",
+            "source_files",
+            "metadata",
+            "material_boundary",
+            "core_analysis",
+            "fact_ledger",
+            "paragraph_map",
+            "title_candidates",
+            "selected_titles",
+            "evidence_map",
+            "quality_control",
+            "batch_quality_control",
+        ):
+            if key in payload:
+                result[key] = copy.deepcopy(payload[key])
     return result
 
 

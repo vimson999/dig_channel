@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import ipaddress
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -55,6 +56,9 @@ LIFECYCLE_DURATION = re.compile(
 )
 PGBOUNCER_STATS = re.compile(
     r"stats:.*?xact (?P<xact>\d+) us, query (?P<query>\d+) us, wait (?P<wait>\d+) us"
+)
+PGBOUNCER_SERVER_SOURCE = re.compile(
+    r"new connection to server \(from (?P<address>.+):(?P<port>\d+)\)"
 )
 SQL_ERROR = re.compile(
     r"publication_tasks SQL categories=[^ ]*error[^ ]*"
@@ -266,8 +270,14 @@ def pgbouncer_event_types(line: str) -> set[str]:
     categories: set[str] = set()
     if "connect timeout" in lowered:
         categories.add("connect_timeout")
+    if "query_wait_timeout" in lowered:
+        categories.add("query_wait_timeout")
     if "query timeout" in lowered:
         categories.add("query_timeout")
+    if "closing because: server conn crashed?" in lowered and " s-" in lowered:
+        categories.add("server_conn_crashed")
+    if "tls_sbufio_recv: read failed:" in lowered:
+        categories.add("tls_receive_error")
     if "warning server login failed" in lowered:
         categories.add("server_login_failed")
         if "no pg_hba.conf entry" in lowered:
@@ -275,6 +285,18 @@ def pgbouncer_event_types(line: str) -> set[str]:
     if "pooler error: server login has been failing" in lowered:
         categories.add("cached_server_login_failure")
     return categories
+
+
+def pgbouncer_server_source(line: str) -> str | None:
+    match = PGBOUNCER_SERVER_SOURCE.search(line)
+    return match.group("address") if match else None
+
+
+def is_proxy_tun_source(address: str) -> bool:
+    try:
+        return ipaddress.ip_address(address) in ipaddress.ip_network("198.18.0.0/15")
+    except ValueError:
+        return False
 
 
 def is_adhoc_diagnostic_context(
@@ -764,6 +786,8 @@ def main() -> int:
     pgbouncer_path = ROOT / "logs" / "pgbouncer.log"
     pgbouncer_counts: Counter[str] = Counter()
     pgbouncer_events: dict[str, set[datetime]] = defaultdict(set)
+    pgbouncer_server_sources: Counter[str] = Counter()
+    pgbouncer_proxy_tun_timestamps: list[datetime] = []
     pgbouncer_wait_ms: list[float] = []
     pgbouncer_query_ms: list[float] = []
     pgbouncer_paths = [pgbouncer_path]
@@ -786,6 +810,11 @@ def main() -> int:
                 for category in pgbouncer_event_types(line):
                     pgbouncer_counts[category] += 1
                     pgbouncer_events[category].add(timestamp)
+                server_source = pgbouncer_server_source(line)
+                if server_source:
+                    pgbouncer_server_sources[server_source] += 1
+                    if is_proxy_tun_source(server_source):
+                        pgbouncer_proxy_tun_timestamps.append(timestamp)
                 stat_match = PGBOUNCER_STATS.search(line)
                 if stat_match:
                     pgbouncer_wait_ms.append(float(stat_match.group("wait")) / 1000.0)
@@ -797,6 +826,9 @@ def main() -> int:
             for key in (
                 "connect_timeout",
                 "query_timeout",
+                "query_wait_timeout",
+                "server_conn_crashed",
+                "tls_receive_error",
                 "server_login_failed",
                 "hba_rejected",
                 "cached_server_login_failure",
@@ -811,12 +843,30 @@ def main() -> int:
             for key in (
                 "connect_timeout",
                 "query_timeout",
+                "query_wait_timeout",
+                "server_conn_crashed",
+                "tls_receive_error",
                 "server_login_failed",
                 "hba_rejected",
                 "cached_server_login_failure",
             )
         )
     )
+    for address, count in pgbouncer_server_sources.most_common():
+        print(
+            "pgbouncer_server_source "
+            f"local_address={address} connections={count} "
+            f"proxy_tun={str(is_proxy_tun_source(address)).lower()}"
+        )
+    if pgbouncer_proxy_tun_timestamps:
+        print(
+            "pgbouncer_proxy_tun_fallback "
+            f"connections={len(pgbouncer_proxy_tun_timestamps)} "
+            f"first_at={min(pgbouncer_proxy_tun_timestamps).isoformat(sep=' ')} "
+            f"last_at={max(pgbouncer_proxy_tun_timestamps).isoformat(sep=' ')}"
+        )
+    else:
+        print("pgbouncer_proxy_tun_fallback connections=0")
     print(f"pgbouncer_wait {stats(pgbouncer_wait_ms)}")
     print(f"pgbouncer_query {stats(pgbouncer_query_ms)}")
     return 0

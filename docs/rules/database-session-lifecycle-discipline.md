@@ -66,9 +66,10 @@ def release_db_session_quietly():
 - Web：小 QueuePool，默认 `WEB_DB_POOL_SIZE=4`，`WEB_DB_MAX_OVERFLOW=0`。
 - Worker / scheduler / watchdog：默认 `NullPool`，任务用完即还。
 - PgBouncer：transaction pool，限制服务端连接，允许应用端短连接进入排队。本地远端
-  PostgreSQL 链路的安全下限为 `min_pool_size=6`、
-  `server_idle_timeout=600`、`server_lifetime=21600`；生成脚本和测试必须共同锁定，
-  禁止重启时回退成冷池。
+  PostgreSQL 链路保留 `min_pool_size=6` 与 `server_idle_timeout=600`，避免页面并发
+  退化为冷连接扇出；跨 Tailscale 的后端 socket 默认 `server_lifetime=300`，并由
+  生成脚本和测试共同锁定。热连接数量与 socket 寿命是两项独立防线，禁止再用
+  6 小时长寿命掩盖网络漂移后的陈旧连接。
 - PostgreSQL 服务端建议设置硬保险：
   - `idle_in_transaction_session_timeout`
   - `statement_timeout`

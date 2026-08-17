@@ -2,7 +2,7 @@
 
 ## 基本信息
 
-- 状态：公网物理绕过与 Tailscale 两轮隔离后仍有应用 query timeout 和 server socket crash；`OPEN/OBSERVING`
+- 状态：公网物理绕过与 Tailscale 两轮隔离后仍有应用 query timeout 和 server socket crash；`RUNTIME_MITIGATED/OPEN`
 - 严重级别：P0
 - 影响模块：全部数据库页面/API / Celery / scheduler / PgBouncer / 本机代理网络
 - 首次发现：2026-08-08 日巡检确认；同类 60 秒连接长尾此前已多轮出现
@@ -135,6 +135,16 @@ socket 脱离 `utun8`。11:03 新建、明确命中 DIRECT 的连接仍在 11:05
 - 连续 24 小时要求 query/connect timeout=0、60 秒 Session=0，MP3/PDF/凭据和 ZSXQ 真实负载均成功；
   在此之前保持 `ISOLATED/OBSERVING`，不得写成已解决。
 
+### 2026-08-12 长寿命后端 socket 缓解与 SSH 隧道回滚
+
+- 新窗口仍出现 6 个去重 query timeout 和多次 `server conn crashed?`；异常 PgBouncer server socket 年龄集中在约 10 分钟以上，旧 `server_lifetime=21600` 会让网络漂移前建立的连接继续复用。
+- 同形 MP3 audio-assets 查询服务端 executor 仅 55.619ms，关联正文最大仅 92 字节，进一步排除 executor、索引和大字段传输作为共同主因。
+- SSH 隧道候选在隔离 A/B 中表现较好，但完整 Worker 启动后的真实直连发生 5 秒 timeout；系统按门禁回滚到 Tailscale，停止 LaunchAgent 并删除服务器受限公钥，没有把失败候选留作生产依赖。
+- 最终保持 6 条热连接，把 PgBouncer `server_lifetime` 调整为 300 秒；100 次、10 并发只读请求全部成功，P95 338.6ms、最大 371.3ms、`cl_waiting=0`。
+- 后续窗口仍记录 4 次 `server conn crashed?`，其中两次是 TLS receive timeout，socket 年龄约 196 秒，另两次约为 46/426 秒；300 秒轮换因此只是缓解，不是根因修复。
+- 无 TLS 候选池 A/B 为 0/100；PostgreSQL 按 HBA 加密要求拒绝 `100.96.3.12` 的 `no encryption` 连接。候选池已停止，未放宽 HBA，正式 TLS 链路未变更。
+- 状态保持 `RUNTIME_MITIGATED/OPEN`；仍需完整 24 小时 query/connect timeout=0、server crash=0 才能转入观察闭环。
+
 ### 2026-08-09 应用 Session 生命周期修复
 
 - 报告截止后仍观测到 PgBouncer timeout/server connection failure，故 Tailscale 私网本身不能闭环。
@@ -149,3 +159,84 @@ socket 脱离 `utun8`。11:03 新建、明确命中 DIRECT 的连接仍在 11:05
   PgBouncer/server socket 异常。24 小时无复发验收从本次发布时点重新计时。
 - 本机 `CELERY_RESULT_BACKEND` 的旧公网 Redis 残留也已改为 Tailscale 地址；三项 Redis 运行
   依赖预检全部通过，Flask 新进程健康且启动日志不再出现 result backend timeout。
+
+### 2026-08-13 300 秒轮换仍复发
+
+- 固定窗口内 PgBouncer 有 8 个去重 `query timeout`（上一窗口 6，+33.3%）、7 个 `connect timeout`（上一窗口 0）和 132 次 `server conn crashed?`；300 秒 `server_lifetime` 后大量失败 socket 年龄仍落在约 25–299 秒，排除“只要缩短旧连接寿命即可根治”。
+- 唯一应用 SQL 错误 `fd910014d5877aa5` 来自 `tasks/report_audio_workflow.py:3021:_wait_child`，耗时 `20.153s`，与 02:31:38 的 PgBouncer query timeout 同秒；它是连接/网络等待，不是 executor 慢。
+- 只读 PostgreSQL 现场无 waiting lock、无 idle-in-transaction；代表性 `EXPLAIN (ANALYZE, BUFFERS)` 为 `0.023–34.606ms`，而应用 SQL P95 为 `7.477s`。目标表索引扫描占比 `98.87%–99.95%`，没有证据支持新增索引作为根治。
+- 状态保持 `RUNTIME_MITIGATED/OPEN`。下一轮优先按 server socket 创建时间、Tailscale path 与 query/connect timeout 做关联 A/B；在完整 24 小时 `query/connect timeout=0`、`server crash=0` 前不得关闭。
+
+### 2026-08-13 10:02 PgBouncer keepalive 参数修复与短窗复核
+
+- 新鲜日志把 127 次 TLS socket crash 进一步定位为 PgBouncer 空闲后端连接的
+  `tls_sbufio_recv: read failed: Operation timed out`；同一窗口中 crash socket 年龄为
+  25–299 秒，且没有对应客户端请求，PostgreSQL `idle_session_timeout=0`、直连 TLS 空闲
+  40 秒稳定，故不是 executor、锁或服务端主动 idle 断开。
+- 修复前本地生成器强制写入 `tcp_keepalive=1`、`tcp_keepcnt=3`、`tcp_keepidle=10`、
+  `tcp_keepintvl=5`。这些平台相关探测值只在 PgBouncer 生效，直连 PostgreSQL 使用 OS
+  默认值；本轮改为默认只保留 `tcp_keepalive=1`，三个 tunable 仅通过
+  `LOCAL_PGBOUNCER_TCP_KEEPCNT/KEEPIDLE/KEEPINTVL` 显式注入，保留可重复 A/B 能力。
+- 证据链：先新增默认配置“不出现 tunable”的测试，在旧代码上得到预期 RED；改动
+  `scripts/dev/setup-local-pgbouncer.py` 后定向 4/4、`compileall`、`git diff --check`
+  通过。随后对 report-audio 窄投影改动重新执行完整测试，用仓库根作为 top-level 运行
+  `1165` 个用例，`OK (skipped=2)`。
+- 已运行配置生成器并通过 `scripts/dev/run-local-pgbouncer.sh` HUP 重载；现场
+  `SHOW CONFIG` 为 `tcp_keepalive=1`、`tcp_keepcnt/idle/intvl=0`，`cl_waiting=0`、6 条
+  后端服务连接正常。未重启 backend/Celery/scheduler，未执行生产 DDL、HBA 或路由变更。
+- 重载后截至 10:20:08 的 PgBouncer 日志为 `server conn crashed=0`、TLS receive
+  timeout `0`、connect timeout `0`；6 个真实 PgBouncer 客户端空闲 90 秒后全部成功。
+  同窗另有 1 次独立业务 `query timeout`，与这次空闲验收客户端不相同，证明 query timeout
+  复发键仍开放，不能把短窗当作根治；自然 `server lifetime over` 5 次属于 300 秒轮换。
+- 该 query timeout 对应的上游大字段放大点也已修复：`tasks/report_audio_workflow.py` 的
+  `_resolve_scheme3_visual_inputs` 原先按主键加载 `PublicationTask` 全行，现只投影
+  `id/user_id/report_audio_pdf_attachment_id/report_audio_pdf_filename/report_audio_pdf_bytes`；
+  先写契约测试并在旧代码上 RED，修复后定向 report-audio/MP3 共 `160` 个用例通过。
+- `venv/bin/python scripts/dev/check-restart-safety.py` 已实际读取远端状态，但仍阻止替换进程：
+  2 个不可中断任务（`report_pdf_audio_workflow`、`report_pdf_gemini`）运行中；未使用
+  `FORCE_RESTART_ACTIVE_TASKS=1`。因此窄投影的 worker 运行态验收待安全窗口。
+- 隔离的一次性只读进程已用真实任务 `d859b7d7-866f-485e-9a9e-d8871ad12295` 调用窄投影解析：
+  首条 `SELECT publication_tasks` 228.18ms、总解析 905.96ms、返回空工作流且无写入/投递；
+  这证明新代码路径可运行，但不替代新 worker 加载后的真实任务验收。
+- 状态仍为 `RUNTIME_MITIGATED/OPEN`：keepalive 行为已落地并短窗改善，但 Tailscale
+  私网 path、query timeout 和 connect timeout 必须在下一完整 24 小时托管 Web/worker/
+  scheduler 窗口中同时为 0，且真实页面/API/任务成功后，才可进入 `OBSERVING`/关闭。
+
+### 2026-08-14 keepalive 后约 20 小时复核
+
+- 从 2026-08-13 10:03:54 重载到本轮窗口末，TLS receive timeout 与 `server conn crashed?` 均为 0，说明移除平台相关 keepalive tunable 的改善持续约 20 小时；因不足完整 24 小时，socket crash 只记 OBSERVING。
+- 同一重载后仍有 10 个去重 query timeout 和 2 个 connect timeout；整个固定窗口为 14/3，上一轮为 8/7，即 query timeout `+75%`、connect timeout `-57%`。多个 query timeout 与应用 20 秒 SQL 失败同秒，网络/连接根因仍复发。
+- PostgreSQL 现场无 waiting lock、无 idle-in-transaction，关键 EXPLAIN 执行 `0.030–37.504ms`；PgBouncer 运行配置仍为 `query_timeout=20`、`server_lifetime=300`、仅 `tcp_keepalive=1`。没有证据支持加索引或继续缩短连接寿命。
+- 状态保持 `RUNTIME_MITIGATED/OPEN`。下一轮必须以完整 24 小时 `query/connect timeout=0`、TLS crash=0、托管应用失败 SQL=0 为验收条件。
+
+### 2026-08-15 代理 TUN 路由回退复发
+
+- 13:06:24 首次出现 pool `query_wait_timeout`；13:07:08 后 PgBouncer 新 server connection
+  的本地 source 从 Tailscale `100.96.3.12` 变成代理 TUN `198.18.0.1`。至 13:10:56
+  共 16 次回退连接，和 9 个去重 query-wait、18 个 server crash、3 个 TLS receive error
+  及 16 条 scheduler repair SQL 失败对齐。
+- 这次失败风暴根因是 PostgreSQL 链路错误进入代理虚拟网卡，不是 executor、锁或索引：
+  scheduler config 同形查询 `EXPLAIN (ANALYZE, BUFFERS)` 仅 0.024ms，失败 SQL 却连续
+  持有约 15.3s。
+- PgBouncer 15:16 重启后 source 恢复为 `100.96.3.12`；当前 route 为 `utun5`，数据库
+  `client_addr` 也为 `100.96.3.12`。但之后仍有 5 个客户端 query timeout、7 个 connect
+  timeout（其中若干发生在路由恢复后），说明一次 TUN 回退解释了主要失败风暴，却没有
+  解释或根治全部传输不稳定。
+- 分析器已增加 query-wait/server crash/TLS/source-address 归因与契约测试。此变更补齐
+  防线，不会自动修改系统路由。
+- 状态保持 `RUNTIME_MITIGATED/OPEN`。下一轮要求完整窗口 proxy TUN source=0、
+  query/connect/query-wait/server crash/TLS error/应用失败 SQL 全部为 0，并完成真实
+scheduler/API/worker 验收；否则继续追代理配置和 Tailscale path。
+
+### 2026-08-16 无 TUN 回退但 timeout 仍复发
+
+- 固定窗口 proxy TUN fallback、query-wait、server crash、TLS receive error 均为 0，说明上一轮
+  路由回退风暴改善；server source 保持 Tailscale `100.96.3.12`。
+- 但去重 query timeout 为 7（上一轮 5，`+40%`），connect timeout 为 11（上一轮 7，
+  `+57.1%`）。15:15:15 的 query timeout 与 request `03cc1336`、SQL origin
+  `api/mp3_video_workflow.py:514:load_page` 同秒，应用最终记录 `server closed`，请求耗时
+  20.169s；这仍是用户可见失败。
+- PostgreSQL 只读现场无 waiting lock、无 idle-in-transaction；代表性 executor 0.023–35.916ms，
+  应用慢 SQL P95 7.079s。故无证据转向索引或锁，剩余根因仍在 PgBouncer/网络传输边界。
+- 状态保持 `RUNTIME_MITIGATED/OPEN`。下一完整窗口必须同时满足 query/connect timeout=0、
+  proxy TUN/query-wait/crash/TLS=0、应用失败 SQL=0，并覆盖真实 API/worker 才能进入关闭观察。

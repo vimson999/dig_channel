@@ -548,7 +548,11 @@ class ReportAudioWorkflowDetailPage {
 
     async retryWorkflow(jobId) {
         if (!jobId || this.retryRequestIds.has(jobId)) return;
-        if (!window.confirm('从失败处续跑这个任务？已完成的 PDF 准备、Gemini 解析和文案会尽量复用。')) return;
+        const captchaRecovery = Boolean(this.reportHumanIntervention(this.job));
+        const confirmText = captchaRecovery
+            ? '已完成人机验证并恢复任务？系统会记录旧 CAPTCHA 尝试已由本次续跑接替，并复用已完成内容。'
+            : '从失败处续跑这个任务？已完成的 PDF 准备、Gemini 解析和文案会尽量复用。';
+        if (!window.confirm(confirmText)) return;
         this.retryRequestIds.add(jobId);
         this.renderChangedSections(['task-overview']);
         try {
@@ -765,6 +769,8 @@ class ReportAudioWorkflowDetailPage {
         const canRetry = ['failed', 'error', 'blocked_by_captcha', 'canceled', 'cancelled']
             .includes(String(job.status || '').trim().toLowerCase());
         const retrying = this.retryRequestIds.has(jobId);
+        const intervention = this.reportHumanIntervention(job);
+        const retryLabel = intervention ? '验证完成，恢复任务' : '从失败处续跑';
         return `
             <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -783,7 +789,7 @@ class ReportAudioWorkflowDetailPage {
                         ].filter(Boolean).join(' · '))}</div>
                     </div>
                     <div class="flex flex-wrap gap-2">
-                        ${canRetry ? `<button type="button" data-detail-action="retry-workflow" data-job-id="${this.escapeAttr(jobId)}" ${retrying ? 'disabled' : ''} class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60"><i class="fas ${retrying ? 'fa-spinner fa-spin' : 'fa-play'} mr-1"></i>${retrying ? '续跑提交中' : '从失败处续跑'}</button>` : ''}
+                        ${canRetry ? `<button type="button" data-detail-action="retry-workflow" data-job-id="${this.escapeAttr(jobId)}" ${retrying ? 'disabled' : ''} class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60"><i class="fas ${retrying ? 'fa-spinner fa-spin' : 'fa-play'} mr-1"></i>${retrying ? '续跑提交中' : retryLabel}</button>` : ''}
                         ${job.pdf?.preview_url ? `<a href="${this.absoluteUrl(job.pdf.preview_url)}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-file-pdf mr-1"></i>PDF 预览</a>` : ''}
                         <button type="button" data-copy-text="${this.escapeAttr(this.displayTitle(job))}" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-copy mr-1"></i>复制标题</button>
                     </div>
@@ -793,6 +799,58 @@ class ReportAudioWorkflowDetailPage {
                 </ol>
                 ${this.orchestrationNotice(job)}
                 ${job.error ? `<div class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">${this.escape(job.error)}</div>` : ''}
+                ${this.renderHumanIntervention(intervention)}
+            </section>
+        `;
+    }
+
+    reportHumanIntervention(job) {
+        const workflowUrl = job?.job_id
+            ? `report-audio-workflow-detail.html?job_id=${encodeURIComponent(job.job_id)}`
+            : '';
+        const items = Array.isArray(job?.doubao_browser_tts) ? job.doubao_browser_tts : [];
+        for (let index = items.length - 1; index >= 0; index -= 1) {
+            const intervention = window.BrowserHumanIntervention?.resolve(
+                items[index],
+                { workflowUrl },
+            );
+            if (intervention) return intervention;
+        }
+        return null;
+    }
+
+    renderHumanIntervention(intervention) {
+        if (!intervention) return '';
+        const failed = intervention.state === 'failed';
+        const sent = intervention.state === 'sent';
+        const tone = failed
+            ? 'border-rose-200 bg-rose-50 text-rose-800'
+            : (sent
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                : 'border-amber-200 bg-amber-50 text-amber-800');
+        const icon = failed
+            ? 'fa-envelope-circle-xmark'
+            : (sent ? 'fa-envelope-circle-check' : 'fa-user-shield');
+        const notificationDetail = [
+            intervention.label,
+            intervention.recipientHint,
+        ].filter(Boolean).join(' · ');
+        const failureDetail = [
+            intervention.notificationError,
+            intervention.missing?.length ? `缺少配置：${intervention.missing.join(', ')}` : '',
+        ].filter(Boolean).join('；');
+        return `
+            <section class="mt-3 rounded-md border px-4 py-3 text-xs leading-5 ${tone}">
+                <div class="font-black"><i class="fas ${icon} mr-1.5"></i>豆包人机验证需要人工处理 · ${this.escape(notificationDetail)}</div>
+                <div class="mt-1">当前任务不会继续自动重试。完成验证后，点击页面上方“验证完成，恢复任务”；系统会保留本次阻塞记录，并创建新的可审计续跑尝试。</div>
+                ${failureDetail ? `<div class="mt-1 font-bold">${this.escape(failureDetail)}</div>` : ''}
+                ${intervention.profile ? `<div class="mt-2 break-all"><span class="font-black">浏览器 Profile：</span>${this.escape(intervention.profile)}</div>` : ''}
+                ${intervention.workerId ? `<div class="break-all"><span class="font-black">Worker：</span>${this.escape(intervention.workerId)}</div>` : ''}
+                ${intervention.screenshotPath ? `<div class="break-all"><span class="font-black">现场截图：</span>${this.escape(intervention.screenshotPath)}</div>` : ''}
+                <ol class="mt-2 list-decimal space-y-1 pl-5">
+                    ${intervention.resolutionSteps.map((step) => `<li>${this.escape(step)}</li>`).join('')}
+                </ol>
+                ${intervention.pageUrl ? `<a href="${this.escapeAttr(intervention.pageUrl)}" target="_blank" rel="noopener noreferrer" class="mt-3 inline-flex rounded-md border border-current bg-white/70 px-2.5 py-1 font-black"><i class="fas fa-arrow-up-right-from-square mr-1"></i>打开豆包页面</a>` : ''}
             </section>
         `;
     }

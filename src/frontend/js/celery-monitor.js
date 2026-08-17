@@ -6,7 +6,7 @@ const state = {
     busyRestartAll: false,
     watchdog: null,
     watchdogError: '',
-    refreshTimer: null,
+    refreshPollingController: null,
 };
 
 const WORKFLOW_SERVICE_ORDER = ['report_audio_workflow', 'report_script_material_workflow', 'report_top10_workflow', 'mp3_video_workflow'];
@@ -32,7 +32,11 @@ const els = {
 document.addEventListener('DOMContentLoaded', () => {
     bindEvents();
     refreshStatus({ loadLogs: true });
-    state.refreshTimer = setInterval(() => refreshStatus({ silent: true }), 15000);
+    state.refreshPollingController = window.VisibilityPolling.create({
+        intervalMs: 15000,
+        poll: () => refreshStatus({ silent: true }),
+    });
+    state.refreshPollingController.start();
 });
 
 function bindEvents() {

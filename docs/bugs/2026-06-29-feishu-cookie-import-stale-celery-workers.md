@@ -2,11 +2,15 @@
 
 ## 基本信息
 
-- 状态：已处置
+- 状态：2026-08-11 再次打开，RUNTIME_REPLACED / OBSERVING
 - 严重级别：高
 - 影响模块：Celery worker / report audio workflow / publisher render / external documents / platform credentials
 - 首次发现：2026-06-28 发布任务报 `resolve_feishu_cookie` ImportError，2026-06-29 研报音频编排再次复现
 - 修复提交：`70aee3c feat: harden workflows and zsxq integrations`
+- 根因分类：运行时拓扑与代码重载
+- 复发键：RUNTIME-TOPOLOGY-RELOAD
+- 是否复发：第 2 次已确认复发
+- 防线层级：shared_guardrail / contract_test / observability
 
 ## 现象
 
@@ -135,3 +139,35 @@ error=None
 
 - 将“共享导入变更后滚动重启 worker”纳入发布检查清单。
 - 考虑让后端自举或 watchdog 在代码版本变化后提示 stale worker，而不是等业务任务触发 ImportError。
+
+## 2026-08-11 复发
+
+`mp3_video_workflow` worker 在 2026-08-10 16:38 启动，早于 18:05 加入 `DEFAULT_INITIAL_SCRIPT_MIN_CHARS` 的共享服务变更。2026-08-11 03:28，该旧 worker 连续消费 5 条消息；任务内 `create_app()` 从磁盘加载新 `api.report_audio_workflow`，但 `services.report_audio_workflow` 仍是进程内旧模块，因而连续报：
+
+```text
+ImportError: cannot import name 'DEFAULT_INITIAL_SCRIPT_MIN_CHARS'
+```
+
+失败 Celery id：
+
+- `2c2eee63-6f78-44dc-8669-f9c261302d26`
+- `e2613f08-7c13-4fb0-b198-04889bc2d12d`
+- `37ccdda6-a66e-4821-9aaa-36d61a94c741`
+- `d8dd7f6b-2a8c-4461-9f35-d6236e511ac5`
+- `b525e322-dc7d-424d-8956-1d2c09a91a7b`
+
+全新 Python 进程可正常导入该常量，进一步排除了磁盘缺代码。故障时段创建的 5 条 MP3 业务任务随后均由新 worker/自动重试推进到 `completed/done/100%`，没有遗留孤儿；但成功重试不能抵消这次运行时混版复发。
+
+本轮按安全门禁执行完整重启以替换全部 worker。下一轮必须确认所有 worker 的启动时间晚于共享导入变更，且 `DEFAULT_INITIAL_SCRIPT_MIN_CHARS` ImportError 为 0；发布门禁仍需补充“共享模块变更必须完整滚动重启”和 worker 代码版本指纹，完成前保持 `OBSERVING`。
+
+## 2026-08-13 再次复发
+
+固定窗口出现 3 次 `public_browser_human_intervention_notification` ImportError：MP3 主任务 1 次，report-audio 的 Gemini/豆包子任务失败传播 2 次。磁盘代码和相关单测中该函数均已存在，失败 worker 的启动时间早于共享通知服务变更，根因仍是运行时模块缓存混版，不是函数缺失。
+
+本轮完整 unit 1154 项通过后，两次重启安全门均确认无不可中断任务，随后完整重启 backend、17 个 worker、watchdog 和调度器。新 MP3、report-audio、workflow_notify worker 分别于 06:15:40、06:15:37、06:15:42 ready；新通知 worker 又完成 3 个真实通知。由于尚未有一条新 MP3/report-audio 业务任务再次走到该导入调用链，状态保持 `RUNTIME_REPLACED/OBSERVING`，下一窗口必须确认同符号 ImportError=0 且真实相关任务成功后才可关闭。
+
+## 2026-08-14 传播失败仍复发
+
+固定窗口内 report-audio 父任务在 10:32 和 10:34 两次因豆包子任务保存的同一 `public_browser_human_intervention_notification` ImportError 失败，Celery id 分别为 `1d5d56cb-6dbf-4a91-aac0-469b291ed3ee` 和 `fe3d3360-9900-48e1-ab4a-5c1cce92de88`，耗时 `20.163s`、`23.111s`。这两条是父任务传播既有子任务失败，尚不能证明新 worker 又在同一符号处首次导入失败；但用户可见调用链确实再次失败，故不能按“新日志未直接捕获”关闭。
+
+下一轮需同时区分“新 worker 新 ImportError”与“历史 failed child 被父任务重复传播”，并验收失败子任务的可恢复/重建策略；在真实相关任务成功且整个窗口同符号新 ImportError=0 前保持 OPEN/OBSERVING。

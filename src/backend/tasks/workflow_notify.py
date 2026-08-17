@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import sys
 
 backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -10,6 +11,13 @@ from celery_config import celery_app
 
 
 logger = logging.getLogger(__name__)
+
+
+def _notification_retry_delay(retries):
+    """Return one provider-level retry delay with exponential backoff + jitter."""
+    retry_index = max(0, int(retries or 0))
+    backoff = min(30 * (2 ** retry_index), 300)
+    return backoff + random.uniform(0, 30)
 
 
 @celery_app.task(bind=True, name="tasks.workflow_notify.send_workflow_notification")
@@ -27,4 +35,10 @@ def send_workflow_notification(self, payload):
         raise RuntimeError(f"workflow notification send failed: {result}")
     except Exception as exc:
         logger.exception("[WORKFLOW_NOTIFY_TASK] send failed: %s", exc)
-        raise self.retry(exc=exc, countdown=30, max_retries=3)
+        countdown = _notification_retry_delay(getattr(self.request, "retries", 0))
+        logger.warning(
+            "[WORKFLOW_NOTIFY_TASK] scheduling provider retry | retry=%s/3 countdown=%.1fs",
+            int(getattr(self.request, "retries", 0) or 0) + 1,
+            countdown,
+        )
+        raise self.retry(exc=exc, countdown=countdown, max_retries=3)

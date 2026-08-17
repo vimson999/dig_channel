@@ -22,6 +22,7 @@ from api.mp3_video_workflow import (
     _prepare_keyframe_job_for_full_video as _api_prepare_keyframe_job_for_full_video,
 )
 from models.task import PublicationTask
+from models.zsxq_sync import ZsxqTopic
 from services.gemini_browser import (
     GeminiBrowserAutomationError,
     GeminiBrowserOptions,
@@ -73,6 +74,7 @@ from services.mp3_video_workflow import (
     _publisher_video_file_is_stable,
     _publisher_video_title,
     _reusable_video_summary,
+    _topic_content_preview_projection,
     _video_summary_ready,
     _video_file_ready,
     _visual_artifacts_ready,
@@ -107,6 +109,13 @@ from services.mp3_video_workflow import (
 
 
 class Mp3VideoWorkflowServiceTest(unittest.TestCase):
+    def test_audio_asset_topic_preview_projection_is_bounded(self):
+        projection = _topic_content_preview_projection()
+        sql = str(projection.compile(compile_kwargs={"literal_binds": True}))
+
+        self.assertIn("substr(zsxq_topics.content, 1, 720)", sql)
+        self.assertNotEqual(projection.element, ZsxqTopic.content)
+
     def test_strict_pro_request_stops_before_submission_when_model_is_unconfirmed(self):
         worker = object.__new__(GeminiBrowserWorker)
         worker.options = GeminiBrowserOptions(

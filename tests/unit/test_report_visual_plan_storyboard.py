@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from PIL import Image
+from flask import Flask
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(BACKEND_DIR) not in sys.path:
@@ -17,6 +18,7 @@ if str(BACKEND_DIR) not in sys.path:
 from services import report_visual_plan_service as service
 from services.gemini_browser import (
     GeminiBrowserAutomationError,
+    GeminiBrowserHumanInterventionError,
     GeminiBrowserOptions,
     GeminiBrowserWorker,
     _write_generation_checkpoint,
@@ -35,14 +37,19 @@ from services.report_visual_plan_integrity import storyboard_integrity_from_rows
 from api.report_stick_figure_video_workflow import (
     _completed_image_asset_can_adopt_prompt_hash,
     _preferred_storyboard,
+    _workflow_payload,
     _workflow_source_payload,
 )
+from api import report_visual_plan as report_visual_plan_api
+from tasks import report_visual_plan as report_visual_plan_task
 from tasks.report_visual_plan import (
     _adopt_storyboard_embedded_images,
     _checkpoint_storyboard_text,
     _material_source_ready,
     _preserve_completed_video_state,
     _storyboard_gemini_worker,
+    _visual_retry_delay_seconds,
+    _visual_retry_limit,
 )
 from tasks.report_stick_figure_assets import (
     PARENT_IMAGE_COMPLETION_STEPS,
@@ -52,6 +59,16 @@ from tasks.report_stick_figure_assets import (
 
 
 class ReportVisualPlanStoryboardTest(unittest.TestCase):
+    def test_profile_contention_gets_longer_recovery_budget_than_transient_browser_errors(self):
+        self.assertEqual(
+            12,
+            _visual_retry_limit("Gemini 浏览器 profile 正在被其他 Chrome 占用"),
+        )
+        self.assertEqual(3, _visual_retry_limit("页面自动化超时"))
+        error = "Gemini 浏览器 profile 正在被其他 Chrome 占用"
+        self.assertEqual(30, _visual_retry_delay_seconds(error, 1))
+        self.assertEqual(120, _visual_retry_delay_seconds(error, 8))
+
     def test_durable_storyboard_integrity_requires_full_contiguous_content(self):
         output = SimpleNamespace(
             task_id="storyboard-1",
@@ -222,10 +239,30 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
         self.assertIn("normalizeMaterialSource(materialResult.data)", frontend_text)
         self.assertIn("workflow_job_id:this.workflowJobId", frontend_text)
 
+    def test_visual_detail_exposes_profile_auto_repair_reason_while_waiting(self):
+        frontend_text = (
+            BACKEND_DIR.parents[0] / "frontend" / "js" / "report-stick-figure-video-workflow-detail.js"
+        ).read_text(encoding="utf-8")
+        task_text = (BACKEND_DIR / "tasks" / "report_visual_plan.py").read_text(encoding="utf-8")
+
+        self.assertIn("自动修复中", frontend_text)
+        self.assertIn("board.error", frontend_text)
+        self.assertIn("retry_limit", task_text)
+
     def test_processing_report_audio_source_is_ready_after_script_projection(self):
         source = SimpleNamespace(
             feature="report_pdf_audio_workflow",
             status="processing",
+            final_script_chars=1551,
+        )
+
+        self.assertTrue(_material_source_ready(source))
+
+    def test_failed_report_audio_source_keeps_its_projected_script_for_visual_recovery(self):
+        """A final-video failure must not make an intact script ineligible for a storyboard."""
+        source = SimpleNamespace(
+            feature="report_pdf_audio_workflow",
+            status="failed",
             final_script_chars=1551,
         )
 
@@ -252,12 +289,342 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
         ), patch(
             "services.gemini_browser.workflow_notification_service.send_browser_human_intervention"
         ) as notify:
-            with self.assertRaisesRegex(GeminiBrowserAutomationError, "登录态失效"):
+            notify.return_value = {"sent": True, "event_type": "login"}
+            with self.assertRaisesRegex(GeminiBrowserAutomationError, "登录态失效") as raised:
                 worker._raise_if_login_or_captcha(page)
 
         notify.assert_called_once()
         self.assertEqual("login", notify.call_args.kwargs["reason"])
         self.assertEqual("gemini-job", notify.call_args.kwargs["job_id"])
+        self.assertEqual("login", raised.exception.reason)
+        self.assertEqual(
+            {"sent": True, "event_type": "login"},
+            raised.exception.notification,
+        )
+        self.assertEqual("/tmp/gemini-login.png", raised.exception.context["screenshot_path"])
+
+    def test_login_intervention_blocks_storyboard_and_parent_for_human_recovery(self):
+        child = SimpleNamespace(
+            id="storyboard-job",
+            feature="report_visual_plan",
+            status="processing",
+            current_step="gemini_storyboard",
+            progress=12,
+            result={"schema_version": "storyboard-v1"},
+            parent_task_id="workflow-job",
+            parent_feature="report_stick_figure_video_workflow",
+            source_task_id="material-job",
+            error_message=None,
+            completed_at=None,
+            updated_at=None,
+        )
+        parent = SimpleNamespace(
+            id="workflow-job",
+            status="processing",
+            current_step="storyboard_queued",
+            progress=35,
+            waiting_child_id="storyboard-job",
+            waiting_child_label="标题与正文分镜",
+            waiting_child_status="processing",
+            waiting_child_step="gemini_storyboard",
+            waiting_child_updated_at=None,
+            error_message=None,
+            completed_at=None,
+            updated_at=None,
+        )
+        exc = GeminiBrowserHumanInterventionError(
+            "Gemini 登录态失效，需要先在浏览器 profile 中登录",
+            reason="login",
+            notification={"sent": True, "to": "owner@example.test"},
+            context={
+                "profile": "/runtime/browser_profiles/worker_2",
+                "page_url": "https://gemini.google.com/app",
+                "screenshot_path": "/tmp/gemini-login.png",
+                "worker_id": "worker_2",
+            },
+        )
+        handler = getattr(report_visual_plan_task, "_block_for_human_intervention", None)
+        self.assertTrue(callable(handler), "missing human-intervention state projector")
+
+        with patch.object(
+            report_visual_plan_task.db.session,
+            "get",
+            side_effect=[child, parent],
+        ), patch.object(report_visual_plan_task.db.session, "rollback"), patch.object(
+            report_visual_plan_task.db.session,
+            "commit",
+        ), patch.object(report_visual_plan_task, "release_db_session_quietly"):
+            result = handler("storyboard-job", exc)
+
+        self.assertFalse(result)
+        self.assertEqual("blocked_by_login", child.status)
+        self.assertEqual("blocked_by_login", child.current_step)
+        self.assertIsNone(child.completed_at)
+        intervention = child.result["human_intervention"]
+        self.assertEqual("login", intervention["reason"])
+        self.assertEqual("/runtime/browser_profiles/worker_2", intervention["profile"])
+        self.assertEqual({"sent": True, "to": "owner@example.test"}, intervention["notification"])
+        self.assertEqual("blocked_by_login", parent.status)
+        self.assertEqual("storyboard_blocked_by_login", parent.current_step)
+        self.assertEqual("blocked_by_login", parent.waiting_child_status)
+        self.assertIsNone(parent.completed_at)
+
+    def test_workflow_payload_reports_login_block_instead_of_running(self):
+        parent = SimpleNamespace(
+            id="workflow-job",
+            report_visual_scheme_key="stick_figure",
+            source_task_id="material-job",
+            source_feature="report_pdf_audio_workflow",
+            task_title="测试研报",
+            report_audio_pdf_attachment_id=None,
+            report_audio_pdf_filename="report.pdf",
+            report_audio_pdf_bytes=100,
+            report_audio_pdf_topic_title="测试研报",
+            task_video_path=None,
+            current_step="storyboard_blocked_by_login",
+            progress=35,
+            waiting_child_label="标题与正文分镜",
+            waiting_child_status="blocked_by_login",
+            waiting_child_step="blocked_by_login",
+            error_message="等待人工登录 Gemini",
+            created_at=None,
+            updated_at=None,
+        )
+        material = SimpleNamespace(
+            id="material-job",
+            feature="report_pdf_audio_workflow",
+            status="completed",
+            current_step="completed",
+            progress=100,
+            task_title="测试研报",
+            report_audio_pdf_attachment_id=None,
+            report_audio_pdf_filename="report.pdf",
+            report_audio_pdf_bytes=100,
+            report_audio_pdf_topic_title="测试研报",
+            final_script_chars=1600,
+        )
+        storyboard = SimpleNamespace(
+            id="storyboard-job",
+            status="blocked_by_login",
+            current_step="blocked_by_login",
+            progress=12,
+            error_message="等待人工登录 Gemini",
+        )
+
+        payload = _workflow_payload(parent, material, storyboard, segment_count=1)
+
+        self.assertEqual("blocked_by_login", payload["status"])
+        self.assertEqual("分镜等待人工登录", payload["stage"])
+
+    def test_login_recovery_email_context_links_parent_workflow(self):
+        builder = getattr(report_visual_plan_task, "_human_intervention_details", None)
+        self.assertTrue(callable(builder), "missing workflow recovery link builder")
+        task = SimpleNamespace(
+            parent_task_id="workflow-job",
+            parent_feature="report_stick_figure_video_workflow",
+        )
+        with patch.dict(
+            "os.environ",
+            {"REPORT_WORKFLOW_FRONTEND_BASE_URL": "http://localhost:5001/"},
+            clear=False,
+        ):
+            details = builder(task)
+
+        self.assertEqual(
+            "http://localhost:5001/report-stick-figure-video-workflow-detail.html?workflow_job_id=workflow-job",
+            details["工作流详情"],
+        )
+
+    def test_resume_after_login_requeues_same_storyboard_and_parent(self):
+        task = SimpleNamespace(
+            id="storyboard-job",
+            feature="report_visual_plan",
+            status="blocked_by_login",
+            current_step="blocked_by_login",
+            progress=12,
+            error_message="等待人工登录 Gemini",
+            completed_at=None,
+            updated_at=None,
+            celery_task_id="old-delivery",
+            parent_task_id="workflow-job",
+            parent_feature="report_stick_figure_video_workflow",
+            result={"human_intervention": {"reason": "login"}},
+        )
+        parent = SimpleNamespace(
+            id="workflow-job",
+            status="blocked_by_login",
+            current_step="storyboard_blocked_by_login",
+            progress=35,
+            waiting_child_id="storyboard-job",
+            waiting_child_label="标题与正文分镜",
+            waiting_child_status="blocked_by_login",
+            waiting_child_step="blocked_by_login",
+            waiting_child_updated_at=None,
+            error_message="等待人工登录 Gemini",
+            completed_at=None,
+            updated_at=None,
+        )
+        resume = getattr(report_visual_plan_api, "_resume_after_login", None)
+        self.assertTrue(callable(resume), "missing same-task login recovery")
+        async_result = SimpleNamespace(id="new-delivery")
+        submit = {
+            "async_result": async_result,
+            "deferred": False,
+            "countdown": 0,
+        }
+
+        with patch.object(
+            report_visual_plan_api.db.session,
+            "get",
+            return_value=parent,
+        ), patch.object(report_visual_plan_api.db.session, "commit"), patch.object(
+            report_visual_plan_api,
+            "uuid4",
+            return_value="new-delivery",
+        ), patch.object(
+            report_visual_plan_api,
+            "release_db_session_quietly",
+        ), patch.object(
+            report_visual_plan_api,
+            "maybe_guarded_apply_async",
+            return_value=submit,
+        ) as enqueue, patch.object(
+            report_visual_plan_api,
+            "_clear_terminal_storyboard_cache",
+        ):
+            result = resume(task)
+
+        self.assertEqual("storyboard-job", result["job_id"])
+        self.assertEqual("queued", result["status"])
+        self.assertEqual("pending", task.status)
+        self.assertEqual("login_recovery_queued", task.current_step)
+        self.assertEqual("new-delivery", task.celery_task_id)
+        self.assertEqual("processing", parent.status)
+        self.assertEqual("storyboard_queued", parent.current_step)
+        self.assertEqual("pending", parent.waiting_child_status)
+        self.assertIsNone(parent.error_message)
+        self.assertEqual(["storyboard-job"], enqueue.call_args.kwargs["args"])
+
+    def test_resume_after_login_rejects_non_login_blocked_task(self):
+        resume = getattr(report_visual_plan_api, "_resume_after_login", None)
+        self.assertTrue(callable(resume), "missing same-task login recovery")
+        task = SimpleNamespace(id="storyboard-job", status="failed")
+        with patch.object(report_visual_plan_api, "maybe_guarded_apply_async") as enqueue:
+            with self.assertRaisesRegex(ValueError, "仅等待人工登录"):
+                resume(task)
+        enqueue.assert_not_called()
+
+    def test_resume_after_login_publish_failure_reloads_and_restores_block(self):
+        task = SimpleNamespace(
+            id="storyboard-job",
+            status="blocked_by_login",
+            current_step="blocked_by_login",
+            result={"human_intervention": {"reason": "login"}},
+            parent_task_id="workflow-job",
+            parent_feature="report_stick_figure_video_workflow",
+            error_message=None,
+            completed_at=None,
+            updated_at=None,
+            celery_task_id="old-delivery",
+        )
+        parent = SimpleNamespace(
+            id="workflow-job",
+            status="blocked_by_login",
+            current_step="storyboard_blocked_by_login",
+            progress=35,
+            waiting_child_id="storyboard-job",
+            waiting_child_label="标题与正文分镜",
+            waiting_child_status="blocked_by_login",
+            waiting_child_step="blocked_by_login",
+            waiting_child_updated_at=None,
+            error_message=None,
+            completed_at=None,
+            updated_at=None,
+        )
+        reloaded_task = SimpleNamespace(**vars(task))
+        reloaded_parent = SimpleNamespace(**vars(parent))
+        release = getattr(report_visual_plan_api, "release_db_session_quietly", None)
+        self.assertTrue(callable(release), "resume must release the DB session before publish")
+
+        with patch.object(
+            report_visual_plan_api.db.session,
+            "get",
+            side_effect=[parent, reloaded_task, reloaded_parent],
+        ) as get, patch.object(report_visual_plan_api.db.session, "commit"), patch.object(
+            report_visual_plan_api.db.session,
+            "rollback",
+        ), patch.object(
+            report_visual_plan_api,
+            "release_db_session_quietly",
+        ) as release_session, patch.object(
+            report_visual_plan_api,
+            "maybe_guarded_apply_async",
+            side_effect=RuntimeError("broker unavailable"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "恢复任务入队失败"):
+                report_visual_plan_api._resume_after_login(task)
+
+        release_session.assert_called_once()
+        self.assertEqual(3, get.call_count)
+        self.assertEqual("blocked_by_login", reloaded_task.status)
+        self.assertEqual("blocked_by_login", reloaded_parent.status)
+        self.assertEqual("resume_enqueue_failed", reloaded_parent.waiting_child_step)
+
+    def test_resume_after_login_route_is_registered(self):
+        app = Flask(__name__)
+        app.register_blueprint(report_visual_plan_api.report_visual_plan_bp)
+
+        rules = {rule.rule for rule in app.url_map.iter_rules()}
+
+        self.assertIn(
+            "/api/report-visual-plans/jobs/<job_id>/resume-after-login",
+            rules,
+        )
+
+    def test_blocked_storyboard_payload_exposes_human_intervention(self):
+        intervention = {
+            "reason": "login",
+            "profile": "/runtime/browser_profiles/worker_2",
+            "notification": {"sent": True, "to": "owner@example.test"},
+            "resolution_steps": ["登录 Gemini", "恢复任务"],
+        }
+        task = SimpleNamespace(
+            id="storyboard-job",
+            status="blocked_by_login",
+            current_step="blocked_by_login",
+            progress=12,
+            task_title="测试分镜",
+            source_task_id="material-job",
+            report_visual_scheme_key="stick_figure",
+            created_at=None,
+            completed_at=None,
+            error_message="等待人工登录 Gemini",
+            result={"human_intervention": intervention},
+        )
+
+        payload = report_visual_plan_api._storyboard_job_payload(
+            task,
+            None,
+            include_segments=False,
+        )
+
+        self.assertEqual("blocked_by_login", payload["status"])
+        self.assertEqual(intervention, payload["human_intervention"])
+
+    def test_visual_detail_renders_and_resumes_login_block(self):
+        frontend_text = (
+            BACKEND_DIR.parents[0]
+            / "frontend"
+            / "js"
+            / "report-stick-figure-video-workflow-detail.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("data-resume-storyboard-login", frontend_text)
+        self.assertIn("resume-after-login", frontend_text)
+        self.assertIn("等待人工登录", frontend_text)
+        self.assertIn("human_intervention", frontend_text)
+        self.assertIn("resolution_steps", frontend_text)
+        self.assertIn("登录完成，恢复任务", frontend_text)
 
     def test_pdf_gemini_selects_and_confirms_pro_before_upload(self):
         worker = GeminiBrowserWorker.__new__(GeminiBrowserWorker)

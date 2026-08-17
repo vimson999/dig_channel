@@ -1,7 +1,7 @@
 import os
 import sys
 from celery import Celery
-from celery.signals import task_failure, task_postrun, task_retry
+from celery.signals import task_failure, task_postrun, task_retry, worker_ready
 from kombu import Exchange, Queue
 from dotenv import load_dotenv
 
@@ -65,6 +65,7 @@ def make_celery(app_name=__name__):
             'tasks.report_top10_workflow',
             'tasks.mp3_video_workflow',
             'tasks.zsxq_sync',
+            'tasks.zsxq_browser_import',
             'tasks.zsxq_workflow',
             'tasks.workflow_notify',
             'tasks.zsxq_publish',
@@ -151,6 +152,7 @@ def make_celery(app_name=__name__):
             'tasks.zsxq_workflow.finalize_zsxq_sync_stage': {'queue': 'zsxq_workflow'},
             'tasks.workflow_notify.send_workflow_notification': {'queue': 'workflow_notify'},
             'tasks.zsxq_sync.run_zsxq_sync': {'queue': 'zsxq_sync'},
+            'tasks.zsxq_browser_import.run_browser_import': {'queue': 'zsxq_sync'},
             'tasks.zsxq_publish.run_publish_clean_output_task': {'queue': 'zsxq_publish'},
             'tasks.report_video.parse_report_pdf_task': {'queue': 'report_video'},
             'tasks.report_video.generate_ai_scripts_task': {'queue': 'report_video'},
@@ -192,3 +194,34 @@ def _cleanup_sqlalchemy_session(**_kwargs):
 task_postrun.connect(_cleanup_sqlalchemy_session, weak=False)
 task_failure.connect(_cleanup_sqlalchemy_session, weak=False)
 task_retry.connect(_cleanup_sqlalchemy_session, weak=False)
+
+
+def _publish_worker_readiness(**_kwargs):
+    queues = [
+        item.strip()
+        for item in str(os.environ.get("WORKFLOW_WORKER_READY_QUEUES") or "").split(",")
+        if item.strip()
+    ]
+    if not queues:
+        return
+    try:
+        from services.workflow_worker_readiness import record_worker_readiness
+
+        worker_id = str(
+            os.environ.get("DOUBAO_BROWSER_TTS_WORKER_ID")
+            or os.environ.get("REPORT_PDF_GEMINI_WORKER_ID")
+            or os.environ.get("HOSTNAME")
+            or "default"
+        )
+        for queue in queues:
+            readiness = record_worker_readiness(queue, worker_id=worker_id)
+            print(
+                "[WORKER_READINESS] "
+                f"queue={queue} worker={worker_id} revision={readiness['revision']}",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"[WORKER_READINESS] failed to publish readiness: {exc}", flush=True)
+
+
+worker_ready.connect(_publish_worker_readiness, weak=False)

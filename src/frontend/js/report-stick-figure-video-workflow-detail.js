@@ -66,6 +66,8 @@ class ReportStickFigureVideoWorkflowDetailPage {
         this.els.refresh.addEventListener('click',()=>this.load(true));
         this.els.sidebarRefresh?.addEventListener('click',()=>this.load(true));
         this.els.root.addEventListener('click',async event=>{
+            const loginResume=event.target.closest('[data-resume-storyboard-login]');
+            if(loginResume){await this.resumeStoryboardAfterLogin(loginResume);return;}
             const normalizeRetry=event.target.closest('[data-retry-storyboard-normalize]');
             if(normalizeRetry){await this.retryStoryboardNormalize(normalizeRetry);return;}
             const storyboard=event.target.closest('[data-generate-storyboard]');
@@ -278,6 +280,25 @@ class ReportStickFigureVideoWorkflowDetailPage {
         }
     }
 
+    async resumeStoryboardAfterLogin(button) {
+        if(!this.storyboard?.job_id)return;
+        const old=button.innerHTML;
+        button.disabled=true;
+        button.innerHTML='<i class="fas fa-spinner fa-spin mr-1"></i>恢复中';
+        try {
+            const result=await this.request(`/api/report-visual-plans/jobs/${encodeURIComponent(this.storyboard.job_id)}/resume-after-login`,{method:'POST',body:'{}'});
+            this.storyboard={...this.storyboard,status:result.status||'queued',step:'login_recovery_queued',error:'',human_intervention:null};
+            this.render();
+            this.setNotice(result.message||'已恢复原分镜任务并重新排队。','success');
+            this.schedulePolling();
+        } catch(error) {
+            this.setNotice(`恢复失败：${error.message}`,'error');
+        } finally {
+            button.disabled=false;
+            button.innerHTML=old;
+        }
+    }
+
     async submitAssets(kind,button) {
         const isRetry=kind.endsWith('-failed');
         const assetKind=kind.startsWith('image')?'images':'tts';
@@ -386,9 +407,9 @@ class ReportStickFigureVideoWorkflowDetailPage {
                 key:'storyboard',
                 label:'2. 标题与正文分镜',
                 shortLabel:'分镜方案',
-                state:state(boardDone,['queued','running','processing'].includes(boardStatus),boardStatus==='failed'),
+                state:boardStatus==='blocked_by_login'?'blocked':state(boardDone,['queued','running','processing'].includes(boardStatus),boardStatus==='failed'),
                 progress:boardDone?100:Number(this.storyboard?.progress||0),
-                detail:this.storyboard?`${this.storyboard.segment_count||0} 镜头`:'未开始',
+                detail:boardStatus==='blocked_by_login'?'等待人工登录':this.storyboard?`${this.storyboard.segment_count||0} 镜头`:'未开始',
             },
             {
                 key:'images',
@@ -424,12 +445,15 @@ class ReportStickFigureVideoWorkflowDetailPage {
     renderSidebarStatus() {
         if(!this.els.sidebarStatus)return;
         const stages=this.workflowStageData();
+        const blocked=stages.find(item=>item.state==='blocked');
         const failed=stages.find(item=>item.state==='failed');
         const active=stages.find(item=>item.state==='active');
         const allDone=stages.every(item=>item.state==='completed');
-        const current=failed||active||stages.find(item=>item.state!=='completed')||stages[stages.length-1];
+        const current=blocked||failed||active||stages.find(item=>item.state!=='completed')||stages[stages.length-1];
         const completedCount=stages.filter(item=>item.state==='completed').length;
-        const overall=failed
+        const overall=blocked
+            ? {label:'等待人工',badge:'bg-amber-100 text-amber-800'}
+            : failed
             ? {label:'失败',badge:'bg-red-100 text-red-700'}
             : allDone
                 ? {label:'已完成',badge:'bg-emerald-100 text-emerald-700'}
@@ -442,6 +466,7 @@ class ReportStickFigureVideoWorkflowDetailPage {
         const stateMeta={
             completed:{icon:'fa-circle-check',color:'text-emerald-600'},
             active:{icon:'fa-spinner fa-spin',color:'text-blue-600'},
+            blocked:{icon:'fa-user-clock',color:'text-amber-600'},
             failed:{icon:'fa-circle-exclamation',color:'text-red-600'},
             pending:{icon:'fa-circle',color:'text-slate-300'},
         };
@@ -456,7 +481,7 @@ class ReportStickFigureVideoWorkflowDetailPage {
             <div class="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
                 <div class="truncate text-xs font-black text-slate-800">${this.escape(current?.shortLabel||'等待任务')}</div>
                 <div class="mt-1 flex items-center justify-between text-[10px] font-bold text-slate-500">
-                    <span>${active?'进行中':failed?'需要处理':allDone?'全部完成':'等待操作'}</span>
+                    <span>${blocked?'等待人工登录':active?'进行中':failed?'需要处理':allDone?'全部完成':'等待操作'}</span>
                     <span>${progress}%</span>
                 </div>
             </div>
@@ -505,11 +530,30 @@ class ReportStickFigureVideoWorkflowDetailPage {
     storyboardSection(board,segments,hasTitleScene,title) {
         const succeeded=board?.status==='succeeded';
         const failed=board?.status==='failed';
-        const actions=`${succeeded||failed?`<button data-view-raw class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">Gem 原文</button>`:''}${failed?`<button data-retry-storyboard-normalize class="rounded-md bg-emerald-700 px-3 py-2 text-xs font-bold text-white"><i class="fas fa-forward mr-1"></i>复用 Gem 原文继续梳理</button>`:''}${succeeded||failed?`<button data-generate-storyboard data-force="1" class="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700"><i class="fas fa-rotate mr-1"></i>重新请求 Gem</button>`:''}${!board?`<button data-generate-storyboard class="rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white">生成分镜</button>`:''}`;
-        const emptyState=failed
+        const blockedByLogin=board?.status==='blocked_by_login';
+        const retrying=board&&['queued','running'].includes(board.status)&&['auto_retry','storyboard_retry_wait'].includes(board.step);
+        const intervention=board?.human_intervention||{};
+        const notification=intervention.notification||{};
+        const resolutionSteps=Array.isArray(intervention.resolution_steps)&&intervention.resolution_steps.length
+            ? intervention.resolution_steps
+            : ['使用指定浏览器 Profile 打开 Gemini','完成登录及安全验证','确认 Gemini 输入框可见','返回本页恢复原任务'];
+        const notificationText=notification.sent
+            ? `通知邮件已发送${notification.to?`至 ${notification.to}`:''}`
+            : notification.reason==='cooldown'
+                ? '相同 Profile 的通知邮件已在冷却期内发送'
+                : notification.reason==='missing_config'
+                    ? '邮件未发送：通知邮箱尚未配置，请直接按下方步骤处理'
+                    : '邮件未确认发送，请直接按下方步骤处理';
+        const actions=`${blockedByLogin?`<button data-resume-storyboard-login class="rounded-md bg-amber-600 px-3 py-2 text-xs font-bold text-white shadow-sm"><i class="fas fa-play mr-1"></i>登录完成，恢复任务</button>`:''}${succeeded||failed?`<button data-view-raw class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">Gem 原文</button>`:''}${failed?`<button data-retry-storyboard-normalize class="rounded-md bg-emerald-700 px-3 py-2 text-xs font-bold text-white"><i class="fas fa-forward mr-1"></i>复用 Gem 原文继续梳理</button>`:''}${succeeded||failed?`<button data-generate-storyboard data-force="1" class="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700"><i class="fas fa-rotate mr-1"></i>重新请求 Gem</button>`:''}${!board?`<button data-generate-storyboard class="rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white">生成分镜</button>`:''}`;
+        const blockedPanel=blockedByLogin
+            ? `<div class="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-amber-950"><div class="flex items-center gap-2 font-black"><i class="fas fa-user-clock"></i>等待人工登录 Gemini</div><div class="mt-2 text-xs text-amber-800">${this.escape(notificationText)}</div><dl class="mt-3 grid gap-2 text-xs md:grid-cols-2"><div><dt class="font-black">浏览器 Profile</dt><dd class="mt-1 break-all">${this.escape(intervention.profile||'-')}</dd></div><div><dt class="font-black">Worker</dt><dd class="mt-1 break-all">${this.escape(intervention.worker_id||'-')}</dd></div><div><dt class="font-black">Gemini 页面</dt><dd class="mt-1 break-all">${this.escape(intervention.page_url||'-')}</dd></div><div><dt class="font-black">失败截图</dt><dd class="mt-1 break-all">${this.escape(intervention.screenshot_path||'-')}</dd></div></dl><ol class="mt-4 list-decimal space-y-1 pl-5 text-xs leading-5">${resolutionSteps.map(step=>`<li>${this.escape(step)}</li>`).join('')}</ol><p class="mt-3 text-xs font-bold">完成以上操作后，点击右上角“登录完成，恢复任务”。系统会继续使用原任务和原文案。</p></div>`
+            : '';
+        const emptyState=blockedByLogin
+            ? ''
+            : failed
             ? '<div class="mt-4 rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">分镜整理未保存，Gem 原始返回仍已保留。优先点击“复用 Gem 原文继续梳理”；如果原始回复缺少字段，再点击“重新请求 Gem”。</div>'
             : '<div class="mt-4 rounded-md border border-dashed p-6 text-center text-sm text-slate-500">基础文案已完成，可生成分镜。</div>';
-        return `<section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"><div class="flex flex-wrap items-center justify-between gap-2"><div><h2 class="font-black">标题与正文分镜</h2><p class="mt-1 text-xs text-slate-500">标题镜头独立保存；正文逐字覆盖原始口播文案。</p></div><div class="flex flex-wrap gap-2">${actions}</div></div>${board&&['queued','running'].includes(board.status)?`<div class="mt-4 rounded-md bg-indigo-50 p-3 text-xs font-bold text-indigo-700"><i class="fas fa-spinner fa-spin mr-2"></i>${this.escape(board.step||board.status)} · ${board.progress||0}%</div>`:''}${failed?`<div class="mt-4 rounded-md bg-red-50 p-3 text-xs text-red-700">${this.escape(board.error||'分镜失败')}</div>`:''}${succeeded?`<div class="mt-4 flex items-center justify-between text-xs"><span class="font-black">${segments.length} 个镜头</span><span class="font-bold text-emerald-700">正文覆盖${board.coverage_complete?'完整':'待检查'}</span></div><div class="mt-3 max-h-[36rem] space-y-2 overflow-auto">${!hasTitleScene?this.legacyTitleCard(title):''}${segments.map(item=>this.sceneCard(item)).join('')}</div>`:emptyState}</section>`;
+        return `<section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"><div class="flex flex-wrap items-center justify-between gap-2"><div><h2 class="font-black">标题与正文分镜</h2><p class="mt-1 text-xs text-slate-500">标题镜头独立保存；正文逐字覆盖原始口播文案。</p></div><div class="flex flex-wrap gap-2">${actions}</div></div>${blockedPanel}${board&&['queued','running'].includes(board.status)?`<div class="mt-4 rounded-md ${retrying?'border border-amber-200 bg-amber-50 text-amber-800':'bg-indigo-50 text-indigo-700'} p-3 text-xs font-bold"><i class="fas ${retrying?'fa-wrench':'fa-spinner fa-spin'} mr-2"></i>${retrying?'自动修复中：':this.escape(board.step||board.status)}${retrying?'':` · ${board.progress||0}%`}${board.error?`<div class="mt-2 break-words text-[11px] font-normal">${this.escape(board.error)}</div>`:''}</div>`:''}${failed?`<div class="mt-4 rounded-md bg-red-50 p-3 text-xs text-red-700">${this.escape(board.error||'分镜失败')}</div>`:''}${succeeded?`<div class="mt-4 flex items-center justify-between text-xs"><span class="font-black">${segments.length} 个镜头</span><span class="font-bold text-emerald-700">正文覆盖${board.coverage_complete?'完整':'待检查'}</span></div><div class="mt-3 max-h-[36rem] space-y-2 overflow-auto">${!hasTitleScene?this.legacyTitleCard(title):''}${segments.map(item=>this.sceneCard(item)).join('')}</div>`:emptyState}</section>`;
     }
 
     assetSection(imageDone,audioReady) {
@@ -517,8 +561,11 @@ class ReportStickFigureVideoWorkflowDetailPage {
         const storyboardReady=storyboardStatus==='succeeded';
         if(!storyboardReady){
             const failed=storyboardStatus==='failed';
+            const blockedByLogin=storyboardStatus==='blocked_by_login';
             const message=this.assetsError||(
-                failed
+                blockedByLogin
+                    ? '标题与正文分镜正在等待人工登录 Gemini。请先按上方步骤登录并恢复原任务。'
+                    : failed
                     ? '标题与正文分镜失败，暂不能批量生成图片。请先在上方续跑分镜梳理或重新请求 Gem。'
                     : '标题与正文分镜完成后，这里才可以批量生成图片。'
             );
@@ -739,8 +786,8 @@ class ReportStickFigureVideoWorkflowDetailPage {
 
     metric(label,value){return `<div class="rounded-md bg-slate-50 p-3"><div class="text-slate-400">${label}</div><div class="mt-1 font-black text-slate-800">${value??0}</div></div>`;}
     formatBytes(value){const size=Number(value||0);if(!size)return '-';if(size>=1024*1024)return `${(size/1024/1024).toFixed(1)} MB`;if(size>=1024)return `${(size/1024).toFixed(1)} KB`;return `${size} B`;}
-    statusBadge(status,progress){const text={pending:'未开始',queued:'排队中',processing:'处理中',completed:'已完成',failed:'失败',blocked:'验证阻塞'}[status]||status||'未开始';const cls=status==='completed'?'bg-emerald-100 text-emerald-700':['queued','processing'].includes(status)?'bg-indigo-100 text-indigo-700':['failed','blocked'].includes(status)?'bg-red-100 text-red-700':'bg-slate-200 text-slate-600';return `<span class="rounded-full px-2 py-1 text-[10px] font-black ${cls}">${text}${['queued','processing'].includes(status)?` · ${progress||0}%`:''}</span>`;}
-    stage(name,state,detail){const meta={completed:{card:'border-emerald-200 bg-emerald-50',title:'text-emerald-800',detail:'text-emerald-700'},active:{card:'border-blue-300 bg-blue-50 ring-1 ring-blue-100',title:'text-blue-900',detail:'text-blue-700'},failed:{card:'border-red-300 bg-red-50',title:'text-red-900',detail:'text-red-700'},pending:{card:'border-slate-200 bg-white',title:'text-slate-700',detail:'text-slate-400'}}[state]||{card:'border-slate-200 bg-white',title:'text-slate-700',detail:'text-slate-400'};return `<div class="rounded-lg border ${meta.card} p-3"><div class="text-xs font-black ${meta.title}">${name}</div><div class="mt-1 text-[11px] ${meta.detail}">${this.escape(detail)}</div></div>`;}
+    statusBadge(status,progress){const text={pending:'未开始',queued:'排队中',processing:'处理中',completed:'已完成',failed:'失败',blocked:'验证阻塞',blocked_by_login:'等待人工登录'}[status]||status||'未开始';const cls=status==='completed'?'bg-emerald-100 text-emerald-700':['queued','processing'].includes(status)?'bg-indigo-100 text-indigo-700':status==='blocked_by_login'?'bg-amber-100 text-amber-800':['failed','blocked'].includes(status)?'bg-red-100 text-red-700':'bg-slate-200 text-slate-600';return `<span class="rounded-full px-2 py-1 text-[10px] font-black ${cls}">${text}${['queued','processing'].includes(status)?` · ${progress||0}%`:''}</span>`;}
+    stage(name,state,detail){const meta={completed:{card:'border-emerald-200 bg-emerald-50',title:'text-emerald-800',detail:'text-emerald-700'},active:{card:'border-blue-300 bg-blue-50 ring-1 ring-blue-100',title:'text-blue-900',detail:'text-blue-700'},blocked:{card:'border-amber-300 bg-amber-50',title:'text-amber-950',detail:'text-amber-700'},failed:{card:'border-red-300 bg-red-50',title:'text-red-900',detail:'text-red-700'},pending:{card:'border-slate-200 bg-white',title:'text-slate-700',detail:'text-slate-400'}}[state]||{card:'border-slate-200 bg-white',title:'text-slate-700',detail:'text-slate-400'};return `<div class="rounded-lg border ${meta.card} p-3"><div class="text-xs font-black ${meta.title}">${name}</div><div class="mt-1 text-[11px] ${meta.detail}">${this.escape(detail)}</div></div>`;}
     legacyTitleCard(title){return `<article class="rounded-lg border border-amber-200 bg-amber-50 p-4"><div class="text-xs font-black text-amber-900">0. 标题镜头</div><div class="mt-2 font-bold text-amber-950">${this.escape(title)}</div><div class="mt-2 text-xs text-amber-700">这条旧分镜没有单独保存标题提示词；请先点击“重新生成含标题分镜”。</div></article>`;}
     sceneCard(item){const isTitle=Number(item.sequence)===0;return `<article class="rounded-lg border ${isTitle?'border-amber-200 bg-amber-50':'border-slate-200 bg-white'} p-4"><div class="text-xs font-black ${isTitle?'text-amber-900':'text-slate-900'}">${Number(item.sequence)||0}. ${this.escape(item.scene_title||'分镜')}</div><div class="mt-2 whitespace-pre-wrap text-xs leading-5 text-slate-600">${this.escape(item.script_text||'')}</div><div class="mt-2 rounded-md bg-white/80 p-3 text-xs leading-5 text-indigo-800"><span class="font-black">画面提示词：</span>${this.escape(item.visual_prompt||'')}</div></article>`;}
     futureCard(title,text,icon){return `<div class="rounded-xl border border-dashed border-slate-300 bg-white p-5"><i class="fas fa-${icon} text-slate-300"></i><h3 class="mt-3 font-black text-slate-700">${title}</h3><p class="mt-2 text-xs leading-5 text-slate-500">${text}</p><span class="mt-3 inline-block rounded-full bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-500">后续阶段</span></div>`;}

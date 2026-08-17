@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
-from sqlalchemy import inspect, or_, text
+from sqlalchemy import func, inspect, or_, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
@@ -75,6 +75,7 @@ TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
 HOT_AUDIO_DOWNLOAD_THRESHOLD = 20
+AUDIO_TOPIC_CONTENT_PREVIEW_SOURCE_CHARS = 720
 PLANNER_VERSION = "mp3_video_planner_20260719_v12"
 VISUAL_ARTIFACT_KEYS = (
     "finance_cover",
@@ -426,6 +427,16 @@ def initial_transcript_prompt(workflow: Optional[Dict[str, Any]] = None) -> str:
     return _env("MP3_VIDEO_TRANSCRIPT_PROMPT", DEFAULT_TRANSCRIPT_DEEPSEEK_PROMPT).strip()
 
 
+def _topic_content_preview_projection():
+    # The API returns only a 180-character preview. Fetch a bounded source
+    # window so large topic bodies are not transferred through PgBouncer.
+    return func.substr(
+        ZsxqTopic.content,
+        1,
+        AUDIO_TOPIC_CONTENT_PREVIEW_SOURCE_CHARS,
+    ).label("topic_content")
+
+
 def list_audio_assets(
     *,
     page: int = 1,
@@ -460,7 +471,7 @@ def list_audio_assets(
             ZsxqAttachment.tab_id.label("tab_id"),
             ZsxqAttachment.topic_id.label("topic_id"),
             ZsxqTopic.title.label("topic_title"),
-            ZsxqTopic.content.label("topic_content"),
+            _topic_content_preview_projection(),
             ZsxqTopic.tab_label.label("tab_label"),
             ZsxqTopic.author_name.label("topic_author"),
             ZsxqTopic.create_time.label("topic_create_time"),
@@ -552,7 +563,7 @@ def audio_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
             ZsxqAttachment.tab_id.label("tab_id"),
             ZsxqAttachment.topic_id.label("topic_id"),
             ZsxqTopic.title.label("topic_title"),
-            ZsxqTopic.content.label("topic_content"),
+            _topic_content_preview_projection(),
             ZsxqTopic.tab_label.label("tab_label"),
             ZsxqTopic.author_name.label("topic_author"),
             ZsxqTopic.create_time.label("topic_create_time"),

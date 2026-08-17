@@ -30,6 +30,7 @@ from .bilibili_publish import PublicationTaskBilibiliUpload
 from .tts import TTSArticle, TTSSegment
 from .zsxq_sync import (
     ZsxqAttachment,
+    ZsxqBrowserSubmission,
     ZsxqSyncCursor,
     ZsxqSyncRun,
     ZsxqSyncRunDownload,
@@ -83,6 +84,7 @@ __all__ = [
     'ZsxqTopicFavorite',
     'ZsxqTopicComment',
     'ZsxqAttachment',
+    'ZsxqBrowserSubmission',
     'ZsxqSyncCursor',
     'ZsxqWorkflowRun',
     'ReportVideoTask',

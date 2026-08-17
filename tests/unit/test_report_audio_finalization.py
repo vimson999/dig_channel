@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from flask import Flask
+from sqlalchemy import event
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -415,7 +416,7 @@ class ReportAudioFinalizationTest(unittest.TestCase):
         self.assertIsNone(coordinator.completed_at)
         self.assertIn("legacy_completion_reopened_at", coordinator.result)
 
-    def test_watchdog_scans_unvalidated_legacy_completions(self):
+    def test_watchdog_does_not_rescan_terminal_legacy_completions(self):
         parent = self._audio_parent()
         coordinator = PublicationTask(
             status="completed",
@@ -451,8 +452,127 @@ class ReportAudioFinalizationTest(unittest.TestCase):
         ) as reconcile:
             summary = finalization_service.repair_pending_finalizations_once()
 
-        reconcile.assert_called_once_with(str(coordinator.id))
-        self.assertEqual(summary["checked"], 1)
+        reconcile.assert_not_called()
+        self.assertEqual(summary["checked"], 0)
+
+    def test_batch_finalization_summaries_keep_fields_without_full_json_rows(self):
+        parent = self._audio_parent()
+        old = PublicationTask(
+            status="processing",
+            current_step="waiting_visual",
+            progress=40,
+            feature=finalization_service.FEATURE_NAME,
+            source_task_id=str(parent.id),
+            params={
+                "feature": finalization_service.FEATURE_NAME,
+                "source_task_id": str(parent.id),
+                finalization_service.INTENT_KEY: {
+                    "include_landscape": False,
+                    "vertical_video_schemes": ["scheme1"],
+                    "visual_scheme_key": "doraemon",
+                },
+            },
+            result={"message": "old"},
+            created_at=datetime.utcnow() - timedelta(minutes=2),
+        )
+        latest = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            feature=finalization_service.FEATURE_NAME,
+            source_task_id=str(parent.id),
+            params={
+                "feature": finalization_service.FEATURE_NAME,
+                "source_task_id": str(parent.id),
+                finalization_service.INTENT_KEY: {
+                    "include_landscape": True,
+                    "vertical_video_schemes": ["scheme3"],
+                    "visual_scheme_key": "stick_figure",
+                },
+            },
+            result={
+                "visual_workflow_id": "visual-1",
+                "whiteboard_video_path": "/tmp/whiteboard.mp4",
+                "whiteboard_attempts": 2,
+                "publisher_task_id": "publisher-1",
+                "message": "ready",
+                "retryable": True,
+            },
+            completed_at=datetime.utcnow(),
+            created_at=datetime.utcnow() - timedelta(minutes=1),
+        )
+        db.session.add_all([old, latest])
+        db.session.commit()
+        parent_id = str(parent.id)
+        latest_id = str(latest.id)
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            normalized = " ".join(statement.lower().split())
+            if " from publication_tasks " in normalized:
+                statements.append(normalized)
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            summaries = finalization_service.finalization_summaries_for_audio_ids(
+                [parent_id]
+            )
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        summary = summaries[parent_id]
+        self.assertEqual(summary["job_id"], latest_id)
+        self.assertEqual(summary["vertical_video_schemes"], ["scheme3"])
+        self.assertEqual(summary["visual_workflow_id"], "visual-1")
+        self.assertEqual(summary["whiteboard_attempts"], 2)
+        self.assertTrue(summary["retryable"])
+        self.assertEqual(len(statements), 1, statements)
+        self.assertNotIn("publication_tasks.params as", statements[0])
+        self.assertNotIn("publication_tasks.result as", statements[0])
+
+    def test_single_finalization_summary_avoids_full_json_transfer(self):
+        parent = self._audio_parent()
+        coordinator = PublicationTask(
+            status="processing",
+            current_step="waiting_visual",
+            progress=45,
+            feature=finalization_service.FEATURE_NAME,
+            source_task_id=str(parent.id),
+            params={
+                "feature": finalization_service.FEATURE_NAME,
+                "source_task_id": str(parent.id),
+                finalization_service.INTENT_KEY: {
+                    "include_landscape": True,
+                    "vertical_video_schemes": ["scheme3"],
+                    "visual_scheme_key": "stick_figure",
+                },
+            },
+            result={
+                "visual_workflow_id": "visual-single",
+                "message": "waiting",
+            },
+        )
+        db.session.add(coordinator)
+        db.session.commit()
+        parent_id = str(parent.id)
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            normalized = " ".join(statement.lower().split())
+            if " from publication_tasks " in normalized:
+                statements.append(normalized)
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            summary = finalization_service.finalization_summary_for_audio(parent_id)
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        self.assertEqual("visual-single", summary["visual_workflow_id"])
+        self.assertEqual(["scheme3"], summary["vertical_video_schemes"])
+        self.assertEqual(1, len(statements), statements)
+        self.assertNotIn("publication_tasks.params as", statements[0])
+        self.assertNotIn("publication_tasks.result as", statements[0])
 
     def test_failed_visual_replaced_by_new_task_is_reported_as_running(self):
         parent = self._audio_parent()

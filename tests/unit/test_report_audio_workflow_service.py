@@ -56,6 +56,54 @@ class ReportAudioWorkflowServiceTest(unittest.TestCase):
         self.assertEqual(payload["landscape_title"], "高盛:首次覆盖智谱")
         self.assertEqual(payload["vertical_title"], "高盛:首次覆盖智谱")
 
+    def test_gem_v2_extension_fields_survive_structured_result_validation(self):
+        source = {
+            "schema_version": "report_audio_gem_v2",
+            "provider": "gemini_gem",
+            "title": "内容标题",
+            "landscape_title": "横屏标题",
+            "landscape_subtitle": "横屏副标题",
+            "vertical_title": "竖屏标题",
+            "vertical_subtitle": "竖屏副标题",
+            "final_script_for_tts": "这是用于直接朗读的完整研报正文，包含足够信息并且没有工作流结构标签。",
+            "fact_ledger": [{"claim_id": "C001"}],
+            "paragraph_map": [{"script_paragraph_index": 1, "claim_ids": ["C001"]}],
+            "evidence_map": [{"script_paragraph_index": 1, "claim_ids": ["C001"], "evidence_items": []}],
+            "title_candidates": {
+                "content": [{"candidate_id": "C_TITLE_1"}],
+                "landscape": [{"candidate_id": "L_TITLE_1"}],
+                "vertical": [{"candidate_id": "V_TITLE_1"}],
+            },
+            "selected_titles": {
+                "content_candidate_id": "C_TITLE_1",
+                "landscape_candidate_id": "L_TITLE_1",
+                "vertical_candidate_id": "V_TITLE_1",
+            },
+            "quality_control": {"output_ready": True},
+            "material_boundary": {"provided_material_only": True, "external_information_used": False},
+            "metadata": {"actual_pdf_page_count": 12},
+            "core_analysis": {"core_conclusion": "供需趋紧"},
+            "batch_quality_control": {"all_reports_output_ready": True},
+        }
+
+        payload = report_audio_service._validate_structured_result(source, "Gem V2 原始结果")
+
+        for key in (
+            "schema_version",
+            "fact_ledger",
+            "paragraph_map",
+            "evidence_map",
+            "title_candidates",
+            "selected_titles",
+            "quality_control",
+            "material_boundary",
+            "metadata",
+            "core_analysis",
+            "batch_quality_control",
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(payload[key], source[key])
+
     def test_default_normalizer_model_is_deepseek_v4_flash(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(_normalizer_model(), "deepseek-v4-flash")

@@ -1,0 +1,22 @@
+{
+  "name": "zsxq-sidebar-sync",
+  "version": "0.1.0",
+  "description": "Knowledge Planet sidebar download deduplication and local workflow handoff",
+  "author": {
+    "name": "Vimson"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "知识星球侧边栏同步",
+    "shortDescription": "下载去重并接入本地清洗发布编排",
+    "longDescription": "为知识星球 MP3 和 PDF 侧边栏下载提供服务端去重、幂等 manifest 提交，以及现有清洗发布流程的本地衔接。",
+    "developerName": "Vimson",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "检查知识星球本地同步服务是否可用。",
+      "读取最近 3 天的知识星球下载历史。"
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

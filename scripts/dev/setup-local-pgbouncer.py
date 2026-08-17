@@ -22,12 +22,25 @@ SERVER_IDLE_TIMEOUT = max(
     int(os.environ.get("LOCAL_PGBOUNCER_SERVER_IDLE_TIMEOUT", "600")),
 )
 SERVER_LIFETIME = max(
-    21600,
-    int(os.environ.get("LOCAL_PGBOUNCER_SERVER_LIFETIME", "21600")),
+    120,
+    int(os.environ.get("LOCAL_PGBOUNCER_SERVER_LIFETIME", "300")),
 )
 QUERY_TIMEOUT = max(10, int(os.environ.get("LOCAL_PGBOUNCER_QUERY_TIMEOUT", "20")))
-TCP_KEEPIDLE = max(5, int(os.environ.get("LOCAL_PGBOUNCER_TCP_KEEPIDLE", "10")))
-TCP_KEEPINTVL = max(2, int(os.environ.get("LOCAL_PGBOUNCER_TCP_KEEPINTVL", "5")))
+
+
+def _optional_int_env(name, minimum):
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return max(int(raw), minimum)
+    except (TypeError, ValueError):
+        return None
+
+
+TCP_KEEPCNT = _optional_int_env("LOCAL_PGBOUNCER_TCP_KEEPCNT", 1)
+TCP_KEEPIDLE = _optional_int_env("LOCAL_PGBOUNCER_TCP_KEEPIDLE", 5)
+TCP_KEEPINTVL = _optional_int_env("LOCAL_PGBOUNCER_TCP_KEEPINTVL", 2)
 
 
 def main():
@@ -112,6 +125,16 @@ def _config_text(target):
         f"user={_conninfo(target['user'])}",
         f"password={_conninfo(target['password'])}",
     ])
+    keepalive_lines = ["tcp_keepalive = 1"]
+    for name, value in (
+        ("tcp_keepcnt", TCP_KEEPCNT),
+        ("tcp_keepidle", TCP_KEEPIDLE),
+        ("tcp_keepintvl", TCP_KEEPINTVL),
+    ):
+        if value is not None:
+            keepalive_lines.append(f"{name} = {value}")
+    keepalive_config = "\n".join(keepalive_lines)
+
     return f"""[databases]
 {target['dbname']} = {db_line}
 
@@ -138,10 +161,7 @@ server_lifetime = {SERVER_LIFETIME}
 query_timeout = {QUERY_TIMEOUT}
 query_wait_timeout = 15
 client_idle_timeout = 300
-tcp_keepalive = 1
-tcp_keepcnt = 3
-tcp_keepidle = {TCP_KEEPIDLE}
-tcp_keepintvl = {TCP_KEEPINTVL}
+{keepalive_config}
 ignore_startup_parameters = extra_float_digits, options
 
 pidfile = {PID_PATH}

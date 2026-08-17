@@ -223,6 +223,46 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(task.celery_task_id, "new-celery-id")
         self.assertEqual(dummy.calls[0]["queue"], "doubao_browser_tts")
 
+    def test_scan_recovers_report_visual_plan_auto_retry_message_lost_during_restart(self):
+        task = self._task(
+            feature="report_visual_plan",
+            step="auto_retry",
+            minutes_old=20,
+        )
+        task.progress = 5
+        task.result = {
+            "auto_retry_history": [{
+                "attempt": 1,
+                "error": "Gemini 浏览器 profile 正在被其他 Chrome 占用",
+                "delay_seconds": 30,
+            }],
+            "last_retry_error": "Gemini 浏览器 profile 正在被其他 Chrome 占用",
+        }
+        task.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+        task_id = task.id
+        dummy = DummyCeleryTask()
+
+        with patch.object(
+            publisher_queue_repair,
+            "_celery_message_visible",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "_repair_target_for_feature",
+            return_value=dummy,
+        ):
+            result = publisher_queue_repair.repair_stale_publication_tasks_once()
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["requeued"], 1)
+        task = db.session.get(PublicationTask, task_id)
+        self.assertEqual(task.status, "pending")
+        self.assertEqual(task.current_step, "queued")
+        self.assertEqual(task.progress, 0)
+        self.assertEqual(task.celery_task_id, "new-celery-id")
+        self.assertEqual(dummy.calls[0]["queue"], "report_visual_plan")
+
     def test_pending_repair_releases_db_transaction_before_celery_inspection(self):
         task = self._task()
         dummy = DummyCeleryTask()
@@ -1104,6 +1144,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         cases = (
             ("doubao_browser_tts", "wait_response", "doubao_browser_tts"),
             ("report_pdf_gemini", "wait_response", "report_pdf_gemini"),
+            ("report_pdf_gemini", "response_contract_repair_1_wait", "report_pdf_gemini"),
             ("gemini_browser", "upload_pdf", "report_pdf_gemini"),
             ("report_visual_plan", "gemini_storyboard", "report_visual_plan"),
             ("report_stick_figure_image", "wait_generated_image", "report_pdf_gemini"),

@@ -1,5 +1,6 @@
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,152 @@ from apis.v1 import celery_monitor  # noqa: E402
 
 
 class CeleryMonitorWatchdogTest(unittest.TestCase):
+    def test_inspect_requests_task_states_in_parallel(self):
+        barrier = threading.Barrier(3)
+        calls = []
+
+        class FakeInspector:
+            def _reply(self, state_name):
+                calls.append(state_name)
+                barrier.wait(timeout=1)
+                return {}
+
+            def active(self):
+                return self._reply("active")
+
+            def reserved(self):
+                return self._reply("reserved")
+
+            def scheduled(self):
+                return self._reply("scheduled")
+
+        with patch(
+            "celery_config.celery_app.control.inspect",
+            return_value=FakeInspector(),
+        ):
+            grouped, error = celery_monitor._inspect_tasks_by_queue()
+
+        self.assertIsNone(error)
+        self.assertEqual(set(calls), {"active", "reserved", "scheduled"})
+        self.assertIn("render", grouped)
+
+    def test_status_payload_releases_request_db_session_before_broker_io(self):
+        events = []
+
+        def broker_ping_after_release():
+            self.assertEqual(events, ["db_session_released"])
+            return True, None
+
+        with patch.object(
+            celery_monitor,
+            "_release_db_session_quietly",
+            side_effect=lambda: events.append("db_session_released"),
+        ), patch.object(
+            celery_monitor,
+            "_broker_ping",
+            side_effect=broker_ping_after_release,
+        ), patch.object(
+            celery_monitor,
+            "_ensure_dirs",
+        ), patch.object(
+            celery_monitor,
+            "_queue_lengths",
+            return_value={},
+        ), patch.object(
+            celery_monitor,
+            "_list_processes",
+            return_value=[],
+        ), patch.object(
+            celery_monitor,
+            "_business_tasks_snapshot",
+            return_value=({}, {}),
+        ), patch.object(
+            celery_monitor,
+            "SERVICES",
+            {},
+        ):
+            payload = celery_monitor._status_payload(include_inspect=False)
+
+        self.assertTrue(payload["success"])
+
+    def test_concurrent_forced_status_refreshes_share_the_inflight_result(self):
+        app = Flask(__name__)
+        refresh_started = threading.Event()
+        second_waiter_arrived = threading.Event()
+        allow_refresh_to_finish = threading.Event()
+        results = []
+        errors = []
+        refresh_calls = []
+
+        class TrackingLock:
+            def __init__(self):
+                self._lock = threading.Lock()
+                self._entrants_lock = threading.Lock()
+                self._entrants = 0
+
+            def __enter__(self):
+                with self._entrants_lock:
+                    self._entrants += 1
+                    if self._entrants == 2:
+                        second_waiter_arrived.set()
+                self._lock.acquire()
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self._lock.release()
+
+        def build_status_payload(**_kwargs):
+            refresh_calls.append(len(refresh_calls) + 1)
+            refresh_started.set()
+            self.assertTrue(allow_refresh_to_finish.wait(timeout=1))
+            return {
+                "success": True,
+                "data": {
+                    "broker": {"ok": True},
+                    "services": [],
+                    "refresh_revision": refresh_calls[-1],
+                },
+            }
+
+        def request_forced_status():
+            try:
+                with app.test_request_context("/status?refresh=1"):
+                    results.append(celery_monitor.status().get_json())
+            except Exception as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        with celery_monitor.STATUS_CACHE_LOCK:
+            celery_monitor.STATUS_CACHE.update({
+                "key": None,
+                "expires_at": 0.0,
+                "payload": None,
+            })
+
+        tracking_lock = TrackingLock()
+        with patch.object(
+            celery_monitor,
+            "STATUS_CACHE_LOCK",
+            tracking_lock,
+        ), patch.object(
+            celery_monitor,
+            "_status_payload",
+            side_effect=build_status_payload,
+        ):
+            first = threading.Thread(target=request_forced_status)
+            second = threading.Thread(target=request_forced_status)
+            first.start()
+            self.assertTrue(refresh_started.wait(timeout=1))
+            second.start()
+            self.assertTrue(second_waiter_arrived.wait(timeout=1))
+            allow_refresh_to_finish.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(len(refresh_calls), 1)
+
     def test_watchdog_stop_script_uses_an_anchored_process_match(self):
         text = STOP_WATCHDOG_SCRIPT.read_text(encoding="utf-8")
 
@@ -898,6 +1045,77 @@ class CeleryMonitorWatchdogTest(unittest.TestCase):
         ]
         self.assertEqual(events[-1]["event_type"], "restart_skipped")
         self.assertNotIn("restarted", [item["event_type"] for item in events])
+
+    def test_watchdog_starts_missing_worker_without_bypassing_a_stop_guard(self):
+        warning_status = {
+            "consumer_warning": "Worker 未运行；看门狗将按自愈策略拉起该队列 worker。",
+            "consumer_note": None,
+            "queue_length": 1,
+            "running": False,
+            "pids": [],
+            "processes": [],
+        }
+        state = {"services": {}, "events": []}
+        with patch.object(celery_monitor, "_ensure_dirs"), patch.object(
+            celery_monitor,
+            "_watchdog_config",
+            return_value={
+                "enabled": True,
+                "notify_enabled": False,
+                "requeue_stale_tasks": True,
+                "services": ["report_pdf_gemini"],
+                "confirmations": 1,
+                "cooldown_seconds": 0,
+            },
+        ), patch.object(
+            celery_monitor,
+            "_load_watchdog_state",
+            return_value=state,
+        ), patch.object(
+            celery_monitor,
+            "_save_watchdog_state",
+        ), patch.object(
+            celery_monitor,
+            "_watchdog_repair_stale_business_tasks",
+            return_value={"requeued": 0},
+        ), patch.object(
+            celery_monitor,
+            "_inspect_tasks_by_queue",
+            return_value=({}, None),
+        ), patch.object(
+            celery_monitor,
+            "_load_paused_services",
+            return_value={},
+        ), patch.object(
+            celery_monitor,
+            "_watchdog_business_activity_probe",
+            return_value=([], None),
+        ), patch.object(
+            celery_monitor,
+            "_service_status",
+            return_value=warning_status,
+        ), patch.object(
+            celery_monitor,
+            "_stop_service",
+        ) as stop_service, patch.object(
+            celery_monitor,
+            "_start_service",
+            return_value={"started": True, "starter_pid": 999},
+        ) as start_service:
+            result = celery_monitor.run_watchdog_once()
+
+        stop_service.assert_not_called()
+        start_service.assert_called_once_with(
+            "report_pdf_gemini",
+            celery_monitor.SERVICES["report_pdf_gemini"],
+            clear_pause=False,
+        )
+        self.assertEqual(result["results"][0]["action"], "started_missing_worker")
+        events = [
+            item for item in state["events"]
+            if item["service_id"] == "report_pdf_gemini"
+        ]
+        self.assertEqual(events[-1]["event_type"], "started_missing_worker")
 
     def test_paused_render_skips_publisher_repair(self):
         with patch.object(

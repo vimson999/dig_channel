@@ -56,3 +56,27 @@
 
 - 下一轮用新 scheduler PID 的完整 24 小时日志验收查询次数、累计耗时和异常回退。
 - 若远端链路仍频繁出现 60 秒 query timeout，单独处理 PgBouncer/网络长尾。
+
+## 2026-08-15 复发复核
+
+固定窗口内指纹 `60ff7467696400d3` 为 90 次、累计 212.614s，P95 6.012s、最大
+15.285s；上一轮为 106 次、222.071s、P95 4.725s、最大 9.975s。次数下降 15.1%、
+累计仅下降 4.3%，但 P95 恶化 27.2%、最大恶化 53.2%。其中 80 次来自 scheduler、
+10 次来自 Web，且 13:07 路由回退时同类 scheduler repair SQL 连续失败。
+
+同形 `EXPLAIN (ANALYZE, BUFFERS)` executor 仍仅 0.024ms，确认主要成本是进程级缓存
+未跨 scheduler/Web 共享、30 秒调度频率和网络/PgBouncer 长尾；没有新增索引证据。状态继续
+OPEN。下一轮应在 proxy TUN source=0 的窗口单独验收缓存命中与查询总量，并要求 P95 <500ms、
+最大值不再被 15 秒连接等待放大。
+
+## 2026-08-16 再次复发
+
+固定窗口指纹 `60ff7467696400d3` 为 128 次、累计 294.165s，P95 5.402s、最大
+18.179s；相对上一轮次数 `+42.2%`、累计 `+38.4%`、P95 `-10.1%`，但最大值
+`+18.9%`。查询仍是本轮应用 SQL 累计耗时第一名；同形 executor 为 0.023ms。
+
+本轮同时确认 ZSXQ 系统同步后台页面会持续扇出四组状态 API，间接维持 scheduler/config
+相关请求压力；已在 `2026-08-16-hidden-status-pages-unbounded-polling.md` 落地 Page Visibility
+与 in-flight 门禁。但该门禁不会替代 scheduler 进程自己的 TTL 验收，且本窗口发生在修复前。
+状态保持 OPEN；下一轮分别统计 scheduler/Web origin，要求 proxy TUN source=0 时该指纹次数、
+累计耗时下降且 P95 <500ms，否则继续追配置失效和跨进程缓存边界。

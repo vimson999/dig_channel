@@ -2161,6 +2161,7 @@ class ReportAudioWorkflowPage {
         const rawParams = child?.raw_params || null;
         const rawResult = child?.raw_result || null;
         const audio = child?.audio || {};
+        const intervention = this.humanIntervention(child, job?.job_id || '');
         const audioUrl = audio.download_url ? `${this.apiRoot()}${audio.download_url}` : '';
         const attemptLabel = metadata.chunk_attempt
             ? `第 ${metadata.chunk_attempt} 次`
@@ -2192,6 +2193,8 @@ class ReportAudioWorkflowPage {
                 </div>
 
                 ${child?.error ? `<div class="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">${this.escape(child.error)}</div>` : ''}
+
+                ${this.renderHumanInterventionPanel(intervention)}
 
                 ${this.renderAttemptRows(attempts)}
 
@@ -2226,6 +2229,79 @@ class ReportAudioWorkflowPage {
                 <div class="text-slate-400">${this.escape(label)}</div>
                 <div class="mt-1 truncate font-black text-slate-700" title="${this.escape(value)}">${this.escape(value)}</div>
             </div>
+        `;
+    }
+
+    humanIntervention(child, jobId = '') {
+        const workflowUrl = jobId
+            ? `report-audio-workflow-detail.html?job_id=${encodeURIComponent(jobId)}`
+            : '';
+        return window.BrowserHumanIntervention?.resolve(child, { workflowUrl }) || null;
+    }
+
+    humanInterventionTone(intervention) {
+        if (intervention?.state === 'sent') {
+            return {
+                box: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+                icon: 'fa-envelope-circle-check',
+            };
+        }
+        if (intervention?.state === 'failed') {
+            return {
+                box: 'border-rose-200 bg-rose-50 text-rose-800',
+                icon: 'fa-envelope-circle-xmark',
+            };
+        }
+        return {
+            box: 'border-amber-200 bg-amber-50 text-amber-800',
+            icon: 'fa-user-shield',
+        };
+    }
+
+    renderHumanInterventionStatus(intervention) {
+        if (!intervention) return '';
+        const tone = this.humanInterventionTone(intervention);
+        const sentAt = this.formatDateTime(intervention.sentAt);
+        const detail = [
+            intervention.label,
+            sentAt ? `发送 ${sentAt}` : '',
+            intervention.recipientHint || '',
+        ].filter(Boolean).join(' · ');
+        return `
+            <div class="mt-2 truncate rounded border px-2 py-1 text-[11px] font-bold ${tone.box}" title="${this.escape(detail)}">
+                <i class="fas ${tone.icon} mr-1"></i>${this.escape(detail)}
+            </div>
+        `;
+    }
+
+    renderHumanInterventionPanel(intervention) {
+        if (!intervention) return '';
+        const tone = this.humanInterventionTone(intervention);
+        const notificationDetail = [
+            intervention.label,
+            this.formatDateTime(intervention.sentAt),
+            intervention.recipientHint,
+        ].filter(Boolean).join(' · ');
+        const failureDetail = [
+            intervention.notificationError,
+            intervention.missing?.length ? `缺少配置：${intervention.missing.join(', ')}` : '',
+        ].filter(Boolean).join('；');
+        return `
+            <section class="mt-4 rounded-md border px-4 py-3 text-xs leading-5 ${tone.box}">
+                <div class="font-black"><i class="fas ${tone.icon} mr-1.5"></i>需要人工处理 · ${this.escape(notificationDetail)}</div>
+                <div class="mt-1">自动化已经停止重试，完成验证后再续跑，避免持续触发豆包风控。</div>
+                ${failureDetail ? `<div class="mt-1 font-bold">${this.escape(failureDetail)}</div>` : ''}
+                ${intervention.profile ? `<div class="mt-2 break-all"><span class="font-black">浏览器 Profile：</span>${this.escape(intervention.profile)}</div>` : ''}
+                ${intervention.workerId ? `<div class="break-all"><span class="font-black">Worker：</span>${this.escape(intervention.workerId)}</div>` : ''}
+                ${intervention.screenshotPath ? `<div class="break-all"><span class="font-black">现场截图：</span>${this.escape(intervention.screenshotPath)}</div>` : ''}
+                <ol class="mt-2 list-decimal space-y-1 pl-5">
+                    ${intervention.resolutionSteps.map((step) => `<li>${this.escape(step)}</li>`).join('')}
+                </ol>
+                <div class="mt-3 flex flex-wrap gap-2">
+                    ${intervention.pageUrl ? `<a href="${this.escape(intervention.pageUrl)}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-current bg-white/70 px-2.5 py-1 font-black"><i class="fas fa-arrow-up-right-from-square mr-1"></i>打开豆包页面</a>` : ''}
+                    ${intervention.workflowUrl ? `<a href="${this.escape(intervention.workflowUrl)}" class="rounded-md border border-current bg-white/70 px-2.5 py-1 font-black"><i class="fas fa-list-check mr-1"></i>打开工作流并续跑</a>` : ''}
+                </div>
+            </section>
         `;
     }
 
@@ -2316,6 +2392,7 @@ class ReportAudioWorkflowPage {
         const detail = this.childDetail(child);
         const preview = this.compactTitle(child?.text_preview || '');
         const retry = this.renderRetryInfo(retryInfo);
+        const intervention = this.humanIntervention(child, detailRef?.jobId || '');
         const clickable = Boolean(detailRef?.jobId && detailRef?.childId);
         const detailAttrs = clickable
             ? `role="button" tabindex="0" data-child-detail="1" data-job-id="${this.escape(detailRef.jobId)}" data-child-kind="${this.escape(detailRef.kind)}" data-child-id="${this.escape(detailRef.childId)}" data-chunk-index="${this.escape(detailRef.chunkIndex || '')}" title="查看子任务详情"`
@@ -2328,6 +2405,7 @@ class ReportAudioWorkflowPage {
                 </div>
                 <div class="mt-1 truncate text-slate-400">${this.escape(child?.job_id || '-')}</div>
                 ${detail ? `<div class="mt-1 truncate text-slate-500">${this.escape(detail)}</div>` : ''}
+                ${this.renderHumanInterventionStatus(intervention)}
                 ${retry}
                 ${preview ? `<div class="mt-1 text-slate-500" title="${this.escape(preview)}" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${this.escape(preview)}</div>` : ''}
             </div>

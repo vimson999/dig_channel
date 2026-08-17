@@ -28,6 +28,14 @@ COMMENT_CLEANUP_MIGRATION_PATH = (
     / "versions"
     / "20260724_comment_hash_index_cleanup.py"
 )
+ZSXQ_INSIGHTS_INDEX_MIGRATION_PATH = (
+    PROJECT_ROOT
+    / "src"
+    / "backend"
+    / "migrations"
+    / "versions"
+    / "20260731_zsxq_insights_query_indexes.py"
+)
 BILIBILI_CHARGING_MIGRATION_PATH = (
     PROJECT_ROOT
     / "src"
@@ -398,6 +406,12 @@ class RestartSafetyGuardTest(unittest.TestCase):
         self.assertIn("pg_has_role(t.relowner, 'MEMBER')", text)
         self.assertIn("Skipping redundant index owned by another role", text)
         self.assertIn("DROP INDEX CONCURRENTLY IF EXISTS", text)
+
+    def test_zsxq_insights_index_migration_skips_when_table_owner_is_unavailable(self):
+        text = ZSXQ_INSIGHTS_INDEX_MIGRATION_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("pg_has_role(c.relowner, 'MEMBER')", text)
+        self.assertIn("Skipping optional insights index owned by another role", text)
 
     def test_charging_migration_binds_json_config_values(self):
         text = BILIBILI_CHARGING_MIGRATION_PATH.read_text(encoding="utf-8")

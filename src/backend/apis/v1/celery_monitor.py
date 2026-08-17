@@ -6,6 +6,7 @@ import signal
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -346,6 +347,7 @@ ZSXQ_SYNC_RESTART_GUARD_SECONDS = max(
 STATUS_CACHE = {
     "key": None,
     "expires_at": 0.0,
+    "refreshed_at": 0.0,
     "payload": None,
 }
 REPORT_VIDEO_STATS_CACHE = {
@@ -375,6 +377,7 @@ def _clear_status_cache():
         STATUS_CACHE.update({
             "key": None,
             "expires_at": 0.0,
+            "refreshed_at": 0.0,
             "payload": None,
         })
     with REPORT_VIDEO_STATS_CACHE_LOCK:
@@ -932,6 +935,20 @@ def _consumer_stuck(status):
     return bool(status.get("consumer_warning"))
 
 
+def _worker_process_definitively_missing(status):
+    """Return true only when process inspection confirms no worker exists.
+
+    A stale database row must normally keep the stop guard closed.  When the
+    service has no process at all, however, starting a replacement cannot
+    interrupt that row and is the safe way to let the broker redeliver it.
+    """
+    return (
+        status.get("running") is False
+        and not status.get("pids")
+        and not status.get("processes")
+    )
+
+
 def _watchdog_business_activity_probe(service_id):
     """Narrow fail-closed heartbeat check for a queue suspected to be stuck."""
     try:
@@ -1278,6 +1295,36 @@ def run_watchdog_once():
             results.append(result)
             continue
 
+        # Do not let a stale `processing` row prevent recovery when process
+        # inspection has already proved that this service has no worker.  We
+        # intentionally start without calling the stop path: there is nothing
+        # to interrupt, and _start_service rechecks for a racing worker.
+        if _worker_process_definitively_missing(status):
+            start_result = _start_service(service_id, service, clear_pause=False)
+            action = (
+                "started_missing_worker"
+                if start_result.get("started")
+                else "worker_appeared"
+            )
+            item_state["last_action_ts"] = now
+            item_state["last_action_at"] = datetime.utcnow().isoformat() + "Z"
+            item_state["stuck_count"] = 0
+            item_state["first_seen_at"] = None
+            item_state["last_seen_at"] = None
+            result.update({
+                "action": action,
+                "start": start_result,
+            })
+            _watchdog_event(
+                state,
+                service_id,
+                action,
+                f"{service['label']} 未发现存活 worker，已请求启动替代 worker。",
+                {"result": result},
+            )
+            results.append(result)
+            continue
+
         subject = f"[Celery自愈] 正在自动重启 worker · {service['label']}"
         try:
             stop_result = _stop_service(service_id, service)
@@ -1378,12 +1425,27 @@ def _inspect_tasks_by_queue():
         from celery_config import celery_app
 
         timeout = float(os.environ.get("CELERY_MONITOR_INSPECT_TIMEOUT", "1.2"))
-        inspector = celery_app.control.inspect(timeout=timeout)
-        replies = {
-            "active": inspector.active() or {},
-            "reserved": inspector.reserved() or {},
-            "scheduled": inspector.scheduled() or {},
-        }
+
+        def request_state(state_name):
+            # Each broadcast owns its connection/reply queue. Busy solo workers
+            # can delay a reply, so serial active/reserved/scheduled requests
+            # multiply the control-plane tail latency.
+            inspector = celery_app.control.inspect(
+                timeout=timeout,
+                limit=len(SERVICES),
+            )
+            return getattr(inspector, state_name)() or {}
+
+        state_names = ("active", "reserved", "scheduled")
+        with ThreadPoolExecutor(max_workers=len(state_names)) as executor:
+            futures = {
+                state_name: executor.submit(request_state, state_name)
+                for state_name in state_names
+            }
+            replies = {
+                state_name: futures[state_name].result()
+                for state_name in state_names
+            }
     except Exception as exc:
         return {}, str(exc)
 
@@ -2468,6 +2530,10 @@ def list_services():
 
 
 def _status_payload(include_logs=False, log_lines=20, include_inspect=False, force_refresh=False):
+    # Authentication may have checked out a connection before this route runs.
+    # Do not carry that request-scoped read transaction across Redis/Celery,
+    # process inspection, or filesystem I/O below.
+    _release_db_session_quietly()
     _ensure_dirs()
 
     broker_ok, broker_error = _broker_ping()
@@ -2510,6 +2576,7 @@ def _status_payload(include_logs=False, log_lines=20, include_inspect=False, for
 
 @bp.route("/status", methods=["GET"])
 def status():
+    refresh_requested_at = time.time()
     include_logs = request.args.get("logs", "0") in {"1", "true", "yes"}
     include_inspect = request.args.get("inspect", "0") in {"1", "true", "yes"}
     force_refresh = request.args.get("refresh", "0") in {"1", "true", "yes"}
@@ -2530,7 +2597,16 @@ def status():
         with STATUS_CACHE_LOCK:
             now = time.time()
             cached = STATUS_CACHE.get("payload")
-            if not force_refresh and STATUS_CACHE.get("key") == cache_key and cached and STATUS_CACHE.get("expires_at", 0) > now:
+            cache_is_fresh = (
+                STATUS_CACHE.get("key") == cache_key
+                and cached
+                and STATUS_CACHE.get("expires_at", 0) > now
+            )
+            refresh_was_coalesced = (
+                force_refresh
+                and STATUS_CACHE.get("refreshed_at", 0) >= refresh_requested_at
+            )
+            if cache_is_fresh and (not force_refresh or refresh_was_coalesced):
                 return jsonify(deepcopy(cached))
             payload = _status_payload(
                 include_logs=include_logs,
@@ -2541,6 +2617,7 @@ def status():
             STATUS_CACHE.update({
                 "key": cache_key,
                 "expires_at": time.time() + STATUS_CACHE_TTL_SECONDS,
+                "refreshed_at": time.time(),
                 "payload": deepcopy(payload),
             })
             return jsonify(payload)

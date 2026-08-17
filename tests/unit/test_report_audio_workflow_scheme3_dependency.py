@@ -68,6 +68,10 @@ class ReportAudioWorkflowScheme3DependencyTest(unittest.TestCase):
             report_audio_api,
             "apply_async_after_db_release",
             return_value=SimpleNamespace(id="celery-scheme3"),
+        ), patch.object(
+            report_audio_api,
+            "require_report_audio_workers_ready",
+            return_value={"ready": True},
         ):
             response = report_audio_api.create_job.__wrapped__(SimpleNamespace(id="user-1"))
 

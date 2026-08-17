@@ -40,8 +40,10 @@ from services.report_audio_workflow import (
     status_payload as workflow_status_payload,
     structured_result_quality_issue,
 )
+from services.report_audio_gem_v2 import resolve_gem_v2_mode
 from services.report_audio_finalization import (
     create_or_resume_finalization,
+    finalization_summaries_for_audio_ids,
     finalization_summary,
     finalization_summary_for_audio,
 )
@@ -80,6 +82,10 @@ from services.wechat_channels_publish_jobs import (
     wechat_channels_publish_payload,
 )
 from services.thumbnail_service import thumbnail_service
+from services.workflow_notification_service import (
+    public_browser_human_intervention_notification,
+)
+from services.workflow_worker_readiness import require_report_audio_workers_ready
 from tasks.publisher import run_publication_pipeline
 from tasks.report_audio_workflow import (
     BANK_ALIASES,
@@ -553,6 +559,19 @@ def create_job(current_user):
     if not isinstance(metadata, dict):
         return jsonify({"success": False, "message": "metadata 必须是对象"}), 400
 
+    try:
+        gem_v2_mode = resolve_gem_v2_mode(data.get("gem_v2_mode"))
+    except ValueError:
+        return jsonify({
+            "success": False,
+            "message": "gem_v2_mode 仅支持 off、shadow 或 direct",
+        }), 400
+    gem_v2_focus = str(data.get("gem_v2_focus") or "").strip()[:1000]
+    gem_v2_allow_external_information = _truthy(
+        data.get("gem_v2_allow_external_information"),
+        False,
+    )
+
     minimum_script_chars = _bounded_int(
         data.get("gemini_min_final_chars"),
         DEFAULT_INITIAL_SCRIPT_MIN_CHARS,
@@ -561,18 +580,22 @@ def create_job(current_user):
     )
     prompt = (data.get("prompt") or DEFAULT_INITIAL_PROMPT).strip()
     pdf_evidence_enabled = _parse_pdf_evidence_enabled(data)
-    review_prompt = review_prompt_for_pdf_evidence(
-        data.get("review_prompt") or DEFAULT_REVIEW_PROMPT,
-        enabled=pdf_evidence_enabled,
-    )
-    submission_prompts = initial_submission_prompts(
-        prompt,
-        review_prompt,
-        minimum_chars=minimum_script_chars,
-    )
-    prompt = submission_prompts["prompt"]
-    review_prompt = submission_prompts["review_prompt"]
-    followups = _parse_followups(data)
+    if gem_v2_mode == "off":
+        review_prompt = review_prompt_for_pdf_evidence(
+            data.get("review_prompt") or DEFAULT_REVIEW_PROMPT,
+            enabled=pdf_evidence_enabled,
+        )
+        submission_prompts = initial_submission_prompts(
+            prompt,
+            review_prompt,
+            minimum_chars=minimum_script_chars,
+        )
+        prompt = submission_prompts["prompt"]
+        review_prompt = submission_prompts["review_prompt"]
+        followups = _parse_followups(data)
+    else:
+        review_prompt = str(data.get("review_prompt") or DEFAULT_REVIEW_PROMPT).strip()
+        followups = []
     video_options = _parse_video_options(data)
     if (
         video_options.get("render_mode") == "full_video"
@@ -620,6 +643,10 @@ def create_job(current_user):
         return jsonify({"success": False, "message": "豆包浏览器朗读未配置", "data": {"doubao_browser_tts": doubao_status}}), 400
     if not script_material_only and tts_provider == "doubao_api" and not is_doubao_api_configured():
         return jsonify({"success": False, "message": "豆包 API TTS 未配置，请设置 DOUBAO_TTS_API_KEY"}), 400
+    try:
+        require_report_audio_workers_ready()
+    except RuntimeError as exc:
+        return jsonify({"success": False, "message": str(exc), "error_type": "deployment_not_ready"}), 503
 
     initial_result = {
         "metadata": metadata,
@@ -632,6 +659,8 @@ def create_job(current_user):
     }
     if script_material_only:
         initial_result["script_material"] = {"status": "pending"}
+    if gem_v2_mode != "off":
+        initial_result["gem_v2"] = {"mode": gem_v2_mode, "status": "pending"}
 
     task = PublicationTask(
         status="pending",
@@ -650,6 +679,9 @@ def create_job(current_user):
                 "gemini_prefer_pro_model": _truthy(data.get("gemini_prefer_pro_model"), True),
                 "gemini_require_pro_model": _truthy(data.get("gemini_require_pro_model"), False),
                 "gemini_min_final_chars": minimum_script_chars,
+                "gem_v2_mode": gem_v2_mode,
+                "gem_v2_focus": gem_v2_focus,
+                "gem_v2_allow_external_information": gem_v2_allow_external_information,
                 "metadata": metadata,
                 "script_material_only": script_material_only,
                 "tts_provider": tts_provider,
@@ -727,7 +759,16 @@ def _query_jobs_page(query, *, page, per_page, include_detail):
             per_page=per_page,
             error_out=False,
         )
-        items = [_job_payload(task) for task in pagination.items]
+        finalizations = finalization_summaries_for_audio_ids(
+            [str(task.id) for task in pagination.items]
+        )
+        items = [
+            _job_payload(
+                task,
+                finalization=finalizations.get(str(task.id)),
+            )
+            for task in pagination.items
+        ]
         return items, pagination.total, pagination.pages
 
     offset = (page - 1) * per_page
@@ -1974,10 +2015,42 @@ def retry_job(current_user, job_id):
             return jsonify({"success": False, "message": "豆包 API TTS 未配置，请设置 DOUBAO_TTS_API_KEY"}), 400
     elif requested_tts_provider == "doubao_browser" and not doubao_browser_tts.status_payload().get("configured"):
         return jsonify({"success": False, "message": "豆包浏览器朗读未配置"}), 400
+    try:
+        require_report_audio_workers_ready()
+    except RuntimeError as exc:
+        return jsonify({"success": False, "message": str(exc), "error_type": "deployment_not_ready"}), 503
 
     result = dict(task.result or {})
     retry_requested_at = datetime.utcnow().isoformat() + "Z"
+    resolved_captcha_child_ids = _resolve_doubao_captcha_children_for_retry(
+        task.id,
+        verified_at=retry_requested_at,
+    )
     logs = list(result.get("logs") or [])
+    if resolved_captcha_child_ids:
+        logs.append({
+            "step": "captcha_verified",
+            "message": (
+                "用户确认豆包人机验证已完成；已将 "
+                f"{len(resolved_captcha_child_ids)} 个历史阻塞尝试标记为已验证，并从此处续跑"
+            ),
+            "progress": task.progress or 0,
+            "updated_at": retry_requested_at,
+        })
+        result["captcha_recovery"] = {
+            "verified_at": retry_requested_at,
+            "resolved_child_ids": resolved_captcha_child_ids,
+            "recovery_state": "retry_queued",
+        }
+        result["doubao_browser_tts"] = _without_child_summaries(
+            result.get("doubao_browser_tts"),
+            resolved_captcha_child_ids,
+        )
+        children = dict(result.get("children") or {})
+        for label, child in list(children.items()):
+            if isinstance(child, dict) and str(child.get("job_id") or "") in resolved_captcha_child_ids:
+                children.pop(label, None)
+        result["children"] = children
     provider_changed = False
     previous_tts_provider = ""
     params = deepcopy(task.params) if isinstance(task.params, dict) else {}
@@ -2095,6 +2168,66 @@ def retry_job(current_user, job_id):
     payload["deferred"] = bool(submit_result.get("deferred"))
     payload["admission"] = submit_result.get("admission")
     return jsonify({"success": True, "message": "任务已从失败处续跑", **payload, "data": payload})
+
+
+def _resolve_doubao_captcha_children_for_retry(parent_id, *, verified_at=None):
+    """Record a human CAPTCHA confirmation before a new retry delivery.
+
+    The worker exits when it encounters a CAPTCHA. Completing the challenge in
+    the retained browser profile updates the profile, but cannot send a result
+    back to that original, finished Celery delivery. The next explicit retry is
+    therefore a new delivery, while the prior attempt remains an auditable
+    historical block marked as manually resolved.
+    """
+
+    timestamp = str(verified_at or datetime.utcnow().isoformat() + "Z")
+    children = (
+        PublicationTask.query
+        .filter(
+            PublicationTask.parent_task_id == str(parent_id),
+            PublicationTask.feature == doubao_browser_tts.FEATURE_NAME,
+            PublicationTask.status == "blocked_by_captcha",
+        )
+        .all()
+    )
+    resolved_ids = []
+    for child in children:
+        result = dict(child.result or {})
+        captcha = result.get("captcha_blocked")
+        if not isinstance(captcha, dict) or captcha.get("resolved_at"):
+            continue
+        captcha = dict(captcha)
+        captcha.update({
+            "blocked": False,
+            "requires_human_action": False,
+            "resolved_at": timestamp,
+            "recovery_state": "retry_queued",
+        })
+        logs = list(result.get("logs") or [])
+        logs.append({
+            "step": "captcha_verified",
+            "message": "用户确认已完成人机验证；本次阻塞尝试将由新的续跑尝试接替",
+            "progress": child.progress or 0,
+            "updated_at": timestamp,
+        })
+        result["captcha_blocked"] = captcha
+        result["logs"] = logs[-80:]
+        child.current_step = "captcha_verified"
+        child.updated_at = datetime.utcnow()
+        child.result = result
+        flag_modified(child, "result")
+        resolved_ids.append(str(child.id))
+    return resolved_ids
+
+
+def _without_child_summaries(items, excluded_ids):
+    excluded = {str(item) for item in excluded_ids or []}
+    if not isinstance(items, list):
+        return []
+    return [
+        item for item in items
+        if not isinstance(item, dict) or str(item.get("job_id") or "") not in excluded
+    ]
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/regenerate-script", methods=["POST"])
@@ -5237,7 +5370,10 @@ def _live_child_tasks(parent_id):
             .order_by(PublicationTask.created_at.asc())
             .all()
         )
-        return _dedupe_child_summary_rows(rows)
+        return [
+            row for row in _dedupe_child_summary_rows(rows)
+            if not _is_resolved_captcha_child_row(row)
+        ]
     except Exception:
         return []
 
@@ -5265,6 +5401,8 @@ def _child_task_summary_query():
         PublicationTask.publisher_vertical_cover_path.label("publisher_vertical_cover_path"),
         PublicationTask.publisher_podcast_cover_path.label("publisher_podcast_cover_path"),
         PublicationTask.publisher_bilibili_cover_path.label("publisher_bilibili_cover_path"),
+        PublicationTask.result["captcha_blocked"].label("captcha_blocked"),
+        PublicationTask.result["notifications"]["doubao_captcha_blocked"].label("captcha_notification"),
         PublicationTask.created_at.label("created_at"),
         PublicationTask.completed_at.label("completed_at"),
     )
@@ -5279,6 +5417,15 @@ def _dedupe_child_summary_rows(rows):
     return sorted(
         deduped.values(),
         key=lambda row: (row.created_at or datetime.min, row.id),
+    )
+
+
+def _is_resolved_captcha_child_row(row):
+    captcha = getattr(row, "captcha_blocked", None)
+    return bool(
+        isinstance(captcha, dict)
+        and captcha.get("resolved_at")
+        and captcha.get("requires_human_action") is False
     )
 
 
@@ -5304,7 +5451,10 @@ def _child_summaries_for_parent_ids(parent_ids):
             .order_by(PublicationTask.created_at.asc())
             .all()
         )
-        rows = _dedupe_child_summary_rows(rows)
+        rows = [
+            row for row in _dedupe_child_summary_rows(rows)
+            if not _is_resolved_captcha_child_row(row)
+        ]
     except Exception:
         return grouped
 
@@ -5444,6 +5594,24 @@ def _child_task_summary_row(row, result_payload=None):
         "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
         "completed_at": row.completed_at.isoformat() + "Z" if row.completed_at else None,
     }
+    captcha = (
+        result.get("captcha_blocked")
+        if isinstance(result.get("captcha_blocked"), dict)
+        else getattr(row, "captcha_blocked", None)
+    )
+    if isinstance(captcha, dict) and captcha:
+        payload["captcha_blocked"] = captcha
+    notification = None
+    notifications = result.get("notifications") if isinstance(result.get("notifications"), dict) else {}
+    if isinstance(notifications.get("doubao_captcha_blocked"), dict):
+        notification = notifications.get("doubao_captcha_blocked")
+    elif isinstance(getattr(row, "captcha_notification", None), dict):
+        notification = getattr(row, "captcha_notification")
+    public_notification = public_browser_human_intervention_notification(notification)
+    if public_notification:
+        payload["notifications"] = {
+            "doubao_captcha_blocked": public_notification,
+        }
     seconds = audio.get("seconds") if audio else getattr(row, "audio_seconds", None)
     audio_bytes = audio.get("bytes") if audio else getattr(row, "audio_bytes", None)
     if audio or row.audio_wav_path or seconds or audio_bytes:
@@ -5478,6 +5646,17 @@ def _child_task_summary(task):
         "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
         "completed_at": task.completed_at.isoformat() + "Z" if task.completed_at else None,
     }
+    captcha = result.get("captcha_blocked") if isinstance(result.get("captcha_blocked"), dict) else None
+    if captcha:
+        payload["captcha_blocked"] = captcha
+    notifications = result.get("notifications") if isinstance(result.get("notifications"), dict) else {}
+    public_notification = public_browser_human_intervention_notification(
+        notifications.get("doubao_captcha_blocked")
+    )
+    if public_notification:
+        payload["notifications"] = {
+            "doubao_captcha_blocked": public_notification,
+        }
     preview = _child_text_preview(result, feature)
     if preview:
         payload["text_preview"] = preview

@@ -108,6 +108,34 @@ class DatabaseConnectionLifecycleTest(unittest.TestCase):
             400.25,
         )
 
+    def test_failed_sql_duration_is_aggregated_for_current_checkout(self):
+        connection = SimpleNamespace(info={"query_start_time": [100.0]})
+        exception_context = SimpleNamespace(
+            connection=connection,
+            statement="SELECT 1",
+            original_exception=RuntimeError("query timeout"),
+        )
+        middleware = database_logger.DatabaseLoggerMiddleware()
+
+        with patch.object(database_logger.time, "time", return_value=120.0), patch.object(
+            database_logger.logger,
+            "exception",
+        ):
+            middleware._handle_error(exception_context)
+
+        self.assertEqual(
+            connection.info[database_logger._connection_sql_count_key],
+            1,
+        )
+        self.assertEqual(
+            connection.info[database_logger._connection_sql_total_ms_key],
+            20000.0,
+        )
+        self.assertEqual(
+            connection.info[database_logger._connection_sql_max_ms_key],
+            20000.0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

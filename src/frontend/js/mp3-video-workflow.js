@@ -9,6 +9,8 @@ class Mp3VideoWorkflowPage {
         this.audioAssetRequestSeq = 0;
         this.audioAssetWorkflowSeq = 0;
         this.selectedAudioAsset = null;
+        this.uploadedAudioFile = null;
+        this.uploadedAudioObjectUrl = '';
         this.jobs = [];
         this.jobPage = this.initialJobPage();
         this.jobStatus = this.initialJobStatus();
@@ -27,6 +29,9 @@ class Mp3VideoWorkflowPage {
             notice: document.getElementById('notice'),
             selectedBadge: document.getElementById('selected-badge'),
             audioAssetTabs: document.getElementById('audio-asset-tabs'),
+            audioUploadInput: document.getElementById('audio-upload-input'),
+            audioUploadSummary: document.getElementById('audio-upload-summary'),
+            clearAudioUploadBtn: document.getElementById('clear-audio-upload-btn'),
             audioAssetSearch: document.getElementById('audio-asset-search'),
             audioAssetRefreshBtn: document.getElementById('audio-asset-refresh-btn'),
             audioAssetSummary: document.getElementById('audio-asset-summary'),
@@ -199,6 +204,8 @@ class Mp3VideoWorkflowPage {
         this.els.refreshStatusBtn.addEventListener('click', () => this.refreshStatus());
         this.els.restartWorkerBtn.addEventListener('click', () => this.restartWorker());
         this.els.audioAssetRefreshBtn.addEventListener('click', () => this.loadAudioAssets({ page: this.audioAssetPage }));
+        this.els.audioUploadInput?.addEventListener('change', (event) => this.handleAudioUploadChange(event));
+        this.els.clearAudioUploadBtn?.addEventListener('click', () => this.clearUploadedAudio());
         this.els.audioAssetTabs?.addEventListener('click', (event) => this.handleAudioAssetScopeClick(event));
         this.els.audioAssetSearch.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') this.loadAudioAssets({ page: 1 });
@@ -254,11 +261,12 @@ class Mp3VideoWorkflowPage {
         const { timeoutMs = 15000, ...fetchOptions } = options;
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        const isFormData = typeof FormData !== 'undefined' && fetchOptions.body instanceof FormData;
         try {
             const response = await fetch(`${this.apiRoot()}${path}`, {
                 ...fetchOptions,
                 headers: {
-                    ...this.headers(true),
+                    ...this.headers(!isFormData),
                     ...(fetchOptions.headers || {})
                 },
                 signal: controller.signal,
@@ -371,6 +379,65 @@ class Mp3VideoWorkflowPage {
         }
     }
 
+    handleAudioUploadChange(event) {
+        const file = event.target?.files?.[0];
+        if (!file) return;
+        const extension = String(file.name || '').split('.').pop()?.toLowerCase() || '';
+        const allowed = new Set(['mp3', 'm4a', 'wav', 'aac', 'flac', 'ogg', 'opus']);
+        if (!allowed.has(extension)) {
+            this.setNotice('只支持 MP3、M4A、WAV、AAC、FLAC、OGG 或 OPUS 音频。', 'warning');
+            event.target.value = '';
+            return;
+        }
+        const maxBytes = 512 * 1024 * 1024;
+        if (file.size > maxBytes) {
+            this.setNotice('音频文件不能超过 512MB。', 'warning');
+            event.target.value = '';
+            return;
+        }
+        this.releaseUploadedAudioPreview();
+        this.uploadedAudioFile = file;
+        this.uploadedAudioObjectUrl = URL.createObjectURL(file);
+        this.selectedAudioAsset = {
+            attachment_id: `upload-${Date.now()}`,
+            filename: file.name,
+            name: file.name,
+            topic_title: file.name,
+            tab_label: '本地上传',
+            bytes: file.size,
+            file_ext: extension,
+            is_upload: true,
+            upload_file: file,
+        };
+        if (this.els.audioUploadSummary) {
+            this.els.audioUploadSummary.textContent = `已选择：${file.name} · ${this.formatBytes(file.size)}，投递时上传并编排。`;
+        }
+        if (this.els.clearAudioUploadBtn) this.els.clearAudioUploadBtn.classList.remove('hidden');
+        this.updateSelectedAudioPanel();
+        this.renderAudioAssets();
+        this.setNotice('本地 MP3 已选择，可以直接投递编排。', 'success');
+    }
+
+    releaseUploadedAudioPreview() {
+        if (this.uploadedAudioObjectUrl) {
+            URL.revokeObjectURL(this.uploadedAudioObjectUrl);
+            this.uploadedAudioObjectUrl = '';
+        }
+    }
+
+    clearUploadedAudio({ clearSelection = true } = {}) {
+        this.releaseUploadedAudioPreview();
+        this.uploadedAudioFile = null;
+        if (this.els.audioUploadInput) this.els.audioUploadInput.value = '';
+        if (this.els.audioUploadSummary) this.els.audioUploadSummary.textContent = '尚未选择本地音频。';
+        this.els.clearAudioUploadBtn?.classList.add('hidden');
+        if (clearSelection && this.selectedAudioAsset?.is_upload) {
+            this.selectedAudioAsset = null;
+            this.updateSelectedAudioPanel();
+            this.renderAudioAssets();
+        }
+    }
+
     handleAudioAssetScopeClick(event) {
         const button = event.target.closest('[data-audio-asset-scope]');
         if (!button) return;
@@ -378,6 +445,7 @@ class Mp3VideoWorkflowPage {
         if (nextScope === this.audioAssetScope) return;
         this.audioAssetScope = nextScope;
         this.audioAssetPage = 1;
+        this.clearUploadedAudio({ clearSelection: true });
         this.selectedAudioAsset = null;
         this.updateSelectedAudioPanel();
         this.loadAudioAssets({ page: 1 });
@@ -440,6 +508,7 @@ class Mp3VideoWorkflowPage {
         if (!target) return;
         const asset = this.audioAssets.find((item) => item.attachment_id === target.dataset.audioId);
         if (!asset) return;
+        this.clearUploadedAudio({ clearSelection: false });
         this.selectedAudioAsset = asset;
         this.updateSelectedAudioPanel();
         this.renderAudioAssets();
@@ -476,12 +545,17 @@ class Mp3VideoWorkflowPage {
             this.audioAssetDownloadText(asset),
             this.formatDateTime(asset.topic_create_time) || asset.topic_create_time || '',
         ].filter(Boolean).join(' · ');
-        this.els.selectedAudioPlayer.src = this.absoluteUrl(`/api/mp3-video-workflows/audio-assets/${encodeURIComponent(asset.attachment_id)}/preview`);
+        this.els.selectedAudioPlayer.src = asset.is_upload && this.uploadedAudioObjectUrl
+            ? this.uploadedAudioObjectUrl
+            : this.absoluteUrl(`/api/mp3-video-workflows/audio-assets/${encodeURIComponent(asset.attachment_id)}/preview`);
     }
 
     async submit() {
-        if (!this.selectedAudioAsset) {
-            this.setNotice('请先选择一个已同步 MP3。', 'warning');
+        const uploadedAudio = this.selectedAudioAsset?.is_upload && this.uploadedAudioFile
+            ? this.uploadedAudioFile
+            : null;
+        if (!this.selectedAudioAsset || (this.selectedAudioAsset.is_upload && !uploadedAudio)) {
+            this.setNotice('请先选择一个已同步 MP3，或上传本地 MP3。', 'warning');
             return;
         }
         const inputSource = this.currentInputSource();
@@ -501,7 +575,6 @@ class Mp3VideoWorkflowPage {
         this.els.submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>投递中';
         try {
             const payload = {
-                audio_asset_id: this.selectedAudioAsset.attachment_id,
                 input_source: inputSource,
                 render_mode: renderMode,
                 generate_subtitles: generateSubtitles,
@@ -518,13 +591,28 @@ class Mp3VideoWorkflowPage {
                     generate_subtitles: generateSubtitles,
                 }
             };
+            let body = JSON.stringify({
+                ...payload,
+                ...(uploadedAudio ? {} : { audio_asset_id: this.selectedAudioAsset.attachment_id }),
+            });
+            if (uploadedAudio) {
+                const formData = new FormData();
+                formData.append('audio', uploadedAudio, uploadedAudio.name);
+                Object.entries(payload).forEach(([key, value]) => {
+                    if (value !== undefined && value !== null) {
+                        formData.append(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
+                    }
+                });
+                body = formData;
+            }
             const result = await this.request('/api/mp3-video-workflows/jobs', {
                 method: 'POST',
-                body: JSON.stringify(payload),
-                timeoutMs: 20000,
+                body,
+                timeoutMs: uploadedAudio ? 120000 : 20000,
             });
             this.setNotice(`任务已投递：${result.job_id || result.data?.job_id}`, 'success');
             this.jobPage = 1;
+            if (uploadedAudio) this.clearUploadedAudio();
             await this.loadAudioAssetWorkflowStats(this.audioAssets);
             await this.loadHistory({ page: 1, force: true });
         } catch (error) {

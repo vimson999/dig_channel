@@ -41,6 +41,13 @@ from services.report_audio_workflow import (
     structured_result_quality_issue,
     synthesize_doubao_api_chunks,
 )
+from services.report_audio_gem_v2 import (
+    SCHEMA_VERSION as GEM_V2_SCHEMA_VERSION,
+    build_gem_v2_trigger,
+    resolve_gem_v2_mode,
+    to_report_audio_structured_result,
+    validate_gem_v2_response,
+)
 from services.report_pdf_evidence import build_and_store_evidence
 from services.report_audio_completion_contract import (
     evaluate_report_video_completion,
@@ -55,7 +62,11 @@ from services.runtime_guard import (
     release_db_session_quietly,
     retry_exception_types,
 )
-from services.workflow_notification_service import workflow_notification_service
+from services.workflow_notification_service import (
+    public_browser_human_intervention_notification,
+    workflow_notification_service,
+)
+from services.workflow_worker_readiness import require_report_audio_workers_ready
 from tasks.doubao_browser_tts import process_doubao_browser_tts_job
 from tasks.gemini_browser import process_report_pdf_gemini_job
 from tasks.publisher import run_publication_pipeline
@@ -694,6 +705,7 @@ def process_report_audio_workflow_job(self, task_id):
     try:
         app = create_app()
         with app.app_context():
+            require_report_audio_workers_ready()
             start = _load_task(
                 task_id,
                 PublicationTask.celery_task_id,
@@ -783,20 +795,36 @@ def _process_job(task_id):
         _mark_failed(task, "PDF 文件不能为空")
         return False
 
-    prompt = (payload.get("prompt") or DEFAULT_INITIAL_PROMPT).strip()
     minimum_final_chars = _required_gemini_final_chars(payload)
+    gem_v2_mode = resolve_gem_v2_mode(payload.get("gem_v2_mode"))
+    if gem_v2_mode == "off":
+        prompt = (payload.get("prompt") or DEFAULT_INITIAL_PROMPT).strip()
+    else:
+        prompt = build_gem_v2_trigger(
+            pdf.get("filename") or Path(pdf_path).name,
+            minimum_final_chars,
+            output_mode=str(payload.get("gem_v2_output_mode") or "separate"),
+            focus=str(payload.get("gem_v2_focus") or ""),
+            allow_external_information=_truthy(
+                payload.get("gem_v2_allow_external_information"),
+                False,
+            ),
+        )
     pdf_evidence_enabled = (
         _truthy(payload.get("pdf_evidence_enabled"), True)
         if "pdf_evidence_enabled" in payload
         else True
     )
-    review_prompt = review_prompt_for_pdf_evidence(
-        payload.get("review_prompt") or DEFAULT_REVIEW_PROMPT,
-        enabled=pdf_evidence_enabled,
-    )
-    followups = [str(item).strip() for item in (payload.get("followups") or []) if str(item).strip()]
-    if review_prompt and review_prompt not in followups:
-        followups.append(review_prompt)
+    if gem_v2_mode == "off":
+        review_prompt = review_prompt_for_pdf_evidence(
+            payload.get("review_prompt") or DEFAULT_REVIEW_PROMPT,
+            enabled=pdf_evidence_enabled,
+        )
+        followups = [str(item).strip() for item in (payload.get("followups") or []) if str(item).strip()]
+        if review_prompt and review_prompt not in followups:
+            followups.append(review_prompt)
+    else:
+        followups = []
 
     result = dict(task.result or {})
     resume_waiting_child = isinstance(result.get("waiting_child"), dict)
@@ -847,6 +875,13 @@ def _process_job(task_id):
         gemini_task_snapshot = None
         raw_final = ""
         initial_text = ""
+        existing_gem_v2 = result.get("gem_v2") if isinstance(result.get("gem_v2"), dict) else {}
+        direct_gem_v2_used = bool(
+            structured
+            and structured.get("schema_version") == GEM_V2_SCHEMA_VERSION
+            and existing_gem_v2.get("route") == "direct"
+            and existing_gem_v2.get("valid") is True
+        )
         manual_gemini_result = _manual_gemini_payload(payload)
         script_material_result = result.get("script_material") if isinstance(result.get("script_material"), dict) else None
         audio_reuse_result = result.get("audio_reuse") if isinstance(result.get("audio_reuse"), dict) else None
@@ -901,17 +936,25 @@ def _process_job(task_id):
                         raise RuntimeError(
                             f"手动 Gemini 返回内容过短: {final_chars} 字，低于 {min_final_chars} 字，停止进入 DeepSeek 结构化"
                         )
-                    _emit(workflow_task_id, "normalize_result", 58, "使用结构化解析器整理手动 Gemini 返回值")
-                    structured = normalize_for_tts(
+                    structured, gem_v2_diagnostics, direct_gem_v2_used = _structure_gemini_response(
                         raw_final,
                         initial_text=initial_text,
                         minimum_script_chars=minimum_final_chars,
+                        gem_v2_mode=gem_v2_mode,
+                        allow_external_information=_truthy(
+                            payload.get("gem_v2_allow_external_information"),
+                            False,
+                        ),
+                        pdf=pdf,
+                        pdf_path=pdf_path,
                         metadata={
                             "workflow_task_id": workflow_task_id,
                             "gemini_source": "manual_input",
                             "pdf_filename": pdf.get("filename"),
                         },
                     )
+                    if gem_v2_diagnostics:
+                        _update_result(workflow_task_id, {"gem_v2": gem_v2_diagnostics})
                 elif gemini_task:
                     _clear_waiting_child(workflow_task_id, "gemini")
                     _emit(workflow_task_id, "reuse_gemini_result", 52, "复用已完成的 Gemini 子任务")
@@ -930,7 +973,13 @@ def _process_job(task_id):
                     if (gemini_task_snapshot or {}).get("status") != "completed":
                         raise RuntimeError(f"Gemini 子任务失败: {_child_error_message(gemini_task)}")
                     _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
-                    _queue_notification(workflow_task_id, "report_audio_gemini_completed", "研报 PDF Gem 第一轮解析和自审追问已完成")
+                    _queue_notification(
+                        workflow_task_id,
+                        "report_audio_gemini_completed",
+                        "研报 PDF Gem 结构化解析已完成"
+                        if gem_v2_mode != "off"
+                        else "研报 PDF Gem 第一轮解析和自审追问已完成",
+                    )
                 else:
                     _queue_notification(workflow_task_id, "report_audio_gemini_submitted", "研报 PDF Gem 解析子任务已入队")
                     gemini_task = _run_gemini_task_with_retries(
@@ -946,7 +995,13 @@ def _process_job(task_id):
                     gemini_task_id = _task_id(gemini_task)
                     gemini_task_snapshot = _task_state_snapshot(gemini_task)
                     _update_result(workflow_task_id, {"gemini": _task_public_summary(gemini_task)})
-                    _queue_notification(workflow_task_id, "report_audio_gemini_completed", "研报 PDF Gem 第一轮解析和自审追问已完成")
+                    _queue_notification(
+                        workflow_task_id,
+                        "report_audio_gemini_completed",
+                        "研报 PDF Gem 结构化解析已完成"
+                        if gem_v2_mode != "off"
+                        else "研报 PDF Gem 第一轮解析和自审追问已完成",
+                    )
 
                 if not manual_gemini_result:
                     fresh_gemini_task = _load_task(gemini_task_id, *TASK_CHILD_COLUMNS) if gemini_task_id else None
@@ -966,28 +1021,39 @@ def _process_job(task_id):
                             f"Gemini 子任务返回内容过短: {final_chars} 字，低于 {min_final_chars} 字，疑似未抓到有效研报解析结果"
                         )
 
-                    _emit(workflow_task_id, "normalize_result", 58, "使用结构化解析器整理 Gemini 结果")
-                    structured = normalize_for_tts(
+                    structured, gem_v2_diagnostics, direct_gem_v2_used = _structure_gemini_response(
                         raw_final,
                         initial_text=initial_text,
                         minimum_script_chars=minimum_final_chars,
+                        gem_v2_mode=gem_v2_mode,
+                        allow_external_information=_truthy(
+                            payload.get("gem_v2_allow_external_information"),
+                            False,
+                        ),
+                        pdf=pdf,
+                        pdf_path=pdf_path,
                         metadata={
                             "workflow_task_id": workflow_task_id,
                             "gemini_task_id": gemini_task_id,
                             "pdf_filename": pdf.get("filename"),
                         },
                     )
-        _emit(workflow_task_id, "review_cover_titles", 60, "生成标题候选并进行独立评审")
-        title_source_text = raw_final or "\n".join(filter(None, [
-            str((structured or {}).get("summary") or ""),
-            str((structured or {}).get("final_script_for_tts") or ""),
-        ]))
-        structured = review_report_cover_titles(
-            structured or {},
-            source_text=title_source_text,
-            pdf_filename=pdf.get("filename") or Path(pdf_path).name,
-            pdf_topic_title=pdf.get("topic_title") or "",
-        )
+                    if gem_v2_diagnostics:
+                        _update_result(workflow_task_id, {"gem_v2": gem_v2_diagnostics})
+        if direct_gem_v2_used:
+            _emit(workflow_task_id, "use_gem_v2_titles", 60, "Gem V2 结构与标题通过校验，跳过 DeepSeek 标题复核")
+        else:
+            _emit(workflow_task_id, "review_cover_titles", 60, "生成标题候选并进行独立评审")
+            title_source_text = raw_final or "\n".join(filter(None, [
+                str((structured or {}).get("summary") or ""),
+                str((structured or {}).get("final_script_for_tts") or ""),
+            ]))
+            structured = review_report_cover_titles(
+                structured or {},
+                source_text=title_source_text,
+                pdf_filename=pdf.get("filename") or Path(pdf_path).name,
+                pdf_topic_title=pdf.get("topic_title") or "",
+            )
 
         # Always sanitize at the final TTS boundary as well. This also repairs
         # reusable/cached structured material created before a cleaner existed.
@@ -1527,6 +1593,69 @@ def _run_gemini_task_with_retries(parent, *, pdf, pdf_path, prompt, followups, p
     raise RuntimeError(f"Gemini 子任务失败: {last_error or '未知错误'}")
 
 
+def _structure_gemini_response(
+    raw_final,
+    *,
+    initial_text,
+    minimum_script_chars,
+    gem_v2_mode,
+    allow_external_information,
+    pdf,
+    pdf_path,
+    metadata,
+):
+    """Choose the direct V2 result or the unchanged DeepSeek compatibility path."""
+
+    mode = resolve_gem_v2_mode(gem_v2_mode)
+    diagnostics = None
+    if mode != "off":
+        validation = validate_gem_v2_response(
+            raw_final,
+            minimum_script_chars=minimum_script_chars,
+            expected_pdf_filename=(pdf or {}).get("filename") or Path(pdf_path).name,
+            actual_pdf_page_count=_actual_pdf_page_count(pdf_path, pdf),
+            allow_external_information=bool(allow_external_information),
+        )
+        diagnostics = validation.diagnostics()
+        diagnostics["mode"] = mode
+        if mode == "direct" and validation.valid:
+            diagnostics["route"] = "direct"
+            return to_report_audio_structured_result(validation), diagnostics, True
+        diagnostics["route"] = "shadow_deepseek" if mode == "shadow" else "deepseek_fallback"
+
+    release_db_session_quietly()
+    structured = normalize_for_tts(
+        raw_final,
+        initial_text=initial_text,
+        minimum_script_chars=minimum_script_chars,
+        metadata=metadata,
+    )
+    return structured, diagnostics, False
+
+
+def _actual_pdf_page_count(pdf_path, pdf=None):
+    for value in (
+        (pdf or {}).get("actual_pdf_page_count"),
+        (pdf or {}).get("page_count"),
+    ):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = 0
+        if parsed > 0:
+            return parsed
+    source = Path(str(pdf_path or ""))
+    if not source.is_file():
+        return None
+    try:
+        import fitz  # type: ignore
+
+        with fitz.open(str(source)) as document:
+            return int(document.page_count or 0) or None
+    except Exception:
+        return None
+
+
 def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload, *, attempt=1, max_attempts=1):
     retry_index = max(0, int(attempt or 1) - 1)
     metadata = {
@@ -1536,6 +1665,29 @@ def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload, *, at
         "max_attempts": int(max_attempts or 1),
         "retry_index": retry_index,
     }
+    gemini_payload = {
+        "prompt": prompt,
+        "followups": followups,
+        "url": (payload.get("gemini_url") or payload.get("url") or "").strip(),
+        "prefer_pro_model": _truthy(payload.get("gemini_prefer_pro_model"), True),
+        "require_pro_model": _truthy(payload.get("gemini_require_pro_model"), False),
+        "minimum_final_response_chars": _required_gemini_final_chars(payload),
+        "metadata": metadata,
+        "pdf": pdf,
+        "pdf_path": pdf_path,
+    }
+    gem_v2_mode = resolve_gem_v2_mode(payload.get("gem_v2_mode"))
+    if gem_v2_mode != "off":
+        gemini_payload.update({
+            "response_contract": GEM_V2_SCHEMA_VERSION,
+            "contract_expected_pdf_filename": (pdf or {}).get("filename") or Path(pdf_path).name,
+            "contract_minimum_script_chars": _required_gemini_final_chars(payload),
+            "contract_max_repairs": 1,
+            "contract_allow_external_information": _truthy(
+                payload.get("gem_v2_allow_external_information"),
+                False,
+            ),
+        })
     child = PublicationTask(
         status="pending",
         current_step="queued",
@@ -1545,17 +1697,7 @@ def _create_gemini_task(parent, pdf, pdf_path, prompt, followups, payload, *, at
             "user_id": parent.params.get("user_id"),
             "parent_feature": FEATURE_NAME,
             "parent_task_id": parent.id,
-            "report_pdf_gemini": {
-                "prompt": prompt,
-                "followups": followups,
-                "url": (payload.get("gemini_url") or payload.get("url") or "").strip(),
-                "prefer_pro_model": _truthy(payload.get("gemini_prefer_pro_model"), True),
-                "require_pro_model": _truthy(payload.get("gemini_require_pro_model"), False),
-                "minimum_final_response_chars": _required_gemini_final_chars(payload),
-                "metadata": metadata,
-                "pdf": pdf,
-                "pdf_path": pdf_path,
-            },
+            "report_pdf_gemini": gemini_payload,
         },
         result={
             "metadata": metadata,
@@ -2049,6 +2191,12 @@ def _run_doubao_tts_chunks(parent, parent_id, chunks, payload, *, retry_requeste
                         error=_child_error_message(failed_summary),
                     )
                 latest_failed = failed_summaries[-1]
+                failure_class = _child_failure_classification(latest_failed)
+                if failure_class:
+                    raise RuntimeError(
+                        f"{failure_class}: 豆包浏览器朗读 worker 与当前代码不一致，"
+                        f"请重启相关 worker 后再续跑: {_child_error_message(latest_failed)}"
+                    )
                 if _is_doubao_captcha_blocked(latest_failed):
                     raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {_child_error_message(latest_failed)}")
                 next_attempt = max(_task_chunk_attempt(task) or 1 for task in failed_summaries) + 1
@@ -2132,6 +2280,12 @@ def _run_doubao_tts_chunks(parent, parent_id, chunks, payload, *, retry_requeste
             continue
 
         last_error = _child_error_message(tts_summary)
+        failure_class = _child_failure_classification(tts_summary)
+        if failure_class:
+            raise RuntimeError(
+                f"{failure_class}: 豆包浏览器朗读 worker 与当前代码不一致，"
+                f"请重启相关 worker 后再续跑: {last_error}"
+            )
         if _is_doubao_captcha_blocked(tts_summary):
             raise RuntimeError(f"豆包浏览器朗读被人机验证阻塞: {last_error}")
         attempt = _task_chunk_attempt(tts_summary) or 1
@@ -2143,7 +2297,10 @@ def _run_doubao_tts_chunks(parent, parent_id, chunks, payload, *, retry_requeste
 
 
 def _doubao_parallelism():
-    return max(1, min(_int_env("REPORT_AUDIO_DOUBAO_PARALLELISM", 2), _int_env("REPORT_AUDIO_DOUBAO_MAX_PARALLELISM", 8)))
+    # Each browser worker owns an independent signed-in profile.  Default to
+    # three chunks per workflow while retaining a conservative cap for
+    # deployments that need to tune the pool through the environment.
+    return max(1, min(_int_env("REPORT_AUDIO_DOUBAO_PARALLELISM", 3), _int_env("REPORT_AUDIO_DOUBAO_MAX_PARALLELISM", 8)))
 
 
 def _doubao_progress_start(index, total):
@@ -2788,7 +2945,18 @@ def _resolve_scheme3_visual_inputs(parent, *, audio_seconds):
     if not parent_id:
         return {}
 
-    audio_task = PublicationTask.query.filter(PublicationTask.id == parent_id).one_or_none()
+    audio_task = (
+        PublicationTask.query
+        .options(load_only(
+            PublicationTask.id,
+            PublicationTask.user_id,
+            PublicationTask.report_audio_pdf_attachment_id,
+            PublicationTask.report_audio_pdf_filename,
+            PublicationTask.report_audio_pdf_bytes,
+        ))
+        .filter(PublicationTask.id == parent_id)
+        .one_or_none()
+    )
     if not audio_task:
         return {}
 
@@ -3454,6 +3622,13 @@ def _is_retryable_child_error(label, message):
     if any(fragment.lower() in lower_text for fragment in NON_RETRYABLE_CHILD_ERROR_FRAGMENTS):
         return False
     return any(fragment.lower() in lower_text for fragment in RETRYABLE_CHILD_ERROR_FRAGMENTS)
+
+
+def _child_failure_classification(child):
+    message = _child_error_message(child).lower()
+    if "cannot import name" in message or "modulenotfounderror" in message or "no module named" in message:
+        return "worker_code_mismatch"
+    return None
 
 
 def _retry_limit(env_name, default):
@@ -4933,7 +5108,7 @@ def _task_public_summary(task):
     if not snapshot:
         return None
     result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
-    return {
+    summary = {
         "job_id": snapshot.get("job_id") or snapshot.get("id"),
         "celery_id": snapshot.get("celery_id") or snapshot.get("celery_task_id"),
         "status": snapshot.get("status"),
@@ -4948,12 +5123,21 @@ def _task_public_summary(task):
         "created_at": _isoformat_z(snapshot.get("created_at")),
         "completed_at": _isoformat_z(snapshot.get("completed_at")),
     }
+    notifications = result.get("notifications") if isinstance(result.get("notifications"), dict) else {}
+    captcha_notification = public_browser_human_intervention_notification(
+        notifications.get("doubao_captcha_blocked")
+    )
+    if captcha_notification:
+        summary["notifications"] = {
+            "doubao_captcha_blocked": captcha_notification,
+        }
+    return summary
 
 
 def _merge_child_summary(previous, summary):
     merged = dict(previous or {})
     merged.update(summary or {})
-    for key in ("metadata", "audio"):
+    for key in ("metadata", "audio", "captcha_blocked", "notifications"):
         if previous.get(key) and not merged.get(key):
             merged[key] = previous.get(key)
     return merged

@@ -15,6 +15,7 @@ from models import db, ReportVisualPlanOutput, ReportVisualPlanSegment
 from models.task import PublicationTask
 from services.gemini_browser import (
     GeminiBrowserAutomationError,
+    GeminiBrowserHumanInterventionError,
     GeminiBrowserOptions,
     GeminiBrowserWorker,
 )
@@ -41,6 +42,8 @@ PROCESSING_SCRIPT_READY_FEATURES = frozenset((
     "report_audio_workflow",
 ))
 VISUAL_RETRY_LIMIT = 3
+VISUAL_PROFILE_RETRY_LIMIT = 12
+VISUAL_PROFILE_RETRY_BACKOFF_MAX_SECONDS = 120
 VISUAL_RETRYABLE_ERROR_FRAGMENTS = (
     "profile 正在被其他 chrome 占用",
     "等待 gemini 回复超时",
@@ -58,6 +61,15 @@ VISUAL_RETRYABLE_ERROR_FRAGMENTS = (
 def _storyboard_gemini_worker():
     """Use the proven long-form Gemini budget for multi-turn storyboard output."""
     options = GeminiBrowserOptions.from_env()
+    # The profile-pool launcher owns isolated automation profiles.  If one of
+    # those profiles is orphaned by a worker restart, allow the browser layer
+    # to reclaim only that exact automation Chrome process.  A custom/manual
+    # profile remains opt-in via the explicit environment variable.
+    pool_profile = "report_visual_plan_gemini_pool" in str(options.user_data_dir or "")
+    options.auto_recover_orphaned_chrome = _truthy_env(
+        "REPORT_VISUAL_PLAN_AUTO_RECOVER_ORPHANED_CHROME",
+        pool_profile,
+    )
     response_floor = max(1800, int(options.response_timeout_seconds or 0))
     total_floor = max(7200, response_floor * 3 + 300)
     options.response_timeout_seconds = _positive_env_int(
@@ -81,8 +93,60 @@ def _positive_env_int(name, default):
         return int(default)
 
 
+def _human_intervention_details(task):
+    workflow_id = str(getattr(task, "parent_task_id", "") or "").strip()
+    if (
+        not workflow_id
+        or str(getattr(task, "parent_feature", "") or "")
+        != "report_stick_figure_video_workflow"
+    ):
+        return {}
+    base_url = str(
+        os.getenv("REPORT_WORKFLOW_FRONTEND_BASE_URL") or "http://localhost:5001"
+    ).strip().rstrip("/")
+    return {
+        "工作流详情": (
+            f"{base_url}/report-stick-figure-video-workflow-detail.html"
+            f"?workflow_job_id={workflow_id}"
+        ),
+    }
+
+
+def _truthy_env(name, default=False):
+    raw = str(os.getenv(name) or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _is_profile_contention_error(error):
+    text = str(error or "").lower()
+    return "profile 正在被其他 chrome 占用" in text
+
+
+def _visual_retry_limit(error):
+    if _is_profile_contention_error(error):
+        return _positive_env_int(
+            "REPORT_VISUAL_PLAN_PROFILE_RETRY_LIMIT",
+            VISUAL_PROFILE_RETRY_LIMIT,
+        )
+    return VISUAL_RETRY_LIMIT
+
+
+def _visual_retry_delay_seconds(error, retry_index):
+    delay = 30 * max(1, int(retry_index or 1))
+    if _is_profile_contention_error(error):
+        ceiling = _positive_env_int(
+            "REPORT_VISUAL_PLAN_PROFILE_RETRY_BACKOFF_MAX_SECONDS",
+            VISUAL_PROFILE_RETRY_BACKOFF_MAX_SECONDS,
+        )
+    else:
+        ceiling = 120
+    return min(ceiling, delay)
+
+
 def _material_source_ready(source):
-    """Accept completed material, or an audio workflow after its script projection."""
+    """Accept completed material, or a script-ready audio workflow awaiting/recovering output."""
     return bool(
         source
         and int(source.final_script_chars or 0) > 0
@@ -90,7 +154,7 @@ def _material_source_ready(source):
             source.status == "completed"
             or (
                 source.feature in PROCESSING_SCRIPT_READY_FEATURES
-                and source.status == "processing"
+                and source.status in {"processing", "failed"}
             )
         )
     )
@@ -270,6 +334,7 @@ def _process_job(task_id, celery_task=None):
             PublicationTask.id, PublicationTask.status, PublicationTask.feature,
             PublicationTask.celery_task_id,
             PublicationTask.source_task_id, PublicationTask.user_id,
+            PublicationTask.parent_task_id, PublicationTask.parent_feature,
             PublicationTask.report_visual_scheme_key,
         ))
         .filter(PublicationTask.id == task_id)
@@ -306,10 +371,11 @@ def _process_job(task_id, celery_task=None):
             )
             _sync_parent_image_dispatch_failure(task_id, str(exc))
         return True
-    if task.status in {"failed", "blocked_by_captcha"}:
+    if task.status in {"failed", "blocked_by_captcha", "blocked_by_login"}:
         release_db_session_quietly()
         return False
     source_task_id = str(task.source_task_id or "")
+    human_intervention_details = _human_intervention_details(task)
     scheme = visual_scheme(task.report_visual_scheme_key or DEFAULT_VISUAL_SCHEME_KEY)
     source = (
         PublicationTask.query.options(load_only(
@@ -363,6 +429,7 @@ def _process_job(task_id, celery_task=None):
                 "本轮仍然只允许输出文字，严禁调用任何图片生成、绘图或图片编辑工具，"
                 "不得生成、插入或展示图片。"
             ),
+            human_intervention_details=human_intervention_details,
             progress_callback=progress,
         )
         raw_text = str(gemini_result.get("final_response_text") or gemini_result.get("response_text") or "").strip()
@@ -390,21 +457,25 @@ def _process_job(task_id, celery_task=None):
         return True
     except Exception as exc:
         logger.error("Report visual plan failed: %s", exc, exc_info=True)
+        if isinstance(exc, GeminiBrowserHumanInterventionError):
+            return _block_for_human_intervention(task_id, exc)
         if _should_retry_visual_plan(celery_task, exc):
             retry_index = int(
                 getattr(getattr(celery_task, "request", None), "retries", 0) or 0
             ) + 1
-            delay = min(120, 30 * retry_index)
+            retry_limit = _visual_retry_limit(exc)
+            delay = _visual_retry_delay_seconds(str(exc), retry_index)
             _mark_visual_plan_retrying(
                 task_id,
                 str(exc),
                 retry_index=retry_index,
                 delay_seconds=delay,
+                retry_limit=retry_limit,
             )
             raise celery_task.retry(
                 exc=GeminiBrowserAutomationError(str(exc)),
                 countdown=delay,
-                max_retries=VISUAL_RETRY_LIMIT,
+                max_retries=retry_limit,
             )
         return _fail(task_id, str(exc))
     finally:
@@ -417,7 +488,7 @@ def _should_retry_visual_plan(celery_task, exc):
     retries = int(
         getattr(getattr(celery_task, "request", None), "retries", 0) or 0
     )
-    if retries >= VISUAL_RETRY_LIMIT:
+    if retries >= _visual_retry_limit(exc):
         return False
     text = str(exc or "").lower()
     if any(marker in text for marker in ("登录态失效", "验证码", "captcha", "额度已耗尽")):
@@ -425,7 +496,14 @@ def _should_retry_visual_plan(celery_task, exc):
     return any(marker in text for marker in VISUAL_RETRYABLE_ERROR_FRAGMENTS)
 
 
-def _mark_visual_plan_retrying(task_id, error, *, retry_index, delay_seconds):
+def _mark_visual_plan_retrying(
+    task_id,
+    error,
+    *,
+    retry_index,
+    delay_seconds,
+    retry_limit=None,
+):
     now = datetime.utcnow()
     task = PublicationTask.query.options(load_only(
         PublicationTask.id,
@@ -443,15 +521,21 @@ def _mark_visual_plan_retrying(task_id, error, *, retry_index, delay_seconds):
         "delay_seconds": int(delay_seconds),
         "at": now.isoformat() + "Z",
     })
-    result["auto_retry_history"] = history[-VISUAL_RETRY_LIMIT:]
+    retry_limit = int(retry_limit or _visual_retry_limit(error))
+    retry_message = (
+        f"自动修复中（第 {int(retry_index)}/{retry_limit} 次）："
+        f"{str(error)[:3600]}"
+    )
+    result["auto_retry_history"] = history[-retry_limit:]
     result["last_retry_error"] = str(error)[:1000]
+    result["retry_limit"] = retry_limit
     PublicationTask.query.filter(
         PublicationTask.id == str(task_id),
         PublicationTask.status != "canceled",
     ).update({
         PublicationTask.status: "pending",
         PublicationTask.current_step: "auto_retry",
-        PublicationTask.error_message: None,
+        PublicationTask.error_message: retry_message,
         PublicationTask.completed_at: None,
         PublicationTask.result: result,
         PublicationTask.updated_at: now,
@@ -467,7 +551,7 @@ def _mark_visual_plan_retrying(task_id, error, *, retry_index, delay_seconds):
             PublicationTask.waiting_child_status: "pending",
             PublicationTask.waiting_child_step: "auto_retry",
             PublicationTask.waiting_child_updated_at: now.isoformat() + "Z",
-            PublicationTask.error_message: None,
+            PublicationTask.error_message: retry_message,
             PublicationTask.completed_at: None,
             PublicationTask.updated_at: now,
         }, synchronize_session=False)
@@ -1064,6 +1148,68 @@ def _sync_parent_image_dispatch_failure(storyboard_task_id, message, workflow_jo
         PublicationTask.updated_at: now,
     }, synchronize_session=False)
     db.session.commit()
+
+
+def _block_for_human_intervention(task_id, exc):
+    db.session.rollback()
+    task = db.session.get(PublicationTask, str(task_id))
+    if not task or task.feature != FEATURE_NAME or task.status == "canceled":
+        release_db_session_quietly()
+        return False
+
+    now = datetime.utcnow()
+    reason = str(getattr(exc, "reason", "verification") or "verification")
+    blocked_status = "blocked_by_login" if reason == "login" else "blocked_by_captcha"
+    intervention = {
+        "reason": reason,
+        "message": str(exc)[:1000],
+        **dict(getattr(exc, "context", {}) or {}),
+        "notification": dict(getattr(exc, "notification", {}) or {}),
+        "blocked_at": now.isoformat() + "Z",
+        "resolution_steps": [
+            "使用通知中指定的浏览器 Profile 打开 Gemini",
+            "完成登录以及验证码或安全验证",
+            "确认 Gemini 输入框可见并能进入目标 Gem",
+            "返回工作流详情页点击“登录完成，恢复任务”",
+        ],
+    }
+    result = dict(task.result or {})
+    result["error"] = str(exc)[:1000]
+    result["error_type"] = blocked_status
+    result["human_intervention"] = intervention
+    task.status = blocked_status
+    task.current_step = blocked_status
+    task.error_message = (
+        "等待人工登录 Gemini；完成后请点击“登录完成，恢复任务”"
+        if reason == "login"
+        else str(exc)[:4000]
+    )
+    task.completed_at = None
+    task.updated_at = now
+    task.result = result
+
+    workflow_id = str(task.parent_task_id or "").strip()
+    if (
+        workflow_id
+        and str(task.parent_feature or "") == "report_stick_figure_video_workflow"
+    ):
+        parent = db.session.get(PublicationTask, workflow_id)
+        if parent and parent.status != "canceled":
+            parent.status = blocked_status
+            parent.current_step = f"storyboard_{blocked_status}"
+            parent.progress = 35
+            parent.waiting_child_id = task.id
+            parent.waiting_child_label = "标题与正文分镜"
+            parent.waiting_child_status = blocked_status
+            parent.waiting_child_step = blocked_status
+            parent.waiting_child_updated_at = now.isoformat() + "Z"
+            parent.error_message = task.error_message
+            parent.completed_at = None
+            parent.updated_at = now
+
+    db.session.commit()
+    release_db_session_quietly()
+    return False
 
 
 def _fail(task_id, message):

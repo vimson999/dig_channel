@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import and_, or_, text
+from sqlalchemy import text
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -1195,7 +1195,103 @@ def latest_finalization_for_audio(audio_task_id):
 
 
 def finalization_summary_for_audio(audio_task_id):
-    return finalization_summary(latest_finalization_for_audio(audio_task_id))
+    task_id = str(audio_task_id or "").strip()
+    if not task_id:
+        return None
+    return finalization_summaries_for_audio_ids([task_id]).get(task_id)
+
+
+def _projected_schemes(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return _normalize_schemes(value)
+
+
+def _projected_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _summary_timestamp(value):
+    return value.isoformat() + "Z" if value else None
+
+
+def finalization_summaries_for_audio_ids(audio_task_ids):
+    """Load latest finalization summaries for one bounded API page.
+
+    The projection intentionally extracts only response fields from JSON. It
+    preserves the stored audit payload while avoiding both an N+1 query and a
+    multi-row transfer of complete ``params``/``result`` documents.
+    """
+
+    ids = list(dict.fromkeys(
+        str(value).strip() for value in (audio_task_ids or []) if str(value).strip()
+    ))[:100]
+    if not ids:
+        return {}
+
+    options = PublicationTask.params[INTENT_KEY]
+    result = PublicationTask.result
+    rows = (
+        db.session.query(
+            PublicationTask.source_task_id.label("audio_task_id"),
+            PublicationTask.id.label("job_id"),
+            PublicationTask.status.label("status"),
+            PublicationTask.current_step.label("current_step"),
+            PublicationTask.progress.label("progress"),
+            PublicationTask.error_message.label("error_message"),
+            PublicationTask.created_at.label("created_at"),
+            PublicationTask.updated_at.label("updated_at"),
+            PublicationTask.completed_at.label("completed_at"),
+            options["include_landscape"].as_boolean().label("include_landscape"),
+            options["vertical_video_schemes"].label("vertical_video_schemes"),
+            options["visual_scheme_key"].as_string().label("visual_scheme_key"),
+            result["visual_workflow_id"].as_string().label("visual_workflow_id"),
+            result["whiteboard_video_path"].as_string().label("whiteboard_video_path"),
+            result["whiteboard_attempts"].as_integer().label("whiteboard_attempts"),
+            result["publisher_task_id"].as_string().label("publisher_task_id"),
+            result["message"].as_string().label("message"),
+            result["retryable"].as_boolean().label("retryable"),
+        )
+        .filter(
+            PublicationTask.feature == FEATURE_NAME,
+            PublicationTask.source_task_id.in_(ids),
+        )
+        .order_by(
+            PublicationTask.source_task_id.asc(),
+            PublicationTask.created_at.desc(),
+        )
+        .all()
+    )
+    summaries = {}
+    for row in rows:
+        audio_task_id = str(row.audio_task_id or "")
+        if not audio_task_id or audio_task_id in summaries:
+            continue
+        summaries[audio_task_id] = {
+            "job_id": str(row.job_id),
+            "status": str(row.status or "pending"),
+            "step": str(row.current_step or "confirmed"),
+            "progress": int(row.progress or 0),
+            "error": row.error_message,
+            "include_landscape": _projected_bool(row.include_landscape),
+            "vertical_video_schemes": _projected_schemes(row.vertical_video_schemes),
+            "visual_scheme_key": str(row.visual_scheme_key or "stick_figure"),
+            "visual_workflow_id": row.visual_workflow_id,
+            "whiteboard_video_path": row.whiteboard_video_path,
+            "whiteboard_attempts": int(row.whiteboard_attempts or 0),
+            "publisher_task_id": row.publisher_task_id,
+            "message": row.message,
+            "retryable": _projected_bool(row.retryable),
+            "created_at": _summary_timestamp(row.created_at),
+            "updated_at": _summary_timestamp(row.updated_at),
+            "completed_at": _summary_timestamp(row.completed_at),
+        }
+    return summaries
 
 
 def reconcile_finalizations_for_audio(audio_task_id):
@@ -1252,25 +1348,12 @@ def reconcile_finalization_for_publisher(publisher_task_id):
 
 def repair_pending_finalizations_once(limit=20):
     stale_before = datetime.utcnow() - timedelta(seconds=15)
-    contract_version = PublicationTask.result[COMPLETION_CONTRACT_KEY].as_integer()
     rows = (
         PublicationTask.query.options(load_only(PublicationTask.id))
         .filter(
             PublicationTask.feature == FEATURE_NAME,
-            or_(
-                and_(
-                    PublicationTask.status.in_(tuple(ACTIVE_STATUSES)),
-                    PublicationTask.updated_at <= stale_before,
-                ),
-                and_(
-                    PublicationTask.status == "completed",
-                    PublicationTask.updated_at <= stale_before,
-                    or_(
-                        contract_version.is_(None),
-                        contract_version < COMPLETION_CONTRACT_VERSION,
-                    ),
-                ),
-            ),
+            PublicationTask.status.in_(tuple(ACTIVE_STATUSES)),
+            PublicationTask.updated_at <= stale_before,
         )
         .order_by(PublicationTask.updated_at.asc())
         .limit(max(1, min(int(limit or 20), 100)))

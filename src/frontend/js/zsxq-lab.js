@@ -45,7 +45,7 @@ const state = {
     syncPollTimer: null,
     syncPollInFlight: false,
     systemSyncSchedulerStatus: null,
-    systemSyncSchedulerPollTimer: null,
+    systemSyncSchedulerPollController: null,
     syncRuns: [],
     systemSyncBatches: [],
     systemSyncBatchesError: null,
@@ -1871,22 +1871,24 @@ function startSystemSyncSchedulerPolling() {
     if (!isSelectedSystemSyncGroup()) {
         return;
     }
-    state.systemSyncSchedulerPollTimer = setInterval(() => {
-        if (!getSystemSyncTargetGroupId() && !state.systemSyncSchedulerStatus?.running) {
-            return;
-        }
-        loadSystemSyncSchedulerStatus({ render: false }).then(() => {
+    state.systemSyncSchedulerPollController = window.VisibilityPolling.create({
+        intervalMs: SYSTEM_SYNC_STATUS_POLL_MS,
+        poll: async () => {
+            if (!getSystemSyncTargetGroupId() && !state.systemSyncSchedulerStatus?.running) {
+                return;
+            }
+            await loadSystemSyncSchedulerStatus({ render: false });
             renderSystemSyncSchedulerPanel();
             renderSystemSyncBatches();
             if (els.systemSyncSchedulerLogs && !els.systemSyncSchedulerLogs.classList.contains('hidden')) {
-                loadSystemSyncSchedulerLogs().then(logs => {
-                    if (els.systemSyncSchedulerLogs && !els.systemSyncSchedulerLogs.classList.contains('hidden')) {
-                        els.systemSyncSchedulerLogs.textContent = logs;
-                    }
-                });
+                const logs = await loadSystemSyncSchedulerLogs();
+                if (els.systemSyncSchedulerLogs && !els.systemSyncSchedulerLogs.classList.contains('hidden')) {
+                    els.systemSyncSchedulerLogs.textContent = logs;
+                }
             }
-        });
-    }, SYSTEM_SYNC_STATUS_POLL_MS);
+        },
+    });
+    state.systemSyncSchedulerPollController.start();
 }
 
 async function loadSystemSyncSchedulerLogs() {
@@ -1926,9 +1928,9 @@ async function toggleSystemSyncSchedulerLogs() {
 }
 
 function stopSystemSyncSchedulerPolling() {
-    if (state.systemSyncSchedulerPollTimer) {
-        clearInterval(state.systemSyncSchedulerPollTimer);
-        state.systemSyncSchedulerPollTimer = null;
+    if (state.systemSyncSchedulerPollController) {
+        state.systemSyncSchedulerPollController.stop();
+        state.systemSyncSchedulerPollController = null;
     }
 }
 

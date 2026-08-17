@@ -87,6 +87,24 @@ class DoubaoBrowserTTSServiceTest(unittest.TestCase):
         self.assertIsInstance(error, DoubaoBrowserTTSCaptchaError)
         self.assertEqual(error.screenshot, "/tmp/doubao-captcha.png")
         self.assertEqual(error.page_url, "https://www.doubao.com/chat/")
+        self.assertEqual(error.profile, "/tmp/doubao-profile")
+        self.assertEqual(error.worker_id, "default")
+
+    def test_loading_verification_iframe_is_detected_before_its_text_renders(self):
+        """A loading verifycenter frame is still an actionable CAPTCHA block."""
+        worker = self._worker()
+        page = SimpleNamespace(
+            url="https://www.doubao.com/chat/",
+            frames=[
+                SimpleNamespace(url="https://www.doubao.com/chat/"),
+                SimpleNamespace(url="https://verifycenter.example/captcha/index.html?challenge=loading"),
+            ],
+        )
+
+        # The challenge screenshot can show only a spinner, so no text selector
+        # is available yet.  Its verification iframe must still stop the task.
+        with patch.object(worker, "_first_visible", return_value=None):
+            self.assertTrue(worker._captcha_visible(page))
 
     def test_image_selection_captcha_selectors_cover_observed_copy(self):
         selectors = self._worker()._selectors("captcha")

@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from sqlalchemy import func, or_, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
+from werkzeug.utils import secure_filename
 
 from celery_config import celery_app
 from models import db
@@ -46,6 +48,7 @@ from services.wechat_channels_publish_jobs import (
 )
 from services.mp3_video_workflow import (
     DEFAULT_GEMINI_URL,
+    AUDIO_EXTENSIONS,
     FEATURE_NAME,
     INFOGRAPHIC_PROMPT,
     Mp3VideoWorkflowError,
@@ -61,6 +64,7 @@ from services.mp3_video_workflow import (
     status_payload as workflow_status_payload,
 )
 from services.runtime_guard import apply_async_after_db_release, release_db_session_quietly
+from services.asr_cache_service import probe_media_duration
 from tasks.mp3_video_workflow import process_mp3_video_workflow_job
 from utils.auth_utils import require_login
 from utils.date_filters import submission_date_utc_range
@@ -77,6 +81,8 @@ STATUS_MAP = {
 }
 SYSTEM_USER_ID = "system"
 WORKFLOW_SOURCE_FEATURE = "zsxq_attachment"
+UPLOAD_SOURCE_FEATURE = "local_mp3_upload"
+DEFAULT_AUDIO_UPLOAD_MAX_MB = 512
 try:
     DOWNLOAD_RESULT_CACHE_TTL_SECONDS = int(os.environ.get("MP3_VIDEO_WORKFLOW_DOWNLOAD_RESULT_CACHE_TTL", "30"))
 except (TypeError, ValueError):
@@ -328,9 +334,14 @@ def preview_audio_asset(_current_user, asset_id):
 def create_job(current_user):
     data = _request_payload()
     user_id = str(getattr(current_user, "id", None))
+    audio_file = request.files.get("audio") or request.files.get("mp3") or request.files.get("file")
     audio_asset_id = (data.get("audio_asset_id") or data.get("attachment_id") or "").strip()
-    if not audio_asset_id:
-        return jsonify({"success": False, "message": "请选择一个已同步 MP3"}), 400
+    if not audio_file and not audio_asset_id:
+        return jsonify({"success": False, "message": "请上传 MP3 或选择一个已同步 MP3"}), 400
+    if audio_file:
+        upload_error = _validate_audio_upload(audio_file)
+        if upload_error:
+            return jsonify({"success": False, "message": upload_error}), 400
 
     transcript_text = str(data.get("transcript_text") or data.get("ima_transcript") or "").strip()
     ds_response_text = str(data.get("ds_response_text") or data.get("direct_ds_response") or data.get("source_response_text") or "").strip()
@@ -375,15 +386,26 @@ def create_job(current_user):
     elif not provider.get("gemini_configured"):
         return jsonify({"success": False, "message": "Gemini 浏览器自动化未配置", "data": {"provider": provider}}), 400
 
-    try:
-        audio = audio_meta_from_zsxq_attachment(audio_asset_id)
-    except ValueError as exc:
-        return jsonify({"success": False, "message": str(exc)}), 400
-
     image_prompt = (data.get("image_prompt") or INFOGRAPHIC_PROMPT).strip()
     gemini_prompt = initial_gemini_prompt({"gemini_prompt": data.get("gemini_prompt")})
     transcript_prompt = initial_transcript_prompt({"transcript_prompt": data.get("transcript_prompt") or data.get("deepseek_prompt")})
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    uploaded_audio_path = None
+    if audio_file:
+        audio_asset_id = str(uuid.uuid4())
+        try:
+            audio = _save_audio_upload(audio_file, audio_asset_id)
+        except ValueError as exc:
+            return jsonify({"success": False, "message": str(exc)}), 400
+        uploaded_audio_path = audio.get("path")
+        if metadata.get("title"):
+            audio["topic_title"] = str(metadata["title"]).strip()[:500]
+    else:
+        try:
+            audio = audio_meta_from_zsxq_attachment(audio_asset_id)
+        except ValueError as exc:
+            return jsonify({"success": False, "message": str(exc)}), 400
+    source_feature = UPLOAD_SOURCE_FEATURE if audio_file else WORKFLOW_SOURCE_FEATURE
     task = PublicationTask(
         status="pending",
         current_step="queued",
@@ -391,7 +413,7 @@ def create_job(current_user):
         params={
             "feature": FEATURE_NAME,
             "user_id": user_id,
-            "source_feature": WORKFLOW_SOURCE_FEATURE,
+            "source_feature": source_feature,
             "source_task_id": audio_asset_id,
             FEATURE_NAME: {
                 "audio_asset_id": audio_asset_id,
@@ -415,14 +437,20 @@ def create_job(current_user):
             "render_mode": render_mode,
             "generate_subtitles": generate_subtitles,
             "direct_ds_response_chars": len(ds_response_text) if source_mode == "ds_response" else 0,
-            "source_feature": WORKFLOW_SOURCE_FEATURE,
+            "source_feature": source_feature,
             "source_task_id": audio_asset_id,
             "children": {},
             "logs": [],
         },
     )
-    db.session.add(task)
-    db.session.commit()
+    try:
+        db.session.add(task)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        if uploaded_audio_path:
+            _remove_uploaded_audio(uploaded_audio_path)
+        raise
 
     try:
         celery_task = apply_async_after_db_release(
@@ -2466,6 +2494,104 @@ def _artifact_cache_token(artifact):
         except OSError:
             return ""
     return ""
+
+
+def _max_audio_upload_bytes():
+    try:
+        configured_mb = float(os.environ.get("MP3_VIDEO_UPLOAD_MAX_MB", DEFAULT_AUDIO_UPLOAD_MAX_MB))
+    except (TypeError, ValueError):
+        configured_mb = DEFAULT_AUDIO_UPLOAD_MAX_MB
+    configured_mb = max(1.0, min(configured_mb, 2048.0))
+    return int(configured_mb * 1024 * 1024)
+
+
+def _audio_upload_filename(file_storage):
+    raw_name = Path(str(getattr(file_storage, "filename", "") or "")).name
+    extension = Path(raw_name).suffix.lower()
+    safe_name = secure_filename(raw_name)
+    safe_stem = Path(safe_name).stem.lower() if safe_name else ""
+    if not safe_name or safe_stem in AUDIO_EXTENSIONS:
+        original_stem = Path(raw_name).stem
+        original_stem = re.sub(r"[^0-9A-Za-z_\-\u4e00-\u9fff]+", "_", original_stem).strip("._-")
+        safe_name = f"{original_stem or 'audio'}{extension or '.mp3'}"
+    if not Path(safe_name).suffix and extension:
+        safe_name = f"{safe_name}{extension}"
+    return safe_name[:400], extension.lstrip(".").lower()
+
+
+def _validate_audio_upload(file_storage):
+    if not file_storage or not str(getattr(file_storage, "filename", "") or "").strip():
+        return "MP3 文件名为空"
+    _, extension = _audio_upload_filename(file_storage)
+    if extension not in AUDIO_EXTENSIONS:
+        supported = ", ".join(sorted(f".{item}" for item in AUDIO_EXTENSIONS))
+        return f"只支持音频文件：{supported}"
+    max_bytes = _max_audio_upload_bytes()
+    content_length = getattr(file_storage, "content_length", None) or request.content_length
+    if content_length and int(content_length) > max_bytes:
+        return f"音频超过 {max_bytes // (1024 * 1024)}MB 限制"
+    return None
+
+
+def _save_audio_upload(file_storage, upload_id):
+    upload_error = _validate_audio_upload(file_storage)
+    if upload_error:
+        raise ValueError(upload_error)
+    filename, extension = _audio_upload_filename(file_storage)
+    upload_dir = (
+        Path(__file__).resolve().parents[3]
+        / "data"
+        / "uploads"
+        / "mp3_video_workflow"
+        / datetime.utcnow().strftime("%Y%m%d")
+    )
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_upload_id = re.sub(r"[^0-9a-fA-F-]", "", str(upload_id or ""))[:36] or str(uuid.uuid4())
+    output_path = upload_dir / f"{safe_upload_id}_{filename}"
+    try:
+        file_storage.save(str(output_path))
+    except Exception as exc:
+        _remove_uploaded_audio(output_path)
+        raise ValueError(f"保存音频失败: {exc}") from exc
+    try:
+        size = output_path.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"保存音频失败: {exc}") from exc
+    if size <= 0:
+        _remove_uploaded_audio(output_path)
+        raise ValueError("音频文件为空")
+    if size > _max_audio_upload_bytes():
+        _remove_uploaded_audio(output_path)
+        raise ValueError(f"音频超过 {_max_audio_upload_bytes() // (1024 * 1024)}MB 限制")
+    try:
+        duration_seconds = float(probe_media_duration(str(output_path)) or 0)
+    except Exception:
+        duration_seconds = 0
+    if duration_seconds <= 0:
+        _remove_uploaded_audio(output_path)
+        raise ValueError("无法读取音频内容，请确认上传的是有效的 MP3 文件")
+    return {
+        "attachment_id": str(upload_id),
+        "filename": filename,
+        "name": filename,
+        "path": str(output_path),
+        "bytes": size,
+        "file_ext": extension,
+        "download_count": None,
+        "duration_seconds": duration_seconds,
+        "topic_title": filename,
+        "tab_label": "本地上传",
+        "source": "local_upload",
+    }
+
+
+def _remove_uploaded_audio(path_value):
+    try:
+        path = Path(str(path_value or ""))
+        if path.exists() and path.is_file():
+            path.unlink()
+    except OSError:
+        pass
 
 
 def _path_exists(path):

@@ -1,3 +1,5 @@
+import json
+import inspect
 import os
 import sys
 import tempfile
@@ -9,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from flask import Flask
+from sqlalchemy import text
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -33,6 +36,7 @@ from tasks.report_audio_workflow import (  # noqa: E402
     _parent_retry_delay_seconds,
     _parse_utc_datetime,
     _completed_tts_task_for_chunk,
+    _doubao_parallelism,
     _ordered_doubao_tts_outputs,
     _process_job,
     _publisher_script_subtitles,
@@ -50,6 +54,10 @@ from tasks.report_audio_workflow import (  # noqa: E402
     _video_stage_enabled,
     _wait_child,
 )
+from tests.unit.test_report_audio_gem_v2 import (  # noqa: E402
+    PDF_FILENAME as GEM_V2_PDF_FILENAME,
+    valid_payload as valid_gem_v2_payload,
+)
 
 
 def _write_test_wav(path, seconds=1.0, sample_rate=16000):
@@ -65,6 +73,54 @@ def _write_test_wav(path, seconds=1.0, sample_rate=16000):
 
 
 class ReportAudioWorkflowTaskTest(unittest.TestCase):
+    def test_doubao_browser_tts_defaults_to_three_parallel_chunks(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_doubao_parallelism(), 3)
+
+    def test_scheme3_visual_resolution_uses_narrow_parent_projection(self):
+        source = inspect.getsource(report_audio_workflow._resolve_scheme3_visual_inputs)
+
+        self.assertIn(".options(load_only(", source)
+        for column in (
+            "PublicationTask.id",
+            "PublicationTask.user_id",
+            "PublicationTask.report_audio_pdf_attachment_id",
+            "PublicationTask.report_audio_pdf_filename",
+            "PublicationTask.report_audio_pdf_bytes",
+        ):
+            self.assertIn(column, source)
+        self.assertNotIn(
+            "PublicationTask.query.filter(PublicationTask.id == parent_id).one_or_none()",
+            source,
+        )
+
+    def test_public_child_summary_keeps_sanitized_captcha_notification(self):
+        summary = report_audio_workflow._task_public_summary({
+            "job_id": "child-1",
+            "status": "blocked_by_captcha",
+            "current_step": "blocked_by_captcha",
+            "progress": 45,
+            "result": {
+                "captcha_blocked": {
+                    "requires_human_action": True,
+                    "workflow_url": "http://localhost:5001/report-audio-workflow-detail.html?job_id=parent-1",
+                },
+                "notifications": {
+                    "doubao_captcha_blocked": {
+                        "sent": True,
+                        "sent_at": "2026-08-12T08:34:14Z",
+                        "to": "owner@example.test",
+                    }
+                },
+            },
+        })
+
+        notification = summary["notifications"]["doubao_captcha_blocked"]
+        self.assertTrue(notification["sent"])
+        self.assertEqual(notification["recipient_hint"], "o***@example.test")
+        self.assertNotIn("to", notification)
+        self.assertTrue(summary["captcha_blocked"]["requires_human_action"])
+
     def test_full_video_completion_contract_requires_every_selected_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -751,6 +807,45 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
             _is_retryable_child_error("doubao", "朗读已触发但未捕获到 PCM 音频")
         )
 
+    def test_worker_import_mismatch_does_not_create_another_doubao_attempt(self):
+        text = "worker 导入版本不一致时不应消耗朗读重试次数。"
+        metadata = {"chunk_index": 1, "chunk_attempt": 1, "text_hash": _tts_text_hash(text)}
+        failed_task = SimpleNamespace(
+            id="failed-child-1",
+            celery_task_id="celery-failed-child-1",
+            feature="doubao_browser_tts",
+            parent_task_id="parent-1",
+            source_task_id=None,
+            created_at=datetime.utcnow(),
+            completed_at=datetime.utcnow(),
+            status="failed",
+            current_step="failed",
+            progress=0,
+            error_message=(
+                "Celery 子任务异常退出: FAILURE: cannot import name "
+                "'public_browser_human_intervention_notification'"
+            ),
+            params={"doubao_browser_tts": {"text": text, "metadata": metadata}},
+            result={"metadata": metadata},
+        )
+
+        with patch.object(report_audio_workflow, "_completed_tts_task_for_chunk", return_value=None), \
+            patch.object(report_audio_workflow, "_active_tts_task_for_chunk", return_value=None), \
+            patch.object(report_audio_workflow, "_failed_tts_tasks_for_chunk", return_value=[failed_task]), \
+            patch.object(report_audio_workflow, "_clear_waiting_child"), \
+            patch.object(report_audio_workflow, "_record_child_attempt"), \
+            patch.object(report_audio_workflow, "_create_doubao_tts_task") as create_child:
+            with self.assertRaisesRegex(RuntimeError, "worker_code_mismatch"):
+                report_audio_workflow._run_doubao_tts_chunks(
+                    SimpleNamespace(id="parent-1"),
+                    "parent-1",
+                    [text],
+                    {},
+                    retry_limit=1,
+                )
+
+        create_child.assert_not_called()
+
     def test_heavy_children_use_short_inline_waits_and_deferred_resume(self):
         env_keys = [
             "REPORT_AUDIO_DOUBAO_INLINE_WAIT_SECONDS",
@@ -1013,6 +1108,227 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         db.session.remove()
         db.drop_all()
         self.ctx.pop()
+
+    def _gem_v2_workflow(self, mode):
+        root = Path(self.app.instance_path)
+        root.mkdir(parents=True, exist_ok=True)
+        pdf_path = root / GEM_V2_PDF_FILENAME
+        pdf_path.write_bytes(b"%PDF-1.4\n% Gem V2 test PDF\n")
+        workflow = PublicationTask(
+            status="pending",
+            current_step="queued",
+            progress=0,
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "user_id": "1",
+                "report_audio_workflow": {
+                    "prompt": "旧版长调用提示词，不应在 V2 模式发送",
+                    "review_prompt": "旧版 Gemini 通用复核，不应在 V2 模式发送",
+                    "followups": ["旧版追问，也不应发送"],
+                    "gem_v2_mode": mode,
+                    "gem_v2_focus": "重点解释供需验证指标",
+                    "gemini_min_final_chars": 20,
+                    "force_gemini_regeneration": True,
+                    "pdf_evidence_enabled": False,
+                    "script_material_only": True,
+                    "pdf_path": str(pdf_path),
+                    "pdf": {
+                        "attachment_id": f"gem-v2-{mode}",
+                        "filename": GEM_V2_PDF_FILENAME,
+                        "path": str(pdf_path),
+                    },
+                    "video": {"enabled": False},
+                },
+            },
+            result={"children": {}, "logs": []},
+        )
+        db.session.add(workflow)
+        db.session.commit()
+        return workflow
+
+    @staticmethod
+    def _gemini_snapshot(raw_text):
+        return {
+            "job_id": "gem-v2-child",
+            "status": "completed",
+            "current_step": "done",
+            "progress": 100,
+            "result": {
+                "initial_response_text": raw_text,
+                "final_response_text": raw_text,
+            },
+        }
+
+    @staticmethod
+    def _legacy_structured():
+        return {
+            "title": "DeepSeek 兼容标题",
+            "landscape_title": "DeepSeek 横屏标题",
+            "landscape_subtitle": "兼容副标题",
+            "vertical_title": "DeepSeek 竖屏标题",
+            "vertical_subtitle": "兼容副标题",
+            "cover_title": "DeepSeek 横屏标题",
+            "cover_subtitle": "兼容副标题",
+            "final_script_for_tts": "这是 DeepSeek 回退链路生成的完整可朗读正文，长度足以通过当前测试要求。",
+        }
+
+    def test_deepseek_structuring_runs_after_database_session_release(self):
+        transaction_states = []
+
+        db.session.execute(text("SELECT 1"))
+        self.assertTrue(db.session().in_transaction())
+
+        def normalize_without_database_session(*_args, **_kwargs):
+            transaction_states.append(db.session().in_transaction())
+            return self._legacy_structured()
+
+        with patch.object(
+            report_audio_workflow,
+            "normalize_for_tts",
+            side_effect=normalize_without_database_session,
+        ):
+            report_audio_workflow._structure_gemini_response(
+                "Gemini 原始研报内容",
+                initial_text="Gemini 初始内容",
+                minimum_script_chars=20,
+                gem_v2_mode="off",
+                allow_external_information=False,
+                pdf={"filename": "report.pdf"},
+                pdf_path="/tmp/report.pdf",
+                metadata={"workflow_task_id": "workflow-1"},
+            )
+
+        self.assertEqual([False], transaction_states)
+
+    def test_gem_v2_shadow_uses_minimal_prompt_without_generic_followup_and_keeps_deepseek(self):
+        workflow = self._gem_v2_workflow("shadow")
+        workflow_id = workflow.id
+        raw = json.dumps(valid_gem_v2_payload(), ensure_ascii=False)
+        legacy = self._legacy_structured()
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "20"}, clear=False), \
+            patch.object(
+                report_audio_workflow,
+                "_run_gemini_task_with_retries",
+                return_value=self._gemini_snapshot(raw),
+            ) as run_gemini, \
+            patch.object(report_audio_workflow, "normalize_for_tts", return_value=legacy) as normalize, \
+            patch.object(report_audio_workflow, "review_report_cover_titles", return_value=legacy) as review, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        submitted = run_gemini.call_args.kwargs
+        self.assertIn("report_audio_gem_v2", submitted["prompt"])
+        self.assertIn(GEM_V2_PDF_FILENAME, submitted["prompt"])
+        self.assertNotIn("旧版长调用提示词", submitted["prompt"])
+        self.assertEqual(submitted["followups"], [])
+        normalize.assert_called_once()
+        review.assert_called_once()
+        workflow = db.session.get(PublicationTask, workflow_id)
+        self.assertTrue(workflow.result["gem_v2"]["valid"])
+        self.assertEqual(workflow.result["gem_v2"]["route"], "shadow_deepseek")
+        self.assertEqual(workflow.result["structured_result"]["title"], "DeepSeek 兼容标题")
+
+    def test_gem_v2_direct_valid_response_bypasses_both_deepseek_stages(self):
+        workflow = self._gem_v2_workflow("direct")
+        raw = json.dumps(valid_gem_v2_payload(), ensure_ascii=False)
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "20"}, clear=False), \
+            patch.object(
+                report_audio_workflow,
+                "_run_gemini_task_with_retries",
+                return_value=self._gemini_snapshot(raw),
+            ), \
+            patch.object(report_audio_workflow, "normalize_for_tts") as normalize, \
+            patch.object(report_audio_workflow, "review_report_cover_titles") as review, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        normalize.assert_not_called()
+        review.assert_not_called()
+        db.session.refresh(workflow)
+        self.assertEqual(workflow.result["gem_v2"]["route"], "direct")
+        self.assertEqual(workflow.result["structured_result"]["schema_version"], "report_audio_gem_v2")
+        self.assertEqual(workflow.result["structured_result"]["provider"], "gemini_gem")
+
+    def test_gem_v2_direct_invalid_response_falls_back_to_both_deepseek_stages(self):
+        workflow = self._gem_v2_workflow("direct")
+        workflow_id = workflow.id
+        invalid = valid_gem_v2_payload()
+        invalid["schema_version"] = "report_audio_gem_v1"
+        raw = json.dumps(invalid, ensure_ascii=False)
+        legacy = self._legacy_structured()
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "20"}, clear=False), \
+            patch.object(
+                report_audio_workflow,
+                "_run_gemini_task_with_retries",
+                return_value=self._gemini_snapshot(raw),
+            ), \
+            patch.object(report_audio_workflow, "normalize_for_tts", return_value=legacy) as normalize, \
+            patch.object(report_audio_workflow, "review_report_cover_titles", return_value=legacy) as review, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        normalize.assert_called_once()
+        review.assert_called_once()
+        workflow = db.session.get(PublicationTask, workflow_id)
+        self.assertEqual(workflow.result["gem_v2"]["route"], "deepseek_fallback")
+        self.assertIn("schema_version", workflow.result["gem_v2"]["error_codes"])
+
+    def test_gem_v2_child_declares_contract_for_one_targeted_repair(self):
+        parent = SimpleNamespace(id="parent-gem-v2-contract", params={"user_id": "1"})
+        pdf = {"filename": GEM_V2_PDF_FILENAME, "attachment_id": "asset-gem-v2"}
+
+        with patch.object(
+            report_audio_workflow,
+            "apply_async_after_db_release",
+            return_value=SimpleNamespace(id="celery-gem-v2"),
+        ):
+            child = report_audio_workflow._create_gemini_task(
+                parent,
+                pdf,
+                "/tmp/gem-v2.pdf",
+                "minimal trigger",
+                [],
+                {"gem_v2_mode": "shadow", "gemini_min_final_chars": 1500},
+            )
+
+        stored = db.session.get(PublicationTask, child.id)
+        request = stored.params["report_pdf_gemini"]
+        self.assertEqual(request["response_contract"], "report_audio_gem_v2")
+        self.assertEqual(request["contract_expected_pdf_filename"], GEM_V2_PDF_FILENAME)
+        self.assertEqual(request["contract_minimum_script_chars"], 1500)
+        self.assertEqual(request["contract_max_repairs"], 1)
+
+    def test_resumed_direct_result_does_not_run_deepseek_title_review(self):
+        workflow = self._gem_v2_workflow("direct")
+        payload = valid_gem_v2_payload()
+        structured = dict(payload["reports"][0])
+        structured.update({
+            "schema_version": "report_audio_gem_v2",
+            "batch_quality_control": payload["batch_quality_control"],
+        })
+        workflow.result = {
+            "children": {},
+            "logs": [],
+            "structured_result": structured,
+            "gem_v2": {"mode": "direct", "route": "direct", "valid": True},
+        }
+        db.session.commit()
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "20"}, clear=False), \
+            patch.object(report_audio_workflow, "normalize_for_tts") as normalize, \
+            patch.object(report_audio_workflow, "review_report_cover_titles") as review, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        normalize.assert_not_called()
+        review.assert_not_called()
 
     def test_deferred_parent_resume_persists_replacement_delivery_id(self):
         parent = PublicationTask(

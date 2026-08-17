@@ -35,6 +35,9 @@ Flask-Redis==0.4.0
 # HTTP请求
 requests==2.31.0
 
+# Model Context Protocol server used by the private ZSXQ sidebar tunnel
+mcp==1.29.0
+
 # YouTube API客户端
 google-api-python-client==2.108.0
 google-auth-httplib2==0.2.0

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "reviewed_through": "2026-08-09",
+  "reviewed_through": "2026-08-16",
   "max_days_between_reviews": 7,
   "clusters": [
     {
@@ -8,9 +8,10 @@
       "title": "数据库 Session 生命周期与热查询",
       "priority": "P0",
       "status": "in_progress",
-      "acceptance_stage": "located",
-      "last_reopened_at": "2026-08-09",
+      "acceptance_stage": "runtime_replaced",
+      "last_reopened_at": "2026-08-16",
       "blocking_records": [
+        "2026-08-14-report-audio-deepseek-session-hold.md",
         "2026-07-18-publication-task-progress-json-write-amplification.md",
         "2026-07-18-zsxq-run-result-clean-handoff-payload.md",
         "2026-07-18-bilibili-upload-json-polling-and-online-ddl-lock-convoy.md",
@@ -37,9 +38,14 @@
         "2026-08-06-zsxq-attachment-state-roundtrip-amplification.md",
         "2026-08-06-zsxq-workflow-notification-expired-session.md",
         "2026-08-06-zsxq-page-reconciliation-n-plus-one.md",
-        "2026-08-08-postgres-tunneled-route-query-timeout.md"
-    ],
-    "systemic_guardrail": "短事务边界、跨等待只传 ID/快照、第一次 commit 前冻结 run/task/asset 标量身份并禁止 ORM 跨 commit、循环提交前把 ORM 集合转为不可变 Row/DTO、commit 后禁止继续访问 ORM parent/asset、子任务创建固定使用 commit 前快照加无 SELECT 窄回写、所有任务生产者成功/失败/延迟分支必须捕获 commit 后 SQL 并拒绝 params/result 回读、热循环每页集合查询次数预算、阶段内写后共享快照、mapper 钩子禁止读取延迟列、大 JSON 延迟物化、批次产物和 source-output 映射必须在源事务/入库端写结构化关系台账并沿工作流传递、周期入库以 JSON 指纹区分结构化变化/审计载荷变化/同步心跳且禁止无差别整行写回、历史任务才允许显式兼容回退、阶段内子服务共享有界上下文、阶段轮询状态 Row、worker 异常/取消收口复用内存快照并只重查状态、数据库异常后先 rollback 再执行恢复 SQL、可重试异常保持 retrying 且完整验证下一次 delivery、runtime guard 与磁盘恢复使用服务端原子 JSONB 更新、外部 I/O 前强制检查 session.new/dirty/deleted 并结束只读事务、任务生产统一采用提交后投递和短事务回写 broker ID、AST 契约禁止 mutation/flush 后未提交直接 apply_async、flush 后 commit 前响应快照、完成消费者错峰、远端 schema readiness 只允许一次紧凑显式目录查询、跨所有者 DDL 单事务执行并拒绝应用连接、重复索引预检、PgBouncer 热连接安全下限由配置生成源和契约测试共同锁定、数据库物理绕过 TUN 必须使用实际加载的 tun.route-exclude-address 而不能以普通 DIRECT 规则替代、变更前确认稳定出口 HBA/防火墙并在巡检中记录 controller 命中规则、gateway/interface 与 PgBouncer server 本地地址、完整重启门禁覆盖 publication_tasks 与独立业务心跳表、应用总耗时与 PostgreSQL executor/PgBouncer 连接事件联合诊断，以及完整调用链实际 SQL 契约测试",
+        "2026-08-08-postgres-tunneled-route-query-timeout.md",
+        "2026-08-10-failed-sql-lifecycle-duration-misclassified.md",
+        "2026-08-11-celery-status-auth-session-held-across-inspect.md",
+        "2026-08-12-zsxq-auto-publish-preview-session-hold.md"
+      ],
+      "latest_guardrail_addition": "每日巡检必须独立统计 PgBouncer query/connect timeout、query_wait_timeout、server crash、TLS receive error，并记录 server connection source address；检测到 198.18.0.0/15 代理 TUN 回退时立即按网络复发升级，不能用 executor 快或流量下降关闭。任何外部 AI normalizer 开始前仍必须显式归还只读 Session，只传不可变标量快照。",
+      "last_runtime_observation": "2026-08-16 固定窗口 proxy TUN source/query-wait/server crash/TLS receive error 均为 0，但去重 query/connect timeout 仍为 7/11，较上一轮 5/7 分别恶化 40%/57.1%；其中一次与 MP3 页面 request 03cc1336 的 20.169s server-closed SQL 同秒。PostgreSQL 无锁等待/idle-in-transaction，代表性 executor 0.023–35.916ms，网络根因保持 OPEN。DeepSeek 长持有没有真实新任务样本，保持 RUNTIME_REPLACED/OPEN。",
+      "systemic_guardrail": "短事务边界、跨等待只传 ID/快照、第一次 commit 前冻结 run/task/asset 标量身份并禁止 ORM 跨 commit、循环提交前把 ORM 集合转为不可变 Row/DTO、commit 后禁止继续访问 ORM parent/asset、子任务创建固定使用 commit 前快照加无 SELECT 窄回写、所有任务生产者成功/失败/延迟分支必须捕获 commit 后 SQL 并拒绝 params/result 回读、热循环每页集合查询次数预算、阶段内写后共享快照、mapper 钩子禁止读取延迟列、大 JSON 延迟物化、批次产物和 source-output 映射必须在源事务/入库端写结构化关系台账并沿工作流传递、周期入库以 JSON 指纹区分结构化变化/审计载荷变化/同步心跳且禁止无差别整行写回、历史任务才允许显式兼容回退、阶段内子服务共享有界上下文、阶段轮询状态 Row、worker 异常/取消收口复用内存快照并只重查状态、数据库异常后先 rollback 再执行恢复 SQL、可重试异常保持 retrying 且完整验证下一次 delivery、runtime guard 与磁盘恢复使用服务端原子 JSONB 更新、外部 I/O 前强制检查 session.new/dirty/deleted 并结束只读事务、任务生产统一采用提交后投递和短事务回写 broker ID、AST 契约禁止 mutation/flush 后未提交直接 apply_async、flush 后 commit 前响应快照、完成消费者错峰、远端 schema readiness 只允许一次紧凑显式目录查询、跨所有者 DDL 单事务执行并拒绝应用连接、重复索引预检、PgBouncer 热连接安全下限由配置生成源和契约测试共同锁定、数据库物理绕过 TUN 必须使用实际加载的 tun.route-exclude-address 而不能以普通 DIRECT 规则替代、变更前确认稳定出口 HBA/防火墙并在巡检中记录 controller 命中规则、gateway/interface 与 PgBouncer server 本地地址、完整重启门禁覆盖 publication_tasks 与独立业务心跳表、应用总耗时与 PostgreSQL executor/PgBouncer 连接事件联合诊断，以及完整调用链实际 SQL 契约测试",
       "records": [
         "2026-06-23-report-audio-detached-session.md",
         "2026-06-24-report-top10-failure-marker-pending-rollback.md",
@@ -82,8 +88,12 @@
         "2026-08-06-zsxq-attachment-state-roundtrip-amplification.md",
         "2026-08-06-zsxq-workflow-notification-expired-session.md",
         "2026-08-06-zsxq-page-reconciliation-n-plus-one.md",
-        "2026-08-08-postgres-tunneled-route-query-timeout.md"
-    ]
+        "2026-08-08-postgres-tunneled-route-query-timeout.md",
+        "2026-08-10-failed-sql-lifecycle-duration-misclassified.md",
+        "2026-08-11-celery-status-auth-session-held-across-inspect.md",
+        "2026-08-12-zsxq-auto-publish-preview-session-hold.md",
+        "2026-08-14-report-audio-deepseek-session-hold.md"
+      ]
     },
     {
       "key": "ORCH-PARENT-CHILD-STATE",
@@ -132,7 +142,7 @@
       "priority": "P0",
       "status": "in_progress",
       "acceptance_stage": "runtime_replaced",
-      "last_reopened_at": "2026-08-09",
+      "last_reopened_at": "2026-08-16",
       "blocking_records": [
         "2026-07-18-publication-task-progress-json-write-amplification.md",
         "2026-07-18-zsxq-run-result-clean-handoff-payload.md",
@@ -151,8 +161,12 @@
         "2026-08-06-stick-image-expired-orm-browser-session.md",
         "2026-08-06-mp3-download-lock-session-hold.md",
         "2026-08-07-visual-storyboard-wide-polling-network-timeout.md",
-        "2026-08-09-zsxq-insights-cold-fulltext-transfer.md"
+        "2026-08-09-zsxq-insights-cold-fulltext-transfer.md",
+        "2026-08-10-report-audio-finalization-json-polling-n-plus-one.md",
+        "2026-08-11-celery-status-auth-session-held-across-inspect.md",
+        "2026-08-16-hidden-status-pages-unbounded-polling.md"
       ],
+      "latest_guardrail_addition": "所有周期页面轮询统一使用共享 Visibility controller：hidden pause、visible immediate refresh、in-flight single-flight、stop/unload cleanup；巡检必须按页面扇出的全部业务端点与 OPTIONS 汇总累计耗时，禁止页面直接新增无门禁 setInterval。",
       "systemic_guardrail": "投影列白名单、每页集合查询次数预算、页面媒体并发请求共享用户作用域权限快照、子任务创建后 Celery ID 只做无 SELECT 窄回写、所有任务生产者成功/失败/延迟分支必须捕获 commit 后 SQL 并拒绝 params/result 回读、阶段内写后共享 Row/DTO、mapper 钩子禁止延迟列补查、单一能力所有者、source-output 映射必须在入库端产生并随事件传递且只有历史任务允许 JSON 回退、批次产物结构化台账、结构化命令生产/消费/终态写回闭环、阶段轮询状态 Row 与终态按需载荷、状态生产者同事务维护结构化投影、轮询端禁止反向扫描通用任务 JSON 修补投影、周期入库必须用轻量指纹跳过未变化 JSON 并以双向测试证明变化时完整写入、批量提交事务数必须 O(1)、worker 异常/取消收口只重查状态、进度 JSON 写入预算与终态强制落盘、兼容回退覆盖判据、Celery 收尾消息体预算/消费者错峰、单飞轮询、Page Visibility 后台暂停、终态停止、批量列表禁止逐项读取后覆盖、热点列表短超时/新鲜缓存/有界 stale fallback、完整 API/service/worker/watchdog 实际 SQL 预算、热点接口冷请求基准、远端 schema readiness 单次紧凑目录查询、区分 executor 与端到端往返、加索引前强制 EXPLAIN/等价定义/使用量检查、executor 小于 10ms 而应用超过 500ms 时强制转查连接池与网络、带大文本/JSON 的全集筛选必须在数据库内完成完整匹配且只回传轻量统计摘要、展示字段仅按有界当前页二次加载并设置服务端 page_size 上限、watchdog 判定禁止加载仅供 UI 展示的业务快照、broker 发布后只允许版本 CAS 且 CAS 失败必须撤销消息，以及 publication_tasks 500ms SQL 指纹/JSON 条件/批量载荷运行时守卫",
       "records": [
         "2026-06-23-report-audio-history-timeout-large-result.md",
@@ -185,7 +199,10 @@
         "2026-08-06-stick-image-expired-orm-browser-session.md",
         "2026-08-06-mp3-download-lock-session-hold.md",
         "2026-08-07-visual-storyboard-wide-polling-network-timeout.md",
-        "2026-08-09-zsxq-insights-cold-fulltext-transfer.md"
+        "2026-08-09-zsxq-insights-cold-fulltext-transfer.md",
+        "2026-08-10-report-audio-finalization-json-polling-n-plus-one.md",
+        "2026-08-11-celery-status-auth-session-held-across-inspect.md",
+        "2026-08-16-hidden-status-pages-unbounded-polling.md"
       ]
     },
     {
@@ -193,7 +210,8 @@
       "title": "回归覆盖完整性与验收假绿",
       "priority": "P0",
       "status": "in_progress",
-      "systemic_guardrail": "单命令确定性全量回归、真实副作用显式 opt-in、全源编译、前端类型检查、单迁移头、SQL 契约必须编译断言 PostgreSQL JSONB/数组/UUID 真实类型、结构门禁、新 PID 与真实负载分阶段验收；任一门失败必须重新打开记录并从头复测",
+      "last_reopened_at": "2026-08-15",
+      "systemic_guardrail": "单命令确定性全量回归、真实副作用显式 opt-in、全源编译、前端类型检查、单迁移头、SQL 契约必须编译断言 PostgreSQL JSONB/数组/UUID 真实类型、结构门禁、新 PID 与真实负载分阶段验收；数据库巡检必须覆盖 PgBouncer pool wait/server crash/TLS error 和 server source address，历史故障片段必须有回放契约；任一门失败必须重新打开记录并从头复测",
       "records": [
         "2026-07-11-backend-restart-accepted-stale-listener.md",
         "2026-07-18-bilibili-upload-json-polling-and-online-ddl-lock-convoy.md",
@@ -202,7 +220,8 @@
         "2026-07-21-zsxq-set-update-jsonb-cast-regression.md",
         "2026-07-21-stick-video-audio-filter-syntax-startup-block.md",
         "2026-08-04-db-audit-skipped-gzip-rotations.md",
-        "2026-08-06-idle-transaction-pressure-observability-gap.md"
+        "2026-08-06-idle-transaction-pressure-observability-gap.md",
+        "2026-08-15-db-audit-missed-pgbouncer-route-fallback.md"
       ]
     },
     {
@@ -232,12 +251,13 @@
       "title": "外部 AI/浏览器调用超时与重试不一致",
       "priority": "P1",
       "status": "in_progress",
-      "acceptance_stage": "code_changed",
-      "last_reopened_at": "2026-07-30",
+      "acceptance_stage": "runtime_replaced",
+      "last_reopened_at": "2026-08-16",
       "blocking_records": [
-        "2026-07-13-mp3-db-disconnect-marked-parent-failed.md"
+        "2026-07-13-mp3-db-disconnect-marked-parent-failed.md",
+        "2026-08-13-workflow-notification-smtp-retry-storm.md"
       ],
-      "systemic_guardrail": "统一外部调用超时、错误分类、有限重试、文件就绪确认和失败收口包装器；数据库断连、只读切换和 failover 等可重试基础设施错误必须在任何业务副作用和永久失败写入前清理 Session 并延迟重试；多轮调用的总预算必须从单轮预算和必要轮次推导，每个有业务价值的完成轮次必须原子持久化 checkpoint；串行 profile、连接池或外部配额的排队等待不得消耗实际远程执行预算，执行硬时限必须在资源所有权取得后开始；AI 输出的浏览器终止容差与最终权威数据校验必须分层，避免可修复微小漂移触发无限追问，同时禁止容差绕过最终 100% 覆盖校验；浏览器/媒体子进程必须有 OS 级硬超时并清理进程组",
+      "systemic_guardrail": "统一外部调用超时、错误分类、有限重试、文件就绪确认和失败收口包装器；数据库断连、只读切换和 failover 等可重试基础设施错误必须在任何业务副作用和永久失败写入前清理 Session 并延迟重试；多轮调用的总预算必须从单轮预算和必要轮次推导，每个有业务价值的完成轮次必须原子持久化 checkpoint；串行 profile、连接池或外部配额的排队等待不得消耗实际远程执行预算，执行硬时限必须在资源所有权取得后开始；AI 输出的浏览器终止容差与最终权威数据校验必须分层，避免可修复微小漂移触发无限追问，同时禁止容差绕过最终 100% 覆盖校验；浏览器/媒体子进程必须有 OS 级硬超时并清理进程组；同一外部 provider 的服务内与任务层重试必须共享总预算，批量失败使用指数退避加抖动、provider 级背压/熔断和 durable pending，禁止固定周期同步重试风暴",
       "records": [
         "2026-06-24-report-top10-editor-prompt-too-large.md",
         "2026-06-24-report-top10-gemini-child-no-retry.md",
@@ -247,7 +267,8 @@
         "2026-07-10-publisher-cover-browser-no-hard-timeout.md",
         "2026-07-13-mp3-db-disconnect-marked-parent-failed.md",
         "2026-07-17-content-pipeline-progress-json-and-retry-contract.md",
-        "2026-07-27-visual-plan-multiturn-gemini-total-timeout.md"
+        "2026-07-27-visual-plan-multiturn-gemini-total-timeout.md",
+        "2026-08-13-workflow-notification-smtp-retry-storm.md"
       ]
     },
     {
@@ -282,16 +303,17 @@
       "priority": "P0",
       "status": "in_progress",
       "acceptance_stage": "runtime_replaced",
-      "last_reopened_at": "2026-07-27",
+      "last_reopened_at": "2026-08-14",
       "blocking_records": [
         "2026-07-18-full-restart-interrupted-active-render.md",
         "2026-07-23-optimized-video-redis-localhost-db-thundering-herd.md",
         "2026-07-24-auto-image-replay-downgraded-completed-video.md",
         "2026-07-24-zsxq-watchdog-killed-active-all-tabs-sync.md",
         "2026-07-27-celery-solo-inspect-false-stuck-watchdog.md",
-        "2026-07-27-watchdog-stop-script-self-match.md"
+        "2026-07-27-watchdog-stop-script-self-match.md",
+        "2026-06-29-feishu-cookie-import-stale-celery-workers.md"
       ],
-      "systemic_guardrail": "单一服务注册表、启动后拓扑验收、代码版本指纹和队列消费者契约测试；所有 shell/UI/API/watchdog 停止与重启入口统一执行 fail-closed 业务阶段门禁；非 publication_tasks 队列必须从自己的结构化业务表读取近期心跳作为重启门禁，Celery inspect 空响应不得覆盖近期业务心跳；solo/浏览器 Worker 疑似卡死时只对目标服务做窄心跳复核，心跳存在或查询失败均禁止告警和重启；stop 返回 skipped/blocked/guard_check_failed 后不得继续 start 或记录 restarted；完整重启必须首次预检、停止 watchdog、cancel_consumer 冻结新领取、关闭 API 入队入口、再次预检并等待竞态领取任务自然结束，禁止检查后直接强杀；backend-only 停止只能递归同 pgid 后代并以真实进程树实验验收，禁止依赖 Darwin/Linux 语义不一致的 ps session 字段；acks_late 恢复必须核对普通队列、worker 快照与 Redis unacked，原消息可见时只降回 pending；Redis unacked 只能证明消息未确认，孤儿 running 收口必须以 active/reserved/scheduled 和业务心跳联合判断；控制面使用独立直连路径，不得依赖流程中已停止的本地代理，也不得用强制中断参数掩盖控制面连接失败；每个托管服务必须显式共享同一项目根和 PID 文件，重启验收必须证明实例唯一、PgBouncer 热池配置与实际后端连接数符合页面并发预算，且维护重载没有触发业务",
+      "systemic_guardrail": "单一服务注册表、启动后拓扑验收、代码版本指纹和队列消费者契约测试；共享 service/API 导入契约变化必须完整滚动重启所有会调用 create_app 的 worker，并在启动验收中验证导入符号与代码版本一致；所有 shell/UI/API/watchdog 停止与重启入口统一执行 fail-closed 业务阶段门禁；非 publication_tasks 队列必须从自己的结构化业务表读取近期心跳作为重启门禁，Celery inspect 空响应不得覆盖近期业务心跳；solo/浏览器 Worker 疑似卡死时只对目标服务做窄心跳复核，心跳存在或查询失败均禁止告警和重启；stop 返回 skipped/blocked/guard_check_failed 后不得继续 start 或记录 restarted；完整重启必须首次预检、停止 watchdog、cancel_consumer 冻结新领取、关闭 API 入队入口、再次预检并等待竞态领取任务自然结束，禁止检查后直接强杀；backend-only 停止只能递归同 pgid 后代并以真实进程树实验验收，禁止依赖 Darwin/Linux 语义不一致的 ps session 字段；acks_late 恢复必须核对普通队列、worker 快照与 Redis unacked，原消息可见时只降回 pending；Redis unacked 只能证明消息未确认，孤儿 running 收口必须以 active/reserved/scheduled 和业务心跳联合判断；控制面使用独立直连路径，不得依赖流程中已停止的本地代理，也不得用强制中断参数掩盖控制面连接失败；每个托管服务必须显式共享同一项目根和 PID 文件，重启验收必须证明实例唯一、PgBouncer 热池配置与实际后端连接数符合页面并发预算，且维护重载没有触发业务",
       "records": [
         "2026-06-23-zsxq-system-scheduler-not-autostarted.md",
         "2026-06-29-feishu-cookie-import-stale-celery-workers.md",

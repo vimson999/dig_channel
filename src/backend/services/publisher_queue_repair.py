@@ -128,7 +128,11 @@ BUSINESS_PROCESSING_REPAIRABLE_FEATURES = {
             "upload_pdf", "submit_prompt", "wait_response", "initial_response",
             "save_result",
         },
-        "requeueable_prefixes": ("followup_", "gemini_"),
+        "requeueable_prefixes": (
+            "followup_",
+            "gemini_",
+            "response_contract_repair_",
+        ),
     },
     "gemini_browser": {
         "queue": "report_pdf_gemini",
@@ -137,7 +141,11 @@ BUSINESS_PROCESSING_REPAIRABLE_FEATURES = {
             "upload_pdf", "submit_prompt", "wait_response", "initial_response",
             "save_result",
         },
-        "requeueable_prefixes": ("followup_", "gemini_"),
+        "requeueable_prefixes": (
+            "followup_",
+            "gemini_",
+            "response_contract_repair_",
+        ),
     },
     "report_visual_plan": {
         "queue": "report_visual_plan",
@@ -281,6 +289,11 @@ REPAIRABLE_PENDING_STEPS_BY_FEATURE = {
     # A worker restart can drop that message, so the watchdog must be able to
     # recover it after the normal visibility and grace-period checks.
     "doubao_browser_tts": {"auto_retry"},
+    # Celery retries for browser-profile contention are persisted as pending
+    # auto_retry rows.  If a worker restarts before the ETA message is
+    # delivered, the watchdog must requeue the storyboard instead of leaving
+    # its parent waiting forever.
+    "report_visual_plan": {"auto_retry"},
 }
 
 

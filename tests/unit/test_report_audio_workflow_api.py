@@ -64,6 +64,132 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(end, datetime(2026, 7, 14, 16, 0, 0))
         self.assertIsNone(report_audio_api._submission_date_utc_range("2026-02-30"))
 
+    def test_lightweight_child_query_exposes_captcha_handoff_without_full_result(self):
+        parent = PublicationTask(
+            status="failed",
+            current_step="failed",
+            progress=45,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.flush()
+        parent_id = str(parent.id)
+        child = PublicationTask(
+            status="blocked_by_captcha",
+            current_step="blocked_by_captcha",
+            progress=45,
+            error_message="豆包要求完成图片验证",
+            params={
+                "feature": report_audio_api.doubao_browser_tts.FEATURE_NAME,
+                "parent_task_id": parent_id,
+                "doubao_browser_tts": {
+                    "metadata": {
+                        "parent_task_id": parent_id,
+                        "chunk_index": 5,
+                        "chunk_total": 5,
+                    }
+                },
+            },
+            result={
+                "captcha_blocked": {
+                    "requires_human_action": True,
+                    "workflow_url": f"http://localhost:5001/report-audio-workflow-detail.html?job_id={parent_id}",
+                    "resolution_steps": ["完成验证", "从失败处续跑"],
+                },
+                "notifications": {
+                    "doubao_captcha_blocked": {
+                        "sent": False,
+                        "reason": "missing_config",
+                        "to": "owner@example.test",
+                    }
+                },
+            },
+        )
+        db.session.add(child)
+        db.session.commit()
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(statement)
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            grouped = report_audio_api._child_summaries_for_parent_ids([parent_id])
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        payload = grouped[parent_id]["doubao_browser_tts"][0]
+        self.assertTrue(payload["captcha_blocked"]["requires_human_action"])
+        notification = payload["notifications"]["doubao_captcha_blocked"]
+        self.assertEqual(notification["reason"], "missing_config")
+        self.assertEqual(notification["recipient_hint"], "o***@example.test")
+        self.assertNotIn("to", notification)
+        selects = [
+            statement.lower()
+            for statement in statements
+            if statement.lstrip().lower().startswith("select")
+        ]
+        self.assertEqual(len(selects), 1)
+        self.assertNotIn("publication_tasks.params", selects[0])
+
+    def test_manual_captcha_confirmation_resolves_history_before_retry(self):
+        """A verified captcha attempt must no longer block the replacement retry."""
+        parent = PublicationTask(
+            status="failed",
+            current_step="failed",
+            progress=45,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.flush()
+        parent_id = str(parent.id)
+        blocked = PublicationTask(
+            status="blocked_by_captcha",
+            current_step="blocked_by_captcha",
+            progress=45,
+            error_message="豆包要求完成图片验证",
+            parent_task_id=parent_id,
+            feature=report_audio_api.doubao_browser_tts.FEATURE_NAME,
+            params={
+                "feature": report_audio_api.doubao_browser_tts.FEATURE_NAME,
+                "parent_task_id": parent_id,
+            },
+            result={"captcha_blocked": {"requires_human_action": True, "reason": "captcha"}},
+        )
+        replacement = PublicationTask(
+            status="pending",
+            current_step="queued",
+            parent_task_id=parent_id,
+            feature=report_audio_api.doubao_browser_tts.FEATURE_NAME,
+            params={
+                "feature": report_audio_api.doubao_browser_tts.FEATURE_NAME,
+                "parent_task_id": parent_id,
+            },
+            result={},
+        )
+        db.session.add_all([blocked, replacement])
+        db.session.commit()
+
+        handler = getattr(report_audio_api, "_resolve_doubao_captcha_children_for_retry", None)
+        self.assertTrue(callable(handler), "missing CAPTCHA recovery state transition")
+        resolved_ids = handler(parent_id, verified_at="2026-08-13T08:20:00Z")
+        db.session.commit()
+
+        self.assertEqual(resolved_ids, [str(blocked.id)])
+        refreshed = db.session.get(PublicationTask, blocked.id)
+        self.assertEqual(refreshed.status, "blocked_by_captcha")
+        self.assertEqual(refreshed.current_step, "captcha_verified")
+        captcha = refreshed.result["captcha_blocked"]
+        self.assertFalse(captcha["requires_human_action"])
+        self.assertEqual(captcha["resolved_at"], "2026-08-13T08:20:00Z")
+        self.assertEqual(captcha["recovery_state"], "retry_queued")
+
+        current = report_audio_api._child_summaries_for_parent_ids([parent_id])[parent_id]["doubao_browser_tts"]
+        self.assertEqual([item["job_id"] for item in current], [str(replacement.id)])
+
+
     def test_read_endpoint_replaces_invalid_session_and_retries_once(self):
         attempts = []
 
@@ -158,11 +284,13 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
                     "pdf": (io.BytesIO(pdf_path.read_bytes()), "source.pdf"),
                     "prompt": "请解析 PDF 并撰写口播文案。",
                     "review_prompt": "请复核事实并输出最终稿。",
+                    "gem_v2_mode": "off",
                 },
                 content_type="multipart/form-data",
             ),
             patch.object(report_audio_api.gemini_browser, "status_payload", return_value={"configured": True}),
             patch.object(report_audio_api.doubao_browser_tts, "status_payload", return_value={"configured": True}),
+            patch.object(report_audio_api, "require_report_audio_workers_ready", return_value={"ready": True}),
             patch.object(report_audio_api, "_save_pdf_upload", return_value=pdf_meta),
             patch.object(
                 report_audio_api,
@@ -178,8 +306,71 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(workflow["gemini_min_final_chars"], 1500)
         self.assertTrue(workflow["gemini_prefer_pro_model"])
         self.assertFalse(workflow["gemini_require_pro_model"])
+        self.assertEqual(workflow["gem_v2_mode"], "off")
         self.assertIn("不少于 1500 字", workflow["prompt"])
         self.assertIn("不少于 1500 字", workflow["review_prompt"])
+
+    def test_default_shadow_submission_omits_legacy_prompt_expansion_and_followups(self):
+        pdf_path = Path(self.tmpdir.name) / "source.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+        pdf_meta = {
+            "filename": "source.pdf",
+            "path": str(pdf_path),
+            "bytes": pdf_path.stat().st_size,
+        }
+
+        with (
+            self.app.test_request_context(
+                "/api/report-audio-workflows/jobs",
+                method="POST",
+                data={
+                    "pdf": (io.BytesIO(pdf_path.read_bytes()), "source.pdf"),
+                    "prompt": "旧版调用提示词",
+                    "review_prompt": "旧版通用复核",
+                    "followups": '["旧版追加追问"]',
+                    "gem_v2_focus": "重点解释验证指标",
+                },
+                content_type="multipart/form-data",
+            ),
+            patch.object(report_audio_api.gemini_browser, "status_payload", return_value={"configured": True}),
+            patch.object(report_audio_api.doubao_browser_tts, "status_payload", return_value={"configured": True}),
+            patch.object(report_audio_api, "require_report_audio_workers_ready", return_value={"ready": True}),
+            patch.object(report_audio_api, "_save_pdf_upload", return_value=pdf_meta),
+            patch.object(
+                report_audio_api,
+                "apply_async_after_db_release",
+                return_value=SimpleNamespace(id="celery-shadow"),
+            ),
+        ):
+            response = report_audio_api.create_job.__wrapped__(SimpleNamespace(id="user-1"))
+
+        payload = response.get_json()
+        task = PublicationTask.query.filter_by(id=payload["job_id"]).one()
+        workflow = task.params["report_audio_workflow"]
+        self.assertEqual(workflow["gem_v2_mode"], "shadow")
+        self.assertEqual(workflow["gem_v2_focus"], "重点解释验证指标")
+        self.assertNotIn("不少于 1500 字", workflow["prompt"])
+        self.assertNotIn("不少于 1500 字", workflow["review_prompt"])
+        self.assertEqual(workflow["followups"], [])
+        self.assertEqual(task.result["gem_v2"], {"mode": "shadow", "status": "pending"})
+
+    def test_submission_rejects_unknown_gem_v2_mode(self):
+        pdf_path = Path(self.tmpdir.name) / "source.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+        with self.app.test_request_context(
+            "/api/report-audio-workflows/jobs",
+            method="POST",
+            data={
+                "pdf": (io.BytesIO(pdf_path.read_bytes()), "source.pdf"),
+                "gem_v2_mode": "experimental",
+            },
+            content_type="multipart/form-data",
+        ):
+            response, status_code = report_audio_api.create_job.__wrapped__(SimpleNamespace(id="user-1"))
+
+        self.assertEqual(status_code, 400)
+        self.assertIn("gem_v2_mode", response.get_json()["message"])
 
     def test_script_regeneration_creates_independent_strict_pro_material_task(self):
         pdf_path = Path(self.tmpdir.name) / "source.pdf"
@@ -589,6 +780,56 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(2, len(statements), statements)
         self.assertIn("select count(publication_tasks.id)", statements[0])
 
+    def test_job_detail_page_batches_finalization_summaries(self):
+        tasks = []
+        for index in range(2):
+            task = PublicationTask(
+                status="completed",
+                current_step="done",
+                progress=100,
+                feature=FEATURE_NAME,
+                user_id="user-1",
+                params={"feature": FEATURE_NAME, "user_id": "user-1"},
+                result={},
+                created_at=datetime(2026, 7, 18, 3, index, 0),
+            )
+            db.session.add(task)
+            tasks.append(task)
+        db.session.commit()
+        expected = {
+            str(task.id): {"job_id": f"finalization-{index}"}
+            for index, task in enumerate(tasks)
+        }
+        query = PublicationTask.query.filter(
+            PublicationTask.feature == FEATURE_NAME,
+            PublicationTask.user_id == "user-1",
+        )
+
+        with (
+            patch.object(
+                report_audio_api,
+                "finalization_summaries_for_audio_ids",
+                return_value=expected,
+                create=True,
+            ) as batch,
+            patch.object(report_audio_api, "_job_payload", wraps=report_audio_api._job_payload) as payload,
+        ):
+            items, total, pages = report_audio_api._query_jobs_page(
+                query,
+                page=1,
+                per_page=2,
+                include_detail=True,
+            )
+
+        self.assertEqual((len(items), total, pages), (2, 2, 1))
+        batch.assert_called_once()
+        requested_ids = batch.call_args.args[0]
+        self.assertEqual(set(requested_ids), {str(task.id) for task in tasks})
+        self.assertEqual(payload.call_count, 2)
+        for call in payload.call_args_list:
+            task = call.args[0]
+            self.assertEqual(call.kwargs["finalization"], expected[str(task.id)])
+
     def test_clear_jobs_cache_matches_composite_visible_user_key(self):
         key = ("system+user-1", 1, 10, "", "", "")
         report_audio_api._REPORT_AUDIO_JOBS_CACHE[key] = {
@@ -920,6 +1161,10 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             return_value=parent,
         ), patch.object(
             report_audio_api,
+            "require_report_audio_workers_ready",
+            return_value={"ready": True},
+        ), patch.object(
+            report_audio_api,
             "maybe_guarded_apply_async",
             return_value={
                 "async_result": SimpleNamespace(id="celery-manual-retry"),
@@ -973,6 +1218,10 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             return_value=parent,
         ), patch.object(
             report_audio_api,
+            "require_report_audio_workers_ready",
+            return_value={"ready": True},
+        ), patch.object(
+            report_audio_api,
             "maybe_guarded_apply_async",
             return_value={
                 "async_result": SimpleNamespace(id="celery-clean-retry"),
@@ -1024,6 +1273,10 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             report_audio_api,
             "is_doubao_api_configured",
             return_value=True,
+        ), patch.object(
+            report_audio_api,
+            "require_report_audio_workers_ready",
+            return_value={"ready": True},
         ), patch.object(
             report_audio_api,
             "maybe_guarded_apply_async",

@@ -610,6 +610,17 @@ def _db_publish_cookie_account_count(group_id=None):
         return count
     except Exception:
         return 0
+    finally:
+        # Previewing the account count immediately precedes remote upload in
+        # content-pipeline publishing.  The count is a plain scalar, so keep
+        # the same transaction boundary as the credential DTO loader and do
+        # not retain this read-only Session across upload/retry I/O.
+        try:
+            from models import db
+
+            db.session.remove()
+        except Exception:
+            logger.exception("[ZSXQ_AUTO_PUBLISH] failed to release credential count session")
 
 
 def _append_publish_event(event_type, **payload):

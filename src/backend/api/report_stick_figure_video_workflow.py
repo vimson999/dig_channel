@@ -3232,6 +3232,14 @@ def _workflow_payload(parent, material, storyboard, *, segment_count=None, asset
         stage = f"基础文案 · {material.current_step or material_status}"
     elif not storyboard:
         status, progress, stage = "running", 35, "基础文案完成 · 等待生成分镜"
+    elif board_status == "blocked_by_login":
+        status = "blocked_by_login"
+        progress = 35 + int(storyboard.progress or 0) * 25 // 100
+        stage = "分镜等待人工登录"
+    elif board_status == "blocked_by_captcha":
+        status = "blocked_by_captcha"
+        progress = 35 + int(storyboard.progress or 0) * 25 // 100
+        stage = "分镜等待人工验证"
     elif board_status == "failed":
         status, progress, stage = "failed", 35 + int(storyboard.progress or 0) * 25 // 100, "分镜失败"
     elif board_status in {"queued", "running"}:

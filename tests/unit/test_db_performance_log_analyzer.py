@@ -1,7 +1,10 @@
 import importlib.util
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT_PATH = (
@@ -203,6 +206,92 @@ class DbPerformanceLogAnalyzerTest(unittest.TestCase):
                 "LOG closing because: no pg_hba.conf entry"
             ),
         )
+
+    def test_classifies_pgbouncer_query_wait_timeout_separately(self):
+        analyzer = load_analyzer()
+
+        self.assertEqual(
+            {"query_wait_timeout"},
+            analyzer.pgbouncer_event_types(
+                "LOG C-0x1: closing because: query_wait_timeout (age=15s)"
+            ),
+        )
+
+    def test_classifies_pgbouncer_server_crash_and_tls_receive_error(self):
+        analyzer = load_analyzer()
+
+        self.assertEqual(
+            {"server_conn_crashed"},
+            analyzer.pgbouncer_event_types(
+                "LOG S-0x1: closing because: server conn crashed? (age=5s)"
+            ),
+        )
+        self.assertEqual(
+            {"tls_receive_error"},
+            analyzer.pgbouncer_event_types(
+                "WARNING tls_sbufio_recv: read failed: Can't assign requested address"
+            ),
+        )
+
+    def test_detects_proxy_tun_source_on_new_server_connection(self):
+        analyzer = load_analyzer()
+
+        fallback = (
+            "LOG S-0x1: db/user@100.92.99.39:5432 new connection to server "
+            "(from 198.18.0.1:63433)"
+        )
+        tailscale = (
+            "LOG S-0x2: db/user@100.92.99.39:5432 new connection to server "
+            "(from 100.96.3.12:62169)"
+        )
+
+        self.assertEqual("198.18.0.1", analyzer.pgbouncer_server_source(fallback))
+        self.assertTrue(analyzer.is_proxy_tun_source("198.18.0.1"))
+        self.assertEqual("100.96.3.12", analyzer.pgbouncer_server_source(tailscale))
+        self.assertFalse(analyzer.is_proxy_tun_source("100.96.3.12"))
+
+    def test_reports_pgbouncer_route_fallback_and_failure_categories(self):
+        analyzer = load_analyzer()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "pgbouncer.log").write_text(
+                "2026-08-14 13:07:08.239 LOG S-0x1: new connection to server "
+                "(from 198.18.0.1:63433)\n"
+                "2026-08-14 13:07:10.904 LOG C-0x2: closing because: "
+                "query_wait_timeout (age=15s)\n"
+                "2026-08-14 13:07:13.242 LOG S-0x1: closing because: "
+                "server conn crashed? (age=5s)\n"
+                "2026-08-14 13:07:54.312 WARNING tls_sbufio_recv: read failed: "
+                "Can't assign requested address\n",
+                encoding="utf-8",
+            )
+            analyzer.ROOT = root
+            analyzer.SLOW_LOG = logs / "slow_query.log"
+            analyzer.DEFAULT_EVENT_LOGS = ()
+            output = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "analyze_db_performance_logs.py",
+                    "--since",
+                    "2026-08-14 00:00:00",
+                    "--until",
+                    "2026-08-15 00:00:00",
+                ],
+            ), redirect_stdout(output):
+                analyzer.main()
+
+        rendered = output.getvalue()
+        self.assertIn("query_wait_timeout=1", rendered)
+        self.assertIn("server_conn_crashed=1", rendered)
+        self.assertIn("tls_receive_error=1", rendered)
+        self.assertIn(
+            "pgbouncer_server_source local_address=198.18.0.1 connections=1",
+            rendered,
+        )
+        self.assertIn("pgbouncer_proxy_tun_fallback connections=1", rendered)
 
     def test_parses_native_celery_bracket_timestamp(self):
         analyzer = load_analyzer()

@@ -8,6 +8,55 @@ from sqlalchemy import event, inspect as sqlalchemy_inspect
 from . import db
 
 
+class ZsxqBrowserSubmission(db.Model):
+    """Durable idempotency receipt for one inline sidebar submission."""
+
+    __tablename__ = "zsxq_browser_submissions"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "kind", "run_id", name="uq_zsxq_browser_submissions_kind_run"
+        ),
+        db.Index("ix_zsxq_browser_submissions_status_updated", "status", "updated_at"),
+    )
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    idempotency_key = db.Column(db.String(255), nullable=False, unique=True, index=True)
+    run_id = db.Column(db.String(200), nullable=False)
+    kind = db.Column(db.String(10), nullable=False)
+    payload_sha256 = db.Column(db.String(64), nullable=False)
+    manifest_path = db.Column(db.String(600), nullable=False)
+    celery_task_id = db.Column(db.String(36), nullable=False)
+    status = db.Column(db.String(24), nullable=False, default="received", index=True)
+    attempt = db.Column(db.Integer, nullable=False, default=0)
+    result = db.Column(db.JSON, default=dict)
+    error_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(
+        db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+    queued_at = db.Column(db.DateTime, nullable=True)
+    completed_at = db.Column(db.DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "idempotency_key": self.idempotency_key,
+            "run_id": self.run_id,
+            "kind": self.kind,
+            "payload_sha256": self.payload_sha256,
+            "manifest_path": self.manifest_path,
+            "celery_task_id": self.celery_task_id,
+            "status": self.status,
+            "attempt": self.attempt or 0,
+            "result": self.result or {},
+            "error_message": self.error_message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "queued_at": self.queued_at.isoformat() if self.queued_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
 class ZsxqSyncRun(db.Model):
     __tablename__ = "zsxq_sync_runs"
     __table_args__ = (

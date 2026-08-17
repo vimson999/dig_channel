@@ -244,6 +244,10 @@ class DatabaseLoggerMiddleware:
     def _query_start_times_quietly(connection):
         if connection is None:
             return []
+        try:
+            return connection.info.setdefault('query_start_time', [])
+        except Exception:
+            return []
 
     @staticmethod
     def _record_checkout_sql_duration(connection, duration_ms):
@@ -264,10 +268,6 @@ class DatabaseLoggerMiddleware:
         except Exception:
             # Lifecycle telemetry must never affect the database operation.
             return
-        try:
-            return connection.info.setdefault('query_start_time', [])
-        except Exception:
-            return []
     
     @staticmethod
     def _get_query_type(statement):

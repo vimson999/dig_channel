@@ -9,6 +9,7 @@ from .favorites import bp as favorites_bp
 from .documents import bp as documents_bp
 from .gemini import bp as gemini_bp
 from .batch_transcription import bp as batch_transcription_bp
+from .zsxq_browser_import import bp as zsxq_browser_import_bp
 
 def register_blueprints(app):
     """注册所有API蓝图
@@ -90,6 +91,7 @@ def register_blueprints(app):
     # 注册知识星球试验 API
     from .zsxq import bp as zsxq_bp
     app.register_blueprint(zsxq_bp)
+    app.register_blueprint(zsxq_browser_import_bp)
 
     # 注册知识星球情报分析 API
     from .zsxq_insights import bp as zsxq_insights_bp

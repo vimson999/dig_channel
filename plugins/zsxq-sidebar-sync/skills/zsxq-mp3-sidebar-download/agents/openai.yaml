@@ -1,0 +1,10 @@
+interface:
+  display_name: "知识星球侧边栏 MP3 下载"
+  short_description: "扫描调研纪要 MP3，按阈值去重下载并提交本地编排"
+  default_prompt: "Use $zsxq-mp3-sidebar-download to process the current 调研纪要 page."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "zsxq-sidebar-sync"
+      description: "Read server-owned download history and submit an idempotent local workflow manifest."
+      transport: "stdio"

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "zsxq-sidebar-sync": {
+      "command": "./scripts/run-zsxq-sidebar-mcp.sh",
+      "args": [],
+      "cwd": ".",
+      "env_vars": ["ZSXQ_LOCAL_API_URL"]
+    }
+  }
+}

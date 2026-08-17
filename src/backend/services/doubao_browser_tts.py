@@ -49,10 +49,20 @@ class DoubaoBrowserTTSAutomationError(DoubaoBrowserTTSError):
 
 
 class DoubaoBrowserTTSCaptchaError(DoubaoBrowserTTSAutomationError):
-    def __init__(self, message: str, *, screenshot: str = "", page_url: str = ""):
+    def __init__(
+        self,
+        message: str,
+        *,
+        screenshot: str = "",
+        page_url: str = "",
+        profile: str = "",
+        worker_id: str = "",
+    ):
         super().__init__(message)
         self.screenshot = screenshot
         self.page_url = page_url
+        self.profile = profile
+        self.worker_id = worker_id
 
 
 @dataclass
@@ -301,12 +311,26 @@ class DoubaoBrowserTTSWorker:
 
     def _submit_text(self, page, text: str, job_id: str) -> None:
         self._raise_if_login_or_captcha(page, job_id)
+        # The desktop-app promotion can be mounted asynchronously after the
+        # first page load.  Dismiss it immediately before resolving/clicking
+        # the textarea as well, otherwise Playwright may resolve the correct
+        # input but fail because the modal still intercepts pointer events.
+        self._dismiss_known_promotional_dialogs(page)
         input_locator = self._first_visible(page, self._selectors("input"))
         if input_locator is None:
             raise DoubaoBrowserTTSAutomationError("未找到豆包输入框")
 
         prompt_text = build_repeat_prompt(text)
-        input_locator.click(timeout=10_000)
+        try:
+            input_locator.click(timeout=10_000)
+        except Exception:
+            # A promotion may appear between the dismiss pass and the click.
+            # Retry once after closing it; non-promotion failures are re-raised
+            # so login/captcha and selector regressions remain visible.
+            dismissed = self._dismiss_known_promotional_dialogs(page)
+            if not dismissed:
+                raise
+            input_locator.click(timeout=10_000)
         tag_name = input_locator.evaluate("(node) => node.tagName.toLowerCase()")
         editable = input_locator.evaluate("(node) => Boolean(node.isContentEditable)")
         if tag_name in {"textarea", "input"}:
@@ -351,26 +375,60 @@ class DoubaoBrowserTTSWorker:
                     for (const dialog of document.querySelectorAll('[role="dialog"]')) {
                         const text = String(dialog.innerText || "");
                         if (!markers.some((marker) => text.includes(marker))) continue;
+                        const box = dialog.getBoundingClientRect();
+                        const visible = (node) => {
+                            const rect = node.getBoundingClientRect();
+                            const style = window.getComputedStyle(node);
+                            return rect.width > 0 && rect.height > 0
+                                && style.visibility !== "hidden"
+                                && style.display !== "none";
+                        };
+                        const clickTarget = (node) => {
+                            const parent = node.closest(
+                                'button, [role="button"], [data-slot="dialog-close"], '
+                                + '[data-radix-dialog-close]'
+                            );
+                            (parent || node).click();
+                        };
                         const direct = dialog.querySelector(
                             'button[aria-label*="关闭"], button[title*="关闭"], '
-                            + '[data-slot="dialog-close"], [data-radix-dialog-close]'
+                            + '[role="button"][aria-label*="关闭"], [role="button"][title*="关闭"], '
+                            + '[data-slot="dialog-close"], [data-radix-dialog-close], '
+                            + '[class*="close"], [class*="Close"]'
                         );
-                        if (direct) {
-                            direct.click();
+                        if (direct && visible(direct)) {
+                            clickTarget(direct);
                             dismissed += 1;
                             continue;
                         }
-                        const box = dialog.getBoundingClientRect();
-                        const candidates = Array.from(dialog.querySelectorAll('button'))
+                        // The current Doubao modal renders its top-right X as
+                        // an unlabelled element.  Select the smallest visible
+                        // control in the dialog's top-right corner, including
+                        // role=button/svg wrappers rather than only <button>.
+                        const candidates = Array.from(dialog.querySelectorAll(
+                            'button, [role="button"], [tabindex], svg, [data-slot], [class*="close"], [class*="Close"]'
+                        ))
                             .filter((button) => {
                                 const rect = button.getBoundingClientRect();
-                                return rect.width > 0 && rect.height > 0
+                                return visible(button)
+                                    && rect.width <= 96 && rect.height <= 96
                                     && rect.left >= box.right - 100
                                     && rect.top <= box.top + 100;
                             })
-                            .sort((left, right) => right.getBoundingClientRect().left - left.getBoundingClientRect().left);
+                            .sort((left, right) => {
+                                const leftRect = left.getBoundingClientRect();
+                                const rightRect = right.getBoundingClientRect();
+                                return rightRect.left - leftRect.left || leftRect.width - rightRect.width;
+                            });
                         if (candidates[0]) {
-                            candidates[0].click();
+                            clickTarget(candidates[0]);
+                            dismissed += 1;
+                            continue;
+                        }
+                        // Last-resort hit test for a non-semantic close icon.
+                        const hit = document.elementFromPoint(box.right - 28, box.top + 28);
+                        if (hit && dialog.contains(hit)) {
+                            clickTarget(hit);
                             dismissed += 1;
                         }
                     }
@@ -594,9 +652,22 @@ class DoubaoBrowserTTSWorker:
             pass
 
         for root in roots:
+            if self._is_verification_challenge_frame(root):
+                return True
             if self._first_visible(root, self._selectors("captcha")) is not None:
                 return True
         return False
+
+    @staticmethod
+    def _is_verification_challenge_frame(root) -> bool:
+        """Detect a verification iframe before its challenge text has loaded."""
+        url = str(getattr(root, "url", "") or "").lower()
+        return (
+            "verifycenter" in url
+            or "/captcha/" in url
+            or "captcha?" in url
+            or "captcha=" in url
+        )
 
     def _captcha_error(self, page, job_id: str) -> Optional[DoubaoBrowserTTSCaptchaError]:
         if not self._captcha_visible(page):
@@ -606,6 +677,12 @@ class DoubaoBrowserTTSWorker:
             "豆包页面触发人机验证，浏览器自动化已被阻塞，需要人工进入浏览器完成验证后再重试",
             screenshot=screenshot,
             page_url=getattr(page, "url", "") or "",
+            profile=str(self.options.user_data_dir or ""),
+            worker_id=str(
+                os.getenv("DOUBAO_BROWSER_TTS_WORKER_ID", "")
+                or self.options.profile_directory
+                or "default"
+            ),
         )
 
     def _wait_for_captcha_resolution(self, page, job_id: str = "") -> float:
@@ -630,6 +707,8 @@ class DoubaoBrowserTTSWorker:
             f"{captcha_error}；浏览器已保留 {self.options.captcha_wait_timeout_seconds} 秒等待人工验证，但验证未完成",
             screenshot=captcha_error.screenshot,
             page_url=captcha_error.page_url,
+            profile=captcha_error.profile,
+            worker_id=captcha_error.worker_id,
         )
 
     def _raise_if_login_or_captcha(self, page, job_id: str = "") -> float:

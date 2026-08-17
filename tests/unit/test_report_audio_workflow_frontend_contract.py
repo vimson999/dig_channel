@@ -72,7 +72,8 @@ def test_keyframe_confirmation_preserves_landscape_selection_and_busts_cache():
     assert "schemes: ['scheme3']" in javascript
     assert "启动白板 + 横屏 + 方案三" in javascript
     assert "selection_source: options.selectionSource || 'vertical-video-panel'" in javascript
-    assert "report-audio-workflow-detail.js?v=20260809-audio-generation-v2" in html
+    assert "browser-human-intervention.js?v=20260812-v1" in html
+    assert "report-audio-workflow-detail.js?v=20260812-human-intervention-v1" in html
 
 
 def test_bilibili_account_selection_applies_report_media_defaults():

@@ -16,6 +16,11 @@ from services.gemini_browser import (
     GeminiBrowserWorker,
     storage_path_for_job,
 )
+from services.report_audio_gem_v2 import (
+    SCHEMA_VERSION as REPORT_AUDIO_GEM_V2_SCHEMA_VERSION,
+    build_gem_v2_repair_prompt,
+    validate_gem_v2_response,
+)
 from services.runtime_guard import release_db_session_quietly
 
 
@@ -172,7 +177,9 @@ def _process_job(task_id, celery_task=None):
         if "prefer_pro_model" in payload:
             options.prefer_pro_model = _truthy(payload.get("prefer_pro_model"), True)
         options.require_pro_model = _truthy(payload.get("require_pro_model"), False)
-        _apply_total_timeout_budget(options, followups)
+        contract_validator, contract_repair_builder, contract_max_repairs = _response_contract_callbacks(payload)
+        timeout_rounds = list(followups) + (["response_contract_repair"] * contract_max_repairs)
+        _apply_total_timeout_budget(options, timeout_rounds)
         worker = GeminiBrowserWorker(options)
         gemini_result = worker.generate(
             job_id=job_id,
@@ -181,6 +188,9 @@ def _process_job(task_id, celery_task=None):
             pdf_path=pdf_path,
             target_url=target_url,
             followup_prompts=followups,
+            response_contract_validator=contract_validator,
+            response_contract_repair_prompt_builder=contract_repair_builder,
+            response_contract_max_repairs=contract_max_repairs,
             progress_callback=update_progress,
         )
 
@@ -195,6 +205,7 @@ def _process_job(task_id, celery_task=None):
             "page_url": gemini_result.get("page_url"),
             "target_url": gemini_result.get("target_url"),
             "output_path": gemini_result.get("output_path"),
+            "response_contract_validation": gemini_result.get("response_contract_validation"),
             "completed_at": datetime.utcnow().isoformat() + "Z",
             "generation_requirements": {
                 "prefer_pro_model": bool(options.prefer_pro_model),
@@ -205,6 +216,8 @@ def _process_job(task_id, celery_task=None):
                     lower=0,
                     upper=20000,
                 ),
+                "response_contract": payload.get("response_contract"),
+                "contract_max_repairs": contract_max_repairs,
             },
         })
         final_response = final_result.get("final_response_text") or final_result.get("response_text") or ""
@@ -243,6 +256,52 @@ def _process_job(task_id, celery_task=None):
         })
         logger.error("Report PDF Gemini task failed: %s", exc, exc_info=True)
         return False
+
+
+def _response_contract_callbacks(payload):
+    request = payload if isinstance(payload, dict) else {}
+    contract = str(request.get("response_contract") or "").strip()
+    if not contract:
+        return None, None, 0
+    if contract != REPORT_AUDIO_GEM_V2_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported Gemini response contract: {contract}")
+
+    expected_filename = str(request.get("contract_expected_pdf_filename") or "").strip()
+    minimum_chars = _bounded_int(
+        request.get("contract_minimum_script_chars"),
+        default=0,
+        lower=0,
+        upper=20000,
+    )
+    actual_page_count = _bounded_int(
+        request.get("contract_actual_pdf_page_count"),
+        default=0,
+        lower=0,
+        upper=100000,
+    ) or None
+    allow_external = _truthy(request.get("contract_allow_external_information"), False)
+
+    def validate(raw_text):
+        validation = validate_gem_v2_response(
+            raw_text,
+            minimum_script_chars=minimum_chars,
+            expected_pdf_filename=expected_filename,
+            actual_pdf_page_count=actual_page_count,
+            allow_external_information=allow_external,
+        )
+        return validation.diagnostics()
+
+    def build_repair(diagnostics):
+        errors = diagnostics.get("errors") if isinstance(diagnostics, dict) else []
+        return build_gem_v2_repair_prompt(errors or [])
+
+    max_repairs = _bounded_int(
+        request.get("contract_max_repairs"),
+        default=1,
+        lower=0,
+        upper=1,
+    )
+    return validate, build_repair, max_repairs
 
 
 def _mark_failed(task, message):
