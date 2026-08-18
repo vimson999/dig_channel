@@ -461,6 +461,18 @@ class BrowserSidebarImportService:
         payload_sha256: str | None = None,
     ) -> Path:
         """Atomically persist one validated inline manifest in the server inbox."""
+        path, _preview = self._persist_inline_manifest_with_preview(
+            manifest,
+            payload_sha256,
+        )
+        return path
+
+    def _persist_inline_manifest_with_preview(
+        self,
+        manifest: dict[str, Any],
+        payload_sha256: str | None = None,
+    ) -> tuple[Path, dict[str, Any]]:
+        """Persist one manifest and return the preview used to validate it."""
         canonical, actual_hash = self.canonical_manifest_payload(manifest)
         if payload_sha256 and payload_sha256 != actual_hash:
             raise BrowserImportValidationError("manifest payload_sha256 校验失败")
@@ -488,7 +500,7 @@ class BrowserSidebarImportService:
                     ) from exc
                 if prior_hash != payload_sha256:
                     raise BrowserImportValidationError("同一 run_id 的既有 manifest 内容不一致")
-                return target
+                return target, self.preview_manifest(target)
             raise BrowserImportValidationError("同一 run_id 已提交不同的 manifest")
 
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
@@ -499,14 +511,25 @@ class BrowserSidebarImportService:
                 ),
                 encoding="utf-8",
             )
+            # Validate the complete manifest, including every downloaded file
+            # path, before the run_id becomes durable. A rejected submission
+            # may then be corrected and retried without colliding with an
+            # orphaned manifest from the failed attempt.
+            preview = self.preview_manifest(temporary)
             os.replace(temporary, target)
+        except BrowserImportValidationError:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         except OSError as exc:
             try:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
             raise BrowserImportValidationError(f"无法持久化内联 manifest: {exc}") from exc
-        return target
+        return target, {**preview, "manifest_path": str(target)}
 
     @staticmethod
     def _expected_idempotency_key(kind: str, run_id: str) -> str:
@@ -638,8 +661,11 @@ class BrowserSidebarImportService:
             )
             return self._submission_response(existing, replayed=True)
 
-        manifest_path = self.persist_inline_manifest(canonical, manifest_payload_sha256)
-        preview = self.preview_manifests([str(manifest_path)])
+        manifest_path, manifest_preview = self._persist_inline_manifest_with_preview(
+            canonical,
+            manifest_payload_sha256,
+        )
+        preview = self._combine_manifest_previews([manifest_preview])
         celery_task_id = str(
             uuid.uuid5(uuid.NAMESPACE_URL, f"zsxq-browser-import:{idempotency_key}")
         )
@@ -1116,10 +1142,8 @@ class BrowserSidebarImportService:
             },
         }
 
-    def preview_manifests(
-        self, manifest_paths: Iterable[str | os.PathLike[str]]
-    ) -> dict[str, Any]:
-        manifests = [self.preview_manifest(path) for path in manifest_paths]
+    @staticmethod
+    def _combine_manifest_previews(manifests: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "manifests": manifests,
             "summary": {
@@ -1134,6 +1158,12 @@ class BrowserSidebarImportService:
                 "warnings": sum(item["summary"]["warning_count"] for item in manifests),
             },
         }
+
+    def preview_manifests(
+        self, manifest_paths: Iterable[str | os.PathLike[str]]
+    ) -> dict[str, Any]:
+        manifests = [self.preview_manifest(path) for path in manifest_paths]
+        return self._combine_manifest_previews(manifests)
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime:

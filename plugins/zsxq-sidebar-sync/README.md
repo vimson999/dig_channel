@@ -1,14 +1,24 @@
 # Knowledge Planet Sidebar Sync
 
-This plugin gives the ChatGPT Chrome sidebar three narrowly scoped MCP tools over an OpenAI Secure MCP Tunnel:
+This plugin packages the MP3/PDF sidebar skills and the optional MCP server used by the Knowledge Planet synchronization workflow.
+
+The current production skills hand off through the loopback-only HTML bridge already served by the local frontend:
+
+- `/zsxq-sidebar-history.html?kind=mp3|pdf`: read complete three-day download history.
+- `/zsxq-sidebar-submit.html?kind=mp3|pdf`: submit one frozen inline manifest to the existing import, clean, and publish workflow.
+- `/zsxq-sidebar-bridge.html`: verify bridge health.
+
+This route requires no Downloads folder authorization. Before the first submit, every newly downloaded file must include its browser-reported absolute path; a definite validation error ends the run, while only an unknown result may replay the identical manifest and `run_id`.
+
+The plugin also retains three narrowly scoped MCP tools for environments where an OpenAI Secure MCP Tunnel is available:
 
 - `zsxq_health`: verify the local import service.
 - `zsxq_get_history`: read the server-owned three-day MP3 or PDF history.
 - `zsxq_submit_manifest`: persist one scan manifest and queue the existing import, clean, and publish workflow idempotently.
 
-The sidebar never receives general shell, filesystem, or arbitrary HTTP access. The MCP server accepts only the fixed Knowledge Planet group and MP3/PDF tabs configured in `mcp_servers.zsxq_sidebar`, and it can call only the local loopback import API.
+The sidebar never receives general shell, filesystem, or arbitrary HTTP access. Both bridge routes accept only the fixed Knowledge Planet group and MP3/PDF tabs; the MCP server can call only the local loopback import API.
 
-## One-time tunnel setup
+## Optional one-time tunnel setup
 
 1. In [OpenAI Platform Tunnels](https://platform.openai.com/settings/organization/tunnels), create a tunnel for the intended organization/workspace and copy its non-secret `tunnel_...` ID.
 2. In [Runtime API keys](https://platform.openai.com/settings/organization/api-keys), create a **Restricted** key with only **Tunnels Read + Use**. Do not use an admin key or an unrestricted key for the daemon.
@@ -29,9 +39,9 @@ The sidebar never receives general shell, filesystem, or arbitrary HTTP access. 
 
 4. Confirm the final status JSON reports `process_running`, `healthy`, and `ready` as true.
 5. While the runtime is ready, open [ChatGPT connector settings](https://chatgpt.com/#settings/Connectors), enable Developer mode if needed, and create a **Tunnel** connection using the same tunnel ID.
-6. Start a new ChatGPT conversation, enable that connection from the tools menu, and first call `zsxq_health`. Only after this read-only check succeeds should either download skill be tested.
+6. Start a new ChatGPT conversation, enable that connection from the tools menu, and first call `zsxq_health`.
 
-Creating the Platform tunnel or Runtime API key grants persistent access and must be completed or explicitly confirmed by the account owner. Never paste either API key into chat.
+The current HTML bridge skills do not require this tunnel. Creating the Platform tunnel or Runtime API key grants persistent access and must be completed or explicitly confirmed by the account owner. Never paste either API key into chat.
 
 ## Test order
 

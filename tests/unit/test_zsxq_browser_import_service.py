@@ -546,6 +546,87 @@ class ZsxqBrowserImportPersistenceTest(unittest.TestCase):
         self.assertEqual(first["task_id"], replay_after_queue["task_id"])
         self.assertTrue(Path(first["manifest_path"]).is_file())
 
+    def test_invalid_inline_manifest_does_not_reserve_run_id_or_persist_manifest(self):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        run_id = "sidebar-pdf-20260818T003014Z-path-retry"
+        key = f"zsxq-sidebar:pdf:{run_id}"
+        invalid = {
+            "run_id": run_id,
+            "kind": "pdf",
+            "group_id": "28888112822211",
+            "tab_id": "51184248544214",
+            "tab_label": "外资研报",
+            "files": [
+                {
+                    "filename": "研报.pdf",
+                    "media_type": "pdf",
+                    "download_count": 31,
+                    "success": True,
+                }
+            ],
+        }
+
+        with self.assertRaises(BrowserImportValidationError):
+            service.prepare_inline_submission(invalid, key)
+
+        self.assertEqual(ZsxqBrowserSubmission.query.count(), 0)
+        self.assertEqual(list(service.inbox_root.glob("sidebar-submit-pdf-*.json")), [])
+
+        downloaded = downloads / "研报.pdf"
+        downloaded.write_bytes(b"pdf-content")
+        corrected = json.loads(json.dumps(invalid))
+        corrected["files"][0]["absolute_path"] = str(downloaded)
+
+        prepared = service.prepare_inline_submission(corrected, key)
+
+        self.assertFalse(prepared["replayed"])
+        self.assertEqual(ZsxqBrowserSubmission.query.count(), 1)
+        self.assertTrue(Path(prepared["manifest_path"]).is_file())
+
+    def test_inline_submission_reuses_preview_when_file_changes_after_validation(self):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        run_id = "sidebar-pdf-20260818T090000+0800-single-preview"
+        key = f"zsxq-sidebar:pdf:{run_id}"
+        downloaded = downloads / "研报.pdf"
+        downloaded.write_bytes(b"pdf-content")
+        manifest = {
+            "run_id": run_id,
+            "kind": "pdf",
+            "group_id": "28888112822211",
+            "tab_id": "51184248544214",
+            "tab_label": "外资研报",
+            "files": [
+                {
+                    "filename": downloaded.name,
+                    "absolute_path": str(downloaded),
+                    "media_type": "pdf",
+                    "download_count": 31,
+                    "success": True,
+                }
+            ],
+        }
+        original_preview_manifest = service.preview_manifest
+        preview_calls = []
+
+        def preview_once(path):
+            result = original_preview_manifest(path)
+            preview_calls.append(str(path))
+            if len(preview_calls) == 1:
+                downloaded.unlink()
+            return result
+
+        service.preview_manifest = preview_once
+
+        prepared = service.prepare_inline_submission(manifest, key)
+
+        self.assertFalse(prepared["replayed"])
+        self.assertEqual(len(preview_calls), 1)
+        self.assertEqual(prepared["preview"]["summary"]["files"], 1)
+        self.assertEqual(ZsxqBrowserSubmission.query.count(), 1)
+        self.assertTrue(Path(prepared["manifest_path"]).is_file())
+
     def test_idempotent_submission_rejects_same_key_with_changed_payload(self):
         tempdir, downloads, service = self._service_and_downloads()
         self.addCleanup(tempdir.cleanup)
