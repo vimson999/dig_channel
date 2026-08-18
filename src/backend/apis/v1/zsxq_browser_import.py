@@ -94,7 +94,11 @@ def browser_import_history():
         return rejected
     try:
         kind, days = _history_request()
-        result = zsxq_browser_import_service.recent_download_history(kind, days=days)
+        result = zsxq_browser_import_service.recent_download_history(
+            kind,
+            days=days,
+            require_submission_receipt=True,
+        )
         return jsonify({"success": True, "data": result})
     except BrowserImportValidationError as exc:
         return (

@@ -137,6 +137,31 @@ class ZsxqBrowserImportServiceTest(unittest.TestCase):
         self.assertEqual(result["errors"][0]["code"], "history_file_invalid")
         self.assertEqual(result["files"], [])
 
+    def test_recent_download_history_fails_closed_when_receipts_cannot_be_queried(self):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        self._write_history_file(
+            downloads,
+            "sidebar-submit-mp3-20260817-run-abcdef123456.json",
+            {"kind": "mp3", "files": [self._history_entry(1)]},
+        )
+
+        def unavailable(_paths):
+            raise RuntimeError("database unavailable")
+
+        service._accepted_submission_manifest_paths = unavailable
+        result = service.recent_download_history(
+            "mp3",
+            days=3,
+            now=datetime.fromisoformat("2026-08-17T12:00:00+08:00"),
+            require_submission_receipt=True,
+        )
+
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["files"], [])
+        self.assertEqual(result["errors"][0]["code"], "history_receipt_lookup_failed")
+        self.assertEqual(result["summary"]["trusted_source_files"], 0)
+
     def test_recent_download_history_applies_later_duplicate_observations(self):
         tempdir, downloads, service = self._service_and_downloads()
         self.addCleanup(tempdir.cleanup)
@@ -171,6 +196,136 @@ class ZsxqBrowserImportServiceTest(unittest.TestCase):
         self.assertEqual(
             result["files"][0]["last_seen_at"], "2026-08-17T12:00:00+08:00"
         )
+
+    def test_recent_history_collapses_equivalent_iso_timestamp_serializations(self):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        original = self._history_entry(1, count=11)
+        original["published_at"] = "2026-08-17T13:39+08:00"
+        duplicate = {**original, "published_at": "2026-08-17T13:39:00+08:00"}
+        self._write_history_file(
+            downloads,
+            "sidebar-submit-mp3-20260817-080000.json",
+            {"kind": "mp3", "files": [original]},
+        )
+        self._write_history_file(
+            downloads,
+            "sidebar-submit-mp3-20260817-120000.json",
+            {"kind": "mp3", "files": [duplicate]},
+        )
+
+        result = service.recent_download_history(
+            "mp3",
+            days=3,
+            now=datetime.fromisoformat("2026-08-17T13:00:00+08:00"),
+        )
+
+        self.assertEqual(result["summary"]["records_seen"], 2)
+        self.assertEqual(result["summary"]["unique_downloads"], 1)
+        self.assertEqual(result["summary"]["duplicates_collapsed"], 1)
+        self.assertEqual(
+            result["files"][0]["published_at_canonical"],
+            "2026-08-17T05:39:00Z",
+        )
+
+    def test_recent_history_ignores_source_url_variants_for_fixed_tab_identity(self):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        original = self._history_entry(2, count=11)
+        duplicate = {
+            **original,
+            "source_url": "https://wx.zsxq.com/tags/%E8%B0%83%E7%A0%94%E7%BA%AA%E8%A6%81/88844545452542",
+            "download_count": 20,
+        }
+        self._write_history_file(
+            downloads,
+            "sidebar-submit-mp3-20260817-080000.json",
+            {"kind": "mp3", "files": [original]},
+        )
+        self._write_history_file(
+            downloads,
+            "sidebar-submit-mp3-20260817-120000.json",
+            {"kind": "mp3", "files": [duplicate]},
+        )
+
+        result = service.recent_download_history(
+            "mp3",
+            days=3,
+            now=datetime.fromisoformat("2026-08-17T13:00:00+08:00"),
+        )
+
+        self.assertEqual(result["summary"]["unique_downloads"], 1)
+        self.assertEqual(result["files"][0]["latest_download_count"], 20)
+
+    def test_recent_history_treats_same_recent_filename_as_downloaded_even_if_time_differs(
+        self,
+    ):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        original = self._history_entry(4, count=11)
+        duplicate = {
+            **original,
+            "published_at": "2026-08-18T04:00:00+08:00",
+            "download_count": 22,
+        }
+        self._write_history_file(
+            downloads,
+            "sidebar-submit-mp3-20260817-080000.json",
+            {"kind": "mp3", "files": [original]},
+        )
+        self._write_history_file(
+            downloads,
+            "sidebar-submit-mp3-20260818-080000.json",
+            {"kind": "mp3", "files": [duplicate]},
+        )
+
+        result = service.recent_download_history(
+            "mp3",
+            days=3,
+            now=datetime.fromisoformat("2026-08-18T09:00:00+08:00"),
+        )
+
+        self.assertEqual(result["summary"]["unique_downloads"], 1)
+        self.assertEqual(result["summary"]["duplicates_collapsed"], 1)
+        self.assertEqual(result["files"][0]["latest_download_count"], 22)
+
+    def test_recent_history_normalizes_chrome_duplicate_suffix_and_unicode_filename(
+        self,
+    ):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        original = {
+            **self._history_entry(3, count=11),
+            "filename": "从算力租赁到Token工厂260817.mp3",
+        }
+        duplicate = {
+            **original,
+            "filename": "从算力租赁到ＴＯＫＥＮ工厂260817 (1).MP3",
+            "download_count": 21,
+        }
+        self._write_history_file(
+            downloads,
+            "sidebar-submit-mp3-20260817-080000.json",
+            {"kind": "mp3", "files": [original]},
+        )
+        self._write_history_file(
+            downloads,
+            "sidebar-submit-mp3-20260817-120000.json",
+            {"kind": "mp3", "files": [duplicate]},
+        )
+
+        result = service.recent_download_history(
+            "mp3",
+            days=3,
+            now=datetime.fromisoformat("2026-08-17T13:00:00+08:00"),
+        )
+
+        self.assertEqual(result["summary"]["unique_downloads"], 1)
+        self.assertEqual(
+            result["files"][0]["normalized_filename"],
+            "从算力租赁到token工厂260817.mp3",
+        )
+        self.assertTrue(result["files"][0]["dedupe_key"].startswith("metadata:"))
 
     def test_recent_download_history_does_not_create_download_from_observation_only(
         self,
@@ -523,6 +678,34 @@ class ZsxqBrowserImportPersistenceTest(unittest.TestCase):
             "files": [],
         }
 
+    @staticmethod
+    def _mp3_inline_manifest(run_id, files, *, new_download_success=None):
+        scan_summary = {"scanned_topics": 1}
+        if new_download_success is not None:
+            scan_summary["new_download_success"] = new_download_success
+        return {
+            "run_id": run_id,
+            "kind": "mp3",
+            "group_id": "28888112822211",
+            "tab_id": "88844545452542",
+            "tab_label": "调研纪要",
+            "scan_summary": scan_summary,
+            "files": files,
+        }
+
+    @staticmethod
+    def _download_entry(path, *, filename=None, content=None):
+        if content is not None:
+            path.write_bytes(content)
+        return {
+            "filename": filename or path.name,
+            "absolute_path": str(path),
+            "media_type": "mp3",
+            "download_count": 11,
+            "published_at": "2026-08-17T13:39:00+08:00",
+            "success": True,
+        }
+
     def test_idempotent_submission_reuses_receipt_manifest_and_task(self):
         tempdir, downloads, service = self._service_and_downloads()
         self.addCleanup(tempdir.cleanup)
@@ -545,6 +728,89 @@ class ZsxqBrowserImportPersistenceTest(unittest.TestCase):
         self.assertEqual(first["manifest_path"], replay_after_queue["manifest_path"])
         self.assertEqual(first["task_id"], replay_after_queue["task_id"])
         self.assertTrue(Path(first["manifest_path"]).is_file())
+
+    def test_recent_history_ignores_deterministic_manifest_without_receipt(self):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        downloaded = downloads / "未被后端接收.mp3"
+        downloaded.write_bytes(b"orphan-content")
+        manifest = {
+            "run_id": "sidebar-mp3-20260817T140000+0800-orphan",
+            "kind": "mp3",
+            "group_id": "28888112822211",
+            "tab_id": "88844545452542",
+            "tab_label": "调研纪要",
+            "files": [
+                {
+                    "filename": downloaded.name,
+                    "absolute_path": str(downloaded),
+                    "media_type": "mp3",
+                    "download_count": 11,
+                    "published_at": "2026-08-17T13:39:00+08:00",
+                    "success": True,
+                }
+            ],
+        }
+        canonical, payload_hash = service.canonical_manifest_payload(manifest)
+        manifest_path = service.persist_inline_manifest(canonical, payload_hash)
+        self.assertRegex(manifest_path.name, r"-[0-9a-f]{12}\.json$")
+        self.assertEqual(ZsxqBrowserSubmission.query.count(), 0)
+
+        history = service.recent_download_history(
+            "mp3",
+            days=3,
+            now=datetime.fromisoformat("2026-08-17T15:00:00+08:00"),
+            require_submission_receipt=True,
+        )
+
+        self.assertTrue(history["complete"])
+        self.assertEqual(history["files"], [])
+        self.assertEqual(history["summary"]["source_files"], 1)
+        self.assertEqual(history["summary"]["trusted_source_files"], 0)
+        self.assertEqual(history["summary"]["ignored_untrusted_manifests"], 1)
+
+    def test_recent_history_includes_deterministic_manifest_with_receipt(self):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        downloaded = downloads / "已被后端接收.mp3"
+        downloaded.write_bytes(b"accepted-content")
+        manifest = {
+            "run_id": "sidebar-mp3-20260817T150000+0800-accepted",
+            "kind": "mp3",
+            "group_id": "28888112822211",
+            "tab_id": "88844545452542",
+            "tab_label": "调研纪要",
+            "files": [
+                {
+                    "filename": downloaded.name,
+                    "absolute_path": str(downloaded),
+                    "media_type": "mp3",
+                    "download_count": 11,
+                    "published_at": "2026-08-17T14:39:00+08:00",
+                    "success": True,
+                }
+            ],
+        }
+        key = f"zsxq-sidebar:mp3:{manifest['run_id']}"
+        prepared = service.prepare_inline_submission(manifest, key)
+        self.assertEqual(ZsxqBrowserSubmission.query.count(), 1)
+
+        history = service.recent_download_history(
+            "mp3",
+            days=3,
+            now=datetime.fromisoformat("2026-08-17T16:00:00+08:00"),
+            require_submission_receipt=True,
+        )
+
+        self.assertTrue(history["complete"])
+        self.assertEqual(history["summary"]["trusted_source_files"], 1)
+        self.assertEqual(history["summary"]["ignored_untrusted_manifests"], 0)
+        self.assertEqual(history["summary"]["unique_downloads"], 1)
+        self.assertEqual(history["files"][0]["filename"], downloaded.name)
+        self.assertEqual(history["files"][0]["dedupe_key"].split(":", 1)[0], "metadata")
+        self.assertEqual(
+            prepared["manifest_path"], ZsxqBrowserSubmission.query.one().manifest_path
+        )
 
     def test_invalid_inline_manifest_does_not_reserve_run_id_or_persist_manifest(self):
         tempdir, downloads, service = self._service_and_downloads()
@@ -583,6 +849,80 @@ class ZsxqBrowserImportPersistenceTest(unittest.TestCase):
         self.assertFalse(prepared["replayed"])
         self.assertEqual(ZsxqBrowserSubmission.query.count(), 1)
         self.assertTrue(Path(prepared["manifest_path"]).is_file())
+
+    def test_inline_submission_rejects_scan_success_count_mismatch_before_receipt(self):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        downloaded = downloads / "计数不一致.mp3"
+        files = [self._download_entry(downloaded, content=b"one-file")]
+        run_id = "sidebar-mp3-20260818T100000+0800-count-mismatch"
+        manifest = self._mp3_inline_manifest(run_id, files, new_download_success=2)
+
+        with self.assertRaises(BrowserImportValidationError):
+            service.prepare_inline_submission(manifest, f"zsxq-sidebar:mp3:{run_id}")
+
+        self.assertEqual(ZsxqBrowserSubmission.query.count(), 0)
+        self.assertEqual(list(service.inbox_root.glob("*.json")), [])
+
+    def test_inline_submission_rejects_duplicate_normalized_basenames_before_receipt(
+        self,
+    ):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        base = downloads / "同轮重复.mp3"
+        chrome_copy = downloads / "同轮重复 (1).mp3"
+        files = [
+            self._download_entry(base, content=b"first"),
+            self._download_entry(chrome_copy, content=b"second"),
+        ]
+        run_id = "sidebar-mp3-20260818T100100+0800-name-duplicate"
+        manifest = self._mp3_inline_manifest(run_id, files, new_download_success=2)
+
+        with self.assertRaises(BrowserImportValidationError):
+            service.prepare_inline_submission(manifest, f"zsxq-sidebar:mp3:{run_id}")
+
+        self.assertEqual(ZsxqBrowserSubmission.query.count(), 0)
+        self.assertEqual(list(service.inbox_root.glob("*.json")), [])
+
+    def test_inline_submission_rejects_duplicate_file_content_before_receipt(self):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        first = downloads / "内容甲.mp3"
+        second = downloads / "内容乙.mp3"
+        files = [
+            self._download_entry(first, content=b"same-content"),
+            self._download_entry(second, content=b"same-content"),
+        ]
+        run_id = "sidebar-mp3-20260818T100200+0800-content-duplicate"
+        manifest = self._mp3_inline_manifest(run_id, files, new_download_success=2)
+
+        with self.assertRaises(BrowserImportValidationError):
+            service.prepare_inline_submission(manifest, f"zsxq-sidebar:mp3:{run_id}")
+
+        self.assertEqual(ZsxqBrowserSubmission.query.count(), 0)
+        self.assertEqual(list(service.inbox_root.glob("*.json")), [])
+
+    def test_inline_submission_rejects_declared_filename_path_mismatch_before_receipt(
+        self,
+    ):
+        tempdir, downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        actual = downloads / "实际文件.mp3"
+        files = [
+            self._download_entry(
+                actual,
+                filename="声称是另一个文件.mp3",
+                content=b"actual-content",
+            )
+        ]
+        run_id = "sidebar-mp3-20260818T100300+0800-path-mismatch"
+        manifest = self._mp3_inline_manifest(run_id, files, new_download_success=1)
+
+        with self.assertRaises(BrowserImportValidationError):
+            service.prepare_inline_submission(manifest, f"zsxq-sidebar:mp3:{run_id}")
+
+        self.assertEqual(ZsxqBrowserSubmission.query.count(), 0)
+        self.assertEqual(list(service.inbox_root.glob("*.json")), [])
 
     def test_inline_submission_reuses_preview_when_file_changes_after_validation(self):
         tempdir, downloads, service = self._service_and_downloads()

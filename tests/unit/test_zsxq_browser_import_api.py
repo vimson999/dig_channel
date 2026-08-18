@@ -61,7 +61,7 @@ class ZsxqBrowserImportApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), {"success": True, "data": report})
-        history.assert_called_once_with("mp3", days=3)
+        history.assert_called_once_with("mp3", days=3, require_submission_receipt=True)
 
     def test_history_endpoint_rejects_invalid_or_mismatched_scope(self):
         invalid_payloads = [

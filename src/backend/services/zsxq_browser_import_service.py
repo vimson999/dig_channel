@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -43,6 +44,8 @@ TAB_CONFIGS = {
 }
 
 _CHROME_DUPLICATE_SUFFIX = re.compile(r"\s+\(\d+\)(?=\.[^.]+$)")
+_INVISIBLE_FILENAME_CHARS = re.compile(r"[\u200b-\u200d\u2060\ufeff]")
+_DETERMINISTIC_INLINE_MANIFEST = re.compile(r"-[0-9a-f]{12}\.json$")
 _RUN_DATE = re.compile(r"(?<!\d)(20\d{2})-?([01]\d)-?([0-3]\d)(?!\d)")
 
 
@@ -84,6 +87,34 @@ def _is_within(path: Path, root: Path) -> bool:
 
 def _strip_chrome_duplicate_suffix(filename: str) -> str:
     return _CHROME_DUPLICATE_SUFFIX.sub("", filename)
+
+
+def _normalize_browser_filename(filename: str) -> str:
+    """Return the stable filename used for browser-history deduplication."""
+    normalized = unicodedata.normalize("NFKC", str(filename or ""))
+    normalized = _INVISIBLE_FILENAME_CHARS.sub("", normalized)
+    normalized = _strip_chrome_duplicate_suffix(normalized.strip())
+    normalized = " ".join(normalized.split())
+    return normalized.casefold()
+
+
+def _canonical_browser_timestamp(value: Any) -> str:
+    """Canonicalize equivalent ISO-8601 serializations to one instant."""
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not text:
+        return ""
+    parseable = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        parsed = datetime.fromisoformat(parseable)
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        return parsed.isoformat(timespec="seconds")
+    return (
+        parsed.astimezone(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _manifest_entries(
@@ -148,20 +179,26 @@ class BrowserSidebarImportService:
 
     @staticmethod
     def _history_identity(entry: dict[str, Any]) -> tuple[str, ...]:
+        filename = _normalize_browser_filename(
+            str(entry.get("filename") or entry.get("name") or "")
+        )
+        if filename:
+            # group_id/tab_id/kind and the three-day window are fixed by the
+            # history request. The normalized filename is the stable browser
+            # identity; published_at and source_url have both been observed
+            # with inconsistent serializations for the same attachment.
+            return ("metadata", filename)
         file_id = str(entry.get("file_id") or "").strip()
         if file_id:
             return ("file_id", file_id)
-        filename = _strip_chrome_duplicate_suffix(
-            str(entry.get("filename") or entry.get("name") or "").strip()
-        )
-        published_at = str(entry.get("published_at") or "").strip()
-        source_url = str(entry.get("source_url") or "").strip()
         digest = str(entry.get("sha256") or "").strip().lower()
-        if filename or published_at or source_url:
-            return ("metadata", filename, published_at, source_url)
         if digest:
             return ("sha256", digest)
         return ("record", json.dumps(entry, ensure_ascii=False, sort_keys=True))
+
+    @staticmethod
+    def _history_dedupe_key(identity: tuple[str, ...]) -> str:
+        return f"{identity[0]}:{json.dumps(list(identity[1:]), ensure_ascii=False, separators=(',', ':'))}"
 
     @staticmethod
     def _history_entry_matches_kind(entry: dict[str, Any], kind: str) -> bool:
@@ -175,12 +212,33 @@ class BrowserSidebarImportService:
             return media_type in config["media_types"]
         return True
 
+    @staticmethod
+    def _is_deterministic_inline_manifest(path: Path) -> bool:
+        return bool(_DETERMINISTIC_INLINE_MANIFEST.search(path.name))
+
+    @staticmethod
+    def _accepted_submission_manifest_paths(paths: Iterable[Path]) -> set[str]:
+        from models.zsxq_sync import ZsxqBrowserSubmission
+
+        candidates = [str(_safe_resolve(path)) for path in paths]
+        if not candidates:
+            return set()
+        rows = (
+            ZsxqBrowserSubmission.query.with_entities(
+                ZsxqBrowserSubmission.manifest_path
+            )
+            .filter(ZsxqBrowserSubmission.manifest_path.in_(candidates))
+            .all()
+        )
+        return {str(_safe_resolve(Path(row[0]))) for row in rows if row[0]}
+
     def recent_download_history(
         self,
         kind: str,
         *,
         days: int = 3,
         now: datetime | None = None,
+        require_submission_receipt: bool = False,
     ) -> dict[str, Any]:
         """Return successful sidebar downloads from recent natural days.
 
@@ -211,7 +269,50 @@ class BrowserSidebarImportService:
         records_seen = 0
         downloads: dict[tuple[str, ...], dict[str, Any]] = {}
 
-        for path in unique_paths:
+        trusted_paths = unique_paths
+        ignored_untrusted_manifests = 0
+        if require_submission_receipt:
+            deterministic_paths = [
+                path
+                for path in unique_paths
+                if self._is_deterministic_inline_manifest(path)
+            ]
+            try:
+                accepted_paths = self._accepted_submission_manifest_paths(
+                    deterministic_paths
+                )
+            except Exception as exc:
+                return {
+                    "kind": kind,
+                    "days": days,
+                    "complete": False,
+                    "files": [],
+                    "errors": [
+                        {
+                            "code": "history_receipt_lookup_failed",
+                            "error": str(exc),
+                        }
+                    ],
+                    "summary": {
+                        "source_files": len(unique_paths),
+                        "trusted_source_files": 0,
+                        "ignored_untrusted_manifests": len(deterministic_paths),
+                        "records_seen": 0,
+                        "unique_downloads": 0,
+                        "duplicates_collapsed": 0,
+                    },
+                }
+            trusted_paths = []
+            for path in unique_paths:
+                if (
+                    self._is_deterministic_inline_manifest(path)
+                    and str(_safe_resolve(path)) not in accepted_paths
+                ):
+                    ignored_untrusted_manifests += 1
+                    continue
+                trusted_paths.append(path)
+
+        for path in trusted_paths:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 entries, _run_id, metadata = _manifest_entries(payload)
@@ -268,7 +369,12 @@ class BrowserSidebarImportService:
                     downloads[identity] = {
                         "file_id": entry.get("file_id"),
                         "filename": filename,
+                        "normalized_filename": _normalize_browser_filename(filename),
                         "published_at": entry.get("published_at"),
+                        "published_at_canonical": _canonical_browser_timestamp(
+                            entry.get("published_at")
+                        ),
+                        "dedupe_key": self._history_dedupe_key(identity),
                         "source_url": entry.get("source_url"),
                         "downloaded_at": entry.get("downloaded_at"),
                         "download_count_at_download": count_at_download,
@@ -296,6 +402,8 @@ class BrowserSidebarImportService:
             "errors": errors,
             "summary": {
                 "source_files": len(unique_paths),
+                "trusted_source_files": len(trusted_paths),
+                "ignored_untrusted_manifests": ignored_untrusted_manifests,
                 "records_seen": records_seen,
                 "unique_downloads": len(files),
                 "duplicates_collapsed": max(records_seen - len(files), 0),
@@ -338,6 +446,7 @@ class BrowserSidebarImportService:
             raise BrowserImportValidationError("内联 manifest 必须包含 files 数组")
         if len(files) > 40:
             raise BrowserImportValidationError("内联 manifest 单次最多包含 40 个文件")
+        seen_declared_names: dict[str, int] = {}
         for index, entry in enumerate(files):
             if not isinstance(entry, dict):
                 raise BrowserImportValidationError(
@@ -354,6 +463,25 @@ class BrowserSidebarImportService:
                     f"内联 manifest 包含错误文件类型，预期 {kind}",
                     details=[{"index": index, "filename": entry.get("filename")}],
                 )
+            declared_name = str(
+                entry.get("filename") or entry.get("name") or ""
+            ).strip()
+            normalized_name = _normalize_browser_filename(declared_name)
+            if normalized_name:
+                prior_index = seen_declared_names.get(normalized_name)
+                if prior_index is not None:
+                    raise BrowserImportValidationError(
+                        "内联 manifest 包含同轮重复文件名",
+                        details=[
+                            {
+                                "index": index,
+                                "prior_index": prior_index,
+                                "filename": declared_name,
+                                "normalized_filename": normalized_name,
+                            }
+                        ],
+                    )
+                seen_declared_names[normalized_name] = index
             count = entry.get("download_count")
             if isinstance(count, bool):
                 raise BrowserImportValidationError(
@@ -378,6 +506,37 @@ class BrowserSidebarImportService:
                     ],
                 )
             entry["download_count"] = numeric_count
+
+        scan_summary = canonical.get("scan_summary")
+        if scan_summary is not None and not isinstance(scan_summary, dict):
+            raise BrowserImportValidationError("scan_summary 必须是对象")
+        if isinstance(scan_summary, dict) and "new_download_success" in scan_summary:
+            reported_success = scan_summary.get("new_download_success")
+            if isinstance(reported_success, bool):
+                raise BrowserImportValidationError(
+                    "scan_summary.new_download_success 必须是非负整数"
+                )
+            try:
+                reported_success = int(reported_success)
+            except (TypeError, ValueError):
+                raise BrowserImportValidationError(
+                    "scan_summary.new_download_success 必须是非负整数"
+                )
+            if reported_success < 0:
+                raise BrowserImportValidationError(
+                    "scan_summary.new_download_success 必须是非负整数"
+                )
+            if reported_success != len(files):
+                raise BrowserImportValidationError(
+                    "scan_summary.new_download_success 与 files 数量不一致",
+                    details=[
+                        {
+                            "new_download_success": reported_success,
+                            "files": len(files),
+                        }
+                    ],
+                )
+            scan_summary["new_download_success"] = reported_success
 
         observations = canonical.get("history_observations", [])
         if not isinstance(observations, list):
@@ -467,6 +626,54 @@ class BrowserSidebarImportService:
         )
         return path
 
+    @staticmethod
+    def _validate_inline_manifest_preview(preview: dict[str, Any]) -> None:
+        duplicate_content = int(
+            (preview.get("summary") or {}).get("duplicate_content") or 0
+        )
+        if duplicate_content:
+            raise BrowserImportValidationError(
+                "内联 manifest 包含重复文件内容",
+                details=[{"duplicate_content": duplicate_content}],
+            )
+
+        seen_actual_names: dict[str, int] = {}
+        for index, item in enumerate(preview.get("files") or []):
+            raw_entry = item.get("raw_manifest_entry") or {}
+            declared_name = str(
+                raw_entry.get("filename") or raw_entry.get("name") or ""
+            ).strip()
+            actual_name = Path(str(item.get("absolute_path") or "")).name
+            declared_normalized = _normalize_browser_filename(declared_name)
+            actual_normalized = _normalize_browser_filename(actual_name)
+            if not declared_normalized or declared_normalized != actual_normalized:
+                raise BrowserImportValidationError(
+                    "内联 manifest 的 filename 与实际下载文件不匹配",
+                    details=[
+                        {
+                            "index": index,
+                            "filename": declared_name,
+                            "actual_filename": actual_name,
+                            "normalized_filename": declared_normalized,
+                            "actual_normalized_filename": actual_normalized,
+                        }
+                    ],
+                )
+            prior_index = seen_actual_names.get(actual_normalized)
+            if prior_index is not None:
+                raise BrowserImportValidationError(
+                    "内联 manifest 包含同轮重复实际文件",
+                    details=[
+                        {
+                            "index": index,
+                            "prior_index": prior_index,
+                            "actual_filename": actual_name,
+                            "normalized_filename": actual_normalized,
+                        }
+                    ],
+                )
+            seen_actual_names[actual_normalized] = index
+
     def _persist_inline_manifest_with_preview(
         self,
         manifest: dict[str, Any],
@@ -500,7 +707,9 @@ class BrowserSidebarImportService:
                     ) from exc
                 if prior_hash != payload_sha256:
                     raise BrowserImportValidationError("同一 run_id 的既有 manifest 内容不一致")
-                return target, self.preview_manifest(target)
+                preview = self.preview_manifest(target)
+                self._validate_inline_manifest_preview(preview)
+                return target, preview
             raise BrowserImportValidationError("同一 run_id 已提交不同的 manifest")
 
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
@@ -516,6 +725,7 @@ class BrowserSidebarImportService:
             # may then be corrected and retried without colliding with an
             # orphaned manifest from the failed attempt.
             preview = self.preview_manifest(temporary)
+            self._validate_inline_manifest_preview(preview)
             os.replace(temporary, target)
         except BrowserImportValidationError:
             try:

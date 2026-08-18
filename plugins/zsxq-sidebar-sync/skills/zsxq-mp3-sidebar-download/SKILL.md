@@ -57,6 +57,28 @@ skill 启动时先读取当前附着标签页的地址。地址必须完全等�
 
 弹层受保护、下载失败或第二次检查后仍无法确认下载完成时，不得写入成功记录。
 
+### 候选、弹层与实际下载文件必须绑定
+
+扫描开始时在当前对话内建立两个集合：`seen_candidate_keys` 和 `downloaded_actual_base_names`。候选键使用下节规定的规范化文件名；同一候选键在本轮第二次出现时记录 `duplicate_candidate_in_same_run`，不得再次打开弹层或点击下载。
+
+对每个首次候选，在读取下载次数之前必须完成以下绑定：
+
+1. 保存主题卡片上的预期文件名 `expected_candidate_filename`，再点击该附件。
+2. 弹层打开后读取弹层当前显示的文件名。对预期文件名与弹层文件名都做 Unicode NFKC 规范化、移除不可见字符、折叠空白、忽略拉丁字母大小写，并去掉扩展名前 Chrome 自动生成的 `(1)`、`(2)` 等后缀后比较。
+3. 第一次读不到弹层文件名或两者不一致时，保持同一弹层不动，固定等待至少 2 秒，只重读一次。第二次仍缺失或不一致，记录 `detail_file_mismatch_after_2s`，关闭弹层并跳过；绝对不得点击此时的下载按钮。
+4. 文件名绑定成功后，才按本节既有规则读取下载次数和下载按钮。
+
+下载必须严格串行：同时只能有 1 个下载任务在途。点击下载后，在获得当前候选对应的下载完成事件、真实路径和真实文件名，或明确得到失败结果之前，不得打开或处理下一个候选，不得用“最近新增文件”或稍后完成的另一个下载来推测对应关系。若无法把完成事件唯一绑定到当前候选，按 `downloaded_file_mismatch` 处理并停止后续下载点击。
+
+浏览器明确报告下载完成后，再做实际文件绑定：
+
+- 从浏览器下载完成结果读取真实 `absolute_path` 和真实落盘文件名，不得根据页面文件名推测路径。
+- 真实落盘文件名去掉 Chrome `(n)` 后缀并按上述规则规范化，必须等于预期文件名的规范化结果；否则记录 `downloaded_file_mismatch`，不加入 `files`，并立即停止本轮后续所有下载点击，因为当前浏览器下载上下文已不可信。
+- 真实落盘文件名的规范化基名若已在 `downloaded_actual_base_names` 中，记录 `duplicate_actual_file_in_same_run`，不加入 `files`，并立即停止本轮后续下载点击。
+- 只有上述检查通过，才把该规范化基名加入 `downloaded_actual_base_names`，并把这一条加入 `files`。
+
+已经停止后续下载点击时，仍可完成当前已验证记录的 manifest 提交；不得重新扫描、重开弹层或尝试“补齐”下载数量。
+
 ## 通过 HTML 桥接查询最近 3 天历史
 
 在任何下载发生前，使用与已经验证成功的本地健康页相同的 **Web preview 页面打开方式**访问：
@@ -76,13 +98,14 @@ skill 启动时先读取当前附着标签页的地址。地址必须完全等�
 
 不得使用 curl、`exec_command`、终端、直接端口 5001、Downloads 中的本地 JSON 或文件夹授权来查询历史。不要请求 `Full access`。
 
-去重键按以下顺序选择：
+历史页中的每条记录由后端提供 `normalized_filename`、`published_at_canonical` 和 `dedupe_key`。去重必须以这些后端规范化字段为准：
 
-1. 页面提供 `file_id` 时使用 `file_id`。
-2. 没有 `file_id` 时使用 `filename + published_at + source_url`。
-3. 如果记录中有 `sha256`，可用 SHA-256 作为同内容文件的补充去重依据。
+1. 当前候选文件名做 Unicode NFKC 规范化，移除不可见字符、折叠空白、忽略拉丁字母大小写，并去掉扩展名前 Chrome `(1)`、`(2)` 等后缀。
+2. 最近 3 天历史中出现同一规范化文件名时，直接视为已经下载，不再要求发布时间字符串相同。固定标签页和媒体类型已经限定范围，文件名中的日期也用于区分版本。
+3. `published_at_canonical` 只用于审计；`2026-08-17T13:39+08:00` 与 `2026-08-17T13:39:00+08:00` 必须理解为同一时刻，但发布时间不参与去重键。
+4. 不得把 `source_url` 加入去重键；同一固定标签页可能返回不同编码的 URL。`file_id` 和 `sha256` 只作为存在于双方时的补充命中依据，不能推翻规范化文件名已经命中的结果。
 
-历史 HTML 页已经完成媒体类型、成功状态和最近自然日窗口过滤。当前文件与返回记录的去重键匹配时，视为已经下载。
+历史 HTML 页已经完成媒体类型、成功状态、最近自然日窗口以及新式 manifest 接收凭证过滤。`data.summary.ignored_untrusted_manifests` 大于 0 是允许的，表示无数据库接收凭证的失败 manifest 已被安全忽略；只要 `data.complete` 为 `true` 就继续。
 
 不要根据 Downloads 文件夹中是否存在同名文件判断是否下载过，也不要使用 `download_count` 单独判断去重。
 
@@ -144,7 +167,8 @@ manifest 必须以这份固定骨架为准，只替换 `run_id`、扫描结果�
 - `historical_already_downloaded`、`new_download_success`；
 - `skipped_download_count_not_over_10`、`outside_48h`、`published_time_unknown`；
 - `download_button_missing`、`download_count_unavailable_after_2s`、`download_button_missing_after_2s`、`download_failed`；其中 `download_button_missing` 可保留为兼容性汇总计数；
-- `history_complete`、`history_records_seen`、`history_unique_files`、`history_duplicates_collapsed`。
+- `duplicate_candidate_in_same_run`、`detail_file_mismatch_after_2s`、`downloaded_file_mismatch`、`duplicate_actual_file_in_same_run`；
+- `history_complete`、`history_records_seen`、`history_unique_files`、`history_duplicates_collapsed`、`history_ignored_untrusted_manifests`。
 
 每条新下载记录至少包含：
 
@@ -162,10 +186,13 @@ manifest 必须以这份固定骨架为准，只替换 `run_id`、扫描结果�
 - `absolute_path` 必须是同一个浏览器下载完成结果对应的非空绝对路径，并且位于 `/Users/v9/Downloads/` 下；不得写 `null`、空字符串、页面上的原始文件名或推测路径。
 - `filename` 必须等于 `absolute_path` 的最后一段文件名。
 - `media_type`、`download_count`、`published_at`、`topic_title`、`source_url`、`downloaded_at` 和 `success: true` 必须同时存在。
+- `new_download_success` 必须严格等于 `files` 数量；不得用点击次数、下载开始次数或扫描候选数代替。
+- `files` 中所有真实落盘文件名去掉 Chrome `(n)` 后缀并规范化后的基名必须互不重复；有 `sha256` 时内容摘要也必须互不重复。
+- 每条记录都必须已经通过“预期候选文件名 = 弹层文件名 = 真实落盘文件名（允许 Chrome `(n)` 后缀）”绑定检查。
 
 若任一新下载文件无法取得实际 `absolute_path`，记录 `manifest_absolute_path_missing` 并停止提交；不得先提交不完整 manifest，再修改内容重试。`files: []` 不需要文件路径检查，仍按正常 0 文件同步提交。
 
-自检通过后，把完整 manifest 视为冻结对象。第一次点击提交之后，不得增加、删除或修改任何字段；后续只有“结果未知”时才能按下节规则重放完全相同的对象。
+自检通过后，把完整 manifest 视为冻结对象。第一次点击提交之后，不得增加、删除或修改任何字段；后续只有“结果未知”时才能按下节规则重放完全相同的对象。最终汇报中的下载数量、文件清单和跳过计数必须只从这个冻结 manifest 及结果页读取，不得依赖此前对话中的临时计数重新汇总。
 
 ## 通过 HTML 表单提交本地编排
 
@@ -201,6 +228,7 @@ HTTP 400、字段校验失败、路径校验失败以及其他已明确返回的
 - 新下载文件名和页面下载次数；
 - 历史 HTML 页判定为最近 3 天已下载的文件及其最新下载次数；
 - 下载次数不超过 10、发布时间超出 48 小时、时间未知、等待 2 秒后仍无法读取下载次数、等待 2 秒后按钮仍未出现或下载失败的文件及具体原因；
+- 同轮候选重复、等待 2 秒后弹层文件名仍不匹配、实际落盘文件名不匹配、同轮实际文件重复的数量；发生实际文件绑定错误时要明确说明后续下载是否已停止；
 - 历史 HTML 页的完整性、历史唯一文件数和折叠重复数；
 - 后端返回的本次 manifest 路径；
 - 本地同步编排接口是否排队成功及任务 ID；即使没有新增文件，也要汇报本轮 0 文件同步是否排队成功。
