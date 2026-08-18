@@ -109,7 +109,7 @@
 - [x] Confirm the malformed 2026-08-18 deterministic manifest is ignored by trusted history.
 - [x] Build a recovery manifest containing only the six confirmed new unique MP3 files.
 - [x] Submit recovery once, record task ID, and verify downstream dispatch is queued.
-- [ ] Commit and push only relevant files.
+- [x] Commit and push only relevant files.
 
 ### Task 6: Manual acceptance handoff
 
