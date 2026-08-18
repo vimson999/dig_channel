@@ -113,10 +113,10 @@
 
 ### Task 6: Manual acceptance handoff
 
-- [ ] Notify the user that implementation is ready for manual acceptance.
-- [ ] Provide one exact MP3 prompt and one exact PDF prompt.
-- [ ] Require evidence: scan count, new downloads, duplicate counters, manifest path, task ID, replayed state, and downstream queue status.
-- [ ] Keep automation paused while waiting for the user's verdict.
+- [x] Notify the user that implementation is ready for manual acceptance.
+- [x] Provide one exact MP3 prompt and one exact PDF prompt.
+- [x] Require evidence: scan count, new downloads, duplicate counters, manifest path, task ID, replayed state, and downstream queue status.
+- [x] Keep automation paused while waiting for the user's verdict.
 
 ### Task 7: Bounded operational test after acceptance
 
