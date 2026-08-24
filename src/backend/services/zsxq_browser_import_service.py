@@ -48,6 +48,27 @@ _INVISIBLE_FILENAME_CHARS = re.compile(r"[\u200b-\u200d\u2060\ufeff]")
 _DETERMINISTIC_INLINE_MANIFEST = re.compile(r"-[0-9a-f]{12}\.json$")
 _RUN_DATE = re.compile(r"(?<!\d)(20\d{2})-?([01]\d)-?([0-3]\d)(?!\d)")
 
+_CANDIDATE_FAILURE_STAGE_COUNTERS = frozenset(
+    {
+        "browser_connection_reset_with_inflight_download",
+        "detail_file_mismatch_after_2s",
+        "detail_preview_close_failed",
+        "download_button_missing_after_2s",
+        "download_count_unavailable_after_2s",
+        "download_event_conflict",
+        "download_failed",
+        "download_listener_unavailable_for_candidate",
+        "download_metadata_capability_unavailable",
+        "download_result_incomplete_after_retry",
+        "download_terminal_timeout_after_retry",
+        "downloaded_file_mismatch",
+        "duplicate_actual_file_in_same_run",
+        "duplicate_candidate_in_same_run",
+        "late_download_event_for_closed_candidate",
+        "unexpected_download_without_armed_candidate",
+    }
+)
+
 
 class BrowserImportValidationError(ValueError):
     """Raised when a sidebar manifest cannot be safely imported."""
@@ -538,6 +559,192 @@ class BrowserSidebarImportService:
                 )
             scan_summary["new_download_success"] = reported_success
 
+        candidate_failures = canonical.get("candidate_failures", [])
+        if not isinstance(candidate_failures, list):
+            raise BrowserImportValidationError("candidate_failures 必须是对象数组")
+        if len(candidate_failures) > 500:
+            raise BrowserImportValidationError("candidate_failures 单次最多包含 500 项")
+        failure_stage_counts: dict[str, int] = {}
+        for index, entry in enumerate(candidate_failures):
+            if not isinstance(entry, dict):
+                raise BrowserImportValidationError(
+                    "candidate_failures 中每一项必须是对象",
+                    details=[{"index": index}],
+                )
+            failure_stage = str(entry.get("failure_stage") or "").strip()
+            if not failure_stage:
+                raise BrowserImportValidationError(
+                    "candidate_failures.failure_stage 不能为空",
+                    details=[{"index": index}],
+                )
+            failure_stage_counts[failure_stage] = (
+                failure_stage_counts.get(failure_stage, 0) + 1
+            )
+
+        if isinstance(scan_summary, dict):
+            expected_failure_counters = {
+                "candidate_failure_count": len(candidate_failures),
+                **{
+                    stage: failure_stage_counts.get(stage, 0)
+                    for stage in _CANDIDATE_FAILURE_STAGE_COUNTERS
+                },
+            }
+            normalization_notes = []
+            for field, expected_count in expected_failure_counters.items():
+                reported_count = scan_summary.get(field, expected_count)
+                if isinstance(reported_count, bool):
+                    raise BrowserImportValidationError(
+                        f"scan_summary.{field} 必须是非负整数"
+                    )
+                try:
+                    reported_count = int(reported_count)
+                except (TypeError, ValueError):
+                    raise BrowserImportValidationError(
+                        f"scan_summary.{field} 必须是非负整数"
+                    )
+                if reported_count < 0:
+                    raise BrowserImportValidationError(
+                        f"scan_summary.{field} 必须是非负整数"
+                    )
+                if reported_count != expected_count:
+                    normalization_notes.append(
+                        {
+                            "field": field,
+                            "reported": reported_count,
+                            "normalized": expected_count,
+                        }
+                    )
+                scan_summary[field] = expected_count
+
+            if normalization_notes:
+                scan_summary["candidate_failure_count_audit_normalized"] = (
+                    normalization_notes
+                )
+
+            if "within_36h" in scan_summary:
+                def summary_count(field: str, default: int = 0) -> int:
+                    raw_value = scan_summary.get(field, default)
+                    if isinstance(raw_value, bool):
+                        raise BrowserImportValidationError(
+                            f"scan_summary.{field} 必须是非负整数"
+                        )
+                    try:
+                        value = int(raw_value)
+                    except (TypeError, ValueError):
+                        raise BrowserImportValidationError(
+                            f"scan_summary.{field} 必须是非负整数"
+                        )
+                    if value < 0:
+                        raise BrowserImportValidationError(
+                            f"scan_summary.{field} 必须是非负整数"
+                        )
+                    return value
+
+                within_36h = summary_count("within_36h")
+                historical = summary_count("historical_already_downloaded")
+                success = summary_count("new_download_success")
+                low_field = (
+                    "skipped_download_count_not_over_10"
+                    if kind == "mp3"
+                    else "skipped_download_count_not_over_30"
+                )
+                low_threshold = summary_count(low_field)
+
+                terminal_failure_keys: set[str] = set()
+                for index, entry in enumerate(candidate_failures):
+                    failure_stage = str(entry.get("failure_stage") or "").strip()
+                    if failure_stage == "duplicate_candidate_in_same_run":
+                        continue
+                    expected_filename = str(
+                        entry.get("expected_filename") or ""
+                    ).strip()
+                    failure_key = (
+                        _normalize_browser_filename(expected_filename)
+                        if expected_filename
+                        else f"__candidate_failure_{index}"
+                    )
+                    terminal_failure_keys.add(failure_key)
+                terminal_failure_count = len(terminal_failure_keys)
+
+                unprocessed_success_limit = summary_count(
+                    "candidates_not_processed_due_success_limit"
+                )
+                unprocessed_global_abort = summary_count(
+                    "candidates_not_processed_due_global_abort"
+                )
+                unprocessed_execution_deadline = summary_count(
+                    "candidates_not_processed_due_execution_deadline"
+                )
+                classified = (
+                    historical
+                    + success
+                    + low_threshold
+                    + terminal_failure_count
+                    + unprocessed_success_limit
+                    + unprocessed_global_abort
+                    + unprocessed_execution_deadline
+                )
+                if classified > within_36h:
+                    raise BrowserImportValidationError(
+                        "scan_summary 窗口内候选终态分类超过 within_36h",
+                        details=[
+                            {
+                                "within_36h": within_36h,
+                                "candidate_terminal_classification_total": classified,
+                            }
+                        ],
+                    )
+
+                classification_gap = within_36h - classified
+                abort_raw = scan_summary.get("abort_latch", False)
+                abort_latch = abort_raw is True or str(abort_raw).lower() == "true"
+                if classification_gap:
+                    if abort_latch:
+                        unprocessed_global_abort += classification_gap
+                    elif success >= 40:
+                        unprocessed_success_limit += classification_gap
+                    else:
+                        unprocessed_execution_deadline += classification_gap
+
+                normalized_classification = {
+                    "candidate_terminal_failure_count": terminal_failure_count,
+                    "candidates_not_processed_due_success_limit": (
+                        unprocessed_success_limit
+                    ),
+                    "candidates_not_processed_due_global_abort": (
+                        unprocessed_global_abort
+                    ),
+                    "candidates_not_processed_due_execution_deadline": (
+                        unprocessed_execution_deadline
+                    ),
+                    "candidate_terminal_classification_total": within_36h,
+                }
+                classification_notes = []
+                for field, normalized_value in normalized_classification.items():
+                    reported_value = scan_summary.get(field)
+                    if reported_value is None:
+                        classification_notes.append(
+                            {
+                                "field": field,
+                                "reported": None,
+                                "normalized": normalized_value,
+                            }
+                        )
+                    else:
+                        parsed_reported = summary_count(field)
+                        if parsed_reported != normalized_value:
+                            classification_notes.append(
+                                {
+                                    "field": field,
+                                    "reported": parsed_reported,
+                                    "normalized": normalized_value,
+                                }
+                            )
+                    scan_summary[field] = normalized_value
+                if classification_notes:
+                    scan_summary[
+                        "candidate_terminal_classification_audit_normalized"
+                    ] = classification_notes
         observations = canonical.get("history_observations", [])
         if not isinstance(observations, list):
             raise BrowserImportValidationError("history_observations 必须是对象数组")

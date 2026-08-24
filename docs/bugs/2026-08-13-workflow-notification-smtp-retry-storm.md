@@ -87,3 +87,9 @@ scheduler。
 因此状态提升到 `RUNTIME_REPLACED/OPEN` 而不是 CLOSED。下一轮先确认新 worker 的 retry 日志出现
 指数抖动且单轮只有一次 SSL（另可有一次协议 fallback），再要求 terminal failure=0、受影响 event
 最终送达和完整 24 小时无风暴，不能仅凭 ready 或测试关闭。
+
+## 2026-08-19 跨 event provider 风暴复发
+
+固定窗口记录 `142 success / 51 retry / 13 terminal failed`。08:52 前后多条 MP3 里程碑同时进入单并发队列；新 worker 已按 30/60/120 秒指数抖动执行，且单轮不再做三次服务内重试，证明 2026-08-16 的“双层固定重试相乘”修复已加载。
+
+但每个 event 仍独立拥有完整 provider 预算，SMTP 故障时每个 event 都执行 SSL 后再做 STARTTLS fallback，并分别进入三次 Celery retry。13 个 event 在 provider 恢复前耗尽预算并永久失败。根因因此上溯为缺少跨 event 共享的 provider 背压/熔断与 durable pending/最终补发；现状仍为 OPEN，不得把指数抖动写成已根治。下一轮必须以 event id 建立待发与最终送达对账，并验证熔断窗口内实际 SMTP 连接数受全局预算约束。

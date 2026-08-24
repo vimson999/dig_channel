@@ -467,6 +467,172 @@ class ZsxqBrowserImportServiceTest(unittest.TestCase):
         )
         self.assertEqual(canonical["history_observations"][0]["download_count"], 25)
 
+    def test_inline_manifest_normalizes_inconsistent_candidate_failure_audit_counts(self):
+        tempdir, _downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        base = {
+            "run_id": "sidebar-mp3-20260819T120000+0800",
+            "kind": "mp3",
+            "group_id": "28888112822211",
+            "tab_id": "88844545452542",
+            "tab_label": "调研纪要",
+            "files": [],
+            "candidate_failures": [
+                {
+                    "expected_filename": "候选-a.mp3",
+                    "failure_stage": "detail_file_mismatch_after_2s",
+                },
+                {
+                    "expected_filename": "候选-b.mp3",
+                    "failure_stage": "detail_file_mismatch_after_2s",
+                },
+                {
+                    "expected_filename": "候选-c.mp3",
+                    "failure_stage": "detail_preview_close_failed",
+                },
+            ],
+        }
+
+        invalid_summaries = (
+            {
+                "candidate_failure_count": 1,
+                "detail_file_mismatch_after_2s": 2,
+                "detail_preview_close_failed": 0,
+            },
+            {
+                "candidate_failure_count": 3,
+                "detail_file_mismatch_after_2s": 0,
+                "detail_preview_close_failed": 1,
+            },
+        )
+        for scan_summary in invalid_summaries:
+            with self.subTest(scan_summary=scan_summary):
+                canonical, _digest = service.canonical_manifest_payload(
+                    {**base, "scan_summary": scan_summary}
+                )
+                self.assertEqual(
+                    canonical["scan_summary"]["candidate_failure_count"],
+                    3,
+                )
+                self.assertEqual(
+                    canonical["scan_summary"]["detail_file_mismatch_after_2s"],
+                    2,
+                )
+                self.assertEqual(
+                    canonical["scan_summary"]["detail_preview_close_failed"],
+                    1,
+                )
+                self.assertIn(
+                    "candidate_failure_count_audit_normalized",
+                    canonical["scan_summary"],
+                )
+
+        canonical, _digest = service.canonical_manifest_payload(
+            {
+                **base,
+                "scan_summary": {
+                    "candidate_failure_count": 3,
+                    "detail_file_mismatch_after_2s": 2,
+                    "detail_preview_close_failed": 1,
+                },
+            }
+        )
+        self.assertEqual(canonical["scan_summary"]["candidate_failure_count"], 3)
+
+    def test_inline_manifest_normalizes_terminal_candidate_classification(self):
+        tempdir, _downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+
+        cases = (
+            {
+                "kind": "mp3",
+                "tab_id": "88844545452542",
+                "tab_label": "调研纪要",
+                "within": 5,
+                "low_field": "skipped_download_count_not_over_10",
+                "low": 1,
+                "history": 1,
+                "abort_latch": True,
+                "expected": {
+                    "candidate_terminal_failure_count": 1,
+                    "candidates_not_processed_due_success_limit": 0,
+                    "candidates_not_processed_due_global_abort": 2,
+                    "candidates_not_processed_due_execution_deadline": 0,
+                    "candidate_terminal_classification_total": 5,
+                },
+            },
+            {
+                "kind": "pdf",
+                "tab_id": "51184248544214",
+                "tab_label": "外资研报",
+                "within": 4,
+                "low_field": "skipped_download_count_not_over_30",
+                "low": 1,
+                "history": 0,
+                "abort_latch": False,
+                "expected": {
+                    "candidate_terminal_failure_count": 1,
+                    "candidates_not_processed_due_success_limit": 0,
+                    "candidates_not_processed_due_global_abort": 0,
+                    "candidates_not_processed_due_execution_deadline": 2,
+                    "candidate_terminal_classification_total": 4,
+                },
+            },
+        )
+        for index, case in enumerate(cases):
+            with self.subTest(kind=case["kind"]):
+                canonical, _digest = service.canonical_manifest_payload(
+                    {
+                        "run_id": f"sidebar-{case['kind']}-20260820T12000{index}+0800",
+                        "kind": case["kind"],
+                        "group_id": "28888112822211",
+                        "tab_id": case["tab_id"],
+                        "tab_label": case["tab_label"],
+                        "files": [],
+                        "candidate_failures": [
+                            {
+                                "expected_filename": f"候选-{index}",
+                                "failure_stage": "detail_preview_close_failed",
+                            }
+                        ],
+                        "scan_summary": {
+                            "within_36h": case["within"],
+                            "new_download_success": 0,
+                            "historical_already_downloaded": case["history"],
+                            case["low_field"]: case["low"],
+                            "abort_latch": case["abort_latch"],
+                        },
+                    }
+                )
+                for field, expected in case["expected"].items():
+                    self.assertEqual(canonical["scan_summary"][field], expected)
+                self.assertIn(
+                    "candidate_terminal_classification_audit_normalized",
+                    canonical["scan_summary"],
+                )
+
+    def test_inline_manifest_rejects_terminal_candidate_overclassification(self):
+        tempdir, _downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+        with self.assertRaises(BrowserImportValidationError):
+            service.canonical_manifest_payload(
+                {
+                    "run_id": "sidebar-mp3-20260820T120010+0800",
+                    "kind": "mp3",
+                    "group_id": "28888112822211",
+                    "tab_id": "88844545452542",
+                    "tab_label": "调研纪要",
+                    "files": [],
+                    "candidate_failures": [],
+                    "scan_summary": {
+                        "within_36h": 2,
+                        "new_download_success": 0,
+                        "historical_already_downloaded": 1,
+                        "skipped_download_count_not_over_10": 2,
+                    },
+                }
+            )
+
     def test_inline_manifest_rejects_same_run_id_with_changed_payload(self):
         tempdir, downloads, service = self._service_and_downloads()
         self.addCleanup(tempdir.cleanup)

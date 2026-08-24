@@ -16,6 +16,12 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-08-20 | [研报基础文案物料页在后台持续刷新 Celery 状态](2026-08-20-report-script-material-hidden-worker-polling.md) | 研报基础文案物料台 / Celery / Page Visibility | RUNTIME_REPLACED/OBSERVING；旧浏览器实例待退出，下一完整窗口复核 |
+| 2026-08-19 | [B站情报双调度器与未变化 JSON 重写放大数据库](2026-08-19-bilibili-intelligence-duplicate-scheduler-write-amplification.md) | Bilibili intelligence / scheduler / JSON 写放大 / 索引 | RUNTIME_REPLACED/OBSERVING；待完整窗口与人工索引维护 |
+| 2026-08-18 | [视频编辑器后台标签页持续轮询 Celery 与 Publisher](2026-08-18-video-editor-hidden-polling.md) | 视频编辑器 / Celery / Publisher / Page Visibility | CODE_CHANGED/OBSERVING；待完整窗口 hidden 验收 |
+| 2026-08-18 | [Watchdog 成功修复分支未归还数据库 Session](2026-08-18-watchdog-success-session-hold.md) | Celery Watchdog / Session / publication_tasks | RUNTIME_REPLACED/OBSERVING；新进程已验收，待完整窗口 |
+| 2026-08-18 | [ZSXQ Insights 冷聚合在查询后继续持有 Session](2026-08-18-zsxq-insights-session-held-after-read.md) | 生财情报台 / PgBouncer / Session | Session 边界已替换；远端网络长尾 OPEN |
+| 2026-08-18 | [DB 巡检把托管日志中的 SQL 失败误分为临时诊断](2026-08-18-managed-sql-error-source-misclassified.md) | DB 分析器 / scheduler / PgBouncer | CODE_CHANGED/OBSERVING；回放已通过 |
 | 2026-08-16 | [后台状态页持续轮询并放大 API 与数据库往返](2026-08-16-hidden-status-pages-unbounded-polling.md) | Celery Monitor / ZSXQ 系统同步 / Page Visibility / PgBouncer | CODE_CHANGED/OBSERVING；真实页面已加载，待完整窗口验收 |
 | 2026-08-15 | [DB 巡检未识别 PgBouncer 路由回退与等待错误](2026-08-15-db-audit-missed-pgbouncer-route-fallback.md) | DB 巡检 / PgBouncer / Tailscale / 代理 TUN | 分析器已修复并回放验证；网络根因 OPEN/OBSERVING |
 | 2026-08-14 | [研报音频 DeepSeek 结构化跨外部调用持有数据库 Session](2026-08-14-report-audio-deepseek-session-hold.md) | report audio / DeepSeek / Session / PgBouncer | RUNTIME_REPLACED/OPEN；待真实任务和完整窗口验收 |
@@ -42,7 +48,7 @@
 | 2026-08-05 | [研报音频后台标签页轮询放大为 HTTP/SQL N+1](2026-08-05-report-audio-hidden-tab-polling-n-plus-one.md) | 研报音频列表与详情页 / publication_tasks / PgBouncer | 代码与回归完成，待下一完整窗口验收 |
 | 2026-08-04 | [PostgreSQL 白名单拒绝变化后的出口 IP](2026-08-04-postgres-hba-egress-ip-outage.md) | 全站 / PgBouncer / 远端 PostgreSQL / 重启门禁 | 再次复现，等待管理员恢复 223.80.177.164 白名单 |
 | 2026-08-04 | [DB 巡检遗漏当日 gzip 轮转日志](2026-08-04-db-audit-skipped-gzip-rotations.md) | DB 巡检 / API E2E / PgBouncer 统计 | 已修复并重跑完整窗口 |
-| 2026-08-03 | [ZSXQ 全部 Tab 调度器重复读取远端配置](2026-08-03-zsxq-scheduler-config-polling-roundtrip.md) | ZSXQ 全部 Tab / scheduler / system_configs / PgBouncer | 已部署，待下一完整窗口验收 |
+| 2026-08-03 | [ZSXQ 全部 Tab 调度器重复读取远端配置](2026-08-03-zsxq-scheduler-config-polling-roundtrip.md) | ZSXQ 全部 Tab / scheduler / system_configs / PgBouncer | RUNTIME_REPLACED/OBSERVING；5 分钟节奏已验收，待完整 24 小时 |
 | 2026-08-02 | [请求鉴权在全局守卫和路由装饰器中重复查询用户](2026-08-02-request-auth-duplicate-user-query.md) | 全站受保护页面/API / 用户鉴权 / PostgreSQL | 已完成进程重载，待真实请求定量验收 |
 | 2026-07-30 | [MP3 强制重生成在延迟续跑中重复创建已完成视频](2026-07-30-mp3-force-regenerate-repeated-completed-video.md) | MP3 视频编排 / Publisher / 延迟续跑 / 重启门禁 | 已部署并完成真实幂等验收，父任务已推进竖屏 |
 | 2026-07-30 | [视觉视频端到端流程停在素材就绪并误阻重启](2026-07-30-visual-ready-state-blocked-restart.md) | 火柴人视觉视频 / 自动成片 / 重启安全门禁 / 父子任务状态机 | 已部署，历史任务自动对齐和最终视频补投进行中 |

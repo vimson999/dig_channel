@@ -171,6 +171,28 @@ class ZsxqAutoPublishServiceTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "数据库中没有可用于当前星球"):
                     auto_publish._resolve_runtime_cookie_accounts(config, required=True)
 
+    def test_manual_retry_can_pin_db_publish_account(self):
+        config = {
+            "group_id": "group-1",
+            "publish_account_id": "xiaoqing-account",
+        }
+        expected = [{"id": "xiaoqing-account", "name": "小青0708", "cookie": "cookie"}]
+        with patch.object(auto_publish, "has_app_context", return_value=True):
+            with patch.object(
+                auto_publish,
+                "_db_publish_cookie_accounts",
+                return_value=expected,
+            ) as resolve:
+                accounts, source = auto_publish._resolve_runtime_cookie_accounts(config, required=True)
+
+        self.assertEqual(accounts, expected)
+        self.assertEqual(source, "db")
+        resolve.assert_called_once_with(
+            group_id="group-1",
+            account_id="xiaoqing-account",
+            required=True,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

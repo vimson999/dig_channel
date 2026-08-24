@@ -20,6 +20,23 @@ from apis.v1 import celery_monitor  # noqa: E402
 
 
 class CeleryMonitorWatchdogTest(unittest.TestCase):
+    def test_successful_watchdog_repair_releases_session_before_next_repair(self):
+        events = []
+
+        with patch.object(
+            celery_monitor,
+            "_release_db_session_quietly",
+            side_effect=lambda: events.append("released"),
+        ):
+            result = celery_monitor._isolated_watchdog_repair(
+                "publisher_cleanup",
+                lambda: events.append("repair") or {"cleaned": 0},
+                fallback={"cleaned": 0},
+            )
+
+        self.assertEqual(result, {"cleaned": 0})
+        self.assertEqual(events, ["repair", "released"])
+
     def test_inspect_requests_task_states_in_parallel(self):
         barrier = threading.Barrier(3)
         calls = []

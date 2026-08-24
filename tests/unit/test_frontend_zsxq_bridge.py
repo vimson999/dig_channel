@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -19,9 +20,10 @@ SPEC.loader.exec_module(frontend_server)
 
 
 class _LocalJsonBackend:
-    def __init__(self, *responses):
+    def __init__(self, *responses, response_delay_seconds=0):
         self.responses = list(responses)
         self.received = []
+        self.response_delay_seconds = response_delay_seconds
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(handler):  # noqa: N802
@@ -76,11 +78,16 @@ class _LocalJsonBackend:
         encoded_payload = (
             payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         )
+        if self.response_delay_seconds:
+            time.sleep(self.response_delay_seconds)
         handler.send_response(status)
         handler.send_header("Content-Type", content_type)
         handler.send_header("Content-Length", str(len(encoded_payload)))
         handler.end_headers()
-        handler.wfile.write(encoded_payload)
+        try:
+            handler.wfile.write(encoded_payload)
+        except BrokenPipeError:
+            return
 
 
 class _RunningServer:
@@ -121,7 +128,9 @@ class _CsrfParser(HTMLParser):
 
 
 def _fetch_csrf(base_url, kind):
-    with _proxyless_open(f"{base_url}/zsxq-sidebar-submit.html?kind={kind}") as response:
+    with _proxyless_open(
+        f"{base_url}/zsxq-sidebar-submit.html?kind={kind}"
+    ) as response:
         parser = _CsrfParser()
         parser.feed(response.read().decode("utf-8"))
     return parser.token
@@ -172,7 +181,9 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
     def test_health_route_returns_the_real_backend_health_without_using_a_proxy(self):
         with _LocalJsonBackend() as backend:
             with self._frontend(backend.base_url) as frontend:
-                with _proxyless_open(f"{frontend.base_url}/bridge/zsxq/health") as response:
+                with _proxyless_open(
+                    f"{frontend.base_url}/bridge/zsxq/health"
+                ) as response:
                     body = json.load(response)
 
         self.assertEqual(response.status, 200)
@@ -301,7 +312,9 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
                     )
 
         self.assertEqual(raised.exception.code, 400)
-        self.assertEqual(raised.exception.headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertEqual(
+            raised.exception.headers["Content-Type"], "text/html; charset=utf-8"
+        )
         self.assertEqual(backend.received, [])
 
     def test_submit_page_contains_native_form_fixed_kind_and_csrf(self):
@@ -344,7 +357,11 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
             ("wrong-label", {**valid_manifest, "tab_label": "wrong"}, 400),
             ("invalid-run-id", {**valid_manifest, "run_id": "bad run id"}, 400),
             ("non-list-files", {**valid_manifest, "files": {}}, 400),
-            ("too-many-files", {**valid_manifest, "files": [{} for _ in range(41)]}, 400),
+            (
+                "too-many-files",
+                {**valid_manifest, "files": [{} for _ in range(41)]},
+                400,
+            ),
         ]
         for case_name, manifest, expected_status in cases:
             with self.subTest(case_name=case_name):
@@ -412,10 +429,14 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
     def test_history_returns_502_html_when_backend_is_unavailable(self):
         with self._frontend("http://127.0.0.1:1") as frontend:
             with self.assertRaises(urllib.error.HTTPError) as raised:
-                _proxyless_open(f"{frontend.base_url}/zsxq-sidebar-history.html?kind=mp3")
+                _proxyless_open(
+                    f"{frontend.base_url}/zsxq-sidebar-history.html?kind=mp3"
+                )
 
         self.assertEqual(raised.exception.code, 502)
-        self.assertEqual(raised.exception.headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertEqual(
+            raised.exception.headers["Content-Type"], "text/html; charset=utf-8"
+        )
         self.assertIn(
             "zsxq_backend_unavailable",
             raised.exception.read().decode("utf-8"),
@@ -479,7 +500,9 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
         self.assertEqual(len(backend.received), 1)
 
     def test_history_keeps_incomplete_state_visible_for_failure_closed_callers(self):
-        with _LocalJsonBackend((200, {"success": True, "data": {"complete": False}})) as backend:
+        with _LocalJsonBackend(
+            (200, {"success": True, "data": {"complete": False}})
+        ) as backend:
             with self._frontend(backend.base_url) as frontend:
                 with _proxyless_open(
                     f"{frontend.base_url}/zsxq-sidebar-history.html?kind=mp3"
@@ -533,6 +556,40 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
             },
         )
 
+    def test_submit_uses_a_longer_backend_timeout_than_history_requests(self):
+        manifest = {
+            "run_id": "sidebar-mp3-20260818T124700+0800-timeout",
+            "kind": "mp3",
+            "group_id": "28888112822211",
+            "tab_id": "88844545452542",
+            "tab_label": "调研纪要",
+            "files": [],
+        }
+        backend_payload = {
+            "success": True,
+            "queued": True,
+            "task_id": "slow-but-accepted-task",
+            "replayed": False,
+        }
+        with _LocalJsonBackend(
+            (202, backend_payload),
+            response_delay_seconds=0.05,
+        ) as backend:
+            bridge = frontend_server.ZsxqSidebarHtmlBridge(
+                backend.base_url,
+                b"test-secret",
+                timeout=0.01,
+            )
+            bridge.submit_timeout = 0.5
+            parser = _CsrfParser()
+            parser.feed(bridge.render_submit_form("mp3").body)
+
+            page = bridge.submit("mp3", parser.token, json.dumps(manifest))
+
+        self.assertEqual(page.status_code, 202)
+        self.assertIn("slow-but-accepted-task", page.body)
+        self.assertEqual(len(backend.received), 1)
+
     def test_manifest_retry_reuses_the_same_backend_idempotency_handoff(self):
         manifest = {
             "run_id": "sidebar-mp3-20260817T160000+0800-a1b2",
@@ -572,7 +629,9 @@ class FrontendZsxqBridgeTest(unittest.TestCase):
 
         self.assertEqual(first_response.status, 202)
         self.assertEqual(second_response.status, 202)
-        self.assertEqual(backend.received[0]["raw_body"], backend.received[1]["raw_body"])
+        self.assertEqual(
+            backend.received[0]["raw_body"], backend.received[1]["raw_body"]
+        )
         self.assertEqual(
             backend.received[0]["headers"]["Idempotency-Key"],
             backend.received[1]["headers"]["Idempotency-Key"],

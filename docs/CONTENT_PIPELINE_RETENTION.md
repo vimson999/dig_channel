@@ -8,6 +8,7 @@
 - 自动清理计划默认保留 3 天、每 24 小时执行一次、默认真实删除。
 - 数据库记录、topic/raw JSON、manifest 等小元数据不作为主要清理目标。
 - `runtime/content_pipeline/batches` 按批次内大文件自身 mtime 判断是否过期；即使父目录最近被碰过，过期 PDF/MP3/WAV/Office/ZIP 等大文件也会进入候选。
+- `data/processed` 只扫描生成的 `.mp4`；按视频文件自身 mtime 判断是否过期，默认保留 3 天。JSON、WAV/MP3、字幕、ASR/TTS 缓存和其他非 MP4 文件不在这一类清理范围内。
 - `pending` / `processing` / `failed` 任务引用的文件默认只保护 3 天；超过 `unfinished_reference_protect_days` 后，视为历史残留，按文件或目录自身保留期进入清理候选。
 
 也就是说，刚失败或刚卡住的任务会短期保留，方便排查或重试；长期未收尾的历史残留不会永久占用磁盘。
@@ -53,6 +54,8 @@ Content-Type: application/json
     "content_pipeline_batch_days": 3,
     "manual_publish_days": 3,
     "pytest_batch_days": 3,
+    "processed_video_days": 3,
+    "include_processed_videos": true,
     "unfinished_reference_protect_days": 3
   }
 }
@@ -92,8 +95,11 @@ CONTENT_RETENTION_EMAIL_NOTIFY=0
 - `runtime/content_pipeline/manual_publish/*`
 - pytest 项目的 `runtime/batches/*`
 - `data/zsxq/*/*/files/*` 下的 PDF、MP3、M4A、WAV、Office、ZIP 等大附件
+- `data/processed/**/*.mp4` 下超过保留期的生成视频
 
-同步目录和 content pipeline 批次默认只删除大文件附件，保留数据库、JSON、manifest 等元数据，方便后续追溯。
+同步目录和 content pipeline 批次默认只删除大文件附件，`data/processed` 只删除 MP4；数据库、JSON、manifest、音频和缓存等元数据或中间产物保留，方便后续追溯。
+
+生成 MP4 的候选会校验 `PublicationTask` 的视频路径投影，以及仍在保护窗口内任务的结果路径；只要任务仍处于 `pending`、`processing` 或近期 `failed` 且引用该文件，就不会进入候选。
 
 ## 未收尾任务保护窗口
 

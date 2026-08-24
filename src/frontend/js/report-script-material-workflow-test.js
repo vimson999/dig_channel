@@ -1,3 +1,24 @@
+function startReportScriptMaterialPolling(page, options = {}) {
+    page.pollingController?.stop();
+    const controller = window.VisibilityPolling.create({
+        documentRef: options.documentRef,
+        windowRef: options.windowRef,
+        setIntervalFn: options.setIntervalFn,
+        clearIntervalFn: options.clearIntervalFn,
+        intervalMs: 12000,
+        poll: async () => {
+            const requests = [page.refreshWorkerStatus()];
+            const hasActiveJob = page.jobs.some((job) => ['queued', 'running', 'submitting'].includes(job.status));
+            if (hasActiveJob) requests.push(page.loadHistory({ page: page.jobPage, silent: true }));
+            await Promise.all(requests);
+        },
+        onError: (error) => console.warn('基础文案物料状态轮询失败', error),
+    });
+    page.pollingController = controller;
+    controller.start();
+    return controller;
+}
+
 class ReportScriptMaterialWorkflowPage {
     constructor() {
         this.assets = [];
@@ -20,7 +41,7 @@ class ReportScriptMaterialWorkflowPage {
         this.storyboardRawText = '';
         this.assetSearchTimer = null;
         this.jobSearchTimer = null;
-        this.pollTimer = null;
+        this.pollingController = null;
         this.geminiEnvUrl = '';
         this.geminiUrlPresets = this.defaultGeminiUrlPresets();
         this.els = {
@@ -843,12 +864,7 @@ class ReportScriptMaterialWorkflowPage {
     }
 
     resetPollTimer() {
-        clearInterval(this.pollTimer);
-        this.pollTimer = setInterval(() => {
-            const hasActiveJob = this.jobs.some((job) => ['queued', 'running', 'submitting'].includes(job.status));
-            if (hasActiveJob) this.loadHistory({ page: this.jobPage, silent: true });
-            this.refreshWorkerStatus();
-        }, 12000);
+        startReportScriptMaterialPolling(this);
     }
 
     render() {

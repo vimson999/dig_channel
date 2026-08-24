@@ -68,6 +68,24 @@ _DATE_RE = re.compile(r"(?<!\d)(20\d{2})[./_-]?(0?[1-9]|1[0-2])[./_-]?(0?[1-9]|[
 _CANDIDATE_CACHE: Dict[str, Dict[str, Any]] = {}
 _CANDIDATE_CACHE_LOCK = threading.RLock()
 
+_VIDEO_SYNC_COLUMNS = (
+    BilibiliCompetitorVideo.competitor_id,
+    BilibiliCompetitorVideo.content_type,
+    BilibiliCompetitorVideo.bvid,
+    BilibiliCompetitorVideo.aid,
+    BilibiliCompetitorVideo.title,
+    BilibiliCompetitorVideo.description,
+    BilibiliCompetitorVideo.cover_url,
+    BilibiliCompetitorVideo.duration_seconds,
+    BilibiliCompetitorVideo.published_at,
+    BilibiliCompetitorVideo.play_count,
+    BilibiliCompetitorVideo.comment_count,
+    BilibiliCompetitorVideo.danmaku_count,
+    BilibiliCompetitorVideo.is_charging,
+    BilibiliCompetitorVideo.raw_payload,
+    BilibiliCompetitorVideo.last_seen_at,
+)
+
 
 class BilibiliIntelligenceError(RuntimeError):
     pass
@@ -205,10 +223,11 @@ def sync_competitor(competitor_id: str, *, page_size: int = 30) -> Dict[str, Any
         item.bvid: item
         for item in BilibiliCompetitorVideo.query.options(load_only(
             BilibiliCompetitorVideo.id,
-            BilibiliCompetitorVideo.bvid,
+            *_VIDEO_SYNC_COLUMNS,
         )).filter(BilibiliCompetitorVideo.bvid.in_(bvids)).all()
     } if bvids else {}
     created = 0
+    created_titles = []
     updated = 0
     for item in values:
         video = existing.get(item["bvid"])
@@ -216,6 +235,7 @@ def sync_competitor(competitor_id: str, *, page_size: int = 30) -> Dict[str, Any
             video = BilibiliCompetitorVideo(**item)
             db.session.add(video)
             created += 1
+            created_titles.append(item["title"])
         else:
             for key, value in item.items():
                 setattr(video, key, value)
@@ -235,8 +255,10 @@ def sync_competitor(competitor_id: str, *, page_size: int = 30) -> Dict[str, Any
     result = {
         "competitor_id": competitor_snapshot["id"],
         "competitor_name": competitor_snapshot["name"],
+        "uid": competitor_snapshot["uid"],
         "fetched": len(values),
         "created": created,
+        "created_titles": created_titles,
         "updated": updated,
         "video_count": video_count,
         "latest_published_at": latest_published_at.isoformat() + "Z" if latest_published_at else None,
@@ -246,9 +268,13 @@ def sync_competitor(competitor_id: str, *, page_size: int = 30) -> Dict[str, Any
 
 
 def sync_all_competitors(*, page_size: int = 30) -> Dict[str, Any]:
-    ids = [
-        row.id
-        for row in BilibiliCompetitor.query.with_entities(BilibiliCompetitor.id)
+    sources = [
+        row
+        for row in BilibiliCompetitor.query.with_entities(
+            BilibiliCompetitor.id,
+            BilibiliCompetitor.uid,
+            BilibiliCompetitor.name,
+        )
         .filter(BilibiliCompetitor.active.is_(True))
         .order_by(BilibiliCompetitor.content_type.asc(), BilibiliCompetitor.name.asc())
         .all()
@@ -256,11 +282,16 @@ def sync_all_competitors(*, page_size: int = 30) -> Dict[str, Any]:
     release_db_session_quietly()
     results = []
     errors = []
-    for competitor_id in ids:
+    for source in sources:
         try:
-            results.append(sync_competitor(competitor_id, page_size=page_size))
+            results.append(sync_competitor(source.id, page_size=page_size))
         except Exception as exc:
-            errors.append({"competitor_id": competitor_id, "error": str(exc)[:1000]})
+            errors.append({
+                "competitor_id": source.id,
+                "competitor_name": source.name,
+                "uid": source.uid,
+                "error": str(exc)[:1000],
+            })
     return {"synced": len(results), "failed": len(errors), "results": results, "errors": errors}
 
 

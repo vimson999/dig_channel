@@ -1461,6 +1461,38 @@ class ZsxqSyncService:
             }
             self._merge_run_pipeline_result(run, result)
             self._sync_content_pipeline_run_context(run_context, run)
+            try:
+                from services.content_pipeline.notification_service import notify_content_pipeline_event
+
+                pipeline = {
+                    "title": f"知识星球 PDF 清洗 - {run.group_name or run.group_id}",
+                    "trigger": trigger,
+                    "metadata": {
+                        "sync_run_id": run.id,
+                        "workflow_run_id": workflow_run_id,
+                        "group_id": run.group_id,
+                        "group_name": run.group_name,
+                        "mode": run.mode,
+                    },
+                }
+                notify_content_pipeline_event(
+                    "workflow_started",
+                    task_id=run.id,
+                    task_label="PDF 清洗发布",
+                    pipeline=pipeline,
+                    result=result,
+                    stage_status="running",
+                )
+                notify_content_pipeline_event(
+                    "clean_skipped",
+                    task_id=run.id,
+                    task_label="PDF 清洗",
+                    pipeline=pipeline,
+                    result=result,
+                    stage_status="skipped",
+                )
+            except Exception:
+                logger.exception("PDF 清洗跳过通知失败: %s", run.id)
             return result
 
         from services.content_pipeline.pdf_clean_task_service import submit_pdf_clean_task
@@ -1481,11 +1513,18 @@ class ZsxqSyncService:
                 "files": cleanable["files"],
             },
         )
+        task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        dedupe = task_result.get("dedupe") if isinstance(task_result.get("dedupe"), dict) else {}
+        queued = bool(task.get("celery_task_id"))
         result = {
-            "queued": True,
+            "queued": queued,
+            "status": task.get("status") or ("queued" if queued else "completed"),
             "task_id": task["id"],
             "celery_task_id": task.get("celery_task_id"),
             "files_count": len(files),
+            "unique_count": int(dedupe.get("unique_count") or len(files)),
+            "duplicate_count": int(dedupe.get("duplicate_count") or 0),
+            "dedupe": dedupe,
             "source_root": cleanable.get("source_root"),
         }
         self._merge_run_pipeline_result(run, result)
@@ -1527,6 +1566,38 @@ class ZsxqSyncService:
             }
             self._merge_run_content_pipeline_result(run, "audio_clean", result)
             self._sync_content_pipeline_run_context(run_context, run)
+            try:
+                from services.content_pipeline.notification_service import notify_content_pipeline_event
+
+                pipeline = {
+                    "title": f"知识星球音频清洗 - {run.group_name or run.group_id}",
+                    "trigger": trigger,
+                    "metadata": {
+                        "sync_run_id": run.id,
+                        "workflow_run_id": workflow_run_id,
+                        "group_id": run.group_id,
+                        "group_name": run.group_name,
+                        "mode": run.mode,
+                    },
+                }
+                notify_content_pipeline_event(
+                    "workflow_started",
+                    task_id=run.id,
+                    task_label="音频清洗发布",
+                    pipeline=pipeline,
+                    result=result,
+                    stage_status="running",
+                )
+                notify_content_pipeline_event(
+                    "clean_skipped",
+                    task_id=run.id,
+                    task_label="音频清洗",
+                    pipeline=pipeline,
+                    result=result,
+                    stage_status="skipped",
+                )
+            except Exception:
+                logger.exception("音频清洗跳过通知失败: %s", run.id)
             return result
 
         from services.content_pipeline.audio_clean_task_service import submit_audio_clean_task
@@ -1547,11 +1618,18 @@ class ZsxqSyncService:
                 "files": cleanable["files"],
             },
         )
+        task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        dedupe = task_result.get("dedupe") if isinstance(task_result.get("dedupe"), dict) else {}
+        queued = bool(task.get("celery_task_id"))
         result = {
-            "queued": True,
+            "queued": queued,
+            "status": task.get("status") or ("queued" if queued else "completed"),
             "task_id": task["id"],
             "celery_task_id": task.get("celery_task_id"),
             "files_count": len(files),
+            "unique_count": int(dedupe.get("unique_count") or len(files)),
+            "duplicate_count": int(dedupe.get("duplicate_count") or 0),
+            "dedupe": dedupe,
             "source_root": cleanable.get("source_root"),
         }
         self._merge_run_content_pipeline_result(run, "audio_clean", result)

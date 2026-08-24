@@ -1,10 +1,12 @@
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import update
 
 from models import db
 from models.task import PublicationTask
+from services.content_pipeline.dedupe_service import mark_task_assets, reserve_files
 from services.runtime_guard import maybe_guarded_apply_async
 from tasks.content_pipeline import run_audio_clean_task
 
@@ -27,6 +29,9 @@ def submit_audio_clean_task(
     cleaner = cleaner if isinstance(cleaner, dict) else {}
     auto_publish = auto_publish if isinstance(auto_publish, dict) else {}
     metadata = metadata if isinstance(metadata, dict) else {}
+    metadata = dict(metadata)
+    metadata.setdefault("source_mode", metadata.get("mode") or "manual_download")
+    metadata.setdefault("orchestration_id", None)
     normalized_files = _normalize_audio_files(files)
     if not normalized_files:
         raise ValueError("files 不能为空")
@@ -76,6 +81,77 @@ def submit_audio_clean_task(
     db.session.add(task)
     db.session.flush()
     task_id = str(task.id)
+    dedupe = reserve_files(
+        task_id=task_id,
+        media_type="audio",
+        files=normalized_files,
+        source_mode=metadata.get("source_mode"),
+    )
+    unique_files = [item["path"] for item in dedupe["unique_files"]]
+    duplicate_by_path = {
+        item["path"]: item for item in dedupe["duplicates"]
+    }
+    task.params = {
+        **task.params,
+        "content_pipeline": {
+            **(task.params.get("content_pipeline") or {}),
+            "audio_clean": {
+                **((task.params.get("content_pipeline") or {}).get("audio_clean") or {}),
+                "files": unique_files,
+            },
+        },
+    }
+    task.result = {
+        **(task.result or {}),
+        "files": [
+            {
+                "path": item,
+                "status": "duplicate" if item in duplicate_by_path else "waiting",
+                **(duplicate_by_path.get(item) or {}),
+            }
+            for item in normalized_files
+        ],
+        "dedupe": dedupe,
+    }
+    metadata["orchestration_id"] = metadata.get("orchestration_id") or f"content-pipeline-{task_id}"
+    task.params = {
+        **task.params,
+        "content_pipeline": {
+            **(task.params.get("content_pipeline") or {}),
+            "metadata": metadata,
+        },
+    }
+    task.result = {**(task.result or {}), "metadata": metadata}
+    pipeline_for_notification = dict(task.params.get("content_pipeline") or {})
+    if not unique_files:
+        task.status = "completed"
+        task.current_step = "dedupe_skipped"
+        task.progress = 100
+        task.completed_at = datetime.utcnow()
+        payload = task.to_dict()
+        db.session.commit()
+        try:
+            from services.content_pipeline.notification_service import notify_content_pipeline_event
+
+            notify_content_pipeline_event(
+                "workflow_started",
+                task_id=task_id,
+                task_label="音频清洗发布",
+                pipeline=pipeline_for_notification,
+                result=payload,
+                stage_status="running",
+            )
+            notify_content_pipeline_event(
+                "clean_skipped",
+                task_id=task_id,
+                task_label="音频清洗",
+                pipeline=pipeline_for_notification,
+                result=payload,
+                stage_status="skipped",
+            )
+        except Exception:
+            logger.exception("音频去重跳过通知失败: %s", task_id)
+        return payload
     payload = task.to_dict()
     db.session.commit()
 
@@ -92,6 +168,10 @@ def submit_audio_clean_task(
     except Exception as exc:
         logger.exception("音频清洗任务入队失败: %s", task_id)
         db.session.rollback()
+        try:
+            mark_task_assets(task_id, status="failed")
+        except Exception:
+            logger.exception("音频去重占位释放失败: %s", task_id)
         error_message = f"音频清洗任务入队失败: {exc}"
         db.session.execute(
             update(PublicationTask)
@@ -119,6 +199,27 @@ def submit_audio_clean_task(
         payload.update(deferred_state)
     payload["deferred"] = bool(submit_result.get("deferred"))
     payload["admission"] = submit_result.get("admission")
+    try:
+        from services.content_pipeline.notification_service import notify_content_pipeline_event
+
+        notify_content_pipeline_event(
+            "workflow_started",
+            task_id=task_id,
+            task_label="音频清洗发布",
+            pipeline=pipeline_for_notification,
+            result=payload,
+            stage_status="running",
+        )
+        notify_content_pipeline_event(
+            "clean_submitted",
+            task_id=task_id,
+            task_label="音频清洗",
+            pipeline=pipeline_for_notification,
+            result=payload,
+            stage_status="queued",
+        )
+    except Exception:
+        logger.exception("音频清洗启动通知失败: %s", task_id)
     return payload
 
 

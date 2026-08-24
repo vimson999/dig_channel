@@ -42,6 +42,7 @@ LARGE_ATTACHMENT_SUFFIXES = {
     ".pptx",
     ".zip",
 }
+PROCESSED_VIDEO_SUFFIXES = {".mp4"}
 RETENTION_PROTECTED_TASK_FEATURES = (
     "content_pdf_clean",
     "content_audio_clean",
@@ -59,10 +60,12 @@ class ContentRetentionPolicy:
     content_pipeline_batch_days: int = 3
     manual_publish_days: int = 3
     pytest_batch_days: int = 3
+    processed_video_days: int = 3
     include_sync_raw: bool = True
     include_content_pipeline_batches: bool = True
     include_manual_publish: bool = True
     include_pytest_batches: bool = True
+    include_processed_videos: bool = True
     max_candidates: int = 2000
     unfinished_reference_protect_days: int = 3
 
@@ -74,10 +77,12 @@ class ContentRetentionPolicy:
             content_pipeline_batch_days=_positive_int(payload.get("content_pipeline_batch_days"), 3),
             manual_publish_days=_positive_int(payload.get("manual_publish_days"), 3),
             pytest_batch_days=_positive_int(payload.get("pytest_batch_days"), 3),
+            processed_video_days=_positive_int(payload.get("processed_video_days"), 3),
             include_sync_raw=_truthy(payload.get("include_sync_raw", True)),
             include_content_pipeline_batches=_truthy(payload.get("include_content_pipeline_batches", True)),
             include_manual_publish=_truthy(payload.get("include_manual_publish", True)),
             include_pytest_batches=_truthy(payload.get("include_pytest_batches", True)),
+            include_processed_videos=_truthy(payload.get("include_processed_videos", True)),
             max_candidates=_positive_int(payload.get("max_candidates"), 2000),
             unfinished_reference_protect_days=_positive_int(payload.get("unfinished_reference_protect_days"), 3),
         )
@@ -88,10 +93,12 @@ class ContentRetentionPolicy:
             "content_pipeline_batch_days": self.content_pipeline_batch_days,
             "manual_publish_days": self.manual_publish_days,
             "pytest_batch_days": self.pytest_batch_days,
+            "processed_video_days": self.processed_video_days,
             "include_sync_raw": self.include_sync_raw,
             "include_content_pipeline_batches": self.include_content_pipeline_batches,
             "include_manual_publish": self.include_manual_publish,
             "include_pytest_batches": self.include_pytest_batches,
+            "include_processed_videos": self.include_processed_videos,
             "max_candidates": self.max_candidates,
             "unfinished_reference_protect_days": self.unfinished_reference_protect_days,
         }
@@ -111,6 +118,7 @@ class ContentPipelineRetentionCleanupService:
         project_root: Optional[str | Path] = None,
         content_pipeline_root: Optional[str | Path] = None,
         zsxq_data_dir: Optional[str | Path] = None,
+        processed_data_dir: Optional[str | Path] = None,
         pytest_project_dir: Optional[str | Path] = None,
     ):
         self.project_root = Path(project_root or PROJECT_ROOT).expanduser().resolve()
@@ -123,6 +131,12 @@ class ContentPipelineRetentionCleanupService:
             zsxq_data_dir
             or _app_config("ZSXQ_DATA_DIR")
             or (self.project_root / "data" / "zsxq")
+        ).expanduser().resolve()
+        self.processed_data_dir = Path(
+            processed_data_dir
+            or os.getenv("PROCESSED_DATA_DIR")
+            or _app_config("PROCESSED_DATA_DIR")
+            or (self.project_root / "data" / "processed")
         ).expanduser().resolve()
         self.pytest_project_dir = Path(
             pytest_project_dir
@@ -160,6 +174,7 @@ class ContentPipelineRetentionCleanupService:
             "roots": {
                 "content_pipeline_root": str(self.content_pipeline_root),
                 "zsxq_data_dir": str(self.zsxq_data_dir),
+                "processed_data_dir": str(self.processed_data_dir),
                 "pytest_project_dir": str(self.pytest_project_dir),
                 "pytest_batch_root": self.pytest_batch_root,
             },
@@ -209,6 +224,14 @@ class ContentPipelineRetentionCleanupService:
             )
         if policy.include_sync_raw:
             candidates.extend(self._collect_old_sync_attachments(policy.sync_raw_days, now, protected_paths))
+        if policy.include_processed_videos:
+            candidates.extend(
+                self._collect_old_processed_videos(
+                    days=policy.processed_video_days,
+                    now=now,
+                    protected_paths=protected_paths,
+                )
+            )
 
         candidates.sort(key=lambda item: (item["category"], item["path"]))
         return candidates
@@ -284,6 +307,24 @@ class ContentPipelineRetentionCleanupService:
             files_glob="*/*/files",
         )
 
+    def _collect_old_processed_videos(
+        self,
+        *,
+        days: int,
+        now: float,
+        protected_paths: set[Path],
+    ) -> list[dict]:
+        return self._collect_old_large_files(
+            root=self.processed_data_dir,
+            category="processed_video",
+            days=days,
+            now=now,
+            protected_paths=protected_paths,
+            reason="data/processed 下生成的 MP4 超过保留期",
+            allowed_root=self.processed_data_dir,
+            suffixes=PROCESSED_VIDEO_SUFFIXES,
+        )
+
     def _collect_old_large_files(
         self,
         *,
@@ -295,6 +336,7 @@ class ContentPipelineRetentionCleanupService:
         reason: str,
         allowed_root: Path,
         files_glob: Optional[str] = None,
+        suffixes: Optional[set[str]] = None,
     ) -> list[dict]:
         if not root.exists() or not root.is_dir():
             return []
@@ -306,11 +348,12 @@ class ContentPipelineRetentionCleanupService:
         else:
             search_roots = (root,)
 
+        allowed_suffixes = LARGE_ATTACHMENT_SUFFIXES if suffixes is None else suffixes
         for search_root in search_roots:
             for path in search_root.rglob("*"):
                 if not path.is_file() or path.is_symlink():
                     continue
-                if path.suffix.lower() not in LARGE_ATTACHMENT_SUFFIXES:
+                if path.suffix.lower() not in allowed_suffixes:
                     continue
                 resolved = path.resolve()
                 _assert_inside(resolved, allowed_root)
@@ -342,10 +385,24 @@ class ContentPipelineRetentionCleanupService:
         task_rows = (
             PublicationTask.query.with_entities(
                 PublicationTask.id,
+                PublicationTask.feature,
                 PublicationTask.content_clean_output_dir,
+                PublicationTask.task_video_path,
+                PublicationTask.publisher_vertical_video_path,
+                PublicationTask.report_audio_video_path,
+                PublicationTask.report_audio_output_path,
             )
             .filter(PublicationTask.status.in_(["pending", "processing", "failed"]))
-            .filter(PublicationTask.feature.in_(RETENTION_PROTECTED_TASK_FEATURES))
+            .filter(
+                or_(
+                    PublicationTask.feature.in_(RETENTION_PROTECTED_TASK_FEATURES),
+                    PublicationTask.content_clean_output_dir.isnot(None),
+                    PublicationTask.task_video_path.isnot(None),
+                    PublicationTask.publisher_vertical_video_path.isnot(None),
+                    PublicationTask.report_audio_video_path.isnot(None),
+                    PublicationTask.report_audio_output_path.isnot(None),
+                )
+            )
             .filter(
                 or_(
                     PublicationTask.updated_at.is_(None),
@@ -356,8 +413,17 @@ class ContentPipelineRetentionCleanupService:
             .all()
         )
         for row in task_rows:
-            if row.content_clean_output_dir:
-                protected.add(Path(str(row.content_clean_output_dir)).expanduser())
+            for value in (
+                row.content_clean_output_dir,
+                row.task_video_path,
+                row.publisher_vertical_video_path,
+                row.report_audio_video_path,
+                row.report_audio_output_path,
+            ):
+                if value:
+                    protected.add(Path(str(value)).expanduser())
+            if row.feature not in RETENTION_PROTECTED_TASK_FEATURES:
+                continue
             payload = (
                 PublicationTask.query.with_entities(PublicationTask.params, PublicationTask.result)
                 .filter(PublicationTask.id == row.id)
@@ -408,6 +474,8 @@ class ContentPipelineRetentionCleanupService:
             _assert_inside(path, self.pytest_project_dir)
         elif category == "sync_raw_attachment":
             _assert_inside(path, self.zsxq_data_dir)
+        elif category == "processed_video":
+            _assert_inside(path, self.processed_data_dir)
         else:
             raise RetentionCleanupError(f"未知清理类别: {category}")
 
@@ -419,6 +487,8 @@ class ContentPipelineRetentionCleanupService:
                 _prune_empty_parents(path.parent, stop_at=self.content_pipeline_root / "batches")
             elif category == "sync_raw_attachment":
                 _prune_empty_parents(path.parent, stop_at=self.zsxq_data_dir)
+            elif category == "processed_video":
+                _prune_empty_parents(path.parent, stop_at=self.processed_data_dir)
         else:
             raise RetentionCleanupError(f"未知清理对象类型: {item.get('kind')}")
 

@@ -1,0 +1,63 @@
+{
+  "run_id": "sidebar-mp3-20260819T140312+0800-recovery-connection-reset-2",
+  "kind": "mp3",
+  "group_id": "28888112822211",
+  "tab_id": "88844545452542",
+  "tab_label": "调研纪要",
+  "scan_summary": {
+    "recovery": true,
+    "source_gate": "formal_gate_a_mp3_browser_connection_reset_at_candidate_40",
+    "source_run_id": "not_reported_by_source_run",
+    "topic_groups_scanned": 40,
+    "attachments_found": 323,
+    "mp3_entries_scanned": 108,
+    "unique_mp3_scanned": 107,
+    "source_confirmed_downloads": 1,
+    "actual_files_found_in_frozen_time_window": 2,
+    "post_report_unaccounted_files": 1,
+    "new_download_success": 2,
+    "history_complete": true,
+    "history_records_seen": 209,
+    "history_unique_files": 108,
+    "history_duplicates_collapsed": 101,
+    "history_ignored_untrusted_manifests": 1,
+    "recovery_name_matches_in_trusted_history": 0,
+    "recovery_sha_matches_in_trusted_history": 0,
+    "recovery_unique_sha256": 2,
+    "source_files_sha_verified": true,
+    "candidate_metadata_readonly_verified": true,
+    "recovery_download_clicks_issued": 0,
+    "recovery_blocked_download_navigation_count": 1,
+    "recovery_blocked_download_navigation_result": "ERR_BLOCKED_BY_CLIENT_no_file_created",
+    "manifest_blocked_by_download_integrity": false
+  },
+  "candidate_failures": [],
+  "history_observations": [],
+  "files": [
+    {
+      "filename": "AI_新技术系列OCS_迎来新变化260819.mp3",
+      "absolute_path": "/Users/v9/Downloads/AI_新技术系列OCS_迎来新变化260819.mp3",
+      "media_type": "mp3",
+      "download_count": 14,
+      "published_at": "2026-08-19T09:51:00+08:00",
+      "topic_title": "#调研纪要",
+      "source_url": "https://wx.zsxq.com/tags/调研纪要/88844545452542",
+      "downloaded_at": "2026-08-19T14:00:31+08:00",
+      "sha256": "d03cd25f462c7f9c267a7ffd581975a9ca3c9945d2a32e355d277560f6036117",
+      "success": true
+    },
+    {
+      "filename": "重视银行科技叙事260818.mp3",
+      "absolute_path": "/Users/v9/Downloads/重视银行科技叙事260818.mp3",
+      "media_type": "mp3",
+      "download_count": 14,
+      "published_at": "2026-08-18T23:54:00+08:00",
+      "topic_title": "#调研纪要",
+      "source_url": "https://wx.zsxq.com/tags/调研纪要/88844545452542",
+      "downloaded_at": "2026-08-19T14:03:12+08:00",
+      "sha256": "bafb26f0798991c1ea9f391e78963bef0f8970f2f22ece226c44273d9ef38d3a",
+      "success": true
+    }
+  ],
+  "recovery_exclusions": []
+}

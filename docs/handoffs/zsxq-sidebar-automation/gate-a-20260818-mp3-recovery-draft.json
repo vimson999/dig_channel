@@ -1,0 +1,47 @@
+{
+  "run_id": "sidebar-mp3-20260818T122825+0800-gatea-recovery-one-valid",
+  "kind": "mp3",
+  "group_id": "28888112822211",
+  "tab_id": "88844545452542",
+  "tab_label": "调研纪要",
+  "scan_summary": {
+    "recovery": true,
+    "source_gate": "gate_a_first_run_failed",
+    "topic_groups_scanned": 0,
+    "attachments_found": 2,
+    "unique_mp3_scanned": 2,
+    "within_48h": 2,
+    "historical_already_downloaded": 0,
+    "new_download_success": 1,
+    "recovery_excluded_ineligible": 1,
+    "history_complete": true,
+    "history_unique_files": 74,
+    "source_files_sha_verified": true,
+    "manifest_blocked_by_download_integrity": false
+  },
+  "history_observations": [],
+  "files": [
+    {
+      "filename": "食品饮料深度报告巡礼食健谈AKK国产益生菌破局之矛260817.mp3",
+      "absolute_path": "/Users/v9/Downloads/食品饮料深度报告巡礼食健谈AKK国产益生菌破局之矛260817.mp3",
+      "media_type": "mp3",
+      "download_count": 12,
+      "published_at": "2026-08-17T23:56:00+08:00",
+      "topic_title": "#调研纪要",
+      "source_url": "https://wx.zsxq.com/tags/调研纪要/88844545452542",
+      "downloaded_at": "2026-08-18T10:29:00+08:00",
+      "sha256": "5fa4d14152ac7d21d6f7a4b6f644b332cfa793b50717dd15d0f8bc0f26b6225d",
+      "success": true
+    }
+  ],
+  "recovery_exclusions": [
+    {
+      "filename": "长江大金融周一有约213期政策空间与配置方向260817.mp3",
+      "absolute_path": "/Users/v9/Downloads/长江大金融周一有约213期政策空间与配置方向260817.mp3",
+      "sha256": "6158788518c4abe6927dd987a7cf922f77eac8f3cfafffa33ea127fe85041b96",
+      "observed_download_count": 10,
+      "reason": "download_count_not_strictly_over_10",
+      "must_not_enter_files": true
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "run_id": "sidebar-pdf-20260818T125800+0800-gatea-recovery-pingan-newly-eligible",
+  "kind": "pdf",
+  "group_id": "28888112822211",
+  "tab_id": "51184248544214",
+  "tab_label": "外资研报",
+  "scan_summary": {
+    "recovery": true,
+    "source_gate": "gate_a_exclusion_recheck",
+    "topic_groups_scanned": 0,
+    "attachments_found": 1,
+    "unique_pdf_scanned": 1,
+    "within_48h": 1,
+    "historical_already_downloaded": 0,
+    "new_download_success": 1,
+    "recovery_excluded_ineligible": 0,
+    "history_complete": true,
+    "history_records_seen": 217,
+    "history_unique_files": 84,
+    "source_files_sha_verified": true,
+    "eligibility_changed_after_initial_recovery": true,
+    "manifest_blocked_by_download_integrity": false
+  },
+  "history_observations": [],
+  "files": [
+    {
+      "filename": "高盛-平安银行(000001.SZ)：盈利回顾：基本符合预期；零售资产质量持续改善，聚焦财富管理和股东回报上行-260817.pdf",
+      "absolute_path": "/Users/v9/Downloads/高盛-平安银行(000001.SZ)：盈利回顾：基本符合预期；零售资产质量持续改善，聚焦财富管理和股东回报上行-260817.pdf",
+      "media_type": "pdf",
+      "download_count": 31,
+      "published_at": "2026-08-17T19:56:00+08:00",
+      "topic_title": "#外资研报",
+      "source_url": "https://wx.zsxq.com/tags/外资研报/51184248544214",
+      "downloaded_at": "2026-08-18T10:56:41+08:00",
+      "sha256": "76dac9510533bc05d9bd3b89f367062ee428e1e83ab05c9b966306677609ae12",
+      "success": true
+    }
+  ],
+  "recovery_exclusions": []
+}

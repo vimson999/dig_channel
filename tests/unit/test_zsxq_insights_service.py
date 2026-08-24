@@ -1,7 +1,9 @@
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 
 from services.zsxq_insights_service import (
+    _released_read_session,
     _normalize_page_size,
     _plain_topic_text,
     _normalize_page,
@@ -28,6 +30,13 @@ class ZsxqInsightsClassifierTest(unittest.TestCase):
 
 
 class ZsxqInsightsContractTest(unittest.TestCase):
+    @patch("services.zsxq_insights_service.release_db_session_quietly")
+    def test_released_read_session_preserves_caller_execute_boundary(self, release):
+        with _released_read_session() as session:
+            self.assertIsNotNone(session)
+
+        release.assert_called_once_with()
+
     def test_plain_topic_text_decodes_known_zsxq_rich_tokens(self):
         raw = (
             '<e type="text_bold" title="%E6%88%91%E4%BB%AC%E8%81%8A%E4%BA%86AI" />'

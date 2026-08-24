@@ -81,8 +81,14 @@ def submit_pdf_clean_task(current_user):
         return jsonify(
             {
                 "success": True,
-                "message": "PDF 清洗任务已提交",
-                "data": {"task_id": task["id"], "celery_id": task["celery_task_id"]},
+                "message": "PDF 清洗任务已提交" if task.get("celery_task_id") else "PDF 文件全部命中去重，未重复进入清洗",
+                "data": {
+                    "task_id": task["id"],
+                    "celery_id": task.get("celery_task_id"),
+                    "status": task.get("status"),
+                    "current_step": task.get("current_step"),
+                    "dedupe": (task.get("result") or {}).get("dedupe") if isinstance(task.get("result"), dict) else {},
+                },
             }
         )
     except ValueError as exc:

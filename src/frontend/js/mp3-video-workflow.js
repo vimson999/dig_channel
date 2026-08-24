@@ -452,7 +452,7 @@ class Mp3VideoWorkflowPage {
     }
 
     audioAssetScopeLabel() {
-        return this.audioAssetScope === 'hot' ? '热门 MP3 ' : '已同步 MP3 ';
+        return this.audioAssetScope === 'hot' ? '热门 MP3 ' : '全部 MP3 ';
     }
 
     renderAudioAssetTabs() {
@@ -812,8 +812,12 @@ class Mp3VideoWorkflowPage {
         const workflowMeta = this.audioAssetWorkflowMeta(asset);
         const syncTime = this.formatDateTime(asset.topic_last_synced_at || asset.updated_at);
         const topicTime = this.formatDateTime(asset.topic_create_time) || asset.topic_create_time || '';
+        const sourceLabel = asset.source_label || asset.tab_label || '';
+        const pipelineStatus = asset.asset_kind === 'content_pipeline'
+            ? this.pipelineAssetStatusLabel(asset.pipeline_status)
+            : '';
         const metaLine = [
-            asset.tab_label || '',
+            sourceLabel,
             syncTime ? `同步 ${syncTime}` : '',
             topicTime ? `发布 ${topicTime}` : '',
         ].filter(Boolean).join(' · ');
@@ -839,6 +843,7 @@ class Mp3VideoWorkflowPage {
                     <span class="rounded-full border px-2 py-0.5 text-[11px] font-bold ${downloadBadgeClass}">
                         <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
                     </span>
+                    ${pipelineStatus ? `<span class="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-bold text-indigo-700">${this.escape(pipelineStatus)}</span>` : ''}
                     <span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${workflowMeta.className}">
                         ${workflowMeta.latestMeta ? `<span class="mr-1 inline-block h-1.5 w-1.5 rounded-full ${workflowMeta.latestMeta.dot}"></span>` : ''}
                         ${this.escape(workflowMeta.text)}
@@ -851,9 +856,22 @@ class Mp3VideoWorkflowPage {
     }
 
     audioAssetDownloadText(asset) {
+        if (asset?.asset_kind === 'content_pipeline') return '手动投递';
         const count = asset?.download_count;
         return window.DownloadCountHighlight?.badgeText(count)
             || (Number.isFinite(Number(count)) ? `下载 ${Number(count)} 次` : '下载 -');
+    }
+
+    pipelineAssetStatusLabel(status) {
+        const labels = {
+            reserved: '已接收',
+            cleaning: '清洗中',
+            cleaned: '已清洗',
+            failed: '清洗失败',
+            canceled: '已取消',
+            released: '已释放',
+        };
+        return labels[String(status || '').trim().toLowerCase()] || '已投递';
     }
 
     audioAssetDownloadBadgeClass(asset) {
@@ -876,6 +894,20 @@ class Mp3VideoWorkflowPage {
                 text: '编排状态待刷新',
                 detail: '',
                 className: 'bg-amber-50 text-amber-700',
+            };
+        }
+
+        if (asset.asset_kind === 'content_pipeline' && !asset.workflow?.has_workflow) {
+            const status = String(asset.pipeline_status || '').trim().toLowerCase();
+            const running = ['reserved', 'cleaning'].includes(status);
+            const failed = ['failed', 'canceled'].includes(status);
+            return {
+                latestMeta: null,
+                text: failed ? '清洗失败' : (running ? '清洗中' : '已清洗'),
+                detail: '内容流水线',
+                className: failed
+                    ? 'bg-rose-50 text-rose-700'
+                    : (running ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'),
             };
         }
 

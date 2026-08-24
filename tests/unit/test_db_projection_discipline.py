@@ -1623,15 +1623,20 @@ class DbProjectionDisciplineTest(unittest.TestCase):
         self.assertIn("finally", body)
         self.assertIn("this.pollInFlight = false", body)
 
-    def test_material_history_polling_stops_when_all_jobs_are_terminal(self):
+    def test_material_history_polling_uses_visibility_controller_and_skips_terminal_history(self):
         text = (PROJECT_ROOT / "src" / "frontend" / "js" / "report-script-material-workflow-test.js").read_text(
             encoding="utf-8"
         )
-        body = text.split("resetPollTimer() {", 1)[1].split("\n    render() {", 1)[0]
+        lifecycle = text.split("function startReportScriptMaterialPolling", 1)[1].split(
+            "\n\nclass ReportScriptMaterialWorkflowPage",
+            1,
+        )[0]
+        reset = text.split("resetPollTimer() {", 1)[1].split("\n    render() {", 1)[0]
 
-        self.assertIn("const hasActiveJob", body)
-        self.assertIn("if (hasActiveJob) this.loadHistory", body)
-        self.assertNotIn("\n            this.loadHistory", body)
+        self.assertIn("window.VisibilityPolling.create", lifecycle)
+        self.assertIn("const hasActiveJob", lifecycle)
+        self.assertIn("if (hasActiveJob) requests.push(page.loadHistory", lifecycle)
+        self.assertIn("startReportScriptMaterialPolling(this)", reset)
 
     def test_stick_figure_progress_does_not_refresh_expired_asset(self):
         text = (BACKEND_DIR / "tasks" / "report_stick_figure_assets.py").read_text(encoding="utf-8")

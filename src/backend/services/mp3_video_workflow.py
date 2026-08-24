@@ -25,6 +25,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from celery_config import celery_app
 from models import db
+from models.content_pipeline_asset import ContentPipelineAsset
 from models.task import PublicationTask
 from models.zsxq_sync import ZsxqAttachment, ZsxqTopic
 from services.asr_cache_service import probe_media_duration
@@ -529,19 +530,55 @@ def list_audio_assets(
         if len(rows) < batch_limit:
             break
 
+    pipeline_items: List[Dict[str, Any]] = []
+    pipeline_scanned = 0
+    if scope not in {"hot", "popular"} and not group_id and not tab_id:
+        pipeline_query = db.session.query(ContentPipelineAsset).filter(
+            ContentPipelineAsset.media_type == "audio"
+        )
+        if q:
+            pipeline_pattern = f"%{q}%"
+            pipeline_query = pipeline_query.filter(or_(
+                ContentPipelineAsset.filename.ilike(pipeline_pattern),
+                ContentPipelineAsset.source_path.ilike(pipeline_pattern),
+                ContentPipelineAsset.source_mode.ilike(pipeline_pattern),
+            ))
+        pipeline_rows = (
+            pipeline_query
+            .order_by(
+                ContentPipelineAsset.updated_at.desc(),
+                ContentPipelineAsset.created_at.desc(),
+            )
+            .limit(scan_limit)
+            .all()
+        )
+        pipeline_scanned = len(pipeline_rows)
+        for row in pipeline_rows:
+            item = _content_pipeline_audio_asset_row_payload(row)
+            if item:
+                pipeline_items.append(item)
+            else:
+                skipped_missing += 1
+
+    combined_items = _merge_audio_asset_items(valid_items, pipeline_items)
+
     start = (page - 1) * per_page
     end = start + per_page
     return {
-        "items": valid_items[start:end],
+        "items": combined_items[start:end],
         "pagination": {
             "page": page,
             "per_page": per_page,
-            "has_more": len(valid_items) > end or scanned >= scan_limit,
+            "has_more": (
+                len(combined_items) > end
+                or scanned >= scan_limit
+                or pipeline_scanned >= scan_limit
+            ),
             "skipped_missing": skipped_missing,
-            "scanned": scanned,
+            "scanned": scanned + pipeline_scanned,
             "scope": "hot" if scope in {"hot", "popular"} else "all",
             "hot_download_threshold": HOT_AUDIO_DOWNLOAD_THRESHOLD,
-            "order": "published_desc",
+            "order": "published_desc_with_pipeline_assets",
         },
     }
 
@@ -590,6 +627,28 @@ def audio_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
     except Exception:
         item["duration_seconds"] = 0
     return item
+
+
+def audio_meta_from_asset_reference(asset_reference: str) -> Dict[str, Any]:
+    """Resolve either a synced ZSXQ attachment or a pipeline asset reference."""
+    reference = str(asset_reference or "").strip()
+    if reference.startswith("pipeline:"):
+        asset_id = reference.split(":", 1)[1].strip()
+        row = (
+            ContentPipelineAsset.query
+            .filter(ContentPipelineAsset.id == asset_id)
+            .filter(ContentPipelineAsset.media_type == "audio")
+            .one_or_none()
+        )
+        item = _content_pipeline_audio_asset_row_payload(row)
+        if not item:
+            raise ValueError("手动投递音频不存在或本地文件缺失")
+        try:
+            item["duration_seconds"] = probe_media_duration(item["path"])
+        except Exception:
+            item["duration_seconds"] = 0
+        return item
+    return audio_meta_from_zsxq_attachment(reference)
 
 
 def _resume_waiting_child_lightweight(task_id: str, wait_hint: Any) -> Optional[bool]:
@@ -5674,6 +5733,92 @@ def _audio_asset_filter():
     return or_(*(ext_conditions + path_conditions))
 
 
+def _content_pipeline_source_label(source_mode: Any) -> str:
+    labels = {
+        "scheduled_api": "计划任务",
+        "sidebar": "侧边栏下载",
+        "browser_sidebar": "侧边栏下载",
+        "manual_download": "手动投递",
+    }
+    return labels.get(str(source_mode or "").strip().lower(), "内容流水线")
+
+
+def _content_pipeline_audio_asset_row_payload(row) -> Optional[Dict[str, Any]]:
+    if not row:
+        return None
+    path = _resolve_project_path(getattr(row, "source_path", None))
+    if not path or not path.exists() or not path.is_file():
+        return None
+    stat = path.stat()
+    asset_id = str(row.id)
+    source_label = _content_pipeline_source_label(row.source_mode)
+    return {
+        "attachment_id": f"pipeline:{asset_id}",
+        "asset_id": asset_id,
+        "asset_kind": "content_pipeline",
+        "source_label": source_label,
+        "source_mode": row.source_mode,
+        "pipeline_status": row.status,
+        "pipeline_task_id": row.canonical_task_id,
+        "filename": row.filename or path.name,
+        "name": row.filename or path.name,
+        "path": str(path),
+        "bytes": stat.st_size,
+        "file_ext": path.suffix.lstrip(".").lower(),
+        "download_count": None,
+        "updated_at": _isoformat_z(row.updated_at),
+        "created_at": _isoformat_z(row.created_at),
+        "group_id": None,
+        "tab_id": None,
+        "topic_id": None,
+        "topic_title": row.filename or source_label,
+        "topic_author": None,
+        "topic_content_excerpt": None,
+        "topic_create_time": None,
+        "topic_first_synced_at": None,
+        "topic_last_synced_at": None,
+        "tab_label": source_label,
+        "preview_url": f"/api/mp3-video-workflows/audio-assets/{asset_id}/preview",
+    }
+
+
+def _audio_asset_sort_timestamp(item: Dict[str, Any]) -> float:
+    for key in ("topic_create_time", "updated_at", "created_at"):
+        value = item.get(key)
+        if not value:
+            continue
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=timezone.utc).timestamp()
+        text_value = str(value).strip()
+        try:
+            return datetime.fromisoformat(text_value.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return 0.0
+
+
+def _merge_audio_asset_items(
+    synced_items: List[Dict[str, Any]],
+    pipeline_items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Merge synced and pipeline assets while suppressing identical local paths."""
+    merged: List[Dict[str, Any]] = []
+    seen_paths = set()
+    for item in sorted(
+        [*(synced_items or []), *(pipeline_items or [])],
+        key=_audio_asset_sort_timestamp,
+        reverse=True,
+    ):
+        path = str(item.get("path") or "").strip()
+        identity = os.path.normcase(os.path.realpath(path)) if path else ""
+        if identity and identity in seen_paths:
+            continue
+        if identity:
+            seen_paths.add(identity)
+        merged.append(item)
+    return merged
+
+
 def _audio_asset_row_payload(row) -> Optional[Dict[str, Any]]:
     if not row:
         return None
@@ -5684,6 +5829,10 @@ def _audio_asset_row_payload(row) -> Optional[Dict[str, Any]]:
     filename = row.attachment_name or path.name
     return {
         "attachment_id": row.attachment_id,
+        "asset_id": row.attachment_id,
+        "asset_kind": "zsxq_attachment",
+        "source_label": "知识星球同步",
+        "source_mode": "zsxq_sync",
         "filename": filename,
         "name": filename,
         "path": str(path),

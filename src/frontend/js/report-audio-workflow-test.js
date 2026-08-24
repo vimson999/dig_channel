@@ -645,10 +645,10 @@ class ReportAudioWorkflowPage {
             if (!options.silent) this.setNotice(`已加载${this.pdfAssetScopeLabel()}第 ${this.pdfAssetPage} 页，共 ${this.pdfAssets.length} 个 PDF。`, 'success');
         } catch (error) {
             if (requestSeq !== this.pdfAssetRequestSeq) return;
-            this.els.pdfAssetSummary.textContent = `加载已同步 PDF 失败：${error.message}`;
+            this.els.pdfAssetSummary.textContent = `加载 PDF 失败：${error.message}`;
             this.els.pdfAssetList.innerHTML = '';
             this.els.pdfAssetPagination.innerHTML = '';
-            if (!options.silent) this.setNotice(`加载已同步 PDF 失败：${error.message}`, 'error');
+            if (!options.silent) this.setNotice(`加载 PDF 失败：${error.message}`, 'error');
         } finally {
             if (requestSeq !== this.pdfAssetRequestSeq) return;
             this.els.pdfAssetRefreshBtn.disabled = false;
@@ -668,7 +668,7 @@ class ReportAudioWorkflowPage {
     }
 
     pdfAssetScopeLabel() {
-        return this.pdfAssetScope === 'hot' ? '热门 PDF ' : '已同步 PDF ';
+        return this.pdfAssetScope === 'hot' ? '热门 PDF ' : '全部 PDF ';
     }
 
     renderPdfAssetTabs() {
@@ -720,11 +720,11 @@ class ReportAudioWorkflowPage {
         const selectedId = this.selectedPdfAsset?.id || '';
         this.els.pdfAssetSummary.textContent = this.pdfAssets.length
             ? `${this.pdfAssetScopeLabel()}· 第 ${this.pdfAssetPage} 页 · 本页 ${this.pdfAssets.length} 个 PDF${this.selectedPdfAsset ? ` · 已选 ${this.selectedPdfAsset.filename}` : ''}`
-            : (this.pdfAssetScope === 'hot' ? '没有找到下载次数达到 40 次的热门 PDF。' : '没有找到已下载的同步 PDF。');
+            : (this.pdfAssetScope === 'hot' ? '没有找到下载次数达到 40 次的热门 PDF。' : '没有找到可用 PDF。');
         if (!this.pdfAssets.length) {
             const emptyText = this.pdfAssetScope === 'hot'
                 ? '暂无热门 PDF。当前筛选条件是下载次数 ≥ 40，且附件已下载到本地。'
-                : '暂无可选 PDF。请先完成知识星球同步并下载附件。';
+                : '暂无可选 PDF。请先同步知识星球附件或投递手动 PDF。';
             this.els.pdfAssetList.innerHTML = `<div class="rounded-md border border-dashed border-slate-300 bg-white px-3 py-6 text-center text-xs text-slate-500">${this.escape(emptyText)}</div>`;
             this.renderPdfAssetPagination();
             return;
@@ -735,9 +735,10 @@ class ReportAudioWorkflowPage {
             const previewUrl = `${this.apiRoot()}${previewPath}`;
             const itemTitle = [item.filename, item.topic_title, item.tab_label].filter(Boolean).join('\n');
             const downloadText = window.DownloadCountHighlight?.badgeText(item.download_count)
-                || (Number.isFinite(Number(item.download_count)) ? `下载 ${Number(item.download_count)} 次` : '下载 -');
+                || (Number.isFinite(Number(item.download_count)) ? `下载 ${Number(item.download_count)} 次` : (item.source_label || '下载 -'));
             const downloadBadgeClass = window.DownloadCountHighlight?.badgeClass(item.download_count)
                 || 'border-slate-200 bg-slate-100 text-slate-500';
+            const sourceMeta = this.pdfAssetSourceMeta(item);
             const workflowMeta = this.pdfAssetWorkflowMeta(item);
             const materialMeta = this.pdfAssetMaterialMeta(item);
             const syncTime = this.formatDateTime(item.topic_last_synced_at || item.updated_at);
@@ -761,6 +762,7 @@ class ReportAudioWorkflowPage {
                     </div>
                     <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(metaLine)}</div>
                     <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                        <span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${sourceMeta.className}">${this.escape(sourceMeta.text)}</span>
                         <span class="rounded-full border px-2 py-0.5 text-[11px] font-bold ${downloadBadgeClass}">
                             <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
                         </span>
@@ -840,7 +842,7 @@ class ReportAudioWorkflowPage {
         const pdf = useAsset ? null : (this.els.pdfInput.files?.[0] || null);
         const selectedAsset = useAsset ? this.selectedPdfAsset : null;
         if (!pdf && !selectedAsset) {
-            this.setNotice(useAsset ? '请先选择一个已同步 PDF。' : '请先上传 PDF。', 'error');
+            this.setNotice(useAsset ? '请先选择一个 PDF 资产。' : '请先上传 PDF。', 'error');
             return;
         }
         const renderMode = this.selectedVideoRenderMode();
@@ -876,7 +878,7 @@ class ReportAudioWorkflowPage {
             : (verticalSchemes.includes('scheme1') && verticalSchemes.includes('scheme2') ? 'scheme2' : (verticalSchemes[0] || primaryVerticalScheme));
         const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const pdfSummary = selectedAsset
-            ? { filename: selectedAsset.filename, bytes: selectedAsset.bytes, source: 'zsxq_attachment', attachment_id: selectedAsset.id, topic_title: selectedAsset.topic_title, tab_label: selectedAsset.tab_label }
+            ? { filename: selectedAsset.filename, bytes: selectedAsset.bytes, source: selectedAsset.source_mode || selectedAsset.source_label || 'asset', attachment_id: selectedAsset.id, topic_title: selectedAsset.topic_title, tab_label: selectedAsset.tab_label }
             : { filename: pdf.name, bytes: pdf.size, source: 'upload' };
         const localJob = {
             local_id: localId,
@@ -946,7 +948,7 @@ class ReportAudioWorkflowPage {
             form.append('metadata', JSON.stringify({
                 source: 'report-audio-workflow-test-page',
                 local_id: localId,
-                pdf_source: selectedAsset ? 'zsxq_attachment' : 'upload',
+                pdf_source: selectedAsset ? (selectedAsset.source_mode || selectedAsset.source_label || 'asset') : 'upload',
                 pdf_asset_id: selectedAsset?.id || null,
             }));
             const result = await this.request('/api/report-audio-workflows/jobs', {
@@ -1656,6 +1658,28 @@ class ReportAudioWorkflowPage {
             text: `编排 ${total} 次`,
             detail,
             className: latestMeta.className,
+        };
+    }
+
+    pdfAssetSourceMeta(item) {
+        if (item?.asset_kind === 'content_pipeline' || item?.asset_kind === 'content_pipeline_legacy') {
+            const status = String(item.pipeline_status || '').toLowerCase();
+            const statusText = {
+                reserved: '已接收',
+                queued: '待清洗',
+                processing: '清洗中',
+                completed: '已清洗',
+                succeeded: '已清洗',
+                failed: '清洗失败',
+            }[status] || '已投递';
+            return {
+                text: `${item.source_label || '手动投递'} · ${statusText}`,
+                className: status === 'failed' ? 'bg-rose-50 text-rose-700' : 'bg-violet-50 text-violet-700',
+            };
+        }
+        return {
+            text: item?.source_label || '知识星球同步',
+            className: 'bg-slate-100 text-slate-600',
         };
     }
 

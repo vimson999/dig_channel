@@ -304,6 +304,7 @@ def _build_retention_email(event, *, trigger, dry_run, policy=None, summary=None
         lines.append(f"- 清洗批次：{policy.get('content_pipeline_batch_days')} 天")
         lines.append(f"- 手动发布临时目录：{policy.get('manual_publish_days')} 天")
         lines.append(f"- pytest 中转批次：{policy.get('pytest_batch_days')} 天")
+        lines.append(f"- 生成 MP4：{policy.get('processed_video_days', 3)} 天")
         lines.append(f"- 未收尾任务保护：{policy.get('unfinished_reference_protect_days')} 天")
         lines.append(f"- 最大候选：{policy.get('max_candidates')}")
 

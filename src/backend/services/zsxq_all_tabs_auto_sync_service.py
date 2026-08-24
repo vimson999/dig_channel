@@ -34,7 +34,10 @@ DEFAULT_TOPIC_COUNT = 20
 CONFIG_TYPE = "zsxq_sync_schedule"
 CONFIG_SCOPE = "production"
 CONFIG_KEY_PREFIX = "zsxq.sync.schedule."
-CONFIG_CACHE_TTL_SECONDS = 60.0
+# Scheduler loops every 30 seconds while operator-managed schedules change
+# rarely. Keep successful snapshots for five minutes; failed reads are still
+# uncached so database recovery continues to be retried on the next loop.
+CONFIG_CACHE_TTL_SECONDS = 300.0
 _config_cache = {"expires_at": 0.0, "configs": None}
 
 DEFAULT_AUTO_SYNC_TARGETS = (

@@ -386,6 +386,31 @@ class DbPerformanceLogAnalyzerTest(unittest.TestCase):
             )
         )
 
+    def test_explicit_shell_process_overrides_shared_managed_log_path(self):
+        analyzer = load_analyzer()
+
+        self.assertTrue(
+            analyzer.is_adhoc_diagnostic_context(
+                {"role": "unknown", "process": "-"},
+                origin="unknown",
+                source_path=analyzer.ROOT / "logs" / "scheduler.log",
+            )
+        )
+        self.assertFalse(
+            analyzer.is_adhoc_diagnostic_context(
+                {"role": "unknown", "process": "unknown"},
+                origin="unknown",
+                source_path=analyzer.ROOT / "logs" / "celery" / "celery_watchdog.log",
+            )
+        )
+        self.assertTrue(
+            analyzer.is_adhoc_diagnostic_context(
+                {"role": "unknown", "process": "-"},
+                origin="unknown",
+                source_path=analyzer.ROOT / "logs" / "publication_tasks_query.log",
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

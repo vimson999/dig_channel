@@ -256,6 +256,17 @@ SCHEDULERS = {
         "log_file": "bilibili_charging_scheduler.log",
         "description": "每天 00:00（Asia/Shanghai）刷新首页 B站 UP 主充电人数并发送节点邮件",
     },
+    "bilibili_intelligence_scheduler": {
+        "label": "B站情报每小时同步调度器",
+        "pattern": "run_bilibili_intelligence_scheduler.py",
+        "argv": [
+            "venv/bin/python",
+            "src/backend/run_bilibili_intelligence_scheduler.py",
+            "start",
+        ],
+        "log_file": "bilibili_intelligence_scheduler.log",
+        "description": "每小时同步 B站监控源投稿，并发送成功/部分失败/失败汇总邮件",
+    },
     "report_video_asset_scheduler": {
         "label": "研报资产扫描调度器",
         "pattern": "run_report_video_asset_scheduler.py",
@@ -1018,10 +1029,14 @@ def _isolated_watchdog_repair(name, callback, *, fallback, args=(), kwargs=None)
         # Each repairer owns an independent idempotent claim.  A broken DB
         # session or an optional dependency in one repairer must not prevent
         # the watchdog from healing unrelated queues during the same tick.
-        _release_db_session_quietly()
         result = dict(fallback or {})
         result.update({"error": str(exc), "failed_repair": str(name)})
         return result
+    finally:
+        # Successful no-op repairers also open read transactions.  Isolate
+        # every repair unit so later filesystem, broker, and repair work never
+        # extends the first checkout for the whole watchdog tick.
+        _release_db_session_quietly()
 
 
 def _watchdog_repair_stale_business_tasks(config):

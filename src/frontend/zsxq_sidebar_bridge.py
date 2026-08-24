@@ -32,10 +32,17 @@ class BridgePage:
 
 
 class ZsxqSidebarHtmlBridge:
-    def __init__(self, backend_url: str, csrf_secret: bytes, timeout: float = 3.0):
+    def __init__(
+        self,
+        backend_url: str,
+        csrf_secret: bytes,
+        timeout: float = 3.0,
+        submit_timeout: float = 30.0,
+    ):
         self.backend_url = backend_url.rstrip("/")
         self.csrf_secret = csrf_secret
         self.timeout = timeout
+        self.submit_timeout = submit_timeout
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def render_history(self, kind: str) -> BridgePage:
@@ -98,12 +105,18 @@ class ZsxqSidebarHtmlBridge:
         try:
             manifest = json.loads(manifest_json)
         except (TypeError, ValueError):
-            return self._submit_error_page(400, "invalid_manifest", "manifest 必须是 JSON 对象")
+            return self._submit_error_page(
+                400, "invalid_manifest", "manifest 必须是 JSON 对象"
+            )
         if not isinstance(manifest, dict):
-            return self._submit_error_page(400, "invalid_manifest", "manifest 必须是 JSON 对象")
+            return self._submit_error_page(
+                400, "invalid_manifest", "manifest 必须是 JSON 对象"
+            )
         scope = TAB_SCOPES.get(kind)
         if scope is None or manifest.get("kind") != kind:
-            return self._submit_error_page(400, "scope_mismatch", "manifest.kind 与页面不匹配")
+            return self._submit_error_page(
+                400, "scope_mismatch", "manifest.kind 与页面不匹配"
+            )
         for field in ("group_id", "tab_id", "tab_label"):
             if str(manifest.get(field) or "") != scope[field]:
                 return self._submit_error_page(
@@ -127,6 +140,7 @@ class ZsxqSidebarHtmlBridge:
                 "auto_publish": {"enabled": True},
             },
             headers={"Idempotency-Key": f"zsxq-sidebar:{kind}:{run_id}"},
+            timeout=self.submit_timeout,
         )
         return self._json_page(
             status,
@@ -151,6 +165,7 @@ class ZsxqSidebarHtmlBridge:
         path: str,
         payload: dict,
         headers: dict | None = None,
+        timeout: float | None = None,
     ) -> tuple[int, dict]:
         request_headers = {"Content-Type": "application/json"}
         if headers:
@@ -162,7 +177,8 @@ class ZsxqSidebarHtmlBridge:
             method=method,
         )
         try:
-            with self.opener.open(request, timeout=self.timeout) as response:
+            request_timeout = self.timeout if timeout is None else timeout
+            with self.opener.open(request, timeout=request_timeout) as response:
                 return response.status, self._decode_object(response.read())
         except urllib.error.HTTPError as error:
             try:
@@ -182,7 +198,9 @@ class ZsxqSidebarHtmlBridge:
             pre_id="history-json",
         )
 
-    def _submit_error_page(self, status_code: int, code: str, message: str) -> BridgePage:
+    def _submit_error_page(
+        self, status_code: int, code: str, message: str
+    ) -> BridgePage:
         return self._json_page(
             status_code,
             "提交同步编排失败",

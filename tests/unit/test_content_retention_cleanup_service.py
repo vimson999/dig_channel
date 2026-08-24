@@ -142,6 +142,92 @@ class ContentRetentionCleanupServiceTest(unittest.TestCase):
             self.assertTrue(note.exists())
             self.assertTrue(files_dir.exists())
 
+    def test_preview_collects_only_expired_processed_mp4_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            processed = root / "data" / "processed" / "mp3_video_workflow" / "20260701"
+            processed.mkdir(parents=True)
+            old_mp4 = processed / "old.mp4"
+            new_mp4 = processed / "new.mp4"
+            old_wav = processed / "keep.wav"
+            old_mp4.write_bytes(b"old-video")
+            new_mp4.write_bytes(b"new-video")
+            old_wav.write_bytes(b"keep-audio")
+            _touch_tree(processed, days_old=5)
+            now = time.time()
+            os.utime(new_mp4, (now, now))
+
+            service = _service(root)
+            service._protected_paths = lambda *_, **__: set()
+            result = service.run(
+                policy=ContentRetentionPolicy(
+                    processed_video_days=2,
+                    include_content_pipeline_batches=False,
+                    include_manual_publish=False,
+                    include_pytest_batches=False,
+                    include_sync_raw=False,
+                ),
+                dry_run=True,
+            )
+
+            self.assertEqual(result["candidate_count"], 1)
+            self.assertEqual(result["candidates"][0]["category"], "processed_video")
+            self.assertEqual(result["candidates"][0]["path"], str(old_mp4.resolve()))
+            self.assertNotIn(str(old_wav.resolve()), {item["path"] for item in result["candidates"]})
+
+    def test_cleanup_deletes_expired_processed_mp4_but_keeps_other_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            processed = root / "data" / "processed" / "report_audio_workflow" / "20260701"
+            processed.mkdir(parents=True)
+            old_mp4 = processed / "old.mp4"
+            old_json = processed / "manifest.json"
+            old_mp4.write_bytes(b"old-video")
+            old_json.write_text("keep", encoding="utf-8")
+            _touch_tree(processed, days_old=5)
+
+            service = _service(root)
+            service._protected_paths = lambda *_, **__: set()
+            result = service.run(
+                policy=ContentRetentionPolicy(
+                    processed_video_days=2,
+                    include_content_pipeline_batches=False,
+                    include_manual_publish=False,
+                    include_pytest_batches=False,
+                    include_sync_raw=False,
+                ),
+                dry_run=False,
+            )
+
+            self.assertEqual(result["deleted_count"], 1)
+            self.assertFalse(old_mp4.exists())
+            self.assertTrue(old_json.exists())
+
+    def test_protected_processed_mp4_is_not_collected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            processed = root / "data" / "processed" / "mp3_video_workflow" / "20260701"
+            processed.mkdir(parents=True)
+            old_mp4 = processed / "still-running.mp4"
+            old_mp4.write_bytes(b"video")
+            _touch_tree(processed, days_old=5)
+
+            service = _service(root)
+            service._protected_paths = lambda *_, **__: {old_mp4.resolve()}
+            result = service.run(
+                policy=ContentRetentionPolicy(
+                    processed_video_days=2,
+                    include_content_pipeline_batches=False,
+                    include_manual_publish=False,
+                    include_pytest_batches=False,
+                    include_sync_raw=False,
+                ),
+                dry_run=True,
+            )
+
+            self.assertEqual(result["candidate_count"], 0)
+            self.assertTrue(old_mp4.exists())
+
     def test_protected_directory_is_not_collected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -178,7 +264,10 @@ class ContentRetentionCleanupServiceTest(unittest.TestCase):
         policy = ContentRetentionPolicy.from_payload({})
 
         self.assertEqual(policy.unfinished_reference_protect_days, 3)
+        self.assertEqual(policy.processed_video_days, 3)
+        self.assertTrue(policy.include_processed_videos)
         self.assertEqual(policy.to_dict()["unfinished_reference_protect_days"], 3)
+        self.assertEqual(policy.to_dict()["processed_video_days"], 3)
 
 
 def _service(root: Path) -> ContentPipelineRetentionCleanupService:

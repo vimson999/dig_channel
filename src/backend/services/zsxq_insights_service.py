@@ -6,6 +6,7 @@ import os
 import re
 import time
 from collections import Counter, OrderedDict, defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from threading import RLock
 from urllib.parse import unquote
@@ -13,6 +14,7 @@ from urllib.parse import unquote
 from sqlalchemy import text
 
 from models import db
+from services.runtime_guard import release_db_session_quietly
 from services.zsxq_yiren_award_cleanup_service import YIREN_NAME, is_yiren_award_comment
 
 
@@ -28,6 +30,15 @@ MAX_CACHE_ENTRIES = 64
 
 _cache_lock = RLock()
 _insights_cache = OrderedDict()
+
+
+@contextmanager
+def _released_read_session():
+    """Release a materialized read before CPU-only aggregation without hiding SQL origin."""
+    try:
+        yield db.session
+    finally:
+        release_db_session_quietly()
 
 AI_PATTERN = r"人工智能|大模型|智能体|提示词|chatgpt|claude|deepseek|cursor|coze|扣子|mcp|工作流|自动化|aigc|(?<![a-z])ai(?![a-z])"
 CONTENT_PATTERN = r"小红书|抖音|视频号|公众号|短视频|自媒体|内容创作|个人IP|起号|直播|播客|流量"
@@ -323,7 +334,8 @@ def _load_topics(group_id: str):
         WHERE rn = 1
         """
     )
-    rows = db.session.execute(statement, {"group_id": group_id}).mappings().all()
+    with _released_read_session() as session:
+        rows = session.execute(statement, {"group_id": group_id}).mappings().all()
     topics = []
     for raw in rows:
         topic = dict(raw)
@@ -407,7 +419,8 @@ def _aggregate_themes(group_id: str):
     )
     params["demand_pattern"] = DEMAND_RE.pattern
     params["proof_pattern"] = PROOF_RE.pattern
-    rows = db.session.execute(statement, params).mappings().all()
+    with _released_read_session() as session:
+        rows = session.execute(statement, params).mappings().all()
     result = {}
     for raw in rows:
         row = dict(raw)
@@ -505,7 +518,8 @@ def _load_selected_topics(group_id: str, theme_id: str, range_days: int, newest:
     }
     for index, (_label, pattern) in enumerate(subtopic_definitions):
         params[f"subtopic_pattern_{index}"] = pattern
-    rows = db.session.execute(statement, params).mappings().all()
+    with _released_read_session() as session:
+        rows = session.execute(statement, params).mappings().all()
     topics = []
     for raw in rows:
         topic = dict(raw)
@@ -529,8 +543,9 @@ def _load_topic_page_details(group_id: str, topic_ids):
     normalized_ids = list(dict.fromkeys(str(topic_id) for topic_id in topic_ids if topic_id))
     if not normalized_ids:
         return {}
-    rows = db.session.execute(
-        text(
+    with _released_read_session() as session:
+        rows = session.execute(
+            text(
             """
             WITH ranked AS (
                 SELECT topic_id, title, author_name, content, question_text, answer_text,
@@ -554,8 +569,8 @@ def _load_topic_page_details(group_id: str, topic_ids):
             WHERE rn = 1
             """
         ),
-        {"group_id": str(group_id), "topic_ids": normalized_ids},
-    ).mappings().all()
+            {"group_id": str(group_id), "topic_ids": normalized_ids},
+        ).mappings().all()
     return {str(row["topic_id"]): dict(row) for row in rows}
 
 
@@ -716,8 +731,9 @@ def _load_yiren_recognition(group_id: str, topic_ids):
     normalized_ids = list(dict.fromkeys(str(topic_id) for topic_id in topic_ids if topic_id))
     if not normalized_ids:
         return {}
-    rows = db.session.execute(
-        text(
+    with _released_read_session() as session:
+        rows = session.execute(
+            text(
             """
             SELECT topic_id, owner_user_id, text, create_time
             FROM zsxq_topic_comments
@@ -727,12 +743,12 @@ def _load_yiren_recognition(group_id: str, topic_ids):
             ORDER BY create_time DESC
             """
         ),
-        {
-            "group_id": str(group_id),
-            "owner_name": YIREN_NAME,
-            "topic_ids": normalized_ids,
-        },
-    ).mappings().all()
+            {
+                "group_id": str(group_id),
+                "owner_name": YIREN_NAME,
+                "topic_ids": normalized_ids,
+            },
+        ).mappings().all()
     result = {topic_id: _empty_yiren_recognition() for topic_id in normalized_ids}
     for raw in rows:
         row = dict(raw)

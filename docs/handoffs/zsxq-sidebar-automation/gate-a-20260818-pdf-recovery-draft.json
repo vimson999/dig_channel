@@ -1,0 +1,120 @@
+{
+  "run_id": "sidebar-pdf-20260818T122825+0800-gatea-recovery-seven-valid",
+  "kind": "pdf",
+  "group_id": "28888112822211",
+  "tab_id": "51184248544214",
+  "tab_label": "外资研报",
+  "scan_summary": {
+    "recovery": true,
+    "source_gate": "gate_a_first_run_failed",
+    "topic_groups_scanned": 0,
+    "attachments_found": 8,
+    "unique_pdf_scanned": 8,
+    "within_48h": 8,
+    "historical_already_downloaded": 0,
+    "new_download_success": 7,
+    "recovery_excluded_ineligible": 1,
+    "history_complete": true,
+    "history_records_seen": 210,
+    "history_unique_files": 77,
+    "source_files_sha_verified": true,
+    "manifest_blocked_by_download_integrity": false
+  },
+  "history_observations": [],
+  "files": [
+    {
+      "filename": "The Biggest Bounce Most Missed -ZeroHedge.pdf",
+      "absolute_path": "/Users/v9/Downloads/The Biggest Bounce Most Missed -ZeroHedge.pdf",
+      "media_type": "pdf",
+      "download_count": 36,
+      "published_at": "2026-08-17T20:55:00+08:00",
+      "topic_title": "#外资研报",
+      "source_url": "https://wx.zsxq.com/tags/外资研报/51184248544214",
+      "downloaded_at": "2026-08-18T10:55:44+08:00",
+      "sha256": "760aea921012071d033525f0b576ed47386af87c039ed4820a41dcdd952f5666",
+      "success": true
+    },
+    {
+      "filename": "高盛-日本：2026年第二季度实际GDP初值环比年化增长1.1_，低于市场预期-260817.pdf",
+      "absolute_path": "/Users/v9/Downloads/高盛-日本：2026年第二季度实际GDP初值环比年化增长1.1_，低于市场预期-260817.pdf",
+      "media_type": "pdf",
+      "download_count": 32,
+      "published_at": "2026-08-17T19:56:00+08:00",
+      "topic_title": "#外资研报",
+      "source_url": "https://wx.zsxq.com/tags/外资研报/51184248544214",
+      "downloaded_at": "2026-08-18T10:56:44+08:00",
+      "sha256": "4b033adb6f08de2ce46502e724d830d84098e56fa968c8e750ae9c5035ea6612",
+      "success": true
+    },
+    {
+      "filename": "高盛-HawkEye 360公司(HAWK)：季度业绩稳健，国际势头强劲，星座建设进展顺利；买入-260816.pdf",
+      "absolute_path": "/Users/v9/Downloads/高盛-HawkEye 360公司(HAWK)：季度业绩稳健，国际势头强劲，星座建设进展顺利；买入-260816.pdf",
+      "media_type": "pdf",
+      "download_count": 31,
+      "published_at": "2026-08-17T19:56:00+08:00",
+      "topic_title": "#外资研报",
+      "source_url": "https://wx.zsxq.com/tags/外资研报/51184248544214",
+      "downloaded_at": "2026-08-18T10:57:20+08:00",
+      "sha256": "9bfe2aceae744bf2fd5ac855501bf2d47e94bf365ba6ffd0f9d964d1b61a1a52",
+      "success": true
+    },
+    {
+      "filename": "高盛-技嘉(2376.TW)：AI服务器扩张；强劲资本支出承诺以捕捉需求；7月和2026年第二季度业绩超预期；中性-260817.pdf",
+      "absolute_path": "/Users/v9/Downloads/高盛-技嘉(2376.TW)：AI服务器扩张；强劲资本支出承诺以捕捉需求；7月和2026年第二季度业绩超预期；中性-260817.pdf",
+      "media_type": "pdf",
+      "download_count": 32,
+      "published_at": "2026-08-17T19:56:00+08:00",
+      "topic_title": "#外资研报",
+      "source_url": "https://wx.zsxq.com/tags/外资研报/51184248544214",
+      "downloaded_at": "2026-08-18T10:57:23+08:00",
+      "sha256": "23811a8bbc5f2403a750b988483762e5d70cbb92a96a7d9af344b418ffb59fe5",
+      "success": true
+    },
+    {
+      "filename": "伯恩斯坦-全球储能：电池周刊8月17日-260817.pdf",
+      "absolute_path": "/Users/v9/Downloads/伯恩斯坦-全球储能：电池周刊8月17日-260817.pdf",
+      "media_type": "pdf",
+      "download_count": 31,
+      "published_at": "2026-08-17T19:56:00+08:00",
+      "topic_title": "#外资研报",
+      "source_url": "https://wx.zsxq.com/tags/外资研报/51184248544214",
+      "downloaded_at": "2026-08-18T10:57:58+08:00",
+      "sha256": "4f050e961ce88bfbab388b676ee2606357df7545a25e9dcf341f2478e8253d3b",
+      "success": true
+    },
+    {
+      "filename": "伯恩斯坦-印度电动汽车电动革命：稀土机会与印度新兴供应链-260817.pdf",
+      "absolute_path": "/Users/v9/Downloads/伯恩斯坦-印度电动汽车电动革命：稀土机会与印度新兴供应链-260817.pdf",
+      "media_type": "pdf",
+      "download_count": 31,
+      "published_at": "2026-08-17T19:56:00+08:00",
+      "topic_title": "#外资研报",
+      "source_url": "https://wx.zsxq.com/tags/外资研报/51184248544214",
+      "downloaded_at": "2026-08-18T10:58:02+08:00",
+      "sha256": "3caaebb75290e659b0b58ed29ab5b7ae3a669320b341d5b13df952003080e408",
+      "success": true
+    },
+    {
+      "filename": "摩根大通-医药行业周报：8月10日至14日：行业重新评级的机会-260815.pdf",
+      "absolute_path": "/Users/v9/Downloads/摩根大通-医药行业周报：8月10日至14日：行业重新评级的机会-260815.pdf",
+      "media_type": "pdf",
+      "download_count": 32,
+      "published_at": "2026-08-17T09:49:00+08:00",
+      "topic_title": "#外资研报",
+      "source_url": "https://wx.zsxq.com/tags/外资研报/51184248544214",
+      "downloaded_at": "2026-08-18T10:58:37+08:00",
+      "sha256": "5b93a27f73b1853b5ce57fb51e870f0b38df2a3c05259200ca28d45c491bf42c",
+      "success": true
+    }
+  ],
+  "recovery_exclusions": [
+    {
+      "filename": "高盛-平安银行(000001.SZ)：盈利回顾：基本符合预期；零售资产质量持续改善，聚焦财富管理和股东回报上行-260817.pdf",
+      "absolute_path": "/Users/v9/Downloads/高盛-平安银行(000001.SZ)：盈利回顾：基本符合预期；零售资产质量持续改善，聚焦财富管理和股东回报上行-260817.pdf",
+      "sha256": "76dac9510533bc05d9bd3b89f367062ee428e1e83ab05c9b966306677609ae12",
+      "observed_download_count": null,
+      "reason": "download_count_unavailable_and_download_button_missing_due_to_content_protection",
+      "must_not_enter_files": true
+    }
+  ]
+}

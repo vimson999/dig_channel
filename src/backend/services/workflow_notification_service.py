@@ -401,8 +401,11 @@ class WorkflowNotificationService:
             f"批次：{workflow.get('batch_id') or '-'}",
             f"工作流 ID：{workflow.get('id') or '-'}",
             f"触发方式：{workflow.get('trigger') or '-'}",
+            f"上游接入：{workflow.get('source_mode') or '-'}",
             f"轮次：{self._round_text(workflow, plain=True) or '-'}",
         ]
+        if workflow.get("content_pipeline_task_id"):
+            lines.append(f"内容流水线任务：{workflow.get('content_pipeline_task_id')}")
         if workflow.get("event_message"):
             lines.append(f"说明：{workflow.get('event_message')}")
         if workflow.get("error_message"):
@@ -502,15 +505,19 @@ class WorkflowNotificationService:
         sync = stage_results.get("sync") if isinstance(stage_results.get("sync"), dict) else {}
         if sync:
             summary = sync.get("summary") if isinstance(sync.get("summary"), dict) else {}
-            lines.append(
-                "同步："
-                f"{self._status_label(sync.get('status'))}"
-                f" | 新增 {self._num(summary.get('topics_new'))}"
-                f" | 更新 {self._num(summary.get('topics_updated'))}"
-                f" | 下载 {self._num(summary.get('attachments_downloaded'))}"
-                f" | 跳过 {self._num(summary.get('attachments_skipped'))}"
-                f" | 失败 {self._num(summary.get('attachments_failed'))}"
-            )
+            bilibili_summary = summary.get("bilibili_intelligence")
+            if bilibili_summary:
+                lines.extend(self._bilibili_intelligence_lines(bilibili_summary))
+            else:
+                lines.append(
+                    "同步："
+                    f"{self._status_label(sync.get('status'))}"
+                    f" | 新增 {self._num(summary.get('topics_new'))}"
+                    f" | 更新 {self._num(summary.get('topics_updated'))}"
+                    f" | 下载 {self._num(summary.get('attachments_downloaded'))}"
+                    f" | 跳过 {self._num(summary.get('attachments_skipped'))}"
+                    f" | 失败 {self._num(summary.get('attachments_failed'))}"
+                )
             lines.extend(self._sync_audit_lines(summary))
             auto_video_lines = self._auto_video_dispatch_lines(summary.get("auto_video_dispatch"))
             if auto_video_lines:
@@ -569,6 +576,70 @@ class WorkflowNotificationService:
                     continue
                 lines.append(f"{key}：{value}")
 
+        return lines
+
+    def _bilibili_intelligence_lines(self, summary):
+        if not isinstance(summary, dict):
+            return []
+
+        lines = [
+            "B站情报同步："
+            f"{self._status_label(summary.get('status'))}"
+            f" | 监控源 {self._num(summary.get('total_competitors'))} 个"
+            f" | 成功 {self._num(summary.get('succeeded_count'))} 个"
+            f" | 失败 {self._num(summary.get('failed_count'))} 个"
+            f" | 抓取 {self._num(summary.get('fetched'))} 条"
+            f" | 新增 {self._num(summary.get('created'))} 条"
+            f" | 更新 {self._num(summary.get('updated'))} 条"
+            f" | 耗时 {self._num(summary.get('duration_seconds'))} 秒"
+        ]
+
+        succeeded = summary.get("succeeded") if isinstance(summary.get("succeeded"), list) else []
+        if succeeded:
+            lines.append("成功明细：")
+            for item in succeeded:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("competitor_name") or item.get("competitor_id") or "未知监控源"
+                uid = item.get("uid")
+                identity = f"{name}（UID {uid}）" if uid else str(name)
+                lines.append(
+                    f"- {identity}：抓取 {self._num(item.get('fetched'))} 条，"
+                    f"新增 {self._num(item.get('created'))} 条，"
+                    f"更新 {self._num(item.get('updated'))} 条"
+                )
+
+        created_titles = []
+        for item in succeeded:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("competitor_name") or item.get("competitor_id") or "未知监控源"
+            uid = item.get("uid")
+            identity = f"{name}（UID {uid}）" if uid else str(name)
+            titles = item.get("created_titles")
+            if not isinstance(titles, (list, tuple)):
+                continue
+            for title in titles:
+                title = str(title or "").strip()
+                if title:
+                    created_titles.append((identity, title))
+
+        if created_titles:
+            lines.append(f"新增内容标题（{len(created_titles)} 条）：")
+            lines.extend(f"- {identity}：{title}" for identity, title in created_titles)
+        else:
+            lines.append("新增内容标题：0 条")
+
+        failed = summary.get("failed") if isinstance(summary.get("failed"), list) else []
+        if failed:
+            lines.append("失败明细：")
+            for item in failed:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("competitor_name") or item.get("competitor_id") or "未知监控源"
+                uid = item.get("uid")
+                identity = f"{name}（UID {uid}）" if uid else str(name)
+                lines.append(f"- {identity}：{item.get('error') or '未知错误'}")
         return lines
 
     def _workflow_totals(self, stage_results):

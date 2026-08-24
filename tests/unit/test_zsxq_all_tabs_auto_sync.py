@@ -355,23 +355,27 @@ class ZsxqAllTabsAutoSyncDatabaseConfigTest(unittest.TestCase):
         self.assertEqual(by_key["shengcai"]["max_pages"], 2)
         self.assertEqual(by_key["honghao"]["topic_count"], 20)
 
-    def test_reuses_normalized_database_configs_for_one_minute(self):
+    def test_reuses_normalized_database_configs_for_five_minutes(self):
         row = SimpleNamespace(
             config_key="zsxq.sync.schedule.shengcai",
             value={"group_id": "1824528822", "group_name": "生财有术"},
             status=1,
             updated_at=None,
         )
+        now = [100.0]
         with patch.object(service, "_db_config_rows", return_value=[row]) as rows, patch.object(
             service.time,
             "monotonic",
-            side_effect=[100.0, 100.0, 120.0],
+            side_effect=lambda: now[0],
         ):
             first = service.load_all_tabs_auto_sync_configs(ensure_defaults=False)
             first[0]["group_name"] = "mutated"
+            now[0] = 240.0
             second = service.load_all_tabs_auto_sync_configs(ensure_defaults=False)
+            now[0] = 401.0
+            service.load_all_tabs_auto_sync_configs(ensure_defaults=False)
 
-        self.assertEqual(rows.call_count, 1)
+        self.assertEqual(rows.call_count, 2)
         self.assertEqual(second[0]["group_name"], "生财有术")
 
     def test_updating_one_group_does_not_change_the_other_group(self):

@@ -10,6 +10,7 @@ from .video import Video, VideoData
 from .favorite import FavoriteVideo
 from .indie_navigator import OpportunitySignal, UserOpportunityInteraction, CollectionKeyword, CollectionJob
 from .task import PublicationTask
+from .content_pipeline_asset import ContentPipelineAsset
 from .report_visual_plan import ReportVisualPlanOutput, ReportVisualPlanSegment
 from .report_stick_figure_asset import ReportStickFigureAudioTrack, ReportStickFigureSceneAsset
 from .report_pdf_evidence import (
@@ -59,6 +60,7 @@ __all__ = [
     'FavoriteVideo', 
     'OpportunitySignal',
     'PublicationTask',
+    'ContentPipelineAsset',
     'ReportVisualPlanOutput',
     'ReportVisualPlanSegment',
     'ReportStickFigureSceneAsset',

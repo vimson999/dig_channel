@@ -303,11 +303,26 @@ def is_adhoc_diagnostic_context(
     fields: dict[str, str],
     *,
     origin: str = "unknown",
+    source_path: Path | None = None,
 ) -> bool:
     """Separate one-off shell/diagnostic SQL from managed application traffic."""
     role = str(fields.get("role") or "unknown").strip().lower()
     process = str(fields.get("process") or "unknown").strip().lower()
     normalized_origin = str(origin or "unknown").strip().lower()
+    if (
+        role == "unknown"
+        and normalized_origin == "unknown"
+        and process in {"-", "-c", "python", "python3"}
+    ):
+        return True
+    if source_path is not None:
+        source_path = Path(source_path)
+        if source_path.parent.name == "celery" or source_path.name in {
+            "app.log",
+            "backend.log",
+            "scheduler.log",
+        }:
+            return False
     return (
         role == "unknown"
         and normalized_origin == "unknown"
@@ -396,8 +411,11 @@ def main() -> int:
     sql_errors: Counter[tuple[str, str, str]] = Counter()
     application_sql_errors: Counter[tuple[str, str, str]] = Counter()
     adhoc_sql_errors: Counter[tuple[str, str, str]] = Counter()
+    sql_error_contexts: dict[
+        tuple[str, str, str, str, str, str],
+        tuple[tuple[str, str, str], bool],
+    ] = {}
     seen: set[tuple[datetime, str, str, str]] = set()
-    sql_error_seen: set[tuple[str, str, str, str, str, str]] = set()
     request_starts: dict[str, tuple[datetime, str, str]] = {}
     request_ends: dict[str, tuple[datetime, int, float]] = {}
     celery_successes: dict[str, list[float]] = defaultdict(list)
@@ -511,6 +529,7 @@ def main() -> int:
                                     fields.get("non_sql_hold_ms", held_ms) or held_ms
                                 ),
                                 "has_breakdown": "sql_total_ms" in fields,
+                                "source_path": path,
                             })
                 error_match = SQL_ERROR.search(line)
                 if error_match:
@@ -530,18 +549,18 @@ def main() -> int:
                         fields.get("pid", "unknown"),
                         fields.get("duration_ms", "unknown"),
                     )
-                    if error_identity not in sql_error_seen:
-                        sql_error_seen.add(error_identity)
-                        sql_errors[error_key] += 1
-                        target = (
-                            adhoc_sql_errors
-                            if is_adhoc_diagnostic_context(
-                                fields,
-                                origin=error_match.group("origin"),
-                            )
-                            else application_sql_errors
-                        )
-                        target[error_key] += 1
+                    is_adhoc = is_adhoc_diagnostic_context(
+                        fields,
+                        origin=error_match.group("origin"),
+                        source_path=path,
+                    )
+                    previous = sql_error_contexts.get(error_identity)
+                    if previous is None or (previous[1] and not is_adhoc):
+                        sql_error_contexts[error_identity] = (error_key, is_adhoc)
+
+    for error_key, is_adhoc in sql_error_contexts.values():
+        sql_errors[error_key] += 1
+        (adhoc_sql_errors if is_adhoc else application_sql_errors)[error_key] += 1
 
     print(
         "events "
@@ -566,6 +585,7 @@ def main() -> int:
         lifecycle_by_origin[str(sample["checkout_origin"])].append(sample)
         if is_adhoc_diagnostic_context(
             {"role": held_role, "process": held_process},
+            source_path=sample.get("source_path"),
         ):
             lifecycle_adhoc.append(held_ms)
     for role, values in sorted(
@@ -621,6 +641,7 @@ def main() -> int:
         (query_correlated if correlated else uncorrelated).append(held_ms)
         if not correlated and not is_adhoc_diagnostic_context(
             {"role": held_role, "process": held_process},
+            source_path=sample.get("source_path"),
         ):
             managed_uncorrelated.append(held_ms)
             managed_uncorrelated_samples.append(sample)

@@ -89,3 +89,17 @@ broker/control-plane 与网络段。与 watchdog 778 次成对、12.8 小时中�
 轮询、恢复可见时立即刷新且不允许 overlap；真实 Chrome 已加载新静态资源。Session 跨 inspect
 旧根因本窗口未出现对应 server-closed 证据，但单次 P95 刚超过 10s、最大仍 26.202s，故本记录
 保持 OBSERVING。下一轮要同时验收后台请求归零和可见前台单次 P95 <10s。
+
+## 2026-08-20 物料页横向遗漏与 Redis pidbox 长尾
+
+固定窗口 `/api/v1/celery/status` 再增至 809 次、累计 1750.319 秒、P95 9.352 秒、
+最大 21.372 秒；上轮只有 5 次。时间序列定位到研报基础文案物料页仍直接使用 12 秒
+`setInterval`，hidden 后 Chrome 节流为每小时 60 次。共享 Visibility controller 已扩展到该页，
+并新增读取实际 HTML/业务脚本的契约；但已加载旧 JS 的浏览器实例不会被 backend 重启替换，
+本轮后续仍有分钟级请求，因此保持 OBSERVING。
+
+窗口后 06:24–06:25 捕获两条无消费者的临时 `reply.celery.pidbox` 消息；Kombu 尝试恢复时
+Redis socket read timeout，记录一次 `Could not restore message`。消息 `delivery_mode=1` 且属于
+Celery control reply，不是持久任务投递；随后 broker status 为 ok、17/17 服务运行、队列无已知
+业务丢失，但一次 status 探针仍耗时 22.876 秒。该证据确认剩余根因是 Redis/control-plane 与
+网络长尾，而非 PostgreSQL executor；未完成下一窗口前不得关闭。

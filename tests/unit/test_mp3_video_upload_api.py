@@ -80,11 +80,14 @@ class Mp3VideoUploadApiTest(unittest.TestCase):
         task = PublicationTask.query.filter_by(id=payload["job_id"]).one()
         workflow = task.params["mp3_video_workflow"]
         self.assertEqual(task.source_feature, "local_mp3_upload")
+        self.assertEqual(task.mp3_audio_filename, "本地调研.mp3")
         self.assertEqual(workflow["audio"]["source"], "local_upload")
         self.assertEqual(workflow["audio"]["attachment_id"], task.source_task_id)
         self.assertEqual(workflow["audio"]["topic_title"], "本地上传测试")
         self.assertEqual(workflow["render_mode"], "full_video")
         self.assertFalse(workflow["generate_subtitles"])
+        list_payload = mp3_api._job_list_payload(task)
+        self.assertEqual(list_payload["request"]["audio"]["filename"], "本地调研.mp3")
 
     def test_upload_rejects_non_audio_extension_before_enqueue(self):
         with self.app.test_request_context(
@@ -98,6 +101,14 @@ class Mp3VideoUploadApiTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("只支持音频文件", response.get_json()["message"])
         self.assertEqual(PublicationTask.query.count(), 0)
+
+    def test_audio_upload_filename_preserves_mixed_unicode_stem(self):
+        storage = SimpleNamespace(filename="AI芯片研究报告.mp3")
+
+        filename, extension = mp3_api._audio_upload_filename(storage)
+
+        self.assertEqual(filename, "AI芯片研究报告.mp3")
+        self.assertEqual(extension, "mp3")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from werkzeug.utils import secure_filename
 
 from celery_config import celery_app
 from models import db
+from models.content_pipeline_asset import ContentPipelineAsset
 from models.report_stick_figure_asset import ReportStickFigureSceneAsset
 from models.report_visual_plan import ReportVisualPlanSegment
 from models.task import PublicationTask
@@ -454,10 +455,63 @@ def list_pdf_assets(_current_user):
         if len(rows) < batch_limit:
             break
 
+    pipeline_items = []
+    pipeline_scanned = 0
+    legacy_items = []
+    legacy_scanned = 0
+    # Manual, scheduled, and sidebar submissions are catalogued by the shared
+    # content pipeline. They have no ZSXQ download count, so they belong in
+    # the all-assets view only (the hot view is specifically download-count
+    # based).
+    if scope not in {"hot", "popular"} and not group_id and not tab_id:
+        pipeline_query = db.session.query(ContentPipelineAsset).filter(
+            ContentPipelineAsset.media_type == "pdf"
+        )
+        if q:
+            pipeline_pattern = f"%{_escape_like(q)}%"
+            pipeline_query = pipeline_query.filter(or_(
+                ContentPipelineAsset.filename.ilike(pipeline_pattern),
+                ContentPipelineAsset.source_path.ilike(pipeline_pattern),
+                ContentPipelineAsset.source_mode.ilike(pipeline_pattern),
+            ))
+        pipeline_rows = (
+            pipeline_query
+            .order_by(
+                ContentPipelineAsset.updated_at.desc(),
+                ContentPipelineAsset.created_at.desc(),
+            )
+            .limit(scan_limit)
+            .all()
+        )
+        pipeline_scanned = len(pipeline_rows)
+        for row in pipeline_rows:
+            item = _content_pipeline_pdf_asset_row_payload(row)
+            if item:
+                pipeline_items.append(item)
+            else:
+                skipped_missing += 1
+
+        # A bounded compatibility read keeps batches submitted before the
+        # shared asset table was introduced visible without rewriting their
+        # historical task rows. Identical files are removed by the same merge
+        # step as the new pipeline rows.
+        legacy_items = _legacy_pdf_asset_items(q=q, limit=scan_limit)
+        legacy_scanned = len(legacy_items)
+
+    combined_items = _merge_pdf_asset_items(
+        valid_items,
+        [*pipeline_items, *legacy_items],
+    )
+
     start = (page - 1) * per_page
     end = start + per_page
-    items = valid_items[start:end]
-    has_more = len(valid_items) > end or scanned >= scan_limit
+    items = combined_items[start:end]
+    has_more = (
+        len(combined_items) > end
+        or scanned >= scan_limit
+        or pipeline_scanned >= scan_limit
+        or legacy_scanned >= scan_limit
+    )
     return jsonify({
         "success": True,
         "data": {
@@ -467,10 +521,10 @@ def list_pdf_assets(_current_user):
                 "per_page": per_page,
                 "has_more": has_more,
                 "skipped_missing": skipped_missing,
-                "scanned": scanned,
+                "scanned": scanned + pipeline_scanned + legacy_scanned,
                 "scope": "hot" if scope in {"hot", "popular"} else "all",
                 "hot_download_threshold": hot_download_threshold,
-                "order": "published_desc",
+                "order": "published_desc_with_pipeline_assets",
             },
         },
         "items": items,
@@ -524,7 +578,7 @@ def pdf_asset_workflow_stats(current_user):
 @require_login
 def preview_pdf_asset(_current_user, asset_id):
     try:
-        pdf = _pdf_meta_from_zsxq_attachment(asset_id, None)
+        pdf = _pdf_meta_from_asset_reference(asset_id, None)
     except ValueError as exc:
         return jsonify({"success": False, "message": str(exc)}), 404
 
@@ -544,7 +598,7 @@ def create_job(current_user):
     pdf_file = request.files.get("pdf") or request.files.get("file")
     pdf_asset_id = (data.get("pdf_asset_id") or data.get("pdf_attachment_id") or "").strip()
     if not pdf_file and not pdf_asset_id:
-        return jsonify({"success": False, "message": "请上传 PDF 或选择一个已同步 PDF"}), 400
+        return jsonify({"success": False, "message": "请上传 PDF 或选择一个 PDF 资产"}), 400
 
     if pdf_file:
         pdf_error = _validate_pdf_upload(pdf_file)
@@ -701,7 +755,7 @@ def create_job(current_user):
         if pdf_file:
             pdf_meta = _save_pdf_upload(pdf_file, task.id)
         else:
-            pdf_meta = _pdf_meta_from_zsxq_attachment(pdf_asset_id, task.id)
+            pdf_meta = _pdf_meta_from_asset_reference(pdf_asset_id, task.id)
     except ValueError as exc:
         db.session.rollback()
         return jsonify({"success": False, "message": str(exc)}), 400
@@ -6068,12 +6122,88 @@ def _save_pdf_upload(file_storage, job_id):
 
 def _validate_pdf_asset_id(asset_id):
     if not asset_id:
-        return "请选择已同步 PDF"
+        return "请选择一个 PDF"
     try:
-        _pdf_meta_from_zsxq_attachment(asset_id, None)
+        _pdf_meta_from_asset_reference(asset_id, None)
     except ValueError as exc:
         return str(exc)
     return None
+
+
+def _pdf_meta_from_asset_reference(asset_id, job_id):
+    """Resolve either a synced ZSXQ attachment or a pipeline asset reference."""
+    reference = str(asset_id or "").strip()
+    if reference.startswith("legacy:"):
+        parts = reference.split(":", 2)
+        if len(parts) != 3 or not parts[1]:
+            raise ValueError("选择的历史 PDF 引用无效")
+        try:
+            file_index = int(parts[2])
+        except (TypeError, ValueError):
+            raise ValueError("选择的历史 PDF 引用无效")
+        row = _legacy_pdf_file_row(parts[1], file_index)
+        if row is None:
+            raise ValueError("选择的历史手动 PDF 不存在")
+        source_mode = row.source_mode or "content_pipeline"
+        path = _resolve_pdf_path(row.file_path)
+        if not path:
+            raise ValueError("选择的历史手动 PDF 本地文件不存在")
+        try:
+            size = path.stat().st_size
+        except OSError:
+            raise ValueError("选择的历史手动 PDF 本地文件不可读")
+        if size <= 0:
+            raise ValueError("选择的历史手动 PDF 文件为空")
+        if size > _max_pdf_bytes():
+            raise ValueError(f"PDF 超过 {_max_pdf_mb()}MB 限制")
+        source_label = _content_pipeline_source_label(source_mode)
+        return {
+            "filename": path.name,
+            "path": str(path),
+            "bytes": size,
+            "source": "content_pipeline_legacy",
+            "source_mode": source_mode,
+            "attachment_id": reference,
+            "pipeline_task_id": row.task_id,
+            "topic_title": path.name,
+            "tab_label": source_label,
+            "download_url": f"/api/report-audio-workflows/jobs/{job_id}/input-pdf" if job_id else None,
+        }
+    if reference.startswith("pipeline:"):
+        pipeline_id = reference.split(":", 1)[1].strip()
+        row = (
+            db.session.query(ContentPipelineAsset)
+            .filter(
+                ContentPipelineAsset.id == pipeline_id,
+                ContentPipelineAsset.media_type == "pdf",
+            )
+            .one_or_none()
+        )
+        if row is None:
+            raise ValueError("选择的手动投递 PDF 不存在")
+        path = _resolve_pdf_path(row.source_path)
+        if not path:
+            raise ValueError("选择的手动投递 PDF 本地文件不存在")
+        size = path.stat().st_size
+        if size <= 0:
+            raise ValueError("选择的手动投递 PDF 文件为空")
+        if size > _max_pdf_bytes():
+            raise ValueError(f"PDF 超过 {_max_pdf_mb()}MB 限制")
+        source_label = _content_pipeline_source_label(row.source_mode)
+        return {
+            "filename": row.filename or path.name,
+            "path": str(path),
+            "bytes": size,
+            "source": "content_pipeline_asset",
+            "source_mode": row.source_mode,
+            "attachment_id": reference,
+            "pipeline_asset_id": row.id,
+            "pipeline_task_id": row.canonical_task_id,
+            "topic_title": row.filename or source_label,
+            "tab_label": source_label,
+            "download_url": f"/api/report-audio-workflows/jobs/{job_id}/input-pdf" if job_id else None,
+        }
+    return _pdf_meta_from_zsxq_attachment(reference, job_id)
 
 
 def _pdf_meta_from_zsxq_attachment(asset_id, job_id):
@@ -6091,13 +6221,13 @@ def _pdf_meta_from_zsxq_attachment(asset_id, job_id):
         .one_or_none()
     )
     if attachment is None:
-        raise ValueError("选择的同步 PDF 不存在")
+        raise ValueError("选择的知识星球 PDF 不存在")
     if attachment.download_status != "downloaded":
-        raise ValueError("选择的同步 PDF 还没有下载完成")
+        raise ValueError("选择的知识星球 PDF 还没有下载完成")
 
     path = _resolve_pdf_path(attachment.local_path)
     if not path:
-        raise ValueError("选择的同步 PDF 本地文件不存在")
+        raise ValueError("选择的知识星球 PDF 本地文件不存在")
     size = path.stat().st_size
     if size <= 0:
         raise ValueError("选择的同步 PDF 文件为空")
@@ -6140,6 +6270,10 @@ def _pdf_asset_payload(attachment, topic=None):
         return None
     return {
         "id": attachment.id,
+        "asset_id": attachment.id,
+        "asset_kind": "zsxq_attachment",
+        "source_label": "知识星球同步",
+        "source_mode": "zsxq_sync",
         "filename": attachment.name or path.name,
         "bytes": size,
         "download_count": attachment.download_count,
@@ -6171,6 +6305,10 @@ def _pdf_asset_row_payload(row):
         return None
     return {
         "id": row.attachment_id,
+        "asset_id": row.attachment_id,
+        "asset_kind": "zsxq_attachment",
+        "source_label": "知识星球同步",
+        "source_mode": "zsxq_sync",
         "filename": row.attachment_name or path.name,
         "bytes": size,
         "download_count": row.download_count,
@@ -6188,6 +6326,271 @@ def _pdf_asset_row_payload(row):
         "local_path": str(path),
         "preview_url": f"/api/report-audio-workflows/pdf-assets/{row.attachment_id}/preview",
     }
+
+
+def _content_pipeline_source_label(source_mode):
+    return {
+        "scheduled_api": "计划任务",
+        "sidebar": "侧边栏下载",
+        "browser_sidebar": "侧边栏下载",
+        "manual_download": "手动投递",
+    }.get(str(source_mode or "").strip().lower(), "内容流水线")
+
+
+def _content_pipeline_pdf_asset_row_payload(row):
+    if not row:
+        return None
+    path = _resolve_pdf_path(getattr(row, "source_path", None))
+    if not path:
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size <= 0:
+        return None
+    asset_id = str(row.id)
+    source_label = _content_pipeline_source_label(getattr(row, "source_mode", None))
+    return {
+        "id": f"pipeline:{asset_id}",
+        "asset_id": asset_id,
+        "asset_kind": "content_pipeline",
+        "source_label": source_label,
+        "source_mode": getattr(row, "source_mode", None),
+        "pipeline_status": getattr(row, "status", None),
+        "pipeline_task_id": getattr(row, "canonical_task_id", None),
+        "filename": getattr(row, "filename", None) or path.name,
+        "bytes": size,
+        "download_count": None,
+        "updated_at": _isoformat_z(getattr(row, "updated_at", None)),
+        "created_at": _isoformat_z(getattr(row, "created_at", None)),
+        "group_id": None,
+        "tab_id": None,
+        "topic_id": None,
+        "topic_title": getattr(row, "filename", None) or source_label,
+        "topic_author": None,
+        "topic_create_time": None,
+        "topic_first_synced_at": None,
+        "topic_last_synced_at": None,
+        "tab_label": source_label,
+        "local_path": str(path),
+        "preview_url": f"/api/report-audio-workflows/pdf-assets/pipeline:{asset_id}/preview",
+    }
+
+
+def _legacy_pdf_task_files(task):
+    params = getattr(task, "params", None)
+    if not isinstance(params, dict):
+        return [], "content_pipeline"
+    pipeline = params.get("content_pipeline") or {}
+    if not isinstance(pipeline, dict):
+        return [], "content_pipeline"
+    pdf_clean = pipeline.get("pdf_clean") or {}
+    files = pdf_clean.get("files") if isinstance(pdf_clean, dict) else []
+    metadata = pipeline.get("metadata") or {}
+    source_mode = metadata.get("source_mode") or metadata.get("mode") if isinstance(metadata, dict) else None
+    if not source_mode:
+        source_mode = "manual_download" if pipeline.get("trigger") == "manual" else "content_pipeline"
+    return [str(item or "").strip() for item in files if str(item or "").strip()], source_mode
+
+
+def _legacy_pdf_asset_items(q="", limit=500):
+    """Expose pre-dedupe PDF clean task files as read-only page assets."""
+    normalized_q = str(q or "").strip().lower()
+    row_limit = max(1, min(int(limit or 500), 5000))
+    if db.engine.dialect.name == "postgresql":
+        # Do not project the large params JSON column. Expanding only the
+        # bounded file-path array avoids the 20-second/full-payload query that
+        # legacy publication_tasks rows can otherwise trigger.
+        rows = db.session.execute(text("""
+            SELECT
+                task.id AS task_id,
+                task.status AS task_status,
+                task.created_at AS task_created_at,
+                task.updated_at AS task_updated_at,
+                COALESCE(
+                    task.params #>> '{content_pipeline,metadata,source_mode}',
+                    task.params #>> '{content_pipeline,metadata,mode}',
+                    CASE
+                        WHEN task.params #>> '{content_pipeline,trigger}' = 'manual'
+                        THEN 'manual_download'
+                        ELSE 'content_pipeline'
+                    END
+                ) AS source_mode,
+                files.file_path AS file_path,
+                files.file_index AS file_index
+            FROM publication_tasks AS task
+            CROSS JOIN LATERAL jsonb_array_elements_text(
+                COALESCE(task.params #> '{content_pipeline,pdf_clean,files}', '[]'::jsonb)
+            ) WITH ORDINALITY AS files(file_path, file_index)
+            WHERE task.feature = 'content_pdf_clean'
+            ORDER BY task.updated_at DESC NULLS LAST, task.created_at DESC
+            LIMIT :row_limit
+        """), {"row_limit": row_limit}).mappings().all()
+    else:
+        tasks = (
+            PublicationTask.query
+            .with_entities(
+                PublicationTask.id.label("task_id"),
+                PublicationTask.status.label("task_status"),
+                PublicationTask.params.label("task_params"),
+                PublicationTask.created_at.label("task_created_at"),
+                PublicationTask.updated_at.label("task_updated_at"),
+            )
+            .filter(PublicationTask.feature == "content_pdf_clean")
+            .order_by(
+                PublicationTask.updated_at.desc().nullslast(),
+                PublicationTask.created_at.desc(),
+            )
+            .limit(row_limit)
+            .all()
+        )
+        rows = []
+        for task_row in tasks:
+            task = SimpleNamespace(
+                id=task_row.task_id,
+                status=task_row.task_status,
+                params=task_row.task_params,
+                created_at=task_row.task_created_at,
+                updated_at=task_row.task_updated_at,
+            )
+            files, source_mode = _legacy_pdf_task_files(task)
+            rows.extend(SimpleNamespace(
+                task_id=task.id,
+                task_status=task.status,
+                task_created_at=task.created_at,
+                task_updated_at=task.updated_at,
+                source_mode=source_mode,
+                file_path=file_path,
+                file_index=index,
+            ) for index, file_path in enumerate(files))
+    items = []
+    for row in rows:
+        source_mode = row.source_mode or "content_pipeline"
+        source_label = _content_pipeline_source_label(source_mode)
+        raw_path = str(row.file_path or "").strip()
+        path = _resolve_pdf_path(raw_path)
+        if not path:
+            continue
+        filename = path.name
+        if normalized_q and normalized_q not in " ".join((filename, raw_path, source_mode)).lower():
+            continue
+        task_key = str(row.task_id)
+        task_index = max(0, int(getattr(row, "file_index", 1) or 1) - 1)
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            continue
+        items.append({
+            "id": f"legacy:{task_key}:{task_index}",
+            "asset_id": f"legacy:{task_key}:{task_index}",
+            "asset_kind": "content_pipeline_legacy",
+            "source_label": source_label,
+            "source_mode": source_mode,
+            "pipeline_status": row.task_status,
+            "pipeline_task_id": task_key,
+            "filename": filename,
+            "bytes": file_size,
+            "download_count": None,
+            "updated_at": _isoformat_z(row.task_updated_at or row.task_created_at),
+            "created_at": _isoformat_z(row.task_created_at),
+            "group_id": None,
+            "tab_id": None,
+            "topic_id": None,
+            "topic_title": filename,
+            "topic_author": None,
+            "topic_create_time": None,
+            "topic_first_synced_at": None,
+            "topic_last_synced_at": None,
+            "tab_label": source_label,
+            "local_path": str(path),
+            "preview_url": f"/api/report-audio-workflows/pdf-assets/legacy:{task_key}:{task_index}/preview",
+        })
+    return items
+
+
+def _legacy_pdf_file_row(task_id, file_index):
+    if db.engine.dialect.name == "postgresql":
+        return db.session.execute(text("""
+            SELECT
+                task.id AS task_id,
+                task.status AS task_status,
+                COALESCE(
+                    task.params #>> '{content_pipeline,metadata,source_mode}',
+                    task.params #>> '{content_pipeline,metadata,mode}',
+                    CASE
+                        WHEN task.params #>> '{content_pipeline,trigger}' = 'manual'
+                        THEN 'manual_download'
+                        ELSE 'content_pipeline'
+                    END
+                ) AS source_mode,
+                files.file_path AS file_path
+            FROM publication_tasks AS task
+            CROSS JOIN LATERAL jsonb_array_elements_text(
+                COALESCE(task.params #> '{content_pipeline,pdf_clean,files}', '[]'::jsonb)
+            ) WITH ORDINALITY AS files(file_path, file_index)
+            WHERE task.id = :task_id
+              AND task.feature = 'content_pdf_clean'
+              AND files.file_index = :file_index
+            LIMIT 1
+        """), {
+            "task_id": str(task_id),
+            "file_index": int(file_index) + 1,
+        }).mappings().first()
+
+    task = (
+        PublicationTask.query
+        .with_entities(PublicationTask.id, PublicationTask.status, PublicationTask.params)
+        .filter(
+            PublicationTask.id == str(task_id),
+            PublicationTask.feature == "content_pdf_clean",
+        )
+        .one_or_none()
+    )
+    if task is None:
+        return None
+    files, source_mode = _legacy_pdf_task_files(task)
+    if int(file_index) < 0 or int(file_index) >= len(files):
+        return None
+    return SimpleNamespace(
+        task_id=task.id,
+        task_status=task.status,
+        source_mode=source_mode,
+        file_path=files[int(file_index)],
+    )
+
+
+def _pdf_asset_sort_timestamp(item):
+    for key in ("topic_create_time", "updated_at", "created_at"):
+        value = item.get(key)
+        if not value:
+            continue
+        if isinstance(value, datetime):
+            return value.timestamp()
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return 0.0
+
+
+def _merge_pdf_asset_items(synced_items, pipeline_items):
+    """Merge all PDF sources while suppressing identical local files."""
+    merged = []
+    seen_paths = set()
+    for item in sorted(
+        [*(synced_items or []), *(pipeline_items or [])],
+        key=_pdf_asset_sort_timestamp,
+        reverse=True,
+    ):
+        path = str(item.get("local_path") or "").strip()
+        identity = os.path.normcase(os.path.realpath(path)) if path else ""
+        if identity and identity in seen_paths:
+            continue
+        if identity:
+            seen_paths.add(identity)
+        merged.append(item)
+    return merged
 
 
 def _isoformat_z(value):

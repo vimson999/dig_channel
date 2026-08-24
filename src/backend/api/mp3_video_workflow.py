@@ -56,7 +56,7 @@ from services.mp3_video_workflow import (
     VISUAL_ARTIFACT_KEYS,
     _db_retry,
     _video_file_ready,
-    audio_meta_from_zsxq_attachment,
+    audio_meta_from_asset_reference,
     initial_gemini_prompt,
     initial_transcript_prompt,
     list_audio_assets,
@@ -317,7 +317,7 @@ def audio_asset_workflow_stats(current_user):
 @require_login
 def preview_audio_asset(_current_user, asset_id):
     try:
-        audio = audio_meta_from_zsxq_attachment(asset_id)
+        audio = audio_meta_from_asset_reference(asset_id)
     except ValueError as exc:
         return jsonify({"success": False, "message": str(exc)}), 404
     mimetype = mimetypes.guess_type(audio["path"])[0] or "audio/mpeg"
@@ -402,7 +402,7 @@ def create_job(current_user):
             audio["topic_title"] = str(metadata["title"]).strip()[:500]
     else:
         try:
-            audio = audio_meta_from_zsxq_attachment(audio_asset_id)
+            audio = audio_meta_from_asset_reference(audio_asset_id)
         except ValueError as exc:
             return jsonify({"success": False, "message": str(exc)}), 400
     source_feature = UPLOAD_SOURCE_FEATURE if audio_file else WORKFLOW_SOURCE_FEATURE
@@ -2509,10 +2509,17 @@ def _audio_upload_filename(file_storage):
     raw_name = Path(str(getattr(file_storage, "filename", "") or "")).name
     extension = Path(raw_name).suffix.lower()
     safe_name = secure_filename(raw_name)
+    original_stem = Path(raw_name).stem
     safe_stem = Path(safe_name).stem.lower() if safe_name else ""
-    if not safe_name or safe_stem in AUDIO_EXTENSIONS:
-        original_stem = Path(raw_name).stem
-        original_stem = re.sub(r"[^0-9A-Za-z_\-\u4e00-\u9fff]+", "_", original_stem).strip("._-")
+    # Werkzeug's secure_filename intentionally drops non-ASCII characters. That
+    # turns mixed names such as ``AI芯片研究报告.mp3`` into ``AI.mp3`` and then
+    # leaks the truncated name into the job list. Keep a filesystem-safe Unicode
+    # stem for user-facing audio metadata whenever the original contains one.
+    if any(ord(char) > 127 for char in original_stem):
+        unicode_stem = re.sub(r"[^\w\-]+", "_", original_stem, flags=re.UNICODE).strip("._-")
+        safe_name = f"{unicode_stem or 'audio'}{extension or '.mp3'}"
+    elif not safe_name or safe_stem in AUDIO_EXTENSIONS:
+        original_stem = re.sub(r"[^0-9A-Za-z_\-]+", "_", original_stem).strip("._-")
         safe_name = f"{original_stem or 'audio'}{extension or '.mp3'}"
     if not Path(safe_name).suffix and extension:
         safe_name = f"{safe_name}{extension}"

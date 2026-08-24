@@ -153,6 +153,20 @@ def submit_publish_clean_output_task(
         for key in ("status", "current_step", "error_message", "completed_at"):
             if key in deferred_state:
                 task_snapshot[key] = deferred_state[key]
+    try:
+        from services.content_pipeline.notification_service import notify_content_pipeline_event
+
+        notify_content_pipeline_event(
+            "publish_submitted" if final_result.get("queued") else "publish_failed",
+            task_id=task_id,
+            task_label="知识星球发布",
+            pipeline={"title": title, "trigger": trigger, "metadata": metadata},
+            result=final_result,
+            stage_status="queued" if final_result.get("queued") else "failed",
+            error=None if final_result.get("queued") else final_result.get("message"),
+        )
+    except Exception:
+        logger.exception("知识星球发布启动通知失败: %s", task_id)
     return task_snapshot
 
 
@@ -287,6 +301,13 @@ def _build_transient_publish_config(*, file_type, source_dir, options):
         config["group_id"] = str(options.get("group_id")).strip()
     if options.get("group_name"):
         config["group_name"] = str(options.get("group_name")).strip()
+    requested_account_id = (
+        options.get("publish_account_id")
+        or options.get("credential_id")
+        or options.get("cookie_account_id")
+    )
+    if requested_account_id:
+        config["publish_account_id"] = str(requested_account_id).strip()
 
     return config
 
