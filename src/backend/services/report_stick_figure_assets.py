@@ -1,6 +1,8 @@
 import hashlib
 from pathlib import Path
 
+from PIL import Image
+
 from services.report_visual_scheme import (
     DEFAULT_IMAGE_GEMINI_URL,
     DEFAULT_VISUAL_SCHEME_KEY,
@@ -19,6 +21,33 @@ IMAGE_STYLE_SUFFIX = (
     "Use minimal spot color accents (e.g., a single touch of red, green, or yellow) "
     "only for emphasizing key data, directional arrows, or crucial elements. --ar 16:9"
 )
+
+
+def has_browser_overlay_artifact(image_path: str) -> bool:
+    """Detect the dark Gemini browser popover captured over whiteboard art."""
+
+    path = Path(str(image_path or ""))
+    if not path.is_file():
+        return False
+    try:
+        with Image.open(path) as image:
+            rgb = image.convert("RGB")
+            width, height = rgb.size
+            if width < 256 or height < 256:
+                return False
+            region = rgb.crop((
+                round(width * 0.68),
+                0,
+                width,
+                round(height * 0.45),
+            ))
+            pixels = list(region.getdata())
+    except Exception:
+        return False
+    if not pixels:
+        return False
+    dark_ratio = sum(1 for red, green, blue in pixels if max(red, green, blue) < 65) / len(pixels)
+    return dark_ratio >= 0.40
 
 
 def image_gemini_url(visual_scheme_key: str = DEFAULT_VISUAL_SCHEME_KEY) -> str:

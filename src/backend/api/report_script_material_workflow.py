@@ -30,7 +30,10 @@ from services.report_script_material_workflow import (
     status_payload as workflow_status_payload,
     storage_path_for_job,
 )
-from services.report_audio_workflow import clean_final_script_for_tts
+from services.report_audio_workflow import (
+    clean_final_script_for_tts,
+    review_prompt_for_pdf_evidence,
+)
 from services.runtime_guard import maybe_guarded_apply_async
 from tasks.report_script_material_workflow import process_report_script_material_workflow_job
 from utils.auth_utils import require_login
@@ -387,7 +390,11 @@ def create_jobs(current_user):
         return jsonify({"success": False, "message": "单次最多投递 50 份 PDF"}), 400
 
     prompt = str(data.get("prompt") or DEFAULT_INITIAL_PROMPT).strip()
-    review_prompt = str(data.get("review_prompt") or DEFAULT_REVIEW_PROMPT).strip()
+    pdf_evidence_enabled = _truthy(data.get("pdf_evidence_enabled"), False)
+    review_prompt = review_prompt_for_pdf_evidence(
+        data.get("review_prompt") or DEFAULT_REVIEW_PROMPT,
+        enabled=pdf_evidence_enabled,
+    )
     followups = _parse_followups(data)
     gemini_url = str(data.get("gemini_url") or data.get("url") or "").strip()
     if gemini_url and not gemini_url.startswith(("http://", "https://")):
@@ -414,6 +421,7 @@ def create_jobs(current_user):
                 followups=followups,
                 gemini_url=gemini_url,
                 metadata=metadata,
+                pdf_evidence_enabled=pdf_evidence_enabled,
             )
             jobs.append(task)
         except Exception as exc:
@@ -429,6 +437,7 @@ def create_jobs(current_user):
                 followups=followups,
                 gemini_url=gemini_url,
                 metadata=metadata,
+                pdf_evidence_enabled=pdf_evidence_enabled,
             )
             jobs.append(task)
         except Exception as exc:
@@ -661,7 +670,17 @@ def input_pdf(current_user, job_id):
     )
 
 
-def _create_task_for_asset(asset_id, *, user_id, prompt, review_prompt, followups, gemini_url, metadata):
+def _create_task_for_asset(
+    asset_id,
+    *,
+    user_id,
+    prompt,
+    review_prompt,
+    followups,
+    gemini_url,
+    metadata,
+    pdf_evidence_enabled=False,
+):
     pdf = _pdf_meta_from_zsxq_attachment(asset_id)
     return _create_task_for_pdf(
         pdf,
@@ -671,10 +690,21 @@ def _create_task_for_asset(asset_id, *, user_id, prompt, review_prompt, followup
         followups=followups,
         gemini_url=gemini_url,
         metadata=metadata,
+        pdf_evidence_enabled=pdf_evidence_enabled,
     )
 
 
-def _create_task_for_pdf(pdf, *, user_id, prompt, review_prompt, followups, gemini_url, metadata):
+def _create_task_for_pdf(
+    pdf,
+    *,
+    user_id,
+    prompt,
+    review_prompt,
+    followups,
+    gemini_url,
+    metadata,
+    pdf_evidence_enabled=False,
+):
     title = str(pdf.get("topic_title") or pdf.get("filename") or "研报基础文案物料").strip()
     task_metadata = dict(metadata or {})
     task_metadata.setdefault("source", "report-script-material-workflow-test-page")
@@ -691,6 +721,7 @@ def _create_task_for_pdf(pdf, *, user_id, prompt, review_prompt, followups, gemi
             FEATURE_NAME: {
                 "prompt": prompt,
                 "review_prompt": review_prompt,
+                "pdf_evidence_enabled": bool(pdf_evidence_enabled),
                 "followups": followups,
                 "gemini_url": gemini_url,
                 "metadata": task_metadata,

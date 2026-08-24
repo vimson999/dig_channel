@@ -43,8 +43,8 @@
                 <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                     <div class="flex items-center justify-between gap-3">
                         <div>
-                            <h2 class="text-base font-black">选择已同步 MP3</h2>
-                            <p class="mt-1 text-xs text-slate-500">支持搜索、翻页和跳页，选中后直接投递全流程。</p>
+                            <h2 class="text-base font-black">选择已同步 MP3 或上传</h2>
+                            <p class="mt-1 text-xs text-slate-500">支持搜索、翻页和跳页；也可以上传本地 MP3，走同一套编排流程。</p>
                         </div>
                         <span id="selected-badge" class="rounded-md bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-500">未选择</span>
                     </div>
@@ -52,6 +52,19 @@
                     <div id="audio-asset-tabs" class="mt-4 grid grid-cols-2 gap-2 text-xs font-bold">
                         <button type="button" data-audio-asset-scope="all" class="rounded-md border px-3 py-2 transition">全部 MP3</button>
                         <button type="button" data-audio-asset-scope="hot" class="rounded-md border px-3 py-2 transition">热门 MP3（下载 ≥20）</button>
+                    </div>
+
+                    <div class="mt-4 rounded-md border border-dashed border-indigo-200 bg-indigo-50/50 p-3">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <div class="text-xs font-black text-indigo-800">上传本地 MP3</div>
+                                <div class="mt-1 text-[11px] leading-5 text-indigo-700/80">上传后会直接进入下方“投递配置”，无需先导入知识星球。</div>
+                            </div>
+                            <i class="fas fa-cloud-arrow-up mt-0.5 text-indigo-500"></i>
+                        </div>
+                        <input id="audio-upload-input" type="file" class="mt-3 block w-full text-xs text-slate-600 file:mr-2 file:rounded-md file:border-0 file:bg-indigo-600 file:px-3 file:py-2 file:text-xs file:font-bold file:text-white hover:file:bg-indigo-700" accept=".mp3,.m4a,.wav,.aac,.flac,.ogg,.opus,audio/*">
+                        <div id="audio-upload-summary" class="mt-2 text-[11px] text-slate-500">尚未选择本地音频。</div>
+                        <button id="clear-audio-upload-btn" type="button" class="mt-2 hidden rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-bold text-slate-600 hover:bg-slate-50">清除上传</button>
                     </div>
 
                     <div class="mt-3 flex gap-2">
@@ -62,7 +75,7 @@
                     </div>
 
                     <div id="audio-asset-summary" class="mt-2 text-xs text-slate-500">等待加载已同步 MP3。</div>
-                    <div id="audio-asset-list" class="mt-2 max-h-[34rem] space-y-2 overflow-auto"></div>
+                    <div id="audio-asset-list" class="mt-2 max-h-[70vh] space-y-2 overflow-y-auto xl:max-h-[72rem]"></div>
                     <div id="audio-asset-pagination" class="mt-3"></div>
 
                     <div id="selected-audio-panel" class="mt-4 hidden rounded-md border border-emerald-100 bg-emerald-50/60 p-3">
@@ -78,7 +91,7 @@
                     <label class="mt-4 block">
                         <span class="mb-1 block text-xs font-bold text-slate-500">内容来源</span>
                         <select id="input-source-select" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 focus:border-slate-500 focus:outline-none">
-                            <option value="gemini_audio">Gemini 上传 MP3（旧流程）</option>
+                            <option value="gemini_audio">Gemini 解析音频</option>
                             <option value="ima_transcript">IMA 转录全文 + DS Prompt</option>
                             <option value="ds_response">直接粘贴 DS 返回值</option>
                         </select>
@@ -91,10 +104,10 @@
                         </select>
                     </label>
                     <label class="mt-4 flex items-start gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5">
-                        <input id="generate-subtitles-checkbox" type="checkbox" checked class="mt-0.5 h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-500">
+                        <input id="generate-subtitles-checkbox" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-500">
                         <span>
-                            <span class="block text-sm font-black text-slate-800">生成字幕</span>
-                            <span class="mt-0.5 block text-xs leading-5 text-slate-500">完整视频时执行 ASR 并烧录字幕；关闭后合成无字幕视频。</span>
+                            <span class="block text-sm font-black text-slate-800">提取并烧录字幕（默认关闭）</span>
+                            <span class="mt-0.5 block text-xs leading-5 text-slate-500">仅明确需要字幕时开启；关闭后跳过 ASR，直接合成无字幕视频。</span>
                         </span>
                     </label>
                     <div id="gemini-config-panel">
@@ -179,6 +192,6 @@
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260720-local-auth-bypass"></script>
     <script src="js/download-count-highlight.js?v=20260702"></script>
-    <script src="js/mp3-video-workflow.js?v=20260714-submission-date-filter"></script>
+    <script src="js/mp3-video-workflow.js?v=20260824-unified-audio-assets"></script>
 </body>
 </html>

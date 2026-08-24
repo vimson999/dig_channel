@@ -46,19 +46,25 @@ class ReportAudioWorkflowPage {
             pdfAssetPagination: document.getElementById('pdf-asset-pagination'),
             promptInput: document.getElementById('prompt-input'),
             reviewPromptInput: document.getElementById('review-prompt-input'),
+            pdfEvidenceEnabled: document.getElementById('pdf-evidence-enabled'),
             geminiUrlSelect: document.getElementById('gemini-url-select'),
             geminiUrlInput: document.getElementById('gemini-url-input'),
             geminiUrlCurrent: document.getElementById('gemini-url-current'),
             manualGeminiResultInput: document.getElementById('manual-gemini-result-input'),
             landscapeVideoEnabled: document.getElementById('landscape-video-enabled'),
-            verticalVideoEnabled: document.getElementById('vertical-video-enabled'),
             visualSchemeKeys: Array.from(document.querySelectorAll('input[name="visual_scheme_keys"]')),
             ttsProvider: document.getElementById('tts-provider'),
             ttsVoicePanel: document.getElementById('tts-voice-panel'),
             ttsVoice: document.getElementById('tts-voice'),
             ttsVoiceId: document.getElementById('tts-voice-id'),
             verticalVideoSchemes: Array.from(document.querySelectorAll('input[name="vertical_video_schemes"]')),
-            videoRenderMode: document.getElementById('video-render-mode'),
+            videoRenderModes: Array.from(document.querySelectorAll('input[name="video_render_mode"]')),
+            generationModeKeyframesCard: document.getElementById('generation-mode-keyframes-card'),
+            generationModeFullVideoCard: document.getElementById('generation-mode-full-video-card'),
+            keyframeOutputs: Array.from(document.querySelectorAll('input[name="keyframe_outputs"]')),
+            keyframeOutputPanel: document.getElementById('keyframe-output-panel'),
+            fullVideoOptionsPanel: document.getElementById('full-video-options-panel'),
+            ttsStepNumber: document.getElementById('tts-step-number'),
             bilibiliEnabled: document.getElementById('bilibili-enabled'),
             videoTitleInput: document.getElementById('video-title-input'),
             videoSubtitleInput: document.getElementById('video-subtitle-input'),
@@ -82,6 +88,7 @@ class ReportAudioWorkflowPage {
         this.syncJobDateInput();
         this.updatePdfSourceUi();
         this.updateTtsProviderUi();
+        this.updateGenerationModeUi();
         this.refreshStatus();
         this.loadPdfAssets({ silent: true });
         this.loadHistory({ silent: true });
@@ -165,6 +172,7 @@ class ReportAudioWorkflowPage {
     defaults() {
         this.els.promptInput.value = '请解析上传的研报 PDF，提取核心观点、关键数据、风险提示和可用于口播的摘要。';
         this.els.reviewPromptInput.value = '担任首席责任主编，利用提供的PDF材料和可查网络信息，对上文内容逐条复核与勘误，确认事实准确、逻辑清晰、表达规范，列出每条修正点及依据，并给出最终优化后的信息版本，附上核对过程说明和参考来源。';
+        if (this.els.pdfEvidenceEnabled) this.els.pdfEvidenceEnabled.checked = false;
     }
 
     defaultGeminiUrlPresets() {
@@ -228,6 +236,53 @@ class ReportAudioWorkflowPage {
         if (this.els.ttsVoiceId) {
             this.els.ttsVoiceId.textContent = this.els.ttsVoice?.value || '';
         }
+    }
+
+    selectedVideoRenderMode() {
+        const selected = (this.els.videoRenderModes || []).find((input) => input.checked);
+        return this.normalizeVideoRenderMode(selected?.value);
+    }
+
+    selectedKeyframeOutputs() {
+        return [...new Set(
+            (this.els.keyframeOutputs || [])
+                .filter((input) => input.checked)
+                .map((input) => String(input.value || '').trim())
+                .filter(Boolean),
+        )];
+    }
+
+    keyframeVerticalSchemes(outputs = this.selectedKeyframeOutputs()) {
+        return ['scheme1', 'scheme2', 'scheme3'].filter(
+            (scheme) => outputs.includes(`vertical_keyframe_${scheme}`),
+        );
+    }
+
+    updateGenerationModeUi() {
+        const keyframesMode = this.selectedVideoRenderMode() === 'keyframes';
+        [
+            [this.els.generationModeKeyframesCard, keyframesMode],
+            [this.els.generationModeFullVideoCard, !keyframesMode],
+        ].forEach(([card, active]) => {
+            card?.classList.toggle('border-indigo-400', active);
+            card?.classList.toggle('bg-indigo-50/60', active);
+            card?.classList.toggle('border-slate-200', !active);
+            card?.classList.toggle('bg-white', !active);
+        });
+        this.els.keyframeOutputPanel?.classList.toggle('hidden', !keyframesMode);
+        this.els.fullVideoOptionsPanel?.classList.toggle('hidden', keyframesMode);
+        if (this.els.ttsStepNumber) this.els.ttsStepNumber.textContent = keyframesMode ? '3' : '4';
+
+        (this.els.keyframeOutputs || []).forEach((input) => {
+            input.disabled = !keyframesMode;
+        });
+        [
+            this.els.landscapeVideoEnabled,
+            ...(this.els.visualSchemeKeys || []),
+            ...(this.els.verticalVideoSchemes || []),
+        ].filter(Boolean).forEach((input) => {
+            input.disabled = keyframesMode;
+        });
     }
 
     initialJobPage() {
@@ -372,6 +427,9 @@ class ReportAudioWorkflowPage {
         this.els.pdfAssetPagination.addEventListener('click', (event) => this.handlePdfAssetPageClick(event));
         this.els.pdfAssetPagination.addEventListener('submit', (event) => this.handlePdfAssetPageJump(event));
         this.els.geminiUrlSelect?.addEventListener('change', () => this.updateGeminiUrlUi());
+        (this.els.videoRenderModes || []).forEach((input) => {
+            input.addEventListener('change', () => this.updateGenerationModeUi());
+        });
         this.els.ttsProvider?.addEventListener('change', () => this.updateTtsProviderUi());
         this.els.ttsVoice?.addEventListener('change', () => this.updateTtsProviderUi());
         this.els.submitBtn.addEventListener('click', () => this.submit());
@@ -415,6 +473,20 @@ class ReportAudioWorkflowPage {
                 this.closeCoverRegenerateModal();
             }
         });
+        document.addEventListener('visibilitychange', () => this.handleVisibilityChange());
+        window.addEventListener('beforeunload', () => {
+            if (this.pollTimer) window.clearInterval(this.pollTimer);
+        });
+    }
+
+    handleVisibilityChange() {
+        if (document.hidden) {
+            if (this.pollTimer) window.clearInterval(this.pollTimer);
+            this.pollTimer = null;
+            return;
+        }
+        this.resetPollTimer();
+        this.refreshJobs();
     }
 
     apiRoot() {
@@ -573,10 +645,10 @@ class ReportAudioWorkflowPage {
             if (!options.silent) this.setNotice(`已加载${this.pdfAssetScopeLabel()}第 ${this.pdfAssetPage} 页，共 ${this.pdfAssets.length} 个 PDF。`, 'success');
         } catch (error) {
             if (requestSeq !== this.pdfAssetRequestSeq) return;
-            this.els.pdfAssetSummary.textContent = `加载已同步 PDF 失败：${error.message}`;
+            this.els.pdfAssetSummary.textContent = `加载 PDF 失败：${error.message}`;
             this.els.pdfAssetList.innerHTML = '';
             this.els.pdfAssetPagination.innerHTML = '';
-            if (!options.silent) this.setNotice(`加载已同步 PDF 失败：${error.message}`, 'error');
+            if (!options.silent) this.setNotice(`加载 PDF 失败：${error.message}`, 'error');
         } finally {
             if (requestSeq !== this.pdfAssetRequestSeq) return;
             this.els.pdfAssetRefreshBtn.disabled = false;
@@ -596,7 +668,7 @@ class ReportAudioWorkflowPage {
     }
 
     pdfAssetScopeLabel() {
-        return this.pdfAssetScope === 'hot' ? '热门 PDF ' : '已同步 PDF ';
+        return this.pdfAssetScope === 'hot' ? '热门 PDF ' : '全部 PDF ';
     }
 
     renderPdfAssetTabs() {
@@ -648,11 +720,11 @@ class ReportAudioWorkflowPage {
         const selectedId = this.selectedPdfAsset?.id || '';
         this.els.pdfAssetSummary.textContent = this.pdfAssets.length
             ? `${this.pdfAssetScopeLabel()}· 第 ${this.pdfAssetPage} 页 · 本页 ${this.pdfAssets.length} 个 PDF${this.selectedPdfAsset ? ` · 已选 ${this.selectedPdfAsset.filename}` : ''}`
-            : (this.pdfAssetScope === 'hot' ? '没有找到下载次数达到 40 次的热门 PDF。' : '没有找到已下载的同步 PDF。');
+            : (this.pdfAssetScope === 'hot' ? '没有找到下载次数达到 40 次的热门 PDF。' : '没有找到可用 PDF。');
         if (!this.pdfAssets.length) {
             const emptyText = this.pdfAssetScope === 'hot'
                 ? '暂无热门 PDF。当前筛选条件是下载次数 ≥ 40，且附件已下载到本地。'
-                : '暂无可选 PDF。请先完成知识星球同步并下载附件。';
+                : '暂无可选 PDF。请先同步知识星球附件或投递手动 PDF。';
             this.els.pdfAssetList.innerHTML = `<div class="rounded-md border border-dashed border-slate-300 bg-white px-3 py-6 text-center text-xs text-slate-500">${this.escape(emptyText)}</div>`;
             this.renderPdfAssetPagination();
             return;
@@ -663,9 +735,10 @@ class ReportAudioWorkflowPage {
             const previewUrl = `${this.apiRoot()}${previewPath}`;
             const itemTitle = [item.filename, item.topic_title, item.tab_label].filter(Boolean).join('\n');
             const downloadText = window.DownloadCountHighlight?.badgeText(item.download_count)
-                || (Number.isFinite(Number(item.download_count)) ? `下载 ${Number(item.download_count)} 次` : '下载 -');
+                || (Number.isFinite(Number(item.download_count)) ? `下载 ${Number(item.download_count)} 次` : (item.source_label || '下载 -'));
             const downloadBadgeClass = window.DownloadCountHighlight?.badgeClass(item.download_count)
                 || 'border-slate-200 bg-slate-100 text-slate-500';
+            const sourceMeta = this.pdfAssetSourceMeta(item);
             const workflowMeta = this.pdfAssetWorkflowMeta(item);
             const materialMeta = this.pdfAssetMaterialMeta(item);
             const syncTime = this.formatDateTime(item.topic_last_synced_at || item.updated_at);
@@ -689,6 +762,7 @@ class ReportAudioWorkflowPage {
                     </div>
                     <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(metaLine)}</div>
                     <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                        <span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${sourceMeta.className}">${this.escape(sourceMeta.text)}</span>
                         <span class="rounded-full border px-2 py-0.5 text-[11px] font-bold ${downloadBadgeClass}">
                             <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
                         </span>
@@ -768,27 +842,43 @@ class ReportAudioWorkflowPage {
         const pdf = useAsset ? null : (this.els.pdfInput.files?.[0] || null);
         const selectedAsset = useAsset ? this.selectedPdfAsset : null;
         if (!pdf && !selectedAsset) {
-            this.setNotice(useAsset ? '请先选择一个已同步 PDF。' : '请先上传 PDF。', 'error');
+            this.setNotice(useAsset ? '请先选择一个 PDF 资产。' : '请先上传 PDF。', 'error');
             return;
         }
-        const verticalSchemes = this.selectedVerticalSchemes();
-        const verticalVideoRequested = this.els.verticalVideoEnabled.checked
-            || verticalSchemes.some((scheme) => scheme === 'scheme2' || scheme === 'scheme3');
-        if (verticalVideoRequested && !verticalSchemes.length) {
-            this.setNotice('生成竖屏视频时，请至少勾选一个竖屏方案。', 'error');
+        const renderMode = this.selectedVideoRenderMode();
+        const keyframeOutputs = renderMode === 'keyframes' ? this.selectedKeyframeOutputs() : [];
+        const verticalSchemes = renderMode === 'keyframes'
+            ? this.keyframeVerticalSchemes(keyframeOutputs)
+            : this.selectedVerticalSchemes();
+        const verticalVideoRequested = renderMode === 'full_video' && verticalSchemes.length > 0;
+        const landscapeVideoRequested = renderMode === 'full_video' && Boolean(this.els.landscapeVideoEnabled?.checked);
+        const visualSchemeKeys = renderMode === 'full_video'
+            ? this.els.visualSchemeKeys.filter((input) => input.checked).map((input) => input.value)
+            : [];
+        if (renderMode === 'keyframes' && !keyframeOutputs.length) {
+            this.setNotice('请至少选择一个需要生成的关键帧或封皮。', 'error');
             return;
         }
-        if (verticalSchemes.length > 2) {
+        if (renderMode === 'full_video' && verticalSchemes.length > 2) {
             this.setNotice('竖屏方案一次最多选择两个，请取消一个后重试。', 'error');
             return;
         }
+        if (
+            renderMode === 'full_video'
+            && !landscapeVideoRequested
+            && !verticalVideoRequested
+            && !visualSchemeKeys.length
+        ) {
+            this.setNotice('请至少选择一个横屏或竖屏完整视频版本。', 'error');
+            return;
+        }
         const primaryVerticalScheme = this.primarySelectedVerticalScheme();
-        const visualSchemeKeys = this.els.visualSchemeKeys
-            .filter((input) => input.checked)
-            .map((input) => input.value);
+        const effectivePrimaryVerticalScheme = verticalSchemes.includes('scheme3')
+            ? 'scheme3'
+            : (verticalSchemes.includes('scheme1') && verticalSchemes.includes('scheme2') ? 'scheme2' : (verticalSchemes[0] || primaryVerticalScheme));
         const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const pdfSummary = selectedAsset
-            ? { filename: selectedAsset.filename, bytes: selectedAsset.bytes, source: 'zsxq_attachment', attachment_id: selectedAsset.id, topic_title: selectedAsset.topic_title, tab_label: selectedAsset.tab_label }
+            ? { filename: selectedAsset.filename, bytes: selectedAsset.bytes, source: selectedAsset.source_mode || selectedAsset.source_label || 'asset', attachment_id: selectedAsset.id, topic_title: selectedAsset.topic_title, tab_label: selectedAsset.tab_label }
             : { filename: pdf.name, bytes: pdf.size, source: 'upload' };
         const localJob = {
             local_id: localId,
@@ -799,13 +889,16 @@ class ReportAudioWorkflowPage {
                 pdf: pdfSummary,
                 prompt: this.els.promptInput.value.trim(),
                 review_prompt: this.els.reviewPromptInput.value.trim(),
+                pdf_evidence_enabled: Boolean(this.els.pdfEvidenceEnabled?.checked),
                 tts_provider: this.els.ttsProvider?.value || 'doubao_browser',
                 tts_voice: this.els.ttsProvider?.value === 'doubao_api' ? (this.els.ttsVoice?.value || '') : '',
                 visual_scheme_keys: visualSchemeKeys,
-                video_render_mode: this.normalizeVideoRenderMode(this.els.videoRenderMode?.value),
+                video_render_mode: renderMode,
+                keyframe_outputs: keyframeOutputs,
                 video: {
+                    landscape_enabled: landscapeVideoRequested,
                     vertical_enabled: verticalVideoRequested,
-                    vertical_video_scheme: primaryVerticalScheme,
+                    vertical_video_scheme: effectivePrimaryVerticalScheme,
                     vertical_video_schemes: verticalSchemes,
                 },
             },
@@ -833,6 +926,7 @@ class ReportAudioWorkflowPage {
             }
             form.append('prompt', this.els.promptInput.value.trim());
             form.append('review_prompt', this.els.reviewPromptInput.value.trim());
+            form.append('pdf_evidence_enabled', this.els.pdfEvidenceEnabled?.checked ? '1' : '0');
             const geminiUrl = this.selectedGeminiUrl();
             if (geminiUrl) form.append('gemini_url', geminiUrl);
             if (manualGeminiResult) form.append('manual_gemini_result', manualGeminiResult);
@@ -840,12 +934,13 @@ class ReportAudioWorkflowPage {
             if (this.els.ttsProvider?.value === 'doubao_api') {
                 form.append('tts_voice', this.els.ttsVoice?.value || 'zh_female_mizai_uranus_bigtts');
             }
-            form.append('landscape_video_enabled', this.els.landscapeVideoEnabled.checked ? '1' : '0');
+            form.append('landscape_video_enabled', landscapeVideoRequested ? '1' : '0');
             form.append('vertical_video_enabled', verticalVideoRequested ? '1' : '0');
-            form.append('vertical_video_scheme', primaryVerticalScheme);
+            form.append('vertical_video_scheme', effectivePrimaryVerticalScheme);
             form.append('vertical_video_schemes', JSON.stringify(verticalSchemes));
             form.append('visual_scheme_keys', JSON.stringify(visualSchemeKeys));
-            form.append('video_render_mode', this.normalizeVideoRenderMode(this.els.videoRenderMode?.value));
+            form.append('video_render_mode', renderMode);
+            form.append('keyframe_outputs', JSON.stringify(keyframeOutputs));
             form.append('preview_seconds', '10');
             form.append('bilibili_enabled', this.els.bilibiliEnabled.checked ? '1' : '0');
             form.append('video_title', this.els.videoTitleInput.value.trim());
@@ -853,7 +948,7 @@ class ReportAudioWorkflowPage {
             form.append('metadata', JSON.stringify({
                 source: 'report-audio-workflow-test-page',
                 local_id: localId,
-                pdf_source: selectedAsset ? 'zsxq_attachment' : 'upload',
+                pdf_source: selectedAsset ? (selectedAsset.source_mode || selectedAsset.source_label || 'asset') : 'upload',
                 pdf_asset_id: selectedAsset?.id || null,
             }));
             const result = await this.request('/api/report-audio-workflows/jobs', {
@@ -1071,10 +1166,13 @@ class ReportAudioWorkflowPage {
     }
 
     async refreshJobs() {
-        if (this.pollInFlight || this.historyLoading) return;
+        if (document.hidden || this.pollInFlight || this.historyLoading) return;
         this.pollInFlight = true;
         try {
-            if (!this.jobs.some((job) => job.job_id && !this.isTerminal(job.status))) {
+            const hasActiveJob = this.jobs.some(
+                (job) => job.job_id && !this.isTerminal(job.status)
+            );
+            if (!hasActiveJob) {
                 const now = new Date();
                 const today = [
                     now.getFullYear(),
@@ -1082,14 +1180,12 @@ class ReportAudioWorkflowPage {
                     String(now.getDate()).padStart(2, '0'),
                 ].join('-');
                 if (this.jobDate && this.jobDate < today) return;
-                await this.loadHistory({ page: this.jobPage, silent: true });
-                return;
             }
-            const active = this.jobs.filter((job) => job.job_id && !this.isTerminal(job.status));
-            await Promise.all(active.map((job) => this.refreshJob(job.job_id).catch(() => null)));
-            if (this.historyLoading) return;
+            // The list endpoint already returns the parent projections and all
+            // child summaries for the current page in bounded batch queries.
+            // Polling every active row first only creates an HTTP/SQL N+1 and
+            // then immediately overwrites those results with the same list.
             await this.loadHistory({ page: this.jobPage, silent: true });
-            this.render();
         } finally {
             this.pollInFlight = false;
         }
@@ -1480,7 +1576,9 @@ class ReportAudioWorkflowPage {
 
     resetPollTimer() {
         if (this.pollTimer) window.clearInterval(this.pollTimer);
-        const delay = Math.max(1000, Number(this.els.pollDelay.value) || 3000);
+        this.pollTimer = null;
+        if (document.hidden) return;
+        const delay = Math.max(5000, Number(this.els.pollDelay.value) || 15000);
         this.pollTimer = window.setInterval(() => this.refreshJobs(), delay);
     }
 
@@ -1560,6 +1658,28 @@ class ReportAudioWorkflowPage {
             text: `编排 ${total} 次`,
             detail,
             className: latestMeta.className,
+        };
+    }
+
+    pdfAssetSourceMeta(item) {
+        if (item?.asset_kind === 'content_pipeline' || item?.asset_kind === 'content_pipeline_legacy') {
+            const status = String(item.pipeline_status || '').toLowerCase();
+            const statusText = {
+                reserved: '已接收',
+                queued: '待清洗',
+                processing: '清洗中',
+                completed: '已清洗',
+                succeeded: '已清洗',
+                failed: '清洗失败',
+            }[status] || '已投递';
+            return {
+                text: `${item.source_label || '手动投递'} · ${statusText}`,
+                className: status === 'failed' ? 'bg-rose-50 text-rose-700' : 'bg-violet-50 text-violet-700',
+            };
+        }
+        return {
+            text: item?.source_label || '知识星球同步',
+            className: 'bg-slate-100 text-slate-600',
         };
     }
 
@@ -2065,6 +2185,7 @@ class ReportAudioWorkflowPage {
         const rawParams = child?.raw_params || null;
         const rawResult = child?.raw_result || null;
         const audio = child?.audio || {};
+        const intervention = this.humanIntervention(child, job?.job_id || '');
         const audioUrl = audio.download_url ? `${this.apiRoot()}${audio.download_url}` : '';
         const attemptLabel = metadata.chunk_attempt
             ? `第 ${metadata.chunk_attempt} 次`
@@ -2096,6 +2217,8 @@ class ReportAudioWorkflowPage {
                 </div>
 
                 ${child?.error ? `<div class="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">${this.escape(child.error)}</div>` : ''}
+
+                ${this.renderHumanInterventionPanel(intervention)}
 
                 ${this.renderAttemptRows(attempts)}
 
@@ -2130,6 +2253,79 @@ class ReportAudioWorkflowPage {
                 <div class="text-slate-400">${this.escape(label)}</div>
                 <div class="mt-1 truncate font-black text-slate-700" title="${this.escape(value)}">${this.escape(value)}</div>
             </div>
+        `;
+    }
+
+    humanIntervention(child, jobId = '') {
+        const workflowUrl = jobId
+            ? `report-audio-workflow-detail.html?job_id=${encodeURIComponent(jobId)}`
+            : '';
+        return window.BrowserHumanIntervention?.resolve(child, { workflowUrl }) || null;
+    }
+
+    humanInterventionTone(intervention) {
+        if (intervention?.state === 'sent') {
+            return {
+                box: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+                icon: 'fa-envelope-circle-check',
+            };
+        }
+        if (intervention?.state === 'failed') {
+            return {
+                box: 'border-rose-200 bg-rose-50 text-rose-800',
+                icon: 'fa-envelope-circle-xmark',
+            };
+        }
+        return {
+            box: 'border-amber-200 bg-amber-50 text-amber-800',
+            icon: 'fa-user-shield',
+        };
+    }
+
+    renderHumanInterventionStatus(intervention) {
+        if (!intervention) return '';
+        const tone = this.humanInterventionTone(intervention);
+        const sentAt = this.formatDateTime(intervention.sentAt);
+        const detail = [
+            intervention.label,
+            sentAt ? `发送 ${sentAt}` : '',
+            intervention.recipientHint || '',
+        ].filter(Boolean).join(' · ');
+        return `
+            <div class="mt-2 truncate rounded border px-2 py-1 text-[11px] font-bold ${tone.box}" title="${this.escape(detail)}">
+                <i class="fas ${tone.icon} mr-1"></i>${this.escape(detail)}
+            </div>
+        `;
+    }
+
+    renderHumanInterventionPanel(intervention) {
+        if (!intervention) return '';
+        const tone = this.humanInterventionTone(intervention);
+        const notificationDetail = [
+            intervention.label,
+            this.formatDateTime(intervention.sentAt),
+            intervention.recipientHint,
+        ].filter(Boolean).join(' · ');
+        const failureDetail = [
+            intervention.notificationError,
+            intervention.missing?.length ? `缺少配置：${intervention.missing.join(', ')}` : '',
+        ].filter(Boolean).join('；');
+        return `
+            <section class="mt-4 rounded-md border px-4 py-3 text-xs leading-5 ${tone.box}">
+                <div class="font-black"><i class="fas ${tone.icon} mr-1.5"></i>需要人工处理 · ${this.escape(notificationDetail)}</div>
+                <div class="mt-1">自动化已经停止重试，完成验证后再续跑，避免持续触发豆包风控。</div>
+                ${failureDetail ? `<div class="mt-1 font-bold">${this.escape(failureDetail)}</div>` : ''}
+                ${intervention.profile ? `<div class="mt-2 break-all"><span class="font-black">浏览器 Profile：</span>${this.escape(intervention.profile)}</div>` : ''}
+                ${intervention.workerId ? `<div class="break-all"><span class="font-black">Worker：</span>${this.escape(intervention.workerId)}</div>` : ''}
+                ${intervention.screenshotPath ? `<div class="break-all"><span class="font-black">现场截图：</span>${this.escape(intervention.screenshotPath)}</div>` : ''}
+                <ol class="mt-2 list-decimal space-y-1 pl-5">
+                    ${intervention.resolutionSteps.map((step) => `<li>${this.escape(step)}</li>`).join('')}
+                </ol>
+                <div class="mt-3 flex flex-wrap gap-2">
+                    ${intervention.pageUrl ? `<a href="${this.escape(intervention.pageUrl)}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-current bg-white/70 px-2.5 py-1 font-black"><i class="fas fa-arrow-up-right-from-square mr-1"></i>打开豆包页面</a>` : ''}
+                    ${intervention.workflowUrl ? `<a href="${this.escape(intervention.workflowUrl)}" class="rounded-md border border-current bg-white/70 px-2.5 py-1 font-black"><i class="fas fa-list-check mr-1"></i>打开工作流并续跑</a>` : ''}
+                </div>
+            </section>
         `;
     }
 
@@ -2220,6 +2416,7 @@ class ReportAudioWorkflowPage {
         const detail = this.childDetail(child);
         const preview = this.compactTitle(child?.text_preview || '');
         const retry = this.renderRetryInfo(retryInfo);
+        const intervention = this.humanIntervention(child, detailRef?.jobId || '');
         const clickable = Boolean(detailRef?.jobId && detailRef?.childId);
         const detailAttrs = clickable
             ? `role="button" tabindex="0" data-child-detail="1" data-job-id="${this.escape(detailRef.jobId)}" data-child-kind="${this.escape(detailRef.kind)}" data-child-id="${this.escape(detailRef.childId)}" data-chunk-index="${this.escape(detailRef.chunkIndex || '')}" title="查看子任务详情"`
@@ -2232,6 +2429,7 @@ class ReportAudioWorkflowPage {
                 </div>
                 <div class="mt-1 truncate text-slate-400">${this.escape(child?.job_id || '-')}</div>
                 ${detail ? `<div class="mt-1 truncate text-slate-500">${this.escape(detail)}</div>` : ''}
+                ${this.renderHumanInterventionStatus(intervention)}
                 ${retry}
                 ${preview ? `<div class="mt-1 text-slate-500" title="${this.escape(preview)}" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${this.escape(preview)}</div>` : ''}
             </div>

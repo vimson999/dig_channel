@@ -27,10 +27,12 @@ def default_config():
         content_pipeline_batch_days=3,
         manual_publish_days=3,
         pytest_batch_days=3,
+        processed_video_days=3,
         include_sync_raw=True,
         include_content_pipeline_batches=True,
         include_manual_publish=True,
         include_pytest_batches=True,
+        include_processed_videos=True,
         max_candidates=5000,
         unfinished_reference_protect_days=3,
     ).to_dict()

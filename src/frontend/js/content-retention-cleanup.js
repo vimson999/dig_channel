@@ -27,6 +27,11 @@
             tone: 'violet',
             icon: 'fa-flask',
         },
+        processed_video: {
+            label: '生成 MP4 视频',
+            tone: 'blue',
+            icon: 'fa-film',
+        },
     };
 
     const TONE_CLASSES = {
@@ -69,6 +74,8 @@
             'manual-publish-days',
             'include-pytest-batches',
             'pytest-batch-days',
+            'include-processed-videos',
+            'processed-video-days',
             'max-candidates',
             'metric-count',
             'metric-size',
@@ -301,6 +308,8 @@
             manual_publish_days: readInt(els.manualPublishDays, 3),
             include_pytest_batches: Boolean(els.includePytestBatches?.checked),
             pytest_batch_days: readInt(els.pytestBatchDays, 3),
+            include_processed_videos: Boolean(els.includeProcessedVideos?.checked),
+            processed_video_days: readInt(els.processedVideoDays, 3),
             max_candidates: readInt(els.maxCandidates, 2000),
         };
     }
@@ -336,6 +345,8 @@
         setValue(els.manualPublishDays, policy.manual_publish_days);
         setChecked(els.includePytestBatches, policy.include_pytest_batches);
         setValue(els.pytestBatchDays, policy.pytest_batch_days);
+        setChecked(els.includeProcessedVideos, policy.include_processed_videos);
+        setValue(els.processedVideoDays, policy.processed_video_days);
         setValue(els.maxCandidates, policy.max_candidates);
     }
 
@@ -377,6 +388,8 @@
             setValue(els.manualPublishDays, policy.manual_publish_days);
             setChecked(els.includePytestBatches, policy.include_pytest_batches);
             setValue(els.pytestBatchDays, policy.pytest_batch_days);
+            setChecked(els.includeProcessedVideos, policy.include_processed_videos);
+            setValue(els.processedVideoDays, policy.processed_video_days);
             setValue(els.maxCandidates, policy.max_candidates);
         } catch (error) {
             console.warn('[RETENTION] restore policy failed:', error);
@@ -401,6 +414,8 @@
             'manual_publish_days',
             'include_pytest_batches',
             'pytest_batch_days',
+            'include_processed_videos',
+            'processed_video_days',
             'max_candidates',
         ];
         return keys.every((key) => normalizePolicyValue(left[key]) === normalizePolicyValue(right[key]));
@@ -686,6 +701,7 @@
         return {
             content_pipeline_root: '内容流水线根目录',
             zsxq_data_dir: '知识星球数据目录',
+            processed_data_dir: '生成视频目录',
             pytest_project_dir: 'pytest 项目目录',
             pytest_batch_root: 'pytest 批次相对目录',
         }[key] || key;

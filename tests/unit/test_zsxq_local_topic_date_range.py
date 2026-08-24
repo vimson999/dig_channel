@@ -89,6 +89,29 @@ class ZsxqLocalTopicDateRangeTest(unittest.TestCase):
                 publish_date_end="2026-07-13",
             )
 
+    def test_exact_topic_id_ignores_current_tab_date_and_keyword_filters(self):
+        result = ZsxqSyncService().list_cached_topics(
+            group_id="group-1",
+            tab_id="another-tab",
+            publish_date_start="2026-08-01",
+            publish_date_end="2026-08-02",
+            keyword="不会命中",
+            topic_id="topic-2",
+        )
+
+        self.assertEqual(result["resp_data"]["total"], 1)
+        self.assertEqual(result["resp_data"]["topics"][0]["topic_id"], "topic-2")
+        self.assertFalse(result["resp_data"]["has_more"])
+
+    def test_missing_exact_topic_id_has_specific_message(self):
+        result = ZsxqSyncService().list_cached_topics(
+            group_id="group-1",
+            topic_id="missing-topic",
+        )
+
+        self.assertEqual(result["resp_data"]["topics"], [])
+        self.assertIn("missing-topic", result["resp_data"]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

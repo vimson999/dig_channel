@@ -25,6 +25,8 @@ class ContentRetentionSchedulerServiceTest(unittest.TestCase):
             self.assertFalse(config["dry_run"])
             self.assertEqual(config["interval_hours"], 24)
             self.assertEqual(config["policy"]["sync_raw_days"], 3)
+            self.assertEqual(config["policy"]["processed_video_days"], 3)
+            self.assertTrue(config["policy"]["include_processed_videos"])
 
     def test_save_config_normalizes_policy_and_preserves_runtime_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -69,6 +71,8 @@ class ContentRetentionSchedulerServiceTest(unittest.TestCase):
                 "content_pipeline_batch_days": 3,
                 "manual_publish_days": 3,
                 "pytest_batch_days": 3,
+                "processed_video_days": 3,
+                "include_processed_videos": True,
                 "unfinished_reference_protect_days": 3,
                 "max_candidates": 5000,
             },
@@ -87,6 +91,7 @@ class ContentRetentionSchedulerServiceTest(unittest.TestCase):
         self.assertIn("完成", subject)
         self.assertIn("已删除：10", body)
         self.assertIn("未收尾任务保护：3 天", body)
+        self.assertIn("生成 MP4：3 天", body)
         self.assertIn("下次计划：2026-06-25T00:00:00Z", body)
 
     def test_scheduled_next_run_preserves_future_persisted_time(self):

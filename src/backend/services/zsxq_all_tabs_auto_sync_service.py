@@ -1,18 +1,26 @@
 """Schedule the existing ZSXQ "sync all official tabs" behavior for fixed groups."""
 
 import fcntl
+from copy import deepcopy
 import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import requests
 
 from models import SystemConfig, db
 from models.zsxq_sync import ZsxqSyncRun
 from services.runtime_guard import release_db_session_quietly
 from services.zsxq_service import zsxq_service
-from services.zsxq_sync_service import STALE_SYNC_RUN_STATUSES, zsxq_sync_service
+from services.zsxq_sync_service import (
+    STALE_SYNC_RUN_STATUSES,
+    ZsxqTransientUpstreamError,
+    zsxq_sync_service,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +34,11 @@ DEFAULT_TOPIC_COUNT = 20
 CONFIG_TYPE = "zsxq_sync_schedule"
 CONFIG_SCOPE = "production"
 CONFIG_KEY_PREFIX = "zsxq.sync.schedule."
+# Scheduler loops every 30 seconds while operator-managed schedules change
+# rarely. Keep successful snapshots for five minutes; failed reads are still
+# uncached so database recovery continues to be retried on the next loop.
+CONFIG_CACHE_TTL_SECONDS = 300.0
+_config_cache = {"expires_at": 0.0, "configs": None}
 
 DEFAULT_AUTO_SYNC_TARGETS = (
     {
@@ -77,6 +90,14 @@ def all_tabs_auto_sync_enabled():
 
 def load_all_tabs_auto_sync_configs(*, include_disabled=True, ensure_defaults=True):
     """Materialize per-group schedules from the shared system_configs table."""
+    now = time.monotonic()
+    cached = _config_cache.get("configs")
+    if cached is not None and now < float(_config_cache.get("expires_at") or 0.0):
+        return [
+            deepcopy(config)
+            for config in cached
+            if include_disabled or config["enabled"]
+        ]
     try:
         rows = _db_config_rows()
         existing_keys = {str(row.config_key) for row in rows}
@@ -95,10 +116,17 @@ def load_all_tabs_auto_sync_configs(*, include_disabled=True, ensure_defaults=Tr
                 updated_at=row.updated_at,
             )
             for row in rows
-            if include_disabled or int(row.status or 0) == 1
         ]
+        _config_cache.update({
+            "expires_at": time.monotonic() + CONFIG_CACHE_TTL_SECONDS,
+            "configs": deepcopy(configs),
+        })
         release_db_session_quietly()
-        return configs
+        return [
+            deepcopy(config)
+            for config in configs
+            if include_disabled or config["enabled"]
+        ]
     except Exception as exc:
         try:
             db.session.rollback()
@@ -139,6 +167,10 @@ def _db_config_rows():
         .order_by(SystemConfig.key.asc())
         .all()
     )
+
+
+def _invalidate_config_cache():
+    _config_cache.update({"expires_at": 0.0, "configs": None})
 
 
 def ensure_default_auto_sync_configs():
@@ -182,6 +214,7 @@ def ensure_default_auto_sync_configs():
         inserted.append(target["key"])
     if inserted:
         db.session.commit()
+        _invalidate_config_cache()
         logger.info(
             "[ZSXQ_ALL_TABS_AUTO] default DB configs inserted | schedules=%s credential_id=%s",
             inserted,
@@ -254,6 +287,7 @@ def save_all_tabs_auto_sync_config(schedule_key, updates):
     updated_at = datetime.utcnow()
     row.updated_at = updated_at
     db.session.commit()
+    _invalidate_config_cache()
     result = _normalize_stored_config(
         schedule_key,
         payload,
@@ -666,8 +700,7 @@ def _queue_target(target, *, cookie, credential_id, trigger, attempt_id):
 
     # The DB session was released by the active-run snapshot. Menu discovery
     # intentionally happens without an open transaction.
-    response = zsxq_service.get_menus(cookie, target["group_id"])
-    zsxq_sync_service._assert_upstream_success(response)
+    response = _get_menus_with_retry(cookie, target)
     resp_data = response.get("resp_data") if isinstance(response, dict) else {}
     menus = (resp_data or {}).get("menus") or (resp_data or {}).get("menu") or []
     tabs = tabs_from_menus(menus)
@@ -755,6 +788,45 @@ def _queue_target(target, *, cookie, credential_id, trigger, attempt_id):
         "mode": target["mode"],
         "comments_refresh_enabled": not target["stop_on_existing"],
     }
+
+
+def _get_menus_with_retry(cookie, target):
+    """Discover official tabs with the same transient retry policy as topic pages."""
+    attempts = zsxq_sync_service._sync_retry_attempts()
+    for attempt in range(1, attempts + 1):
+        try:
+            response = zsxq_service.get_menus(cookie, target["group_id"])
+            zsxq_sync_service._assert_upstream_success(response)
+            if attempt > 1:
+                logger.info(
+                    "[ZSXQ_ALL_TABS_AUTO] menu retry recovered | group_id=%s attempt=%s/%s",
+                    target["group_id"],
+                    attempt,
+                    attempts,
+                )
+            return response
+        except (ZsxqTransientUpstreamError, requests.RequestException) as exc:
+            if attempt >= attempts:
+                logger.warning(
+                    "[ZSXQ_ALL_TABS_AUTO] menu retry exhausted | group_id=%s attempts=%s error=%s",
+                    target["group_id"],
+                    attempts,
+                    exc,
+                )
+                raise
+            delay = zsxq_sync_service._sync_retry_delay_seconds(attempt)
+            logger.warning(
+                "[ZSXQ_ALL_TABS_AUTO] menu transient failure | group_id=%s attempt=%s/%s retry_in=%.1fs error=%s",
+                target["group_id"],
+                attempt,
+                attempts,
+                delay,
+                exc,
+            )
+            release_db_session_quietly()
+            time.sleep(delay)
+
+    raise RuntimeError("ZSXQ_ALL_TABS_MENU_RETRY_LOOP_UNREACHABLE")
 
 
 def _enqueue_all_tabs_notification(

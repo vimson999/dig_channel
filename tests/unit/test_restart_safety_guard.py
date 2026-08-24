@@ -28,6 +28,14 @@ COMMENT_CLEANUP_MIGRATION_PATH = (
     / "versions"
     / "20260724_comment_hash_index_cleanup.py"
 )
+ZSXQ_INSIGHTS_INDEX_MIGRATION_PATH = (
+    PROJECT_ROOT
+    / "src"
+    / "backend"
+    / "migrations"
+    / "versions"
+    / "20260731_zsxq_insights_query_indexes.py"
+)
 BILIBILI_CHARGING_MIGRATION_PATH = (
     PROJECT_ROOT
     / "src"
@@ -74,6 +82,12 @@ class RestartSafetyGuardTest(unittest.TestCase):
             "landscape_video_waiting",
             "storyboard_queued",
             "waiting_child",
+            "images_done",
+            "whole_audio_aligned",
+            "whole_audio_alignment_failed",
+            "reconcile_retry_wait",
+            "visual_retry_wait",
+            "final_video_retry_wait",
         ):
             self.assertFalse(guard.is_non_interruptible_step(step), step)
 
@@ -87,7 +101,7 @@ class RestartSafetyGuardTest(unittest.TestCase):
             now=now,
             guard_seconds=300,
         ))
-        self.assertTrue(guard.is_recent_active_zsxq_run(
+        self.assertFalse(guard.is_recent_active_zsxq_run(
             "retrying",
             now - timedelta(seconds=30),
             now=now,
@@ -126,6 +140,9 @@ class RestartSafetyGuardTest(unittest.TestCase):
         self.assertLess(text.index(redis_guard_call), text.index(schema_guard_call))
         self.assertLess(text.index(schema_guard_call), text.index(guard_call))
         self.assertLess(text.index(guard_call), text.index('"$SCRIPT_DIR/stop-backend.sh"'))
+        self.assertIn("precheck_status=$?", text)
+        self.assertIn('if [ "$precheck_status" -eq 2 ]', text)
+        self.assertIn("继续冻结新消费和 API 入队", text)
 
     def test_direct_backend_start_checks_redis_and_schema_before_app(self):
         text = RUN_BACKEND_PATH.read_text(encoding="utf-8")
@@ -163,6 +180,41 @@ class RestartSafetyGuardTest(unittest.TestCase):
 
         self.assertEqual(failures, [])
         self.assertEqual(len(calls), 1)
+
+    def test_redis_guard_warns_for_unused_result_backend_but_keeps_broker_hard_gate(self):
+        guard = load_redis_guard_module()
+
+        class Client:
+            def __init__(self, healthy):
+                self.healthy = healthy
+
+            def ping(self):
+                if not self.healthy:
+                    raise TimeoutError("result backend unavailable")
+                return True
+
+        def client_factory(url, **_kwargs):
+            return Client("result.test" not in url)
+
+        environ = {
+            "REDIS_URL": "redis://cache.test:6379/14",
+            "CELERY_BROKER_URL": "redis://broker.test:6379/15",
+            "CELERY_RESULT_BACKEND": "redis://result.test:6379/15",
+        }
+        failures, warnings = guard.check_runtime_dependencies(
+            environ,
+            client_factory=client_factory,
+        )
+        self.assertEqual(failures, [])
+        self.assertEqual(warnings, ["Celery result backend: TimeoutError"])
+
+        environ["CELERY_RESULT_BACKEND_REQUIRED"] = "1"
+        failures, warnings = guard.check_runtime_dependencies(
+            environ,
+            client_factory=client_factory,
+        )
+        self.assertEqual(failures, ["Celery result backend: TimeoutError"])
+        self.assertEqual(warnings, [])
 
     def test_full_restart_quiesces_consumers_and_rechecks_before_stopping_workers(self):
         text = RESTART_PATH.read_text(encoding="utf-8")
@@ -354,6 +406,12 @@ class RestartSafetyGuardTest(unittest.TestCase):
         self.assertIn("pg_has_role(t.relowner, 'MEMBER')", text)
         self.assertIn("Skipping redundant index owned by another role", text)
         self.assertIn("DROP INDEX CONCURRENTLY IF EXISTS", text)
+
+    def test_zsxq_insights_index_migration_skips_when_table_owner_is_unavailable(self):
+        text = ZSXQ_INSIGHTS_INDEX_MIGRATION_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("pg_has_role(c.relowner, 'MEMBER')", text)
+        self.assertIn("Skipping optional insights index owned by another role", text)
 
     def test_charging_migration_binds_json_config_values(self):
         text = BILIBILI_CHARGING_MIGRATION_PATH.read_text(encoding="utf-8")

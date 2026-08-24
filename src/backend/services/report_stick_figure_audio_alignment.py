@@ -59,7 +59,7 @@ def find_reusable_audio_candidate(
     material_task_id: str = "",
     visible_user_ids: Iterable[str] = (),
 ) -> AudioCandidate | None:
-    """按结构化列寻找同一研报已经完成且文件完整的整篇 WAV。"""
+    """Find an intact full WAV, including one preserved after final-video recovery."""
 
     attachment_id = str(attachment_id or "").strip()
     material_task_id = str(material_task_id or "").strip()
@@ -87,7 +87,7 @@ def find_reusable_audio_candidate(
             PublicationTask.created_at,
         ))
         .filter(PublicationTask.feature.in_(REPORT_AUDIO_FEATURES))
-        .filter(PublicationTask.status == "completed")
+        .filter(PublicationTask.status.in_(("completed", "failed")))
         .filter(PublicationTask.report_audio_wav_path.isnot(None))
         .filter(or_(*identity_filters))
     )
@@ -96,6 +96,10 @@ def find_reusable_audio_candidate(
         query = query.filter(or_(PublicationTask.user_id.in_(user_ids), PublicationTask.user_id.is_(None)))
     rows = query.order_by(PublicationTask.completed_at.desc(), PublicationTask.created_at.desc()).limit(10).all()
     for row in rows:
+        # A failed source is only reusable once its final script projection and
+        # combined WAV both survived the later video-stage failure.
+        if row.status == "failed" and int(row.final_script_chars or 0) <= 0:
+            continue
         path = Path(str(row.report_audio_wav_path or "")).expanduser()
         if not path.is_file() or path.stat().st_size <= 0:
             continue
@@ -239,6 +243,113 @@ def align_storyboard_to_audio(
         "storyboard_script_hash": text_hash(storyboard_text),
         "source_script_hash": text_hash(source_text) if source_text else None,
         "timeline": timeline,
+    }
+
+
+def align_subtitles_to_audio(
+    subtitles: Sequence[Mapping],
+    asr_segments: Sequence[Mapping],
+    *,
+    audio_seconds: float,
+) -> dict:
+    """使用 ASR 时间戳对齐原始字幕文字，避免把识别误差写进成片。"""
+
+    source_entries = []
+    leading_punctuation = ""
+    for item in subtitles or []:
+        if not isinstance(item, Mapping):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        if not normalize_alignment_text(text):
+            if source_entries:
+                source_entries[-1]["script_text"] += text
+            else:
+                leading_punctuation += text
+            continue
+        sequence = len(source_entries) + 1
+        source_entries.append({
+            "asset_id": f"subtitle-{sequence}",
+            "segment_id": f"subtitle-{sequence}",
+            "sequence": sequence,
+            "script_text": f"{leading_punctuation}{text}",
+        })
+        leading_punctuation = ""
+    if leading_punctuation and source_entries:
+        source_entries[-1]["script_text"] += leading_punctuation
+    if not source_entries:
+        raise ValueError("没有可用于强制对齐的原始字幕")
+    source_script = "".join(item["script_text"] for item in source_entries)
+    alignment = align_storyboard_to_audio(
+        source_entries,
+        asr_segments,
+        audio_seconds=audio_seconds,
+        source_script=source_script,
+    )
+    return {
+        **alignment,
+        "subtitles": [
+            {
+                "start": entry["start_seconds"],
+                "end": entry["end_seconds"],
+                "text": entry["script_text"],
+            }
+            for entry in alignment["timeline"]
+        ],
+    }
+
+
+def align_scene_timeline_to_audio(
+    scene_timeline: Mapping,
+    asr_segments: Sequence[Mapping],
+    *,
+    audio_seconds: float,
+    source_script: str,
+) -> dict:
+    """把方案三分镜映射到同一份精确语音时间轴。"""
+
+    raw_scenes = (
+        scene_timeline.get("scenes")
+        if isinstance(scene_timeline, Mapping)
+        and isinstance(scene_timeline.get("scenes"), list)
+        else []
+    )
+    if not raw_scenes:
+        raise ValueError("方案三缺少可对齐的分镜时间轴")
+    if any(not str(item.get("script_text") or "").strip() for item in raw_scenes):
+        raise ValueError("方案三分镜缺少原始文案，不能进行精确语音对齐")
+
+    alignment = align_storyboard_to_audio(
+        raw_scenes,
+        asr_segments,
+        audio_seconds=audio_seconds,
+        source_script=source_script,
+    )
+    aligned_by_sequence = {
+        int(item["sequence"]): item
+        for item in alignment["timeline"]
+    }
+    aligned_scenes = []
+    for raw in raw_scenes:
+        aligned = aligned_by_sequence[int(raw["sequence"])]
+        aligned_scenes.append({
+            **dict(raw),
+            "start_seconds": aligned["start_seconds"],
+            "end_seconds": aligned["end_seconds"],
+            "duration_seconds": aligned["duration_seconds"],
+            "alignment_confidence": aligned["confidence"],
+        })
+    return {
+        **dict(scene_timeline),
+        "schema_version": ALIGNMENT_SCHEMA_VERSION,
+        "timing_source": "asr_forced_alignment",
+        "audio_seconds": alignment["audio_seconds"],
+        "scene_count": alignment["scene_count"],
+        "average_confidence": alignment["average_confidence"],
+        "minimum_confidence": alignment["minimum_confidence"],
+        "asr_match_ratio": alignment["asr_match_ratio"],
+        "scenes": aligned_scenes,
     }
 
 

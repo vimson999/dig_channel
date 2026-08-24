@@ -223,6 +223,46 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(task.celery_task_id, "new-celery-id")
         self.assertEqual(dummy.calls[0]["queue"], "doubao_browser_tts")
 
+    def test_scan_recovers_report_visual_plan_auto_retry_message_lost_during_restart(self):
+        task = self._task(
+            feature="report_visual_plan",
+            step="auto_retry",
+            minutes_old=20,
+        )
+        task.progress = 5
+        task.result = {
+            "auto_retry_history": [{
+                "attempt": 1,
+                "error": "Gemini 浏览器 profile 正在被其他 Chrome 占用",
+                "delay_seconds": 30,
+            }],
+            "last_retry_error": "Gemini 浏览器 profile 正在被其他 Chrome 占用",
+        }
+        task.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+        task_id = task.id
+        dummy = DummyCeleryTask()
+
+        with patch.object(
+            publisher_queue_repair,
+            "_celery_message_visible",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "_repair_target_for_feature",
+            return_value=dummy,
+        ):
+            result = publisher_queue_repair.repair_stale_publication_tasks_once()
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["requeued"], 1)
+        task = db.session.get(PublicationTask, task_id)
+        self.assertEqual(task.status, "pending")
+        self.assertEqual(task.current_step, "queued")
+        self.assertEqual(task.progress, 0)
+        self.assertEqual(task.celery_task_id, "new-celery-id")
+        self.assertEqual(dummy.calls[0]["queue"], "report_visual_plan")
+
     def test_pending_repair_releases_db_transaction_before_celery_inspection(self):
         task = self._task()
         dummy = DummyCeleryTask()
@@ -295,6 +335,37 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertIsNone(updated.error_message)
         self.assertEqual(dummy.calls[0]["queue"], "zsxq_publish")
 
+    def test_requeues_visual_plan_lost_during_worker_restart(self):
+        task = self._task(
+            feature="report_visual_plan",
+            step="deferred_backlog",
+            minutes_old=20,
+        )
+        task.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+        dummy = DummyCeleryTask()
+
+        with patch.object(
+            publisher_queue_repair,
+            "_celery_message_visible",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "_repair_target_for_feature",
+            return_value=dummy,
+        ):
+            updated, requeued = (
+                publisher_queue_repair.maybe_requeue_stale_publication_task(task)
+            )
+
+        self.assertTrue(requeued)
+        self.assertEqual(updated.celery_task_id, "new-celery-id")
+        self.assertEqual(dummy.calls[0]["queue"], "report_visual_plan")
+        self.assertEqual(
+            updated.result["queue_repair"]["feature"],
+            "report_visual_plan",
+        )
+
     def test_requeues_pending_report_audio_parent_after_message_vanishes(self):
         task = self._task(
             feature="report_pdf_audio_workflow",
@@ -329,6 +400,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
 
     def test_requeues_deferred_publisher_task_after_message_vanishes(self):
         task = self._pending_publisher_task(step="deferred_capacity")
+        task_id = task.id
         dummy = DummyCeleryTask()
 
         with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
@@ -338,11 +410,75 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
 
         self.assertEqual(result["checked"], 1)
         self.assertEqual(result["requeued"], 1)
-        db.session.refresh(task)
+        task = db.session.get(PublicationTask, task_id)
         self.assertEqual(task.status, "pending")
         self.assertEqual(task.current_step, "queued")
         self.assertEqual(task.celery_task_id, "new-celery-id")
         self.assertIsNone(task.error_message)
+
+    def test_publisher_pending_repair_releases_transaction_before_external_checks(self):
+        task = self._pending_publisher_task(step="deferred_capacity")
+        dummy = DummyCeleryTask()
+        transaction_states = []
+
+        def worker_visibility(*_args, **_kwargs):
+            transaction_states.append(("worker", db.session().in_transaction()))
+            return False, True
+
+        def queue_visibility(*_args, **_kwargs):
+            transaction_states.append(("queue", db.session().in_transaction()))
+            return False, True
+
+        with patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_workers",
+            side_effect=worker_visibility,
+        ), patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_queue",
+            side_effect=queue_visibility,
+        ), patch.object(
+            publisher_queue_repair,
+            "run_publication_pipeline",
+            dummy,
+        ):
+            updated, requeued = (
+                publisher_queue_repair.maybe_requeue_stale_publisher_child(task)
+            )
+
+        self.assertTrue(requeued)
+        self.assertEqual("new-celery-id", updated.celery_task_id)
+        self.assertEqual(
+            [("worker", False), ("queue", False)],
+            transaction_states,
+        )
+
+    def test_superseded_repair_releases_transaction_before_revoke(self):
+        task = self._pending_publisher_task()
+        task_id = task.id
+        transaction_states = []
+
+        # Reproduce the post-publish CAS/state-check phase: loading the row opens
+        # a transaction that must be closed before the Celery control request.
+        self.assertIsNotNone(db.session.get(PublicationTask, task_id))
+        self.assertTrue(db.session().in_transaction())
+
+        def capture_revoke(*_args, **_kwargs):
+            transaction_states.append(db.session().in_transaction())
+
+        with patch.object(
+            publisher_queue_repair,
+            "_revoke_published_repair_message",
+            side_effect=capture_revoke,
+        ) as revoke:
+            publisher_queue_repair._release_then_revoke_published_repair_message(
+                SimpleNamespace(id="superseded-celery-id"),
+                task_id=task_id,
+                log=publisher_queue_repair.logger,
+            )
+
+        revoke.assert_called_once()
+        self.assertEqual(transaction_states, [False])
 
     def test_requeues_post_completion_bilibili_upload_to_platform_upload_queue(self):
         _, child = self._parent_with_publisher_child(parent_status="completed")
@@ -372,6 +508,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         )
         db.session.add(projection)
         db.session.commit()
+        projection_task_id = projection.task_id
         dummy = DummyCeleryTask()
 
         with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
@@ -383,7 +520,10 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(updated.celery_task_id, "new-celery-id")
         self.assertEqual(dummy.calls[0]["queue"], "platform_upload")
         self.assertEqual(queue_scan.call_args.kwargs["queue"], "platform_upload")
-        db.session.refresh(projection)
+        projection = db.session.get(
+            PublicationTaskBilibiliUpload,
+            projection_task_id,
+        )
         self.assertEqual(projection.queue_repair_count, 1)
         self.assertEqual(projection.queue_repair_queue, "platform_upload")
         self.assertEqual(projection.queue_repair_current_celery_id, "new-celery-id")
@@ -453,6 +593,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
 
     def test_requeues_deferred_publisher_task_when_message_is_unacked_but_not_active(self):
         task = self._pending_publisher_task(step="deferred_capacity")
+        task_id = task.id
         dummy = DummyCeleryTask()
 
         with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
@@ -462,7 +603,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
 
         self.assertEqual(result["checked"], 1)
         self.assertEqual(result["requeued"], 1)
-        db.session.refresh(task)
+        task = db.session.get(PublicationTask, task_id)
         self.assertEqual(task.celery_task_id, "new-celery-id")
         repair = task.result["queue_repair"]
         self.assertEqual(repair["reason"], "pending_message_not_active_but_queue_visible")
@@ -550,6 +691,8 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
 
     def test_cleans_publisher_child_when_parent_workflow_is_canceled(self):
         parent, child = self._parent_with_publisher_child(parent_status="canceled")
+        parent_id = parent.id
+        child_id = child.id
 
         with patch.object(publisher_queue_repair, "_revoke_celery_task") as revoke:
             result = publisher_queue_repair.cleanup_publisher_children_of_terminal_parents_once()
@@ -557,13 +700,32 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(result["checked"], 1)
         self.assertEqual(result["cleaned"], 1)
         revoke.assert_called_once()
-        db.session.refresh(child)
+        child = db.session.get(PublicationTask, child_id)
         self.assertEqual(child.status, "canceled")
         self.assertEqual(child.current_step, "canceled")
         self.assertEqual(child.completed_at is not None, True)
         cleanup = child.result["orphan_child_cleanup"]
-        self.assertEqual(cleanup["parent_task_id"], parent.id)
+        self.assertEqual(cleanup["parent_task_id"], parent_id)
         self.assertEqual(cleanup["parent_status"], "canceled")
+
+    def test_terminal_parent_cleanup_releases_db_before_revoke(self):
+        self._parent_with_publisher_child(parent_status="canceled")
+        transaction_states = []
+
+        def capture_revoke(*_args, **_kwargs):
+            transaction_states.append(db.session().in_transaction())
+
+        with patch.object(
+            publisher_queue_repair,
+            "_revoke_celery_task",
+            side_effect=capture_revoke,
+        ):
+            result = (
+                publisher_queue_repair.cleanup_publisher_children_of_terminal_parents_once()
+            )
+
+        self.assertEqual(result["cleaned"], 1)
+        self.assertEqual(transaction_states, [False])
 
     def test_cleans_doubao_child_left_processing_after_parent_failed(self):
         now = datetime.utcnow()
@@ -595,6 +757,8 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         )
         db.session.add(child)
         db.session.commit()
+        parent_id = parent.id
+        child_id = child.id
 
         with patch.object(publisher_queue_repair, "_revoke_celery_task") as revoke:
             result = publisher_queue_repair.cleanup_publisher_children_of_terminal_parents_once()
@@ -602,12 +766,12 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(result["checked"], 1)
         self.assertEqual(result["cleaned"], 1)
         revoke.assert_called_once()
-        db.session.refresh(child)
+        child = db.session.get(PublicationTask, child_id)
         self.assertEqual(child.status, "canceled")
         self.assertEqual(child.current_step, "canceled")
         self.assertIn("遗留子任务自动收口", child.error_message)
         cleanup = child.result["orphan_child_cleanup"]
-        self.assertEqual(cleanup["parent_task_id"], parent.id)
+        self.assertEqual(cleanup["parent_task_id"], parent_id)
         self.assertEqual(cleanup["parent_feature"], "report_pdf_audio_workflow")
         self.assertEqual(cleanup["previous_step"], "capture_audio")
 
@@ -648,6 +812,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
             db.session.add(child)
             children.append(child)
         db.session.commit()
+        child_ids = [child.id for child in children]
 
         with patch.object(publisher_queue_repair, "_revoke_celery_task") as revoke:
             result = publisher_queue_repair.cleanup_publisher_children_of_terminal_parents_once()
@@ -655,8 +820,8 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(result["checked"], 2)
         self.assertEqual(result["cleaned"], 2)
         self.assertEqual(revoke.call_count, 2)
-        for child in children:
-            db.session.refresh(child)
+        for child_id in child_ids:
+            child = db.session.get(PublicationTask, child_id)
             self.assertEqual(child.status, "canceled")
             self.assertEqual(child.current_step, "canceled")
             self.assertEqual(
@@ -739,13 +904,14 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
             },
         }
         db.session.commit()
+        child_id = child.id
 
         with patch.object(publisher_queue_repair, "_revoke_celery_task") as revoke:
             result = publisher_queue_repair.cleanup_publisher_children_of_terminal_parents_once()
 
         self.assertEqual(result["cleaned"], 1)
         revoke.assert_called_once()
-        db.session.refresh(child)
+        child = db.session.get(PublicationTask, child_id)
         self.assertEqual(child.status, "canceled")
         self.assertIn("父编排任务已终止(canceled)", child.error_message)
 
@@ -853,6 +1019,68 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(repair["previous_celery_id"], "old-render-celery-id")
         self.assertEqual(repair["previous_step"], "v_synthesis")
 
+    def test_publisher_processing_repair_releases_db_before_visibility_checks(self):
+        task = self._processing_publisher_task(step="v_synthesis")
+        dummy = DummyCeleryTask()
+        transaction_states = []
+
+        def worker_visibility(*_args, **_kwargs):
+            transaction_states.append(("worker", db.session().in_transaction()))
+            return False, True
+
+        def queue_visibility(*_args, **_kwargs):
+            transaction_states.append(("queue", db.session().in_transaction()))
+            return False, True
+
+        with patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_workers",
+            side_effect=worker_visibility,
+        ), patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_queue",
+            side_effect=queue_visibility,
+        ), patch.object(
+            publisher_queue_repair,
+            "run_publication_pipeline",
+            dummy,
+        ):
+            _updated, repaired, action = (
+                publisher_queue_repair.maybe_repair_stale_publisher_processing_task(
+                    task
+                )
+            )
+
+        self.assertTrue(repaired)
+        self.assertEqual(action, "requeued")
+        self.assertEqual(transaction_states, [("worker", False), ("queue", False)])
+
+    def test_publisher_processing_close_releases_db_before_revoke(self):
+        task = self._processing_publisher_task(step="upload_bilibili")
+        transaction_states = []
+
+        def capture_revoke(*_args, **_kwargs):
+            transaction_states.append(db.session().in_transaction())
+
+        with patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_workers",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "_revoke_celery_task",
+            side_effect=capture_revoke,
+        ):
+            _updated, repaired, action = (
+                publisher_queue_repair.maybe_repair_stale_publisher_processing_task(
+                    task
+                )
+            )
+
+        self.assertTrue(repaired)
+        self.assertEqual(action, "closed")
+        self.assertEqual(transaction_states, [False])
+
     def test_requeues_stale_processing_local_clean_task_when_celery_message_is_missing(self):
         cases = (
             ("content_pdf_clean", "local_cleaning"),
@@ -879,10 +1107,49 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
                 self.assertEqual(repair["previous_celery_id"], "old-business-celery-id")
                 self.assertEqual(repair["previous_step"], step)
 
+    def test_requeues_stale_processing_report_audio_parent_when_message_is_missing(self):
+        cases = (
+            ("report_audio_workflow", "doubao_2_reuse"),
+            ("report_pdf_audio_workflow", "pub_synthesis"),
+        )
+        for feature, step in cases:
+            with self.subTest(feature=feature, step=step):
+                task = self._processing_business_task(feature=feature, step=step)
+                dummy = DummyCeleryTask()
+
+                with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
+                     patch.object(publisher_queue_repair, "_message_visible_in_queue", return_value=(False, True)), \
+                     patch.object(publisher_queue_repair, "_repair_target_for_feature", return_value=dummy):
+                    updated, repaired, action = publisher_queue_repair.maybe_repair_stale_business_processing_task(task)
+
+                self.assertTrue(repaired)
+                self.assertEqual(action, "requeued")
+                self.assertEqual(updated.status, "pending")
+                self.assertEqual(updated.current_step, "queued")
+                self.assertEqual(dummy.calls[0]["queue"], "report_audio_workflow")
+
+    def test_age_seconds_normalizes_naive_database_local_time(self):
+        now_utc = datetime(2026, 8, 5, 8, 12, 0)
+        now_local = datetime(2026, 8, 5, 16, 12, 0)
+
+        age = publisher_queue_repair._age_seconds(
+            datetime(2026, 8, 5, 15, 58, 0),
+            now_utc=now_utc,
+            now_local=now_local,
+        )
+
+        self.assertEqual(age, 14 * 60)
+
     def test_requeues_stale_processing_browser_children_when_message_is_missing(self):
         cases = (
             ("doubao_browser_tts", "wait_response", "doubao_browser_tts"),
+            ("report_pdf_gemini", "wait_response", "report_pdf_gemini"),
+            ("report_pdf_gemini", "response_contract_repair_1_wait", "report_pdf_gemini"),
+            ("gemini_browser", "upload_pdf", "report_pdf_gemini"),
+            ("report_visual_plan", "gemini_storyboard", "report_visual_plan"),
             ("report_stick_figure_image", "wait_generated_image", "report_pdf_gemini"),
+            ("report_stick_figure_audio_alignment", "transcribe_whole_audio", "render"),
+            ("report_stick_figure_video_render", "render_video", "render"),
         )
         for feature, step, queue in cases:
             with self.subTest(feature=feature, step=step):

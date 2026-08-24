@@ -84,7 +84,7 @@ class BilibiliCompetitorVideo(db.Model):
         index=True,
     )
     content_type = db.Column(db.String(32), nullable=False, index=True)
-    bvid = db.Column(db.String(32), nullable=False, unique=True, index=True)
+    bvid = db.Column(db.String(32), nullable=False)
     aid = db.Column(db.String(32), nullable=True)
     title = db.Column(db.String(500), nullable=False)
     description = db.Column(db.Text, nullable=True)

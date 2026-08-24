@@ -10,6 +10,9 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services.bilibili.uploader import (  # noqa: E402
+    BilibiliChunkRetryError,
+    BilibiliUploadTimeoutError,
+    BoundedVideoUploader,
     BiliUploader,
     DEFAULT_CHARGING_PREVIEW_END,
     DEFAULT_NEUTRAL_MARK,
@@ -17,6 +20,53 @@ from services.bilibili.uploader import (  # noqa: E402
 
 
 class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_bounded_sdk_uploader_stops_infinite_chunk_retries(self):
+        uploader = object.__new__(BoundedVideoUploader)
+        uploader._max_chunk_attempts = 2
+        uploader._chunk_attempts = {}
+        page = Mock(path="/tmp/video.mp4")
+        failed = {
+            "ok": False,
+            "chunk_number": 0,
+            "offset": 0,
+            "page": page,
+        }
+
+        with patch(
+            "services.bilibili.uploader.VideoUploader._upload_chunk",
+            new=AsyncMock(return_value=failed),
+        ):
+            first = await uploader._upload_chunk(page, 0, 0, 3, {})
+            self.assertFalse(first["ok"])
+            with self.assertRaises(BilibiliChunkRetryError):
+                await uploader._upload_chunk(page, 0, 0, 3, {})
+
+    async def test_upload_single_stops_when_overall_timeout_expires(self):
+        async def expire(awaitable, *, timeout):
+            awaitable.close()
+            self.assertEqual(timeout, 7)
+            raise TimeoutError
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            with patch("services.bilibili.uploader.BoundedVideoUploader") as sdk_uploader_cls:
+                sdk_uploader = sdk_uploader_cls.return_value
+                sdk_uploader.start = Mock(return_value=AsyncMock()())
+                sdk_uploader.on.return_value = lambda handler: handler
+                with patch(
+                    "services.bilibili.uploader.asyncio.wait_for",
+                    side_effect=expire,
+                ), patch.dict(
+                    "os.environ",
+                    {"BILIBILI_UPLOAD_TIMEOUT_SECONDS": "7"},
+                ):
+                    uploader = BiliUploader(sessdata="sess", bili_jct="csrf")
+                    with self.assertRaises(BilibiliUploadTimeoutError):
+                        await uploader.upload_single(
+                            video_path=video.name,
+                            title="超时测试",
+                            cover_path="/tmp/cover.jpg",
+                        )
+
     def test_creator_seasons_reads_empty_creator_collection_and_paginates(self):
         first_response = Mock()
         first_response.raise_for_status.return_value = None
@@ -59,7 +109,7 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
     async def test_upload_single_maps_neutral_mark_to_creation_statement(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
             with patch("services.bilibili.uploader.VideoMeta") as meta_cls:
-                with patch("services.bilibili.uploader.VideoUploader") as sdk_uploader_cls:
+                with patch("services.bilibili.uploader.BoundedVideoUploader") as sdk_uploader_cls:
                     sdk_uploader = sdk_uploader_cls.return_value
                     sdk_uploader.start = AsyncMock(return_value={"aid": 1, "bvid": "BVtest"})
                     sdk_uploader.on.return_value = lambda handler: handler
@@ -85,7 +135,7 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
     async def test_upload_single_passes_delay_time_to_meta(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
             with patch("services.bilibili.uploader.VideoMeta") as meta_cls:
-                with patch("services.bilibili.uploader.VideoUploader") as sdk_uploader_cls:
+                with patch("services.bilibili.uploader.BoundedVideoUploader") as sdk_uploader_cls:
                     sdk_uploader = sdk_uploader_cls.return_value
                     sdk_uploader.start = AsyncMock(return_value={"aid": 4, "bvid": "BVdelay"})
                     sdk_uploader.on.return_value = lambda handler: handler
@@ -115,7 +165,7 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
                     return_value={"season_id": 12345, "section_id": 67890, "cid": 99},
                 ) as add_to_season:
                     with patch("services.bilibili.uploader.VideoMeta") as meta_cls:
-                        with patch("services.bilibili.uploader.VideoUploader") as sdk_uploader_cls:
+                        with patch("services.bilibili.uploader.BoundedVideoUploader") as sdk_uploader_cls:
                             sdk_uploader = sdk_uploader_cls.return_value
                             sdk_uploader.start = AsyncMock(return_value={"aid": 5, "bvid": "BVseason"})
                             sdk_uploader.on.return_value = lambda handler: handler
@@ -171,7 +221,7 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
                     "_add_uploaded_video_to_season",
                     side_effect=RuntimeError("加入合集失败"),
                 ):
-                    with patch("services.bilibili.uploader.VideoUploader") as sdk_uploader_cls:
+                    with patch("services.bilibili.uploader.BoundedVideoUploader") as sdk_uploader_cls:
                         sdk_uploader = sdk_uploader_cls.return_value
                         sdk_uploader.start = AsyncMock(return_value={"aid": 5, "bvid": "BVseason"})
                         sdk_uploader.on.return_value = lambda handler: handler
@@ -233,7 +283,7 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
     async def test_upload_single_builds_only_self_meta_dict(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
             with patch("services.bilibili.uploader.VideoMeta") as meta_cls:
-                with patch("services.bilibili.uploader.VideoUploader") as sdk_uploader_cls:
+                with patch("services.bilibili.uploader.BoundedVideoUploader") as sdk_uploader_cls:
                     sdk_uploader = sdk_uploader_cls.return_value
                     sdk_uploader.start = AsyncMock(return_value={"aid": 6, "bvid": "BVprivate"})
                     sdk_uploader.on.return_value = lambda handler: handler
@@ -261,7 +311,7 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
             with patch.object(BiliUploader, "_fetch_default_upower_level_id", return_value="level-1"):
                 with patch("services.bilibili.uploader.VideoMeta") as meta_cls:
-                    with patch("services.bilibili.uploader.VideoUploader") as sdk_uploader_cls:
+                    with patch("services.bilibili.uploader.BoundedVideoUploader") as sdk_uploader_cls:
                         sdk_uploader = sdk_uploader_cls.return_value
                         sdk_uploader.start = AsyncMock(return_value={"aid": 2, "bvid": "BVcharge"})
                         sdk_uploader.on.return_value = lambda handler: handler
@@ -301,7 +351,7 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
     async def test_upload_single_charging_pay_defaults_preview_end(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
             with patch.object(BiliUploader, "_fetch_default_upower_level_id", return_value="level-1"):
-                with patch("services.bilibili.uploader.VideoUploader") as sdk_uploader_cls:
+                with patch("services.bilibili.uploader.BoundedVideoUploader") as sdk_uploader_cls:
                     sdk_uploader = sdk_uploader_cls.return_value
                     sdk_uploader.start = AsyncMock(return_value={"aid": 3, "bvid": "BVdefault"})
                     sdk_uploader.on.return_value = lambda handler: handler

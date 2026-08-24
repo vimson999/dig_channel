@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
+from uuid import uuid4
 
 from flask import Blueprint, jsonify, request, send_file
 from sqlalchemy import or_
@@ -38,7 +39,7 @@ from services.report_visual_scheme import (
     visual_scheme_payloads,
 )
 from services import gemini_browser
-from services.runtime_guard import maybe_guarded_apply_async
+from services.runtime_guard import maybe_guarded_apply_async, release_db_session_quietly
 from tasks.report_visual_plan import (
     process_report_visual_plan_job,
     retry_normalize_report_visual_plan_job,
@@ -58,6 +59,8 @@ _TERMINAL_STORYBOARD_CACHE = {}
 _TERMINAL_STORYBOARD_JOB_CACHE = {}
 _TERMINAL_STORYBOARD_CACHE_LOCK = Lock()
 _TERMINAL_STORYBOARD_CACHE_MAX_ENTRIES = 512
+_STORYBOARD_PARENT_FEATURES = {"storyboard", "report_stick_figure_video_workflow"}
+_AUDIO_WORKFLOW_SCRIPT_READY_FEATURES = {"report_pdf_audio_workflow", "report_audio_workflow"}
 logger = logging.getLogger(__name__)
 
 
@@ -252,6 +255,15 @@ def create_storyboard_job(current_user):
         )
         if not workflow:
             return jsonify({"success": False, "message": "火柴人视频编排任务不存在或与文案不匹配"}), 400
+        try:
+            from api.report_stick_figure_video_workflow import _clear_scene_structure_cache
+
+            _clear_scene_structure_cache(
+                workflow_id=workflow_id,
+                source_task_id=material_task.id,
+            )
+        except Exception as exc:
+            logger.warning("清理旧分镜结构缓存失败: workflow=%s source=%s error=%s", workflow_id, material_task.id, exc)
     task = PublicationTask(
         status="pending",
         current_step="queued",
@@ -338,7 +350,14 @@ def _resolve_storyboard_source(data, current_user):
     )
     if not task:
         raise ValueError("基础文案任务不存在")
-    if task.status != "completed" or int(task.final_script_chars or 0) <= 0:
+    script_ready = (
+        task.status == "completed"
+        or (
+            task.feature in _AUDIO_WORKFLOW_SCRIPT_READY_FEATURES
+            and task.status in {"processing", "failed"}
+        )
+    )
+    if not script_ready or int(task.final_script_chars or 0) <= 0:
         raise ValueError("基础文案任务还没有完整文案")
     return task
 
@@ -435,10 +454,12 @@ def get_job(current_user, job_id):
     task = _get_owned_visual_task(current_user, job_id, include_result=False)
     if not task:
         return jsonify({"success": False, "message": "visual_plan 任务不存在"}), 404
+    if task.status in {"blocked_by_login", "blocked_by_captcha"}:
+        task = _get_owned_visual_task(current_user, job_id, include_result=True)
     output = _storyboard_output(task.id)
     if output:
         payload = _storyboard_job_payload(task, output, include_segments=True)
-    elif task.parent_feature == "storyboard":
+    elif task.parent_feature in _STORYBOARD_PARENT_FEATURES:
         payload = _storyboard_job_payload(task, None, include_segments=False)
     else:
         task = _get_owned_visual_task(current_user, job_id, include_result=True)
@@ -505,6 +526,124 @@ def retry_storyboard_normalize(current_user, job_id):
     })
 
 
+def _resume_after_login(task):
+    if str(getattr(task, "status", "") or "") != "blocked_by_login":
+        raise ValueError("仅等待人工登录的分镜任务可以执行此恢复操作")
+
+    now = datetime.utcnow()
+    task_id = str(task.id)
+    broker_task_id = str(uuid4())
+    parent = None
+    workflow_id = str(getattr(task, "parent_task_id", "") or "").strip()
+    if (
+        workflow_id
+        and str(getattr(task, "parent_feature", "") or "")
+        == "report_stick_figure_video_workflow"
+    ):
+        parent = db.session.get(PublicationTask, workflow_id)
+
+    result = dict(getattr(task, "result", {}) or {})
+    intervention = dict(result.get("human_intervention") or {})
+    intervention["recovery_requested_at"] = now.isoformat() + "Z"
+    result["human_intervention"] = intervention
+    result.pop("error", None)
+    result.pop("error_type", None)
+    task.status = "pending"
+    task.current_step = "login_recovery_queued"
+    task.error_message = None
+    task.completed_at = None
+    task.updated_at = now
+    task.celery_task_id = broker_task_id
+    task.result = result
+
+    if parent and parent.status != "canceled":
+        parent.status = "processing"
+        parent.current_step = "storyboard_queued"
+        parent.progress = 35
+        parent.waiting_child_id = task.id
+        parent.waiting_child_label = "标题与正文分镜"
+        parent.waiting_child_status = "pending"
+        parent.waiting_child_step = "login_recovery_queued"
+        parent.waiting_child_updated_at = now.isoformat() + "Z"
+        parent.error_message = None
+        parent.completed_at = None
+        parent.updated_at = now
+    db.session.commit()
+    release_db_session_quietly()
+
+    try:
+        submit_result = maybe_guarded_apply_async(
+            process_report_visual_plan_job,
+            args=[task_id],
+            queue=QUEUE_NAME,
+            feature=FEATURE_NAME,
+            task_id=task_id,
+            broker_task_id=broker_task_id,
+            retry=False,
+        )
+    except Exception as exc:
+        db.session.rollback()
+        failed_at = datetime.utcnow()
+        message = f"登录已处理，但恢复任务入队失败：{exc}"[:4000]
+        reloaded_task = db.session.get(PublicationTask, task_id)
+        reloaded_parent = (
+            db.session.get(PublicationTask, workflow_id) if workflow_id else None
+        )
+        if reloaded_task and reloaded_task.status != "canceled":
+            reloaded_task.status = "blocked_by_login"
+            reloaded_task.current_step = "blocked_by_login"
+            reloaded_task.error_message = message
+            reloaded_task.celery_task_id = None
+            reloaded_task.updated_at = failed_at
+        if reloaded_parent and reloaded_parent.status != "canceled":
+            reloaded_parent.status = "blocked_by_login"
+            reloaded_parent.current_step = "storyboard_blocked_by_login"
+            reloaded_parent.waiting_child_status = "blocked_by_login"
+            reloaded_parent.waiting_child_step = "resume_enqueue_failed"
+            reloaded_parent.waiting_child_updated_at = failed_at.isoformat() + "Z"
+            reloaded_parent.error_message = message
+            reloaded_parent.updated_at = failed_at
+        db.session.commit()
+        raise RuntimeError(message) from exc
+
+    async_result = submit_result["async_result"]
+    async_task_id = str(async_result.id)
+    if async_task_id != broker_task_id:
+        PublicationTask.query.filter(PublicationTask.id == task_id).update(
+            {PublicationTask.celery_task_id: async_task_id},
+            synchronize_session=False,
+        )
+        db.session.commit()
+    _clear_terminal_storyboard_cache()
+    try:
+        from api.report_stick_figure_video_workflow import _clear_active_workflow_cache
+
+        _clear_active_workflow_cache()
+    except Exception as exc:
+        logger.warning("清理登录恢复工作流缓存失败: task=%s error=%s", task_id, exc)
+    return {
+        "job_id": task_id,
+        "status": "deferred" if submit_result.get("deferred") else "queued",
+        "celery_task_id": async_task_id,
+        "message": "已恢复原分镜任务并重新排队",
+    }
+
+
+@report_visual_plan_bp.route("/jobs/<job_id>/resume-after-login", methods=["POST"])
+@require_login
+def resume_storyboard_after_login(current_user, job_id):
+    task = _get_owned_visual_task(current_user, job_id, include_result=True)
+    if not task:
+        return jsonify({"success": False, "message": "分镜任务不存在"}), 404
+    try:
+        result = _resume_after_login(task)
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 409
+    except RuntimeError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 502
+    return jsonify({"success": True, **result})
+
+
 @report_visual_plan_bp.route("/sources/<source_task_id>/latest", methods=["GET"])
 @require_login
 def get_latest_storyboard_for_source(current_user, source_task_id):
@@ -556,6 +695,8 @@ def get_latest_storyboard_for_source(current_user, source_task_id):
         return jsonify({"success": True, "data": None})
 
     task = _get_owned_visual_task(current_user, latest_id[0], include_result=False)
+    if task.status in {"blocked_by_login", "blocked_by_captcha"}:
+        task = _get_owned_visual_task(current_user, task.id, include_result=True)
     output = _storyboard_output(task.id)
     payload = _storyboard_job_payload(task, output, include_segments=bool(output))
     response_payload = {"success": True, "job_id": task.id, "status": payload.get("status"), "data": payload}
@@ -608,6 +749,10 @@ def get_storyboard_gemini_raw(current_user, job_id):
 
 
 def _storyboard_job_payload(task, output, *, include_segments=False):
+    result = {}
+    if task.status in {"blocked_by_login", "blocked_by_captcha"}:
+        task_result = getattr(task, "result", None)
+        result = task_result if isinstance(task_result, dict) else {}
     payload = {
         "job_id": task.id,
         "status": _status_label(task.status),
@@ -631,6 +776,7 @@ def _storyboard_job_payload(task, output, *, include_segments=False):
         "created_at": _isoformat_z(task.created_at),
         "completed_at": _isoformat_z(task.completed_at),
         "error": task.error_message,
+        "human_intervention": result.get("human_intervention"),
     }
     if include_segments and output:
         rows = (
@@ -800,6 +946,8 @@ def _get_owned_visual_task(current_user, job_id, include_result=False):
         PublicationTask.feature,
         PublicationTask.source_task_id,
         PublicationTask.parent_feature,
+        PublicationTask.parent_task_id,
+        PublicationTask.celery_task_id,
         PublicationTask.report_visual_scheme_key,
         PublicationTask.task_title,
         PublicationTask.created_at,

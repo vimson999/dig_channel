@@ -168,6 +168,8 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                 self.assertTrue(report_workflow["video"]["enabled"])
                 self.assertTrue(report_workflow["video"]["vertical_enabled"])
                 self.assertFalse(report_workflow["video"]["bilibili_enabled"])
+                self.assertFalse(report_workflow["pdf_evidence_enabled"])
+                self.assertNotIn("PDF_EVIDENCE_V1_JSON", report_workflow["review_prompt"])
                 self.assertEqual(report_task.report_audio_pdf_attachment_id, "att-pdf")
 
                 mp3_task = next(task for task in tasks if task.feature == "mp3_video_workflow")
@@ -271,6 +273,8 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                 workflow = task.params["report_script_material_workflow"]
                 self.assertFalse(workflow["video"]["enabled"])
                 self.assertFalse(workflow["video"]["vertical_enabled"])
+                self.assertFalse(workflow["pdf_evidence_enabled"])
+                self.assertNotIn("PDF_EVIDENCE_V1_JSON", workflow["review_prompt"])
                 self.assertEqual(task.result["script_material"]["status"], "pending")
                 self.assertEqual(
                     task.result["auto_script_material_dispatch"]["threshold"],

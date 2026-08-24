@@ -19,6 +19,7 @@ fi
 export PYTHONPATH=$PROJECT_ROOT/src/backend
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export DATABASE_TYPE=${DATABASE_TYPE:-postgresql}
+export WORKFLOW_WORKER_READY_QUEUES=render
 # Redis / Celery broker is loaded by src/backend/celery_config.py from .env.
 # Do not set a shell default here, otherwise python-dotenv cannot override it.
 

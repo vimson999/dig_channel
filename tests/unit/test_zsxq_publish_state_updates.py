@@ -11,6 +11,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from models import db  # noqa: E402
+from models.platform_credential import PlatformCredentialAccount  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
 from services import zsxq_auto_publish_service  # noqa: E402
 from tasks import zsxq_publish  # noqa: E402
@@ -27,9 +28,11 @@ class ZsxqPublishStateUpdateTest(unittest.TestCase):
         self.ctx = self.app.app_context()
         self.ctx.push()
         PublicationTask.__table__.create(bind=db.engine)
+        PlatformCredentialAccount.__table__.create(bind=db.engine)
 
     def tearDown(self):
         db.session.remove()
+        PlatformCredentialAccount.__table__.drop(bind=db.engine)
         PublicationTask.__table__.drop(bind=db.engine)
         self.ctx.pop()
 
@@ -128,6 +131,28 @@ class ZsxqPublishStateUpdateTest(unittest.TestCase):
             )
 
         self.assertEqual(accounts, result)
+        remove.assert_called_once_with()
+
+    def test_db_credential_count_releases_session_before_preview_returns(self):
+        account = PlatformCredentialAccount(
+            platform="zsxq",
+            name="publisher",
+            credential_type="cookie_header",
+            purposes=["zsxq.publish"],
+            status="active",
+            encrypted_payload="encrypted",
+            payload_fingerprint="fingerprint-1",
+            extra={"group_ids": ["group-1"]},
+        )
+        db.session.add(account)
+        db.session.commit()
+
+        with patch.object(db.session, "remove", wraps=db.session.remove) as remove:
+            count = zsxq_auto_publish_service._db_publish_cookie_account_count(
+                group_id="group-1",
+            )
+
+        self.assertEqual(1, count)
         remove.assert_called_once_with()
 
 

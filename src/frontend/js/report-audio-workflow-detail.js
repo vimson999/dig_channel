@@ -3,7 +3,7 @@ class ReportAudioWorkflowDetailPage {
         this.jobId = new URLSearchParams(window.location.search).get('job_id') || '';
         this.job = null;
         this.refreshTimer = null;
-        this.autoRefreshMs = 6000;
+        this.autoRefreshMs = 10000;
         this.biliPanel = null;
         this.biliPanelDraft = null;
         this.biliPanelDraftJobId = '';
@@ -17,12 +17,37 @@ class ReportAudioWorkflowDetailPage {
         this.publishTabs = null;
         this.verticalVideoRequestIds = new Set();
         this.finalVideoRequestIds = new Set();
+        this.finalizationRequestIds = new Set();
         this.selectedVerticalScheme = null;
         this.podcastCoverRequestIds = new Set();
         this.coverRegeneratingIds = new Set();
         this.stickWorkflowRequestIds = new Set();
+        this.retryRequestIds = new Set();
+        this.scriptRegenerationRequestIds = new Set();
+        this.audioGenerationRequestIds = new Set();
         this.visualSchemes = [{ key: 'stick_figure', name: '白板火柴人', configured: true }];
         this.selectedVisualSchemeKey = 'stick_figure';
+        this.verticalVideoSchemes = [
+            {
+                key: 'scheme1',
+                label: '方案一',
+                name: '当前竖屏背景',
+                description: '复用当前竖屏模板、标题、字幕和既有背景素材。',
+            },
+            {
+                key: 'scheme2',
+                label: '方案二',
+                name: '封面工具台背景',
+                description: '使用竖版封面工具台生成的视觉背景承载口播。',
+            },
+            {
+                key: 'scheme3',
+                label: '方案三',
+                name: '视觉嵌框',
+                description: '把已完成的火柴人、哆啦A梦等视觉分镜嵌入竖屏模板。',
+            },
+        ];
+        this.lastRefreshedAt = null;
         this.quickNavObserver = null;
         this.sectionRenderCache = new Map();
         this.els = {
@@ -34,6 +59,8 @@ class ReportAudioWorkflowDetailPage {
             notice: document.getElementById('notice'),
             root: document.getElementById('detail-root'),
             quickNav: document.getElementById('quick-nav'),
+            sidebarStatus: document.getElementById('sidebar-task-status'),
+            sidebarRefreshBtn: document.getElementById('sidebar-refresh-btn'),
         };
         this.bind();
         this.loadVisualSchemes();
@@ -42,7 +69,12 @@ class ReportAudioWorkflowDetailPage {
 
     bind() {
         this.els.refreshBtn?.addEventListener('click', () => this.load({ manual: true }));
+        this.els.sidebarRefreshBtn?.addEventListener('click', () => this.load({ manual: true }));
         window.addEventListener('beforeunload', () => { this.clearAutoRefresh(); this.quickNavObserver?.disconnect(); this.douyinPanel?.destroy?.(); this.wechatChannelsPanel?.destroy?.(); });
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) this.clearAutoRefresh();
+            else this.scheduleAutoRefresh();
+        });
         this.els.quickNav?.addEventListener('click', (event) => {
             const item = event.target.closest('[data-quick-nav]');
             if (item && !item.disabled) {
@@ -70,6 +102,7 @@ class ReportAudioWorkflowDetailPage {
         this.els.root?.addEventListener('change', (event) => {
             if (event.target.matches('[data-detail-visual-scheme]')) {
                 this.selectedVisualSchemeKey = String(event.target.value || 'stick_figure');
+                this.render();
                 return;
             }
             if (!event.target.matches('[data-detail-vertical-scheme]')) return;
@@ -141,8 +174,7 @@ class ReportAudioWorkflowDetailPage {
         if (options.manual) this.clearAutoRefresh();
         const background = Boolean(this.job) && !options.manual;
         if (!background) {
-            this.els.refreshBtn.disabled = true;
-            this.els.refreshBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>刷新中';
+            this.setRefreshBusy(true);
         }
         this.els.jobIdLabel.textContent = `任务 ${this.jobId}`;
         this.els.openApiJson.href = this.absoluteUrl(`/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}`);
@@ -164,17 +196,31 @@ class ReportAudioWorkflowDetailPage {
                 const detailResult = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(this.jobId)}`, { timeoutMs: 30000 });
                 this.job = detailResult.data || detailResult;
             }
+            this.lastRefreshedAt = new Date();
             if (background) this.renderChangedSections();
             else this.render();
             this.scheduleAutoRefresh();
             this.setNotice('', 'info', true);
         } catch (error) {
             this.setNotice(`加载失败：${error.message}`, 'error');
+            this.scheduleRetryRefresh();
         } finally {
-            if (!background) {
-                this.els.refreshBtn.disabled = false;
-                this.els.refreshBtn.innerHTML = '<i class="fas fa-rotate mr-1.5"></i>刷新详情';
-            }
+            if (!background) this.setRefreshBusy(false);
+        }
+    }
+
+    setRefreshBusy(busy) {
+        if (this.els.refreshBtn) {
+            this.els.refreshBtn.disabled = busy;
+            this.els.refreshBtn.innerHTML = busy
+                ? '<i class="fas fa-spinner fa-spin mr-1.5"></i>刷新中'
+                : '<i class="fas fa-rotate mr-1.5"></i>刷新详情';
+        }
+        if (this.els.sidebarRefreshBtn) {
+            this.els.sidebarRefreshBtn.disabled = busy;
+            this.els.sidebarRefreshBtn.innerHTML = busy
+                ? '<i class="fas fa-spinner fa-spin"></i><span>刷新中</span>'
+                : '<i class="fas fa-rotate"></i><span>刷新详情</span>';
         }
     }
 
@@ -187,6 +233,7 @@ class ReportAudioWorkflowDetailPage {
 
     scheduleAutoRefresh() {
         this.clearAutoRefresh();
+        if (document.hidden) return;
         const activeJob = ['queued', 'running', 'submitting'].includes(String(this.job?.status || '').toLowerCase());
         const uploadItems = Array.isArray(this.job?.bilibili_uploads) ? [...this.job.bilibili_uploads] : [];
         const localUpload = this.biliPanel?.lastUpload;
@@ -206,6 +253,15 @@ class ReportAudioWorkflowDetailPage {
                 this.refreshBilibiliUploads();
             }
         }, this.autoRefreshMs);
+    }
+
+    scheduleRetryRefresh() {
+        this.clearAutoRefresh();
+        if (document.hidden) return;
+        this.refreshTimer = setTimeout(() => {
+            this.refreshTimer = null;
+            this.load({ background: Boolean(this.job) });
+        }, Math.min(this.autoRefreshMs, 5000));
     }
 
     async refreshBilibiliUploads() {
@@ -235,9 +291,10 @@ class ReportAudioWorkflowDetailPage {
             ...((job && job.children) || {}),
             ...(payload.children || {}),
         };
-        for (const key of ['publisher_video', 'publisher_vertical_video', 'publisher_vertical_preview_video']) {
+        for (const key of ['publisher_video', 'publisher_vertical_video', 'publisher_vertical_preview_video', 'finalization']) {
             if (next.children[key]) next[key] = next.children[key];
         }
+        if (payload.finalization) next.finalization = payload.finalization;
         if (payload.doubao_browser_tts) next.doubao_browser_tts = payload.doubao_browser_tts;
         if (payload.bilibili_uploads) next.bilibili_uploads = payload.bilibili_uploads;
         if (payload.visual_videos) next.visual_videos = payload.visual_videos;
@@ -253,6 +310,8 @@ class ReportAudioWorkflowDetailPage {
             job?.publisher_video,
             job?.publisher_vertical_video,
             job?.publisher_vertical_preview_video,
+            children.finalization,
+            job?.finalization,
             ...(Array.isArray(job?.visual_videos) ? job.visual_videos : []),
         ].some((item) => this.isActiveStatus(item?.status));
     }
@@ -277,6 +336,7 @@ class ReportAudioWorkflowDetailPage {
         this.mountDouyinPanel(job, douyinPanelDraft);
         this.mountWechatChannelsPanel(job, wechatChannelsPanelDraft);
         this.mountPublishTabs();
+        this.renderSidebarStatus(job);
         this.setupQuickNavigation();
     }
 
@@ -323,7 +383,63 @@ class ReportAudioWorkflowDetailPage {
             job.completed_at ? `完成 ${this.formatDateTime(job.completed_at)}` : '',
         ].filter(Boolean).join(' · ');
         this.biliPanel?.updateJobData?.(job);
+        this.renderSidebarStatus(job);
         if (structureChanged) this.setupQuickNavigation();
+    }
+
+    renderSidebarStatus(job) {
+        if (!this.els.sidebarStatus) return;
+        const status = this.statusMeta(job?.status);
+        const stages = this.reportWorkflowStages(job);
+        const current = stages.find((stage) => ['active', 'running', 'waiting', 'needs_attention', 'failed', 'canceled'].includes(stage.state))
+            || [...stages].reverse().find((stage) => stage.state === 'completed')
+            || stages[0];
+        const stateMeta = {
+            completed: { icon: 'fa-circle-check', color: 'text-emerald-600', dot: 'bg-emerald-500' },
+            active: { icon: 'fa-spinner fa-spin', color: 'text-blue-600', dot: 'bg-blue-500' },
+            running: { icon: 'fa-spinner fa-spin', color: 'text-blue-600', dot: 'bg-blue-500' },
+            reused: { icon: 'fa-recycle', color: 'text-cyan-600', dot: 'bg-cyan-500' },
+            waiting: { icon: 'fa-hourglass-half', color: 'text-amber-600', dot: 'bg-amber-500' },
+            needs_attention: { icon: 'fa-triangle-exclamation', color: 'text-rose-600', dot: 'bg-rose-500' },
+            skipped: { icon: 'fa-minus', color: 'text-slate-300', dot: 'bg-slate-300' },
+            failed: { icon: 'fa-circle-exclamation', color: 'text-red-600', dot: 'bg-red-500' },
+            canceled: { icon: 'fa-circle-stop', color: 'text-amber-600', dot: 'bg-amber-500' },
+            pending: { icon: 'fa-circle', color: 'text-slate-300', dot: 'bg-slate-300' },
+        };
+        const activelyRefreshing = Boolean(this.refreshTimer)
+            || ['queued', 'running', 'submitting'].includes(String(job?.status || '').toLowerCase())
+            || this.hasActiveVideoChild(job);
+        const refreshedAt = this.lastRefreshedAt
+            ? this.lastRefreshedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+            : '--:--:--';
+        this.els.sidebarStatus.innerHTML = `
+            <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] font-black uppercase tracking-wider text-slate-400">任务状态</span>
+                <span class="rounded-full px-2 py-0.5 text-[10px] font-black ${status.className}">${this.escape(status.label)}</span>
+            </div>
+            <div class="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
+                <div class="truncate text-xs font-black text-slate-800">${this.escape(current?.label || '等待任务')}</div>
+                <div class="mt-1 flex items-center justify-between text-[10px] font-bold text-slate-500">
+                    <span>${this.escape(['active', 'running'].includes(current?.state) ? '进行中' : (current?.state === 'needs_attention' ? '需要处理' : (current?.state === 'waiting' ? '等待' : (status.label || '等待'))))}</span>
+                    <span>${Math.max(0, Math.min(100, Number(job?.progress || 0)))}%</span>
+                </div>
+            </div>
+            <ol class="mt-2 grid grid-cols-2 gap-1" aria-label="左侧任务流程状态">
+                ${stages.map((stage) => {
+                    const meta = stateMeta[stage.state] || stateMeta.pending;
+                    return `
+                        <li class="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] ${['active', 'running'].includes(stage.state) ? 'bg-blue-50 font-black text-blue-800' : 'font-bold text-slate-500'}" title="${this.escapeAttr(stage.label)}">
+                            <i class="fas ${meta.icon} ${meta.color} w-3 shrink-0 text-center" aria-hidden="true"></i>
+                            <span class="truncate">${this.escape(stage.label)}</span>
+                        </li>
+                    `;
+                }).join('')}
+            </ol>
+            <div class="mt-2 border-t border-slate-100 pt-2 text-[10px] leading-4 text-slate-400">
+                <div>${activelyRefreshing ? `运行中每 ${Math.round(this.autoRefreshMs / 1000)} 秒自动刷新` : '状态稳定，可手动刷新'}</div>
+                <div>最近刷新 ${this.escape(refreshedAt)}</div>
+            </div>
+        `;
     }
 
     navSection(id, html) {
@@ -392,6 +508,15 @@ class ReportAudioWorkflowDetailPage {
     handleDetailAction(button) {
         const jobId = button.dataset.jobId || this.jobId;
         const action = button.dataset.detailAction;
+        if (action === 'retry-workflow') {
+            this.retryWorkflow(jobId);
+        }
+        if (action === 'regenerate-script-pro') {
+            this.regenerateScriptWithPro(jobId);
+        }
+        if (action === 'generate-audio-from-script') {
+            this.generateAudioFromScript(jobId);
+        }
         if (action === 'generate-vertical-preview') {
             this.generateVerticalVideo(jobId, {
                 previewSeconds: Number(button.dataset.previewSeconds || 10),
@@ -417,7 +542,110 @@ class ReportAudioWorkflowDetailPage {
             this.regenerateCoverAsset(jobId, button.dataset.coverKey || '', button);
         }
         if (action === 'open-stick-figure-workflow') {
-            this.openStickFigureWorkflow(jobId);
+            this.openStickFigureWorkflow(jobId, button.dataset.visualSchemeKey || '');
+        }
+    }
+
+    async retryWorkflow(jobId) {
+        if (!jobId || this.retryRequestIds.has(jobId)) return;
+        const captchaRecovery = Boolean(this.reportHumanIntervention(this.job));
+        const confirmText = captchaRecovery
+            ? '已完成人机验证并恢复任务？系统会记录旧 CAPTCHA 尝试已由本次续跑接替，并复用已完成内容。'
+            : '从失败处续跑这个任务？已完成的 PDF 准备、Gemini 解析和文案会尽量复用。';
+        if (!window.confirm(confirmText)) return;
+        this.retryRequestIds.add(jobId);
+        this.renderChangedSections(['task-overview']);
+        try {
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/retry`, {
+                method: 'POST',
+                body: JSON.stringify({}),
+                timeoutMs: 20000,
+            });
+            this.job = this.mergeJobStatus(this.job || {}, result.data || result);
+            this.setNotice(result.message || '任务已从失败处续跑。', 'success');
+            this.render();
+            this.scheduleAutoRefresh();
+        } catch (error) {
+            this.setNotice(`续跑失败：${error.message}`, 'error');
+        } finally {
+            this.retryRequestIds.delete(jobId);
+            this.renderChangedSections(['task-overview']);
+        }
+    }
+
+    async regenerateScriptWithPro(jobId) {
+        if (!jobId || this.scriptRegenerationRequestIds.has(jobId)) return;
+        const confirmed = window.confirm(
+            '将新建一个独立文案任务：原文案、音频和已生成视频都不会被覆盖。\n\n'
+            + '新任务只有在页面确认 Gemini Pro 后才会提交，并要求最终可朗读正文至少 1500 字。继续吗？',
+        );
+        if (!confirmed) return;
+        const pendingWindow = window.open('about:blank', '_blank');
+        if (pendingWindow) {
+            pendingWindow.opener = null;
+            pendingWindow.document.title = '正在创建 Pro 文案重生成任务';
+            pendingWindow.document.body.textContent = '正在创建独立文案重生成任务…';
+        }
+        this.scriptRegenerationRequestIds.add(jobId);
+        this.renderChangedSections(['content-results']);
+        try {
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/regenerate-script`, {
+                method: 'POST',
+                body: JSON.stringify({ minimum_chars: 1500 }),
+                timeoutMs: 30000,
+            });
+            const payload = result.data || result;
+            const detailUrl = new URL(
+                payload.detail_url || `report-audio-workflow-detail.html?job_id=${encodeURIComponent(payload.regeneration_job_id || payload.job_id || '')}`,
+                window.location.href,
+            ).href;
+            this.setNotice(result.message || 'Pro 文案重生成任务已创建。', 'success');
+            if (pendingWindow) pendingWindow.location.replace(detailUrl);
+            else window.location.assign(detailUrl);
+        } catch (error) {
+            pendingWindow?.close();
+            this.setNotice(`文案重生成失败：${error.message}`, 'error');
+        } finally {
+            this.scriptRegenerationRequestIds.delete(jobId);
+            this.renderChangedSections(['content-results']);
+        }
+    }
+
+    async generateAudioFromScript(jobId) {
+        if (!jobId || this.audioGenerationRequestIds.has(jobId)) return;
+        const confirmed = window.confirm(
+            '将新建一个独立语音任务，使用当前页面这版文案直接生成语音。\n\n'
+            + '不会重新请求 Gemini，也不会覆盖旧文案、旧音频或已生成视频。继续吗？',
+        );
+        if (!confirmed) return;
+        const pendingWindow = window.open('about:blank', '_blank');
+        if (pendingWindow) {
+            pendingWindow.opener = null;
+            pendingWindow.document.title = '正在创建语音任务';
+            pendingWindow.document.body.textContent = '正在使用当前文案创建独立语音任务…';
+        }
+        this.audioGenerationRequestIds.add(jobId);
+        this.renderChangedSections(['content-results']);
+        try {
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/generate-audio`, {
+                method: 'POST',
+                body: JSON.stringify({}),
+                timeoutMs: 30000,
+            });
+            const payload = result.data || result;
+            const detailUrl = new URL(
+                payload.detail_url || `report-audio-workflow-detail.html?job_id=${encodeURIComponent(payload.audio_generation_job_id || payload.job_id || '')}`,
+                window.location.href,
+            ).href;
+            this.setNotice(result.message || '语音任务已创建。', 'success');
+            if (pendingWindow) pendingWindow.location.replace(detailUrl);
+            else window.location.assign(detailUrl);
+        } catch (error) {
+            pendingWindow?.close();
+            this.setNotice(`语音任务创建失败：${error.message}`, 'error');
+        } finally {
+            this.audioGenerationRequestIds.delete(jobId);
+            this.renderChangedSections(['content-results']);
         }
     }
 
@@ -447,15 +675,18 @@ class ReportAudioWorkflowDetailPage {
                 onNotice: (message, type) => this.setNotice(message, type),
                 uploadPath: (jobId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload`,
                 cancelPath: (jobId, uploadTaskId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload/${encodeURIComponent(uploadTaskId)}/cancel`,
+                retryPath: (jobId, uploadTaskId) => `/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload/${encodeURIComponent(uploadTaskId)}/retry`,
                 uploads: (payload) => payload.bilibili_uploads || [],
                 videoOptions: (payload) => this.biliUploadVideoOptions(payload),
                 coverOptions: (payload, videoKey) => this.biliCoverOptions(payload, videoKey),
                 defaultCoverKey: (payload, videoKey) => this.defaultBiliCoverKey(payload, videoKey),
+                accountDefaults: (credential) => this.reportBilibiliAccountDefaults(credential),
                 defaultTitle: (payload) => this.defaultBiliTitle(payload),
                 defaultTags: '财经,音频,研报解读',
                 emptyDescription: '当前任务还没有完整视频文件。请先生成横屏或竖屏视频后再投递 B站。',
                 onAfterSubmit: async () => this.refreshBilibiliUploads(),
                 onAfterCancel: async () => this.refreshBilibiliUploads(),
+                onAfterRetry: async () => this.refreshBilibiliUploads(),
             });
         }
         this.biliPanel.setJob(job, { formDraft });
@@ -532,6 +763,14 @@ class ReportAudioWorkflowDetailPage {
     renderSummary(job) {
         const status = this.statusMeta(job.status);
         const pdfName = job.pdf?.filename || job.request?.pdf?.filename || 'PDF';
+        const workflowStages = this.reportWorkflowStages(job);
+        const outputSummary = this.reportWorkflowOutputSummary(job);
+        const jobId = job.job_id || this.jobId || '';
+        const canRetry = ['failed', 'error', 'blocked_by_captcha', 'canceled', 'cancelled']
+            .includes(String(job.status || '').trim().toLowerCase());
+        const retrying = this.retryRequestIds.has(jobId);
+        const intervention = this.reportHumanIntervention(job);
+        const retryLabel = intervention ? '验证完成，恢复任务' : '从失败处续跑';
         return `
             <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -544,20 +783,309 @@ class ReportAudioWorkflowDetailPage {
                         <div class="mt-3 text-sm font-bold text-slate-900">${this.escape(pdfName)}</div>
                         <div class="mt-1 text-xs leading-5 text-slate-500">${this.escape([
                             job.job_id || '',
+                            job.step ? `当前 ${job.step}` : '',
                             job.audio?.seconds ? `音频 ${this.formatDuration(job.audio.seconds)}` : '',
-                            job.video?.vertical_video_scheme ? `竖屏 ${job.video.vertical_video_scheme}` : '',
+                            ...outputSummary,
                         ].filter(Boolean).join(' · '))}</div>
                     </div>
                     <div class="flex flex-wrap gap-2">
+                        ${canRetry ? `<button type="button" data-detail-action="retry-workflow" data-job-id="${this.escapeAttr(jobId)}" ${retrying ? 'disabled' : ''} class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60"><i class="fas ${retrying ? 'fa-spinner fa-spin' : 'fa-play'} mr-1"></i>${retrying ? '续跑提交中' : retryLabel}</button>` : ''}
                         ${job.pdf?.preview_url ? `<a href="${this.absoluteUrl(job.pdf.preview_url)}" target="_blank" rel="noopener noreferrer" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-file-pdf mr-1"></i>PDF 预览</a>` : ''}
                         <button type="button" data-copy-text="${this.escapeAttr(this.displayTitle(job))}" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-copy mr-1"></i>复制标题</button>
                     </div>
                 </div>
-                <div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
-                    <div class="h-full rounded-full ${status.bar}" style="width: ${Math.min(100, Math.max(0, Number(job.progress || 0)))}%"></div>
-                </div>
+                <ol class="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7" aria-label="任务流程进度">
+                    ${workflowStages.map((stage) => this.renderWorkflowStage(stage)).join('')}
+                </ol>
+                ${this.orchestrationNotice(job)}
                 ${job.error ? `<div class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">${this.escape(job.error)}</div>` : ''}
+                ${this.renderHumanIntervention(intervention)}
             </section>
+        `;
+    }
+
+    reportHumanIntervention(job) {
+        const workflowUrl = job?.job_id
+            ? `report-audio-workflow-detail.html?job_id=${encodeURIComponent(job.job_id)}`
+            : '';
+        const items = Array.isArray(job?.doubao_browser_tts) ? job.doubao_browser_tts : [];
+        for (let index = items.length - 1; index >= 0; index -= 1) {
+            const intervention = window.BrowserHumanIntervention?.resolve(
+                items[index],
+                { workflowUrl },
+            );
+            if (intervention) return intervention;
+        }
+        return null;
+    }
+
+    renderHumanIntervention(intervention) {
+        if (!intervention) return '';
+        const failed = intervention.state === 'failed';
+        const sent = intervention.state === 'sent';
+        const tone = failed
+            ? 'border-rose-200 bg-rose-50 text-rose-800'
+            : (sent
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                : 'border-amber-200 bg-amber-50 text-amber-800');
+        const icon = failed
+            ? 'fa-envelope-circle-xmark'
+            : (sent ? 'fa-envelope-circle-check' : 'fa-user-shield');
+        const notificationDetail = [
+            intervention.label,
+            intervention.recipientHint,
+        ].filter(Boolean).join(' · ');
+        const failureDetail = [
+            intervention.notificationError,
+            intervention.missing?.length ? `缺少配置：${intervention.missing.join(', ')}` : '',
+        ].filter(Boolean).join('；');
+        return `
+            <section class="mt-3 rounded-md border px-4 py-3 text-xs leading-5 ${tone}">
+                <div class="font-black"><i class="fas ${icon} mr-1.5"></i>豆包人机验证需要人工处理 · ${this.escape(notificationDetail)}</div>
+                <div class="mt-1">当前任务不会继续自动重试。完成验证后，点击页面上方“验证完成，恢复任务”；系统会保留本次阻塞记录，并创建新的可审计续跑尝试。</div>
+                ${failureDetail ? `<div class="mt-1 font-bold">${this.escape(failureDetail)}</div>` : ''}
+                ${intervention.profile ? `<div class="mt-2 break-all"><span class="font-black">浏览器 Profile：</span>${this.escape(intervention.profile)}</div>` : ''}
+                ${intervention.workerId ? `<div class="break-all"><span class="font-black">Worker：</span>${this.escape(intervention.workerId)}</div>` : ''}
+                ${intervention.screenshotPath ? `<div class="break-all"><span class="font-black">现场截图：</span>${this.escape(intervention.screenshotPath)}</div>` : ''}
+                <ol class="mt-2 list-decimal space-y-1 pl-5">
+                    ${intervention.resolutionSteps.map((step) => `<li>${this.escape(step)}</li>`).join('')}
+                </ol>
+                ${intervention.pageUrl ? `<a href="${this.escapeAttr(intervention.pageUrl)}" target="_blank" rel="noopener noreferrer" class="mt-3 inline-flex rounded-md border border-current bg-white/70 px-2.5 py-1 font-black"><i class="fas fa-arrow-up-right-from-square mr-1"></i>打开豆包页面</a>` : ''}
+            </section>
+        `;
+    }
+
+    reportWorkflowRenderMode(job) {
+        const explicitMode = String(
+            job?.video?.render_mode
+            || job?.request?.video?.render_mode
+            || job?.request?.video_render_mode
+            || ''
+        ).trim().toLowerCase();
+        if (explicitMode === 'keyframes' || explicitMode === 'full_video') return explicitMode;
+        return String(job?.video?.status || '').trim().toLowerCase() === 'keyframes_ready'
+            ? 'keyframes'
+            : 'full_video';
+    }
+
+    reportWorkflowOutputSummary(job) {
+        const video = job?.video || {};
+        if (this.reportWorkflowRenderMode(job) === 'keyframes') {
+            const keyframes = Object.entries(video.keyframes || {});
+            const summary = [`关键帧/封皮${keyframes.length ? ` ${keyframes.length} 项` : ''}`];
+            const verticalKeyframe = keyframes.find(([key, item]) => (
+                /vertical_(background|keyframe)/.test(String(key || ''))
+                || /竖.*关键帧/.test(String(item?.label || ''))
+            ));
+            if (verticalKeyframe) {
+                const scheme = verticalKeyframe[1]?.scheme || video.vertical_video_scheme;
+                if (scheme) summary.push(`${this.verticalSchemeLabel(scheme)}竖版关键帧`);
+            }
+            return summary;
+        }
+
+        const summary = ['完整视频'];
+        const verticalRequested = Boolean(
+            video.vertical_enabled
+            || job?.request?.video?.vertical_enabled
+            || video.vertical_video
+            || Object.keys(video.vertical_videos || {}).length
+        );
+        if (verticalRequested && video.vertical_video_scheme) {
+            summary.push(`${this.verticalSchemeLabel(video.vertical_video_scheme)}竖屏`);
+        }
+        return summary;
+    }
+
+    reportWorkflowStages(job) {
+        const serverStages = Array.isArray(job?.orchestration?.stages)
+            ? job.orchestration.stages
+            : [];
+        if (serverStages.length) {
+            const icons = {
+                input: 'fa-file-pdf',
+                script: 'fa-file-lines',
+                audio: 'fa-wave-square',
+                visual: 'fa-images',
+                video: 'fa-film',
+                acceptance: 'fa-clipboard-check',
+                publish: 'fa-cloud-arrow-up',
+            };
+            return serverStages.map((stage) => ({
+                key: String(stage?.key || ''),
+                label: String(stage?.label || stage?.key || '阶段'),
+                icon: icons[stage?.key] || 'fa-circle',
+                state: String(stage?.state || 'pending'),
+                detail: String(stage?.detail || ''),
+            }));
+        }
+        const stages = [
+            { key: 'input', label: '输入', icon: 'fa-file-pdf' },
+            { key: 'script', label: '文案', icon: 'fa-file-lines' },
+            { key: 'audio', label: '音频', icon: 'fa-wave-square' },
+            { key: 'visual', label: '视觉', icon: 'fa-images' },
+            { key: 'video', label: '成片', icon: 'fa-film' },
+            { key: 'acceptance', label: '验收', icon: 'fa-clipboard-check' },
+            { key: 'publish', label: '发布', icon: 'fa-cloud-arrow-up' },
+        ];
+        const taskStatus = String(job?.status || '').trim().toLowerCase();
+        const step = String(job?.step || '').trim().toLowerCase();
+        const progress = Math.max(0, Math.min(100, Number(job?.progress || 0)));
+        let currentIndex = this.reportWorkflowStageIndex(step, progress);
+        if (['completed', 'success', 'succeeded', 'done'].includes(taskStatus) || step === 'done') {
+            currentIndex = 5;
+        }
+        const failed = ['failed', 'error'].includes(taskStatus);
+        const canceled = ['canceled', 'cancelled'].includes(taskStatus);
+        return stages.map((stage, index) => ({
+            ...stage,
+            state: (
+                index < currentIndex || (index === currentIndex && currentIndex === stages.length - 1 && !failed && !canceled)
+                    ? 'completed'
+                    : (index === currentIndex ? (failed ? 'failed' : (canceled ? 'canceled' : 'active')) : 'pending')
+            ),
+        }));
+    }
+
+    reportWorkflowStageIndex(step, progress) {
+        if (step === 'done') return 5;
+        if (step.includes('upload') || step.includes('publish')) return 6;
+        if (step.includes('completion_contract') || step.includes('acceptance')) return 5;
+        if (
+            step.includes('publisher')
+            || step.includes('video')
+            || step.includes('keyframe')
+            || step.includes('pdf_preview')
+            || step.includes('render_pdf')
+        ) return 4;
+        if (step.includes('visual') || step.includes('storyboard') || step.includes('image')) return 3;
+        if (
+            step.includes('doubao')
+            || step.includes('tts')
+            || step.includes('audio')
+            || step.includes('reading')
+            || step.includes('combine')
+        ) return 2;
+        if (
+            step.includes('normalize')
+            || step.includes('review_cover')
+            || step.includes('structured')
+            || step.includes('script_material')
+            || step.includes('manual_gemini')
+        ) return 1;
+        if (step.includes('gemini')) return 1;
+        if (step && !['queued', 'pending', 'start'].includes(step)) {
+            if (progress >= 94) return 4;
+            if (progress >= 61) return 2;
+            if (progress >= 53) return 1;
+            if (progress >= 8) return 1;
+        }
+        return 0;
+    }
+
+    orchestrationNotice(job) {
+        const orchestration = job?.orchestration || {};
+        const capacity = orchestration.capacity;
+        const waiting = orchestration.waiting;
+        const completion = orchestration.completion_contract;
+        const notices = [];
+        if (capacity) {
+            const retryAt = capacity.next_retry_at
+                ? ` · 下次重试 ${this.formatDateTime(capacity.next_retry_at)}`
+                : '';
+            notices.push(`<div class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800"><i class="fas fa-gauge-high mr-1"></i>容量保护：当前活动数 ${this.escape(capacity.active_count ?? '-')} / ${this.escape(capacity.limit ?? '-')}${this.escape(retryAt)}</div>`);
+        }
+        if (waiting?.child_id) {
+            notices.push(`<div class="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-800"><i class="fas fa-hourglass-half mr-1"></i>等待 ${this.escape(waiting.label || '子任务')} · ${this.escape(waiting.status || '运行中')} / ${this.escape(waiting.step || '-')}</div>`);
+        }
+        if (completion && !completion.ready && Array.isArray(completion.missing) && completion.missing.length) {
+            notices.push(`<div class="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-800"><i class="fas fa-triangle-exclamation mr-1"></i>验收需要处理：缺少或未通过 ${this.escape(completion.missing.join('、'))}</div>`);
+        }
+        return notices.length ? `<div class="mt-3 space-y-2">${notices.join('')}</div>` : '';
+    }
+
+    renderWorkflowStage(stage) {
+        const meta = {
+            completed: {
+                card: 'border-emerald-200 bg-emerald-50',
+                icon: 'fa-circle-check text-emerald-600',
+                label: 'text-emerald-950',
+                status: '已完成',
+                statusClass: 'text-emerald-700',
+            },
+            active: {
+                card: 'border-blue-300 bg-blue-50 ring-1 ring-blue-100',
+                icon: 'fa-spinner fa-spin text-blue-600',
+                label: 'text-blue-950',
+                status: '进行中',
+                statusClass: 'text-blue-700',
+            },
+            running: {
+                card: 'border-blue-300 bg-blue-50 ring-1 ring-blue-100',
+                icon: 'fa-spinner fa-spin text-blue-600',
+                label: 'text-blue-950',
+                status: '进行中',
+                statusClass: 'text-blue-700',
+            },
+            reused: {
+                card: 'border-cyan-200 bg-cyan-50',
+                icon: 'fa-recycle text-cyan-600',
+                label: 'text-cyan-950',
+                status: '已复用',
+                statusClass: 'text-cyan-700',
+            },
+            waiting: {
+                card: 'border-amber-200 bg-amber-50',
+                icon: 'fa-hourglass-half text-amber-600',
+                label: 'text-amber-950',
+                status: '等待',
+                statusClass: 'text-amber-700',
+            },
+            needs_attention: {
+                card: 'border-rose-300 bg-rose-50',
+                icon: 'fa-triangle-exclamation text-rose-600',
+                label: 'text-rose-950',
+                status: '需要处理',
+                statusClass: 'text-rose-700',
+            },
+            skipped: {
+                card: 'border-slate-200 bg-white',
+                icon: 'fa-minus text-slate-300',
+                label: 'text-slate-500',
+                status: '未启用',
+                statusClass: 'text-slate-400',
+            },
+            failed: {
+                card: 'border-red-300 bg-red-50',
+                icon: 'fa-circle-exclamation text-red-600',
+                label: 'text-red-950',
+                status: '失败',
+                statusClass: 'text-red-700',
+            },
+            canceled: {
+                card: 'border-amber-300 bg-amber-50',
+                icon: 'fa-circle-stop text-amber-600',
+                label: 'text-amber-950',
+                status: '已取消',
+                statusClass: 'text-amber-700',
+            },
+            pending: {
+                card: 'border-slate-200 bg-slate-50',
+                icon: `${stage.icon} text-slate-400`,
+                label: 'text-slate-600',
+                status: '待开始',
+                statusClass: 'text-slate-400',
+            },
+        }[stage.state];
+        return `
+            <li class="flex min-w-0 items-center gap-2.5 rounded-lg border px-3 py-2.5 ${meta.card}" title="${this.escapeAttr(stage.detail || stage.label)}">
+                <i class="fas ${meta.icon} w-4 shrink-0 text-center" aria-hidden="true"></i>
+                <div class="min-w-0">
+                    <div class="truncate text-xs font-black ${meta.label}">${this.escape(stage.label)}</div>
+                    <div class="mt-0.5 text-[11px] font-bold ${meta.statusClass}">${meta.status}</div>
+                    ${stage.detail ? `<div class="mt-0.5 truncate text-[10px] text-slate-500">${this.escape(stage.detail)}</div>` : ''}
+                </div>
+            </li>
         `;
     }
 
@@ -578,6 +1106,9 @@ class ReportAudioWorkflowDetailPage {
         const verticalChild = job.publisher_vertical_video || job.children?.publisher_vertical_video;
         const previewChild = job.publisher_vertical_preview_video || job.children?.publisher_vertical_preview_video;
         const verticalActive = this.isActiveStatus(verticalChild?.status) || this.isActiveStatus(previewChild?.status) || this.verticalVideoRequestIds.has(jobId);
+        const finalization = job.finalization || job.children?.finalization || null;
+        const finalizationActive = this.isActiveStatus(finalization?.status) || this.finalizationRequestIds.has(jobId);
+        const finalizationDone = String(finalization?.status || '').toLowerCase() === 'completed';
         const finalVideoActive = this.finalVideoRequestIds.has(jobId)
             || (this.isActiveStatus(verticalChild?.status) && Boolean(verticalChild?.metadata?.include_landscape));
         const podcastGenerating = this.podcastCoverRequestIds.has(jobId);
@@ -590,81 +1121,164 @@ class ReportAudioWorkflowDetailPage {
             || video.vertical_preview_scheme
             || 'scheme1'
         );
-        const requestedSchemes = Array.isArray(job.request?.video?.vertical_video_schemes)
-            ? job.request.video.vertical_video_schemes.map((item) => this.normalizeVerticalScheme(item))
-            : [scheme];
-        const landscapeSelected = job.request?.video?.enabled !== false;
-        const scheme1Selected = requestedSchemes.includes('scheme1');
-        const scheme2Selected = requestedSchemes.includes('scheme2');
-        const scheme3Selected = requestedSchemes.includes('scheme3');
+        const keyframeMode = String(video.render_mode || job.request?.video?.render_mode || '').toLowerCase() === 'keyframes';
+        const requestedSchemes = Array.isArray(finalization?.vertical_video_schemes)
+            ? finalization.vertical_video_schemes.map((item) => this.normalizeVerticalScheme(item))
+            : (keyframeMode
+                ? ['scheme3']
+                : (Array.isArray(job.request?.video?.vertical_video_schemes)
+                    ? job.request.video.vertical_video_schemes.map((item) => this.normalizeVerticalScheme(item))
+                    : [scheme]));
+        const landscapeSelected = finalization ? finalization.include_landscape !== false : true;
         const canRequestVertical = Boolean(audioUrl || videoUrl);
         const stickWorkflowActive = this.stickWorkflowRequestIds.has(jobId);
-        const keyframeMode = String(video.render_mode || job.request?.video?.render_mode || '').toLowerCase() === 'keyframes';
+        const selectedVisualScheme = this.visualSchemes.find(
+            (item) => item.key === this.selectedVisualSchemeKey
+        ) || this.visualSchemes[0];
+        const visualWorkflowEntries = this.visualSchemes
+            .map((item, index) => {
+                const existing = (Array.isArray(job.visual_videos) ? job.visual_videos : []).find(
+                    (workflow) => String(workflow?.visual_scheme?.key || '') === item.key
+                );
+                const selected = item.key === this.selectedVisualSchemeKey;
+                const action = existing?.detail_url
+                    ? `<a href="${this.absoluteUrl(existing.detail_url)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center rounded-md border border-violet-200 bg-white px-3 py-1.5 text-xs font-bold text-violet-700 hover:bg-violet-50"><i class="fas fa-arrow-up-right-from-square mr-1"></i>${this.escape(item.name)}详情</a>`
+                    : `<button type="button" data-detail-action="open-stick-figure-workflow" data-visual-scheme-key="${this.escapeAttr(item.key)}" data-job-id="${this.escapeAttr(jobId)}" ${!item.configured || !audioUrl || stickWorkflowActive ? 'disabled' : ''} class="rounded-md border border-violet-200 bg-white px-3 py-1.5 text-xs font-bold text-violet-700 hover:bg-violet-50 disabled:cursor-wait disabled:opacity-60"><i class="fas ${stickWorkflowActive ? 'fa-spinner fa-spin' : 'fa-folder-open'} mr-1"></i>创建${this.escape(item.name)}详情</button>`;
+                return `
+                    <article class="rounded-lg border p-3 ${selected ? 'border-violet-300 bg-violet-50 ring-1 ring-violet-100' : 'border-slate-200 bg-white'} ${item.configured ? '' : 'opacity-60'}">
+                        <label class="flex cursor-pointer items-start gap-2">
+                            <input type="radio" name="detail_visual_scheme" value="${this.escapeAttr(item.key)}" data-detail-visual-scheme ${selected ? 'checked' : ''} ${item.configured ? '' : 'disabled'} class="mt-0.5 h-4 w-4 border-slate-300 text-violet-700 focus:ring-violet-500">
+                            <span class="min-w-0">
+                                <span class="block text-xs font-black text-slate-900">方案 ${index + 2} · ${this.escape(item.name)}</span>
+                                <span class="mt-1 block text-[11px] leading-4 text-slate-500">${this.escape(item.description || '由视觉方案注册表提供的横屏分镜视频。')}</span>
+                            </span>
+                        </label>
+                        <div class="mt-3 flex flex-wrap items-center gap-2">
+                            ${action}
+                            ${existing ? `<span class="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-bold text-emerald-700">${this.isActiveStatus(existing.status) ? '生成中' : '已有任务'}</span>` : ''}
+                            ${!item.configured ? '<span class="text-[11px] font-bold text-amber-700">待配置 Gem</span>' : ''}
+                        </div>
+                    </article>
+                `;
+            })
+            .join('');
+        const finalVerticalOptions = this.verticalVideoSchemes.filter((item) => item.key === 'scheme3').map((item) => `
+            <label class="flex cursor-pointer items-start gap-2 rounded-md border border-fuchsia-100 bg-fuchsia-50/60 px-3 py-2 text-xs text-fuchsia-950">
+                <input type="checkbox" value="${this.escapeAttr(item.key)}" data-detail-final-video-option checked disabled class="mt-0.5 h-4 w-4 rounded border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500 disabled:opacity-100">
+                <span><span class="block font-black">${this.escape(item.label)} · ${this.escape(item.name)}</span><span class="mt-0.5 block text-[11px] font-normal text-fuchsia-700">${this.escape(item.description)}</span></span>
+            </label>
+        `).join('');
+        const verticalSchemeCards = this.verticalVideoSchemes.map((item) => {
+            const selected = item.key === scheme;
+            return `
+                <label class="flex cursor-pointer items-start gap-2 rounded-lg border p-3 ${selected ? 'border-fuchsia-300 bg-fuchsia-50 ring-1 ring-fuchsia-100' : 'border-slate-200 bg-white'}">
+                    <input type="radio" name="detail_vertical_scheme" value="${this.escapeAttr(item.key)}" data-detail-vertical-scheme ${selected ? 'checked' : ''} class="mt-0.5 h-4 w-4 border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500">
+                    <span class="min-w-0">
+                        <span class="block text-xs font-black text-slate-900">${this.escape(item.label)} · ${this.escape(item.name)}</span>
+                        <span class="mt-1 block text-[11px] leading-4 text-slate-500">${this.escape(item.description)}</span>
+                    </span>
+                </label>
+            `;
+        }).join('');
         return `
-            <section class="rounded-lg border border-indigo-100 bg-indigo-50/60 p-4 shadow-sm">
+            <section class="rounded-xl border border-indigo-100 bg-indigo-50/40 p-4 shadow-sm">
                 <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <div>
-                        <div class="text-sm font-black text-indigo-950">视频操作区</div>
-                        <div class="mt-1 text-xs text-indigo-700">复用列表页同一套接口，不重新跑 Gemini 和豆包朗读。</div>
+                        <div class="text-sm font-black text-indigo-950">成片方案中心</div>
+                        <div class="mt-1 text-xs text-indigo-700">先按横屏、竖屏选择方案；所有方案复用现有音频、文案和素材，不重新跑 Gemini 与豆包朗读。</div>
                     </div>
                     ${!canRequestVertical ? `<span class="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-700">需要先有音频或视频文件</span>` : ''}
                 </div>
-                ${keyframeMode && !videoUrl ? `
-                    <div class="mb-3 rounded-lg border border-indigo-200 bg-white p-3">
-                        <div class="text-xs font-black text-indigo-950">关键帧确认完成后</div>
-                        <div class="mt-1 text-xs leading-5 text-slate-600">勾选需要的成片版本，可同时生成多个版本；直接复用现有音频、文案和截图。</div>
-                        <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4" data-detail-final-video-options>
-                            <label class="flex cursor-pointer items-center gap-2 rounded-md border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs font-bold text-indigo-950">
-                                <input type="checkbox" value="landscape" data-detail-final-video-option ${landscapeSelected ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-indigo-700 focus:ring-indigo-500">
-                                横屏成片
-                            </label>
-                            <label class="flex cursor-pointer items-center gap-2 rounded-md border border-fuchsia-100 bg-fuchsia-50/60 px-3 py-2 text-xs font-bold text-fuchsia-950">
-                                <input type="checkbox" value="scheme1" data-detail-final-video-option ${scheme1Selected ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500">
-                                方案一竖屏
-                            </label>
-                            <label class="flex cursor-pointer items-center gap-2 rounded-md border border-fuchsia-100 bg-fuchsia-50/60 px-3 py-2 text-xs font-bold text-fuchsia-950">
-                                <input type="checkbox" value="scheme2" data-detail-final-video-option ${scheme2Selected ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-fuchsia-700 focus:ring-fuchsia-500">
-                                方案二竖屏
-                            </label>
-                            <label class="flex cursor-pointer items-center gap-2 rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-bold text-violet-950">
-                                <input type="checkbox" value="scheme3" data-detail-final-video-option ${scheme3Selected ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300 text-violet-700 focus:ring-violet-500">
-                                方案三·视觉嵌框
-                            </label>
+                ${keyframeMode ? `
+                    <div class="mb-4 rounded-xl border border-indigo-200 bg-white p-4">
+                        <div class="text-xs font-black text-indigo-950">关键帧确认与端到端成片</div>
+                        <div class="mt-1 text-xs leading-5 text-slate-600">确认一次后，系统会创建/续跑白板任务；白板图片就绪后自动投递横屏 + 方案三竖屏，重复点击不会重复投递。</div>
+                        <div class="mt-3 grid gap-4 xl:grid-cols-2" data-detail-final-video-options>
+                            <fieldset>
+                                <legend class="mb-2 text-xs font-black text-indigo-900"><i class="fas fa-display mr-1"></i>横屏 · 16:9</legend>
+                                <label class="flex cursor-pointer items-start gap-2 rounded-md border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-950">
+                                    <input type="checkbox" value="landscape" data-detail-final-video-option checked disabled class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-700 focus:ring-indigo-500 disabled:opacity-100">
+                                    <span><span class="block font-black">方案 1 · 研报截图成片</span><span class="mt-0.5 block text-[11px] font-normal text-indigo-700">使用已确认的研报截图关键帧生成横屏 MP4。</span></span>
+                                </label>
+                            </fieldset>
+                            <fieldset>
+                                <legend class="mb-2 text-xs font-black text-fuchsia-900"><i class="fas fa-mobile-screen mr-1"></i>竖屏 · 9:16</legend>
+                                <div class="grid gap-2">${finalVerticalOptions}</div>
+                            </fieldset>
                         </div>
-                        <button type="button" data-detail-action="confirm-keyframes-generate-final" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive || finalVideoActive ? 'disabled' : ''} class="mt-2 rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-wait disabled:opacity-60">
-                            <i class="fas ${finalVideoActive ? 'fa-spinner fa-spin' : 'fa-circle-check'} mr-1"></i>${finalVideoActive ? '所选成片生成中' : '确认关键帧，生成所选成片'}
+                        ${this.renderFinalizationProgress(job)}
+                        <button type="button" data-detail-action="confirm-keyframes-generate-final" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || finalizationActive || finalizationDone ? 'disabled' : ''} class="mt-3 rounded-md bg-indigo-700 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-wait disabled:opacity-60">
+                            <i class="fas ${finalizationActive ? 'fa-spinner fa-spin' : (finalizationDone ? 'fa-circle-check' : 'fa-circle-check')} mr-1"></i>${finalizationActive ? '白板与成片自动续链中' : (finalizationDone ? '白板 + 横屏 + 方案三已完成' : (finalization?.status === 'failed' ? '安全续跑白板 + 横屏 + 方案三' : '确认关键帧，启动白板 + 横屏 + 方案三'))}
                         </button>
                     </div>
                 ` : ''}
-                <div class="flex flex-wrap items-center gap-2">
-                    <select data-detail-visual-scheme class="rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1.5 text-xs font-bold text-violet-800" aria-label="视觉方案">
-                        ${this.visualSchemes.map((item) => `<option value="${this.escapeAttr(item.key)}" ${item.key === this.selectedVisualSchemeKey ? 'selected' : ''} ${item.configured ? '' : 'disabled'}>${this.escape(item.name)}${item.configured ? '' : '（待配置 Gem）'}</option>`).join('')}
-                    </select>
-                    <button type="button" data-detail-action="open-stick-figure-workflow" data-job-id="${this.escapeAttr(jobId)}" ${!audioUrl || stickWorkflowActive ? 'disabled' : ''} class="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60">
-                        <i class="fas ${stickWorkflowActive ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${stickWorkflowActive ? '正在创建视觉方案' : '视觉方案横屏视频'}
-                    </button>
-                    ${coverUrl ? `<a href="${this.absoluteUrl(coverUrl)}" download class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50"><i class="fas fa-image mr-1"></i>封面</a>` : ''}
-                    <button type="button" data-detail-action="regenerate-cover" data-job-id="${this.escapeAttr(jobId)}" ${coverRegenerating ? 'disabled' : ''} class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60">
-                        <i class="fas ${coverRegenerating ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${coverRegenerating ? '生成中' : '重做封面'}
-                    </button>
-                    ${videoUrl ? `<a href="${this.absoluteUrl(videoUrl)}" download class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800"><i class="fas fa-film mr-1"></i>横屏 MP4</a>` : ''}
-                    ${verticalVideoItems.length ? verticalVideoItems.map((item) => `<a href="${this.absoluteUrl(item.download_url)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>${this.escape(item.label || this.verticalSchemeLabel(item.scheme))}竖屏 MP4</a>`).join('') : (verticalVideoUrl ? `<a href="${this.absoluteUrl(verticalVideoUrl)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : '')}
-                    ${verticalPreviewItems.length ? verticalPreviewItems.map((item) => `<a href="${this.absoluteUrl(item.download_url)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>${this.escape(item.label || this.verticalSchemeLabel(item.scheme))}10秒预览</a>`).join('') : (verticalPreviewVideoUrl ? `<a href="${this.absoluteUrl(verticalPreviewVideoUrl)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>10秒预览</a>` : '')}
-                    ${verticalCoverUrl ? `<a href="${this.absoluteUrl(verticalCoverUrl)}" download class="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><i class="fas fa-image-portrait mr-1"></i>竖版封皮</a>` : ''}
-                    ${podcastCoverUrl ? `<a href="${this.absoluteUrl(podcastCoverUrl)}" download class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50"><i class="fas fa-record-vinyl mr-1"></i>播客封皮</a>` : ''}
-                    ${bilibiliCoverUrl ? `<a href="${this.absoluteUrl(bilibiliCoverUrl)}" download class="rounded-md border border-pink-200 bg-white px-3 py-1.5 text-xs font-bold text-pink-700 hover:bg-pink-50"><i class="fas fa-tv mr-1"></i>B站封皮</a>` : ''}
-                    ${!podcastCoverUrl ? `<button type="button" data-detail-action="generate-podcast-cover" data-job-id="${this.escapeAttr(jobId)}" ${podcastGenerating ? 'disabled' : ''} class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50 disabled:cursor-wait disabled:opacity-60"><i class="fas ${podcastGenerating ? 'fa-spinner fa-spin' : 'fa-record-vinyl'} mr-1"></i>${podcastGenerating ? '封皮生成中' : '补生成播客封皮'}</button>` : ''}
-                    <select data-detail-vertical-scheme class="rounded-md border border-fuchsia-200 bg-white px-2 py-1.5 text-xs font-bold text-fuchsia-800 focus:border-fuchsia-400 focus:outline-none">
-                        <option value="scheme1" ${scheme === 'scheme1' ? 'selected' : ''}>方案一</option>
-                        <option value="scheme2" ${scheme === 'scheme2' ? 'selected' : ''}>方案二</option>
-                        <option value="scheme3" ${scheme === 'scheme3' ? 'selected' : ''}>方案三·视觉嵌框</option>
-                    </select>
-                    <button type="button" data-detail-action="generate-vertical-preview" data-preview-seconds="10" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive ? 'disabled' : ''} class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50 disabled:cursor-wait disabled:opacity-60">
-                        <i class="fas ${verticalActive ? 'fa-spinner fa-spin' : 'fa-bolt'} mr-1"></i>${verticalActive ? '竖屏生成中' : '10秒预览'}
-                    </button>
-                    <button type="button" data-detail-action="generate-vertical-full" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive ? 'disabled' : ''} class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800 disabled:cursor-wait disabled:opacity-60">
-                        <i class="fas fa-mobile-screen-button mr-1"></i>${verticalVideoUrl ? '完整重合成' : '生成完整竖屏'}
-                    </button>
+                <div class="grid gap-4 xl:grid-cols-2">
+                    <section class="rounded-xl border border-indigo-200 bg-white p-4">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <h3 class="text-sm font-black text-indigo-950"><i class="fas fa-display mr-2 text-indigo-600"></i>横屏方案 <span class="text-xs font-bold text-slate-400">16:9</span></h3>
+                                <p class="mt-1 text-xs text-slate-500">截图成片与视觉方案横屏视频统一在这里管理。</p>
+                            </div>
+                            ${videoUrl ? '<span class="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-bold text-emerald-700">已有横屏成片</span>' : ''}
+                        </div>
+                        <div class="mt-3 space-y-3">
+                            <article class="rounded-lg border border-indigo-200 bg-indigo-50/60 p-3">
+                                <div class="text-xs font-black text-slate-900">方案 1 · 研报截图成片</div>
+                                <div class="mt-1 text-[11px] leading-4 text-slate-500">使用研报页面、标题、字幕和整篇音频生成标准横屏视频。</div>
+                                <div class="mt-3 flex flex-wrap gap-2">
+                                    ${coverUrl ? `<a href="${this.absoluteUrl(coverUrl)}" download class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50"><i class="fas fa-image mr-1"></i>横版封面</a>` : ''}
+                                    <button type="button" data-detail-action="regenerate-cover" data-job-id="${this.escapeAttr(jobId)}" ${coverRegenerating ? 'disabled' : ''} class="rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60">
+                                        <i class="fas ${coverRegenerating ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${coverRegenerating ? '生成中' : '重做横版封面'}
+                                    </button>
+                                    ${videoUrl ? `<a href="${this.absoluteUrl(videoUrl)}" download class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800"><i class="fas fa-film mr-1"></i>下载横屏 MP4</a>` : ''}
+                                    ${bilibiliCoverUrl ? `<a href="${this.absoluteUrl(bilibiliCoverUrl)}" download class="rounded-md border border-pink-200 bg-white px-3 py-1.5 text-xs font-bold text-pink-700 hover:bg-pink-50"><i class="fas fa-tv mr-1"></i>B站封皮</a>` : ''}
+                                </div>
+                            </article>
+                            <div>
+                                <div class="mb-2 text-[11px] font-black uppercase tracking-wide text-violet-700">视觉方案注册表</div>
+                                <div class="grid gap-2">${visualWorkflowEntries}</div>
+                            </div>
+                        </div>
+                    </section>
+                    <section class="rounded-xl border border-fuchsia-200 bg-white p-4">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <h3 class="text-sm font-black text-fuchsia-950"><i class="fas fa-mobile-screen mr-2 text-fuchsia-600"></i>竖屏方案 <span class="text-xs font-bold text-slate-400">9:16</span></h3>
+                                <p class="mt-1 text-xs text-slate-500">先选择竖屏模板，再生成 10 秒预览或完整成片。</p>
+                            </div>
+                            ${verticalVideoItems.length || verticalVideoUrl ? '<span class="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-bold text-emerald-700">已有竖屏成片</span>' : ''}
+                        </div>
+                        <div class="mt-3 grid gap-2">${verticalSchemeCards}</div>
+                        ${scheme === 'scheme3' ? `
+                            <label class="mt-3 block rounded-lg border border-violet-200 bg-violet-50 p-3 text-xs font-bold text-violet-900">
+                                方案三视觉素材源
+                                <select data-detail-visual-scheme class="mt-2 w-full rounded-md border border-violet-200 bg-white px-2.5 py-2 text-xs font-bold text-violet-800" aria-label="方案三视觉素材源">
+                                    ${this.visualSchemes.map((item) => `<option value="${this.escapeAttr(item.key)}" ${item.key === this.selectedVisualSchemeKey ? 'selected' : ''} ${item.configured ? '' : 'disabled'}>${this.escape(item.name)}${item.configured ? '' : '（待配置 Gem）'}</option>`).join('')}
+                                </select>
+                                <span class="mt-1 block text-[11px] font-normal text-violet-700">当前使用：${this.escape(selectedVisualScheme?.name || '白板火柴人')}。需先在左侧创建并完成对应视觉任务。</span>
+                            </label>
+                        ` : ''}
+                        <div class="mt-3 flex flex-wrap gap-2">
+                            <button type="button" data-detail-action="generate-vertical-preview" data-preview-seconds="10" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive ? 'disabled' : ''} class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50 disabled:cursor-wait disabled:opacity-60">
+                                <i class="fas ${verticalActive ? 'fa-spinner fa-spin' : 'fa-bolt'} mr-1"></i>${verticalActive ? '竖屏生成中' : '生成 10 秒预览'}
+                            </button>
+                            <button type="button" data-detail-action="generate-vertical-full" data-job-id="${this.escapeAttr(jobId)}" ${!canRequestVertical || verticalActive ? 'disabled' : ''} class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800 disabled:cursor-wait disabled:opacity-60">
+                                <i class="fas fa-mobile-screen-button mr-1"></i>${verticalVideoUrl ? '重新生成完整竖屏' : '生成完整竖屏'}
+                            </button>
+                            ${verticalCoverUrl ? `<a href="${this.absoluteUrl(verticalCoverUrl)}" download class="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><i class="fas fa-image-portrait mr-1"></i>竖版封皮</a>` : ''}
+                            ${podcastCoverUrl ? `<a href="${this.absoluteUrl(podcastCoverUrl)}" download class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50"><i class="fas fa-record-vinyl mr-1"></i>播客封皮</a>` : ''}
+                            ${!podcastCoverUrl ? `<button type="button" data-detail-action="generate-podcast-cover" data-job-id="${this.escapeAttr(jobId)}" ${podcastGenerating ? 'disabled' : ''} class="rounded-md border border-amber-200 bg-white px-3 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-50 disabled:cursor-wait disabled:opacity-60"><i class="fas ${podcastGenerating ? 'fa-spinner fa-spin' : 'fa-record-vinyl'} mr-1"></i>${podcastGenerating ? '封皮生成中' : '补生成播客封皮'}</button>` : ''}
+                        </div>
+                        ${(verticalVideoItems.length || verticalVideoUrl || verticalPreviewItems.length || verticalPreviewVideoUrl) ? `
+                            <div class="mt-3 border-t border-fuchsia-100 pt-3">
+                                <div class="mb-2 text-[11px] font-black text-slate-500">已生成文件</div>
+                                <div class="flex flex-wrap gap-2">
+                                    ${verticalVideoItems.length ? verticalVideoItems.map((item) => `<a href="${this.absoluteUrl(item.download_url)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>${this.escape(item.label || this.verticalSchemeLabel(item.scheme))} MP4</a>`).join('') : (verticalVideoUrl ? `<a href="${this.absoluteUrl(verticalVideoUrl)}" download class="rounded-md bg-fuchsia-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-fuchsia-800"><i class="fas fa-mobile-screen mr-1"></i>竖屏 MP4</a>` : '')}
+                                    ${verticalPreviewItems.length ? verticalPreviewItems.map((item) => `<a href="${this.absoluteUrl(item.download_url)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>${this.escape(item.label || this.verticalSchemeLabel(item.scheme))} 10秒预览</a>`).join('') : (verticalPreviewVideoUrl ? `<a href="${this.absoluteUrl(verticalPreviewVideoUrl)}" download class="rounded-md border border-fuchsia-200 bg-white px-3 py-1.5 text-xs font-bold text-fuchsia-700 hover:bg-fuchsia-50"><i class="fas fa-clock mr-1"></i>10秒预览</a>` : '')}
+                                </div>
+                            </div>
+                        ` : ''}
+                    </section>
                 </div>
                 ${verticalChild?.error ? `<div class="mt-2 rounded border border-red-100 bg-white/80 px-2 py-1 text-xs text-red-700">完整竖屏失败：${this.escape(verticalChild.error)}</div>` : ''}
                 ${previewChild?.error ? `<div class="mt-2 rounded border border-red-100 bg-white/80 px-2 py-1 text-xs text-red-700">10秒预览失败：${this.escape(previewChild.error)}</div>` : ''}
@@ -673,21 +1287,52 @@ class ReportAudioWorkflowDetailPage {
     }
 
     currentDetailVerticalScheme() {
-        const select = this.els.root?.querySelector('[data-detail-vertical-scheme]');
+        const select = (
+            this.els.root?.querySelector('[data-detail-vertical-scheme]:checked')
+            || this.els.root?.querySelector('[data-detail-vertical-scheme]')
+        );
         return this.normalizeVerticalScheme(select?.value || this.job?.request?.video?.vertical_video_scheme || this.job?.video?.vertical_video_scheme);
     }
 
     currentFinalVideoSelection() {
-        const selected = Array.from(this.els.root?.querySelectorAll('[data-detail-final-video-option]:checked') || [])
-            .map((input) => String(input.value || '').trim());
         return {
-            includeLandscape: selected.includes('landscape'),
-            schemes: ['scheme1', 'scheme2', 'scheme3'].filter((scheme) => selected.includes(scheme)),
+            includeLandscape: true,
+            schemes: ['scheme3'],
         };
     }
 
-    async openStickFigureWorkflow(jobId) {
+    renderFinalizationProgress(job) {
+        const finalization = job?.finalization || job?.children?.finalization;
+        if (!finalization) {
+            return '<div class="mt-3 rounded-lg border border-dashed border-indigo-200 bg-indigo-50/40 px-3 py-2 text-xs text-indigo-700">待确认：确认后由系统持续跟进白板、横屏和方案三，不需要守着页面。</div>';
+        }
+        const step = String(finalization.step || '').toLowerCase();
+        const status = String(finalization.status || '').toLowerCase();
+        const stages = [
+            { label: '已确认', ready: true },
+            { label: '白板素材', ready: ['waiting_visual', 'visual_queued', 'visual_retry_wait', 'final_video_queued', 'done'].includes(step) },
+            { label: '横屏 + 方案三', ready: ['final_video_queued', 'done'].includes(step) },
+            { label: '完成', ready: status === 'completed' || step === 'done' },
+        ];
+        const failed = status === 'failed';
+        return `
+            <div class="mt-3 rounded-lg border ${failed ? 'border-rose-200 bg-rose-50' : 'border-indigo-100 bg-indigo-50/50'} p-3" data-finalization-status>
+                <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span class="font-black ${failed ? 'text-rose-800' : 'text-indigo-900'}">${this.escape(finalization.message || (failed ? '全链路需要安全续跑' : '系统正在自动续链'))}</span>
+                    <span class="font-black ${failed ? 'text-rose-700' : 'text-indigo-700'}">${Math.max(0, Math.min(100, Number(finalization.progress || 0)))}%</span>
+                </div>
+                <ol class="mt-2 grid grid-cols-2 gap-1 sm:grid-cols-4">
+                    ${stages.map((item) => `<li class="rounded px-2 py-1 text-[11px] font-bold ${item.ready ? 'bg-emerald-50 text-emerald-700' : 'bg-white text-slate-400'}"><i class="fas ${item.ready ? 'fa-circle-check' : 'fa-circle'} mr-1"></i>${this.escape(item.label)}</li>`).join('')}
+                </ol>
+                ${finalization.error ? `<div class="mt-2 text-xs font-bold leading-5 text-rose-700">${this.escape(finalization.error)}</div>` : ''}
+            </div>
+        `;
+    }
+
+    async openStickFigureWorkflow(jobId, visualSchemeKey = '') {
         if (!jobId || this.stickWorkflowRequestIds.has(jobId)) return;
+        const requestedSchemeKey = String(visualSchemeKey || this.selectedVisualSchemeKey || 'stick_figure');
+        this.selectedVisualSchemeKey = requestedSchemeKey;
         const detailWindow = window.open('about:blank', '_blank');
         if (detailWindow) detailWindow.opener = null;
         this.stickWorkflowRequestIds.add(jobId);
@@ -697,7 +1342,7 @@ class ReportAudioWorkflowDetailPage {
                 method: 'POST',
                 timeoutMs: 30000,
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ force_new: false, visual_scheme_key: this.selectedVisualSchemeKey || 'stick_figure' }),
+                body: JSON.stringify({ force_new: false, visual_scheme_key: requestedSchemeKey }),
             });
             const workflowJobId = result.workflow_job_id || result.job_id || result.data?.workflow_job_id || result.data?.job_id;
             if (!workflowJobId) throw new Error('后端未返回视觉编排任务 ID');
@@ -787,6 +1432,7 @@ class ReportAudioWorkflowDetailPage {
                     preview_seconds: previewSeconds,
                     force: options.force !== false,
                     include_landscape: options.includeLandscape === true,
+                    selection_source: options.selectionSource || 'vertical-video-panel',
                     ...(schemes.includes('scheme3')
                         ? {
                             visual_scheme_key: this.selectedVisualSchemeKey || 'stick_figure',
@@ -834,23 +1480,56 @@ class ReportAudioWorkflowDetailPage {
     }
 
     async generateFinalVideos(jobId) {
-        if (!jobId || this.finalVideoRequestIds.has(jobId)) return;
+        if (!jobId || this.finalizationRequestIds.has(jobId)) return;
         const selection = this.currentFinalVideoSelection();
         if (!selection.includeLandscape && selection.schemes.length === 0) {
             this.setNotice('请至少选择一个成片版本。', 'error');
             return;
         }
-        this.finalVideoRequestIds.add(jobId);
+        this.finalizationRequestIds.add(jobId);
+        if (this.job) {
+            this.job.finalization = {
+                ...(this.job.finalization || {}),
+                status: 'processing',
+                step: 'confirmed',
+                progress: Math.max(5, Number(this.job.finalization?.progress || 0)),
+                include_landscape: true,
+                vertical_video_schemes: ['scheme3'],
+                message: '关键帧已确认，正在创建或续跑白板任务',
+            };
+            this.job.children = { ...(this.job.children || {}), finalization: this.job.finalization };
+        }
         this.render();
         try {
-            await this.generateVerticalVideo(jobId, {
-                schemes: selection.schemes,
-                previewSeconds: 0,
-                force: true,
-                includeLandscape: selection.includeLandscape,
+            const result = await this.request(`/api/report-audio-workflows/jobs/${encodeURIComponent(jobId)}/confirm-keyframes`, {
+                method: 'POST',
+                timeoutMs: 30000,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    include_landscape: selection.includeLandscape,
+                    vertical_video_schemes: selection.schemes,
+                    visual_scheme_key: this.selectedVisualSchemeKey || 'stick_figure',
+                    selection_source: 'keyframe-confirmation',
+                    force: true,
+                }),
             });
+            this.mergeJobPayload(result.data || result);
+            this.setNotice(result.message || '关键帧已确认；白板完成后将自动生成横屏 + 方案三。', 'success');
+            await this.load({ manual: true });
+        } catch (error) {
+            try {
+                await this.load({ manual: true });
+                const persisted = this.job?.finalization || this.job?.children?.finalization;
+                if (persisted && !['failed', 'canceled', 'cancelled'].includes(String(persisted.status || '').toLowerCase())) {
+                    this.setNotice('关键帧确认响应曾中断，但全链路任务已从数据库确认，系统会继续跟进。', 'success');
+                    return;
+                }
+            } catch (_) {
+                // Preserve the original submission error when verification is unavailable.
+            }
+            this.setNotice(`确认关键帧失败：${error.message}`, 'error');
         } finally {
-            this.finalVideoRequestIds.delete(jobId);
+            this.finalizationRequestIds.delete(jobId);
             this.render();
         }
     }
@@ -1119,6 +1798,10 @@ class ReportAudioWorkflowDetailPage {
     renderStructured(job) {
         const structured = job.structured_result || {};
         if (!Object.keys(structured).length) return '';
+        const displayCoverTitle = this.recognizedInstitutionTitle(
+            job,
+            structured.cover_title || job.cover_title,
+        );
         return `
             <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -1127,7 +1810,7 @@ class ReportAudioWorkflowDetailPage {
                 </div>
                 <div class="grid gap-3 md:grid-cols-2">
                     ${this.renderTextBlock('标题', structured.title || job.title)}
-                    ${this.renderTextBlock('封面主标题', structured.cover_title || job.cover_title)}
+                    ${this.renderTextBlock('封面主标题', displayCoverTitle)}
                     ${this.renderTextBlock('封面副标题', structured.cover_subtitle || job.cover_subtitle)}
                     ${this.renderTextBlock('摘要', structured.summary)}
                 </div>
@@ -1226,6 +1909,10 @@ class ReportAudioWorkflowDetailPage {
         const script = this.audioScriptPayload(job);
         if (!script.text) return '';
         const qualityIssue = script.qualityIssue || this.audioScriptQualityIssue(script.text);
+        const jobId = String(job.job_id || job.id || this.jobId || '');
+        const regenerating = this.scriptRegenerationRequestIds.has(jobId);
+        const generatingAudio = this.audioGenerationRequestIds.has(jobId);
+        const hasAudio = Boolean(job?.audio?.wav_path || job?.audio?.download_url);
         return `
             <section class="rounded-lg border border-blue-100 bg-white p-4 shadow-sm">
                 <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
@@ -1238,9 +1925,17 @@ class ReportAudioWorkflowDetailPage {
                             ${script.provider ? ` · ${this.escape(script.provider)}` : ''}
                         </div>
                     </div>
-                    <button type="button" data-copy-text="${this.escapeAttr(script.text)}" class="rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-100">
-                        <i class="fas fa-copy mr-1"></i>复制文案
-                    </button>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <button type="button" data-copy-text="${this.escapeAttr(script.text)}" class="rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-100">
+                            <i class="fas fa-copy mr-1"></i>复制文案
+                        </button>
+                        <button type="button" data-detail-action="generate-audio-from-script" data-job-id="${this.escapeAttr(jobId)}" ${generatingAudio ? 'disabled' : ''} class="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-60">
+                            <i class="fas ${generatingAudio ? 'fa-spinner fa-spin' : 'fa-volume-high'} mr-1"></i>${generatingAudio ? '创建中' : (hasAudio ? '重新生成语音' : '用此文案生成语音')}
+                        </button>
+                        <button type="button" data-detail-action="regenerate-script-pro" data-job-id="${this.escapeAttr(jobId)}" ${regenerating ? 'disabled' : ''} class="rounded-md bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-800 disabled:cursor-wait disabled:opacity-60">
+                            <i class="fas ${regenerating ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'} mr-1"></i>${regenerating ? '创建中' : 'Pro 重写 · 至少 1500 字'}
+                        </button>
+                    </div>
                 </div>
                 ${qualityIssue ? `
                     <div class="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold leading-5 text-amber-800">
@@ -1418,6 +2113,31 @@ class ReportAudioWorkflowDetailPage {
         return covers[0]?.key || '';
     }
 
+    reportBilibiliAccountDefaults(credential) {
+        const label = [credential?.owner_label, credential?.name, credential?.masked_summary]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, '')
+            .toLowerCase();
+        if (label.includes('ai研报0709')) {
+            return { videoKey: 'vertical', coverKey: 'bilibili_cover' };
+        }
+        if (label.includes('小君君0708')) {
+            return { videoKey: 'landscape', coverKey: 'cover' };
+        }
+        return null;
+    }
+
+    recognizedInstitutionTitle(job, value) {
+        const text = this.compactMultilineCoverText(value);
+        if (!text) return '';
+        const institution = this.reportInstitution(job, text);
+        if (institution === '机构研报' || !/^\s*(?:机构|机构研报|深度研报)\s*[:：]/.test(text)) {
+            return text;
+        }
+        return this.coverTitleWithInstitution(job, text);
+    }
+
     keyframeOptions(job) {
         const raw = job?.video?.keyframes || {};
         return Object.entries(raw)
@@ -1471,6 +2191,14 @@ class ReportAudioWorkflowDetailPage {
             .map((value) => String(value || ''))
             .join(' ');
         const aliases = [
+            ['GHHK', '香港广发'],
+            ['GF Securities (Hong Kong)', '香港广发'],
+            ['GF Securities Hong Kong', '香港广发'],
+            ['广发证券（香港）', '香港广发'],
+            ['广发证券(香港)', '香港广发'],
+            ['香港广发', '香港广发'],
+            ['GF Securities', '广发证券'],
+            ['广发证券', '广发证券'],
             ['摩根士丹利', '大摩'], ['大摩', '大摩'], ['摩根大通', '摩根大通'], ['小摩', '摩根大通'],
             ['高盛', '高盛'], ['瑞银', '瑞银'], ['野村', '野村'], ['美国银行', '美银'], ['美银', '美银'], ['汇丰', '汇丰'],
             ['Jefferies', '杰富瑞'], ['杰富瑞', '杰富瑞'],
@@ -1482,7 +2210,7 @@ class ReportAudioWorkflowDetailPage {
 
     stripInstitution(title, institution) {
         let text = this.compactTitle(title);
-        const aliases = [institution, '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰', 'Jefferies', '杰富瑞', 'Bernstein', '伯恩斯坦', '盛博'];
+        const aliases = [institution, 'GHHK', 'GF Securities (Hong Kong)', 'GF Securities Hong Kong', '广发证券（香港）', '广发证券(香港)', '香港广发', 'GF Securities', '广发证券', '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰', 'Jefferies', '杰富瑞', 'Bernstein', '伯恩斯坦', '盛博'];
         for (const alias of aliases.filter(Boolean).sort((a, b) => b.length - a.length)) {
             const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             text = text.replace(new RegExp(`^\\s*${escaped}(?:证券)?\\s*[:：]\\s*`, 'i'), '');
@@ -1509,7 +2237,7 @@ class ReportAudioWorkflowDetailPage {
         });
         if (explicitFullInstitution && !genericPrefix) return body;
 
-        const aliases = [institution, '机构', '机构研报', '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰', 'Jefferies', '杰富瑞', 'Bernstein', '伯恩斯坦', '盛博'];
+        const aliases = [institution, '机构', '机构研报', 'GHHK', 'GF Securities (Hong Kong)', 'GF Securities Hong Kong', '广发证券（香港）', '广发证券(香港)', '香港广发', 'GF Securities', '广发证券', '摩根士丹利', '大摩', '摩根大通', '小摩', '高盛', '瑞银', '野村', '美国银行', '美银', '汇丰', 'Jefferies', '杰富瑞', 'Bernstein', '伯恩斯坦', '盛博'];
         let previousBody = '';
         while (body !== previousBody) {
             previousBody = body;
@@ -1551,9 +2279,10 @@ class ReportAudioWorkflowDetailPage {
         ];
         for (const candidate of candidates) {
             const title = this.compactTitle(candidate);
-            if (title && !this.isGenericTitle(title)) return title;
+            if (title && !this.isGenericTitle(title)) return this.recognizedInstitutionTitle(job, title);
         }
-        return candidates.map((item) => this.compactTitle(item)).find(Boolean) || '';
+        const fallback = candidates.map((item) => this.compactTitle(item)).find(Boolean) || '';
+        return this.recognizedInstitutionTitle(job, fallback);
     }
 
     compactTitle(value) {
@@ -1576,7 +2305,8 @@ class ReportAudioWorkflowDetailPage {
     }
 
     verticalSchemeLabel(value) {
-        return { scheme1: '方案一', scheme2: '方案二', scheme3: '方案三' }[this.normalizeVerticalScheme(value)];
+        const key = this.normalizeVerticalScheme(value);
+        return this.verticalVideoSchemes.find((item) => item.key === key)?.label || key;
     }
 
     selectedCompletedVisualVideo() {
@@ -1611,7 +2341,7 @@ class ReportAudioWorkflowDetailPage {
         ];
         for (const value of candidates) {
             const text = this.compactMultilineCoverText(value);
-            if (text) return text;
+            if (text) return this.recognizedInstitutionTitle(job, text);
         }
         return '';
     }

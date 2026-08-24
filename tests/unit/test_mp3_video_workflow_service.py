@@ -2,6 +2,7 @@ import base64
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -21,10 +22,14 @@ from api.mp3_video_workflow import (
     _prepare_keyframe_job_for_full_video as _api_prepare_keyframe_job_for_full_video,
 )
 from models.task import PublicationTask
+from models.zsxq_sync import ZsxqTopic
 from services.gemini_browser import (
+    GeminiBrowserAutomationError,
     GeminiBrowserOptions,
     GeminiBrowserWorker,
     _clear_stale_singleton_files,
+    _expects_pdf_evidence_contract,
+    _has_complete_pdf_evidence_payload,
     _looks_like_page_shell_text,
     _looks_like_incomplete_response,
     _looks_like_singleton_launch_error,
@@ -43,16 +48,19 @@ from services.mp3_video_workflow import (
     VISUAL_ARTIFACT_EXPECTED_SIZES,
     VISUAL_ARTIFACT_KEYS,
     VISUAL_ARTIFACT_VERSION,
+    _apply_workflow_audio_range_override,
     _build_transcript_user_prompt,
     _active_workflow_state,
     _child_inline_wait_seconds,
     _child_id_from_result,
     _db_retry,
+    _direct_ds_numbered_sections,
     _emit,
     _finance_cover_highlight_text,
     _generate_from_transcript,
     _infographic_bullets,
     _is_retryable_gemini_error,
+    _local_plan_from_direct_ds_response,
     _keyframe_artifacts_ready,
     _parent_max_defers,
     _parent_retry_delay_seconds,
@@ -66,6 +74,7 @@ from services.mp3_video_workflow import (
     _publisher_video_file_is_stable,
     _publisher_video_title,
     _reusable_video_summary,
+    _topic_content_preview_projection,
     _video_summary_ready,
     _video_file_ready,
     _visual_artifacts_ready,
@@ -74,6 +83,7 @@ from services.mp3_video_workflow import (
     _workflow_result_scope,
     _write_data_url,
     _workflow_generate_subtitles,
+    _workflow_force_video_regenerate_at,
     _workflow_render_mode,
     audio_segment_from_plan,
     draw_audio_background,
@@ -94,10 +104,30 @@ from services.mp3_video_workflow import (
     transcript_model,
     validate_plan,
     _validate_strict_ds_plan,
+    _validate_ds_response_contract,
 )
 
 
 class Mp3VideoWorkflowServiceTest(unittest.TestCase):
+    def test_audio_asset_topic_preview_projection_is_bounded(self):
+        projection = _topic_content_preview_projection()
+        sql = str(projection.compile(compile_kwargs={"literal_binds": True}))
+
+        self.assertIn("substr(zsxq_topics.content, 1, 720)", sql)
+        self.assertNotEqual(projection.element, ZsxqTopic.content)
+
+    def test_strict_pro_request_stops_before_submission_when_model_is_unconfirmed(self):
+        worker = object.__new__(GeminiBrowserWorker)
+        worker.options = GeminiBrowserOptions(
+            user_data_dir="/tmp/gemini-test",
+            require_pro_model=True,
+        )
+
+        with self.assertRaisesRegex(GeminiBrowserAutomationError, "未能确认 Gemini Pro 模型"):
+            worker._ensure_required_pro_model({"status": "picker_not_found", "confirmed": False})
+
+        worker._ensure_required_pro_model({"status": "selected_pro", "confirmed": True})
+
     def test_gemini_login_selectors_target_controls_not_prompt_text(self):
         worker = object.__new__(GeminiBrowserWorker)
         worker.options = GeminiBrowserOptions(user_data_dir="/tmp/gemini-test")
@@ -197,6 +227,120 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         queued_hint = send_task.call_args.kwargs["args"][1]
         self.assertEqual(4, queued_hint["defer_count"])
         self.assertNotEqual(hint["updated_at"], queued_hint["updated_at"])
+
+    def test_wait_continuation_releases_db_before_disk_and_celery_probes(self):
+        parent = SimpleNamespace(
+            status="processing",
+            progress=80,
+            waiting_child_label="landscape_video",
+            waiting_child_id="child-1",
+            waiting_child_updated_at="2026-08-09T02:00:00Z",
+        )
+        child = SimpleNamespace(
+            id="child-1",
+            celery_task_id="celery-child-1",
+            status="processing",
+            current_step="rendering",
+            progress=60,
+            error_message=None,
+            feature="publisher",
+            task_video_path=None,
+            publisher_aspect_ratio="16:9",
+            publisher_generate_subtitles=True,
+            publisher_audio_signature=None,
+            publisher_vertical_video_path=None,
+            publisher_vertical_cover_path=None,
+            publisher_podcast_cover_path=None,
+            publisher_bilibili_cover_path=None,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            completed_at=None,
+            params={},
+            result={},
+        )
+        hint = {
+            "label": "landscape_video",
+            "child_id": "child-1",
+            "updated_at": "2026-08-09T02:00:00Z",
+        }
+        released = {"count": 0}
+
+        def release():
+            released["count"] += 1
+
+        def disk_probe(_child):
+            self.assertGreaterEqual(released["count"], 1)
+            return None
+
+        def celery_probe(_child):
+            self.assertGreaterEqual(released["count"], 2)
+            return None
+
+        with (
+            patch("services.mp3_video_workflow._load_task", side_effect=[parent, child]),
+            patch("services.mp3_video_workflow.release_db_session_quietly", side_effect=release),
+            patch("services.mp3_video_workflow._publisher_child_disk_video_path", side_effect=disk_probe),
+            patch("services.mp3_video_workflow._publisher_child_repair_due", return_value=False),
+            patch("services.mp3_video_workflow._celery_failure_message", side_effect=celery_probe),
+            patch("services.mp3_video_workflow._db_retry", return_value=1),
+            patch("services.mp3_video_workflow.celery_app.send_task"),
+        ):
+            result = _resume_waiting_child_lightweight("parent-1", hint)
+
+        self.assertTrue(result)
+
+    def test_wait_child_releases_db_before_poll_sleep(self):
+        parent = SimpleNamespace(id="parent-1", status="processing")
+        child = SimpleNamespace(
+            id="child-1",
+            celery_task_id=None,
+            status="processing",
+            current_step="rendering",
+            progress=60,
+            error_message=None,
+            feature="publisher",
+            task_video_path=None,
+            publisher_aspect_ratio="16:9",
+            publisher_generate_subtitles=True,
+            publisher_audio_signature=None,
+            publisher_vertical_video_path=None,
+            publisher_vertical_cover_path=None,
+            publisher_podcast_cover_path=None,
+            publisher_bilibili_cover_path=None,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            completed_at=None,
+            params={},
+            result={},
+        )
+        released = {"count": 0}
+
+        def release():
+            released["count"] += 1
+
+        def sleep(_seconds):
+            self.assertGreaterEqual(released["count"], 2)
+
+        with (
+            patch("services.mp3_video_workflow._child_inline_wait_seconds", return_value=1),
+            patch("services.mp3_video_workflow.time.monotonic", side_effect=[0, 0, 0, 2]),
+            patch("services.mp3_video_workflow._load_task", side_effect=[parent, child, child]),
+            patch("services.mp3_video_workflow.release_db_session_quietly", side_effect=release),
+            patch("services.mp3_video_workflow._publisher_child_disk_video_path", return_value=None),
+            patch("services.mp3_video_workflow._publisher_child_repair_due", return_value=False),
+            patch("services.mp3_video_workflow._emit"),
+            patch("services.mp3_video_workflow._record_child"),
+            patch("services.mp3_video_workflow.time.sleep", side_effect=sleep),
+        ):
+            with self.assertRaises(ChildTaskStillRunning):
+                _wait_child(
+                    parent.id,
+                    child.id,
+                    "landscape_video",
+                    start_progress=80,
+                    end_progress=90,
+                )
+
 
     def test_stale_wait_continuation_is_a_noop(self):
         parent = SimpleNamespace(
@@ -636,6 +780,51 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
             "内资闭门会 | Micro-TEC关键材料用量极小 | 复兴科技良品率追赶日系 | 1.6T送样预计50元单价 | 2026-07-07",
         )
 
+    def test_markdown_numbered_sections_ignore_numbered_gold_quotes(self):
+        response = """
+### 1. 投资者视角标题（版本一）
+**AI资本开支中光通信占比将从5%升至15%**
+
+### 2｜投资者视角标题（版本二）
+**ScaleUp光连接从0到1放量**
+
+### 3. 精简短标题
+**光模块高增长刚开始**
+
+### 4｜最精华片段推荐
+**开始时间：05:43**
+**结束时间：20:35**
+片段内部关键钩子位置：
+- 10:51-11:27：光进铜退
+- 13:02-13:50：ScaleUp放量
+
+### 5｜金句提炼
+1. **第一条金句**
+2. **第二条金句**
+
+### 6｜优化标题（内资闭门会格式）
+**内资闭门会 / 光通信占比5%到15% / ScaleUp从0到1 / 龙头高增长 / 2026-08-01**
+
+### 7｜另一个版本（内资闭门会竖线格式）
+**内资闭门会 | 光模块认知差 | 规格持续升级 | 龙头最受益 | 2026-08-01**
+"""
+
+        sections = _direct_ds_numbered_sections(response)
+        titles = extract_closed_door_video_titles(response)
+        plan = _local_plan_from_direct_ds_response(response, audio={"duration_seconds": 1275.0})
+        _validate_ds_response_contract(response, source_label="IMA 全文 DS 返回值")
+        _validate_strict_ds_plan(plan, source_label="IMA 全文 DS 返回值")
+
+        self.assertEqual(list(sections), ["1", "2", "3", "4", "5", "6", "7"])
+        self.assertNotIn("第一条金句", sections["1"])
+        self.assertEqual(extract_audio_range(sections["4"]), (343.0, 1235.0))
+        self.assertEqual(plan["audio"]["start_seconds"], 343.0)
+        self.assertEqual(plan["audio"]["end_seconds"], 1235.0)
+        self.assertEqual(plan["xiaojunjun_video_title"], titles["xiaojunjun_video_title"])
+        self.assertEqual(plan["ciketc_video_title"], titles["ciketc_video_title"])
+        self.assertIn("光通信占比5%到15%", titles["xiaojunjun_video_title"])
+        self.assertIn("光模块认知差", titles["ciketc_video_title"])
+
     def test_direct_ds_response_skips_standalone_section_headings(self):
         response = (
             "1. 标题版本一（信息密度高、点击率强）\n"
@@ -736,6 +925,25 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
                 patch("services.mp3_video_workflow.db.session.remove") as remove, \
                 patch("services.mp3_video_workflow.time.sleep") as sleep:
             self.assertEqual(_db_retry(operation, "test"), "ok")
+
+        self.assertEqual(attempts["count"], 2)
+        rollback.assert_called_once()
+        remove.assert_called_once()
+        sleep.assert_called_once()
+
+    def test_db_retry_recovers_after_read_only_transaction(self):
+        attempts = {"count": 0}
+
+        def operation():
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise RuntimeError("cannot execute UPDATE in a read-only transaction")
+            return "ok"
+
+        with patch("services.mp3_video_workflow.db.session.rollback") as rollback, \
+                patch("services.mp3_video_workflow.db.session.remove") as remove, \
+                patch("services.mp3_video_workflow.time.sleep") as sleep:
+            self.assertEqual(_db_retry(operation, "read-only test"), "ok")
 
         self.assertEqual(attempts["count"], 2)
         rollback.assert_called_once()
@@ -864,6 +1072,18 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         """
 
         self.assertEqual(extract_audio_range(response), (10.0, 1506.5))
+
+    def test_audio_range_prefers_explicit_clip_over_internal_hook_ranges(self):
+        response = """
+        ### 4｜最精华片段推荐
+        **开始时间：05:43**
+        **结束时间：20:35**
+        片段内部关键钩子位置：
+        - 10:51-11:27：光进铜退
+        - 13:02-13:50：ScaleUp光连接放量
+        """
+
+        self.assertEqual(extract_audio_range(response), (343.0, 1235.0))
 
     def test_fallback_plan_extracts_flattened_gemini_version_titles(self):
         response = (
@@ -1192,8 +1412,8 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertEqual(_workflow_render_mode({"output_mode": "preview"}), "keyframes")
         self.assertEqual(_workflow_render_mode({"preview_only": True}), "keyframes")
 
-    def test_workflow_generate_subtitles_defaults_to_true_and_accepts_false(self):
-        self.assertTrue(_workflow_generate_subtitles({}))
+    def test_workflow_generate_subtitles_defaults_to_false_and_accepts_explicit_true(self):
+        self.assertFalse(_workflow_generate_subtitles({}))
         self.assertTrue(_workflow_generate_subtitles({"generate_subtitles": True}))
         self.assertFalse(_workflow_generate_subtitles({"generate_subtitles": False}))
         self.assertFalse(_workflow_generate_subtitles({"generate_subtitles": "off"}))
@@ -1404,6 +1624,32 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertFalse(_looks_like_incomplete_response("4. 精华片段提取 开始时间戳： 00:36 结束时间戳：02:41"))
         self.assertFalse(_looks_like_incomplete_response("推荐截取时间戳：01:10 - 09:45 （预估时长约 8分35秒）"))
 
+    def test_pdf_evidence_wait_requires_a_complete_third_json_block(self):
+        prompt = (
+            "请复核正文。最后输出 PDF_EVIDENCE_V1_JSON: "
+            '{"schema_version":"report_pdf_evidence_v1","claims":[...]}'
+        )
+        first_two_blocks = "第一块正文。第二块标题。"
+        partial_third_block = (
+            first_two_blocks
+            + ' JSON {"schema_version":"report_pdf_evidence_v1","claims":['
+        )
+        complete_third_block = (
+            partial_third_block
+            + '{"claim_text":"增长","pdf_page":1}]}'
+        )
+        legacy_complete_block = (
+            first_two_blocks
+            + ' JSON {"evidence_map":[{"script_paragraph_index":1,'
+            '"pdf_pages":[1],"source_excerpt":"Revenue"}]}'
+        )
+
+        self.assertTrue(_expects_pdf_evidence_contract(prompt))
+        self.assertFalse(_has_complete_pdf_evidence_payload(first_two_blocks))
+        self.assertFalse(_has_complete_pdf_evidence_payload(partial_third_block))
+        self.assertTrue(_has_complete_pdf_evidence_payload(complete_third_block))
+        self.assertTrue(_has_complete_pdf_evidence_payload(legacy_complete_block))
+
     def test_promptless_submit_wait_does_not_treat_ready_button_as_submitted(self):
         self.assertFalse(_promptless_submit_confirmed({"enabledSend": True}, "", generating=False))
         self.assertFalse(_promptless_submit_confirmed({"enabledSend": False}, "", generating=False))
@@ -1554,6 +1800,86 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
                 aspect_ratio="9:16",
             )
 
+    def test_forced_regeneration_reuses_only_child_created_after_request(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = Path(tmpdir) / "regenerated.mp4"
+            video_path.write_bytes(b"mp4")
+            requested_at = datetime(2026, 7, 30, 1, 30, 0)
+            child = PublicationTask(
+                id="child-regenerated",
+                status="completed",
+                current_step="done",
+                progress=100,
+                params={"aspect_ratio": "16:9"},
+                result={"video_path": str(video_path)},
+                created_at=requested_at + timedelta(seconds=1),
+            )
+            with (
+                patch(
+                    "services.mp3_video_workflow._completed_child_from_result",
+                    return_value=child,
+                ),
+                patch("services.mp3_video_workflow._video_file_ready", return_value=True),
+                patch(
+                    "services.mp3_video_workflow._find_existing_publisher_video_task",
+                ) as find_existing,
+            ):
+                summary, task = _reusable_video_summary(
+                    {"landscape_video": {"video_path": "/tmp/old.mp4"}},
+                    "landscape_video",
+                    parent_id="parent-1",
+                    created_not_before=requested_at,
+                )
+
+            self.assertIs(task, child)
+            self.assertEqual(summary["landscape_video_path"], str(video_path))
+            find_existing.assert_not_called()
+
+    def test_forced_regeneration_rejects_child_created_before_request(self):
+        requested_at = datetime(2026, 7, 30, 1, 30, 0)
+        old_child = PublicationTask(
+            id="child-old",
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"aspect_ratio": "16:9"},
+            result={"video_path": "/tmp/old.mp4"},
+            created_at=requested_at - timedelta(seconds=1),
+        )
+        with (
+            patch(
+                "services.mp3_video_workflow._completed_child_from_result",
+                return_value=old_child,
+            ),
+            patch(
+                "services.mp3_video_workflow._find_existing_publisher_video_task",
+                return_value=None,
+            ) as find_existing,
+        ):
+            summary, task = _reusable_video_summary(
+                {"landscape_video": {"video_path": "/tmp/old.mp4"}},
+                "landscape_video",
+                parent_id="parent-1",
+                created_not_before=requested_at,
+            )
+
+        self.assertIsNone(summary)
+        self.assertIsNone(task)
+        find_existing.assert_called_once_with(
+            "parent-1",
+            role="xiaojunjun_landscape",
+            aspect_ratio="16:9",
+            created_not_before=requested_at,
+        )
+
+    def test_force_regeneration_timestamp_is_utc_naive_cutoff(self):
+        cutoff = _workflow_force_video_regenerate_at(
+            {"force_video_regenerate_at": "2026-07-30T09:30:00+08:00"},
+            {},
+        )
+
+        self.assertEqual(cutoff, datetime(2026, 7, 30, 1, 30, 0))
+
     def test_completed_result_drops_waiting_state(self):
         result = {
             "plan": {"title": "demo"},
@@ -1640,13 +1966,24 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
                 },
             )
 
-            ok, message = _api_prepare_job_for_video_regeneration(task)
+            ok, message = _api_prepare_job_for_video_regeneration(
+                task,
+                {"start_seconds": "00:12", "end_seconds": "12:46"},
+            )
 
         self.assertTrue(ok, message)
         self.assertEqual(task.status, "pending")
         self.assertEqual(task.current_step, "queued_regenerate_videos")
         self.assertEqual(task.params["mp3_video_workflow"]["render_mode"], "full_video")
         self.assertIn("force_video_regenerate_at", task.params["mp3_video_workflow"])
+        self.assertEqual(
+            task.params["mp3_video_workflow"]["audio_range_override"],
+            {"start_seconds": 12.0, "end_seconds": 766.0},
+        )
+        self.assertEqual(
+            task.result["plan"]["audio"],
+            {"start_seconds": 12.0, "end_seconds": 766.0, "speed": 1.2},
+        )
         self.assertIn("force_video_regenerate_at", task.result)
         self.assertEqual(task.result["children"], {})
         self.assertNotIn("landscape_video", task.result)
@@ -1654,6 +1991,27 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertEqual(task.result["regenerated_video_history"][0]["children"]["landscape_video"]["job_id"], "old-landscape")
         self.assertNotIn("output_path", task.result)
         self.assertNotIn("completed_at", task.result)
+        self.assertIn("音频 00:12-12:46", task.result["logs"][-1]["message"])
+
+    def test_regeneration_audio_override_wins_over_rebuilt_ds_plan(self):
+        plan = {
+            "title": "demo",
+            "audio": {"start_seconds": 12, "end_seconds": 766, "speed": 1.2},
+        }
+
+        updated = _apply_workflow_audio_range_override(
+            plan,
+            {"audio_range_override": {"start_seconds": 95, "end_seconds": 754}},
+        )
+
+        self.assertEqual(
+            updated["audio"],
+            {"start_seconds": 95.0, "end_seconds": 754.0, "speed": 1.2},
+        )
+        self.assertEqual(
+            plan["audio"],
+            {"start_seconds": 12, "end_seconds": 766, "speed": 1.2},
+        )
 
     def test_publisher_video_children_use_short_inline_wait_and_deferred_resume(self):
         with patch.dict(os.environ, {

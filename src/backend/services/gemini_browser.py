@@ -2,6 +2,9 @@ import json
 import logging
 import os
 import re
+import shlex
+import signal
+import subprocess
 import time
 import base64
 import hashlib
@@ -31,6 +34,16 @@ _IMAGE_ONLY_STORYBOARD_RECOVERY_PROMPT = """你刚才只生成了图片，没有
 请停止继续生图，现在只输出完整分镜文本，不要再次调用图片工具。
 必须逐个分镜包含【文案原句】【画面动作】【视觉隐喻】【AI 提示词】；保留刚才使用的英文 AI 提示词原文，不得翻译、改写、缩写或遗漏。
 所有【文案原句】合并后必须 100% 覆盖用户提供的正文。"""
+_IMAGE_QUOTA_MARKERS = (
+    "i can create more images as soon as your limit resets",
+    "image generation limit reached",
+    "you've reached your image generation limit",
+    "you have reached your image generation limit",
+    "图片生成额度已用尽",
+    "图片生成已达上限",
+    "图片生成次数已达上限",
+    "达到图片生成限额",
+)
 
 
 class GeminiBrowserError(RuntimeError):
@@ -43,6 +56,19 @@ class GeminiBrowserConfigError(GeminiBrowserError):
 
 class GeminiBrowserAutomationError(GeminiBrowserError):
     pass
+
+
+class GeminiBrowserHumanInterventionError(GeminiBrowserAutomationError):
+    def __init__(self, message, *, reason, notification=None, context=None):
+        super().__init__(message)
+        self.reason = str(reason or "verification")
+        self.notification = dict(notification or {})
+        self.context = dict(context or {})
+
+
+def _is_image_quota_text(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    return any(marker in normalized for marker in _IMAGE_QUOTA_MARKERS)
 
 
 @dataclass
@@ -59,7 +85,17 @@ class GeminiBrowserOptions:
     total_timeout_seconds: int = 900
     ready_timeout_seconds: int = 90
     upload_timeout_seconds: int = 300
+    # Playwright's persistent-context launch defaults to no timeout.  A
+    # browser/profile startup failure must not hold a Celery worker forever.
+    browser_launch_timeout_seconds: int = 90
+    # Isolated report-visual-plan profiles may be left behind by an orphaned
+    # Chrome process after a worker restart.  Keep recovery opt-in for generic
+    # Gemini/PDF profiles so a user's normal Chrome session is never touched.
+    auto_recover_orphaned_chrome: bool = False
     min_response_chars: int = 120
+    prefer_pro_model: bool = True
+    require_pro_model: bool = False
+    model_switch_timeout_seconds: int = 12
     selectors: Dict[str, List[str]] = field(default_factory=dict)
 
     @classmethod
@@ -81,7 +117,23 @@ class GeminiBrowserOptions:
             total_timeout_seconds=_int_env("REPORT_PDF_GEMINI_TOTAL_TIMEOUT", _int_env("GEMINI_BROWSER_TOTAL_TIMEOUT", 900)),
             ready_timeout_seconds=_int_env("REPORT_PDF_GEMINI_READY_TIMEOUT", _int_env("GEMINI_BROWSER_READY_TIMEOUT", 90)),
             upload_timeout_seconds=_int_env("REPORT_PDF_GEMINI_UPLOAD_TIMEOUT", _int_env("GEMINI_BROWSER_UPLOAD_TIMEOUT", 300)),
+            browser_launch_timeout_seconds=_int_env(
+                "REPORT_PDF_GEMINI_BROWSER_LAUNCH_TIMEOUT_SECONDS",
+                _int_env("GEMINI_BROWSER_LAUNCH_TIMEOUT_SECONDS", 90),
+            ),
+            auto_recover_orphaned_chrome=_truthy_env(
+                "REPORT_PDF_GEMINI_AUTO_RECOVER_ORPHANED_CHROME",
+                _truthy_env("GEMINI_BROWSER_AUTO_RECOVER_ORPHANED_CHROME", False),
+            ),
             min_response_chars=_int_env("REPORT_PDF_GEMINI_MIN_RESPONSE_CHARS", _int_env("GEMINI_BROWSER_MIN_RESPONSE_CHARS", 120)),
+            prefer_pro_model=_truthy_env(
+                "REPORT_PDF_GEMINI_PREFER_PRO",
+                _truthy_env("GEMINI_BROWSER_PREFER_PRO", True),
+            ),
+            model_switch_timeout_seconds=_int_env(
+                "REPORT_PDF_GEMINI_MODEL_SWITCH_TIMEOUT_SECONDS",
+                _int_env("GEMINI_BROWSER_MODEL_SWITCH_TIMEOUT_SECONDS", 12),
+            ),
             selectors=_load_selectors_from_env(),
         )
 
@@ -89,6 +141,14 @@ class GeminiBrowserOptions:
 def is_configured(options: Optional[GeminiBrowserOptions] = None) -> bool:
     options = options or GeminiBrowserOptions.from_env()
     return bool(options.user_data_dir)
+
+
+def _looks_like_image_bytes(value: bytes) -> bool:
+    return bool(
+        value.startswith(b"\x89PNG\r\n\x1a\n")
+        or value.startswith(b"\xff\xd8\xff")
+        or value.startswith((b"GIF87a", b"GIF89a", b"RIFF"))
+    )
 
 
 def status_payload(options: Optional[GeminiBrowserOptions] = None) -> Dict[str, Any]:
@@ -111,6 +171,8 @@ def status_payload(options: Optional[GeminiBrowserOptions] = None) -> Dict[str, 
         "chrome_path_exists": bool(chrome_path and chrome_path.exists()),
         "chrome_channel": options.chrome_channel,
         "upload_timeout_seconds": options.upload_timeout_seconds,
+        "browser_launch_timeout_seconds": options.browser_launch_timeout_seconds,
+        "auto_recover_orphaned_chrome": options.auto_recover_orphaned_chrome,
         "mode": "real_browser",
         "business_feature": FEATURE_NAME,
         "automation_engine": "gemini_browser",
@@ -136,9 +198,14 @@ class GeminiBrowserWorker:
         recover_image_only_storyboard: bool = False,
         response_complete_callback: Optional[Callable[[str], bool]] = None,
         incomplete_response_followup_prompt: str = "",
+        response_contract_validator: Optional[Callable[[str], Dict[str, Any]]] = None,
+        response_contract_repair_prompt_builder: Optional[Callable[[Dict[str, Any]], str]] = None,
+        response_contract_max_repairs: int = 1,
+        human_intervention_details: Optional[Dict[str, Any]] = None,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         self._current_job_id = str(job_id or "")
+        self._human_intervention_details = dict(human_intervention_details or {})
         prompt = (prompt or "").strip()
         followups = [str(item).strip() for item in (followup_prompts or []) if str(item).strip()]
         pdf_file = Path(pdf_path).expanduser() if pdf_path else None
@@ -179,6 +246,17 @@ class GeminiBrowserWorker:
                     self._wait_for_interactive_page(page, started)
                     self._raise_if_login_or_captcha(page)
                     self._guard_total_timeout(started)
+
+                    self._emit(progress_callback, "select_pro_model", 18, "尝试切换 Gemini Pro 模型")
+                    pro_model_selection = self._try_select_pro_model(page)
+                    self._emit(
+                        progress_callback,
+                        "pro_model_ready",
+                        20,
+                        _pro_model_selection_message(pro_model_selection),
+                        result={"gemini_model_selection": pro_model_selection},
+                    )
+                    self._ensure_required_pro_model(pro_model_selection)
 
                     baseline_text = self._body_text(page)
                     baseline_image_keys = self._visible_image_keys(page)
@@ -333,6 +411,35 @@ class GeminiBrowserWorker:
                             embedded_images=embedded_images,
                         )
                     response = {"text": combined_response_text}
+                    # The incomplete-storyboard path may have several turns.
+                    # Keep the merged text as the result unless an explicit
+                    # generic follow-up later replaces it; returning
+                    # ``turns[-1]`` here silently discarded the title and all
+                    # earlier continuation scenes.
+                    final_response_text = combined_response_text
+                    response_contract_validation = None
+                    if response_contract_validator:
+                        final_response_text, response_contract_validation = self._repair_response_contract(
+                            page=page,
+                            started=started,
+                            response_text=final_response_text,
+                            turns=turns,
+                            validator=response_contract_validator,
+                            repair_prompt_builder=response_contract_repair_prompt_builder,
+                            max_repairs=response_contract_max_repairs,
+                            progress_callback=progress_callback,
+                        )
+                        _write_generation_checkpoint(
+                            output,
+                            prompt=prompt,
+                            followups=followups,
+                            initial_response_text=initial_response_text,
+                            combined_response_text=final_response_text,
+                            turns=turns,
+                            page_url=page.url,
+                            target_url=url,
+                            embedded_images=embedded_images,
+                        )
 
                     for followup_number, followup in enumerate(followups, start=1):
                         index = len(turns) + 1
@@ -362,6 +469,7 @@ class GeminiBrowserWorker:
                             "page_url": page.url,
                             "completed_at": datetime.utcnow().isoformat() + "Z",
                         })
+                        final_response_text = str(turns[-1]["response_text"] or "")
                         _write_generation_checkpoint(
                             output,
                             prompt=prompt,
@@ -408,11 +516,13 @@ class GeminiBrowserWorker:
                             "bytes": pdf_file.stat().st_size if pdf_file else None,
                         } if pdf_file else None,
                         "initial_response_text": initial_response_text,
-                        "response_text": turns[-1]["response_text"],
-                        "final_response_text": turns[-1]["response_text"],
+                        "response_text": final_response_text,
+                        "final_response_text": final_response_text,
                         "turns": turns,
                         "page_url": page.url,
                         "target_url": url,
+                        "gemini_model_selection": pro_model_selection,
+                        "response_contract_validation": response_contract_validation,
                         "embedded_images": embedded_images,
                         "completed_at": datetime.utcnow().isoformat() + "Z",
                     }
@@ -428,6 +538,90 @@ class GeminiBrowserWorker:
                     raise
                 finally:
                     context.close()
+
+    def _repair_response_contract(
+        self,
+        *,
+        page,
+        started: float,
+        response_text: str,
+        turns: List[Dict[str, Any]],
+        validator: Callable[[str], Dict[str, Any]],
+        repair_prompt_builder: Optional[Callable[[Dict[str, Any]], str]],
+        max_repairs: int,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]],
+    ):
+        """Validate a response and replace it through at most one repair turn."""
+
+        current_text = str(response_text or "").strip()
+        current = _contract_diagnostics(validator(current_text))
+        initial = dict(current)
+        repairs = []
+        try:
+            repair_limit = max(0, min(int(max_repairs or 0), 1))
+        except (TypeError, ValueError):
+            repair_limit = 1
+
+        while (
+            not current.get("valid")
+            and len(repairs) < repair_limit
+            and repair_prompt_builder is not None
+        ):
+            repair_prompt = str(repair_prompt_builder(current) or "").strip()
+            if not repair_prompt:
+                break
+            attempt = len(repairs) + 1
+            baseline_text = self._body_text(page)
+            self._emit(
+                progress_callback,
+                f"response_contract_repair_{attempt}_submit",
+                72,
+                "Gemini 返回未通过结构校验，提交一次定向修复",
+                result={"response_contract_validation": current},
+            )
+            self._submit_prompt(page, repair_prompt)
+            self._guard_total_timeout(started)
+            self._emit(
+                progress_callback,
+                f"response_contract_repair_{attempt}_wait",
+                78,
+                "等待 Gemini 返回完整替换 JSON",
+            )
+            response = self._wait_for_response(page, repair_prompt, baseline_text, started)
+            current_text = str(response.get("text") or "").strip()
+            turns.append({
+                "index": len(turns) + 1,
+                "kind": "response_contract_repair",
+                "prompt": repair_prompt,
+                "response_text": current_text,
+                "page_url": page.url,
+                "completed_at": datetime.utcnow().isoformat() + "Z",
+            })
+            current = _contract_diagnostics(validator(current_text))
+            repairs.append({
+                "attempt": attempt,
+                "valid": bool(current.get("valid")),
+                "error_codes": list(current.get("error_codes") or []),
+            })
+            self._emit(
+                progress_callback,
+                f"response_contract_repair_{attempt}_response",
+                84,
+                "Gemini 定向修复结果已获取",
+                result={
+                    "response_text": current_text,
+                    "final_response_text": current_text,
+                    "turns": turns,
+                    "response_contract_validation": current,
+                },
+            )
+
+        diagnostics = dict(current)
+        diagnostics["initial_valid"] = bool(initial.get("valid"))
+        diagnostics["initial_error_codes"] = list(initial.get("error_codes") or [])
+        diagnostics["repair_attempt_count"] = len(repairs)
+        diagnostics["repair_attempts"] = repairs
+        return current_text, diagnostics
 
     def generate_image(
         self,
@@ -559,6 +753,17 @@ class GeminiBrowserWorker:
                 self._raise_if_login_or_captcha(page)
                 self._guard_total_timeout(started)
 
+                self._emit(progress_callback, "select_pro_model", 12, "尝试切换 Gemini Pro 模型")
+                pro_model_selection = self._try_select_pro_model(page)
+                self._emit(
+                    progress_callback,
+                    "pro_model_ready",
+                    15,
+                    _pro_model_selection_message(pro_model_selection),
+                    result={"gemini_model_selection": pro_model_selection},
+                )
+                self._ensure_required_pro_model(pro_model_selection)
+
                 baseline_text = self._body_text(page)
                 self._emit(progress_callback, "upload_file", 18, f"上传文件到 Gemini：{source_file.name}")
                 self._upload_file(page, str(source_file), started)
@@ -679,6 +884,7 @@ class GeminiBrowserWorker:
                     "turns": turns,
                     "page_url": page.url,
                     "target_url": url,
+                    "gemini_model_selection": pro_model_selection,
                     "completed_at": datetime.utcnow().isoformat() + "Z",
                 }
                 output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -713,6 +919,12 @@ class GeminiBrowserWorker:
 
         while _path_exists_or_symlink(lock_path):
             owner = _singleton_owner(lock_path)
+            if _recover_orphaned_chrome_profile(
+                user_data_dir,
+                owner,
+                enabled=bool(getattr(self.options, "auto_recover_orphaned_chrome", False)),
+            ):
+                continue
             if _clear_stale_singleton_files(user_data_dir, owner):
                 continue
             if time.monotonic() >= deadline:
@@ -737,6 +949,9 @@ class GeminiBrowserWorker:
             "headless": False,
             "accept_downloads": True,
             "args": args,
+            # Playwright treats None as unlimited here.  Keep this bounded so
+            # a broken Chrome/profile launch fails and releases the worker lock.
+            "timeout": max(5, int(self.options.browser_launch_timeout_seconds or 0)) * 1000,
         }
         if self.options.chrome_executable_path:
             kwargs["executable_path"] = self.options.chrome_executable_path
@@ -747,7 +962,18 @@ class GeminiBrowserWorker:
         profile_lock.__enter__()
         try:
             self._wait_for_profile_singleton_release()
-            context = self._launch_persistent_context_with_singleton_retry(playwright, user_data_dir, kwargs)
+            try:
+                context = self._launch_persistent_context_with_singleton_retry(playwright, user_data_dir, kwargs)
+            except Exception as exc:
+                # Playwright's persistent-context launch has no default
+                # timeout.  Convert its bounded timeout into a domain error so
+                # the task records a useful failure and releases the lock.
+                if exc.__class__.__name__ == "TimeoutError":
+                    raise GeminiBrowserAutomationError(
+                        "Gemini 浏览器启动超时（"
+                        f"{max(5, int(self.options.browser_launch_timeout_seconds or 0))} 秒）: {exc}"
+                    ) from exc
+                raise
             return _LockedBrowserContext(context, profile_lock)
         except Exception:
             profile_lock.__exit__(None, None, None)
@@ -822,6 +1048,116 @@ class GeminiBrowserWorker:
         sample = _clean_text(last_text)[:200]
         raise GeminiBrowserAutomationError(
             f"Gemini 页面未加载完成，未找到输入区; text_sample={sample}"
+        )
+
+    def _try_select_pro_model(self, page) -> Dict[str, Any]:
+        """Attempt Pro selection before an uploaded file reaches Gemini.
+
+        Gemini renders the composer before its mode picker.  Wait for the
+        picker separately so strict Pro jobs do not fail during that short UI
+        race.  Missing/unsupported pickers are still recorded for the caller;
+        strict jobs can then stop before uploading any user content.
+        """
+        if not self.options.prefer_pro_model:
+            return {"requested": False, "selected": False, "confirmed": False, "status": "disabled"}
+
+        try:
+            picker_wait_seconds = max(
+                0.0,
+                min(30.0, float(self.options.model_switch_timeout_seconds or 0)),
+            )
+            picker_deadline = time.monotonic() + picker_wait_seconds
+            picker = None
+            while picker is None:
+                picker = self._first_visible(page, self._selectors("model_picker"))
+                if picker is not None or time.monotonic() >= picker_deadline:
+                    break
+                time.sleep(0.25)
+            if picker is None:
+                return {"requested": True, "selected": False, "confirmed": False, "status": "picker_not_found"}
+
+            before = _locator_control_text(picker)
+            if _looks_like_pro_model_label(before):
+                return {
+                    "requested": True,
+                    "selected": True,
+                    "confirmed": True,
+                    "status": "already_pro",
+                    "before": before,
+                    "after": before,
+                }
+
+            picker.click(timeout=8_000)
+            timeout_seconds = max(2, min(30, int(self.options.model_switch_timeout_seconds or 12)))
+            deadline = time.monotonic() + timeout_seconds
+            option = None
+            while time.monotonic() < deadline:
+                option = self._first_visible(page, self._selectors("pro_model_option"))
+                if option is not None and _looks_like_pro_model_label(_locator_control_text(option)):
+                    break
+                option = None
+                time.sleep(0.25)
+
+            if option is None:
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                return {
+                    "requested": True,
+                    "selected": False,
+                    "confirmed": False,
+                    "status": "pro_option_not_found",
+                    "before": before,
+                }
+
+            option_label = _locator_control_text(option)
+            option.click(timeout=8_000)
+
+            confirm_deadline = time.monotonic() + min(5, timeout_seconds)
+            after = ""
+            while time.monotonic() < confirm_deadline:
+                current_picker = self._first_visible(page, self._selectors("model_picker"))
+                after = _locator_control_text(current_picker) if current_picker is not None else ""
+                if _looks_like_pro_model_label(after):
+                    return {
+                        "requested": True,
+                        "selected": True,
+                        "confirmed": True,
+                        "status": "selected_pro",
+                        "before": before,
+                        "option": option_label,
+                        "after": after,
+                    }
+                time.sleep(0.25)
+
+            return {
+                "requested": True,
+                "selected": True,
+                "confirmed": False,
+                "status": "selected_unconfirmed",
+                "before": before,
+                "option": option_label,
+                "after": after,
+            }
+        except Exception as exc:
+            logger.warning("Gemini Pro model selection skipped after recoverable error: %s", exc)
+            return {
+                "requested": True,
+                "selected": False,
+                "confirmed": False,
+                "status": "selection_error",
+                "error": str(exc)[:500],
+            }
+
+    def _ensure_required_pro_model(self, selection: Dict[str, Any]) -> None:
+        if not self.options.require_pro_model:
+            return
+        if isinstance(selection, dict) and selection.get("confirmed") is True:
+            return
+        status = str((selection or {}).get("status") or "unknown")
+        raise GeminiBrowserAutomationError(
+            f"未能确认 Gemini Pro 模型，已停止提交内容请求（模型切换状态: {status}）"
         )
 
     def _upload_pdf(self, page, pdf_path: str, started_at: float) -> None:
@@ -900,6 +1236,7 @@ class GeminiBrowserWorker:
         )
 
     def _select_image_generation_mode(self, page, started_at: float) -> None:
+        self._raise_if_image_quota_exhausted(page)
         image_labels = (
             "制作图片", "制作图像", "生成图片", "生成图像", "创建图片", "创建图像",
             "Create image", "Create images", "Generate image", "Generate images",
@@ -945,6 +1282,7 @@ class GeminiBrowserWorker:
         while time.monotonic() < deadline:
             self._guard_total_timeout(started_at)
             self._raise_if_login_or_captcha(page)
+            self._raise_if_image_quota_exhausted(page)
             if self._click_first_visible(page, direct_selectors):
                 time.sleep(0.8)
                 return
@@ -1323,6 +1661,10 @@ class GeminiBrowserWorker:
         image_only_baseline_keys: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         deadline = time.monotonic() + self.options.response_timeout_seconds
+        active_generation_grace_deadline = deadline + max(
+            0,
+            _int_env("GEMINI_BROWSER_ACTIVE_GENERATION_GRACE_SECONDS", 300),
+        )
         incomplete_extra_wait = max(0, _int_env("GEMINI_BROWSER_INCOMPLETE_RESPONSE_EXTRA_WAIT", 90))
         last_text = ""
         stable_since = time.monotonic()
@@ -1332,8 +1674,16 @@ class GeminiBrowserWorker:
         last_resubmit_at = 0.0
         image_only_since = None
         idle_empty_since = None
+        evidence_contract_expected = _expects_pdf_evidence_contract(prompt)
 
-        while time.monotonic() < deadline:
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                # Gemini can still visibly be generating when the ordinary
+                # response window expires.  Keep waiting for a bounded grace
+                # period, still subject to the workflow's total timeout.
+                if now >= active_generation_grace_deadline or not self._is_generating(page):
+                    break
             self._guard_total_timeout(started_at)
             self._raise_if_login_or_captcha(page)
             candidate = self._latest_response_text(page, prompt, baseline_text)
@@ -1346,6 +1696,14 @@ class GeminiBrowserWorker:
                     time.monotonic() - stable_since >= self.options.response_stable_seconds
                     and not self._is_generating(page)
                 ):
+                    if (
+                        evidence_contract_expected
+                        and not _has_complete_pdf_evidence_payload(candidate)
+                    ):
+                        if incomplete_since is None:
+                            incomplete_since = time.monotonic()
+                        time.sleep(1)
+                        continue
                     if _looks_like_incomplete_response(candidate):
                         if incomplete_since is None:
                             incomplete_since = time.monotonic()
@@ -1416,6 +1774,15 @@ class GeminiBrowserWorker:
                         continue
             time.sleep(1)
 
+        if (
+            last_text
+            and evidence_contract_expected
+            and not _has_complete_pdf_evidence_payload(last_text)
+        ):
+            raise GeminiBrowserAutomationError(
+                "等待 Gemini 回复超时：证据契约已请求，但未捕获到完整的 "
+                "PDF_EVIDENCE_V1_JSON/claims 或兼容 evidence_map JSON"
+            )
         if last_text:
             return {"text": last_text}
         debug = _submit_state_summary(self._composer_submit_state(page, ""), self._composer_text(page))
@@ -1489,6 +1856,7 @@ class GeminiBrowserWorker:
         while time.monotonic() < deadline:
             self._guard_total_timeout(started_at)
             self._raise_if_login_or_captcha(page)
+            self._raise_if_image_quota_exhausted(page)
             records = self._visible_image_records(page)
             candidates = []
             for record in records:
@@ -1527,6 +1895,16 @@ class GeminiBrowserWorker:
         saved_by = "screenshot"
         if src:
             try:
+                response = page.context.request.get(src, timeout=30_000)
+                content_type = str(response.headers.get("content-type") or "").lower()
+                body = response.body() if response.ok else b""
+                if body and (content_type.startswith("image/") or _looks_like_image_bytes(body)):
+                    pending.write_bytes(body)
+                    saved_by = "context_request"
+            except Exception:
+                saved_by = "screenshot"
+        if src and (not pending.exists() or pending.stat().st_size <= 0):
+            try:
                 data_url = page.evaluate(
                     """async (src) => {
                         const response = await fetch(src);
@@ -1551,8 +1929,11 @@ class GeminiBrowserWorker:
             dom_index = record.get("dom_index")
             if dom_index is None:
                 raise GeminiBrowserAutomationError("无法定位 Gemini 生成图片")
-            page.locator("img").nth(int(dom_index)).screenshot(path=str(pending))
-            saved_by = "screenshot"
+            saved_by = self._save_isolated_image_screenshot(
+                page,
+                int(dom_index),
+                pending,
+            )
 
         if not pending.exists() or pending.stat().st_size <= 0:
             raise GeminiBrowserAutomationError("Gemini 新图片保存为空")
@@ -1566,6 +1947,75 @@ class GeminiBrowserWorker:
             "width": record.get("naturalWidth") or record.get("width"),
             "height": record.get("naturalHeight") or record.get("height"),
         }
+
+    def _save_isolated_image_screenshot(self, page, dom_index: int, output: Path) -> str:
+        """Screenshot a cloned image above page overlays.
+
+        Gemini occasionally shows a privacy/help popover over the generated
+        image. Locator screenshots include that popover, so the fallback must
+        isolate the image before capture.
+        """
+
+        marker = f"gemini-image-capture-{int(time.time() * 1000)}-{dom_index}"
+        try:
+            created = page.evaluate(
+                """({ index, marker }) => {
+                    const source = document.querySelectorAll("img")[index];
+                    if (!source) return false;
+                    const rect = source.getBoundingClientRect();
+                    const host = document.createElement("div");
+                    host.dataset.geminiIsolatedCapture = marker;
+                    Object.assign(host.style, {
+                        position: "fixed",
+                        left: "0",
+                        top: "0",
+                        zIndex: "2147483647",
+                        width: `${Math.max(1, Math.round(rect.width))}px`,
+                        height: `${Math.max(1, Math.round(rect.height))}px`,
+                        overflow: "hidden",
+                        background: "transparent",
+                        isolation: "isolate",
+                    });
+                    const clone = source.cloneNode(true);
+                    Object.assign(clone.style, {
+                        display: "block",
+                        width: "100%",
+                        height: "100%",
+                        maxWidth: "none",
+                        maxHeight: "none",
+                        margin: "0",
+                        objectFit: getComputedStyle(source).objectFit || "fill",
+                    });
+                    host.appendChild(clone);
+                    document.body.appendChild(host);
+                    return true;
+                }""",
+                {"index": dom_index, "marker": marker},
+            )
+            if created:
+                page.locator(f'[data-gemini-isolated-capture="{marker}"] img').screenshot(path=str(output))
+                return "isolated_screenshot"
+        except Exception:
+            logger.warning(
+                "Gemini isolated image capture failed for job %s; using locator fallback",
+                getattr(self, "_current_job_id", ""),
+                exc_info=True,
+            )
+        finally:
+            try:
+                page.evaluate(
+                    """(marker) => {
+                        document.querySelectorAll("[data-gemini-isolated-capture]").forEach((node) => {
+                            if (node.dataset.geminiIsolatedCapture === marker) node.remove();
+                        });
+                    }""",
+                    marker,
+                )
+            except Exception:
+                pass
+
+        page.locator("img").nth(dom_index).screenshot(path=str(output))
+        return "screenshot"
 
     def _save_embedded_response_images(
         self,
@@ -1821,6 +2271,41 @@ class GeminiBrowserWorker:
                 "mat-option:has-text('上传文件')",
                 "mat-option:has-text('Upload files')",
             ],
+            "model_picker": [
+                "button[data-test-id='bard-mode-menu-button']",
+                "bard-mode-switcher button[aria-haspopup='true']",
+                "input-area-v2 .model-picker-container button",
+                "button.input-area-switch[aria-haspopup='true']",
+                "button[aria-label*='模式选择器']",
+                "button[aria-label*='当前模式']",
+                "button[aria-label*='model' i]",
+                "[role='button'][aria-label*='model' i]",
+                "button[aria-label*='mode' i]",
+                "[role='button'][aria-label*='mode' i]",
+                "button[aria-label*='模型']",
+                "[role='button'][aria-label*='模型']",
+                "button[title*='model' i]",
+                "button[title*='模型']",
+                "button[data-test-id*='model' i]",
+                "button[data-testid*='model' i]",
+                "button[class*='model-selector']",
+                "button[aria-haspopup='menu']:has-text('Pro')",
+                "button[aria-haspopup='menu']:has-text('Fast')",
+                "button[aria-haspopup='menu']:has-text('Thinking')",
+                "button[aria-haspopup='listbox']:has-text('Pro')",
+                "button[aria-haspopup='listbox']:has-text('Fast')",
+                "button[aria-haspopup='listbox']:has-text('Thinking')",
+            ],
+            "pro_model_option": [
+                "[data-test-id='gem-mode-menu'] [role='menuitem']:has-text('Pro')",
+                "[data-test-id^='bard-mode-option-']:has-text('Pro')",
+                "[role='menuitemradio']:has-text('Pro')",
+                "[role='option']:has-text('Pro')",
+                "[role='menuitem']:has-text('Pro')",
+                "mat-option:has-text('Pro')",
+                ".mat-mdc-menu-item:has-text('Pro')",
+                "button[role='menuitem']:has-text('Pro')",
+            ],
             "response": [
                 "message-content",
                 "model-response",
@@ -1860,6 +2345,8 @@ class GeminiBrowserWorker:
             "generating": [
                 "button[aria-label*='Stop']",
                 "button[aria-label*='停止']",
+                "[role='button'][aria-label*='Stop']",
+                "[role='button'][aria-label*='停止']",
                 "[role='progressbar']",
                 ".mat-mdc-progress-spinner",
                 "mat-spinner",
@@ -1912,29 +2399,60 @@ class GeminiBrowserWorker:
 
         return None
 
-    def _notify_human_intervention(self, page, *, reason: str, message: str) -> None:
+    def _notify_human_intervention(self, page, *, reason: str, message: str) -> Dict[str, Any]:
         job_id = str(getattr(self, "_current_job_id", "") or "")
         screenshot = self._save_failure_screenshot(page, job_id or "browser_auth")
-        workflow_notification_service.send_browser_human_intervention(
+        context = {
+            "job_id": job_id,
+            "page_url": str(getattr(page, "url", "") or ""),
+            "screenshot_path": screenshot,
+            "profile": str(self.options.user_data_dir or ""),
+            "worker_id": str(self.options.profile_directory or "Default"),
+        }
+        notification = workflow_notification_service.send_browser_human_intervention(
             provider="Gemini",
             reason=reason,
             message=message,
-            job_id=job_id,
-            page_url=str(getattr(page, "url", "") or ""),
-            screenshot_path=screenshot,
-            profile=str(self.options.user_data_dir or ""),
-            worker_id=str(self.options.profile_directory or "Default"),
+            details=dict(getattr(self, "_human_intervention_details", {}) or {}),
+            **context,
         )
+        return {"notification": notification, "context": context}
 
     def _raise_if_login_or_captcha(self, page) -> None:
         if self._first_visible(page, self._selectors("captcha")) is not None:
             message = "Gemini 页面出现验证码或安全验证，需要人工处理"
-            self._notify_human_intervention(page, reason="verification", message=message)
-            raise GeminiBrowserAutomationError(message)
+            intervention = self._notify_human_intervention(
+                page,
+                reason="verification",
+                message=message,
+            )
+            raise GeminiBrowserHumanInterventionError(
+                message,
+                reason="verification",
+                **intervention,
+            )
         if self._first_visible(page, self._selectors("login")) is not None:
             message = "Gemini 登录态失效，需要先在浏览器 profile 中登录"
-            self._notify_human_intervention(page, reason="login", message=message)
-            raise GeminiBrowserAutomationError(message)
+            intervention = self._notify_human_intervention(
+                page,
+                reason="login",
+                message=message,
+            )
+            raise GeminiBrowserHumanInterventionError(
+                message,
+                reason="login",
+                **intervention,
+            )
+
+    def _raise_if_image_quota_exhausted(self, page) -> None:
+        try:
+            text = page.locator("body").inner_text(timeout=1_000)
+        except Exception:
+            return
+        if _is_image_quota_text(text):
+            raise GeminiBrowserAutomationError(
+                "Gemini 图片生成额度已耗尽，请等待额度重置后再继续"
+            )
 
     def _save_failure_screenshot(self, page, job_id: str) -> str:
         try:
@@ -2179,6 +2697,94 @@ def _clear_stale_singleton_files(user_data_dir: Path, owner: str) -> bool:
     return cleared
 
 
+def _profile_process_info(pid: int) -> Dict[str, Any]:
+    """Return the parent pid and command line for a suspected Chrome owner."""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(int(pid)), "-o", "ppid=,command="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
+    line = str(result.stdout or "").strip()
+    if not line:
+        return {}
+    parts = line.split(None, 1)
+    if len(parts) != 2:
+        return {}
+    try:
+        ppid = int(parts[0])
+    except ValueError:
+        return {}
+    return {"pid": int(pid), "ppid": ppid, "command": parts[1]}
+
+
+def _command_uses_exact_user_data_dir(command: str, user_data_dir: Path) -> bool:
+    expected = str(user_data_dir.expanduser().resolve())
+    try:
+        argv = shlex.split(str(command or ""))
+    except ValueError:
+        argv = str(command or "").split()
+    for arg in argv:
+        if not arg.startswith("--user-data-dir="):
+            continue
+        actual = arg.split("=", 1)[1]
+        try:
+            if str(Path(actual).expanduser().resolve()) == expected:
+                return True
+        except (OSError, RuntimeError):
+            continue
+    return False
+
+
+def _recover_orphaned_chrome_profile(
+    user_data_dir: Path,
+    owner: str,
+    *,
+    enabled: bool = False,
+) -> bool:
+    """Terminate only an orphaned Chrome process owned by this automation profile.
+
+    A live SingletonLock is normally treated as a real user session.  The
+    recovery path is opt-in and additionally requires an orphaned process
+    (PPID 1), the exact profile path, and the launch flags used by our
+    Playwright workers.  That combination prevents a normal Chrome window from
+    being mistaken for a stale worker process.
+    """
+    if not enabled:
+        return False
+    pid = _singleton_pid(owner)
+    if pid is None or pid == os.getpid() or not _pid_is_running(pid):
+        return False
+    info = _profile_process_info(pid)
+    command = str(info.get("command") or "")
+    if (
+        int(info.get("ppid") or 0) != 1
+        or "--no-startup-window" not in command
+        or "--use-mock-keychain" not in command
+        or not _command_uses_exact_user_data_dir(command, user_data_dir)
+    ):
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+
+    timeout_seconds = max(
+        1,
+        _int_env("GEMINI_BROWSER_ORPHAN_CHROME_TERMINATE_WAIT_SECONDS", 5),
+    )
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not _pid_is_running(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def _singleton_pid(target: str) -> Optional[int]:
     text = str(target or "")
     marker = "pid "
@@ -2253,6 +2859,55 @@ def _looks_like_incomplete_response(text: Any) -> bool:
     return bool(dangling_re.search(clean))
 
 
+def _expects_pdf_evidence_contract(prompt: Any) -> bool:
+    value = str(prompt or "").lower()
+    return (
+        "pdf_evidence_v1_json" in value
+        or "report_pdf_evidence_v1" in value
+    )
+
+
+def _has_complete_pdf_evidence_payload(text: Any) -> bool:
+    """Require a decodable final evidence block, not a partially streamed prefix."""
+
+    raw = str(text or "")
+    decoder = json.JSONDecoder()
+    index = 0
+    decoded = 0
+    while index < len(raw) and decoded < 200:
+        match = re.search(r"[\{\[]", raw[index:])
+        if not match:
+            return False
+        start = index + match.start()
+        try:
+            payload, consumed = decoder.raw_decode(raw[start:])
+        except ValueError:
+            index = start + 1
+            continue
+        decoded += 1
+        if _contains_pdf_evidence_envelope(payload):
+            return True
+        index = start + max(1, consumed)
+    return False
+
+
+def _contains_pdf_evidence_envelope(value: Any) -> bool:
+    if isinstance(value, dict):
+        schema = str(value.get("schema_version") or "").strip().lower()
+        if schema == "report_pdf_evidence_v1" and isinstance(value.get("claims"), list):
+            return True
+        if isinstance(value.get("evidence_map"), list):
+            return True
+        return any(
+            _contains_pdf_evidence_envelope(item)
+            for item in value.values()
+            if isinstance(item, (dict, list))
+        )
+    if isinstance(value, list):
+        return any(_contains_pdf_evidence_envelope(item) for item in value)
+    return False
+
+
 def _promptless_submit_confirmed(state: Any, composer_text: str, generating: bool = False, *, clicked_send: bool = False) -> bool:
     if generating:
         return True
@@ -2309,6 +2964,67 @@ def _looks_like_page_shell_text(value: str) -> bool:
     )
     hits = sum(1 for marker in shell_markers if marker in text)
     return hits >= 3 and "gemini" in text
+
+
+def _locator_control_text(locator) -> str:
+    if locator is None:
+        return ""
+    values = []
+    try:
+        values.append(locator.inner_text(timeout=2_000))
+    except Exception:
+        pass
+    for name in ("aria-label", "title", "data-test-id", "data-testid"):
+        try:
+            values.append(locator.get_attribute(name, timeout=2_000))
+        except Exception:
+            continue
+    return " | ".join(
+        value
+        for value in (_clean_text(str(item or "")) for item in values)
+        if value
+    )[:300]
+
+
+def _looks_like_pro_model_label(value: Any) -> bool:
+    text = _clean_text(str(value or ""))
+    if not text or len(text) > 300:
+        return False
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("upgrade", "get pro", "try pro", "升级", "订阅")):
+        return False
+    return bool(re.search(r"(?:^|[^a-z])pro(?:$|[^a-z])", lowered))
+
+
+def _pro_model_selection_message(result: Any) -> str:
+    data = result if isinstance(result, dict) else {}
+    status = str(data.get("status") or "")
+    if status == "already_pro":
+        return "Gemini 当前已是 Pro 模型"
+    if status == "selected_pro":
+        return "已切换并确认 Gemini Pro 模型"
+    if status == "selected_unconfirmed":
+        return "已点击 Gemini Pro 模型，页面未提供可确认的模型标签，继续上传"
+    if status == "disabled":
+        return "Gemini Pro 模型优先已关闭，继续使用当前模型"
+    if status == "picker_not_found":
+        return "当前 Gemini 页面没有模型切换入口，继续使用页面默认模型"
+    if status == "pro_option_not_found":
+        return "Gemini 模型菜单没有可用的 Pro 选项，继续使用当前模型"
+    return "Gemini Pro 模型切换未成功，继续使用当前模型"
+
+
+def _contract_diagnostics(value: Any) -> Dict[str, Any]:
+    diagnostics = dict(value) if isinstance(value, dict) else {"valid": bool(value)}
+    diagnostics["valid"] = bool(diagnostics.get("valid"))
+    raw_codes = diagnostics.get("error_codes")
+    if isinstance(raw_codes, (list, tuple)):
+        diagnostics["error_codes"] = [str(item) for item in raw_codes if str(item).strip()]
+    else:
+        diagnostics["error_codes"] = []
+    raw_errors = diagnostics.get("errors")
+    diagnostics["errors"] = list(raw_errors) if isinstance(raw_errors, (list, tuple)) else []
+    return diagnostics
 
 
 def _truthy_env(name: str, default: bool = False) -> bool:

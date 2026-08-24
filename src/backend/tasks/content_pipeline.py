@@ -23,6 +23,7 @@ from services.content_pipeline.audio_cleaner_adapter import (
     AudioCleanerAdapter,
 )
 from services.content_pipeline.auto_publish_handoff import submit_publish_clean_output_task
+from services.content_pipeline.dedupe_service import mark_task_assets
 from services.runtime_guard import (
     guard_publication_task_start,
     is_retryable_db_error,
@@ -191,6 +192,7 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
                 error_message=None,
                 completed_at=None,
             )
+            mark_task_assets(task_key, status="cleaning")
 
             options = PdfCleanOptions(
                 threshold=int(cleaner_config.get("threshold") or 245),
@@ -258,6 +260,7 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
 
             merged_result = dict(progress_result)
             merged_result.update(result)
+            mark_task_assets(task_key, status="cleaned")
             source_refs = _clean_source_refs(pipeline, merged_result)
             result = _enqueue_auto_publish_task(
                 task_id=task_key,
@@ -277,6 +280,14 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
                 error_message=None,
                 result=result,
             )
+            _notify_content_pipeline_event(
+                "clean_completed",
+                task_id=task_key,
+                task_label="PDF 清洗",
+                pipeline=pipeline,
+                result=result,
+                stage_status="completed",
+            )
             logger.info("PDF clean task completed: %s files=%s", task_key, len(cleaned_files))
             _notify_workflow_run(
                 workflow_run_id,
@@ -286,6 +297,10 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
             return True
         except Exception as exc:
             db.session.rollback()
+            try:
+                mark_task_assets(task_key, status="failed")
+            except Exception:
+                logger.exception("PDF clean asset status update failed: %s", task_key)
             if _is_retryable_db_error(exc):
                 db.session.remove()
                 raise
@@ -299,6 +314,15 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
                 error_message=str(exc),
                 completed_at=datetime.utcnow(),
                 result=failure_result,
+            )
+            _notify_content_pipeline_event(
+                "clean_failed",
+                task_id=task_key,
+                task_label="PDF 清洗",
+                pipeline=pipeline,
+                result=failure_result,
+                error=str(exc),
+                stage_status="failed",
             )
             _notify_workflow_run(workflow_run_id, task_key)
             logger.error("PDF clean task failed: %s", exc, exc_info=True)
@@ -352,6 +376,7 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
                 error_message=None,
                 completed_at=None,
             )
+            mark_task_assets(task_key, status="cleaning")
 
             options = AudioCleanOptions(
                 head_trim_seconds=float(cleaner_config.get("head_trim_seconds") or 11),
@@ -402,6 +427,7 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
 
             merged_result = dict(progress_result)
             merged_result.update(result)
+            mark_task_assets(task_key, status="cleaned")
             source_refs = _clean_source_refs(pipeline, merged_result)
             result = _enqueue_auto_publish_task(
                 task_id=task_key,
@@ -421,6 +447,14 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
                 error_message=None,
                 result=result,
             )
+            _notify_content_pipeline_event(
+                "clean_completed",
+                task_id=task_key,
+                task_label="音频清洗",
+                pipeline=pipeline,
+                result=result,
+                stage_status="completed",
+            )
             logger.info("Audio clean task completed: %s files=%s", task_key, len(cleaned_files))
             _notify_workflow_run(
                 workflow_run_id,
@@ -430,6 +464,10 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
             return True
         except Exception as exc:
             db.session.rollback()
+            try:
+                mark_task_assets(task_key, status="failed")
+            except Exception:
+                logger.exception("Audio clean asset status update failed: %s", task_key)
             if _is_retryable_db_error(exc):
                 db.session.remove()
                 raise
@@ -443,6 +481,15 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
                 error_message=str(exc),
                 completed_at=datetime.utcnow(),
                 result=failure_result,
+            )
+            _notify_content_pipeline_event(
+                "clean_failed",
+                task_id=task_key,
+                task_label="音频清洗",
+                pipeline=pipeline,
+                result=failure_result,
+                error=str(exc),
+                stage_status="failed",
             )
             _notify_workflow_run(workflow_run_id, task_key)
             logger.error("Audio clean task failed: %s", exc, exc_info=True)
@@ -475,15 +522,28 @@ def _run_content_pipeline_task_with_guard(celery_task, task_id, task_label, runn
             raise celery_task.retry(exc=exc, countdown=countdown, max_retries=_db_retry_count())
 
         details = _mark_clean_task_failed_safely(task_id, exc)
-        _send_direct_clean_failure_email(
-            task_id=task_id,
-            task_label=task_label,
-            error=exc,
-            workflow_run_id=details.get("workflow_run_id"),
-            persisted=details.get("persisted"),
-            workflow_notified=details.get("workflow_notified"),
-            persist_error=details.get("persist_error"),
-        )
+        direct_notified = False
+        if details.get("pipeline"):
+            direct_notified = bool(
+                _notify_content_pipeline_event(
+                    "clean_failed",
+                    task_id=task_id,
+                    task_label=task_label,
+                    pipeline=details.get("pipeline"),
+                    error=str(exc),
+                    stage_status="failed",
+                ).get("queued")
+            )
+        if not direct_notified:
+            _send_direct_clean_failure_email(
+                task_id=task_id,
+                task_label=task_label,
+                error=exc,
+                workflow_run_id=details.get("workflow_run_id"),
+                persisted=details.get("persisted"),
+                workflow_notified=details.get("workflow_notified"),
+                persist_error=details.get("persist_error"),
+            )
         logger.error(
             "[CONTENT_PIPELINE] task failed outside normal handler | task=%s label=%s persisted=%s workflow_notified=%s error=%s",
             task_id,
@@ -515,6 +575,7 @@ def _mark_clean_task_failed_safely(task_id, exc):
             pipeline = (task.params or {}).get("content_pipeline") or {}
             workflow_run_id = _workflow_run_id_from_pipeline(pipeline)
             details["workflow_run_id"] = workflow_run_id
+            details["pipeline"] = pipeline
 
             result = dict(task.result or {})
             result["error"] = str(exc)
@@ -528,6 +589,10 @@ def _mark_clean_task_failed_safely(task_id, exc):
             flag_modified(task, "result")
             db.session.commit()
             details["persisted"] = True
+            try:
+                mark_task_assets(task_id, status="failed")
+            except Exception:
+                logger.exception("[CONTENT_PIPELINE] failed to release dedupe reservation | task=%s", task_id)
             details["workflow_notified"] = _notify_workflow_run(workflow_run_id, task_id)
     except Exception as persist_exc:
         details["persist_error"] = str(persist_exc)
@@ -568,6 +633,37 @@ def _send_direct_clean_failure_email(
         workflow_notification_service.send_email_message(subject, "\n".join(lines))
     except Exception:
         logger.exception("[CONTENT_PIPELINE] direct failure email failed | task=%s", task_id)
+
+
+def _notify_content_pipeline_event(
+    event_type,
+    *,
+    task_id,
+    task_label,
+    pipeline,
+    result=None,
+    error=None,
+    stage_status=None,
+):
+    try:
+        from services.content_pipeline.notification_service import notify_content_pipeline_event
+
+        return notify_content_pipeline_event(
+            event_type,
+            task_id=task_id,
+            task_label=task_label,
+            pipeline=pipeline,
+            result=result,
+            error=error,
+            stage_status=stage_status,
+        )
+    except Exception:
+        logger.exception(
+            "[CONTENT_PIPELINE] milestone notification failed | event=%s task=%s",
+            event_type,
+            task_id,
+        )
+        return {"queued": False, "reason": "queue_failed"}
 
 
 def _enqueue_auto_publish_task(*, task_id, file_type, result, options, pipeline, source_refs=None):

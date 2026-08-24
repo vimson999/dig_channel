@@ -69,6 +69,18 @@
                     </div>
 
                     <div class="space-y-3">
+                        <label class="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3">
+                            <input id="include-processed-videos" type="checkbox" class="mt-1 h-4 w-4 rounded border-blue-300" checked>
+                            <span class="min-w-0 flex-1">
+                                <span class="block text-sm font-black">生成 MP4 视频</span>
+                                <span class="mt-1 block text-xs leading-5 text-slate-500">清理 data/processed 下超过保留期的生成 MP4；保留 JSON、音频、缓存和仍被任务引用的视频。</span>
+                                <span class="mt-2 block">
+                                    <span class="text-xs text-slate-500">保留天数</span>
+                                    <input id="processed-video-days" type="number" min="0" max="365" step="1" value="3" class="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                                </span>
+                            </span>
+                        </label>
+
                         <label class="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
                             <input id="include-sync-raw" type="checkbox" class="mt-1 h-4 w-4 rounded border-slate-300" checked>
                             <span class="min-w-0 flex-1">

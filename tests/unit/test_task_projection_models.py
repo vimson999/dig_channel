@@ -12,6 +12,30 @@ from models.zsxq_sync import ZsxqAttachment, ZsxqSyncRun, ZsxqTopic  # noqa: E40
 
 
 class TaskProjectionModelTest(unittest.TestCase):
+    def test_zsxq_model_indexes_do_not_recreate_cleanup_candidates(self):
+        topic_indexes = {index.name for index in ZsxqTopic.__table__.indexes}
+        attachment_indexes = {
+            index.name for index in ZsxqAttachment.__table__.indexes
+        }
+
+        self.assertIn(
+            "ix_zsxq_topics_group_tab_create_time_desc",
+            topic_indexes,
+        )
+        self.assertNotIn(
+            "ix_zsxq_topics_group_tab_create_synced_desc",
+            topic_indexes,
+        )
+        self.assertNotIn("ix_zsxq_topics_topic_type", topic_indexes)
+        self.assertIn(
+            "ix_zsxq_attachments_publish_status_updated_at",
+            attachment_indexes,
+        )
+        self.assertNotIn(
+            "ix_zsxq_attachments_publish_status",
+            attachment_indexes,
+        )
+
     def test_zsxq_topic_payload_hash_matches_postgres_jsonb_text(self):
         topic = ZsxqTopic(
             group_id="g",

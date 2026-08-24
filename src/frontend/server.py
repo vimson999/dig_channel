@@ -5,18 +5,184 @@
 """
 
 import http.server
-import socketserver
+import html
+import json
 import os
+import secrets
+import socketserver
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+try:
+    from src.frontend.zsxq_sidebar_bridge import (
+        MAX_FORM_BODY_BYTES,
+        ZsxqSidebarHtmlBridge,
+    )
+except ModuleNotFoundError:
+    from zsxq_sidebar_bridge import MAX_FORM_BODY_BYTES, ZsxqSidebarHtmlBridge
 
 PORT = 8888
+ZSXQ_CSRF_SECRET = secrets.token_bytes(32)
 
 class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+    zsxq_backend_url = "http://127.0.0.1:5001"
+    zsxq_csrf_secret = ZSXQ_CSRF_SECRET
+
+    def do_GET(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/zsxq-sidebar-history.html":
+            query = urllib.parse.parse_qs(parsed.query)
+            page = self._zsxq_bridge().render_history(query.get("kind", [""])[0])
+            self._send_html(page.status_code, page.body)
+            return
+        if parsed.path == "/zsxq-sidebar-submit.html":
+            query = urllib.parse.parse_qs(parsed.query)
+            page = self._zsxq_bridge().render_submit_form(query.get("kind", [""])[0])
+            self._send_html(page.status_code, page.body)
+            return
+        if parsed.path == "/bridge/zsxq/health":
+            self._handle_zsxq_health()
+            return
+        if parsed.path == "/zsxq-sidebar-bridge.html":
+            self._handle_zsxq_health_page()
+            return
+        super().do_GET()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path != "/zsxq-sidebar-submit.html":
+            self.send_error(404)
+            return
+        content_type = self.headers.get_content_type()
+        if content_type != "application/x-www-form-urlencoded":
+            self._send_bridge_error(415, "unsupported_media_type")
+            return
+        raw_length = self.headers.get("Content-Length", "")
+        try:
+            content_length = int(raw_length)
+        except ValueError:
+            self._send_bridge_error(400, "invalid_content_length")
+            return
+        if content_length < 1 or content_length > MAX_FORM_BODY_BYTES:
+            self._send_bridge_error(
+                413 if content_length > MAX_FORM_BODY_BYTES else 400,
+                "request_body_too_large" if content_length > MAX_FORM_BODY_BYTES else "empty_request_body",
+            )
+            return
+        try:
+            decoded_body = self.rfile.read(content_length).decode("utf-8")
+        except UnicodeDecodeError:
+            self._send_bridge_error(400, "invalid_utf8")
+            return
+        fields = urllib.parse.parse_qs(decoded_body, keep_blank_values=True)
+        page = self._zsxq_bridge().submit(
+            fields.get("kind", [""])[0],
+            fields.get("csrf_token", [""])[0],
+            fields.get("manifest_json", [""])[0],
+        )
+        self._send_html(page.status_code, page.body)
+
+    def _send_bridge_error(self, status_code, code):
+        body = f"""<!doctype html>
+<html lang=\"zh-CN\">
+<head><meta charset=\"utf-8\"><title>请求失败</title></head>
+<body><main><h1>请求失败</h1><pre>{html.escape(code)}</pre></main></body>
+</html>
+"""
+        self._send_html(status_code, body)
+
+    def _zsxq_bridge(self):
+        return ZsxqSidebarHtmlBridge(
+            self.zsxq_backend_url,
+            self.zsxq_csrf_secret,
+        )
+
+    def _fetch_zsxq_health(self):
+        health_url = f"{self.zsxq_backend_url.rstrip('/')}/health"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(health_url, timeout=3) as response:
+            return json.load(response)
+
+    def _handle_zsxq_health(self):
+        try:
+            payload = self._fetch_zsxq_health()
+        except (OSError, ValueError, urllib.error.URLError):
+            self._send_json(
+                502,
+                {
+                    "status": "unavailable",
+                    "error": "zsxq_backend_unavailable",
+                },
+            )
+            return
+
+        self._send_json(200, payload)
+
+    def _handle_zsxq_health_page(self):
+        try:
+            payload = self._fetch_zsxq_health()
+        except (OSError, ValueError, urllib.error.URLError):
+            payload = {
+                "status": "unavailable",
+                "version": "unknown",
+            }
+
+        status = html.escape(str(payload.get("status", "unknown")))
+        version = html.escape(str(payload.get("version", "unknown")))
+        body = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>知识星球本地桥接</title>
+</head>
+<body>
+  <main>
+    <h1>知识星球本地桥接</h1>
+    <p>服务状态：{status}</p>
+    <p>版本：{version}</p>
+  </main>
+</body>
+</html>
+"""
+        self._send_html(200, body)
+
+    def _send_json(self, status_code, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_html(self, status_code, body):
+        encoded_body = body.encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        if self._is_zsxq_bridge_request():
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+            )
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Length", str(len(encoded_body)))
+        self.end_headers()
+        self.wfile.write(encoded_body)
+
+    def _is_zsxq_bridge_request(self):
+        path = urllib.parse.urlsplit(self.path).path
+        return path.startswith("/zsxq-sidebar-") or path.startswith("/bridge/zsxq/")
+
     def end_headers(self):
-        # 添加CORS头部
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        if not self._is_zsxq_bridge_request():
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
         super().end_headers()
 
 class ReusableThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):

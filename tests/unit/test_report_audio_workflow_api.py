@@ -1,3 +1,4 @@
+import io
 import sys
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from flask import Flask
 from sqlalchemy import event, update
 from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
+from sqlalchemy.exc import OperationalError
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -25,6 +27,7 @@ from services.bilibili_publish import (  # noqa: E402
     bilibili_upload_children,
     create_bilibili_upload_task,
     enqueue_bilibili_upload_task,
+    retry_bilibili_upload_child,
 )
 from services.browser_publish_jobs import (  # noqa: E402
     BrowserPublishJobSpec,
@@ -61,6 +64,175 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(end, datetime(2026, 7, 14, 16, 0, 0))
         self.assertIsNone(report_audio_api._submission_date_utc_range("2026-02-30"))
 
+    def test_lightweight_child_query_exposes_captcha_handoff_without_full_result(self):
+        parent = PublicationTask(
+            status="failed",
+            current_step="failed",
+            progress=45,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.flush()
+        parent_id = str(parent.id)
+        child = PublicationTask(
+            status="blocked_by_captcha",
+            current_step="blocked_by_captcha",
+            progress=45,
+            error_message="豆包要求完成图片验证",
+            params={
+                "feature": report_audio_api.doubao_browser_tts.FEATURE_NAME,
+                "parent_task_id": parent_id,
+                "doubao_browser_tts": {
+                    "metadata": {
+                        "parent_task_id": parent_id,
+                        "chunk_index": 5,
+                        "chunk_total": 5,
+                    }
+                },
+            },
+            result={
+                "captcha_blocked": {
+                    "requires_human_action": True,
+                    "workflow_url": f"http://localhost:5001/report-audio-workflow-detail.html?job_id={parent_id}",
+                    "resolution_steps": ["完成验证", "从失败处续跑"],
+                },
+                "notifications": {
+                    "doubao_captcha_blocked": {
+                        "sent": False,
+                        "reason": "missing_config",
+                        "to": "owner@example.test",
+                    }
+                },
+            },
+        )
+        db.session.add(child)
+        db.session.commit()
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(statement)
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            grouped = report_audio_api._child_summaries_for_parent_ids([parent_id])
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        payload = grouped[parent_id]["doubao_browser_tts"][0]
+        self.assertTrue(payload["captcha_blocked"]["requires_human_action"])
+        notification = payload["notifications"]["doubao_captcha_blocked"]
+        self.assertEqual(notification["reason"], "missing_config")
+        self.assertEqual(notification["recipient_hint"], "o***@example.test")
+        self.assertNotIn("to", notification)
+        selects = [
+            statement.lower()
+            for statement in statements
+            if statement.lstrip().lower().startswith("select")
+        ]
+        self.assertEqual(len(selects), 1)
+        self.assertNotIn("publication_tasks.params", selects[0])
+
+    def test_manual_captcha_confirmation_resolves_history_before_retry(self):
+        """A verified captcha attempt must no longer block the replacement retry."""
+        parent = PublicationTask(
+            status="failed",
+            current_step="failed",
+            progress=45,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.flush()
+        parent_id = str(parent.id)
+        blocked = PublicationTask(
+            status="blocked_by_captcha",
+            current_step="blocked_by_captcha",
+            progress=45,
+            error_message="豆包要求完成图片验证",
+            parent_task_id=parent_id,
+            feature=report_audio_api.doubao_browser_tts.FEATURE_NAME,
+            params={
+                "feature": report_audio_api.doubao_browser_tts.FEATURE_NAME,
+                "parent_task_id": parent_id,
+            },
+            result={"captcha_blocked": {"requires_human_action": True, "reason": "captcha"}},
+        )
+        replacement = PublicationTask(
+            status="pending",
+            current_step="queued",
+            parent_task_id=parent_id,
+            feature=report_audio_api.doubao_browser_tts.FEATURE_NAME,
+            params={
+                "feature": report_audio_api.doubao_browser_tts.FEATURE_NAME,
+                "parent_task_id": parent_id,
+            },
+            result={},
+        )
+        db.session.add_all([blocked, replacement])
+        db.session.commit()
+
+        handler = getattr(report_audio_api, "_resolve_doubao_captcha_children_for_retry", None)
+        self.assertTrue(callable(handler), "missing CAPTCHA recovery state transition")
+        resolved_ids = handler(parent_id, verified_at="2026-08-13T08:20:00Z")
+        db.session.commit()
+
+        self.assertEqual(resolved_ids, [str(blocked.id)])
+        refreshed = db.session.get(PublicationTask, blocked.id)
+        self.assertEqual(refreshed.status, "blocked_by_captcha")
+        self.assertEqual(refreshed.current_step, "captcha_verified")
+        captcha = refreshed.result["captcha_blocked"]
+        self.assertFalse(captcha["requires_human_action"])
+        self.assertEqual(captcha["resolved_at"], "2026-08-13T08:20:00Z")
+        self.assertEqual(captcha["recovery_state"], "retry_queued")
+
+        current = report_audio_api._child_summaries_for_parent_ids([parent_id])[parent_id]["doubao_browser_tts"]
+        self.assertEqual([item["job_id"] for item in current], [str(replacement.id)])
+
+
+    def test_read_endpoint_replaces_invalid_session_and_retries_once(self):
+        attempts = []
+
+        @report_audio_api._retry_transient_db_read("test read")
+        def read_once():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise OperationalError(
+                    "SELECT 1",
+                    {},
+                    Exception("server closed the connection unexpectedly"),
+                )
+            return "ok"
+
+        with (
+            patch.object(report_audio_api, "_set_hot_read_statement_timeout"),
+            patch.object(report_audio_api, "_reset_failed_db_session") as reset,
+        ):
+            self.assertEqual(read_once(), "ok")
+
+        self.assertEqual(len(attempts), 2)
+        reset.assert_called_once_with()
+
+    def test_linked_pdf_bytes_identity_matches_varchar_projection(self):
+        self.assertEqual(
+            report_audio_api._linked_pdf_bytes_identity(
+                SimpleNamespace(report_audio_pdf_bytes=495174)
+            ),
+            "495174",
+        )
+        self.assertEqual(
+            report_audio_api._linked_pdf_bytes_identity(
+                SimpleNamespace(report_audio_pdf_bytes="495174")
+            ),
+            "495174",
+        )
+        self.assertEqual(
+            report_audio_api._linked_pdf_bytes_identity(
+                SimpleNamespace(report_audio_pdf_bytes="not-a-number")
+            ),
+            "",
+        )
+
     def test_video_options_accept_both_vertical_schemes(self):
         options = report_audio_api._parse_video_options({
             "vertical_video_enabled": "1",
@@ -89,6 +261,273 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
 
         self.assertEqual(options["vertical_video_schemes"], ["scheme1"])
         self.assertEqual(options["vertical_video_scheme"], "scheme1")
+
+    def test_pdf_evidence_is_opt_in_for_new_submissions(self):
+        self.assertFalse(report_audio_api._parse_pdf_evidence_enabled({}))
+        self.assertFalse(report_audio_api._parse_pdf_evidence_enabled({"pdf_evidence_enabled": "0"}))
+        self.assertTrue(report_audio_api._parse_pdf_evidence_enabled({"pdf_evidence_enabled": "1"}))
+
+    def test_initial_submission_persists_1500_character_contract(self):
+        pdf_path = Path(self.tmpdir.name) / "source.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+        pdf_meta = {
+            "filename": "source.pdf",
+            "path": str(pdf_path),
+            "bytes": pdf_path.stat().st_size,
+        }
+
+        with (
+            self.app.test_request_context(
+                "/api/report-audio-workflows/jobs",
+                method="POST",
+                data={
+                    "pdf": (io.BytesIO(pdf_path.read_bytes()), "source.pdf"),
+                    "prompt": "请解析 PDF 并撰写口播文案。",
+                    "review_prompt": "请复核事实并输出最终稿。",
+                    "gem_v2_mode": "off",
+                },
+                content_type="multipart/form-data",
+            ),
+            patch.object(report_audio_api.gemini_browser, "status_payload", return_value={"configured": True}),
+            patch.object(report_audio_api.doubao_browser_tts, "status_payload", return_value={"configured": True}),
+            patch.object(report_audio_api, "require_report_audio_workers_ready", return_value={"ready": True}),
+            patch.object(report_audio_api, "_save_pdf_upload", return_value=pdf_meta),
+            patch.object(
+                report_audio_api,
+                "apply_async_after_db_release",
+                return_value=SimpleNamespace(id="celery-initial"),
+            ),
+        ):
+            response = report_audio_api.create_job.__wrapped__(SimpleNamespace(id="user-1"))
+
+        payload = response.get_json()
+        task = PublicationTask.query.filter_by(id=payload["job_id"]).one()
+        workflow = task.params["report_audio_workflow"]
+        self.assertEqual(workflow["gemini_min_final_chars"], 1500)
+        self.assertTrue(workflow["gemini_prefer_pro_model"])
+        self.assertFalse(workflow["gemini_require_pro_model"])
+        self.assertEqual(workflow["gem_v2_mode"], "off")
+        self.assertIn("不少于 1500 字", workflow["prompt"])
+        self.assertIn("不少于 1500 字", workflow["review_prompt"])
+
+    def test_default_shadow_submission_omits_legacy_prompt_expansion_and_followups(self):
+        pdf_path = Path(self.tmpdir.name) / "source.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+        pdf_meta = {
+            "filename": "source.pdf",
+            "path": str(pdf_path),
+            "bytes": pdf_path.stat().st_size,
+        }
+
+        with (
+            self.app.test_request_context(
+                "/api/report-audio-workflows/jobs",
+                method="POST",
+                data={
+                    "pdf": (io.BytesIO(pdf_path.read_bytes()), "source.pdf"),
+                    "prompt": "旧版调用提示词",
+                    "review_prompt": "旧版通用复核",
+                    "followups": '["旧版追加追问"]',
+                    "gem_v2_focus": "重点解释验证指标",
+                },
+                content_type="multipart/form-data",
+            ),
+            patch.object(report_audio_api.gemini_browser, "status_payload", return_value={"configured": True}),
+            patch.object(report_audio_api.doubao_browser_tts, "status_payload", return_value={"configured": True}),
+            patch.object(report_audio_api, "require_report_audio_workers_ready", return_value={"ready": True}),
+            patch.object(report_audio_api, "_save_pdf_upload", return_value=pdf_meta),
+            patch.object(
+                report_audio_api,
+                "apply_async_after_db_release",
+                return_value=SimpleNamespace(id="celery-shadow"),
+            ),
+        ):
+            response = report_audio_api.create_job.__wrapped__(SimpleNamespace(id="user-1"))
+
+        payload = response.get_json()
+        task = PublicationTask.query.filter_by(id=payload["job_id"]).one()
+        workflow = task.params["report_audio_workflow"]
+        self.assertEqual(workflow["gem_v2_mode"], "shadow")
+        self.assertEqual(workflow["gem_v2_focus"], "重点解释验证指标")
+        self.assertNotIn("不少于 1500 字", workflow["prompt"])
+        self.assertNotIn("不少于 1500 字", workflow["review_prompt"])
+        self.assertEqual(workflow["followups"], [])
+        self.assertEqual(task.result["gem_v2"], {"mode": "shadow", "status": "pending"})
+
+    def test_submission_rejects_unknown_gem_v2_mode(self):
+        pdf_path = Path(self.tmpdir.name) / "source.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+        with self.app.test_request_context(
+            "/api/report-audio-workflows/jobs",
+            method="POST",
+            data={
+                "pdf": (io.BytesIO(pdf_path.read_bytes()), "source.pdf"),
+                "gem_v2_mode": "experimental",
+            },
+            content_type="multipart/form-data",
+        ):
+            response, status_code = report_audio_api.create_job.__wrapped__(SimpleNamespace(id="user-1"))
+
+        self.assertEqual(status_code, 400)
+        self.assertIn("gem_v2_mode", response.get_json()["message"])
+
+    def test_script_regeneration_creates_independent_strict_pro_material_task(self):
+        pdf_path = Path(self.tmpdir.name) / "source.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+        source = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            feature=FEATURE_NAME,
+            user_id="user-1",
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "prompt": "解析 PDF 并撰写口播文案。",
+                    "review_prompt": "复核事实并输出最终稿。",
+                    "pdf": {"path": str(pdf_path), "filename": "source.pdf"},
+                    "pdf_path": str(pdf_path),
+                    "video": {"enabled": True, "vertical_enabled": True},
+                },
+            },
+            result={"pdf": {"path": str(pdf_path), "filename": "source.pdf"}},
+        )
+        db.session.add(source)
+        db.session.commit()
+
+        with (
+            self.app.test_request_context(json={"minimum_chars": 1500}),
+            patch.object(
+                report_audio_api,
+                "maybe_guarded_apply_async",
+                return_value={
+                    "async_result": SimpleNamespace(id="celery-regenerate"),
+                    "deferred": False,
+                    "admission": {"allowed": True},
+                },
+            ) as enqueue,
+        ):
+            response, status_code = report_audio_api.regenerate_script.__wrapped__(
+                SimpleNamespace(id="user-1"),
+                source.id,
+            )
+
+        payload = response.get_json()
+        self.assertEqual(status_code, 202)
+        child = PublicationTask.query.filter_by(id=payload["regeneration_job_id"]).one()
+        workflow = child.params["report_audio_workflow"]
+        self.assertNotEqual(child.id, source.id)
+        self.assertEqual(child.source_task_id, source.id)
+        self.assertEqual(child.parent_feature, report_audio_api.SCRIPT_REGENERATION_PARENT_FEATURE)
+        self.assertTrue(workflow["script_material_only"])
+        self.assertTrue(workflow["force_gemini_regeneration"])
+        self.assertTrue(workflow["gemini_require_pro_model"])
+        self.assertEqual(workflow["gemini_min_final_chars"], 1500)
+        self.assertFalse(workflow["pdf_evidence_enabled"])
+        self.assertFalse(workflow["video"]["enabled"])
+        self.assertIn("不少于 1500 字", workflow["review_prompt"])
+        self.assertNotIn("PDF_EVIDENCE_V1_JSON", workflow["review_prompt"])
+        enqueue.assert_called_once()
+
+    def test_generate_audio_from_script_creates_idempotent_tts_only_continuation(self):
+        pdf_path = Path(self.tmpdir.name) / "source.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+        script = "这是一段已经完成审核、可以直接交给语音合成的财经口播正文。" * 30
+        structured = {
+            "title": "测试研报",
+            "final_script_for_tts": script,
+        }
+        source = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            feature=FEATURE_NAME,
+            user_id="user-1",
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"path": str(pdf_path), "filename": "source.pdf"},
+                    "pdf_path": str(pdf_path),
+                    "script_material_only": True,
+                    "tts_provider": "doubao_browser",
+                    "gemini_min_final_chars": 1500,
+                    "video": {"enabled": False},
+                },
+            },
+            result={
+                "pdf": {"path": str(pdf_path), "filename": "source.pdf"},
+                "structured_result": structured,
+                "script_material": {"status": "completed"},
+            },
+        )
+        db.session.add(source)
+        db.session.commit()
+
+        with (
+            self.app.test_request_context(json={}),
+            patch.object(
+                report_audio_api.doubao_browser_tts,
+                "status_payload",
+                return_value={"configured": True},
+            ),
+            patch.object(
+                report_audio_api,
+                "maybe_guarded_apply_async",
+                return_value={
+                    "async_result": SimpleNamespace(id="celery-audio"),
+                    "deferred": False,
+                    "admission": {"allowed": True},
+                },
+            ) as enqueue,
+        ):
+            response, status_code = report_audio_api.generate_audio_from_script.__wrapped__(
+                SimpleNamespace(id="user-1"),
+                source.id,
+            )
+            repeated_response, repeated_status = report_audio_api.generate_audio_from_script.__wrapped__(
+                SimpleNamespace(id="user-1"),
+                source.id,
+            )
+
+        payload = response.get_json()
+        repeated_payload = repeated_response.get_json()
+        self.assertEqual(status_code, 202)
+        self.assertEqual(repeated_status, 202)
+        self.assertEqual(
+            repeated_payload["audio_generation_job_id"],
+            payload["audio_generation_job_id"],
+        )
+        child = PublicationTask.query.filter_by(id=payload["audio_generation_job_id"]).one()
+        workflow = child.params["report_audio_workflow"]
+        self.assertNotEqual(child.id, source.id)
+        self.assertEqual(child.source_task_id, source.id)
+        self.assertEqual(child.parent_feature, report_audio_api.AUDIO_GENERATION_PARENT_FEATURE)
+        self.assertFalse(workflow["script_material_only"])
+        self.assertFalse(workflow["force_gemini_regeneration"])
+        self.assertFalse(workflow["video"]["enabled"])
+        self.assertEqual(workflow["visual_scheme_keys"], [])
+        self.assertEqual(workflow["tts_provider"], "doubao_browser")
+        self.assertNotIn("gemini_min_final_chars", workflow)
+        self.assertEqual(child.result["structured_result"]["final_script_for_tts"], script)
+        enqueue.assert_called_once()
+
+    def test_video_options_normalize_explicit_keyframe_outputs(self):
+        options = report_audio_api._parse_video_options({
+            "video_render_mode": "keyframes",
+            "keyframe_outputs": (
+                '["bilibili_cover", "vertical_keyframe_scheme1", '
+                '"vertical_keyframe_scheme1", "unknown"]'
+            ),
+        })
+
+        self.assertEqual(options["render_mode"], "keyframes")
+        self.assertEqual(
+            options["keyframe_outputs"],
+            ["bilibili_cover", "vertical_keyframe_scheme1"],
+        )
 
     def test_scheme3_scene_timeline_falls_back_to_script_weight(self):
         root = Path(self.tmpdir.name)
@@ -129,6 +568,7 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             timeline["scenes"][1]["duration_seconds"],
             timeline["scenes"][0]["duration_seconds"],
         )
+        self.assertEqual(timeline["scenes"][0]["script_text"], "十个字的短文案")
 
     def test_ready_linked_visual_workflow_uses_live_scene_readiness(self):
         with patch.object(
@@ -339,6 +779,56 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(items[0]["request"]["pdf"]["filename"], "report-2.pdf")
         self.assertEqual(2, len(statements), statements)
         self.assertIn("select count(publication_tasks.id)", statements[0])
+
+    def test_job_detail_page_batches_finalization_summaries(self):
+        tasks = []
+        for index in range(2):
+            task = PublicationTask(
+                status="completed",
+                current_step="done",
+                progress=100,
+                feature=FEATURE_NAME,
+                user_id="user-1",
+                params={"feature": FEATURE_NAME, "user_id": "user-1"},
+                result={},
+                created_at=datetime(2026, 7, 18, 3, index, 0),
+            )
+            db.session.add(task)
+            tasks.append(task)
+        db.session.commit()
+        expected = {
+            str(task.id): {"job_id": f"finalization-{index}"}
+            for index, task in enumerate(tasks)
+        }
+        query = PublicationTask.query.filter(
+            PublicationTask.feature == FEATURE_NAME,
+            PublicationTask.user_id == "user-1",
+        )
+
+        with (
+            patch.object(
+                report_audio_api,
+                "finalization_summaries_for_audio_ids",
+                return_value=expected,
+                create=True,
+            ) as batch,
+            patch.object(report_audio_api, "_job_payload", wraps=report_audio_api._job_payload) as payload,
+        ):
+            items, total, pages = report_audio_api._query_jobs_page(
+                query,
+                page=1,
+                per_page=2,
+                include_detail=True,
+            )
+
+        self.assertEqual((len(items), total, pages), (2, 2, 1))
+        batch.assert_called_once()
+        requested_ids = batch.call_args.args[0]
+        self.assertEqual(set(requested_ids), {str(task.id) for task in tasks})
+        self.assertEqual(payload.call_count, 2)
+        for call in payload.call_args_list:
+            task = call.args[0]
+            self.assertEqual(call.kwargs["finalization"], expected[str(task.id)])
 
     def test_clear_jobs_cache_matches_composite_visible_user_key(self):
         key = ("system+user-1", 1, 10, "", "", "")
@@ -671,6 +1161,10 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             return_value=parent,
         ), patch.object(
             report_audio_api,
+            "require_report_audio_workers_ready",
+            return_value={"ready": True},
+        ), patch.object(
+            report_audio_api,
             "maybe_guarded_apply_async",
             return_value={
                 "async_result": SimpleNamespace(id="celery-manual-retry"),
@@ -694,6 +1188,56 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertNotIn("completed_at", parent.result)
         self.assertEqual(parent.result["queue_repair_history"][-1]["count"], 3)
         self.assertEqual(parent.result["queue_repair_history"][-1]["archive_reason"], "manual_retry")
+
+    def test_manual_retry_cleans_cached_evidence_contract_when_evidence_is_disabled(self):
+        cached_contract = report_audio_api.DEFAULT_REVIEW_PROMPT.replace(
+            "必须包含claim_text",
+            "必须包含 claim_text",
+        )
+        parent = PublicationTask(
+            status="failed",
+            current_step="failed",
+            progress=18,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                FEATURE_NAME: {
+                    "pdf_evidence_enabled": False,
+                    "review_prompt": cached_contract,
+                },
+            },
+            result={"error": "picker_not_found"},
+            error_message="picker_not_found",
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        with patch.object(
+            report_audio_api,
+            "_get_owned_task",
+            return_value=parent,
+        ), patch.object(
+            report_audio_api,
+            "require_report_audio_workers_ready",
+            return_value={"ready": True},
+        ), patch.object(
+            report_audio_api,
+            "maybe_guarded_apply_async",
+            return_value={
+                "async_result": SimpleNamespace(id="celery-clean-retry"),
+                "deferred": False,
+                "admission": {"allowed": True, "reason": "ok"},
+            },
+        ):
+            response = report_audio_api.retry_job.__wrapped__(
+                SimpleNamespace(id="user-1"),
+                parent.id,
+            )
+
+        payload = response.get_json()
+        db.session.refresh(parent)
+        self.assertTrue(payload["success"])
+        self.assertNotIn("PDF_EVIDENCE_V1_JSON", parent.params[FEATURE_NAME]["review_prompt"])
 
     def test_manual_retry_can_switch_failed_browser_tts_to_doubao_api(self):
         parent = PublicationTask(
@@ -729,6 +1273,10 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             report_audio_api,
             "is_doubao_api_configured",
             return_value=True,
+        ), patch.object(
+            report_audio_api,
+            "require_report_audio_workers_ready",
+            return_value={"ready": True},
         ), patch.object(
             report_audio_api,
             "maybe_guarded_apply_async",
@@ -905,6 +1453,137 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertIn("publication_task_bilibili_uploads", selects[0])
         self.assertNotIn("publication_tasks.params", selects[0])
         self.assertNotIn("publication_tasks.result", selects[0])
+
+    def test_failed_bilibili_upload_can_be_requeued_without_rebuilding_media(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.commit()
+        child = create_bilibili_upload_task(
+            parent,
+            parent_feature=FEATURE_NAME,
+            source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+            video_path="/tmp/retry-report.mp4",
+            video_key="landscape",
+            title="失败后重投",
+            data={"credential_id": "credential-1", "season_id": "123"},
+        )
+        persisted = PublicationTask.query.filter_by(id=child.id).one()
+        persisted.status = "failed"
+        persisted.current_step = "failed"
+        persisted.progress = 10
+        persisted.error_message = "HTTP 403"
+        persisted.completed_at = datetime.utcnow()
+        db.session.commit()
+
+        with patch(
+            "services.bilibili_publish.dispatch_platform_publish",
+            return_value={"celery_id": "retry-celery-id"},
+        ) as dispatch:
+            retried = retry_bilibili_upload_child(
+                child.id,
+                parent_task_id=parent.id,
+                parent_feature=FEATURE_NAME,
+                source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+            )
+
+        self.assertEqual(retried.id, child.id)
+        self.assertEqual(retried.status, "pending")
+        self.assertEqual(retried.current_step, "queued")
+        self.assertEqual(retried.progress, 0)
+        self.assertEqual(retried.error_message, None)
+        self.assertEqual(retried.celery_task_id, "retry-celery-id")
+        dispatch.assert_called_once()
+        broker_task_id = dispatch.call_args.kwargs["broker_task_id"]
+        self.assertTrue(broker_task_id)
+        self.assertNotEqual(broker_task_id, child.id)
+        self.assertEqual(dispatch.call_args.args[0], "bilibili")
+        self.assertEqual(dispatch.call_args.args[1], child.id)
+        self.assertEqual(
+            PublicationTask.query.filter_by(id=child.id).one().result["bilibili_retry_history"][-1]["previous_error"],
+            "HTTP 403",
+        )
+
+    def test_bilibili_upload_retry_rejects_completed_remote_submission(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.commit()
+        child = create_bilibili_upload_task(
+            parent,
+            parent_feature=FEATURE_NAME,
+            source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+            video_path="/tmp/already-submitted.mp4",
+            video_key="landscape",
+            title="已有稿件",
+            data={},
+        )
+        upload = PublicationTaskBilibiliUpload.query.filter_by(task_id=child.id).one()
+        upload.bvid = "BV1already"
+        task = PublicationTask.query.filter_by(id=child.id).one()
+        task.status = "failed"
+        task.error_message = "网络响应中断"
+        db.session.commit()
+
+        with self.assertRaisesRegex(RuntimeError, "已有 B站稿件标识"):
+            retry_bilibili_upload_child(
+                child.id,
+                parent_task_id=parent.id,
+                parent_feature=FEATURE_NAME,
+                source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+            )
+
+    def test_bilibili_upload_retry_restores_failed_state_when_enqueue_fails(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.commit()
+        child = create_bilibili_upload_task(
+            parent,
+            parent_feature=FEATURE_NAME,
+            source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+            video_path="/tmp/retry-fails.mp4",
+            video_key="landscape",
+            title="重投入队失败",
+            data={},
+        )
+        task = PublicationTask.query.filter_by(id=child.id).one()
+        task.status = "failed"
+        task.current_step = "failed"
+        task.error_message = "旧错误"
+        db.session.commit()
+
+        with patch(
+            "services.bilibili_publish.dispatch_platform_publish",
+            side_effect=RuntimeError("broker offline"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "重投入队失败"):
+                retry_bilibili_upload_child(
+                    child.id,
+                    parent_task_id=parent.id,
+                    parent_feature=FEATURE_NAME,
+                    source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+                )
+
+        restored = PublicationTask.query.filter_by(id=child.id).one()
+        self.assertEqual(restored.status, "failed")
+        self.assertEqual(restored.current_step, "failed")
+        self.assertIn("broker offline", restored.error_message)
 
     def test_bilibili_worker_context_is_one_structured_query_without_task_json(self):
         parent = PublicationTask(
@@ -1191,6 +1870,35 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertIn("第一部分", payload["audio_script"]["text"])
         self.assertIn("结构", payload["audio_script"]["quality_issue"])
 
+    def test_job_payload_repairs_legacy_generic_gfhk_cover_prefix_for_display(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"filename": "GHHK - AI Capex & Platform Value Shift.pdf"},
+                },
+            },
+            result={
+                "structured_result": {
+                    "title": "广发证券：2028年资本开支增速急刹车",
+                    "cover_title": "机构：AI资本开支与平台价值转移\n2028年增速急刹车",
+                },
+                "pdf": {"filename": "GHHK - AI Capex & Platform Value Shift.pdf"},
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        payload = report_audio_api._job_payload(parent)
+
+        self.assertTrue(payload["title"].startswith("香港广发："))
+        self.assertTrue(payload["cover_title"].startswith("香港广发："))
+        self.assertNotIn("机构：", payload["title"])
+
     def test_job_status_payload_omits_raw_json_payloads(self):
         parent = PublicationTask(
             status="processing",
@@ -1220,6 +1928,116 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertNotIn("raw_result", payload)
         self.assertNotIn("logs", payload)
         self.assertNotIn("structured_result", payload)
+
+    def test_job_payload_exposes_capacity_wait_with_next_retry_time(self):
+        parent = PublicationTask(
+            status="pending",
+            current_step="deferred_capacity",
+            progress=95,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {"pdf": {"filename": "capacity.pdf"}},
+            },
+            result={
+                "runtime_guard": {
+                    "reason": "feature_capacity",
+                    "message": "系统保护：任务稍后自动重试",
+                    "active_count": 2,
+                    "limit": 2,
+                    "countdown": 180,
+                    "queue": "report_audio_workflow",
+                    "created_at": "2026-08-10T01:00:00Z",
+                }
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        payload = report_audio_api._job_payload(parent)
+
+        capacity = payload["orchestration"]["capacity"]
+        self.assertEqual(capacity["active_count"], 2)
+        self.assertEqual(capacity["limit"], 2)
+        self.assertEqual(capacity["countdown"], 180)
+        self.assertEqual(capacity["next_retry_at"], "2026-08-10T01:03:00Z")
+        fragments, _request = report_audio_api._status_orchestration_fragments(parent.id)
+        self.assertEqual(fragments["runtime_guard"]["active_count"], 2)
+
+    def test_job_payload_exposes_exact_waiting_child_projection(self):
+        parent = PublicationTask(
+            status="processing",
+            current_step="pub_waiting",
+            progress=95,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {"pdf": {"filename": "waiting.pdf"}},
+            },
+            result={
+                "waiting_child": {
+                    "label": "publisher_video",
+                    "child_id": "publisher-child-1",
+                    "status": "processing",
+                    "step": "v_synthesis",
+                    "updated_at": "2026-08-10T01:05:00Z",
+                }
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        payload = report_audio_api._job_payload(parent)
+
+        waiting = payload["orchestration"]["waiting"]
+        self.assertEqual(waiting["label"], "publisher_video")
+        self.assertEqual(waiting["child_id"], "publisher-child-1")
+        self.assertEqual(waiting["status"], "processing")
+        self.assertEqual(waiting["step"], "v_synthesis")
+
+    def test_completed_job_exposes_seven_stages_and_completion_outputs(self):
+        contract = {
+            "schema_version": "report_video_completion_v1",
+            "ready": True,
+            "missing": [],
+            "outputs": {
+                "landscape": {"ready": True, "path": "/tmp/landscape.mp4", "reason": None},
+                "vertical_scheme3": {"ready": True, "path": "/tmp/scheme3.mp4", "reason": None},
+            },
+        }
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"filename": "completed.pdf"},
+                    "video": {
+                        "enabled": True,
+                        "vertical_enabled": True,
+                        "vertical_video_schemes": ["scheme3"],
+                    },
+                },
+            },
+            result={"completion_contract": contract},
+            completed_at=datetime.utcnow(),
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        payload = report_audio_api._job_payload(parent)
+
+        orchestration = payload["orchestration"]
+        self.assertEqual(
+            [stage["label"] for stage in orchestration["stages"]],
+            ["输入", "文案", "音频", "视觉", "成片", "验收", "发布"],
+        )
+        self.assertTrue(orchestration["completion_contract"]["ready"])
+        self.assertTrue(
+            orchestration["completion_contract"]["outputs"]["vertical_scheme3"]["ready"]
+        )
 
     def test_previewable_file_is_inline_only_for_preview_requests(self):
         media_path = Path(self.tmpdir.name) / "cover.jpg"
@@ -1779,6 +2597,131 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertFalse(child.params["vertical_thumbnail"]["enabled"])
         self.assertFalse(child.params["vertical_cover"]["enabled"])
         self.assertEqual(child.result["metadata"]["vertical_video_schemes"], [])
+
+    def test_combined_landscape_and_unready_scheme3_still_queues_landscape(self):
+        root = Path(self.tmpdir.name)
+        audio_path = root / "audio.wav"
+        screenshot_path = root / "page.jpg"
+        pdf_path = root / "sample.pdf"
+        audio_path.write_bytes(b"RIFF----WAVE")
+        screenshot_path.write_bytes(b"jpeg")
+        pdf_path.write_bytes(b"%PDF-1.4")
+
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            user_id="user-1",
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "pdf": {"filename": "sample.pdf", "path": str(pdf_path)},
+                    "video": {"enabled": True},
+                },
+            },
+            result={
+                "audio": {"wav_path": str(audio_path), "seconds": 12.0},
+                "structured_result": {
+                    "final_script_for_tts": "测试口播稿。",
+                    "cover_title": "测试标题",
+                },
+                "pdf_first_page_image": {"path": str(screenshot_path), "bytes": 4},
+                "video": {"render_mode": "keyframes"},
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+
+        with (
+            self.app.test_request_context(
+                json={
+                    "vertical_video_schemes": ["scheme3"],
+                    "include_landscape": True,
+                    "force": True,
+                },
+            ),
+            patch.object(
+                report_audio_api,
+                "_ready_linked_visual_workflow_id",
+                return_value=None,
+            ),
+            patch.object(
+                report_audio_api.run_publication_pipeline,
+                "apply_async",
+                return_value=SimpleNamespace(id="celery-landscape-fallback"),
+            ),
+        ):
+            response = report_audio_api.generate_vertical_video.__wrapped__(
+                SimpleNamespace(id="user-1"),
+                parent.id,
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["success"], payload)
+        child = PublicationTask.query.filter_by(source_task_id=parent.id, feature="publisher").one()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["partial_success"])
+        self.assertEqual(payload["submitted_vertical_video_schemes"], [])
+        self.assertEqual(payload["skipped_outputs"][0]["output"], "scheme3")
+        self.assertTrue(child.params["video"]["enabled"])
+        self.assertFalse(child.params["vertical_video"]["enabled"])
+
+    def test_keyframe_confirmation_persists_full_chain_instead_of_dropping_scheme3(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            feature=FEATURE_NAME,
+            user_id="user-1",
+            params={"feature": FEATURE_NAME, "user_id": "user-1", "report_audio_workflow": {}},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.commit()
+        coordinator = SimpleNamespace(id="finalization-1")
+        summary = {
+            "job_id": "finalization-1",
+            "status": "processing",
+            "step": "visual_queued",
+            "progress": 20,
+            "include_landscape": True,
+            "vertical_video_schemes": ["scheme3"],
+            "message": "白板任务已创建",
+        }
+
+        with (
+            self.app.test_request_context(json={
+                "include_landscape": True,
+                "vertical_video_schemes": ["scheme3"],
+                "visual_scheme_key": "stick_figure",
+            }),
+            patch.object(
+                report_audio_api,
+                "create_or_resume_finalization",
+                return_value=coordinator,
+            ) as create_intent,
+            patch.object(report_audio_api, "finalization_summary", return_value=summary),
+            patch.object(report_audio_api, "_linked_visual_video_payloads", return_value=[]),
+            patch.object(report_audio_api, "_job_payload", return_value={"job_id": parent.id, "children": {}}),
+        ):
+            response, status_code = report_audio_api.confirm_keyframes.__wrapped__(
+                SimpleNamespace(id="user-1"),
+                parent.id,
+            )
+
+        payload = response.get_json()
+        self.assertEqual(status_code, 202)
+        self.assertTrue(payload["accepted"])
+        self.assertEqual(payload["finalization"]["vertical_video_schemes"], ["scheme3"])
+        create_intent.assert_called_once_with(
+            parent.id,
+            include_landscape=True,
+            schemes=["scheme3"],
+            visual_scheme_key="stick_figure",
+            selection_source="keyframe-confirmation",
+            force=True,
+        )
 
     def test_main_publisher_vertical_output_is_reused_as_downloadable_video(self):
         root = Path(self.tmpdir.name)

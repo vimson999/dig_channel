@@ -9,6 +9,8 @@ class Mp3VideoWorkflowPage {
         this.audioAssetRequestSeq = 0;
         this.audioAssetWorkflowSeq = 0;
         this.selectedAudioAsset = null;
+        this.uploadedAudioFile = null;
+        this.uploadedAudioObjectUrl = '';
         this.jobs = [];
         this.jobPage = this.initialJobPage();
         this.jobStatus = this.initialJobStatus();
@@ -27,6 +29,9 @@ class Mp3VideoWorkflowPage {
             notice: document.getElementById('notice'),
             selectedBadge: document.getElementById('selected-badge'),
             audioAssetTabs: document.getElementById('audio-asset-tabs'),
+            audioUploadInput: document.getElementById('audio-upload-input'),
+            audioUploadSummary: document.getElementById('audio-upload-summary'),
+            clearAudioUploadBtn: document.getElementById('clear-audio-upload-btn'),
             audioAssetSearch: document.getElementById('audio-asset-search'),
             audioAssetRefreshBtn: document.getElementById('audio-asset-refresh-btn'),
             audioAssetSummary: document.getElementById('audio-asset-summary'),
@@ -199,6 +204,8 @@ class Mp3VideoWorkflowPage {
         this.els.refreshStatusBtn.addEventListener('click', () => this.refreshStatus());
         this.els.restartWorkerBtn.addEventListener('click', () => this.restartWorker());
         this.els.audioAssetRefreshBtn.addEventListener('click', () => this.loadAudioAssets({ page: this.audioAssetPage }));
+        this.els.audioUploadInput?.addEventListener('change', (event) => this.handleAudioUploadChange(event));
+        this.els.clearAudioUploadBtn?.addEventListener('click', () => this.clearUploadedAudio());
         this.els.audioAssetTabs?.addEventListener('click', (event) => this.handleAudioAssetScopeClick(event));
         this.els.audioAssetSearch.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') this.loadAudioAssets({ page: 1 });
@@ -254,11 +261,12 @@ class Mp3VideoWorkflowPage {
         const { timeoutMs = 15000, ...fetchOptions } = options;
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        const isFormData = typeof FormData !== 'undefined' && fetchOptions.body instanceof FormData;
         try {
             const response = await fetch(`${this.apiRoot()}${path}`, {
                 ...fetchOptions,
                 headers: {
-                    ...this.headers(true),
+                    ...this.headers(!isFormData),
                     ...(fetchOptions.headers || {})
                 },
                 signal: controller.signal,
@@ -371,6 +379,65 @@ class Mp3VideoWorkflowPage {
         }
     }
 
+    handleAudioUploadChange(event) {
+        const file = event.target?.files?.[0];
+        if (!file) return;
+        const extension = String(file.name || '').split('.').pop()?.toLowerCase() || '';
+        const allowed = new Set(['mp3', 'm4a', 'wav', 'aac', 'flac', 'ogg', 'opus']);
+        if (!allowed.has(extension)) {
+            this.setNotice('只支持 MP3、M4A、WAV、AAC、FLAC、OGG 或 OPUS 音频。', 'warning');
+            event.target.value = '';
+            return;
+        }
+        const maxBytes = 512 * 1024 * 1024;
+        if (file.size > maxBytes) {
+            this.setNotice('音频文件不能超过 512MB。', 'warning');
+            event.target.value = '';
+            return;
+        }
+        this.releaseUploadedAudioPreview();
+        this.uploadedAudioFile = file;
+        this.uploadedAudioObjectUrl = URL.createObjectURL(file);
+        this.selectedAudioAsset = {
+            attachment_id: `upload-${Date.now()}`,
+            filename: file.name,
+            name: file.name,
+            topic_title: file.name,
+            tab_label: '本地上传',
+            bytes: file.size,
+            file_ext: extension,
+            is_upload: true,
+            upload_file: file,
+        };
+        if (this.els.audioUploadSummary) {
+            this.els.audioUploadSummary.textContent = `已选择：${file.name} · ${this.formatBytes(file.size)}，投递时上传并编排。`;
+        }
+        if (this.els.clearAudioUploadBtn) this.els.clearAudioUploadBtn.classList.remove('hidden');
+        this.updateSelectedAudioPanel();
+        this.renderAudioAssets();
+        this.setNotice('本地 MP3 已选择，可以直接投递编排。', 'success');
+    }
+
+    releaseUploadedAudioPreview() {
+        if (this.uploadedAudioObjectUrl) {
+            URL.revokeObjectURL(this.uploadedAudioObjectUrl);
+            this.uploadedAudioObjectUrl = '';
+        }
+    }
+
+    clearUploadedAudio({ clearSelection = true } = {}) {
+        this.releaseUploadedAudioPreview();
+        this.uploadedAudioFile = null;
+        if (this.els.audioUploadInput) this.els.audioUploadInput.value = '';
+        if (this.els.audioUploadSummary) this.els.audioUploadSummary.textContent = '尚未选择本地音频。';
+        this.els.clearAudioUploadBtn?.classList.add('hidden');
+        if (clearSelection && this.selectedAudioAsset?.is_upload) {
+            this.selectedAudioAsset = null;
+            this.updateSelectedAudioPanel();
+            this.renderAudioAssets();
+        }
+    }
+
     handleAudioAssetScopeClick(event) {
         const button = event.target.closest('[data-audio-asset-scope]');
         if (!button) return;
@@ -378,13 +445,14 @@ class Mp3VideoWorkflowPage {
         if (nextScope === this.audioAssetScope) return;
         this.audioAssetScope = nextScope;
         this.audioAssetPage = 1;
+        this.clearUploadedAudio({ clearSelection: true });
         this.selectedAudioAsset = null;
         this.updateSelectedAudioPanel();
         this.loadAudioAssets({ page: 1 });
     }
 
     audioAssetScopeLabel() {
-        return this.audioAssetScope === 'hot' ? '热门 MP3 ' : '已同步 MP3 ';
+        return this.audioAssetScope === 'hot' ? '热门 MP3 ' : '全部 MP3 ';
     }
 
     renderAudioAssetTabs() {
@@ -440,6 +508,7 @@ class Mp3VideoWorkflowPage {
         if (!target) return;
         const asset = this.audioAssets.find((item) => item.attachment_id === target.dataset.audioId);
         if (!asset) return;
+        this.clearUploadedAudio({ clearSelection: false });
         this.selectedAudioAsset = asset;
         this.updateSelectedAudioPanel();
         this.renderAudioAssets();
@@ -476,12 +545,17 @@ class Mp3VideoWorkflowPage {
             this.audioAssetDownloadText(asset),
             this.formatDateTime(asset.topic_create_time) || asset.topic_create_time || '',
         ].filter(Boolean).join(' · ');
-        this.els.selectedAudioPlayer.src = this.absoluteUrl(`/api/mp3-video-workflows/audio-assets/${encodeURIComponent(asset.attachment_id)}/preview`);
+        this.els.selectedAudioPlayer.src = asset.is_upload && this.uploadedAudioObjectUrl
+            ? this.uploadedAudioObjectUrl
+            : this.absoluteUrl(`/api/mp3-video-workflows/audio-assets/${encodeURIComponent(asset.attachment_id)}/preview`);
     }
 
     async submit() {
-        if (!this.selectedAudioAsset) {
-            this.setNotice('请先选择一个已同步 MP3。', 'warning');
+        const uploadedAudio = this.selectedAudioAsset?.is_upload && this.uploadedAudioFile
+            ? this.uploadedAudioFile
+            : null;
+        if (!this.selectedAudioAsset || (this.selectedAudioAsset.is_upload && !uploadedAudio)) {
+            this.setNotice('请先选择一个已同步 MP3，或上传本地 MP3。', 'warning');
             return;
         }
         const inputSource = this.currentInputSource();
@@ -501,7 +575,6 @@ class Mp3VideoWorkflowPage {
         this.els.submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>投递中';
         try {
             const payload = {
-                audio_asset_id: this.selectedAudioAsset.attachment_id,
                 input_source: inputSource,
                 render_mode: renderMode,
                 generate_subtitles: generateSubtitles,
@@ -518,13 +591,28 @@ class Mp3VideoWorkflowPage {
                     generate_subtitles: generateSubtitles,
                 }
             };
+            let body = JSON.stringify({
+                ...payload,
+                ...(uploadedAudio ? {} : { audio_asset_id: this.selectedAudioAsset.attachment_id }),
+            });
+            if (uploadedAudio) {
+                const formData = new FormData();
+                formData.append('audio', uploadedAudio, uploadedAudio.name);
+                Object.entries(payload).forEach(([key, value]) => {
+                    if (value !== undefined && value !== null) {
+                        formData.append(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
+                    }
+                });
+                body = formData;
+            }
             const result = await this.request('/api/mp3-video-workflows/jobs', {
                 method: 'POST',
-                body: JSON.stringify(payload),
-                timeoutMs: 20000,
+                body,
+                timeoutMs: uploadedAudio ? 120000 : 20000,
             });
             this.setNotice(`任务已投递：${result.job_id || result.data?.job_id}`, 'success');
             this.jobPage = 1;
+            if (uploadedAudio) this.clearUploadedAudio();
             await this.loadAudioAssetWorkflowStats(this.audioAssets);
             await this.loadHistory({ page: 1, force: true });
         } catch (error) {
@@ -724,8 +812,12 @@ class Mp3VideoWorkflowPage {
         const workflowMeta = this.audioAssetWorkflowMeta(asset);
         const syncTime = this.formatDateTime(asset.topic_last_synced_at || asset.updated_at);
         const topicTime = this.formatDateTime(asset.topic_create_time) || asset.topic_create_time || '';
+        const sourceLabel = asset.source_label || asset.tab_label || '';
+        const pipelineStatus = asset.asset_kind === 'content_pipeline'
+            ? this.pipelineAssetStatusLabel(asset.pipeline_status)
+            : '';
         const metaLine = [
-            asset.tab_label || '',
+            sourceLabel,
             syncTime ? `同步 ${syncTime}` : '',
             topicTime ? `发布 ${topicTime}` : '',
         ].filter(Boolean).join(' · ');
@@ -751,6 +843,7 @@ class Mp3VideoWorkflowPage {
                     <span class="rounded-full border px-2 py-0.5 text-[11px] font-bold ${downloadBadgeClass}">
                         <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
                     </span>
+                    ${pipelineStatus ? `<span class="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-bold text-indigo-700">${this.escape(pipelineStatus)}</span>` : ''}
                     <span class="rounded-full px-2 py-0.5 text-[11px] font-bold ${workflowMeta.className}">
                         ${workflowMeta.latestMeta ? `<span class="mr-1 inline-block h-1.5 w-1.5 rounded-full ${workflowMeta.latestMeta.dot}"></span>` : ''}
                         ${this.escape(workflowMeta.text)}
@@ -763,9 +856,22 @@ class Mp3VideoWorkflowPage {
     }
 
     audioAssetDownloadText(asset) {
+        if (asset?.asset_kind === 'content_pipeline') return '手动投递';
         const count = asset?.download_count;
         return window.DownloadCountHighlight?.badgeText(count)
             || (Number.isFinite(Number(count)) ? `下载 ${Number(count)} 次` : '下载 -');
+    }
+
+    pipelineAssetStatusLabel(status) {
+        const labels = {
+            reserved: '已接收',
+            cleaning: '清洗中',
+            cleaned: '已清洗',
+            failed: '清洗失败',
+            canceled: '已取消',
+            released: '已释放',
+        };
+        return labels[String(status || '').trim().toLowerCase()] || '已投递';
     }
 
     audioAssetDownloadBadgeClass(asset) {
@@ -788,6 +894,20 @@ class Mp3VideoWorkflowPage {
                 text: '编排状态待刷新',
                 detail: '',
                 className: 'bg-amber-50 text-amber-700',
+            };
+        }
+
+        if (asset.asset_kind === 'content_pipeline' && !asset.workflow?.has_workflow) {
+            const status = String(asset.pipeline_status || '').trim().toLowerCase();
+            const running = ['reserved', 'cleaning'].includes(status);
+            const failed = ['failed', 'canceled'].includes(status);
+            return {
+                latestMeta: null,
+                text: failed ? '清洗失败' : (running ? '清洗中' : '已清洗'),
+                detail: '内容流水线',
+                className: failed
+                    ? 'bg-rose-50 text-rose-700'
+                    : (running ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'),
             };
         }
 
@@ -1023,7 +1143,7 @@ class Mp3VideoWorkflowPage {
             ? '手动 DS 返回'
             : (inputSource === 'ima_transcript' ? 'IMA + DS 返回' : 'Gemini 第一轮');
         const renderMode = job.render_mode || job.request?.render_mode || 'full_video';
-        const generateSubtitles = job.generate_subtitles ?? job.request?.generate_subtitles ?? true;
+        const generateSubtitles = job.generate_subtitles ?? job.request?.generate_subtitles ?? false;
         const timeText = [
             audio.start_seconds !== undefined ? `起点 ${this.formatDuration(audio.start_seconds)}` : null,
             audio.end_seconds !== null && audio.end_seconds !== undefined ? `终点 ${this.formatDuration(audio.end_seconds)}` : '终点自动',

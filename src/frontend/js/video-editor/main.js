@@ -45,6 +45,7 @@ const state = {
     renderIdleSince: null,
     renderWakeInFlight: false,
     lastRenderWakeAt: 0,
+    taskListPollingController: null,
     subtitle_y_pct: DEFAULT_SUBTITLE_Y_BY_RATIO['16:9']
 };
 
@@ -77,8 +78,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initEventListeners();
     initSubtitleDrag();
     renderTimeline();
-    refreshTaskList();
-    setInterval(refreshTaskList, 4000);
+    startTaskListPolling();
 });
 
 function initSubtitleDrag() {
@@ -546,6 +546,20 @@ function trimActiveEnd() {
 // --- 任务管理 ---
 
 let previousTaskStatuses = {}; 
+
+function startTaskListPolling(options = {}) {
+    state.taskListPollingController?.stop();
+    state.taskListPollingController = window.VisibilityPolling.create({
+        documentRef: options.documentRef,
+        windowRef: options.windowRef,
+        setIntervalFn: options.setIntervalFn,
+        clearIntervalFn: options.clearIntervalFn,
+        intervalMs: 4000,
+        poll: refreshTaskList,
+    });
+    state.taskListPollingController.start();
+    return state.taskListPollingController;
+}
 
 async function refreshTaskList() {
     try {

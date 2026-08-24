@@ -6,8 +6,10 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from flask import Flask
 from PIL import Image, ImageDraw
 
 
@@ -21,7 +23,20 @@ from services.report_stick_figure_video import (  # noqa: E402
     probe_video,
     render_scene_timeline,
 )
-from services.report_stick_figure_audio_alignment import align_storyboard_to_audio  # noqa: E402
+from services.report_stick_figure_audio_alignment import (  # noqa: E402
+    align_scene_timeline_to_audio,
+    align_storyboard_to_audio,
+    align_subtitles_to_audio,
+)
+from models import (  # noqa: E402
+    ReportStickFigureAudioTrack,
+    ReportStickFigureSceneAsset,
+    db,
+)
+from models.task import PublicationTask  # noqa: E402
+from tasks.report_stick_figure_video import (  # noqa: E402
+    maybe_auto_enqueue_stick_figure_video,
+)
 
 
 class ReportStickFigureVideoRenderTest(unittest.TestCase):
@@ -104,6 +119,8 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
         self.assertIn("复用整篇语音并对齐", frontend_text)
         self.assertIn("整篇 WAV 连续时间轴", frontend_text)
         self.assertIn('payload["video"] = _video_payload(parent_snapshot)', api_text)
+        self.assertIn("_overlay_durable_audio_strategy", api_text)
+        self.assertIn("if task\n            else None", api_text)
         self.assertIn('/jobs/<job_id>/audio-preview', api_text)
 
         task_text = (BACKEND_DIR / "tasks" / "report_stick_figure_video.py").read_text(encoding="utf-8")
@@ -133,6 +150,14 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
         self.assertIn("scrollIntoView({behavior:'smooth'", frontend_text)
         self.assertIn("new IntersectionObserver", frontend_text)
         self.assertIn("setActiveQuickNav", frontend_text)
+        self.assertIn('id="sidebar-task-status"', html)
+        self.assertIn('id="sidebar-refresh-btn"', html)
+        self.assertIn("max-h-[calc(100vh-7rem)]", html)
+        self.assertIn("workflowStageData()", frontend_text)
+        self.assertIn("renderSidebarStatus()", frontend_text)
+        self.assertIn('aria-label="左侧视觉任务流程状态"', frontend_text)
+        self.assertIn("最近刷新", frontend_text)
+        self.assertIn("sticky-sidebar-status-v4-storyboard-guard", html)
 
     def test_report_audio_detail_exposes_sticky_quick_navigation(self):
         html = (
@@ -298,6 +323,75 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
         self.assertEqual(result["timeline"][0]["end_seconds"], result["timeline"][1]["start_seconds"])
         self.assertEqual(5.0, result["timeline"][1]["end_seconds"])
 
+    def test_subtitle_alignment_preserves_original_copy_with_asr_timestamps(self):
+        subtitles = [
+            {"start": 0.0, "end": 2.0, "text": "钢厂产量还在惯性走高"},
+            {"start": 2.0, "end": 2.1, "text": "。"},
+            {"start": 2.0, "end": 5.0, "text": "下游真实需求正在下滑。"},
+        ]
+        asr = [
+            {"start": 0.0, "end": 1.6, "text": "钢厂产量还在惯性走高"},
+            {"start": 2.1, "end": 4.1, "text": "下游真实需求正在下滑"},
+        ]
+
+        result = align_subtitles_to_audio(
+            subtitles,
+            asr,
+            audio_seconds=4.5,
+        )
+
+        self.assertEqual(
+            ["钢厂产量还在惯性走高。", "下游真实需求正在下滑。"],
+            [item["text"] for item in result["subtitles"]],
+        )
+        self.assertAlmostEqual(result["subtitles"][0]["end"], 1.85, places=2)
+        self.assertEqual(result["subtitles"][1]["start"], result["subtitles"][0]["end"])
+        self.assertEqual(result["subtitles"][-1]["end"], 4.5)
+
+    def test_scheme3_timeline_uses_same_forced_alignment_as_subtitles(self):
+        timeline = {
+            "timing_source": "script_weight",
+            "scenes": [
+                {
+                    "asset_id": "a1",
+                    "sequence": 1,
+                    "image_path": "/tmp/001.png",
+                    "script_text": "第一段研报正文。",
+                    "start_seconds": 0.0,
+                    "end_seconds": 2.5,
+                    "duration_seconds": 2.5,
+                },
+                {
+                    "asset_id": "a2",
+                    "sequence": 2,
+                    "image_path": "/tmp/002.png",
+                    "script_text": "第二段研报正文。",
+                    "start_seconds": 2.5,
+                    "end_seconds": 5.0,
+                    "duration_seconds": 2.5,
+                },
+            ],
+        }
+        asr = [
+            {"start": 0.1, "end": 1.4, "text": "第一段研报正文"},
+            {"start": 2.2, "end": 4.6, "text": "第二段研报正文"},
+        ]
+
+        result = align_scene_timeline_to_audio(
+            timeline,
+            asr,
+            audio_seconds=5.0,
+            source_script="第一段研报正文。第二段研报正文。",
+        )
+
+        self.assertEqual(result["timing_source"], "asr_forced_alignment")
+        self.assertEqual(result["scenes"][0]["image_path"], "/tmp/001.png")
+        self.assertAlmostEqual(result["scenes"][0]["end_seconds"], 1.8, places=2)
+        self.assertEqual(
+            result["scenes"][0]["end_seconds"],
+            result["scenes"][1]["start_seconds"],
+        )
+
     def test_alignment_rejects_audio_from_different_script(self):
         scenes = [{"asset_id": "a1", "segment_id": "s1", "sequence": 1, "script_text": "这是当前研报正文。"}]
         with self.assertRaisesRegex(ValueError, "文案与当前分镜正文不一致"):
@@ -323,6 +417,36 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
         self.assertGreaterEqual(preflight_body.count("workflow_id=workflow_id"), 3)
         self.assertIn("PublicationTask.waiting_child_status: \"failed\"", mark_failed_body)
         self.assertIn("PublicationTask.completed_at: now", mark_failed_body)
+
+    def test_end_to_end_workflow_wires_final_render_from_both_race_orders(self):
+        video_task_text = (
+            BACKEND_DIR / "tasks" / "report_stick_figure_video.py"
+        ).read_text(encoding="utf-8")
+        image_task_text = (
+            BACKEND_DIR / "tasks" / "report_stick_figure_assets.py"
+        ).read_text(encoding="utf-8")
+        monitor_text = (
+            BACKEND_DIR / "apis" / "v1" / "celery_monitor.py"
+        ).read_text(encoding="utf-8")
+        align_completion = video_task_text.split(
+            "def _align_whole_audio(", 1
+        )[1].split("\ndef _update_alignment_parent", 1)[0]
+        image_completion = image_task_text.split(
+            "def _refresh_parent_image_state(", 1
+        )[1].split("\ndef _normalize_png", 1)[0]
+
+        self.assertIn(
+            "maybe_auto_enqueue_stick_figure_video(workflow_id)",
+            align_completion,
+        )
+        self.assertIn(
+            "maybe_auto_enqueue_stick_figure_video(",
+            image_completion,
+        )
+        self.assertIn(
+            "repair_ready_stick_figure_video_workflows_once",
+            monitor_text,
+        )
 
     def test_report_audio_detail_aggregates_visual_videos_by_stable_pdf_identity(self):
         api_text = (
@@ -367,6 +491,100 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
         self.assertNotIn("this.els.root.innerHTML", schedule_body)
         self.assertIn("if (this.sectionRenderCache.get(id) === markup) continue;", frontend_text)
         self.assertIn("if (id === 'publish-center'", frontend_text)
+
+
+class ReportStickFigureAutoRenderContinuationTest(unittest.TestCase):
+    def setUp(self):
+        self.app = Flask(__name__)
+        self.app.config.update(
+            SQLALCHEMY_DATABASE_URI="sqlite:///:memory:",
+            SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        )
+        db.init_app(self.app)
+        self.ctx = self.app.app_context()
+        self.ctx.push()
+        db.create_all()
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        db.session.remove()
+        db.drop_all()
+        self.ctx.pop()
+
+    def test_ready_workflow_auto_enqueues_exactly_one_final_video(self):
+        image_path = Path(self.tmp.name) / "001.png"
+        audio_path = Path(self.tmp.name) / "whole.wav"
+        image_path.write_bytes(b"png")
+        audio_path.write_bytes(b"wav")
+        source = PublicationTask(
+            status="completed",
+            params={"feature": "report_pdf_audio_workflow", "user_id": "user-1"},
+            result={},
+        )
+        workflow = PublicationTask(
+            status="processing",
+            current_step="whole_audio_aligned",
+            progress=88,
+            params={
+                "feature": "report_stick_figure_video_workflow",
+                "user_id": "user-1",
+                "source_feature": "report_pdf_audio_workflow",
+            },
+            result={},
+        )
+        storyboard = PublicationTask(
+            status="completed",
+            params={"feature": "report_visual_plan", "user_id": "user-1"},
+            result={},
+        )
+        db.session.add_all([source, workflow, storyboard])
+        db.session.flush()
+        track = ReportStickFigureAudioTrack(
+            workflow_task_id=workflow.id,
+            storyboard_task_id=storyboard.id,
+            source_task_id=source.id,
+            status="completed",
+            audio_path=str(audio_path),
+            aligned_scene_count=1,
+        )
+        asset = ReportStickFigureSceneAsset(
+            workflow_task_id=workflow.id,
+            storyboard_task_id=storyboard.id,
+            segment_id="segment-1",
+            sequence=1,
+            script_text_hash="script",
+            visual_prompt_hash="visual",
+            image_status="completed",
+            image_path=str(image_path),
+            timeline_start_seconds=0.0,
+            timeline_end_seconds=2.0,
+            timeline_source="whole_audio",
+        )
+        db.session.add_all([track, asset])
+        db.session.commit()
+        workflow_id = str(workflow.id)
+
+        async_result = SimpleNamespace(id="celery-video-1")
+        with patch(
+            "tasks.report_stick_figure_video.maybe_guarded_apply_async",
+            return_value={"async_result": async_result},
+        ) as submit:
+            first = maybe_auto_enqueue_stick_figure_video(workflow_id)
+            second = maybe_auto_enqueue_stick_figure_video(workflow_id)
+
+        self.assertTrue(first["enqueued"])
+        self.assertEqual(second["reason"], "render_already_active")
+        self.assertEqual(submit.call_count, 1)
+        render_tasks = PublicationTask.query.filter(
+            PublicationTask.feature == "report_stick_figure_video_render",
+            PublicationTask.parent_task_id == workflow_id,
+        ).all()
+        self.assertEqual(len(render_tasks), 1)
+        self.assertEqual(render_tasks[0].celery_task_id, "celery-video-1")
+        refreshed = db.session.get(PublicationTask, workflow_id)
+        self.assertEqual(refreshed.current_step, "video_queued")
+        self.assertEqual(refreshed.waiting_child_id, render_tasks[0].id)
 
 
 if __name__ == "__main__":

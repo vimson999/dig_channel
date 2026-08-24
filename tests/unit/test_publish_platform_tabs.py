@@ -40,6 +40,7 @@ class PublishPlatformTabsTest(unittest.TestCase):
             "task-overview",
             "content-extract",
             "downloads",
+            "keyframes",
             "visual-assets",
             "video-files",
             "publish-center",
@@ -50,6 +51,33 @@ class PublishPlatformTabsTest(unittest.TestCase):
         self.assertIn("scrollIntoView({ behavior: 'smooth'", frontend)
         self.assertIn("new IntersectionObserver", frontend)
         self.assertIn("setupQuickNavigation", frontend)
+
+    def test_mp3_detail_shows_stage_progress_sidebar_refresh_and_vertical_keyframes(self):
+        html = (PROJECT_ROOT / "src/frontend/mp3-video-workflow-detail.html").read_text(encoding="utf-8")
+        frontend = (PROJECT_ROOT / "src/frontend/js/mp3-video-workflow-detail.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="sidebar-task-status"', html)
+        self.assertIn('id="sidebar-refresh-btn"', html)
+        self.assertIn("this.mp3WorkflowStages(job)", frontend)
+        self.assertIn("this.renderWorkflowStage(stage)", frontend)
+        self.assertIn("this.renderSidebarStatus(job)", frontend)
+        self.assertIn("this.renderKeyframes(job)", frontend)
+        self.assertIn("横屏和竖屏关键帧均在此展示", frontend)
+        self.assertIn("orientation: vertical ? '竖屏' : '横屏'", frontend)
+
+    def test_mp3_bilibili_account_selection_applies_matching_media_suite(self):
+        html = (PROJECT_ROOT / "src/frontend/mp3-video-workflow-detail.html").read_text(encoding="utf-8")
+        frontend = (PROJECT_ROOT / "src/frontend/js/mp3-video-workflow-detail.js").read_text(encoding="utf-8")
+
+        self.assertIn("accountDefaults: (credential) => this.mp3BilibiliAccountDefaults(credential)", frontend)
+        self.assertIn("label.includes('小君君')", frontend)
+        self.assertIn("{ videoKey: 'landscape', coverKey: 'xiaojunjun_cover' }", frontend)
+        self.assertIn("label.includes('此刻此声')", frontend)
+        self.assertIn("{ videoKey: 'vertical', coverKey: 'finance_cover' }", frontend)
+        self.assertIn(
+            "mp3-video-workflow-detail.js?v=20260806-account-media-defaults-v1-poll-pressure-v2",
+            html,
+        )
 
 
 if __name__ == "__main__":

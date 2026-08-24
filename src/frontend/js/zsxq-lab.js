@@ -45,7 +45,7 @@ const state = {
     syncPollTimer: null,
     syncPollInFlight: false,
     systemSyncSchedulerStatus: null,
-    systemSyncSchedulerPollTimer: null,
+    systemSyncSchedulerPollController: null,
     syncRuns: [],
     systemSyncBatches: [],
     systemSyncBatchesError: null,
@@ -55,6 +55,8 @@ const state = {
     attachmentViewFilter: 'all',
     favoriteTotal: 0,
     favoriteOnly: false,
+    favoriteFilterPending: false,
+    inspectorTopicKey: '',
     lastTopicRequestAt: 0,
     topicCooldownUntil: 0,
 };
@@ -71,10 +73,8 @@ const els = {
     saveCookieBtn: document.getElementById('save-cookie-btn'),
     deleteCookieBtn: document.getElementById('delete-cookie-btn'),
     countInput: document.getElementById('count-input'),
-    scopeSelect: document.getElementById('scope-select'),
     loadGroupsBtn: document.getElementById('load-groups-btn'),
     loadRemoteGroupsBtn: document.getElementById('load-remote-groups-btn'),
-    clearBtn: document.getElementById('clear-btn'),
     groupsList: document.getElementById('groups-list'),
     topicsTitle: document.getElementById('topics-title'),
     topicsSubtitle: document.getElementById('topics-subtitle'),
@@ -128,6 +128,15 @@ const els = {
     hotRankList: document.getElementById('hot-rank-list'),
     topicsTabs: document.getElementById('topics-tabs'),
     topicsList: document.getElementById('topics-list'),
+    headerContext: document.getElementById('zsxq-header-context'),
+    headerSyncCurrentBtn: document.getElementById('header-sync-current-btn'),
+    metricGroup: document.getElementById('zsxq-metric-group'),
+    metricTab: document.getElementById('zsxq-metric-tab'),
+    metricTopics: document.getElementById('zsxq-metric-topics'),
+    metricFiles: document.getElementById('zsxq-metric-files'),
+    metricExternal: document.getElementById('zsxq-metric-external'),
+    metricAi: document.getElementById('zsxq-metric-ai'),
+    topicInspector: document.getElementById('zsxq-topic-inspector'),
 };
 
 let zsxqKnowledgeGraph = null;
@@ -164,190 +173,191 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function initZsxqKnowledgeGraph() {
-    const root = document.getElementById('zsxq-knowledge-map');
-    if (!root || !window.ShioaThreeGraph) return;
-    zsxqKnowledgeGraph = window.ShioaThreeGraph.mount(root, {
-        kicker: 'Knowledge Graph',
-        title: '知识对象图谱',
-        subtitle: '星球、Tab、主题、附件、外链、总结和语音的当前连接。',
-    });
+    zsxqKnowledgeGraph = { update: renderZsxqAnalysisWorkspace };
     updateZsxqKnowledgeGraph();
 }
 
 function updateZsxqKnowledgeGraph() {
     if (!zsxqKnowledgeGraph) return;
-    zsxqKnowledgeGraph.update(buildZsxqKnowledgeGraphModel());
+    zsxqKnowledgeGraph.update();
 }
 
-function buildZsxqKnowledgeGraphModel() {
-    const selectedGroup = state.selectedGroup || null;
-    const tabs = typeof getTabDefinitions === 'function' ? getTabDefinitions() : [];
-    const activeTab = typeof getActiveTabConfig === 'function' ? getActiveTabConfig() : null;
+function contentCoverageMetrics() {
     const topics = Array.isArray(state.currentTopics) ? state.currentTopics : [];
-    const visibleTopics = topics.slice(0, 5);
-    const nodes = [];
-    const links = [];
-    const groupId = selectedGroup ? `group:${selectedGroup.group_id}` : 'group:pending';
-    const groupLabel = selectedGroup?.name || '选择星球';
     let fileCount = 0;
     let externalCount = 0;
     let summaryCount = 0;
     let audioCount = 0;
 
-    nodes.push({
-        id: groupId,
-        type: 'group',
-        label: groupLabel,
-        primary: true,
-        rank: 0,
-        value: selectedGroup ? 10 : 5,
-        status: selectedGroup ? 'success' : 'idle',
-        labelMax: 24,
-    });
-
-    if (!selectedGroup && state.groups.length) {
-        state.groups.slice(0, 6).forEach(group => {
-            const id = `group-option:${group.group_id}`;
-            nodes.push({
-                id,
-                type: 'group',
-                label: group.name || group.group_id,
-                rank: 1,
-                value: group.topic_count ? 4 : 2,
-                status: 'idle',
-                labelMax: 18,
-            });
-            links.push({ source: groupId, target: id, opacity: 0.26 });
-        });
-    }
-
     topics.forEach(topic => {
-        const files = topicFiles(topic);
-        const docs = Array.isArray(topic.external_documents) ? topic.external_documents : [];
-        fileCount += files.length;
-        externalCount += docs.length;
-        docs.forEach(link => {
+        fileCount += topicFiles(topic).length;
+        const documents = Array.isArray(topic.external_documents) ? topic.external_documents : [];
+        externalCount += documents.length;
+        documents.forEach(link => {
             const document = link?.document || {};
-            const summaryStatus = document.summary_status || 'pending';
-            const ttsStatus = document.tts_status || 'not_submitted';
-            if (summaryStatus === 'completed' || summaryStatus === 'summarized') summaryCount += 1;
-            if (ttsStatus === 'completed') audioCount += 1;
+            if (['completed', 'summarized'].includes(document.summary_status)) summaryCount += 1;
+            if (document.tts_status === 'completed') audioCount += 1;
         });
     });
 
-    if (selectedGroup) {
-        const activeTabNode = activeTab || tabs[0] || null;
-        const graphTabs = [];
-        if (activeTabNode) graphTabs.push(activeTabNode);
-        tabs
-            .filter(tab => !activeTabNode || tab.id !== activeTabNode.id)
-            .slice(0, 4)
-            .forEach(tab => graphTabs.push(tab));
+    return { topics, fileCount, externalCount, summaryCount, audioCount };
+}
 
-        graphTabs.forEach(tab => {
-            const id = `tab:${tab.id}`;
-            const active = tab.id === state.activeTab;
-            nodes.push({
-                id,
-                type: 'tab',
-                label: tab.label || tab.id,
-                rank: 1,
-                value: active ? 7 : 4,
-                status: active ? 'success' : 'idle',
-                labelMax: 18,
-            });
-            links.push({ source: groupId, target: id, opacity: active ? 0.78 : 0.28 });
-        });
+function renderZsxqAnalysisWorkspace() {
+    const selectedGroup = state.selectedGroup || null;
+    const activeTab = typeof getActiveTabConfig === 'function' ? getActiveTabConfig() : null;
+    const metrics = contentCoverageMetrics();
+    const groupLabel = selectedGroup?.name || '未选择';
+    const tabLabel = activeTab?.label || '—';
 
-        if (tabs.length > graphTabs.length) {
-            const moreTabId = 'tab:more';
-            nodes.push({
-                id: moreTabId,
-                type: 'tab',
-                label: `其余 ${tabs.length - graphTabs.length} 个 Tab`,
-                rank: 1,
-                value: 3,
-                status: 'idle',
-                labelMax: 16,
-            });
-            links.push({ source: groupId, target: moreTabId, opacity: 0.18 });
-        }
-
-        const activeTabId = activeTabNode ? `tab:${activeTabNode.id}` : groupId;
-        visibleTopics.forEach((topic, index) => {
-            const topicId = `topic:${topicKeyForRender(topic)}`;
-            const title = normalizeTopicTitle(topic.title || topic?.article?.title || topic?.talk?.text || `主题 ${index + 1}`) || `主题 ${index + 1}`;
-            const files = topicFiles(topic);
-            const docs = Array.isArray(topic.external_documents) ? topic.external_documents : [];
-            nodes.push({
-                id: topicId,
-                type: 'topic',
-                label: title,
-                rank: 2,
-                value: Math.min(9, 3 + files.length + docs.length),
-                status: files.length || docs.length ? 'success' : 'idle',
-                labelMax: 22,
-            });
-            links.push({ source: activeTabId, target: topicId, opacity: 0.44 });
-        });
-
-        if (topics.length > visibleTopics.length) {
-            const moreTopicId = 'topic:more';
-            nodes.push({
-                id: moreTopicId,
-                type: 'topic',
-                label: `其余 ${topics.length - visibleTopics.length} 条主题`,
-                rank: 2,
-                value: 4,
-                status: 'idle',
-                labelMax: 16,
-            });
-            links.push({ source: activeTabId, target: moreTopicId, opacity: 0.2 });
-        }
-
-        const aggregateSource = visibleTopics.length ? activeTabId : groupId;
-        [
-            { id: 'aggregate:files', type: 'attachment', label: `附件 ${fileCount || state.fileMap.size}`, value: Math.min(9, 3 + (fileCount || state.fileMap.size) / 8), count: fileCount || state.fileMap.size },
-            { id: 'aggregate:external', type: 'external', label: `外链 ${externalCount}`, value: Math.min(8, 3 + externalCount / 5), count: externalCount },
-            { id: 'aggregate:summary', type: 'summary', label: `总结 ${summaryCount}`, value: Math.min(8, 3 + summaryCount / 4), count: summaryCount },
-            { id: 'aggregate:audio', type: 'audio', label: `语音 ${audioCount}`, value: Math.min(8, 3 + audioCount / 4), count: audioCount },
-        ].forEach(item => {
-            nodes.push({
-                id: item.id,
-                type: item.type,
-                label: item.label,
-                rank: 3,
-                value: item.value,
-                status: item.count ? 'success' : 'idle',
-                labelMax: 14,
-            });
-            links.push({ source: aggregateSource, target: item.id, opacity: item.count ? 0.36 : 0.16 });
-        });
+    if (els.metricGroup) els.metricGroup.textContent = groupLabel;
+    if (els.metricTab) els.metricTab.textContent = tabLabel;
+    if (els.metricTopics) els.metricTopics.textContent = String(metrics.topics.length);
+    if (els.metricFiles) els.metricFiles.textContent = String(metrics.fileCount);
+    if (els.metricExternal) els.metricExternal.textContent = String(metrics.externalCount);
+    if (els.metricAi) els.metricAi.textContent = `${metrics.summaryCount} / ${metrics.audioCount}`;
+    if (els.headerContext) {
+        els.headerContext.textContent = selectedGroup
+            ? `${groupLabel} · ${tabLabel} · 已加载 ${metrics.topics.length} 条主题，右侧检查器会解释当前主题还缺什么。`
+            : `已发现 ${state.groups.length} 个本地星球，选择一个星球后查看内容覆盖和处理缺口。`;
+    }
+    if (els.headerSyncCurrentBtn) {
+        els.headerSyncCurrentBtn.disabled = !selectedGroup || !activeTab || state.isSyncing;
     }
 
-    const loadedText = topics.length ? `${topics.length} 条主题` : (selectedGroup ? '等待主题' : '等待星球');
-    const assetText = `附件 ${fileCount || state.fileMap.size} · 外链 ${externalCount} · AI ${summaryCount}/${audioCount}`;
+    renderTopicInspector(metrics.topics);
+}
+
+function renderTopicInspector(topics) {
+    if (!els.topicInspector) return;
+    const availableKeys = new Set(topics.map(topicKeyForRender));
+    if (!availableKeys.has(state.inspectorTopicKey)) {
+        state.inspectorTopicKey = topics.length ? topicKeyForRender(topics[0]) : '';
+    }
+
+    const topic = topics.find(item => topicKeyForRender(item) === state.inspectorTopicKey);
+    if (!topic) {
+        els.topicInspector.innerHTML = `
+            <div class="zsxq-inspector-empty">
+                <span class="zsxq-inspector-empty-icon"><i class="fas fa-list-check" aria-hidden="true"></i></span>
+                <strong>${state.selectedGroup ? '当前 Tab 暂无可分析主题' : '选择一条主题查看分析'}</strong>
+                <p>${state.selectedGroup ? '切换 Tab 或同步当前 Tab 后，这里会显示内容覆盖和处理建议。' : '这里会解释正文、附件、外链、总结和语音之间的关系，并给出下一步动作。'}</p>
+            </div>
+        `;
+        syncInspectorTopicHighlight();
+        return;
+    }
+
+    const title = normalizeTopicTitle(topic.title || topic?.talk?.text || topic?.article?.title || '无标题主题') || '无标题主题';
+    const author = topic?.owner?.name || topic?.talk?.owner?.name || '未知作者';
+    const created = formatZsxqTime(topic.create_time || topic?.talk?.create_time || '');
+    const files = topicFiles(topic);
+    const documents = Array.isArray(topic.external_documents) ? topic.external_documents : [];
+    const summarized = documents.filter(link => ['completed', 'summarized'].includes(link?.document?.summary_status)).length;
+    const voiced = documents.filter(link => link?.document?.tts_status === 'completed').length;
+    const article = topicArticleLink(topic);
+    const gap = topicCoverageGap(files.length, documents.length, summarized, voiced);
+
+    els.topicInspector.innerHTML = `
+        <div class="zsxq-inspector-head">
+            <div>
+                <p class="zsxq-inspector-eyebrow">主题检查器</p>
+                <h3>${escapeHtml(title)}</h3>
+                <p>${escapeHtml(author)}${created ? ` · ${escapeHtml(created)}` : ''}</p>
+            </div>
+            <span class="zsxq-inspector-status ${gap.className}">${escapeHtml(gap.label)}</span>
+        </div>
+        <div class="zsxq-inspector-coverage" aria-label="主题内容覆盖">
+            ${renderInspectorCoverageItem('正文', true, 'fa-file-lines')}
+            ${renderInspectorCoverageItem('附件', files.length > 0, 'fa-paperclip', files.length)}
+            ${renderInspectorCoverageItem('外链', documents.length > 0, 'fa-link', documents.length)}
+            ${renderInspectorCoverageItem('总结', summarized > 0, 'fa-wand-magic-sparkles', summarized)}
+            ${renderInspectorCoverageItem('语音', voiced > 0, 'fa-volume-high', voiced)}
+        </div>
+        <div class="zsxq-inspector-explanation">
+            <strong>${escapeHtml(gap.title)}</strong>
+            <p>${escapeHtml(gap.description)}</p>
+        </div>
+        <div class="zsxq-inspector-path" aria-label="内容处理路径">
+            <span>星球</span><i class="fas fa-chevron-right" aria-hidden="true"></i>
+            <span>${escapeHtml(getActiveTabConfig()?.label || 'Tab')}</span><i class="fas fa-chevron-right" aria-hidden="true"></i>
+            <span>主题</span><i class="fas fa-chevron-right" aria-hidden="true"></i>
+            <span>${documents.length ? '外链处理' : (files.length ? '附件处理' : '正文阅读')}</span>
+        </div>
+        <div class="zsxq-inspector-actions">
+            <button type="button" data-inspector-action="locate">
+                <i class="fas fa-location-crosshairs" aria-hidden="true"></i>定位主题
+            </button>
+            ${article ? `<a href="${escapeHtml(article.url)}" target="_blank" rel="noopener noreferrer"><i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>查看原文</a>` : ''}
+            <button type="button" data-inspector-action="sync" ${state.isSyncing ? 'disabled' : ''}>
+                <i class="fas fa-cloud-arrow-down" aria-hidden="true"></i>同步当前 Tab
+            </button>
+        </div>
+    `;
+
+    els.topicInspector.querySelector('[data-inspector-action="locate"]')?.addEventListener('click', locateInspectorTopic);
+    els.topicInspector.querySelector('[data-inspector-action="sync"]')?.addEventListener('click', () => els.syncCurrentTabBtn?.click());
+    syncInspectorTopicHighlight();
+}
+
+function renderInspectorCoverageItem(label, complete, icon, count = null) {
+    return `
+        <div class="${complete ? 'is-complete' : 'is-missing'}">
+            <span><i class="fas ${escapeHtml(icon)}" aria-hidden="true"></i></span>
+            <strong>${count === null ? '' : escapeHtml(String(count))}${escapeHtml(label)}</strong>
+            <small>${complete ? '已有' : '缺失'}</small>
+        </div>
+    `;
+}
+
+function topicCoverageGap(fileCount, documentCount, summaryCount, audioCount) {
+    if (documentCount > 0 && summaryCount < documentCount) {
+        return {
+            label: '待处理',
+            className: 'is-warning',
+            title: `还有 ${documentCount - summaryCount} 条外链未总结`,
+            description: '外链已经登记，但信息还没有变成可快速消费的总结。可在主题卡片的外链区域继续抓取或总结。',
+        };
+    }
+    if (summaryCount > 0 && audioCount < summaryCount) {
+        return {
+            label: '可继续',
+            className: 'is-info',
+            title: `已有总结，${summaryCount - audioCount} 条尚未生成语音`,
+            description: '文字信息已经整理完成；如果需要音频消费，可以在主题卡片的外链区域继续生成语音。',
+        };
+    }
+    if (!fileCount && !documentCount) {
+        return {
+            label: '仅正文',
+            className: 'is-neutral',
+            title: '这是一条纯正文主题',
+            description: '没有附件或外链需要处理。当前最有价值的动作是阅读正文、查看评论，或打开原文。',
+        };
+    }
     return {
-        layout: 'columns',
-        title: selectedGroup ? groupLabel : '知识星球实验台',
-        subtitle: activeTab ? `${activeTab.label} · ${loadedText} · ${assetText}` : '选择星球后形成主题、附件和外部文档网络',
-        metrics: [
-            { label: '星球', value: selectedGroup ? 1 : state.groups.length },
-            { label: 'Tab', value: tabs.length },
-            { label: '主题', value: topics.length },
-            { label: '附件', value: fileCount || state.fileMap.size },
-        ],
-        legend: [
-            { label: '星球', color: window.ShioaThreeGraph.colors.group },
-            { label: 'Tab', color: window.ShioaThreeGraph.colors.tab },
-            { label: '主题', color: window.ShioaThreeGraph.colors.topic },
-            { label: '附件', color: window.ShioaThreeGraph.colors.attachment },
-            { label: '外链', color: window.ShioaThreeGraph.colors.external },
-            { label: '总结/语音', color: window.ShioaThreeGraph.colors.summary },
-        ],
-        nodes,
-        links,
+        label: '覆盖完整',
+        className: 'is-success',
+        title: '当前可用内容已经齐备',
+        description: fileCount
+            ? `主题包含 ${fileCount} 个附件，可直接下载或加入下载计划。`
+            : '主题外链已经完成总结和语音处理，可直接消费现有结果。',
     };
+}
+
+function locateInspectorTopic() {
+    const topic = Array.from(els.topicsList?.querySelectorAll('[data-topic-key]') || [])
+        .find(node => node.dataset.topicKey === state.inspectorTopicKey);
+    topic?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    topic?.focus({ preventScroll: true });
+}
+
+function syncInspectorTopicHighlight() {
+    els.topicsList?.querySelectorAll('[data-topic-key]').forEach(node => {
+        const selected = node.dataset.topicKey === state.inspectorTopicKey;
+        node.classList.toggle('is-inspector-selected', selected);
+        node.setAttribute('aria-current', selected ? 'true' : 'false');
+    });
 }
 
 function loadSystemSyncSchedulerPanelsAfterBootstrap() {
@@ -462,12 +472,6 @@ function bindEvents() {
         event.preventDefault();
         applyLocalTopicFilters();
     });
-    els.scopeSelect.addEventListener('change', () => {
-        const tab = getTabDefinitions().find(item => !item.hashtagId && item.scope === els.scopeSelect.value);
-        state.activeTab = tab?.id || 'preset:all';
-        if (tab) applyAttachmentDefaultsForTab(tab);
-        if (state.selectedGroup) loadActiveTabPage({ reset: true });
-    });
     els.selectAllTopicsBtn.addEventListener('click', toggleSelectAllTopics);
     els.batchDownloadBtn.addEventListener('click', createManualDownloadWorkflow);
     els.manualPlanLimitInput?.addEventListener('change', () => {
@@ -499,12 +503,9 @@ function bindEvents() {
         }
         renderSyncIntro();
     });
-    els.favoriteTopicsFilterBtn?.addEventListener('click', () => {
-        state.favoriteOnly = !state.favoriteOnly;
-        renderFavoriteFilterControl();
-        if (state.selectedGroup) loadActiveTabPage({ reset: true });
-    });
+    els.favoriteTopicsFilterBtn?.addEventListener('click', requestFavoriteFilterChange);
     els.copyTopicsJsonBtn?.addEventListener('click', copyLastTopicsJson);
+    els.headerSyncCurrentBtn?.addEventListener('click', () => els.syncCurrentTabBtn?.click());
     els.syncCurrentTabBtn?.addEventListener('click', () => syncTabs('current'));
     els.syncAllTabsBtn?.addEventListener('click', () => syncTabs('all'));
     els.autoSyncTestBtn?.addEventListener('click', () => toggleAutoSyncTest('full'));
@@ -517,7 +518,6 @@ function bindEvents() {
     els.systemSyncSchedulerOpenLogsBtn.addEventListener('click', toggleSystemSyncSchedulerLogs);
     els.publishTopicBtn.addEventListener('click', publishTopic);
     els.topicsList.addEventListener('scroll', handleTopicsScroll);
-    els.clearBtn.addEventListener('click', clearAll);
     els.hotRankList.addEventListener('click', (event) => {
         const button = event.target.closest('[data-rank-file-id]');
         if (!button) return;
@@ -923,7 +923,7 @@ async function loadGroups(options = {}) {
 
 async function loadLocalGroups() {
     state.groupSource = 'local';
-    setLoading(els.loadGroupsBtn, true, '读取中...');
+    setLoading(els.loadGroupsBtn, true, '<i class="fas fa-spinner fa-spin" aria-hidden="true"></i>');
     showGroupsMessage('正在读取本地缓存星球...');
     try {
         const result = await apiGet('/zsxq/groups/local');
@@ -936,7 +936,7 @@ async function loadLocalGroups() {
     } catch (error) {
         showGroupsMessage(`本地缓存读取失败：${error.message}`, 'error');
     } finally {
-        setLoading(els.loadGroupsBtn, false, '<i class="fas fa-database mr-2"></i>本地缓存');
+        setLoading(els.loadGroupsBtn, false, '<i class="fas fa-rotate" aria-hidden="true"></i>');
     }
 }
 
@@ -961,7 +961,7 @@ async function loadRemoteGroups() {
     } catch (error) {
         showGroupsMessage(error.message, 'error');
     } finally {
-        setLoading(els.loadRemoteGroupsBtn, false, '<i class="fas fa-cloud-arrow-down mr-2"></i>远端刷新');
+        setLoading(els.loadRemoteGroupsBtn, false, '<i class="fas fa-cloud-arrow-down mr-2"></i>从远端发现星球');
     }
 }
 
@@ -1075,27 +1075,32 @@ async function loadLocalCachedTabs(groupId) {
 async function loadActiveTabPage(options = {}) {
     if (!state.selectedGroup || state.isLoadingMore) return;
 
-    const tab = getActiveTabConfig();
-    const tabState = getTabState(tab.id);
+    const tab = options.tab || getActiveTabConfig();
+    const tabState = options.tabState || getTabState(tab.id);
+    const shouldRender = options.render !== false;
     const reset = Boolean(options.reset);
     if (!reset && !tabState.hasMore) return;
 
     if (reset) {
         resetTabState(tabState);
-        els.topicsList.innerHTML = loadingCard(`正在读取本地${tab.label}...`);
+        if (shouldRender) {
+            els.topicsList.innerHTML = loadingCard(`正在读取本地${tab.label}...`);
+        }
     }
 
     state.isLoadingMore = true;
     tabState.loading = true;
     tabState.error = null;
-    renderActiveTab();
+    if (shouldRender) renderActiveTab();
 
     try {
         let pagesLoaded = 0;
         const maxAutoPages = 1;
 
         do {
-            const requestPayload = buildLocalTopicsRequest(tab, tabState);
+            const requestPayload = buildLocalTopicsRequest(tab, tabState, {
+                favoriteOnlyOverride: options.favoriteOnlyOverride,
+            });
             const result = await apiPost('/zsxq/topics/local', requestPayload);
             state.lastTopicsRequest = withoutSensitiveCookie(requestPayload);
             state.lastTopicsResponse = result;
@@ -1117,16 +1122,18 @@ async function loadActiveTabPage(options = {}) {
         } while (
             pagesLoaded < maxAutoPages
         );
+        return true;
     } catch (error) {
         tabState.error = error.message;
         if (tabState.topics.length > 0) {
             tabState.hasMore = false;
         }
         state.lastTopicsResponse = null;
+        return false;
     } finally {
         tabState.loading = false;
         state.isLoadingMore = false;
-        renderActiveTab();
+        if (shouldRender) renderActiveTab();
     }
 }
 
@@ -1864,22 +1871,24 @@ function startSystemSyncSchedulerPolling() {
     if (!isSelectedSystemSyncGroup()) {
         return;
     }
-    state.systemSyncSchedulerPollTimer = setInterval(() => {
-        if (!getSystemSyncTargetGroupId() && !state.systemSyncSchedulerStatus?.running) {
-            return;
-        }
-        loadSystemSyncSchedulerStatus({ render: false }).then(() => {
+    state.systemSyncSchedulerPollController = window.VisibilityPolling.create({
+        intervalMs: SYSTEM_SYNC_STATUS_POLL_MS,
+        poll: async () => {
+            if (!getSystemSyncTargetGroupId() && !state.systemSyncSchedulerStatus?.running) {
+                return;
+            }
+            await loadSystemSyncSchedulerStatus({ render: false });
             renderSystemSyncSchedulerPanel();
             renderSystemSyncBatches();
             if (els.systemSyncSchedulerLogs && !els.systemSyncSchedulerLogs.classList.contains('hidden')) {
-                loadSystemSyncSchedulerLogs().then(logs => {
-                    if (els.systemSyncSchedulerLogs && !els.systemSyncSchedulerLogs.classList.contains('hidden')) {
-                        els.systemSyncSchedulerLogs.textContent = logs;
-                    }
-                });
+                const logs = await loadSystemSyncSchedulerLogs();
+                if (els.systemSyncSchedulerLogs && !els.systemSyncSchedulerLogs.classList.contains('hidden')) {
+                    els.systemSyncSchedulerLogs.textContent = logs;
+                }
             }
-        });
-    }, SYSTEM_SYNC_STATUS_POLL_MS);
+        },
+    });
+    state.systemSyncSchedulerPollController.start();
 }
 
 async function loadSystemSyncSchedulerLogs() {
@@ -1919,9 +1928,9 @@ async function toggleSystemSyncSchedulerLogs() {
 }
 
 function stopSystemSyncSchedulerPolling() {
-    if (state.systemSyncSchedulerPollTimer) {
-        clearInterval(state.systemSyncSchedulerPollTimer);
-        state.systemSyncSchedulerPollTimer = null;
+    if (state.systemSyncSchedulerPollController) {
+        state.systemSyncSchedulerPollController.stop();
+        state.systemSyncSchedulerPollController = null;
     }
 }
 
@@ -2351,8 +2360,19 @@ function buildTopicsRequest(tab, tabState) {
     };
 }
 
-function buildLocalTopicsRequest(tab, tabState) {
+function buildLocalTopicsRequest(tab, tabState, options = {}) {
     const publishFilter = currentAttachmentViewFilter() === 'publish_attention' ? 'attention' : '';
+    const favoriteOnly = options.favoriteOnlyOverride === undefined
+        ? state.favoriteOnly
+        : Boolean(options.favoriteOnlyOverride);
+    const topicId = localTopicIdQuery();
+    if (topicId) {
+        return {
+            group_id: state.selectedGroup.group_id,
+            topic_id: topicId,
+            count: 1,
+        };
+    }
     return {
         group_id: state.selectedGroup.group_id,
         tab_id: tab.id,
@@ -2364,8 +2384,13 @@ function buildLocalTopicsRequest(tab, tabState) {
         publish_date_start: els.localTopicDateStartInput?.value || '',
         publish_date_end: els.localTopicDateEndInput?.value || '',
         keyword: els.localTopicKeywordInput?.value.trim() || '',
-        favorite_only: state.favoriteOnly && isSelectedFavoritesGroup(),
+        favorite_only: favoriteOnly && isSelectedFavoritesGroup(),
     };
+}
+
+function localTopicIdQuery() {
+    const value = els.localTopicKeywordInput?.value.trim() || '';
+    return /^\d{8,64}$/.test(value) ? value : '';
 }
 
 function localDateInputValue(date) {
@@ -2409,10 +2434,18 @@ function normalizeLocalTopicDateRange(changedBoundary = '') {
 
 async function applyLocalTopicFilters() {
     if (!state.selectedGroup || state.isLoadingMore) return;
+    const topicId = localTopicIdQuery();
     state.tabStates.clear();
     state.selectedTopicKeys.clear();
     state.selectedAttachmentKeys.clear();
-    await loadActiveTabPage({ reset: true });
+    const succeeded = await loadActiveTabPage({ reset: true });
+    if (!succeeded || !topicId) return;
+
+    const topic = state.currentTopics.find(item => String(item.topic_id || '') === topicId);
+    if (!topic) return;
+    state.inspectorTopicKey = topicKeyForRender(topic);
+    renderTopicInspector(state.currentTopics);
+    requestAnimationFrame(locateInspectorTopic);
 }
 
 function withoutSensitiveCookie(payload) {
@@ -2423,23 +2456,31 @@ function withoutSensitiveCookie(payload) {
     };
 }
 
+function tabStateKey(tabId) {
+    return `${state.selectedGroup?.group_id || 'none'}:${tabId}`;
+}
+
+function createTabState(tabId) {
+    return {
+        id: tabId,
+        topics: [],
+        rawCount: 0,
+        total: null,
+        source: 'local_db',
+        topicIds: new Set(),
+        endTime: null,
+        hasMore: true,
+        loading: false,
+        loaded: false,
+        error: null,
+        emptyMessage: '',
+    };
+}
+
 function getTabState(tabId) {
-    const key = `${state.selectedGroup?.group_id || 'none'}:${tabId}`;
+    const key = tabStateKey(tabId);
     if (!state.tabStates.has(key)) {
-        state.tabStates.set(key, {
-            id: tabId,
-            topics: [],
-            rawCount: 0,
-            total: null,
-            source: 'local_db',
-            topicIds: new Set(),
-            endTime: null,
-            hasMore: true,
-            loading: false,
-            loaded: false,
-            error: null,
-            emptyMessage: '',
-        });
+        state.tabStates.set(key, createTabState(tabId));
     }
     return state.tabStates.get(key);
 }
@@ -2476,17 +2517,24 @@ function renderActiveTab() {
     state.currentTopics = tabState.topics;
 
     if (state.selectedGroup) {
+        const topicId = localTopicIdQuery();
         const sourceLabel = tabState.source === 'local_db' ? '本地库' : '接口';
         const totalText = tabState.total === null || tabState.total === undefined
             ? `${sourceLabel} ${tabState.rawCount} 条`
             : `${sourceLabel} ${tabState.total} 条`;
-        els.topicsSubtitle.textContent = [
-            `Group ID: ${state.selectedGroup.group_id}`,
-            tab.hashtagId ? `hashtag ${tab.hashtagId}` : `scope ${tab.scope || 'all'}`,
-            totalText,
-            `当前 tab ${tabState.topics.length} 条`,
-            tabState.hasMore ? '可继续下滑' : '已到底',
-        ].join(' · ');
+        els.topicsSubtitle.textContent = topicId
+            ? [
+                `Group ID: ${state.selectedGroup.group_id}`,
+                `帖子 ID: ${topicId}`,
+                tabState.topics.length ? '已精确定位' : '未找到',
+            ].join(' · ')
+            : [
+                `Group ID: ${state.selectedGroup.group_id}`,
+                tab.hashtagId ? `hashtag ${tab.hashtagId}` : `scope ${tab.scope || 'all'}`,
+                totalText,
+                `当前 tab ${tabState.topics.length} 条`,
+                tabState.hasMore ? '可继续下滑' : '已到底',
+            ].join(' · ');
     }
 
     renderTopicTabs();
@@ -2600,7 +2648,6 @@ async function activateTopicTab(tabId, options = {}) {
     if (!targetTab) return false;
 
     state.activeTab = targetTab.id;
-    if (!targetTab.hashtagId) els.scopeSelect.value = targetTab.scope || 'all';
     applyAttachmentDefaultsForTab(targetTab);
     state.selectedTopicKeys.clear();
     state.selectedAttachmentKeys.clear();
@@ -2810,8 +2857,6 @@ function renderGroups(groups) {
         button.addEventListener('click', () => {
             const group = state.groups.find(item => String(item.group_id) === button.dataset.groupId);
             if (group) {
-                const tab = getTabDefinitions().find(item => !item.hashtagId && item.scope === els.scopeSelect.value);
-                state.activeTab = tab?.id || 'preset:all';
                 loadTopics(group, { allowRemoteMenus: Boolean(group.remote_loaded || group.local_cached === false) });
             }
         });
@@ -2863,7 +2908,7 @@ function renderTopics(topics, tabState = null) {
         const favoriteButton = isSelectedFavoritesGroup() ? renderFavoriteTopicButton(topic, topicKey) : '';
 
         return `
-            <article class="rounded-lg border border-slate-200 p-4 hover:border-blue-200 hover:shadow-sm transition-all min-w-0" data-topic-key="${escapeHtml(topicKey)}">
+            <article class="zsxq-topic-card rounded-lg border border-slate-200 p-4 hover:border-blue-200 transition-all min-w-0" data-topic-key="${escapeHtml(topicKey)}" tabindex="-1">
                 <div class="flex items-start justify-between gap-4 min-w-0">
                     <div class="flex items-start gap-3 min-w-0 flex-1">
                         ${manualDownloadEnabled ? `<input type="checkbox" class="topic-select-checkbox mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 shrink-0" data-topic-key="${escapeHtml(topicKey)}" ${topicSelection.total ? '' : 'disabled'} ${topicSelection.allSelected ? 'checked' : ''} title="${topicSelection.total ? '勾选该主题下当前类型的全部附件' : '该主题没有匹配附件'}">` : ''}
@@ -2874,6 +2919,7 @@ function renderTopics(topics, tabState = null) {
                     </div>
                     <div class="shrink-0 flex flex-wrap justify-end items-center gap-2 max-w-[240px]">
                         ${favoriteButton}
+                        <button class="open-topic-inspector-btn rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-bold text-blue-700 hover:bg-blue-100" data-topic-key="${escapeHtml(topicKey)}">查看分析</button>
                         <button class="copy-topic-json-btn rounded-md border border-slate-300 px-2 py-1 text-xs font-bold text-slate-500 hover:bg-slate-50" data-topic-key="${escapeHtml(topicKey)}">详情 JSON</button>
                         <span class="text-xs text-slate-400">#${escapeHtml(String(topic.topic_id || ''))}</span>
                     </div>
@@ -2963,14 +3009,65 @@ function renderFavoriteFilterControl() {
     if (!visible) return;
 
     const count = Number(state.favoriteTotal || 0);
+    const pending = Boolean(state.favoriteFilterPending);
+    const active = state.favoriteOnly && !pending;
     if (els.favoriteTopicsCount) els.favoriteTopicsCount.textContent = String(count);
-    els.favoriteTopicsFilterBtn.setAttribute('aria-pressed', String(state.favoriteOnly));
-    els.favoriteTopicsFilterBtn.classList.toggle('bg-amber-100', state.favoriteOnly);
-    els.favoriteTopicsFilterBtn.classList.toggle('ring-2', state.favoriteOnly);
-    els.favoriteTopicsFilterBtn.classList.toggle('ring-amber-200', state.favoriteOnly);
+    els.favoriteTopicsFilterBtn.setAttribute('aria-pressed', String(active));
+    els.favoriteTopicsFilterBtn.setAttribute('aria-busy', String(pending));
+    els.favoriteTopicsFilterBtn.disabled = pending || state.isLoadingMore;
+    els.favoriteTopicsFilterBtn.classList.toggle('bg-amber-100', active);
+    els.favoriteTopicsFilterBtn.classList.toggle('ring-2', active);
+    els.favoriteTopicsFilterBtn.classList.toggle('ring-amber-200', active);
+    els.favoriteTopicsFilterBtn.classList.toggle('cursor-wait', pending);
+    els.favoriteTopicsFilterBtn.classList.toggle('opacity-60', pending || state.isLoadingMore);
     const icon = els.favoriteTopicsFilterBtn.querySelector('i');
-    icon?.classList.toggle('fa-regular', !state.favoriteOnly);
-    icon?.classList.toggle('fa-solid', state.favoriteOnly);
+    icon?.classList.toggle('fa-regular', !active);
+    icon?.classList.toggle('fa-solid', active);
+    const label = els.favoriteTopicsFilterBtn.querySelector('[data-favorite-filter-label]');
+    if (label) label.textContent = pending ? '筛选收藏中…' : '只看收藏';
+    els.favoriteTopicsFilterBtn.title = pending
+        ? '正在加载收藏内容，完成后才会切换筛选状态'
+        : '仅显示本地收藏的主题';
+}
+
+async function requestFavoriteFilterChange() {
+    if (!state.selectedGroup || state.isLoadingMore || state.favoriteFilterPending) return;
+
+    const groupId = String(state.selectedGroup.group_id || '');
+    const tab = getActiveTabConfig();
+    if (!groupId || !tab) return;
+
+    const nextFavoriteOnly = !state.favoriteOnly;
+    const candidateTabState = createTabState(tab.id);
+    state.favoriteFilterPending = true;
+    renderFavoriteFilterControl();
+
+    const succeeded = await loadActiveTabPage({
+        tab,
+        tabState: candidateTabState,
+        reset: true,
+        render: false,
+        favoriteOnlyOverride: nextFavoriteOnly,
+    });
+
+    state.favoriteFilterPending = false;
+    const stillViewingSameTab = String(state.selectedGroup?.group_id || '') === groupId
+        && state.activeTab === tab.id;
+    if (!succeeded || !stillViewingSameTab) {
+        if (stillViewingSameTab) {
+            renderFavoriteFilterControl();
+            renderSyncStatus({
+                type: 'error',
+                title: '收藏筛选未生效',
+                message: '列表加载失败，已保留原来的筛选状态和列表。请稍后重试。',
+            });
+        }
+        return;
+    }
+
+    state.favoriteOnly = nextFavoriteOnly;
+    state.tabStates.set(tabStateKey(tab.id), candidateTabState);
+    renderActiveTab();
 }
 
 function renderFavoriteTopicButton(topic, topicKey) {
@@ -3994,6 +4091,13 @@ function bindFileActions() {
 }
 
 function bindTopicActions() {
+    els.topicsList.querySelectorAll('.open-topic-inspector-btn').forEach(button => {
+        button.addEventListener('click', () => {
+            state.inspectorTopicKey = button.dataset.topicKey || '';
+            renderTopicInspector(state.currentTopics);
+        });
+    });
+
     els.topicsList.querySelectorAll('.favorite-topic-btn').forEach(button => {
         button.addEventListener('click', async () => {
             const topic = state.topicMap.get(button.dataset.topicKey);
@@ -4200,13 +4304,6 @@ async function downloadFile(button) {
         setLoading(button, false, originalHTML);
         await refreshAttachmentStatusBadges();
     }
-}
-
-function clearAll() {
-    resetZsxqWorkspace();
-    els.publishTextInput.value = '';
-    els.publishFilesInput.value = '';
-    setPublishStatus('');
 }
 
 async function publishTopic() {

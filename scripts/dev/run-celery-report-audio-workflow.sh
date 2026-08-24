@@ -17,6 +17,7 @@ fi
 export PYTHONPATH=$PROJECT_ROOT/src/backend
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export DATABASE_TYPE=${DATABASE_TYPE:-postgresql}
+export WORKFLOW_WORKER_READY_QUEUES=report_audio_workflow
 export DB_PROCESS_ROLE=${DB_PROCESS_ROLE:-worker}
 export WORKER_DB_POOL_MODE=${WORKER_DB_POOL_MODE:-null}
 export WORKER_DB_POOL_SIZE=${WORKER_DB_POOL_SIZE:-1}
@@ -33,4 +34,5 @@ export TASK_ADMISSION_RETRY_DELAY_SECONDS=${TASK_ADMISSION_RETRY_DELAY_SECONDS:-
 export TASK_ADMISSION_FEATURE_BACKLOG_LIMITS=${TASK_ADMISSION_FEATURE_BACKLOG_LIMITS:-publisher=12,report_audio_workflow=10,report_pdf_audio_workflow=10,mp3_video_workflow=5,content_pdf_clean=10,content_audio_clean=5,zsxq_clean_output_publish=5}
 
 cd "$PROJECT_ROOT/src/backend"
-celery -A celery_config.celery_app worker --loglevel=info --concurrency=1 -P threads -Q report_audio_workflow --hostname=report_audio_workflow@%h --without-gossip --without-mingle
+REPORT_AUDIO_WORKFLOW_CONCURRENCY=${REPORT_AUDIO_WORKFLOW_CONCURRENCY:-3}
+celery -A celery_config.celery_app worker --loglevel=info --concurrency="$REPORT_AUDIO_WORKFLOW_CONCURRENCY" -P threads -Q report_audio_workflow --hostname=report_audio_workflow@%h --without-gossip --without-mingle

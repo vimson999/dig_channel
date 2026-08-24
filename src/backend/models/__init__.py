@@ -10,8 +10,14 @@ from .video import Video, VideoData
 from .favorite import FavoriteVideo
 from .indie_navigator import OpportunitySignal, UserOpportunityInteraction, CollectionKeyword, CollectionJob
 from .task import PublicationTask
+from .content_pipeline_asset import ContentPipelineAsset
 from .report_visual_plan import ReportVisualPlanOutput, ReportVisualPlanSegment
 from .report_stick_figure_asset import ReportStickFigureAudioTrack, ReportStickFigureSceneAsset
+from .report_pdf_evidence import (
+    ReportPdfEvidenceClaim,
+    ReportPdfEvidenceOutput,
+    ReportVisualPlanSegmentEvidence,
+)
 from .download_task import DownloadTask
 from .system_config import SystemConfig
 from .platform_credential import PlatformCredentialAccount, PlatformCredentialBinding
@@ -25,6 +31,7 @@ from .bilibili_publish import PublicationTaskBilibiliUpload
 from .tts import TTSArticle, TTSSegment
 from .zsxq_sync import (
     ZsxqAttachment,
+    ZsxqBrowserSubmission,
     ZsxqSyncCursor,
     ZsxqSyncRun,
     ZsxqSyncRunDownload,
@@ -53,10 +60,14 @@ __all__ = [
     'FavoriteVideo', 
     'OpportunitySignal',
     'PublicationTask',
+    'ContentPipelineAsset',
     'ReportVisualPlanOutput',
     'ReportVisualPlanSegment',
     'ReportStickFigureSceneAsset',
     'ReportStickFigureAudioTrack',
+    'ReportPdfEvidenceOutput',
+    'ReportPdfEvidenceClaim',
+    'ReportVisualPlanSegmentEvidence',
     'DownloadTask',
     'SystemConfig',
     'PlatformCredentialAccount',
@@ -75,6 +86,7 @@ __all__ = [
     'ZsxqTopicFavorite',
     'ZsxqTopicComment',
     'ZsxqAttachment',
+    'ZsxqBrowserSubmission',
     'ZsxqSyncCursor',
     'ZsxqWorkflowRun',
     'ReportVideoTask',

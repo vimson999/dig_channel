@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from sqlalchemy import func, or_, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
+from werkzeug.utils import secure_filename
 
 from celery_config import celery_app
 from models import db
@@ -46,6 +48,7 @@ from services.wechat_channels_publish_jobs import (
 )
 from services.mp3_video_workflow import (
     DEFAULT_GEMINI_URL,
+    AUDIO_EXTENSIONS,
     FEATURE_NAME,
     INFOGRAPHIC_PROMPT,
     Mp3VideoWorkflowError,
@@ -53,14 +56,15 @@ from services.mp3_video_workflow import (
     VISUAL_ARTIFACT_KEYS,
     _db_retry,
     _video_file_ready,
-    audio_meta_from_zsxq_attachment,
+    audio_meta_from_asset_reference,
     initial_gemini_prompt,
     initial_transcript_prompt,
     list_audio_assets,
     regenerate_visual_artifact,
     status_payload as workflow_status_payload,
 )
-from services.runtime_guard import apply_async_after_db_release
+from services.runtime_guard import apply_async_after_db_release, release_db_session_quietly
+from services.asr_cache_service import probe_media_duration
 from tasks.mp3_video_workflow import process_mp3_video_workflow_job
 from utils.auth_utils import require_login
 from utils.date_filters import submission_date_utc_range
@@ -77,6 +81,8 @@ STATUS_MAP = {
 }
 SYSTEM_USER_ID = "system"
 WORKFLOW_SOURCE_FEATURE = "zsxq_attachment"
+UPLOAD_SOURCE_FEATURE = "local_mp3_upload"
+DEFAULT_AUDIO_UPLOAD_MAX_MB = 512
 try:
     DOWNLOAD_RESULT_CACHE_TTL_SECONDS = int(os.environ.get("MP3_VIDEO_WORKFLOW_DOWNLOAD_RESULT_CACHE_TTL", "30"))
 except (TypeError, ValueError):
@@ -311,7 +317,7 @@ def audio_asset_workflow_stats(current_user):
 @require_login
 def preview_audio_asset(_current_user, asset_id):
     try:
-        audio = audio_meta_from_zsxq_attachment(asset_id)
+        audio = audio_meta_from_asset_reference(asset_id)
     except ValueError as exc:
         return jsonify({"success": False, "message": str(exc)}), 404
     mimetype = mimetypes.guess_type(audio["path"])[0] or "audio/mpeg"
@@ -328,9 +334,14 @@ def preview_audio_asset(_current_user, asset_id):
 def create_job(current_user):
     data = _request_payload()
     user_id = str(getattr(current_user, "id", None))
+    audio_file = request.files.get("audio") or request.files.get("mp3") or request.files.get("file")
     audio_asset_id = (data.get("audio_asset_id") or data.get("attachment_id") or "").strip()
-    if not audio_asset_id:
-        return jsonify({"success": False, "message": "请选择一个已同步 MP3"}), 400
+    if not audio_file and not audio_asset_id:
+        return jsonify({"success": False, "message": "请上传 MP3 或选择一个已同步 MP3"}), 400
+    if audio_file:
+        upload_error = _validate_audio_upload(audio_file)
+        if upload_error:
+            return jsonify({"success": False, "message": upload_error}), 400
 
     transcript_text = str(data.get("transcript_text") or data.get("ima_transcript") or "").strip()
     ds_response_text = str(data.get("ds_response_text") or data.get("direct_ds_response") or data.get("source_response_text") or "").strip()
@@ -352,12 +363,12 @@ def create_job(current_user):
         render_mode = "full_video"
     if render_mode not in {"keyframes", "full_video"}:
         return jsonify({"success": False, "message": "render_mode 只能是 keyframes 或 full_video"}), 400
-    generate_subtitles_value = True
+    generate_subtitles_value = False
     for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
         if key in data:
             generate_subtitles_value = data.get(key)
             break
-    generate_subtitles = _truthy(generate_subtitles_value, default=True)
+    generate_subtitles = _truthy(generate_subtitles_value, default=False)
 
     gemini_url = (data.get("gemini_url") or DEFAULT_GEMINI_URL).strip()
     if gemini_url and not gemini_url.startswith(("http://", "https://")):
@@ -375,15 +386,26 @@ def create_job(current_user):
     elif not provider.get("gemini_configured"):
         return jsonify({"success": False, "message": "Gemini 浏览器自动化未配置", "data": {"provider": provider}}), 400
 
-    try:
-        audio = audio_meta_from_zsxq_attachment(audio_asset_id)
-    except ValueError as exc:
-        return jsonify({"success": False, "message": str(exc)}), 400
-
     image_prompt = (data.get("image_prompt") or INFOGRAPHIC_PROMPT).strip()
     gemini_prompt = initial_gemini_prompt({"gemini_prompt": data.get("gemini_prompt")})
     transcript_prompt = initial_transcript_prompt({"transcript_prompt": data.get("transcript_prompt") or data.get("deepseek_prompt")})
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    uploaded_audio_path = None
+    if audio_file:
+        audio_asset_id = str(uuid.uuid4())
+        try:
+            audio = _save_audio_upload(audio_file, audio_asset_id)
+        except ValueError as exc:
+            return jsonify({"success": False, "message": str(exc)}), 400
+        uploaded_audio_path = audio.get("path")
+        if metadata.get("title"):
+            audio["topic_title"] = str(metadata["title"]).strip()[:500]
+    else:
+        try:
+            audio = audio_meta_from_asset_reference(audio_asset_id)
+        except ValueError as exc:
+            return jsonify({"success": False, "message": str(exc)}), 400
+    source_feature = UPLOAD_SOURCE_FEATURE if audio_file else WORKFLOW_SOURCE_FEATURE
     task = PublicationTask(
         status="pending",
         current_step="queued",
@@ -391,7 +413,7 @@ def create_job(current_user):
         params={
             "feature": FEATURE_NAME,
             "user_id": user_id,
-            "source_feature": WORKFLOW_SOURCE_FEATURE,
+            "source_feature": source_feature,
             "source_task_id": audio_asset_id,
             FEATURE_NAME: {
                 "audio_asset_id": audio_asset_id,
@@ -415,14 +437,20 @@ def create_job(current_user):
             "render_mode": render_mode,
             "generate_subtitles": generate_subtitles,
             "direct_ds_response_chars": len(ds_response_text) if source_mode == "ds_response" else 0,
-            "source_feature": WORKFLOW_SOURCE_FEATURE,
+            "source_feature": source_feature,
             "source_task_id": audio_asset_id,
             "children": {},
             "logs": [],
         },
     )
-    db.session.add(task)
-    db.session.commit()
+    try:
+        db.session.add(task)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        if uploaded_audio_path:
+            _remove_uploaded_audio(uploaded_audio_path)
+        raise
 
     try:
         celery_task = apply_async_after_db_release(
@@ -1014,7 +1042,8 @@ def regenerate_videos(current_user, job_id):
         payload = _job_payload(task)
         return jsonify({"success": False, "message": "任务仍在运行中，请先等待或取消后再重生成", **payload, "data": payload}), 409
 
-    ok, message = _prepare_job_for_video_regeneration(task)
+    payload = request.get_json(silent=True) or {}
+    ok, message = _prepare_job_for_video_regeneration(task, payload)
     if not ok:
         payload = _job_payload(task)
         return jsonify({"success": False, "message": message, **payload, "data": payload}), 400
@@ -1038,7 +1067,18 @@ def regenerate_videos(current_user, job_id):
     db.session.commit()
     _clear_job_detail_cache(task.id)
     payload = _job_payload(task)
-    return jsonify({"success": True, "message": "已重新投递横屏和竖屏视频生成任务", **payload, "data": payload})
+    plan_audio = (payload.get("plan") or {}).get("audio") or {}
+    range_text = (
+        f"（{_format_audio_time(plan_audio.get('start_seconds'))}"
+        f"-{_format_audio_time(plan_audio.get('end_seconds'))}，"
+        f"{plan_audio.get('speed') or 1.2}×）"
+    )
+    return jsonify({
+        "success": True,
+        "message": f"已按新时间重新投递横屏和竖屏视频生成任务{range_text}",
+        **payload,
+        "data": payload,
+    })
 
 
 @mp3_video_workflow_bp.route("/jobs/<job_id>/artifacts/<artifact_key>/regenerate", methods=["POST"])
@@ -1200,6 +1240,7 @@ def _get_owned_task(
     include_params=True,
     include_result=True,
     db_attempts=3,
+    visible_user_ids=None,
 ):
     def load_task():
         columns = [
@@ -1235,12 +1276,14 @@ def _get_owned_task(
             include_params=True,
             include_result=include_result,
             db_attempts=db_attempts,
+            visible_user_ids=visible_user_ids,
         )
     params = task.params if task and include_params and isinstance(task.params, dict) else {}
     if not task or (task.feature or params.get("feature")) != FEATURE_NAME:
         return None
     task_user_id = str(task.user_id or params.get("user_id") or "").strip()
-    if task_user_id not in _visible_user_ids(current_user):
+    allowed_user_ids = visible_user_ids if visible_user_ids is not None else _visible_user_ids(current_user)
+    if task_user_id not in allowed_user_ids:
         return None
     return task
 
@@ -1376,26 +1419,39 @@ def _download_result_for_owned_task(current_user, job_id):
     if not cache_key:
         return None
     visible_user_ids = _visible_user_ids(current_user)
+    # Authentication may have opened a read transaction. Media requests can
+    # wait on this cache lock and then stream a file for seconds, neither of
+    # which may retain that checkout.
+    release_db_session_quietly()
     with _download_result_cache_lock:
         now = time.monotonic()
         cached = _download_result_cache.get(cache_key)
         if cached and cached["expires_at"] > now and cached["user_id"] in visible_user_ids:
             return cached["result"]
 
-        task = _get_owned_task(current_user, cache_key, include_params=False, include_result=True)
-        if not task:
-            _download_result_cache.pop(cache_key, None)
-            return None
-        result = task.result if isinstance(task.result, dict) else {}
-        owner_user_id = str(task.user_id or "").strip()
-        if DOWNLOAD_RESULT_CACHE_TTL_SECONDS > 0 and owner_user_id:
-            _download_result_cache[cache_key] = {
-                "expires_at": now + DOWNLOAD_RESULT_CACHE_TTL_SECONDS,
-                "user_id": owner_user_id,
-                "result": result,
-            }
-            _trim_download_result_cache(now)
-        return result
+        try:
+            task = _get_owned_task(
+                current_user,
+                cache_key,
+                include_params=False,
+                include_result=True,
+                visible_user_ids=visible_user_ids,
+            )
+            if not task:
+                _download_result_cache.pop(cache_key, None)
+                return None
+            result = copy.deepcopy(task.result) if isinstance(task.result, dict) else {}
+            owner_user_id = str(task.user_id or "").strip()
+            if DOWNLOAD_RESULT_CACHE_TTL_SECONDS > 0 and owner_user_id:
+                _download_result_cache[cache_key] = {
+                    "expires_at": now + DOWNLOAD_RESULT_CACHE_TTL_SECONDS,
+                    "user_id": owner_user_id,
+                    "result": result,
+                }
+                _trim_download_result_cache(now)
+            return result
+        finally:
+            release_db_session_quietly()
 
 
 def _trim_download_result_cache(now=None):
@@ -1572,14 +1628,14 @@ def _job_payload(task, include_raw=False):
             "audio": request_payload.get("audio") or result.get("audio"),
             "input_source": request_payload.get("input_source") or result.get("input_source"),
             "render_mode": request_payload.get("render_mode") or result.get("render_mode"),
-            "generate_subtitles": _truthy(request_payload.get("generate_subtitles", result.get("generate_subtitles")), default=True),
+            "generate_subtitles": _truthy(request_payload.get("generate_subtitles", result.get("generate_subtitles")), default=False),
             "gemini_url": request_payload.get("gemini_url"),
             "transcript_chars": len(str(request_payload.get("transcript_text") or "")) if request_payload.get("input_source") == "ima_transcript" else 0,
             "metadata": request_payload.get("metadata") or {},
         },
         "input_source": result.get("input_source") or request_payload.get("input_source") or "gemini_audio",
         "render_mode": result.get("render_mode") or request_payload.get("render_mode") or "full_video",
-        "generate_subtitles": _truthy(result.get("generate_subtitles", request_payload.get("generate_subtitles")), default=True),
+        "generate_subtitles": _truthy(result.get("generate_subtitles", request_payload.get("generate_subtitles")), default=False),
         "audio": result.get("audio") or request_payload.get("audio"),
         "gemini": result.get("gemini"),
         "source": result.get("source"),
@@ -1591,6 +1647,15 @@ def _job_payload(task, include_raw=False):
         "children": result.get("children") or {},
         "retry_attempts": result.get("retry_attempts") or {},
         "retry_state": result.get("retry_state") or {},
+        "regeneration": {
+            "requested_at": request_payload.get("force_video_regenerate_at") or result.get("force_video_regenerate_at"),
+            "audio_range": request_payload.get("audio_range_override") or result.get("continue_full_video_audio_range"),
+            "active": bool(
+                (request_payload.get("force_video_regenerate_at") or result.get("force_video_regenerate_at"))
+                and task.status in {"pending", "processing"}
+            ),
+            "history_count": len(result.get("regenerated_video_history") or []),
+        },
         "bilibili_uploads": _bilibili_upload_children(task.id),
         "landscape_video": result.get("landscape_video"),
         "vertical_video": result.get("vertical_video"),
@@ -1793,7 +1858,7 @@ def _prepare_keyframe_job_for_full_video(task, payload=None):
     return True, "ok"
 
 
-def _prepare_job_for_video_regeneration(task):
+def _prepare_job_for_video_regeneration(task, payload=None):
     params = dict(task.params or {})
     workflow = dict(params.get(FEATURE_NAME) or {})
     result = dict(task.result or {})
@@ -1805,6 +1870,10 @@ def _prepare_job_for_video_regeneration(task):
         return False, "当前任务缺少小君君横屏背景图，不能重生成视频"
     if not _path_exists((artifacts.get("audio_background") or {}).get("path")):
         return False, "当前任务缺少此刻此声竖屏背景图，不能重生成视频"
+
+    ok, message, audio_range = _apply_continue_audio_range_override(result, workflow, payload)
+    if not ok:
+        return False, message
 
     requested_at = datetime.utcnow().isoformat() + "Z"
     workflow["render_mode"] = "full_video"
@@ -1842,7 +1911,15 @@ def _prepare_job_for_video_regeneration(task):
     logs = list(result.get("logs") or [])
     logs.append({
         "step": "regenerate_videos_requested",
-        "message": "用户要求重新生成横屏和竖屏视频，强制跳过旧视频复用",
+        "message": (
+            "用户要求重新生成横屏和竖屏视频，强制跳过旧视频复用"
+            + (
+                f"（音频 {_format_audio_time(audio_range.get('start_seconds'))}"
+                f"-{_format_audio_time(audio_range.get('end_seconds'))}）"
+                if audio_range
+                else ""
+            )
+        ),
         "progress": max(int(task.progress or 0), 68),
         "updated_at": requested_at,
     })
@@ -2417,6 +2494,111 @@ def _artifact_cache_token(artifact):
         except OSError:
             return ""
     return ""
+
+
+def _max_audio_upload_bytes():
+    try:
+        configured_mb = float(os.environ.get("MP3_VIDEO_UPLOAD_MAX_MB", DEFAULT_AUDIO_UPLOAD_MAX_MB))
+    except (TypeError, ValueError):
+        configured_mb = DEFAULT_AUDIO_UPLOAD_MAX_MB
+    configured_mb = max(1.0, min(configured_mb, 2048.0))
+    return int(configured_mb * 1024 * 1024)
+
+
+def _audio_upload_filename(file_storage):
+    raw_name = Path(str(getattr(file_storage, "filename", "") or "")).name
+    extension = Path(raw_name).suffix.lower()
+    safe_name = secure_filename(raw_name)
+    original_stem = Path(raw_name).stem
+    safe_stem = Path(safe_name).stem.lower() if safe_name else ""
+    # Werkzeug's secure_filename intentionally drops non-ASCII characters. That
+    # turns mixed names such as ``AI芯片研究报告.mp3`` into ``AI.mp3`` and then
+    # leaks the truncated name into the job list. Keep a filesystem-safe Unicode
+    # stem for user-facing audio metadata whenever the original contains one.
+    if any(ord(char) > 127 for char in original_stem):
+        unicode_stem = re.sub(r"[^\w\-]+", "_", original_stem, flags=re.UNICODE).strip("._-")
+        safe_name = f"{unicode_stem or 'audio'}{extension or '.mp3'}"
+    elif not safe_name or safe_stem in AUDIO_EXTENSIONS:
+        original_stem = re.sub(r"[^0-9A-Za-z_\-]+", "_", original_stem).strip("._-")
+        safe_name = f"{original_stem or 'audio'}{extension or '.mp3'}"
+    if not Path(safe_name).suffix and extension:
+        safe_name = f"{safe_name}{extension}"
+    return safe_name[:400], extension.lstrip(".").lower()
+
+
+def _validate_audio_upload(file_storage):
+    if not file_storage or not str(getattr(file_storage, "filename", "") or "").strip():
+        return "MP3 文件名为空"
+    _, extension = _audio_upload_filename(file_storage)
+    if extension not in AUDIO_EXTENSIONS:
+        supported = ", ".join(sorted(f".{item}" for item in AUDIO_EXTENSIONS))
+        return f"只支持音频文件：{supported}"
+    max_bytes = _max_audio_upload_bytes()
+    content_length = getattr(file_storage, "content_length", None) or request.content_length
+    if content_length and int(content_length) > max_bytes:
+        return f"音频超过 {max_bytes // (1024 * 1024)}MB 限制"
+    return None
+
+
+def _save_audio_upload(file_storage, upload_id):
+    upload_error = _validate_audio_upload(file_storage)
+    if upload_error:
+        raise ValueError(upload_error)
+    filename, extension = _audio_upload_filename(file_storage)
+    upload_dir = (
+        Path(__file__).resolve().parents[3]
+        / "data"
+        / "uploads"
+        / "mp3_video_workflow"
+        / datetime.utcnow().strftime("%Y%m%d")
+    )
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_upload_id = re.sub(r"[^0-9a-fA-F-]", "", str(upload_id or ""))[:36] or str(uuid.uuid4())
+    output_path = upload_dir / f"{safe_upload_id}_{filename}"
+    try:
+        file_storage.save(str(output_path))
+    except Exception as exc:
+        _remove_uploaded_audio(output_path)
+        raise ValueError(f"保存音频失败: {exc}") from exc
+    try:
+        size = output_path.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"保存音频失败: {exc}") from exc
+    if size <= 0:
+        _remove_uploaded_audio(output_path)
+        raise ValueError("音频文件为空")
+    if size > _max_audio_upload_bytes():
+        _remove_uploaded_audio(output_path)
+        raise ValueError(f"音频超过 {_max_audio_upload_bytes() // (1024 * 1024)}MB 限制")
+    try:
+        duration_seconds = float(probe_media_duration(str(output_path)) or 0)
+    except Exception:
+        duration_seconds = 0
+    if duration_seconds <= 0:
+        _remove_uploaded_audio(output_path)
+        raise ValueError("无法读取音频内容，请确认上传的是有效的 MP3 文件")
+    return {
+        "attachment_id": str(upload_id),
+        "filename": filename,
+        "name": filename,
+        "path": str(output_path),
+        "bytes": size,
+        "file_ext": extension,
+        "download_count": None,
+        "duration_seconds": duration_seconds,
+        "topic_title": filename,
+        "tab_label": "本地上传",
+        "source": "local_upload",
+    }
+
+
+def _remove_uploaded_audio(path_value):
+    try:
+        path = Path(str(path_value or ""))
+        if path.exists() and path.is_file():
+            path.unlink()
+    except OSError:
+        pass
 
 
 def _path_exists(path):

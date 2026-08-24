@@ -213,6 +213,7 @@ def local_topics():
             publish_date_start=data.get("publish_date_start"),
             publish_date_end=data.get("publish_date_end"),
             keyword=data.get("keyword"),
+            topic_id=data.get("topic_id"),
             favorite_only=bool(data.get("favorite_only")),
             include_raw_payload=bool(data.get("include_raw_payload")),
         )

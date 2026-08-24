@@ -2,7 +2,7 @@
 
 ## 基本信息
 
-- 状态：运行修复已上线并完成真实库幂等验收；剩余 3 个 `postgres` 所有者冗余索引待管理员删除
+- 状态：2026-07-29 巡检重新打开；运行修复已上线，ORM 索引定义防回归已修复，生产索引待管理员复核
 - 严重级别：P0
 - 影响模块：ZSXQ 同步入库 / PgBouncer / PostgreSQL 重点表索引
 - 首次发现：2026-07-24
@@ -67,5 +67,26 @@
 
 ## 后续事项
 
-- 管理员并发删除剩余 3 个冗余索引，随后重跑维护脚本记录 Alembic 版本。
+- 不再按旧清单批量删除剩余 3 个索引。管理员只评估
+  `ix_zsxq_attachments_publish_status`；两个 topic-type 复合索引保留到有完整查询计划
+  对照和更长观察窗后再决定。
+- 使用
+  `docs/sql/zsxq_attachment_publish_status_index_cleanup_dbeaver_20260729.sql`
+  逐条复核并发删除候选，随后重跑 schema 维护检查。
+
+## 2026-07-29 自动巡检复核
+
+- 统计自 PostgreSQL 2026-07-17 启动以来累计：
+  `ix_zsxq_attachments_publish_status` 扫描 0 次、352 KiB，且被
+  `(publish_status, publish_updated_at DESC)` 复合索引左前缀覆盖。
+- 原清理清单中的
+  `ix_zsxq_topics_group_tab_type_create_desc` 已扫描 104 次、读取 2023 个索引项；
+  `ix_zsxq_topics_group_type_create_desc` 扫描 1 次但读取 3380 个索引项。仅凭旧清单
+  删除会违反“真实查询 + 使用统计 + EXPLAIN”纪律，因此本轮明确取消无人值守批量删除。
+- ORM 模型仍把 `publish_status` 和 `topic_type` 声明为自动单列索引，并保留已废弃的
+  `ix_zsxq_topics_group_tab_create_synced_desc` 名称；新库或 `create_all` 会重新制造
+  已清理索引。
+- 模型元数据已改为当前规范索引：
+  `ix_zsxq_attachments_publish_status_updated_at` 和
+  `ix_zsxq_topics_group_tab_create_time_desc`，并新增契约测试禁止旧索引名复发。
 - 在下一轮真实自动同步后再次核对评论 UPDATE 数和哈希缺失数，并持续观察 30-60 分钟 PgBouncer 超时是否归零。

@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -13,6 +14,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from services.workflow_notification_service import workflow_notification_service
+
+
+logger = logging.getLogger(__name__)
 
 try:
     import fcntl
@@ -45,10 +49,20 @@ class DoubaoBrowserTTSAutomationError(DoubaoBrowserTTSError):
 
 
 class DoubaoBrowserTTSCaptchaError(DoubaoBrowserTTSAutomationError):
-    def __init__(self, message: str, *, screenshot: str = "", page_url: str = ""):
+    def __init__(
+        self,
+        message: str,
+        *,
+        screenshot: str = "",
+        page_url: str = "",
+        profile: str = "",
+        worker_id: str = "",
+    ):
         super().__init__(message)
         self.screenshot = screenshot
         self.page_url = page_url
+        self.profile = profile
+        self.worker_id = worker_id
 
 
 @dataclass
@@ -65,6 +79,7 @@ class DoubaoBrowserTTSOptions:
     audio_stable_seconds: float = 2.5
     audio_capture_timeout_seconds: int = 90
     total_timeout_seconds: int = 300
+    captcha_wait_timeout_seconds: int = 300
     selectors: Dict[str, List[str]] = field(default_factory=dict)
 
     @classmethod
@@ -87,6 +102,7 @@ class DoubaoBrowserTTSOptions:
             audio_stable_seconds=_float_env("DOUBAO_BROWSER_TTS_AUDIO_STABLE_SECONDS", 2.5),
             audio_capture_timeout_seconds=_int_env("DOUBAO_BROWSER_TTS_AUDIO_CAPTURE_TIMEOUT", 90),
             total_timeout_seconds=_int_env("DOUBAO_BROWSER_TTS_TOTAL_TIMEOUT", 300),
+            captcha_wait_timeout_seconds=_int_env("DOUBAO_BROWSER_TTS_CAPTCHA_WAIT_TIMEOUT", 300),
             selectors=selectors,
         )
 
@@ -141,6 +157,7 @@ class DoubaoBrowserTTSWorker:
             raise ValueError("合成文本不能为空")
 
         started = time.monotonic()
+        self._captcha_waited_seconds = 0.0
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -294,12 +311,26 @@ class DoubaoBrowserTTSWorker:
 
     def _submit_text(self, page, text: str, job_id: str) -> None:
         self._raise_if_login_or_captcha(page, job_id)
+        # The desktop-app promotion can be mounted asynchronously after the
+        # first page load.  Dismiss it immediately before resolving/clicking
+        # the textarea as well, otherwise Playwright may resolve the correct
+        # input but fail because the modal still intercepts pointer events.
+        self._dismiss_known_promotional_dialogs(page)
         input_locator = self._first_visible(page, self._selectors("input"))
         if input_locator is None:
             raise DoubaoBrowserTTSAutomationError("未找到豆包输入框")
 
         prompt_text = build_repeat_prompt(text)
-        input_locator.click(timeout=10_000)
+        try:
+            input_locator.click(timeout=10_000)
+        except Exception:
+            # A promotion may appear between the dismiss pass and the click.
+            # Retry once after closing it; non-promotion failures are re-raised
+            # so login/captcha and selector regressions remain visible.
+            dismissed = self._dismiss_known_promotional_dialogs(page)
+            if not dismissed:
+                raise
+            input_locator.click(timeout=10_000)
         tag_name = input_locator.evaluate("(node) => node.tagName.toLowerCase()")
         editable = input_locator.evaluate("(node) => Boolean(node.isContentEditable)")
         if tag_name in {"textarea", "input"}:
@@ -330,7 +361,7 @@ class DoubaoBrowserTTSWorker:
             button = self._last_visible(page, self._selectors("read"))
             if button is not None:
                 return button
-            self._raise_if_login_or_captcha(page, job_id)
+            deadline += self._raise_if_login_or_captcha(page, job_id)
             time.sleep(1)
         raise DoubaoBrowserTTSAutomationError("等待豆包回复或朗读按钮超时")
 
@@ -344,26 +375,60 @@ class DoubaoBrowserTTSWorker:
                     for (const dialog of document.querySelectorAll('[role="dialog"]')) {
                         const text = String(dialog.innerText || "");
                         if (!markers.some((marker) => text.includes(marker))) continue;
+                        const box = dialog.getBoundingClientRect();
+                        const visible = (node) => {
+                            const rect = node.getBoundingClientRect();
+                            const style = window.getComputedStyle(node);
+                            return rect.width > 0 && rect.height > 0
+                                && style.visibility !== "hidden"
+                                && style.display !== "none";
+                        };
+                        const clickTarget = (node) => {
+                            const parent = node.closest(
+                                'button, [role="button"], [data-slot="dialog-close"], '
+                                + '[data-radix-dialog-close]'
+                            );
+                            (parent || node).click();
+                        };
                         const direct = dialog.querySelector(
                             'button[aria-label*="关闭"], button[title*="关闭"], '
-                            + '[data-slot="dialog-close"], [data-radix-dialog-close]'
+                            + '[role="button"][aria-label*="关闭"], [role="button"][title*="关闭"], '
+                            + '[data-slot="dialog-close"], [data-radix-dialog-close], '
+                            + '[class*="close"], [class*="Close"]'
                         );
-                        if (direct) {
-                            direct.click();
+                        if (direct && visible(direct)) {
+                            clickTarget(direct);
                             dismissed += 1;
                             continue;
                         }
-                        const box = dialog.getBoundingClientRect();
-                        const candidates = Array.from(dialog.querySelectorAll('button'))
+                        // The current Doubao modal renders its top-right X as
+                        // an unlabelled element.  Select the smallest visible
+                        // control in the dialog's top-right corner, including
+                        // role=button/svg wrappers rather than only <button>.
+                        const candidates = Array.from(dialog.querySelectorAll(
+                            'button, [role="button"], [tabindex], svg, [data-slot], [class*="close"], [class*="Close"]'
+                        ))
                             .filter((button) => {
                                 const rect = button.getBoundingClientRect();
-                                return rect.width > 0 && rect.height > 0
+                                return visible(button)
+                                    && rect.width <= 96 && rect.height <= 96
                                     && rect.left >= box.right - 100
                                     && rect.top <= box.top + 100;
                             })
-                            .sort((left, right) => right.getBoundingClientRect().left - left.getBoundingClientRect().left);
+                            .sort((left, right) => {
+                                const leftRect = left.getBoundingClientRect();
+                                const rightRect = right.getBoundingClientRect();
+                                return rightRect.left - leftRect.left || leftRect.width - rightRect.width;
+                            });
                         if (candidates[0]) {
-                            candidates[0].click();
+                            clickTarget(candidates[0]);
+                            dismissed += 1;
+                            continue;
+                        }
+                        // Last-resort hit test for a non-semantic close icon.
+                        const hit = document.elementFromPoint(box.right - 28, box.top + 28);
+                        if (hit && dialog.contains(hit)) {
+                            clickTarget(hit);
                             dismissed += 1;
                         }
                     }
@@ -381,7 +446,7 @@ class DoubaoBrowserTTSWorker:
         last_stats = self._audio_stats(page)
         while time.monotonic() < first_audio_deadline:
             self._guard_total_timeout(started_at)
-            self._raise_if_login_or_captcha(page, job_id)
+            first_audio_deadline += self._raise_if_login_or_captcha(page, job_id)
             stats = self._audio_stats(page)
             if int(stats.get("chunks") or 0) > 0:
                 last_stats = stats
@@ -400,7 +465,7 @@ class DoubaoBrowserTTSWorker:
         last_seconds = _float_value(last_stats.get("seconds"))
         while time.monotonic() < capture_deadline:
             self._guard_total_timeout(started_at)
-            self._raise_if_login_or_captcha(page, job_id)
+            capture_deadline += self._raise_if_login_or_captcha(page, job_id)
             stats = self._audio_stats(page)
             chunks = int(stats.get("chunks") or 0)
             seconds = _float_value(stats.get("seconds"))
@@ -537,7 +602,13 @@ class DoubaoBrowserTTSWorker:
                 "text=安全验证",
                 "text=验证身份",
                 "text=请选择所有符合上文描述的图片",
+                "text=请选择符合以下描述的图片",
+                "text=请选择符合描述的图片",
+                "text=请将下列图片中符合描述的选项拖动到下方",
+                "text=请将符合描述的图片拖拽到下方",
                 "text=拖拽到这里",
+                "text=拖动到这里",
+                "text=请拖动上方图片到此处",
                 "text=拖动滑块",
                 "text=滑块验证",
             ],
@@ -568,20 +639,80 @@ class DoubaoBrowserTTSWorker:
                 continue
         return None
 
+    def _captcha_visible(self, page) -> bool:
+        # ByteDance's image-selection challenge is commonly rendered in a
+        # cross-origin iframe. A page-level locator cannot see into that frame,
+        # which previously turned a CAPTCHA into three misleading 120-second
+        # "wait for read button" timeouts. Check every frame as well as the
+        # main document so the parent workflow can stop retrying immediately.
+        roots = [page]
+        try:
+            roots.extend(frame for frame in page.frames if frame is not page)
+        except Exception:
+            pass
+
+        for root in roots:
+            if self._is_verification_challenge_frame(root):
+                return True
+            if self._first_visible(root, self._selectors("captcha")) is not None:
+                return True
+        return False
+
+    @staticmethod
+    def _is_verification_challenge_frame(root) -> bool:
+        """Detect a verification iframe before its challenge text has loaded."""
+        url = str(getattr(root, "url", "") or "").lower()
+        return (
+            "verifycenter" in url
+            or "/captcha/" in url
+            or "captcha?" in url
+            or "captcha=" in url
+        )
+
     def _captcha_error(self, page, job_id: str) -> Optional[DoubaoBrowserTTSCaptchaError]:
-        if self._first_visible(page, self._selectors("captcha")) is None:
+        if not self._captcha_visible(page):
             return None
         screenshot = self._save_failure_screenshot(page, job_id)
         return DoubaoBrowserTTSCaptchaError(
             "豆包页面触发人机验证，浏览器自动化已被阻塞，需要人工进入浏览器完成验证后再重试",
             screenshot=screenshot,
             page_url=getattr(page, "url", "") or "",
+            profile=str(self.options.user_data_dir or ""),
+            worker_id=str(
+                os.getenv("DOUBAO_BROWSER_TTS_WORKER_ID", "")
+                or self.options.profile_directory
+                or "default"
+            ),
         )
 
-    def _raise_if_login_or_captcha(self, page, job_id: str = "") -> None:
+    def _wait_for_captcha_resolution(self, page, job_id: str = "") -> float:
         captcha_error = self._captcha_error(page, job_id)
-        if captcha_error:
-            raise captcha_error
+        if not captcha_error:
+            return 0.0
+        started = time.monotonic()
+        deadline = started + max(1, int(self.options.captcha_wait_timeout_seconds))
+        logger.warning(
+            "Doubao CAPTCHA detected; keeping browser open for manual resolution | job=%s timeout=%ss",
+            job_id,
+            self.options.captcha_wait_timeout_seconds,
+        )
+        while time.monotonic() < deadline:
+            time.sleep(1)
+            if not self._captcha_visible(page):
+                waited = max(0.0, time.monotonic() - started)
+                self._captcha_waited_seconds = float(getattr(self, "_captcha_waited_seconds", 0.0)) + waited
+                logger.info("Doubao CAPTCHA cleared manually; automation continues | job=%s waited=%.1fs", job_id, waited)
+                return waited
+        raise DoubaoBrowserTTSCaptchaError(
+            f"{captcha_error}；浏览器已保留 {self.options.captcha_wait_timeout_seconds} 秒等待人工验证，但验证未完成",
+            screenshot=captcha_error.screenshot,
+            page_url=captcha_error.page_url,
+            profile=captcha_error.profile,
+            worker_id=captcha_error.worker_id,
+        )
+
+    def _raise_if_login_or_captcha(self, page, job_id: str = "") -> float:
+        captcha_waited = self._wait_for_captcha_resolution(page, job_id)
         if self._first_visible(page, self._selectors("login")) is not None:
             message = "豆包登录态失效，需要先在浏览器 profile 中登录"
             screenshot = self._save_failure_screenshot(page, job_id or "browser_auth")
@@ -600,6 +731,7 @@ class DoubaoBrowserTTSWorker:
                 ),
             )
             raise DoubaoBrowserTTSAutomationError(message)
+        return captcha_waited
 
     def _save_failure_screenshot(self, page, job_id: str) -> str:
         try:
@@ -611,7 +743,8 @@ class DoubaoBrowserTTSWorker:
             return ""
 
     def _guard_total_timeout(self, started_at: float) -> None:
-        if time.monotonic() - started_at > self.options.total_timeout_seconds:
+        captcha_waited = float(getattr(self, "_captcha_waited_seconds", 0.0))
+        if time.monotonic() - started_at - captcha_waited > self.options.total_timeout_seconds:
             raise DoubaoBrowserTTSAutomationError("任务总超时")
 
     def _emit(

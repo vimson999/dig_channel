@@ -9,21 +9,23 @@ import re
 import subprocess
 import time
 from contextvars import ContextVar
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
-from sqlalchemy import inspect, or_, text
+from sqlalchemy import func, inspect, or_, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
 
 from celery_config import celery_app
 from models import db
+from models.content_pipeline_asset import ContentPipelineAsset
 from models.task import PublicationTask
 from models.zsxq_sync import ZsxqAttachment, ZsxqTopic
 from services.asr_cache_service import probe_media_duration
@@ -34,7 +36,11 @@ from services.gemini_browser import (
     is_configured as gemini_is_configured,
 )
 from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
-from services.runtime_guard import apply_async_after_db_release
+from services.runtime_guard import (
+    apply_async_after_db_release,
+    is_retryable_db_error,
+    release_db_session_quietly,
+)
 from services.workflow_notification_service import workflow_notification_service
 from tasks.publisher import run_publication_pipeline
 
@@ -70,6 +76,7 @@ TERMINAL_STATUSES = {"completed", "failed", "canceled"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
 HOT_AUDIO_DOWNLOAD_THRESHOLD = 20
+AUDIO_TOPIC_CONTENT_PREVIEW_SOURCE_CHARS = 720
 PLANNER_VERSION = "mp3_video_planner_20260719_v12"
 VISUAL_ARTIFACT_KEYS = (
     "finance_cover",
@@ -266,7 +273,9 @@ def _db_retry(operation, label: str = "db operation", *, attempts: int = 3, dela
     for attempt in range(1, max(1, attempts) + 1):
         try:
             return operation()
-        except OperationalError as exc:
+        except Exception as exc:
+            if not is_retryable_db_error(exc):
+                raise
             last_error = exc
             try:
                 db.session.rollback()
@@ -419,6 +428,16 @@ def initial_transcript_prompt(workflow: Optional[Dict[str, Any]] = None) -> str:
     return _env("MP3_VIDEO_TRANSCRIPT_PROMPT", DEFAULT_TRANSCRIPT_DEEPSEEK_PROMPT).strip()
 
 
+def _topic_content_preview_projection():
+    # The API returns only a 180-character preview. Fetch a bounded source
+    # window so large topic bodies are not transferred through PgBouncer.
+    return func.substr(
+        ZsxqTopic.content,
+        1,
+        AUDIO_TOPIC_CONTENT_PREVIEW_SOURCE_CHARS,
+    ).label("topic_content")
+
+
 def list_audio_assets(
     *,
     page: int = 1,
@@ -453,7 +472,7 @@ def list_audio_assets(
             ZsxqAttachment.tab_id.label("tab_id"),
             ZsxqAttachment.topic_id.label("topic_id"),
             ZsxqTopic.title.label("topic_title"),
-            ZsxqTopic.content.label("topic_content"),
+            _topic_content_preview_projection(),
             ZsxqTopic.tab_label.label("tab_label"),
             ZsxqTopic.author_name.label("topic_author"),
             ZsxqTopic.create_time.label("topic_create_time"),
@@ -511,19 +530,55 @@ def list_audio_assets(
         if len(rows) < batch_limit:
             break
 
+    pipeline_items: List[Dict[str, Any]] = []
+    pipeline_scanned = 0
+    if scope not in {"hot", "popular"} and not group_id and not tab_id:
+        pipeline_query = db.session.query(ContentPipelineAsset).filter(
+            ContentPipelineAsset.media_type == "audio"
+        )
+        if q:
+            pipeline_pattern = f"%{q}%"
+            pipeline_query = pipeline_query.filter(or_(
+                ContentPipelineAsset.filename.ilike(pipeline_pattern),
+                ContentPipelineAsset.source_path.ilike(pipeline_pattern),
+                ContentPipelineAsset.source_mode.ilike(pipeline_pattern),
+            ))
+        pipeline_rows = (
+            pipeline_query
+            .order_by(
+                ContentPipelineAsset.updated_at.desc(),
+                ContentPipelineAsset.created_at.desc(),
+            )
+            .limit(scan_limit)
+            .all()
+        )
+        pipeline_scanned = len(pipeline_rows)
+        for row in pipeline_rows:
+            item = _content_pipeline_audio_asset_row_payload(row)
+            if item:
+                pipeline_items.append(item)
+            else:
+                skipped_missing += 1
+
+    combined_items = _merge_audio_asset_items(valid_items, pipeline_items)
+
     start = (page - 1) * per_page
     end = start + per_page
     return {
-        "items": valid_items[start:end],
+        "items": combined_items[start:end],
         "pagination": {
             "page": page,
             "per_page": per_page,
-            "has_more": len(valid_items) > end or scanned >= scan_limit,
+            "has_more": (
+                len(combined_items) > end
+                or scanned >= scan_limit
+                or pipeline_scanned >= scan_limit
+            ),
             "skipped_missing": skipped_missing,
-            "scanned": scanned,
+            "scanned": scanned + pipeline_scanned,
             "scope": "hot" if scope in {"hot", "popular"} else "all",
             "hot_download_threshold": HOT_AUDIO_DOWNLOAD_THRESHOLD,
-            "order": "published_desc",
+            "order": "published_desc_with_pipeline_assets",
         },
     }
 
@@ -545,7 +600,7 @@ def audio_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
             ZsxqAttachment.tab_id.label("tab_id"),
             ZsxqAttachment.topic_id.label("topic_id"),
             ZsxqTopic.title.label("topic_title"),
-            ZsxqTopic.content.label("topic_content"),
+            _topic_content_preview_projection(),
             ZsxqTopic.tab_label.label("tab_label"),
             ZsxqTopic.author_name.label("topic_author"),
             ZsxqTopic.create_time.label("topic_create_time"),
@@ -572,6 +627,28 @@ def audio_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
     except Exception:
         item["duration_seconds"] = 0
     return item
+
+
+def audio_meta_from_asset_reference(asset_reference: str) -> Dict[str, Any]:
+    """Resolve either a synced ZSXQ attachment or a pipeline asset reference."""
+    reference = str(asset_reference or "").strip()
+    if reference.startswith("pipeline:"):
+        asset_id = reference.split(":", 1)[1].strip()
+        row = (
+            ContentPipelineAsset.query
+            .filter(ContentPipelineAsset.id == asset_id)
+            .filter(ContentPipelineAsset.media_type == "audio")
+            .one_or_none()
+        )
+        item = _content_pipeline_audio_asset_row_payload(row)
+        if not item:
+            raise ValueError("手动投递音频不存在或本地文件缺失")
+        try:
+            item["duration_seconds"] = probe_media_duration(item["path"])
+        except Exception:
+            item["duration_seconds"] = 0
+        return item
+    return audio_meta_from_zsxq_attachment(reference)
 
 
 def _resume_waiting_child_lightweight(task_id: str, wait_hint: Any) -> Optional[bool]:
@@ -613,10 +690,17 @@ def _resume_waiting_child_lightweight(task_id: str, wait_hint: Any) -> Optional[
 
     requeued = False
     if child.status not in TERMINAL_STATUSES:
-        disk_video = _publisher_child_disk_video_path(child)
+        child = _publisher_child_wait_snapshot(child)
         repair_due = _publisher_child_repair_due(child)
+        release_db_session_quietly()
+        disk_video = _publisher_child_disk_video_path(child)
         if disk_video:
-            child = _recover_completed_publisher_child_from_disk(child)
+            recovery_child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS)
+            if recovery_child:
+                child = _recover_completed_publisher_child_from_disk(
+                    recovery_child,
+                    video_path=disk_video,
+                )
         if child and child.status not in TERMINAL_STATUSES and repair_due:
             full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
             if full_child:
@@ -628,6 +712,8 @@ def _resume_waiting_child_lightweight(task_id: str, wait_hint: Any) -> Optional[
     if child_status in TERMINAL_STATUSES:
         return None
 
+    child = _publisher_child_wait_snapshot(child)
+    release_db_session_quietly()
     celery_failure = _celery_failure_message(child)
     if celery_failure:
         full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
@@ -860,6 +946,18 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
 
         existing = _fresh_result(task_key)
         plan = _reusable_plan(existing)
+        if plan and (_workflow_uses_direct_ds_response(workflow) or _workflow_uses_transcript(workflow)):
+            try:
+                _validate_strict_ds_plan(
+                    plan,
+                    source_label="手动 DS 返回值" if _workflow_uses_direct_ds_response(workflow) else "IMA 全文 DS 返回值",
+                )
+            except Mp3VideoWorkflowError:
+                # A previous attempt may have persisted a model-rewritten plan
+                # immediately before strict validation rejected it. Never keep
+                # reusing that poisoned intermediate result on every retry.
+                plan = None
+                _emit(task_key, "invalid_ds_plan_rebuild", 58, "旧规划未通过严格校验，按已验收 DS 原文重新解析")
         if plan:
             audio = existing.get("audio") if isinstance(existing.get("audio"), dict) else audio
             _emit(task_key, "deepseek_plan_reused", 58, "复用已完成的 DS v4 flash 标题和音频时间戳规划")
@@ -875,8 +973,18 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
             else:
                 if _workflow_uses_transcript(workflow):
                     _validate_ds_response_contract(first_response, source_label="IMA 全文 DS 返回值")
-                plan = plan_from_first_response(first_response, audio=audio)
+                    # IMA has already returned the seven required DS sections.
+                    # Parse that accepted response deterministically instead of
+                    # asking a second model to rewrite it; the rewrite can drop
+                    # valid cover fields and create a false strict-plan failure.
+                    plan = _local_plan_from_direct_ds_response(first_response, audio=audio)
+                    plan["provider"] = "ima_transcript_local"
+                else:
+                    plan = plan_from_first_response(first_response, audio=audio)
             _update_result(task_key, {"plan": plan, "audio": audio})
+        plan = _apply_workflow_audio_range_override(plan, workflow)
+        if workflow.get("audio_range_override"):
+            _update_result(task_key, {"plan": plan})
         if _workflow_uses_direct_ds_response(workflow) or _workflow_uses_transcript(workflow):
             _validate_strict_ds_plan(
                 plan,
@@ -985,17 +1093,19 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
         existing = _fresh_result(task_key)
         audio_segment = audio_segment_from_plan(audio, plan)
         audio_signature = _audio_segment_signature(audio_segment)
-        force_video_regenerate = _workflow_force_video_regenerate(workflow, existing)
-        if force_video_regenerate:
-            landscape_summary, landscape_task = None, None
-        else:
-            landscape_summary, landscape_task = _reusable_video_summary(
-                existing,
-                "landscape_video",
-                parent_id=task_key,
-                generate_subtitles=generate_subtitles,
-                audio_signature=audio_signature,
-            )
+        force_video_regenerate_at = _workflow_force_video_regenerate_at(
+            workflow,
+            existing,
+        )
+        force_video_regenerate = force_video_regenerate_at is not None
+        landscape_summary, landscape_task = _reusable_video_summary(
+            existing,
+            "landscape_video",
+            parent_id=task_key,
+            generate_subtitles=generate_subtitles,
+            audio_signature=audio_signature,
+            created_not_before=force_video_regenerate_at,
+        )
         if landscape_summary:
             landscape_child_summary = _task_public_summary(landscape_task) if landscape_task else None
             _emit(task_key, "landscape_video_reused", 90, "复用已完成的小君君横屏视频")
@@ -1008,6 +1118,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                 "landscape_video",
                 generate_subtitles=generate_subtitles,
                 audio_signature=audio_signature,
+                created_not_before=force_video_regenerate_at,
             )
             if landscape_task:
                 landscape_task_key = str(landscape_task.id)
@@ -1028,6 +1139,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                     aspect_ratio="16:9",
                     generate_subtitles=generate_subtitles,
                     force_new=force_video_regenerate,
+                    created_not_before=force_video_regenerate_at,
                 )
                 landscape_task_key = str(landscape_task.id)
                 _record_child(task_key, "landscape_video", _task_public_summary(landscape_task))
@@ -1041,16 +1153,14 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
 
         _raise_if_parent_canceled(task_key)
         existing = _fresh_result(task_key)
-        if force_video_regenerate:
-            vertical_summary, vertical_task = None, None
-        else:
-            vertical_summary, vertical_task = _reusable_video_summary(
-                existing,
-                "vertical_video",
-                parent_id=task_key,
-                generate_subtitles=generate_subtitles,
-                audio_signature=audio_signature,
-            )
+        vertical_summary, vertical_task = _reusable_video_summary(
+            existing,
+            "vertical_video",
+            parent_id=task_key,
+            generate_subtitles=generate_subtitles,
+            audio_signature=audio_signature,
+            created_not_before=force_video_regenerate_at,
+        )
         if vertical_summary:
             vertical_child_summary = _task_public_summary(vertical_task) if vertical_task else None
             _emit(task_key, "vertical_video_reused", 99, "复用已完成的此刻此声竖屏视频")
@@ -1063,6 +1173,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                 "vertical_video",
                 generate_subtitles=generate_subtitles,
                 audio_signature=audio_signature,
+                created_not_before=force_video_regenerate_at,
             )
             if vertical_task:
                 vertical_task_key = str(vertical_task.id)
@@ -1083,6 +1194,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                     aspect_ratio="9:16",
                     generate_subtitles=generate_subtitles,
                     force_new=force_video_regenerate,
+                    created_not_before=force_video_regenerate_at,
                 )
                 vertical_task_key = str(vertical_task.id)
                 _record_child(task_key, "vertical_video", _task_public_summary(vertical_task))
@@ -1237,9 +1349,52 @@ def _workflow_render_mode(workflow: Dict[str, Any]) -> str:
 
 
 def _workflow_force_video_regenerate(workflow: Dict[str, Any], result: Optional[Dict[str, Any]] = None) -> bool:
+    return _workflow_force_video_regenerate_at(workflow, result) is not None
+
+
+def _apply_workflow_audio_range_override(
+    plan: Dict[str, Any],
+    workflow: Dict[str, Any],
+) -> Dict[str, Any]:
+    plan = dict(plan or {})
+    workflow = workflow if isinstance(workflow, dict) else {}
+    override = workflow.get("audio_range_override")
+    if not isinstance(override, dict):
+        return plan
+    start = _parse_seconds(override.get("start_seconds"), default=None)
+    end = _parse_seconds(override.get("end_seconds"), default=None)
+    if start is None or start < 0 or end is None or end <= start:
+        raise Mp3VideoWorkflowError("用户重生成音频截取范围无效，请重新设置起止时间")
+    audio_plan = dict(plan.get("audio") or {})
+    audio_plan["start_seconds"] = round(float(start), 3)
+    audio_plan["end_seconds"] = round(float(end), 3)
+    plan["audio"] = audio_plan
+    return plan
+
+
+def _workflow_force_video_regenerate_at(
+    workflow: Dict[str, Any],
+    result: Optional[Dict[str, Any]] = None,
+) -> Optional[datetime]:
     workflow = workflow if isinstance(workflow, dict) else {}
     result = result if isinstance(result, dict) else {}
-    return bool(workflow.get("force_video_regenerate_at") or result.get("force_video_regenerate_at"))
+    raw = workflow.get("force_video_regenerate_at") or result.get(
+        "force_video_regenerate_at"
+    )
+    text_value = str(raw or "").strip()
+    if not text_value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+    except ValueError:
+        logger.error(
+            "Ignore invalid force_video_regenerate_at value: %s",
+            text_value,
+        )
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _truthy(value: Any, default: bool = True) -> bool:
@@ -1260,20 +1415,20 @@ def _truthy(value: Any, default: bool = True) -> bool:
 def _workflow_generate_subtitles(workflow: Dict[str, Any], result: Optional[Dict[str, Any]] = None) -> bool:
     for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
         if key in workflow:
-            return _truthy(workflow.get(key), default=True)
+            return _truthy(workflow.get(key), default=False)
     metadata = workflow.get("metadata") if isinstance(workflow.get("metadata"), dict) else {}
     for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
         if key in metadata:
-            return _truthy(metadata.get(key), default=True)
+            return _truthy(metadata.get(key), default=False)
     result = result if isinstance(result, dict) else {}
     for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
         if key in result:
-            return _truthy(result.get(key), default=True)
+            return _truthy(result.get(key), default=False)
     result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     for key in ("generate_subtitles", "subtitles_enabled", "enable_subtitles"):
         if key in result_metadata:
-            return _truthy(result_metadata.get(key), default=True)
-    return True
+            return _truthy(result_metadata.get(key), default=False)
+    return False
 
 
 def _generate_from_direct_ds_response(
@@ -1669,6 +1824,25 @@ def plan_from_direct_ds_response(first_response: str, *, audio: Dict[str, Any]) 
     first_response = (first_response or "").strip()
     if not first_response:
         raise Mp3VideoWorkflowError("DS 返回值为空，无法规划视频")
+    local_plan = _local_plan_from_direct_ds_response(first_response, audio=audio)
+    try:
+        planner_payload = deepseek_plan(first_response, audio=audio)
+    except Exception as exc:
+        local_plan["planner_error"] = str(exc)
+        _validate_strict_ds_plan(local_plan, source_label="手动 DS 返回值")
+        return local_plan
+    if planner_payload:
+        plan = validate_plan(planner_payload, fallback=local_plan, audio=audio)
+        plan["provider"] = planner_payload.get("provider") or "deepseek"
+        plan["planner_input_source"] = "direct_ds_response"
+    else:
+        plan = local_plan
+    _validate_strict_ds_plan(plan, source_label="手动 DS 返回值")
+    return plan
+
+
+def _local_plan_from_direct_ds_response(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a complete plan from an already accepted seven-section DS response."""
     fallback = fallback_plan(first_response, audio=audio)
     sections = _direct_ds_numbered_sections(first_response)
     title_1 = _direct_ds_title_value(sections.get("1", ""))
@@ -1711,21 +1885,7 @@ def plan_from_direct_ds_response(first_response: str, *, audio: Dict[str, Any]) 
         "audio": audio_plan,
         "provider": "direct_ds_local",
     }
-    local_plan = validate_plan(payload, fallback=fallback, audio=audio)
-    try:
-        planner_payload = deepseek_plan(first_response, audio=audio)
-    except Exception as exc:
-        local_plan["planner_error"] = str(exc)
-        _validate_strict_ds_plan(local_plan, source_label="手动 DS 返回值")
-        return local_plan
-    if planner_payload:
-        plan = validate_plan(planner_payload, fallback=local_plan, audio=audio)
-        plan["provider"] = planner_payload.get("provider") or "deepseek"
-        plan["planner_input_source"] = "direct_ds_response"
-    else:
-        plan = local_plan
-    _validate_strict_ds_plan(plan, source_label="手动 DS 返回值")
-    return plan
+    return validate_plan(payload, fallback=fallback, audio=audio)
 
 
 def _validate_ds_response_contract(first_response: str, *, source_label: str = "DS 返回值") -> None:
@@ -1806,14 +1966,23 @@ def _direct_ds_numbered_sections(text: str) -> Dict[str, str]:
     source = str(text or "").replace("\r", "\n")
     if not source.strip():
         return {}
-    marker_re = re.compile(
-        r"(?:(?<=\n)|^)\s*(?:[-*]\s*)?(?:\*\*)?\s*([1-7])\s*[.．、:：]\s*"
-        r"|(?:\*\*)\s*([1-7])\s*[.．、:：]\s*"
+    # DeepSeek commonly emits top-level sections as Markdown headings such as
+    # ``### 6.`` or ``### 6｜``. Prefer those explicit headings when present so
+    # numbered quotes inside section 5 cannot be mistaken for new sections.
+    markdown_marker_re = re.compile(
+        r"^[ \t]*#{1,6}[ \t]*(?:\*\*)?[ \t]*([1-7])[ \t]*[.．、:：|｜][ \t]*",
+        flags=re.M,
     )
-    matches = list(marker_re.finditer(source))
+    matches = list(markdown_marker_re.finditer(source))
+    if not matches:
+        marker_re = re.compile(
+            r"(?:(?<=\n)|^)\s*(?:[-*]\s*)?(?:\*\*)?\s*([1-7])\s*[.．、:：]\s*"
+            r"|(?:\*\*)\s*([1-7])\s*[.．、:：]\s*"
+        )
+        matches = list(marker_re.finditer(source))
     sections: Dict[str, str] = {}
     for index, match in enumerate(matches):
-        number = match.group(1) or match.group(2)
+        number = next((group for group in match.groups() if group), "")
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
         content = source[start:end].strip()
@@ -1879,7 +2048,14 @@ def _direct_ds_title_value(section: str) -> str:
 
 def _direct_ds_closed_door_title(section: str, *, separator: str) -> str:
     expected = "|" if separator in {"|", "｜"} else "/"
-    for line in _direct_ds_content_lines(section):
+    lines = _direct_ds_content_lines(section)
+    separator_re = r"[|｜]" if expected == "|" else r"/"
+    # Prefer the actual formatted title. A heading such as
+    # "另一个版本（内资闭门会竖线格式）" mentions the format but is not itself
+    # usable cover copy and must not be auto-formatted into a false positive.
+    for line in lines:
+        if not re.search(rf"内资闭门会(?:议)?\s*{separator_re}", line):
+            continue
         title = _clean_closed_door_video_title(line, expected_separator=expected)
         if title:
             return title
@@ -3146,21 +3322,23 @@ def create_publisher_video_task(
     image_path: str,
     role: str,
     aspect_ratio: str,
-    generate_subtitles: bool = True,
+    generate_subtitles: bool = False,
     force_new: bool = False,
+    created_not_before: Optional[datetime] = None,
 ) -> PublicationTask:
     title = _publisher_video_title(plan, role=role)
     generate_subtitles = bool(generate_subtitles)
     audio_segment = audio_segment_from_plan(audio, plan)
     audio_signature = _audio_segment_signature(audio_segment)
     existing = None
-    if not force_new:
+    if not force_new or created_not_before is not None:
         existing = _find_existing_publisher_video_task(
             parent_id,
             role=role,
             aspect_ratio=aspect_ratio,
             generate_subtitles=generate_subtitles,
             audio_signature=audio_signature,
+            created_not_before=created_not_before,
         )
     if existing:
         _sync_publisher_video_task_title(existing, title)
@@ -3298,6 +3476,7 @@ def _find_existing_publisher_video_task(
     aspect_ratio: str,
     generate_subtitles: Optional[bool] = None,
     audio_signature: Optional[str] = None,
+    created_not_before: Optional[datetime] = None,
 ) -> Optional[PublicationTask]:
     query = (
         PublicationTask.query
@@ -3312,6 +3491,8 @@ def _find_existing_publisher_video_task(
         query = query.filter(PublicationTask.publisher_generate_subtitles.is_(bool(generate_subtitles)))
     if audio_signature:
         query = query.filter(PublicationTask.publisher_audio_signature == audio_signature)
+    if created_not_before is not None:
+        query = query.filter(PublicationTask.created_at >= created_not_before)
     matching = query.limit(30).all()
     if not matching:
         return None
@@ -3708,9 +3889,18 @@ def transcript_model() -> str:
 
 
 def extract_closed_door_video_titles(text: str) -> Dict[str, str]:
+    # Section-aware extraction is safest for explicit Markdown headings. For
+    # legacy one-line responses ("6. ... 7. ..."), retain the date-bounded
+    # full-text extractor below so the section 6 value cannot absorb section 7.
+    has_markdown_sections = bool(re.search(r"^[ \t]*#{1,6}[ \t]*[1-7][ \t]*[.．、:：|｜]", str(text or ""), flags=re.M))
+    sections = _direct_ds_numbered_sections(text) if has_markdown_sections else {}
+    slash_title = _direct_ds_closed_door_title(sections.get("6", ""), separator="/")
+    pipe_title = _direct_ds_closed_door_title(sections.get("7", ""), separator="|")
     candidates = _closed_door_full_title_candidates(text)
-    slash_title = _select_closed_door_video_title(candidates, separator="/")
-    pipe_title = _select_closed_door_video_title(candidates, separator="|")
+    if not slash_title:
+        slash_title = _select_closed_door_video_title(candidates, separator="/")
+    if not pipe_title:
+        pipe_title = _select_closed_door_video_title(candidates, separator="|")
     return {
         "xiaojunjun_video_title": slash_title,
         "ciketc_video_title": pipe_title,
@@ -3945,20 +4135,10 @@ def _extract_inline_title_after_heading(value: Any) -> str:
 def extract_audio_range(text: str) -> Optional[Tuple[float, float]]:
     normalized = str(text or "").replace("：", ":").replace("–", "-").replace("—", "-")
     token = r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
-    range_re = re.compile(
-        rf"[\[【(（]?\s*(?P<start>{token})\s*[\]】)）]?\s*"
-        rf"(?:-|~|～|至|到)\s*[\[【(（]?\s*(?P<end>{token})\s*[\]】)）]?"
-    )
-    for match in range_re.finditer(normalized):
-        context = normalized[max(0, match.start() - 80): min(len(normalized), match.end() + 80)]
-        if not re.search(r"截取|剪辑|片段|精华|时间戳|时段|时间段|推荐", context):
-            continue
-        start = _parse_seconds(match.group("start"), default=None)
-        end = _parse_seconds(match.group("end"), default=None)
-        if start is None or end is None or end <= start:
-            continue
-        return float(start), float(end)
 
+    # Explicit start/end fields are authoritative. Check them before generic
+    # inline ranges so a later "关键钩子 10:51-11:27" cannot override the
+    # recommended clip's "开始时间 05:43 / 结束时间 20:35".
     start_re = re.compile(rf"(?:开始|起始)(?:时间戳|时间)?[*_\s]*:\s*[\[【(（]?\s*(?P<start>{token})")
     end_re = re.compile(rf"(?:结束|截止|终止)(?:时间戳|时间)?[*_\s]*:\s*[\[【(（]?\s*(?P<end>{token})")
     start_match = start_re.search(normalized)
@@ -3972,6 +4152,32 @@ def extract_audio_range(text: str) -> Optional[Tuple[float, float]]:
             end = _parse_seconds(end_match.group("end"), default=None)
             if start is not None and end is not None and end > start:
                 return float(start), float(end)
+
+    range_re = re.compile(
+        rf"[\[【(（]?\s*(?P<start>{token})\s*[\]】)）]?\s*"
+        rf"(?:-|~|～|至|到)\s*[\[【(（]?\s*(?P<end>{token})\s*[\]】)）]?"
+    )
+    candidates = []
+    for match in range_re.finditer(normalized):
+        context = normalized[max(0, match.start() - 80): min(len(normalized), match.end() + 80)]
+        if not re.search(r"截取|剪辑|片段|精华|时间戳|时段|时间段|推荐", context):
+            continue
+        start = _parse_seconds(match.group("start"), default=None)
+        end = _parse_seconds(match.group("end"), default=None)
+        if start is None or end is None or end <= start:
+            continue
+        before = normalized[max(0, match.start() - 100):match.start()]
+        score = 0
+        if re.search(r"推荐片段|建议精华片段|精华片段时间戳|推荐截取|建议截取|推荐时段", before):
+            score += 20
+        if re.search(r"推荐|精华|片段|截取", context):
+            score += 5
+        if re.search(r"钩子|金句|内部|位置", before):
+            score -= 20
+        candidates.append((score, match.start(), float(start), float(end)))
+    if candidates:
+        _, _, start, end = sorted(candidates, key=lambda item: (-item[0], item[1]))[0]
+        return start, end
     return None
 
 
@@ -4196,10 +4402,12 @@ def _reusable_video_summary(
     parent_id: Optional[str] = None,
     generate_subtitles: Optional[bool] = None,
     audio_signature: Optional[str] = None,
+    created_not_before: Optional[datetime] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[PublicationTask]]:
     summary = result.get(label) if isinstance(result.get(label), dict) else {}
     if (
-        _video_summary_ready(summary)
+        created_not_before is None
+        and _video_summary_ready(summary)
         and _summary_matches_generate_subtitles(summary, generate_subtitles)
         and _summary_matches_audio_signature(summary, audio_signature)
     ):
@@ -4208,6 +4416,7 @@ def _reusable_video_summary(
     child = _completed_child_from_result(result, label)
     if (
         child
+        and _task_created_not_before(child, created_not_before)
         and _publisher_child_matches_generate_subtitles(child, generate_subtitles)
         and _publisher_child_matches_audio_signature(child, audio_signature)
     ):
@@ -4220,6 +4429,7 @@ def _reusable_video_summary(
         parent_id=parent_id,
         generate_subtitles=generate_subtitles,
         audio_signature=audio_signature,
+        created_not_before=created_not_before,
     )
     if existing and existing.status == "completed":
         existing_summary = _publisher_result_summary(existing)
@@ -4235,6 +4445,7 @@ def _find_existing_publisher_video_task_for_label(
     parent_id: Optional[str] = None,
     generate_subtitles: Optional[bool] = None,
     audio_signature: Optional[str] = None,
+    created_not_before: Optional[datetime] = None,
 ) -> Optional[PublicationTask]:
     resolved_parent_id = str(parent_id or (result or {}).get("workflow_task_id") or "").strip()
     if not resolved_parent_id:
@@ -4247,6 +4458,8 @@ def _find_existing_publisher_video_task_for_label(
         kwargs["generate_subtitles"] = generate_subtitles
     if audio_signature:
         kwargs["audio_signature"] = audio_signature
+    if created_not_before is not None:
+        kwargs["created_not_before"] = created_not_before
     return _find_existing_publisher_video_task(resolved_parent_id, **kwargs)
 
 
@@ -4264,16 +4477,28 @@ def _active_child_from_result(
     *,
     generate_subtitles: Optional[bool] = None,
     audio_signature: Optional[str] = None,
+    created_not_before: Optional[datetime] = None,
 ) -> Optional[PublicationTask]:
     child = _child_from_result(result, label)
     if (
         child
         and child.status not in TERMINAL_STATUSES
+        and _task_created_not_before(child, created_not_before)
         and _publisher_child_matches_generate_subtitles(child, generate_subtitles)
         and _publisher_child_matches_audio_signature(child, audio_signature)
     ):
         return child
     return None
+
+
+def _task_created_not_before(
+    task: Optional[PublicationTask],
+    cutoff: Optional[datetime],
+) -> bool:
+    if cutoff is None:
+        return True
+    created_at = getattr(task, "created_at", None)
+    return bool(created_at and created_at >= cutoff)
 
 
 def _child_from_result(result: Dict[str, Any], label: str) -> Optional[PublicationTask]:
@@ -4403,10 +4628,14 @@ def _load_json_file(path: Any) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _recover_completed_publisher_child_from_disk(child: PublicationTask) -> PublicationTask:
+def _recover_completed_publisher_child_from_disk(
+    child: PublicationTask,
+    *,
+    video_path: Optional[Path] = None,
+) -> PublicationTask:
     if not child or child.feature != "publisher" or child.status in TERMINAL_STATUSES:
         return child
-    video_path = _publisher_child_disk_video_path(child)
+    video_path = video_path or _publisher_child_disk_video_path(child)
     if not video_path:
         return child
 
@@ -4483,6 +4712,16 @@ def _recover_completed_publisher_child_from_disk(child: PublicationTask) -> Publ
     return child
 
 
+def _publisher_child_wait_snapshot(child: PublicationTask) -> Any:
+    payload = {
+        column.key: getattr(child, column.key, None)
+        for column in TASK_PUBLIC_STATUS_COLUMNS
+    }
+    payload["params"] = {}
+    payload["result"] = {}
+    return SimpleNamespace(**payload)
+
+
 def _publisher_child_disk_video_path(child: PublicationTask) -> Optional[Path]:
     task_id = str(getattr(child, "id", "") or "")
     if not task_id:
@@ -4542,23 +4781,33 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
         now_mono = time.monotonic()
         requeued = False
         if child.status not in TERMINAL_STATUSES and now_mono >= next_full_recovery_check:
-            disk_video = _publisher_child_disk_video_path(child)
+            child = _publisher_child_wait_snapshot(child)
             repair_due = _publisher_child_repair_due(child)
+            release_db_session_quietly()
+            disk_video = _publisher_child_disk_video_path(child)
             if disk_video or repair_due:
-                full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
-                if full_child and disk_video:
-                    full_child = _recover_completed_publisher_child_from_disk(full_child)
-                if full_child and full_child.status not in TERMINAL_STATUSES and repair_due:
-                    full_child, requeued = maybe_requeue_stale_publisher_child(full_child, log=logger)
-                child = full_child or child
-                if requeued:
-                    child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS) or child
+                if disk_video:
+                    recovery_child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS)
+                    if recovery_child:
+                        child = _recover_completed_publisher_child_from_disk(
+                            recovery_child,
+                            video_path=disk_video,
+                        )
+                if child and child.status not in TERMINAL_STATUSES and repair_due:
+                    full_child = _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+                    if full_child:
+                        full_child, requeued = maybe_requeue_stale_publisher_child(full_child, log=logger)
+                        child = full_child or child
+                    if requeued:
+                        child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS) or child
             next_full_recovery_check = now_mono + recovery_check_seconds
 
+        child = _publisher_child_wait_snapshot(child)
         child_status = str(child.status or "")
         child_step = str(child.current_step or "")
         child_progress = int(child.progress or 0)
         child_summary = _task_public_summary(child)
+        release_db_session_quietly()
         celery_failure = None if child_status in TERMINAL_STATUSES else _celery_failure_message(child)
 
         if child_step != last_step or requeued:
@@ -4577,8 +4826,8 @@ def _wait_child(parent_id: str, child_id: str, label: str, *, start_progress: in
             db.session.expire_all()
             _clear_waiting_child(parent_id, label)
             return _load_task(child_id, *TASK_PUBLIC_COLUMNS)
+        release_db_session_quietly()
         time.sleep(poll_seconds)
-        db.session.expire_all()
 
     child = _load_task(child_id, *TASK_PUBLIC_STATUS_COLUMNS)
     if not child:
@@ -5484,6 +5733,92 @@ def _audio_asset_filter():
     return or_(*(ext_conditions + path_conditions))
 
 
+def _content_pipeline_source_label(source_mode: Any) -> str:
+    labels = {
+        "scheduled_api": "计划任务",
+        "sidebar": "侧边栏下载",
+        "browser_sidebar": "侧边栏下载",
+        "manual_download": "手动投递",
+    }
+    return labels.get(str(source_mode or "").strip().lower(), "内容流水线")
+
+
+def _content_pipeline_audio_asset_row_payload(row) -> Optional[Dict[str, Any]]:
+    if not row:
+        return None
+    path = _resolve_project_path(getattr(row, "source_path", None))
+    if not path or not path.exists() or not path.is_file():
+        return None
+    stat = path.stat()
+    asset_id = str(row.id)
+    source_label = _content_pipeline_source_label(row.source_mode)
+    return {
+        "attachment_id": f"pipeline:{asset_id}",
+        "asset_id": asset_id,
+        "asset_kind": "content_pipeline",
+        "source_label": source_label,
+        "source_mode": row.source_mode,
+        "pipeline_status": row.status,
+        "pipeline_task_id": row.canonical_task_id,
+        "filename": row.filename or path.name,
+        "name": row.filename or path.name,
+        "path": str(path),
+        "bytes": stat.st_size,
+        "file_ext": path.suffix.lstrip(".").lower(),
+        "download_count": None,
+        "updated_at": _isoformat_z(row.updated_at),
+        "created_at": _isoformat_z(row.created_at),
+        "group_id": None,
+        "tab_id": None,
+        "topic_id": None,
+        "topic_title": row.filename or source_label,
+        "topic_author": None,
+        "topic_content_excerpt": None,
+        "topic_create_time": None,
+        "topic_first_synced_at": None,
+        "topic_last_synced_at": None,
+        "tab_label": source_label,
+        "preview_url": f"/api/mp3-video-workflows/audio-assets/{asset_id}/preview",
+    }
+
+
+def _audio_asset_sort_timestamp(item: Dict[str, Any]) -> float:
+    for key in ("topic_create_time", "updated_at", "created_at"):
+        value = item.get(key)
+        if not value:
+            continue
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=timezone.utc).timestamp()
+        text_value = str(value).strip()
+        try:
+            return datetime.fromisoformat(text_value.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return 0.0
+
+
+def _merge_audio_asset_items(
+    synced_items: List[Dict[str, Any]],
+    pipeline_items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Merge synced and pipeline assets while suppressing identical local paths."""
+    merged: List[Dict[str, Any]] = []
+    seen_paths = set()
+    for item in sorted(
+        [*(synced_items or []), *(pipeline_items or [])],
+        key=_audio_asset_sort_timestamp,
+        reverse=True,
+    ):
+        path = str(item.get("path") or "").strip()
+        identity = os.path.normcase(os.path.realpath(path)) if path else ""
+        if identity and identity in seen_paths:
+            continue
+        if identity:
+            seen_paths.add(identity)
+        merged.append(item)
+    return merged
+
+
 def _audio_asset_row_payload(row) -> Optional[Dict[str, Any]]:
     if not row:
         return None
@@ -5494,6 +5829,10 @@ def _audio_asset_row_payload(row) -> Optional[Dict[str, Any]]:
     filename = row.attachment_name or path.name
     return {
         "attachment_id": row.attachment_id,
+        "asset_id": row.attachment_id,
+        "asset_kind": "zsxq_attachment",
+        "source_label": "知识星球同步",
+        "source_mode": "zsxq_sync",
         "filename": filename,
         "name": filename,
         "path": str(path),

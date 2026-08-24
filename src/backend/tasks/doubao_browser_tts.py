@@ -2,6 +2,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta
+from urllib.parse import quote
 
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified
@@ -47,6 +48,7 @@ RETRYABLE_ERROR_FRAGMENTS = (
     "导出 WAV",
     "WAV 已保存",
     "音频捕获",
+    "未捕获到 PCM 音频",
     "页面自动化超时",
     "Timeout",
     "timed out",
@@ -67,6 +69,7 @@ NON_RETRYABLE_ERROR_FRAGMENTS = (
 
 TASK_UPDATE_COLUMNS = (
     PublicationTask.id,
+    PublicationTask.celery_task_id,
     PublicationTask.status,
     PublicationTask.current_step,
     PublicationTask.progress,
@@ -117,7 +120,22 @@ def _process_job(task_id, celery_task=None):
     if not isinstance(task.params, dict) or task.params.get("feature") != FEATURE_NAME:
         logger.error("Invalid Doubao browser TTS task params: %s", task_id)
         return False
-    if task.status == "canceled":
+    request_id = str(
+        getattr(getattr(celery_task, "request", None), "id", "") or ""
+    )
+    current_celery_id = str(getattr(task, "celery_task_id", "") or "")
+    if request_id and current_celery_id and request_id != current_celery_id:
+        logger.info(
+            "Doubao browser TTS task received stale delivery; task=%s request=%s current=%s",
+            task_id,
+            request_id,
+            current_celery_id,
+        )
+        return False
+    if task.status == "completed":
+        logger.info("Doubao browser TTS task already completed; skip duplicate: %s", task_id)
+        return True
+    if task.status in {"failed", "blocked_by_captcha", "canceled"}:
         return False
 
     job_id = task.id
@@ -495,6 +513,8 @@ def _mark_blocked_by_captcha(task, exc, *, result_snapshot=None, scene_asset_id=
         "message": message,
         "page_url": getattr(exc, "page_url", "") or "",
         "screenshot_path": getattr(exc, "screenshot", "") or "",
+        "profile": getattr(exc, "profile", "") or "",
+        "worker_id": getattr(exc, "worker_id", "") or "",
         "requires_human_action": True,
         "blocked_at": now.isoformat() + "Z",
     }
@@ -532,6 +552,55 @@ def _mark_blocked_by_captcha(task, exc, *, result_snapshot=None, scene_asset_id=
     _send_captcha_blocked_email(task.id)
 
 
+def _captcha_human_intervention_context(task, captcha):
+    params = task.params if isinstance(task.params, dict) else {}
+    payload = (
+        params.get("doubao_browser_tts")
+        if isinstance(params.get("doubao_browser_tts"), dict)
+        else {}
+    )
+    metadata = (
+        payload.get("metadata")
+        if isinstance(payload.get("metadata"), dict)
+        else {}
+    )
+    parent_task_id = str(
+        metadata.get("parent_task_id") or params.get("parent_task_id") or ""
+    ).strip()
+    base_url = str(
+        os.getenv("REPORT_AUDIO_WORKFLOW_FRONTEND_BASE_URL")
+        or os.getenv("REPORT_WORKFLOW_FRONTEND_BASE_URL")
+        or os.getenv("FRONTEND_BASE_URL")
+        or "http://localhost:5001"
+    ).strip().rstrip("/")
+    workflow_url = (
+        f"{base_url}/report-audio-workflow-detail.html?job_id={quote(parent_task_id)}"
+        if parent_task_id
+        else ""
+    )
+    return {
+        "parent_task_id": parent_task_id,
+        "workflow_url": workflow_url,
+        "profile": str(
+            captcha.get("profile")
+            or payload.get("user_data_dir")
+            or os.getenv("DOUBAO_BROWSER_TTS_USER_DATA_DIR")
+            or ""
+        ),
+        "worker_id": str(
+            captcha.get("worker_id")
+            or metadata.get("worker_id")
+            or os.getenv("DOUBAO_BROWSER_TTS_WORKER_ID")
+            or "default"
+        ),
+        "resolution_steps": [
+            "使用通知中指定的浏览器 Profile 打开豆包页面",
+            "完成验证码或安全验证，并确认页面可以正常发起朗读",
+            "返回工作流详情页，点击“从失败处续跑”",
+        ],
+    }
+
+
 def _send_captcha_blocked_email(task_id):
     task = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
     if not task:
@@ -539,13 +608,19 @@ def _send_captcha_blocked_email(task_id):
     result = dict(task.result or {})
     notifications = dict(result.get("notifications") or {})
     event_key = "doubao_captcha_blocked"
-    if notifications.get(event_key, {}).get("sent"):
-        return True
-
-    captcha = result.get("captcha_blocked") if isinstance(result.get("captcha_blocked"), dict) else {}
+    captcha = dict(result.get("captcha_blocked") or {}) if isinstance(result.get("captcha_blocked"), dict) else {}
     params = task.params if isinstance(task.params, dict) else {}
     payload = params.get("doubao_browser_tts") if isinstance(params.get("doubao_browser_tts"), dict) else {}
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    context = _captcha_human_intervention_context(task, captcha)
+    captcha.update(context)
+    result["captcha_blocked"] = captcha
+    if notifications.get(event_key, {}).get("sent"):
+        task.result = result
+        flag_modified(task, "result")
+        db.session.commit()
+        return True
+
     notification = {
         "event_type": event_key,
         "sent_at": datetime.utcnow().isoformat() + "Z",
@@ -558,14 +633,16 @@ def _send_captcha_blocked_email(task_id):
             job_id=str(task.id),
             page_url=captcha.get("page_url") or "",
             screenshot_path=captcha.get("screenshot_path") or "",
-            profile=str(payload.get("user_data_dir") or ""),
-            worker_id=str(metadata.get("worker_id") or ""),
+            profile=captcha.get("profile") or "",
+            worker_id=captcha.get("worker_id") or "",
             details={
-                "父编排任务": metadata.get("parent_task_id") or params.get("parent_task_id") or "-",
+                "父编排任务": captcha.get("parent_task_id") or "-",
+                "工作流详情": captcha.get("workflow_url") or "-",
                 "分段": f"{metadata.get('chunk_index') or '-'}/{metadata.get('chunk_total') or '-'}",
                 "尝试": metadata.get("chunk_attempt") or "-",
                 "文本长度": f"{len(str(payload.get('text') or ''))} 字",
             },
+            resolution_steps=captcha.get("resolution_steps") or [],
         )
         notification.update(send_result if isinstance(send_result, dict) else {"sent": False, "result": send_result})
         logger.info("[DOUBAO_BROWSER_TTS] captcha blocked email result | task=%s result=%s", task.id, send_result)

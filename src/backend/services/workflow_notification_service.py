@@ -78,6 +78,50 @@ SUPPORTED_EMAIL_PROVIDERS = {"email", "smtp", "qq_email", "qq-mail"}
 TRUTHY = {"1", "true", "yes", "on"}
 FALSY = {"0", "false", "no", "off"}
 _BROWSER_ALERT_LOCK = threading.RLock()
+_PUBLIC_BROWSER_NOTIFICATION_FIELDS = (
+    "sent",
+    "reason",
+    "sent_at",
+    "retry_after_seconds",
+    "event_type",
+    "error",
+    "missing",
+)
+
+
+def _mask_email_address(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    masked = []
+    for address in text.replace(";", ",").split(","):
+        address = address.strip()
+        if not address:
+            continue
+        local, separator, domain = address.partition("@")
+        masked.append(
+            f"{local[:1]}***@{domain}"
+            if separator
+            else f"{address[:1]}***"
+        )
+    return ", ".join(masked)
+
+
+def public_browser_human_intervention_notification(notification):
+    """Return the browser-alert fields safe for authenticated workflow UIs."""
+    if not isinstance(notification, dict):
+        return {}
+    summary = {
+        key: notification.get(key)
+        for key in _PUBLIC_BROWSER_NOTIFICATION_FIELDS
+        if key in notification and notification.get(key) is not None
+    }
+    recipient = notification.get("to")
+    if recipient:
+        summary["recipient_hint"] = _mask_email_address(recipient)
+    elif notification.get("recipient_hint"):
+        summary["recipient_hint"] = str(notification.get("recipient_hint"))
+    return summary
 
 
 class WorkflowNotificationService:
@@ -184,6 +228,7 @@ class WorkflowNotificationService:
         profile="",
         worker_id="",
         details=None,
+        resolution_steps=None,
     ):
         """Send a deduplicated alert when browser automation needs a human."""
         settings = self.email_settings()
@@ -235,10 +280,38 @@ class WorkflowNotificationService:
                 ]
                 for key, value in (details or {}).items():
                     lines.append(f"{key}：{value or '-'}")
+                lines.append("")
+                custom_steps = [
+                    str(item or "").strip()
+                    for item in (resolution_steps or [])
+                    if str(item or "").strip()
+                ]
+                if custom_steps:
+                    lines.append("处理步骤：")
+                    lines.extend(
+                        f"{index}. {step}"
+                        for index, step in enumerate(custom_steps, start=1)
+                    )
+                elif reason == "login":
+                    lines.extend([
+                        "处理步骤：",
+                        "1. 关闭正在占用上述浏览器 Profile 的自动化 Chrome 窗口。",
+                        f"2. 使用上述浏览器 Profile 打开 {provider} 页面。",
+                        "3. 完成 Google/Gemini 登录以及验证码或安全验证。",
+                        "4. 确认 Gemini 输入框可见并能进入目标 Gem。",
+                        "5. 返回工作流详情页，点击“登录完成，恢复任务”。",
+                        "6. 若仍失败，请根据上述截图、页面、Worker 和 Profile 定位对应浏览器实例。",
+                    ])
+                else:
+                    lines.extend([
+                        "处理步骤：",
+                        f"1. 使用上述浏览器 Profile 打开 {provider} 页面。",
+                        "2. 完成页面要求的验证码或安全验证。",
+                        "3. 返回工作流详情页并重试被阻塞的任务。",
+                    ])
                 lines.extend([
                     "",
-                    f"处理方式：请打开对应的 {provider} 浏览器窗口，完成登录或安全验证后重试失败任务。",
-                    "系统处理：当前任务会保留失败/阻塞状态，不会把验证页面当作正常结果保存。",
+                    "系统处理：当前任务会保留人工阻塞状态，不会把登录或验证页面当作正常结果保存。",
                     "",
                     f"发送时间：{self._now_iso()}",
                 ])
@@ -294,7 +367,9 @@ class WorkflowNotificationService:
             "from_name": self._first_env(["WORKFLOW_EMAIL_FROM_NAME", "SMTP_FROM_NAME", "EMAIL_FROM_NAME"], "内容流水线"),
             "to": self._first_env(["WORKFLOW_NOTIFY_TO", "WORKFLOW_EMAIL_TO", "EMAIL_TO"], ""),
             "timeout": self._int_env(["WORKFLOW_EMAIL_TIMEOUT_SECONDS", "SMTP_TIMEOUT_SECONDS"], default=12),
-            "retry_attempts": self._int_env(["WORKFLOW_EMAIL_RETRY_ATTEMPTS", "SMTP_RETRY_ATTEMPTS"], default=3),
+            # The Celery delivery task owns the retry budget.  Retrying here as
+            # well multiplies SMTP attempts and synchronizes failure bursts.
+            "retry_attempts": self._int_env(["WORKFLOW_EMAIL_RETRY_ATTEMPTS", "SMTP_RETRY_ATTEMPTS"], default=1),
             "retry_delay_seconds": self._float_env(["WORKFLOW_EMAIL_RETRY_DELAY_SECONDS", "SMTP_RETRY_DELAY_SECONDS"], default=2.0),
             "fallback_starttls": self._bool_env(["WORKFLOW_EMAIL_FALLBACK_STARTTLS", "SMTP_FALLBACK_STARTTLS"], default=True),
             "use_ssl": self._bool_env(["WORKFLOW_EMAIL_USE_SSL", "SMTP_USE_SSL"], default=(port == 465)),
@@ -326,8 +401,11 @@ class WorkflowNotificationService:
             f"批次：{workflow.get('batch_id') or '-'}",
             f"工作流 ID：{workflow.get('id') or '-'}",
             f"触发方式：{workflow.get('trigger') or '-'}",
+            f"上游接入：{workflow.get('source_mode') or '-'}",
             f"轮次：{self._round_text(workflow, plain=True) or '-'}",
         ]
+        if workflow.get("content_pipeline_task_id"):
+            lines.append(f"内容流水线任务：{workflow.get('content_pipeline_task_id')}")
         if workflow.get("event_message"):
             lines.append(f"说明：{workflow.get('event_message')}")
         if workflow.get("error_message"):
@@ -427,15 +505,19 @@ class WorkflowNotificationService:
         sync = stage_results.get("sync") if isinstance(stage_results.get("sync"), dict) else {}
         if sync:
             summary = sync.get("summary") if isinstance(sync.get("summary"), dict) else {}
-            lines.append(
-                "同步："
-                f"{self._status_label(sync.get('status'))}"
-                f" | 新增 {self._num(summary.get('topics_new'))}"
-                f" | 更新 {self._num(summary.get('topics_updated'))}"
-                f" | 下载 {self._num(summary.get('attachments_downloaded'))}"
-                f" | 跳过 {self._num(summary.get('attachments_skipped'))}"
-                f" | 失败 {self._num(summary.get('attachments_failed'))}"
-            )
+            bilibili_summary = summary.get("bilibili_intelligence")
+            if bilibili_summary:
+                lines.extend(self._bilibili_intelligence_lines(bilibili_summary))
+            else:
+                lines.append(
+                    "同步："
+                    f"{self._status_label(sync.get('status'))}"
+                    f" | 新增 {self._num(summary.get('topics_new'))}"
+                    f" | 更新 {self._num(summary.get('topics_updated'))}"
+                    f" | 下载 {self._num(summary.get('attachments_downloaded'))}"
+                    f" | 跳过 {self._num(summary.get('attachments_skipped'))}"
+                    f" | 失败 {self._num(summary.get('attachments_failed'))}"
+                )
             lines.extend(self._sync_audit_lines(summary))
             auto_video_lines = self._auto_video_dispatch_lines(summary.get("auto_video_dispatch"))
             if auto_video_lines:
@@ -494,6 +576,70 @@ class WorkflowNotificationService:
                     continue
                 lines.append(f"{key}：{value}")
 
+        return lines
+
+    def _bilibili_intelligence_lines(self, summary):
+        if not isinstance(summary, dict):
+            return []
+
+        lines = [
+            "B站情报同步："
+            f"{self._status_label(summary.get('status'))}"
+            f" | 监控源 {self._num(summary.get('total_competitors'))} 个"
+            f" | 成功 {self._num(summary.get('succeeded_count'))} 个"
+            f" | 失败 {self._num(summary.get('failed_count'))} 个"
+            f" | 抓取 {self._num(summary.get('fetched'))} 条"
+            f" | 新增 {self._num(summary.get('created'))} 条"
+            f" | 更新 {self._num(summary.get('updated'))} 条"
+            f" | 耗时 {self._num(summary.get('duration_seconds'))} 秒"
+        ]
+
+        succeeded = summary.get("succeeded") if isinstance(summary.get("succeeded"), list) else []
+        if succeeded:
+            lines.append("成功明细：")
+            for item in succeeded:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("competitor_name") or item.get("competitor_id") or "未知监控源"
+                uid = item.get("uid")
+                identity = f"{name}（UID {uid}）" if uid else str(name)
+                lines.append(
+                    f"- {identity}：抓取 {self._num(item.get('fetched'))} 条，"
+                    f"新增 {self._num(item.get('created'))} 条，"
+                    f"更新 {self._num(item.get('updated'))} 条"
+                )
+
+        created_titles = []
+        for item in succeeded:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("competitor_name") or item.get("competitor_id") or "未知监控源"
+            uid = item.get("uid")
+            identity = f"{name}（UID {uid}）" if uid else str(name)
+            titles = item.get("created_titles")
+            if not isinstance(titles, (list, tuple)):
+                continue
+            for title in titles:
+                title = str(title or "").strip()
+                if title:
+                    created_titles.append((identity, title))
+
+        if created_titles:
+            lines.append(f"新增内容标题（{len(created_titles)} 条）：")
+            lines.extend(f"- {identity}：{title}" for identity, title in created_titles)
+        else:
+            lines.append("新增内容标题：0 条")
+
+        failed = summary.get("failed") if isinstance(summary.get("failed"), list) else []
+        if failed:
+            lines.append("失败明细：")
+            for item in failed:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("competitor_name") or item.get("competitor_id") or "未知监控源"
+                uid = item.get("uid")
+                identity = f"{name}（UID {uid}）" if uid else str(name)
+                lines.append(f"- {identity}：{item.get('error') or '未知错误'}")
         return lines
 
     def _workflow_totals(self, stage_results):

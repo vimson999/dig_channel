@@ -295,6 +295,24 @@ class ExternalDocumentService:
             db.session.commit()
         return created
 
+    def scan_topic_batch(
+        self,
+        topics: Iterable[ZsxqTopic],
+        *,
+        commit: bool = False,
+    ) -> Dict[str, Any]:
+        """Reconcile a page of topic links with bounded database queries.
+
+        The single-topic API remains for callers that process one record. Sync
+        pages should use this entry point so document shells and topic
+        relations are loaded in one query each instead of one pair per topic.
+        """
+
+        result = self._scan_topic_batch(topics)
+        if commit:
+            db.session.commit()
+        return result
+
     def scan_existing_topics(
         self,
         *,
@@ -364,14 +382,16 @@ class ExternalDocumentService:
             # Historical backfill reads compact projection columns. Loading the
             # full raw payload is several orders of magnitude heavier and mostly
             # contains attachments/platform metadata rather than user links.
-            links = extract_external_links_from_topic({
-                "title": topic.title,
-                "content": topic.content,
-                "question_text": topic.question_text,
-                "answer_text": topic.answer_text,
-                "article_title": topic.article_title,
-                "article_excerpt": topic.article_excerpt,
-            })
+            links = getattr(topic, "_external_links", None)
+            if links is None:
+                links = extract_external_links_from_topic({
+                    "title": topic.title,
+                    "content": topic.content,
+                    "question_text": topic.question_text,
+                    "answer_text": topic.answer_text,
+                    "article_title": topic.article_title,
+                    "article_excerpt": topic.article_excerpt,
+                })
             if links:
                 topic_links.append((topic, links))
         if not topic_links:

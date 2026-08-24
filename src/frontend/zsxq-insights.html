@@ -6,7 +6,7 @@
     <title>生财情报台 - Shioa</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
     <link rel="stylesheet" href="css/zsxq-lab.css?v=20260715-insights">
-    <link rel="stylesheet" href="css/zsxq-insights.css?v=20260715-v1">
+    <link rel="stylesheet" href="css/zsxq-insights.css?v=20260731-yiren-readability">
 </head>
 <body class="zsxq-insights-page min-h-screen bg-slate-50 text-slate-900 overflow-x-hidden">
     <main class="insights-page">
@@ -43,11 +43,12 @@
             </div>
         </section>
 
-        <nav class="insights-view-tabs" aria-label="情报视图">
-            <button type="button" data-view="overview"><i class="fa-regular fa-rectangle-list"></i>全景</button>
-            <button type="button" data-view="trend"><i class="fa-solid fa-arrow-trend-up"></i>趋势</button>
-            <button type="button" data-view="opportunity"><i class="fa-solid fa-bullseye"></i>机会</button>
-            <button type="button" class="is-active" data-view="library"><i class="fa-solid fa-table-cells-large"></i>主题库</button>
+        <nav class="insights-view-tabs" aria-label="情报快捷视图">
+            <button type="button" data-view="overview"><i class="fa-regular fa-rectangle-list"></i>全景概览</button>
+            <button type="button" data-view="trend"><i class="fa-solid fa-arrow-trend-up"></i>趋势追踪</button>
+            <button type="button" data-view="opportunity"><i class="fa-solid fa-bullseye"></i>机会筛选</button>
+            <button type="button" class="is-active" data-view="library" aria-current="page"><i class="fa-solid fa-table-cells-large"></i>主题下钻</button>
+            <button type="button" data-view="experiment"><i class="fa-solid fa-flask"></i>项目实验</button>
         </nav>
 
         <section class="research-workspace" aria-label="生财主题研究工作台">
@@ -142,6 +143,53 @@
                 </section>
             </aside>
         </section>
+
+        <section id="experiment-workspace" class="experiment-workspace is-hidden" aria-labelledby="experiment-title">
+            <header class="experiment-intro">
+                <div>
+                    <span class="experiment-kicker"><i class="fa-solid fa-flask"></i>从信号到行动</span>
+                    <h3 id="experiment-title">把升温方向变成可验证的项目实验</h3>
+                    <p>情报台用于发现主题热度、需求和结果信号；本页结合你的现有能力，把信号收敛为一到两周可执行的实验。评分是初版决策建议，不承诺收益。</p>
+                </div>
+                <div id="experiment-signal-summary" class="experiment-signal-summary" aria-label="项目实验数据概览"></div>
+            </header>
+
+            <div class="experiment-layout">
+                <section class="experiment-list-section" aria-labelledby="experiment-list-title">
+                    <div class="experiment-list-heading">
+                        <div>
+                            <h4 id="experiment-list-title">优先实验清单</h4>
+                            <p>先验证客户是否愿意采用，再决定是否产品化。</p>
+                        </div>
+                        <div class="experiment-stage-filter" role="group" aria-label="筛选实验阶段">
+                            <button type="button" class="is-active" data-experiment-stage="all">全部</button>
+                            <button type="button" data-experiment-stage="now">1–2 周可测</button>
+                            <button type="button" data-experiment-stage="later">后续产品化</button>
+                        </div>
+                    </div>
+                    <div id="experiment-list" class="experiment-list" aria-live="polite"></div>
+                </section>
+
+                <aside class="experiment-method" aria-label="项目评分说明">
+                    <div class="experiment-method-heading">
+                        <span>筛选说明</span>
+                        <strong>100 分制</strong>
+                    </div>
+                    <h4>项目决策器</h4>
+                    <p>主题热度回答“大家在谈什么”，项目评分回答“你现在是否值得试”。两者不会混为一个结论。</p>
+                    <div id="experiment-score-guide" class="experiment-score-guide"></div>
+                    <div class="experiment-review">
+                        <h5>人工复核</h5>
+                        <ul>
+                            <li>核对原帖和评论，区分作者陈述与可验证事实</li>
+                            <li>确认目标客户、获客入口和实际交付成本</li>
+                            <li>检查平台时效、版权、隐私与合规边界</li>
+                            <li>一次最多启动三个实验，并提前设置停止条件</li>
+                        </ul>
+                    </div>
+                </aside>
+            </div>
+        </section>
     </main>
 
     <div id="loading-layer" class="loading-layer" role="status">
@@ -163,6 +211,6 @@
     <script src="js/config.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <script src="js/shared-navigation.js?v=20260715-insights"></script>
-    <script src="js/zsxq-insights.js?v=20260715-v1"></script>
+    <script src="js/zsxq-insights.js?v=20260731-fast-first-paint"></script>
 </body>
 </html>

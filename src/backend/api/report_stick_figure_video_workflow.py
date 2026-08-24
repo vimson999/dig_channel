@@ -47,10 +47,12 @@ from services.report_visual_plan_service import (
     FEATURE_NAME as STORYBOARD_FEATURE,
     provider_status as storyboard_status_payload,
 )
+from services.report_visual_plan_integrity import durable_storyboard_integrity
 from services.doubao_browser_tts import FEATURE_NAME as DOUBAO_TTS_FEATURE, QUEUE_NAME as DOUBAO_TTS_QUEUE, status_payload as doubao_status_payload
 from services.report_stick_figure_assets import (
     FEATURE_NAME as IMAGE_FEATURE,
     QUEUE_NAME as IMAGE_QUEUE,
+    has_browser_overlay_artifact,
     scene_image_prompt_hash,
 )
 from services.report_visual_scheme import (
@@ -150,12 +152,16 @@ VIDEO_TASK_COLUMNS = (
 )
 SCENE_PARENT_COLUMNS = (
     PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
     PublicationTask.user_id,
     PublicationTask.source_task_id,
     PublicationTask.task_title,
     PublicationTask.task_video_path,
     PublicationTask.report_audio_pdf_attachment_id,
     PublicationTask.report_visual_scheme_key,
+    PublicationTask.waiting_child_label,
+    PublicationTask.waiting_child_status,
 )
 SCENE_ASSET_COLUMNS = (
     ReportStickFigureSceneAsset.id,
@@ -406,6 +412,8 @@ def _clear_terminal_workflow_cache(current_user=None, job_id=None):
     _clear_legacy_scene_bundle_cache(job_id)
     _clear_scene_status_bundle_cache(job_id)
     _clear_active_workflow_cache(current_user, job_id)
+    if job_id:
+        _clear_scene_structure_cache(workflow_id=job_id)
 
 
 @report_stick_figure_video_workflow_bp.route("/status", methods=["GET"])
@@ -626,7 +634,7 @@ def create_job_from_report_audio(current_user, audio_job_id):
     )
     if not audio_task:
         return jsonify({"success": False, "message": "研报转语音任务不存在"}), 404
-    if audio_task.status != "completed" or int(audio_task.final_script_chars or 0) <= 0:
+    if audio_task.status not in {"completed", "failed"} or int(audio_task.final_script_chars or 0) <= 0:
         return jsonify({"success": False, "message": "研报转语音任务尚未生成完整文案"}), 409
     audio_path = Path(str(audio_task.report_audio_wav_path or ""))
     if not audio_path.is_file() or audio_path.stat().st_size <= 0:
@@ -917,10 +925,16 @@ def get_scene_assets(current_user, job_id):
         # process's in-memory cache. Always overlay the narrow durable render
         # status so a completed video never remains displayed as queued.
         payload["video"] = _video_payload(parent_snapshot)
+        _overlay_durable_audio_strategy(parent_snapshot, storyboard_id, payload)
         return jsonify({"success": True, "data": payload})
     cached_payload = _cached_legacy_scene_bundle(parent_snapshot)
     if cached_payload is not None:
         cached_payload["video"] = _video_payload(parent_snapshot)
+        _overlay_durable_audio_strategy(
+            parent_snapshot,
+            cached_payload.get("storyboard_job_id"),
+            cached_payload,
+        )
         return jsonify({"success": True, "data": cached_payload})
     try:
         storyboard, assets = _ensure_scene_assets(parent)
@@ -1184,6 +1198,12 @@ def submit_video(current_user, job_id):
     for asset in render_assets:
         if asset.image_status != "completed" or not asset.image_path or not Path(asset.image_path).is_file():
             return jsonify({"success": False, "message": f"第 {asset.sequence} 段图片尚未完成"}), 409
+        if has_browser_overlay_artifact(asset.image_path):
+            return jsonify({
+                "success": False,
+                "message": f"第 {asset.sequence} 段图片包含浏览器浮层，请重新生成该图片",
+                "code": "scene_image_browser_overlay",
+            }), 409
         if (
             audio_mode == "scene_tts"
             and (asset.tts_status != "completed" or not asset.audio_path or not Path(asset.audio_path).is_file())
@@ -1377,12 +1397,16 @@ def _scene_parent_snapshot(parent):
         return None
     return SimpleNamespace(
         id=str(parent.id),
+        status=str(getattr(parent, "status", "") or ""),
+        current_step=str(getattr(parent, "current_step", "") or ""),
         user_id=str(parent.user_id or ""),
         source_task_id=parent.source_task_id,
         task_title=parent.task_title,
         task_video_path=parent.task_video_path,
         report_audio_pdf_attachment_id=parent.report_audio_pdf_attachment_id,
         report_visual_scheme_key=getattr(parent, "report_visual_scheme_key", None) or DEFAULT_VISUAL_SCHEME_KEY,
+        waiting_child_label=str(getattr(parent, "waiting_child_label", "") or ""),
+        waiting_child_status=str(getattr(parent, "waiting_child_status", "") or ""),
     )
 
 
@@ -1420,7 +1444,7 @@ def _scene_asset_tts_snapshot(asset):
 
 def _completed_storyboard(source_task_id, visual_scheme_key=DEFAULT_VISUAL_SCHEME_KEY):
     scheme_key = str(visual_scheme_key or DEFAULT_VISUAL_SCHEME_KEY)
-    return (
+    candidates = (
         PublicationTask.query.options(load_only(
             PublicationTask.id,
             PublicationTask.status,
@@ -1432,15 +1456,20 @@ def _completed_storyboard(source_task_id, visual_scheme_key=DEFAULT_VISUAL_SCHEM
         .filter(
             PublicationTask.feature == STORYBOARD_FEATURE,
             PublicationTask.source_task_id == str(source_task_id),
-            PublicationTask.status == "completed",
+            PublicationTask.status != "canceled",
         )
         .filter(or_(
             PublicationTask.report_visual_scheme_key == scheme_key,
             *([PublicationTask.report_visual_scheme_key.is_(None)] if scheme_key == DEFAULT_VISUAL_SCHEME_KEY else []),
         ))
         .order_by(PublicationTask.created_at.desc())
-        .first()
+        .limit(5)
+        .all()
     )
+    for candidate in candidates:
+        if durable_storyboard_integrity(candidate.id):
+            return candidate
+    return None
 
 
 def _ensure_scene_assets(parent, *, force_refresh=False):
@@ -1449,6 +1478,20 @@ def _ensure_scene_assets(parent, *, force_refresh=False):
     cache_key = (parent_id, source_task_id)
     cached_storyboard_id = None if force_refresh else _scene_structure_cache_get(cache_key)
     if cached_storyboard_id:
+        storyboard_failed = (
+            str(getattr(parent, "current_step", "") or "") == "storyboard_failed"
+            or (
+                str(getattr(parent, "waiting_child_label", "") or "") == "标题与正文分镜"
+                and str(getattr(parent, "waiting_child_status", "") or "").lower() == "failed"
+            )
+        )
+        if storyboard_failed and not durable_storyboard_integrity(cached_storyboard_id):
+            _clear_scene_structure_cache(
+                workflow_id=parent_id,
+                source_task_id=source_task_id,
+                storyboard_id=cached_storyboard_id,
+            )
+            raise ValueError("请先完成标题与正文分镜")
         return (
             SimpleNamespace(id=cached_storyboard_id),
             _scene_assets(parent_id, cached_storyboard_id),
@@ -1566,6 +1609,35 @@ def _completed_image_asset_can_adopt_prompt_hash(asset) -> bool:
         return path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
+
+
+def _clear_scene_structure_cache(*, workflow_id=None, source_task_id=None, storyboard_id=None):
+    """Drop scene structure snapshots when their storyboard is no longer valid."""
+
+    workflow_key = str(workflow_id or "").strip()
+    source_key = str(source_task_id or "").strip()
+    storyboard_key = str(storyboard_id or "").strip()
+    with _scene_structure_cache_lock:
+        stale_structure_keys = []
+        for key in _scene_structure_cache:
+            if key == ("segments", storyboard_key) and storyboard_key:
+                stale_structure_keys.append(key)
+            elif workflow_key and key and str(key[0]) == workflow_key:
+                stale_structure_keys.append(key)
+            elif source_key and len(key) > 1 and str(key[1]) == source_key:
+                stale_structure_keys.append(key)
+        for key in stale_structure_keys:
+            _scene_structure_cache.pop(key, None)
+        if storyboard_key:
+            _scene_segment_cache.pop(storyboard_key, None)
+
+    if source_key:
+        client = _scene_structure_redis_client()
+        if client is not None:
+            try:
+                client.delete(_scene_structure_redis_key((workflow_key, source_key)))
+            except Exception:
+                pass
 
 
 def _scene_structure_cache_get(cache_key):
@@ -1933,7 +2005,11 @@ def _video_payload(parent, task=None, *, include_result=True):
         "height": result.get("height"),
         "fps": result.get("fps"),
         "render_profile": result.get("render_profile") or result.get("schema_version"),
-        "audio_mode": result.get("audio_mode") or task_params.get("audio_mode") or "scene_tts",
+        "audio_mode": (
+            result.get("audio_mode") or task_params.get("audio_mode") or "scene_tts"
+            if task
+            else None
+        ),
         "render_options": render_options,
         "subtitle_entry_count": result.get("subtitle_entry_count"),
         "subtitle_url": (
@@ -2458,6 +2534,42 @@ def _ensure_whole_audio_track(parent, storyboard):
     return _whole_audio_track(parent.id, storyboard.id)
 
 
+def _auto_enqueue_whole_audio_alignment(parent, storyboard):
+    """Bind and align a reusable full WAV without requiring a UI click.
+
+    A missing reusable WAV is a supported workflow mode, so it is reported as
+    unavailable rather than treated as a dispatch failure.  Queue submission
+    remains idempotent in ``_enqueue_whole_audio_alignment``.
+    """
+    try:
+        track = _ensure_whole_audio_track(parent, storyboard)
+    except ValueError as exc:
+        return {
+            "available": False,
+            "queued": False,
+            "message": str(exc),
+        }
+    alignment_task = _enqueue_whole_audio_alignment(
+        parent,
+        storyboard,
+        track,
+        force=False,
+    )
+    return {
+        "available": True,
+        "queued": bool(
+            alignment_task
+            and str(getattr(alignment_task, "status", "") or "") != "completed"
+        ),
+        "audio_track_id": str(track.id),
+        "job_id": (
+            str(getattr(alignment_task, "id", "") or "")
+            or str(track.alignment_task_id or "")
+        ),
+        "status": str(getattr(alignment_task, "status", "") or track.status or ""),
+    }
+
+
 def _enqueue_whole_audio_alignment(parent, storyboard, track, *, force=False):
     if track.status == "completed" and _whole_audio_track_ready(track) and not force:
         return SimpleNamespace(id=track.alignment_task_id, status="completed")
@@ -2660,6 +2772,23 @@ def _scene_asset_status_bundle(parent, storyboard, assets):
         "summary": _scene_asset_summary(items, audio_strategy),
         "items": items,
     }
+
+
+def _overlay_durable_audio_strategy(parent, storyboard_id, payload):
+    """Overlay worker-owned audio alignment state onto cached scene bundles."""
+
+    if not storyboard_id or not isinstance(payload, dict):
+        return payload
+    items = payload.get("items") or []
+    body_count = sum(1 for item in items if int(item.get("sequence") or 0) >= 1)
+    audio_strategy = _audio_strategy_payload(
+        parent,
+        SimpleNamespace(id=str(storyboard_id)),
+        body_count,
+    )
+    payload["audio_strategy"] = audio_strategy
+    payload["summary"] = _scene_asset_summary(items, audio_strategy)
+    return payload
 
 
 def _cache_legacy_scene_bundle(payload):
@@ -3103,6 +3232,14 @@ def _workflow_payload(parent, material, storyboard, *, segment_count=None, asset
         stage = f"基础文案 · {material.current_step or material_status}"
     elif not storyboard:
         status, progress, stage = "running", 35, "基础文案完成 · 等待生成分镜"
+    elif board_status == "blocked_by_login":
+        status = "blocked_by_login"
+        progress = 35 + int(storyboard.progress or 0) * 25 // 100
+        stage = "分镜等待人工登录"
+    elif board_status == "blocked_by_captcha":
+        status = "blocked_by_captcha"
+        progress = 35 + int(storyboard.progress or 0) * 25 // 100
+        stage = "分镜等待人工验证"
     elif board_status == "failed":
         status, progress, stage = "failed", 35 + int(storyboard.progress or 0) * 25 // 100, "分镜失败"
     elif board_status in {"queued", "running"}:

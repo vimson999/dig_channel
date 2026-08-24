@@ -49,15 +49,22 @@
         <div id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm"></div>
         <div class="lg:grid lg:grid-cols-[11rem_minmax(0,1fr)] lg:items-start lg:gap-5">
             <aside id="quick-nav" class="hidden lg:sticky lg:top-24 lg:block" aria-label="详情快速导航">
-                <nav class="rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
+                <nav class="max-h-[calc(100vh-7rem)] overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
                     <div class="px-3 pb-2 pt-1 text-[11px] font-black uppercase tracking-wider text-slate-400">快速导航</div>
                     <button data-quick-nav="task-overview" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-list-check w-4 text-center"></i><span>任务概览</span></button>
                     <button data-quick-nav="content-extract" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-file-lines w-4 text-center"></i><span>文案提取</span></button>
                     <button data-quick-nav="downloads" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-download w-4 text-center"></i><span>下载入口</span></button>
+                    <button data-quick-nav="keyframes" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-images w-4 text-center"></i><span>关键帧预览</span></button>
                     <button data-quick-nav="visual-assets" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-images w-4 text-center"></i><span>视觉素材</span></button>
                     <button data-quick-nav="video-files" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-film w-4 text-center"></i><span>视频文件</span></button>
                     <button data-quick-nav="publish-center" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-share-nodes w-4 text-center"></i><span>发布投递</span></button>
                     <button data-quick-nav="run-logs" class="quick-nav-item flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-bold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"><i class="fas fa-terminal w-4 text-center"></i><span>运行日志</span></button>
+                    <div id="sidebar-task-status" class="mt-2 border-t border-slate-100 px-2 pt-3" aria-live="polite">
+                        <div class="rounded-lg bg-slate-50 px-2.5 py-3 text-[11px] text-slate-400">任务状态加载中...</div>
+                    </div>
+                    <button id="sidebar-refresh-btn" type="button" class="mt-2 flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-3 py-2.5 text-xs font-black text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-wait disabled:opacity-60">
+                        <i class="fas fa-rotate"></i><span>刷新详情</span>
+                    </button>
                     <button data-scroll-top class="mt-2 flex w-full items-center justify-center gap-2 border-t border-slate-100 px-3 pt-3 text-[11px] font-bold text-slate-400 hover:text-indigo-700"><i class="fas fa-arrow-up"></i>回到顶部</button>
                 </nav>
             </aside>
@@ -65,10 +72,46 @@
         </div>
     </main>
 
+    <dialog id="regenerate-video-dialog" class="w-[min(92vw,32rem)] rounded-2xl border-0 bg-white p-0 shadow-2xl backdrop:bg-slate-950/45">
+        <form id="regenerate-video-form" method="dialog" class="overflow-hidden rounded-2xl">
+            <div class="border-b border-slate-200 px-5 py-4">
+                <h2 class="text-base font-black text-slate-900">重新生成完整视频</h2>
+                <p class="mt-1 text-xs leading-5 text-slate-500">请重新确认本次音频的截取范围。默认带入上一次的时间，你可以直接修改。</p>
+            </div>
+            <div class="space-y-4 px-5 py-5">
+                <div class="grid grid-cols-2 gap-3">
+                    <label class="text-xs font-bold text-slate-600">
+                        起点时间
+                        <input id="regenerate-video-start" name="start_time" type="text" required placeholder="00:12" inputmode="numeric" class="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm font-black text-slate-900 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100">
+                    </label>
+                    <label class="text-xs font-bold text-slate-600">
+                        终点时间
+                        <input id="regenerate-video-end" name="end_time" type="text" required placeholder="12:46" inputmode="numeric" class="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm font-black text-slate-900 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100">
+                    </label>
+                </div>
+                <div class="flex items-center justify-between rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2.5">
+                    <div>
+                        <div class="text-xs font-black text-indigo-900">播放倍速</div>
+                        <div class="mt-0.5 text-[11px] text-indigo-600">沿用原设置，本次只修改起止时间</div>
+                    </div>
+                    <div id="regenerate-video-speed" class="rounded-md bg-white px-3 py-1.5 text-sm font-black text-indigo-700 shadow-sm">1.2×</div>
+                </div>
+                <p class="text-[11px] leading-5 text-slate-400">支持 MM:SS、HH:MM:SS 或秒数；终点必须晚于起点。旧视频会保留。</p>
+                <div id="regenerate-video-error" class="hidden rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700"></div>
+            </div>
+            <div class="flex justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-4">
+                <button id="regenerate-video-cancel" type="button" class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100">取消</button>
+                <button id="regenerate-video-submit" type="submit" class="rounded-lg bg-amber-600 px-4 py-2 text-xs font-black text-white hover:bg-amber-700">
+                    <i class="fas fa-arrows-rotate mr-1.5"></i>按新时间重新生成
+                </button>
+            </div>
+        </form>
+    </dialog>
+
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20260720-local-auth-bypass"></script>
     <script src="js/bilibili-publish-panel.js?v=20260708-bili-empty-draft-fallback"></script>
     <script src="js/platform-browser-publish-panel.js?v=20260721-douyin-verify"></script>
-    <script src="js/mp3-video-workflow-detail.js?v=20260722-quick-nav-v1"></script>
+    <script src="js/mp3-video-workflow-detail.js?v=20260806-account-media-defaults-v1-poll-pressure-v2"></script>
 </body>
 </html>

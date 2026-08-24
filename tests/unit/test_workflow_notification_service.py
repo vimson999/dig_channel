@@ -10,9 +10,67 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services.workflow_notification_service import workflow_notification_service  # noqa: E402
+from services import workflow_notification_service as notification_module  # noqa: E402
 
 
 class WorkflowNotificationServiceTest(unittest.TestCase):
+    def test_public_human_intervention_notification_masks_recipient(self):
+        summary = notification_module.public_browser_human_intervention_notification({
+            "sent": True,
+            "sent_at": "2026-08-12T08:34:14Z",
+            "event_type": "doubao_captcha_blocked",
+            "to": "owner@example.test",
+        })
+
+        self.assertEqual(summary["recipient_hint"], "o***@example.test")
+        self.assertNotIn("to", summary)
+
+    def test_public_human_intervention_notification_masks_every_recipient(self):
+        summary = notification_module.public_browser_human_intervention_notification({
+            "sent": True,
+            "to": "owner@example.test, backup@example.test",
+        })
+
+        self.assertEqual(
+            summary["recipient_hint"],
+            "o***@example.test, b***@example.test",
+        )
+        self.assertNotIn("owner@", summary["recipient_hint"])
+        self.assertNotIn("backup@", summary["recipient_hint"])
+
+    def test_browser_verification_alert_uses_caller_recovery_steps(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {
+                "WORKFLOW_NOTIFY_PROVIDER": "email",
+                "WORKFLOW_EMAIL_USER": "sender@example.test",
+                "WORKFLOW_EMAIL_PASSWORD": "secret",
+                "WORKFLOW_NOTIFY_TO": "owner@example.test",
+                "BROWSER_HUMAN_INTERVENTION_STATE_DIR": directory,
+            },
+            clear=False,
+        ), patch.object(workflow_notification_service, "_send_email_with_retry") as send:
+            result = workflow_notification_service.send_browser_human_intervention(
+                provider="豆包",
+                reason="verification",
+                message="需要人机验证",
+                job_id="child-1",
+                details={
+                    "工作流详情": "http://localhost:5001/report-audio-workflow-detail.html?job_id=parent-1",
+                },
+                resolution_steps=[
+                    "使用指定浏览器 Profile 打开豆包页面",
+                    "完成人机验证并确认可以发起朗读",
+                    "返回工作流详情页，点击“从失败处续跑”",
+                ],
+            )
+
+        self.assertTrue(result["sent"])
+        body = send.call_args.args[2]
+        self.assertIn("工作流详情：http://localhost:5001/report-audio-workflow-detail.html?job_id=parent-1", body)
+        self.assertIn("1. 使用指定浏览器 Profile 打开豆包页面", body)
+        self.assertIn("3. 返回工作流详情页，点击“从失败处续跑”", body)
+
     def test_failure_only_level_includes_direct_sync_failure(self):
         with patch.dict(
             "os.environ",
@@ -60,6 +118,41 @@ class WorkflowNotificationServiceTest(unittest.TestCase):
         self.assertTrue(first["sent"])
         self.assertEqual("cooldown", second["reason"])
         send.assert_called_once()
+
+    def test_browser_login_alert_contains_actionable_profile_recovery_runbook(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {
+                "WORKFLOW_NOTIFY_PROVIDER": "email",
+                "WORKFLOW_EMAIL_USER": "sender@example.test",
+                "WORKFLOW_EMAIL_PASSWORD": "secret",
+                "WORKFLOW_NOTIFY_TO": "owner@example.test",
+                "BROWSER_HUMAN_INTERVENTION_STATE_DIR": directory,
+            },
+            clear=False,
+        ), patch.object(workflow_notification_service, "_send_email_with_retry") as send:
+            result = workflow_notification_service.send_browser_human_intervention(
+                provider="Gemini",
+                reason="login",
+                message="登录态失效",
+                job_id="storyboard-job",
+                page_url="https://gemini.google.com/app",
+                screenshot_path="/tmp/gemini-login.png",
+                profile="/runtime/browser_profiles/worker_2",
+                worker_id="worker_2",
+                details={
+                    "工作流详情": "http://localhost:5001/report-stick-figure-video-workflow-detail.html?workflow_job_id=workflow-job",
+                },
+            )
+
+        self.assertTrue(result["sent"])
+        body = send.call_args.args[2]
+        self.assertIn("关闭正在占用上述浏览器 Profile 的自动化 Chrome 窗口", body)
+        self.assertIn("使用上述浏览器 Profile 打开 Gemini 页面", body)
+        self.assertIn("完成 Google/Gemini 登录以及验证码或安全验证", body)
+        self.assertIn("确认 Gemini 输入框可见并能进入目标 Gem", body)
+        self.assertIn("点击“登录完成，恢复任务”", body)
+        self.assertIn("workflow_job_id=workflow-job", body)
 
     def test_skipped_clean_checks_are_not_reported_as_running(self):
         workflow = {

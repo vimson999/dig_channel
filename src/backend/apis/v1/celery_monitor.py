@@ -6,6 +6,7 @@ import signal
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -139,9 +140,9 @@ SERVICES = {
         "label": "研报分镜梳理",
         "queue": "report_visual_plan",
         "hostname_prefix": "report_visual_plan@",
-        "run_script": "scripts/dev/run-celery-report-visual-plan.sh",
+        "run_script": "scripts/dev/run-celery-report-visual-plan-pool.sh",
         "log_file": "report_visual_plan.log",
-        "description": "消费已有基础文案，经分镜 Gem 与 DS v4 Flash 生成完整覆盖的结构化分镜列表",
+        "description": "多个独立 Gemini profile 并行消费分镜任务；单个 profile 内保持串行，生成完整覆盖的结构化分镜列表",
     },
     "report_top10_workflow": {
         "label": "今日研报 Top10 编排",
@@ -255,6 +256,17 @@ SCHEDULERS = {
         "log_file": "bilibili_charging_scheduler.log",
         "description": "每天 00:00（Asia/Shanghai）刷新首页 B站 UP 主充电人数并发送节点邮件",
     },
+    "bilibili_intelligence_scheduler": {
+        "label": "B站情报每小时同步调度器",
+        "pattern": "run_bilibili_intelligence_scheduler.py",
+        "argv": [
+            "venv/bin/python",
+            "src/backend/run_bilibili_intelligence_scheduler.py",
+            "start",
+        ],
+        "log_file": "bilibili_intelligence_scheduler.log",
+        "description": "每小时同步 B站监控源投稿，并发送成功/部分失败/失败汇总邮件",
+    },
     "report_video_asset_scheduler": {
         "label": "研报资产扫描调度器",
         "pattern": "run_report_video_asset_scheduler.py",
@@ -346,6 +358,7 @@ ZSXQ_SYNC_RESTART_GUARD_SECONDS = max(
 STATUS_CACHE = {
     "key": None,
     "expires_at": 0.0,
+    "refreshed_at": 0.0,
     "payload": None,
 }
 REPORT_VIDEO_STATS_CACHE = {
@@ -375,6 +388,7 @@ def _clear_status_cache():
         STATUS_CACHE.update({
             "key": None,
             "expires_at": 0.0,
+            "refreshed_at": 0.0,
             "payload": None,
         })
     with REPORT_VIDEO_STATS_CACHE_LOCK:
@@ -932,6 +946,20 @@ def _consumer_stuck(status):
     return bool(status.get("consumer_warning"))
 
 
+def _worker_process_definitively_missing(status):
+    """Return true only when process inspection confirms no worker exists.
+
+    A stale database row must normally keep the stop guard closed.  When the
+    service has no process at all, however, starting a replacement cannot
+    interrupt that row and is the safe way to let the broker redeliver it.
+    """
+    return (
+        status.get("running") is False
+        and not status.get("pids")
+        and not status.get("processes")
+    )
+
+
 def _watchdog_business_activity_probe(service_id):
     """Narrow fail-closed heartbeat check for a queue suspected to be stuck."""
     try:
@@ -992,6 +1020,25 @@ def _paused_business_features():
     return features
 
 
+def _isolated_watchdog_repair(name, callback, *, fallback, args=(), kwargs=None):
+    """Run one repairer without allowing it to starve the remaining repairs."""
+
+    try:
+        return callback(*(args or ()), **(kwargs or {}))
+    except Exception as exc:
+        # Each repairer owns an independent idempotent claim.  A broken DB
+        # session or an optional dependency in one repairer must not prevent
+        # the watchdog from healing unrelated queues during the same tick.
+        result = dict(fallback or {})
+        result.update({"error": str(exc), "failed_repair": str(name)})
+        return result
+    finally:
+        # Successful no-op repairers also open read transactions.  Isolate
+        # every repair unit so later filesystem, broker, and repair work never
+        # extends the first checkout for the whole watchdog tick.
+        _release_db_session_quietly()
+
+
 def _watchdog_repair_stale_business_tasks(config):
     if not config.get("enabled"):
         return {"enabled": False, "skipped": "auto_heal_disabled"}
@@ -1006,8 +1053,33 @@ def _watchdog_repair_stale_business_tasks(config):
             repair_stale_publisher_pending_tasks_once,
             repair_stale_publisher_processing_tasks_once,
         )
+        from tasks.report_stick_figure_video import (
+            repair_ready_stick_figure_video_workflows_once,
+        )
+        from services.report_audio_finalization import (
+            repair_pending_finalizations_once,
+        )
+        from services.report_audio_recovery import (
+            repair_failed_report_audio_workflows_once,
+        )
 
         excluded_features = _paused_business_features()
+        if {"report_audio_workflow", "report_pdf_audio_workflow"} & excluded_features:
+            report_audio_failed_recovery = {
+                "enabled": False,
+                "skipped": "report_audio_paused",
+                "requeued": 0,
+                "items": [],
+            }
+        else:
+            # Claim retryable failed parents before terminal-parent cleanup so
+            # a still-useful child is not canceled merely because the parent
+            # hit a transient terminal state between watchdog ticks.
+            report_audio_failed_recovery = _isolated_watchdog_repair(
+                "report_audio_failed_recovery",
+                repair_failed_report_audio_workflows_once,
+                fallback={"enabled": True, "requeued": 0, "items": []},
+            )
         publisher_repair_paused = "publisher" in excluded_features
         if publisher_repair_paused:
             cleanup_result = {"enabled": False, "skipped": "publisher_paused", "cleaned": 0}
@@ -1020,23 +1092,84 @@ def _watchdog_repair_stale_business_tasks(config):
                 "closed": 0,
             }
         else:
-            cleanup_result = cleanup_publisher_children_of_terminal_parents_once()
-            publisher_pending_repair_result = repair_stale_publisher_pending_tasks_once()
-            processing_repair_result = repair_stale_publisher_processing_tasks_once()
-        repair_result = repair_stale_publication_tasks_once(
-            excluded_features=excluded_features,
+            cleanup_result = _isolated_watchdog_repair(
+                "publisher_terminal_child_cleanup",
+                cleanup_publisher_children_of_terminal_parents_once,
+                fallback={"enabled": True, "cleaned": 0, "items": []},
+            )
+            publisher_pending_repair_result = _isolated_watchdog_repair(
+                "publisher_pending_repair",
+                repair_stale_publisher_pending_tasks_once,
+                fallback={"enabled": True, "requeued": 0, "items": []},
+            )
+            processing_repair_result = _isolated_watchdog_repair(
+                "publisher_processing_repair",
+                repair_stale_publisher_processing_tasks_once,
+                fallback={
+                    "enabled": True,
+                    "requeued": 0,
+                    "demoted": 0,
+                    "closed": 0,
+                    "items": [],
+                },
+            )
+        repair_result = _isolated_watchdog_repair(
+            "publication_pending_repair",
+            repair_stale_publication_tasks_once,
+            fallback={"enabled": True, "requeued": 0, "items": []},
+            kwargs={"excluded_features": excluded_features},
         )
-        business_processing_repair_result = repair_stale_business_processing_tasks_once(
-            excluded_features=excluded_features,
+        business_processing_repair_result = _isolated_watchdog_repair(
+            "business_processing_repair",
+            repair_stale_business_processing_tasks_once,
+            fallback={
+                "enabled": True,
+                "requeued": 0,
+                "demoted": 0,
+                "closed": 0,
+                "items": [],
+            },
+            kwargs={"excluded_features": excluded_features},
         )
+        if "report_stick_figure_video_render" in excluded_features:
+            visual_video_repair_result = {
+                "enabled": False,
+                "skipped": "render_paused",
+                "enqueued": 0,
+                "items": [],
+            }
+        else:
+            visual_video_repair_result = _isolated_watchdog_repair(
+                "visual_video_repair",
+                repair_ready_stick_figure_video_workflows_once,
+                fallback={"enabled": True, "enqueued": 0, "items": []},
+            )
+        if "publisher" in excluded_features or "report_stick_figure_video_render" in excluded_features:
+            finalization_repair_result = {
+                "enabled": False,
+                "skipped": "dependency_paused",
+                "reconciled": 0,
+                "items": [],
+            }
+        else:
+            finalization_repair_result = _isolated_watchdog_repair(
+                "report_audio_finalization_repair",
+                repair_pending_finalizations_once,
+                fallback={"enabled": True, "reconciled": 0, "items": []},
+            )
         repair_result["publisher_pending_repair"] = publisher_pending_repair_result
         repair_result["processing_repair"] = processing_repair_result
         repair_result["business_processing_repair"] = business_processing_repair_result
+        repair_result["visual_video_repair"] = visual_video_repair_result
+        repair_result["report_audio_finalization_repair"] = finalization_repair_result
+        repair_result["report_audio_failed_recovery"] = report_audio_failed_recovery
         repair_result["requeued"] = (
             (repair_result.get("requeued") or 0)
             + (publisher_pending_repair_result.get("requeued") or 0)
             + (processing_repair_result.get("requeued") or 0)
             + (business_processing_repair_result.get("requeued") or 0)
+            + (visual_video_repair_result.get("enqueued") or 0)
+            + (report_audio_failed_recovery.get("requeued") or 0)
         )
         repair_result["demoted"] = (
             (processing_repair_result.get("demoted") or 0)
@@ -1177,6 +1310,36 @@ def run_watchdog_once():
             results.append(result)
             continue
 
+        # Do not let a stale `processing` row prevent recovery when process
+        # inspection has already proved that this service has no worker.  We
+        # intentionally start without calling the stop path: there is nothing
+        # to interrupt, and _start_service rechecks for a racing worker.
+        if _worker_process_definitively_missing(status):
+            start_result = _start_service(service_id, service, clear_pause=False)
+            action = (
+                "started_missing_worker"
+                if start_result.get("started")
+                else "worker_appeared"
+            )
+            item_state["last_action_ts"] = now
+            item_state["last_action_at"] = datetime.utcnow().isoformat() + "Z"
+            item_state["stuck_count"] = 0
+            item_state["first_seen_at"] = None
+            item_state["last_seen_at"] = None
+            result.update({
+                "action": action,
+                "start": start_result,
+            })
+            _watchdog_event(
+                state,
+                service_id,
+                action,
+                f"{service['label']} 未发现存活 worker，已请求启动替代 worker。",
+                {"result": result},
+            )
+            results.append(result)
+            continue
+
         subject = f"[Celery自愈] 正在自动重启 worker · {service['label']}"
         try:
             stop_result = _stop_service(service_id, service)
@@ -1277,12 +1440,27 @@ def _inspect_tasks_by_queue():
         from celery_config import celery_app
 
         timeout = float(os.environ.get("CELERY_MONITOR_INSPECT_TIMEOUT", "1.2"))
-        inspector = celery_app.control.inspect(timeout=timeout)
-        replies = {
-            "active": inspector.active() or {},
-            "reserved": inspector.reserved() or {},
-            "scheduled": inspector.scheduled() or {},
-        }
+
+        def request_state(state_name):
+            # Each broadcast owns its connection/reply queue. Busy solo workers
+            # can delay a reply, so serial active/reserved/scheduled requests
+            # multiply the control-plane tail latency.
+            inspector = celery_app.control.inspect(
+                timeout=timeout,
+                limit=len(SERVICES),
+            )
+            return getattr(inspector, state_name)() or {}
+
+        state_names = ("active", "reserved", "scheduled")
+        with ThreadPoolExecutor(max_workers=len(state_names)) as executor:
+            futures = {
+                state_name: executor.submit(request_state, state_name)
+                for state_name in state_names
+            }
+            replies = {
+                state_name: futures[state_name].result()
+                for state_name in state_names
+            }
     except Exception as exc:
         return {}, str(exc)
 
@@ -2052,15 +2230,17 @@ def _service_status(
 
 def _stop_service(service_id, service, *, pause=False, reason=None, force=False):
     _ensure_dirs()
+    guard = None
     if not force:
         guard = _service_stop_guard(service_id)
-        if guard:
-            return {
-                **guard,
-                "terminated_pids": [],
-                "force_killed_pids": [],
-                "paused": None,
-            }
+    _release_db_session_quietly()
+    if guard:
+        return {
+            **guard,
+            "terminated_pids": [],
+            "force_killed_pids": [],
+            "paused": None,
+        }
 
     pause_state = None
     if pause:
@@ -2365,6 +2545,10 @@ def list_services():
 
 
 def _status_payload(include_logs=False, log_lines=20, include_inspect=False, force_refresh=False):
+    # Authentication may have checked out a connection before this route runs.
+    # Do not carry that request-scoped read transaction across Redis/Celery,
+    # process inspection, or filesystem I/O below.
+    _release_db_session_quietly()
     _ensure_dirs()
 
     broker_ok, broker_error = _broker_ping()
@@ -2407,6 +2591,7 @@ def _status_payload(include_logs=False, log_lines=20, include_inspect=False, for
 
 @bp.route("/status", methods=["GET"])
 def status():
+    refresh_requested_at = time.time()
     include_logs = request.args.get("logs", "0") in {"1", "true", "yes"}
     include_inspect = request.args.get("inspect", "0") in {"1", "true", "yes"}
     force_refresh = request.args.get("refresh", "0") in {"1", "true", "yes"}
@@ -2427,7 +2612,16 @@ def status():
         with STATUS_CACHE_LOCK:
             now = time.time()
             cached = STATUS_CACHE.get("payload")
-            if not force_refresh and STATUS_CACHE.get("key") == cache_key and cached and STATUS_CACHE.get("expires_at", 0) > now:
+            cache_is_fresh = (
+                STATUS_CACHE.get("key") == cache_key
+                and cached
+                and STATUS_CACHE.get("expires_at", 0) > now
+            )
+            refresh_was_coalesced = (
+                force_refresh
+                and STATUS_CACHE.get("refreshed_at", 0) >= refresh_requested_at
+            )
+            if cache_is_fresh and (not force_refresh or refresh_was_coalesced):
                 return jsonify(deepcopy(cached))
             payload = _status_payload(
                 include_logs=include_logs,
@@ -2438,6 +2632,7 @@ def status():
             STATUS_CACHE.update({
                 "key": cache_key,
                 "expires_at": time.time() + STATUS_CACHE_TTL_SECONDS,
+                "refreshed_at": time.time(),
                 "payload": deepcopy(payload),
             })
             return jsonify(payload)

@@ -5,6 +5,7 @@ import os
 import random
 import re
 import time
+import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
 from html import unescape
@@ -58,6 +59,8 @@ DEFAULT_THRESHOLD_ATTACHMENT_DOWNLOAD_LIMIT = 40
 DEFAULT_MANUAL_ATTACHMENT_PLAN_LIMIT = 20
 DEFAULT_MANUAL_ATTACHMENT_PLAN_HARD_LIMIT = 50
 DEFAULT_PROGRESS_RESULT_PERSIST_SECONDS = 30.0
+MAX_PROGRESS_COMMIT_INTERVAL_SECONDS = 30.0
+ATTACHMENT_DOWNLOAD_STATE_BATCH_SIZE = 20
 TOPIC_PAGE_SIZE_HINT = 20
 MAX_COMMENTS_PER_TOPIC_ENV = "ZSXQ_SYNC_MAX_COMMENTS_PER_TOPIC"
 DEFAULT_MAX_COMMENTS_PER_TOPIC = 200
@@ -150,6 +153,24 @@ ATTACHMENT_DOWNLOAD_SNAPSHOT_COLUMNS = (
     ZsxqAttachment.download_status,
     ZsxqAttachment.error_message,
 )
+
+TOPIC_COMMENT_SNAPSHOT_COLUMNS = (
+    ZsxqTopicComment.id,
+    ZsxqTopicComment.topic_id,
+    ZsxqTopicComment.comment_id,
+    ZsxqTopicComment.tab_id,
+    ZsxqTopicComment.parent_comment_id,
+    ZsxqTopicComment.owner_user_id,
+    ZsxqTopicComment.owner_name,
+    ZsxqTopicComment.text,
+    ZsxqTopicComment.create_time,
+    ZsxqTopicComment.likes_count,
+    ZsxqTopicComment.replies_count,
+    ZsxqTopicComment.rewards_count,
+    ZsxqTopicComment.sticky,
+    ZsxqTopicComment.raw_payload_hash,
+)
+COMMENT_SNAPSHOT_QUERY_BATCH_SIZE = 1000
 
 TOPIC_UPDATE_SNAPSHOT_FIELDS = (
     "id",
@@ -1440,6 +1461,38 @@ class ZsxqSyncService:
             }
             self._merge_run_pipeline_result(run, result)
             self._sync_content_pipeline_run_context(run_context, run)
+            try:
+                from services.content_pipeline.notification_service import notify_content_pipeline_event
+
+                pipeline = {
+                    "title": f"知识星球 PDF 清洗 - {run.group_name or run.group_id}",
+                    "trigger": trigger,
+                    "metadata": {
+                        "sync_run_id": run.id,
+                        "workflow_run_id": workflow_run_id,
+                        "group_id": run.group_id,
+                        "group_name": run.group_name,
+                        "mode": run.mode,
+                    },
+                }
+                notify_content_pipeline_event(
+                    "workflow_started",
+                    task_id=run.id,
+                    task_label="PDF 清洗发布",
+                    pipeline=pipeline,
+                    result=result,
+                    stage_status="running",
+                )
+                notify_content_pipeline_event(
+                    "clean_skipped",
+                    task_id=run.id,
+                    task_label="PDF 清洗",
+                    pipeline=pipeline,
+                    result=result,
+                    stage_status="skipped",
+                )
+            except Exception:
+                logger.exception("PDF 清洗跳过通知失败: %s", run.id)
             return result
 
         from services.content_pipeline.pdf_clean_task_service import submit_pdf_clean_task
@@ -1460,11 +1513,18 @@ class ZsxqSyncService:
                 "files": cleanable["files"],
             },
         )
+        task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        dedupe = task_result.get("dedupe") if isinstance(task_result.get("dedupe"), dict) else {}
+        queued = bool(task.get("celery_task_id"))
         result = {
-            "queued": True,
+            "queued": queued,
+            "status": task.get("status") or ("queued" if queued else "completed"),
             "task_id": task["id"],
             "celery_task_id": task.get("celery_task_id"),
             "files_count": len(files),
+            "unique_count": int(dedupe.get("unique_count") or len(files)),
+            "duplicate_count": int(dedupe.get("duplicate_count") or 0),
+            "dedupe": dedupe,
             "source_root": cleanable.get("source_root"),
         }
         self._merge_run_pipeline_result(run, result)
@@ -1506,6 +1566,38 @@ class ZsxqSyncService:
             }
             self._merge_run_content_pipeline_result(run, "audio_clean", result)
             self._sync_content_pipeline_run_context(run_context, run)
+            try:
+                from services.content_pipeline.notification_service import notify_content_pipeline_event
+
+                pipeline = {
+                    "title": f"知识星球音频清洗 - {run.group_name or run.group_id}",
+                    "trigger": trigger,
+                    "metadata": {
+                        "sync_run_id": run.id,
+                        "workflow_run_id": workflow_run_id,
+                        "group_id": run.group_id,
+                        "group_name": run.group_name,
+                        "mode": run.mode,
+                    },
+                }
+                notify_content_pipeline_event(
+                    "workflow_started",
+                    task_id=run.id,
+                    task_label="音频清洗发布",
+                    pipeline=pipeline,
+                    result=result,
+                    stage_status="running",
+                )
+                notify_content_pipeline_event(
+                    "clean_skipped",
+                    task_id=run.id,
+                    task_label="音频清洗",
+                    pipeline=pipeline,
+                    result=result,
+                    stage_status="skipped",
+                )
+            except Exception:
+                logger.exception("音频清洗跳过通知失败: %s", run.id)
             return result
 
         from services.content_pipeline.audio_clean_task_service import submit_audio_clean_task
@@ -1526,11 +1618,18 @@ class ZsxqSyncService:
                 "files": cleanable["files"],
             },
         )
+        task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        dedupe = task_result.get("dedupe") if isinstance(task_result.get("dedupe"), dict) else {}
+        queued = bool(task.get("celery_task_id"))
         result = {
-            "queued": True,
+            "queued": queued,
+            "status": task.get("status") or ("queued" if queued else "completed"),
             "task_id": task["id"],
             "celery_task_id": task.get("celery_task_id"),
             "files_count": len(files),
+            "unique_count": int(dedupe.get("unique_count") or len(files)),
+            "duplicate_count": int(dedupe.get("duplicate_count") or 0),
+            "dedupe": dedupe,
             "source_root": cleanable.get("source_root"),
         }
         self._merge_run_content_pipeline_result(run, "audio_clean", result)
@@ -2239,7 +2338,7 @@ class ZsxqSyncService:
     def _create_auto_report_audio_video_task(self, *, run, attachment, threshold, workflow_run_id=None):
         from services.report_audio_workflow import (
             DEFAULT_INITIAL_PROMPT,
-            DEFAULT_REVIEW_PROMPT,
+            DEFAULT_REVIEW_PROMPT_BASE,
             FEATURE_NAME,
             QUEUE_NAME,
         )
@@ -2283,7 +2382,8 @@ class ZsxqSyncService:
                 "source_task_id": attachment.id,
                 "report_audio_workflow": {
                     "prompt": DEFAULT_INITIAL_PROMPT,
-                    "review_prompt": DEFAULT_REVIEW_PROMPT,
+                    "review_prompt": DEFAULT_REVIEW_PROMPT_BASE,
+                    "pdf_evidence_enabled": False,
                     "followups": [],
                     "gemini_url": "",
                     "metadata": metadata,
@@ -2412,6 +2512,7 @@ class ZsxqSyncService:
                 FEATURE_NAME: {
                     "prompt": DEFAULT_INITIAL_PROMPT,
                     "review_prompt": DEFAULT_REVIEW_PROMPT,
+                    "pdf_evidence_enabled": False,
                     "followups": [],
                     "gemini_url": "",
                     "metadata": metadata,
@@ -3088,6 +3189,7 @@ class ZsxqSyncService:
         publish_date_start=None,
         publish_date_end=None,
         keyword=None,
+        topic_id=None,
         favorite_only=False,
         include_raw_payload=False,
     ):
@@ -3124,11 +3226,16 @@ class ZsxqSyncService:
         except (TypeError, ValueError):
             limit = 20
 
+        topic_id = str(topic_id or "").strip()[:64]
         base_query = ZsxqTopic.query.filter(ZsxqTopic.group_id == group_id)
-        if tab_id:
+        if topic_id:
+            # A copied topic ID is a global locator inside one group. It must
+            # not disappear because the UI currently shows another tab/date.
+            base_query = base_query.filter(ZsxqTopic.topic_id == topic_id)
+        elif tab_id:
             base_query = base_query.filter(ZsxqTopic.tab_id == tab_id)
         favorite_only = bool(favorite_only)
-        if favorite_only:
+        if favorite_only and not topic_id:
             favorite_topic_ids = db.session.query(ZsxqTopicFavorite.topic_id).filter(
                 ZsxqTopicFavorite.group_id == group_id,
             )
@@ -3149,14 +3256,14 @@ class ZsxqSyncService:
                 raise ValueError(f"{field_name} 必须是 YYYY-MM-DD 格式") from exc
         if publish_date_start and publish_date_end and publish_date_start > publish_date_end:
             raise ValueError("publish_date_start 不能晚于 publish_date_end")
-        if publish_date_start:
+        if publish_date_start and not topic_id:
             base_query = base_query.filter(ZsxqTopic.create_time >= publish_date_start)
-        if publish_date_end:
+        if publish_date_end and not topic_id:
             exclusive_end = parsed_publish_dates["publish_date_end"] + timedelta(days=1)
             base_query = base_query.filter(ZsxqTopic.create_time < exclusive_end.strftime("%Y-%m-%d"))
 
         keyword = str(keyword or "").strip()[:200]
-        if keyword:
+        if keyword and not topic_id:
             escaped_keyword = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             pattern = f"%{escaped_keyword}%"
             base_query = base_query.filter(or_(
@@ -3169,7 +3276,7 @@ class ZsxqSyncService:
                 ZsxqTopic.article_excerpt.ilike(pattern, escape="\\"),
             ))
         attention_filter = str(publish_filter or "").strip().lower() == "attention"
-        if attention_filter:
+        if attention_filter and not topic_id:
             attachment_query = db.session.query(ZsxqAttachment.topic_id).filter(
                 ZsxqAttachment.group_id == group_id,
                 ZsxqAttachment.download_status == "downloaded",
@@ -3189,12 +3296,12 @@ class ZsxqSyncService:
             base_query = base_query.filter(ZsxqTopic.topic_id.in_(attachment_query))
 
         page_query = base_query
-        if end_time:
+        if end_time and not topic_id:
             page_query = page_query.filter(ZsxqTopic.create_time < str(end_time))
 
-        filters_applied = favorite_only or attention_filter or bool(publish_date_start) or bool(publish_date_end) or bool(keyword)
+        filters_applied = bool(topic_id) or favorite_only or attention_filter or bool(publish_date_start) or bool(publish_date_end) or bool(keyword)
         total = (
-            base_query.with_entities(db.func.count(ZsxqTopic.id)).scalar()
+            base_query.with_entities(db.func.count(db.distinct(ZsxqTopic.topic_id))).scalar()
             if filters_applied
             else self._cached_topic_total(group_id, tab_id)
         )
@@ -3226,9 +3333,9 @@ class ZsxqSyncService:
         ).order_by(
             ZsxqTopic.create_time.desc(),
             ZsxqTopic.last_synced_at.desc(),
-        ).limit(limit + 1).all()
-        has_more = len(rows) > limit
-        topics = rows[:limit]
+        ).limit(1 if topic_id else limit + 1).all()
+        has_more = False if topic_id else len(rows) > limit
+        topics = rows[:1] if topic_id else rows[:limit]
         if include_raw_payload:
             self._hydrate_topic_raw_payloads(topics)
         else:
@@ -3259,7 +3366,9 @@ class ZsxqSyncService:
             payloads.append(payload)
         next_end_time = self._oldest_cached_topic_time(topics) if has_more else None
         message = ""
-        if not payloads and not end_time and filters_applied:
+        if not payloads and topic_id:
+            message = f"本地库中未找到帖子 ID {topic_id}。"
+        elif not payloads and not end_time and filters_applied:
             message = "当前日期和关键词条件下没有匹配主题。"
         elif not payloads and not end_time and not self._has_cached_topics(group_id, tab_id):
             message = "本地库暂无该 Tab 的主题。请先点击“同步当前 Tab”拉取元数据。"
@@ -3609,6 +3718,45 @@ class ZsxqSyncService:
                 getattr(topic_record, "group_id", None),
                 getattr(topic_record, "tab_id", None),
                 getattr(topic_record, "topic_id", None),
+                exc,
+            )
+
+    @staticmethod
+    def _external_document_scan_snapshot(topic_record):
+        """Freeze only the compact topic projection needed by link scanning."""
+
+        from services.external_document_service import extract_external_links_from_topic
+
+        return SimpleNamespace(
+            group_id=getattr(topic_record, "group_id", None),
+            group_name=getattr(topic_record, "group_name", None),
+            tab_id=getattr(topic_record, "tab_id", None),
+            tab_label=getattr(topic_record, "tab_label", None),
+            topic_id=getattr(topic_record, "topic_id", None),
+            title=getattr(topic_record, "title", None),
+            content=getattr(topic_record, "content", None),
+            question_text=getattr(topic_record, "question_text", None),
+            answer_text=getattr(topic_record, "answer_text", None),
+            article_title=getattr(topic_record, "article_title", None),
+            article_excerpt=getattr(topic_record, "article_excerpt", None),
+            # Extract links while the full upstream payload is still in memory;
+            # do not carry the large raw JSON across the page commit boundary.
+            _external_links=extract_external_links_from_topic(topic_record),
+        )
+
+    def _scan_external_document_links_batch(self, topic_records):
+        if not topic_records:
+            return
+        if str(os.environ.get("ZSXQ_EXTERNAL_LINK_SCAN_ENABLED", "1")).strip().lower() in {"0", "false", "no", "off"}:
+            return
+        try:
+            from services.external_document_service import external_document_service
+
+            external_document_service.scan_topic_batch(topic_records, commit=False)
+        except Exception as exc:
+            logger.warning(
+                "[ZSXQ_SYNC] external document batch scan skipped | topics=%s | error=%s",
+                len(topic_records),
                 exc,
             )
 
@@ -5079,6 +5227,14 @@ class ZsxqSyncService:
                 tab_id,
                 topics,
             )
+            # Comment reconciliation used to issue one SELECT per topic while
+            # keeping the page Session checked out.  Hydrate the lightweight
+            # comment projection once for the page; the raw payload is still
+            # only written when its hash changes.
+            existing_comment_snapshots = self._load_existing_topic_comment_snapshots(
+                group_id,
+                topics,
+            )
             self._refresh_existing_attachment_snapshots_for_page(
                 group_id,
                 tab,
@@ -5089,17 +5245,74 @@ class ZsxqSyncService:
             # return the connection before per-topic CPU and file processing.
             db.session.commit()
 
+            pending_topic_updates = []
+            pending_new_records = False
+            pending_external_scan_topics = []
+            # The page snapshot commit is the initial progress boundary. This
+            # avoids an immediate first-topic heartbeat followed by the
+            # mandatory page-end result write; long pages still heartbeat at
+            # the bounded interval below.
+            last_progress_commit_monotonic = time.monotonic()
+            last_processed_topic_id = None
+            progress_interval = self._sync_progress_commit_interval_seconds()
+
+            def maybe_commit_progress(topic_id, *, force=False):
+                nonlocal last_progress_commit_monotonic, pending_new_records
+                if pending_new_records and not force:
+                    # A heartbeat commit would autoflush every newly added
+                    # topic/attachment seen so far. Defer it to the page
+                    # boundary so new rows are inserted as one batch.
+                    return
+                now_monotonic = time.monotonic()
+                due = (
+                    force
+                    or last_progress_commit_monotonic is None
+                    or progress_interval <= 0
+                    or now_monotonic - last_progress_commit_monotonic >= progress_interval
+                )
+                if not due:
+                    return
+                self._apply_existing_topic_updates(pending_topic_updates)
+                pending_topic_updates.clear()
+                self._commit_running_progress(
+                    run,
+                    tab,
+                    topic_id,
+                    tab_result,
+                    force_result=force,
+                )
+                last_progress_commit_monotonic = time.monotonic()
+                pending_new_records = False
+
             for topic in topics:
                 topic_id = self._topic_id(topic)
                 if not topic_id or topic_id in seen_ids:
                     continue
                 seen_ids.add(topic_id)
+                last_processed_topic_id = topic_id
                 if newest_topic is None:
                     newest_topic = topic
 
-                self._upsert_topic_comments(group_id, tab, topic)
-
                 topic_snapshot = existing_topic_snapshots.get(str(topic_id))
+                if topic_snapshot and pending_new_records:
+                    # Preserve batching for the preceding new topics, then
+                    # start the existing-topic projection path with a clean
+                    # transaction before its read/write queries.
+                    db.session.commit()
+                    pending_new_records = False
+
+                # Comment reconciliation only needs the topic's external ID;
+                # prevent any pending page inserts from autoflushing. Existing
+                # rows come from the page-level scalar snapshot above, so this
+                # loop no longer pays one remote SELECT per topic.
+                with db.session.no_autoflush:
+                    self._upsert_topic_comments(
+                        group_id,
+                        tab,
+                        topic,
+                        existing_records=existing_comment_snapshots.get(str(topic_id), {}),
+                    )
+
                 if topic_snapshot:
                     tab_result["topics_existing"] += 1
                     attachment_stats, attachment_records = self._upsert_attachments(
@@ -5108,10 +5321,21 @@ class ZsxqSyncService:
                         topic,
                         existing_records=existing_attachment_snapshots.get(str(topic_id), ()),
                         existing_records_persisted=True,
+                        defer_flush=True,
                     )
                     self._merge_attachment_stats(tab_result, attachment_stats)
                     download_stats = {}
                     if download_attachments:
+                        # Persist the topic/comment/attachment projection
+                        # before entering the download loop. Otherwise a
+                        # queued status UPDATE can autoflush newly-added rows
+                        # inside _apply_attachment_download_state_updates,
+                        # hiding a large INSERT behind the state-write origin.
+                        # Existing-topic projections are still only scalar
+                        # Python mappings at this point; keeping them pending
+                        # lets the page batch survive the external-I/O commit
+                        # boundary instead of degrading to one UPDATE/topic.
+                        db.session.commit()
                         download_stats = self._download_topic_attachments(
                             cookie=cookie,
                             group_id=group_id,
@@ -5137,31 +5361,48 @@ class ZsxqSyncService:
                     if stop_on_existing and not max_download_files and not has_pending_download_work:
                         tab_result["stopped_by_existing"] = True
                         break
-                    changed, topic_for_external_scan = self._update_existing_topic(
+                    changed, topic_for_external_scan, update_values = self._prepare_existing_topic_update(
                         None,
                         topic,
                         tab,
                         run,
                         previous=topic_snapshot,
                     )
+                    pending_topic_updates.append({
+                        "id": topic_snapshot.get("id"),
+                        "values": update_values,
+                    })
                     tab_result["topics_updated"] += 1 if changed else 0
-                    self._scan_external_document_links(topic_for_external_scan)
-                    self._commit_running_progress(run, tab, topic_id, tab_result)
+                    pending_external_scan_topics.append(
+                        self._external_document_scan_snapshot(topic_for_external_scan)
+                    )
+                    maybe_commit_progress(topic_id)
                     continue
 
                 topic_record = self._create_topic_record(group_id, group_name, tab, topic, run)
                 db.session.add(topic_record)
-                db.session.flush()
-                self._scan_external_document_links(topic_record)
+                # The topic UUID is assigned before add(), so attachment and
+                # external-document projections can stay pending until the
+                # page boundary. Do not let a link-scan SELECT autoflush one
+                # new topic at a time over the remote connection.
+                with db.session.no_autoflush:
+                    pending_external_scan_topics.append(
+                        self._external_document_scan_snapshot(topic_record)
+                    )
                 attachment_stats, attachment_records = self._upsert_attachments(
                     group_id,
                     tab,
                     topic,
                     existing_records=existing_attachment_snapshots.get(str(topic_id), ()),
                     existing_records_persisted=True,
+                    defer_flush=True,
                 )
                 self._merge_attachment_stats(tab_result, attachment_stats)
                 if download_attachments:
+                    # Keep the external-download Session boundary explicit:
+                    # new topic/attachment rows are committed once before
+                    # state transitions or network I/O can begin.
+                    db.session.commit()
                     download_stats = self._download_topic_attachments(
                         cookie=cookie,
                         group_id=group_id,
@@ -5180,10 +5421,27 @@ class ZsxqSyncService:
                         tab_result["download_limit_reached"] = True
                     if remaining_downloads is not None:
                         tab_result["remaining_downloads"] = remaining_downloads
+                    pending_new_records = False
+                else:
+                    pending_new_records = True
                 tab_result["topics_new"] += 1
-                self._commit_running_progress(run, tab, topic_id, tab_result)
+                maybe_commit_progress(topic_id)
 
+            if last_processed_topic_id:
+                # Persist the final page counters/result even when the page
+                # completed inside the heartbeat interval.
+                maybe_commit_progress(last_processed_topic_id, force=True)
+            else:
+                self._apply_existing_topic_updates(pending_topic_updates)
+                pending_topic_updates.clear()
             db.session.commit()
+            # Link reconciliation is page-scoped too.  The snapshot DTOs keep
+            # this post-commit batch from refreshing ORM topic rows, while the
+            # document service performs one shell query and one relation query
+            # for the page instead of one pair per topic.
+            if pending_external_scan_topics:
+                self._scan_external_document_links_batch(pending_external_scan_topics)
+                db.session.commit()
             if tab_result["stopped_by_existing"]:
                 break
             if tab_result["topics_fetched"] >= target_topics:
@@ -5311,36 +5569,50 @@ class ZsxqSyncService:
             visit(comment)
         return output
 
-    def _upsert_topic_comments(self, group_id, tab, topic):
+    def _upsert_topic_comments(self, group_id, tab, topic, *, existing_records=None):
         comments = self._topic_comments(topic)
         if not comments:
             return {"comments_seen": 0, "comments_new": 0, "comments_updated": 0, "favorite_added": False}
         topic_id = self._topic_id(topic)
         comment_ids = [str(item.get("comment_id")) for item in comments]
-        existing = ZsxqTopicComment.query.filter(
-            ZsxqTopicComment.group_id == str(group_id),
-            ZsxqTopicComment.topic_id == str(topic_id),
-            ZsxqTopicComment.comment_id.in_(comment_ids),
-        ).options(
-            load_only(
-                ZsxqTopicComment.id,
-                ZsxqTopicComment.comment_id,
-                ZsxqTopicComment.tab_id,
-                ZsxqTopicComment.parent_comment_id,
-                ZsxqTopicComment.owner_user_id,
-                ZsxqTopicComment.owner_name,
-                ZsxqTopicComment.text,
-                ZsxqTopicComment.create_time,
-                ZsxqTopicComment.likes_count,
-                ZsxqTopicComment.replies_count,
-                ZsxqTopicComment.rewards_count,
-                ZsxqTopicComment.sticky,
-                ZsxqTopicComment.raw_payload_hash,
-            )
-        ).all()
-        by_comment_id = {str(item.comment_id): item for item in existing}
+        if existing_records is None:
+            existing = ZsxqTopicComment.query.filter(
+                ZsxqTopicComment.group_id == str(group_id),
+                ZsxqTopicComment.topic_id == str(topic_id),
+                ZsxqTopicComment.comment_id.in_(comment_ids),
+            ).options(
+                load_only(
+                    ZsxqTopicComment.id,
+                    ZsxqTopicComment.comment_id,
+                    ZsxqTopicComment.tab_id,
+                    ZsxqTopicComment.parent_comment_id,
+                    ZsxqTopicComment.owner_user_id,
+                    ZsxqTopicComment.owner_name,
+                    ZsxqTopicComment.text,
+                    ZsxqTopicComment.create_time,
+                    ZsxqTopicComment.likes_count,
+                    ZsxqTopicComment.replies_count,
+                    ZsxqTopicComment.rewards_count,
+                    ZsxqTopicComment.sticky,
+                    ZsxqTopicComment.raw_payload_hash,
+                )
+            ).all()
+            by_comment_id = {str(item.comment_id): item for item in existing}
+        elif isinstance(existing_records, dict):
+            by_comment_id = {
+                str(comment_id): record
+                for comment_id, record in existing_records.items()
+                if isinstance(record, dict)
+            }
+        else:
+            by_comment_id = {
+                str(item.comment_id): item
+                for item in existing_records
+                if getattr(item, "comment_id", None)
+            }
         stats = {"comments_seen": len(comments), "comments_new": 0, "comments_updated": 0, "favorite_added": False}
         now = datetime.utcnow()
+        pending_snapshot_updates = []
         for payload in comments:
             comment_id = str(payload.get("comment_id") or "").strip()
             owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
@@ -5372,32 +5644,53 @@ class ZsxqSyncService:
                 by_comment_id[comment_id] = record
                 stats["comments_new"] += 1
                 continue
+            current_values = {
+                field: (
+                    record.get(field)
+                    if isinstance(record, dict)
+                    else getattr(record, field)
+                )
+                for field in values
+            }
             changed_values = {
                 key: value
-                for key, value, current in (
-                    ("tab_id", values["tab_id"], record.tab_id),
-                    ("parent_comment_id", values["parent_comment_id"], record.parent_comment_id),
-                    ("owner_user_id", values["owner_user_id"], record.owner_user_id),
-                    ("owner_name", values["owner_name"], record.owner_name),
-                    ("text", values["text"], record.text),
-                    ("create_time", values["create_time"], record.create_time),
-                    ("likes_count", values["likes_count"], record.likes_count),
-                    ("replies_count", values["replies_count"], record.replies_count),
-                    ("rewards_count", values["rewards_count"], record.rewards_count),
-                    ("sticky", values["sticky"], record.sticky),
-                )
-                if current != value
+                for key, value in values.items()
+                if current_values.get(key) != value
             }
             for key, value in changed_values.items():
+                if isinstance(record, dict):
+                    continue
                 setattr(record, key, value)
             changed = bool(changed_values)
-            if record.raw_payload_hash != payload_hash:
-                record.raw_payload = payload
-                record.raw_payload_hash = payload_hash
+            current_payload_hash = (
+                record.get("raw_payload_hash")
+                if isinstance(record, dict)
+                else record.raw_payload_hash
+            )
+            snapshot_update = {
+                "id": str(record.get("id")) if isinstance(record, dict) else None,
+                **changed_values,
+            }
+            if current_payload_hash != payload_hash:
+                if isinstance(record, dict):
+                    snapshot_update.update({
+                        "raw_payload": payload,
+                        "raw_payload_hash": payload_hash,
+                    })
+                else:
+                    record.raw_payload = payload
+                    record.raw_payload_hash = payload_hash
                 changed = True
             if changed:
-                record.last_synced_at = now
+                if isinstance(record, dict):
+                    snapshot_update["last_synced_at"] = now
+                    pending_snapshot_updates.append(snapshot_update)
+                else:
+                    record.last_synced_at = now
                 stats["comments_updated"] += 1
+        if pending_snapshot_updates:
+            with db.session.no_autoflush:
+                self._apply_topic_comment_updates(pending_snapshot_updates)
         yiren_awarded = any(
             is_yiren_award_comment(
                 (item.get("owner") or {}).get("name") or (item.get("owner") or {}).get("alias"),
@@ -5417,6 +5710,101 @@ class ZsxqSyncService:
                 db.session.add(ZsxqTopicFavorite(group_id=str(group_id), topic_id=str(topic_id)))
                 stats["favorite_added"] = True
         return stats
+
+    def _load_existing_topic_comment_snapshots(self, group_id, topics):
+        """Load comment projections for a topic page without full JSON rows.
+
+        The sync loop used to query comments once per topic.  A page can carry
+        dozens of topics, so those point reads kept one remote Session checked
+        out for the whole loop.  Restricting the query by the comment IDs
+        already present in the upstream payload keeps this one page read small
+        while preserving the existing reconciliation semantics.
+        """
+
+        topic_ids = []
+        comment_ids = []
+        comments_by_topic = {}
+        for topic in topics or ():
+            topic_id = self._topic_id(topic)
+            if not topic_id:
+                continue
+            topic_key = str(topic_id)
+            topic_ids.append(topic_key)
+            ids = []
+            for comment in self._topic_comments(topic):
+                comment_id = str(comment.get("comment_id") or "").strip()
+                if not comment_id:
+                    continue
+                ids.append(comment_id)
+                comment_ids.append(comment_id)
+            comments_by_topic[topic_key] = set(ids)
+        topic_ids = list(dict.fromkeys(topic_ids))
+        comment_ids = list(dict.fromkeys(comment_ids))
+        grouped = {topic_id: {} for topic_id in topic_ids}
+        if not topic_ids or not comment_ids:
+            return grouped
+
+        for start in range(0, len(comment_ids), COMMENT_SNAPSHOT_QUERY_BATCH_SIZE):
+            chunk = comment_ids[start:start + COMMENT_SNAPSHOT_QUERY_BATCH_SIZE]
+            rows = (
+                db.session.query(*TOPIC_COMMENT_SNAPSHOT_COLUMNS)
+                .filter(
+                    ZsxqTopicComment.group_id == str(group_id),
+                    ZsxqTopicComment.topic_id.in_(topic_ids),
+                    ZsxqTopicComment.comment_id.in_(chunk),
+                )
+                .all()
+            )
+            for row in rows:
+                topic_key = str(row.topic_id)
+                comment_key = str(row.comment_id)
+                if comment_key not in comments_by_topic.get(topic_key, set()):
+                    continue
+                grouped.setdefault(topic_key, {})[comment_key] = {
+                    column.key: getattr(row, column.key)
+                    for column in TOPIC_COMMENT_SNAPSHOT_COLUMNS
+                }
+        return grouped
+
+    def _apply_topic_comment_updates(self, updates):
+        """Write scalar comment projections in shape batches.
+
+        Existing comments are loaded as detached scalar snapshots for the
+        page-level read.  Core updates avoid re-attaching ORM rows (and avoid
+        expiring or refreshing them across download commits) while keeping the
+        raw audit payload intact whenever its hash changes.
+        """
+
+        grouped = {}
+        table = ZsxqTopicComment.__table__
+        for item in updates or ():
+            if not isinstance(item, dict):
+                continue
+            record_id = str(item.get("id") or "").strip()
+            values = {
+                key: value
+                for key, value in item.items()
+                if key not in {"id", "_comment_id"} and key in table.c
+            }
+            if not record_id or not values:
+                continue
+            shape = tuple(sorted(values))
+            grouped.setdefault(shape, []).append({
+                "_comment_id": record_id,
+                **{field: value for field, value in values.items()},
+            })
+
+        for shape, mappings in grouped.items():
+            statement = (
+                table.update()
+                .where(table.c.id == bindparam("_comment_id"))
+                .values(**{
+                    field: bindparam(field)
+                    for field in shape
+                })
+                .execution_options(synchronize_session=False)
+            )
+            db.session.execute(statement, mappings)
 
     def _find_existing_downloaded_attachment(self, record):
         conditions = []
@@ -5463,7 +5851,7 @@ class ZsxqSyncService:
                     return candidate
         return None
 
-    def _commit_running_progress(self, run, tab, topic_id, tab_result):
+    def _commit_running_progress(self, run, tab, topic_id, tab_result, *, force_result=False):
         previous_result = self._cached_run_result(run)
         next_result = {
             "running": True,
@@ -5473,7 +5861,15 @@ class ZsxqSyncService:
             "partial": dict(tab_result),
         }
         next_result = self._preserve_run_result_context(next_result, previous_result)
-        self._update_run_progress_result(run, next_result)
+        self._update_run_progress_result(run, next_result, force_result=force_result)
+
+    def _sync_progress_commit_interval_seconds(self):
+        """Bound sync heartbeats so page work cannot keep a stale run forever."""
+
+        configured = self._progress_result_persist_seconds()
+        if configured <= 0:
+            return 0.0
+        return min(configured, MAX_PROGRESS_COMMIT_INTERVAL_SECONDS)
 
     def _preserve_run_result_context(self, next_result, previous_result):
         if not isinstance(previous_result, dict):
@@ -5648,6 +6044,7 @@ class ZsxqSyncService:
         meta = self._topic_meta(topic)
         run_id = self._cached_sync_run_id(run)
         return ZsxqTopic(
+            id=str(uuid.uuid4()),
             group_id=group_id,
             group_name=group_name,
             tab_id=tab["id"],
@@ -5708,7 +6105,7 @@ class ZsxqSyncService:
             for row in rows
         }
 
-    def _update_existing_topic(
+    def _prepare_existing_topic_update(
         self,
         record,
         topic,
@@ -5781,12 +6178,64 @@ class ZsxqSyncService:
             })
             if payload_hash_column_available:
                 values["raw_payload_hash"] = payload_hash
-        db.session.execute(
-            update(ZsxqTopic)
-            .where(ZsxqTopic.id == str(previous.get("id")))
-            .values(**values)
-            .execution_options(synchronize_session=False)
+        return changed, projected, values
+
+    def _apply_existing_topic_updates(self, updates):
+        """Apply a page of topic projections with one round trip per shape.
+
+        Existing topics can have different update shapes (payload changed versus
+        metadata-only, and legacy schemas without ``raw_payload_hash``). Grouping
+        by shape keeps the update set correct while letting PostgreSQL execute
+        each group as one DBAPI executemany call instead of one network round
+        trip per topic.
+        """
+
+        grouped = {}
+        for item in updates or ():
+            if not isinstance(item, dict):
+                continue
+            topic_id = str(item.get("id") or "").strip()
+            values = item.get("values")
+            if not topic_id or not isinstance(values, dict) or not values:
+                continue
+            shape = tuple(sorted(values))
+            grouped.setdefault(shape, []).append({"_topic_id": topic_id, **values})
+
+        table = ZsxqTopic.__table__
+        for shape, mappings in grouped.items():
+            statement = table.update().where(
+                table.c.id == bindparam("_topic_id")
+            ).values(**{
+                field: bindparam(field)
+                for field in shape
+            })
+            db.session.execute(statement, mappings)
+
+    def _update_existing_topic(
+        self,
+        record,
+        topic,
+        tab,
+        run,
+        previous=None,
+        payload_hash_column_available=True,
+    ):
+        changed, projected, values = self._prepare_existing_topic_update(
+            record,
+            topic,
+            tab,
+            run,
+            previous=previous,
+            payload_hash_column_available=payload_hash_column_available,
         )
+        topic_id = (previous or {}).get("id") or self._loaded_model_attr(record, "id")
+        if topic_id and values:
+            db.session.execute(
+                update(ZsxqTopic)
+                .where(ZsxqTopic.id == str(topic_id))
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            )
         return changed, projected
 
     def _load_existing_attachment_snapshots(self, group_id, tab_id, topics):
@@ -5981,6 +6430,7 @@ class ZsxqSyncService:
         *,
         existing_records=None,
         existing_records_persisted=False,
+        defer_flush=False,
     ):
         topic_id = self._topic_id(topic)
         attachments = self._topic_attachment_items(topic)
@@ -6036,14 +6486,15 @@ class ZsxqSyncService:
                 for field, value in values.items():
                     setattr(record, field, value)
             else:
-                record = ZsxqAttachment(**values)
+                record = ZsxqAttachment(id=str(uuid.uuid4()), **values)
                 db.session.add(record)
                 records_by_key[str(key)] = record
             records.append(record)
             stats["attachments_seen"] += 1
         if pending_updates:
             self._update_existing_attachment_projections(pending_updates)
-        db.session.flush()
+        if not defer_flush:
+            db.session.flush()
         snapshots = [
             SimpleNamespace(**{
                 column.key: getattr(record, column.key)
@@ -6103,6 +6554,32 @@ class ZsxqSyncService:
         if remaining_downloads is None:
             remaining_downloads = int(max_download_files) if max_download_files else None
 
+        pending_state_updates = []
+
+        def flush_state_updates():
+            if pending_state_updates:
+                # Core UPDATEs must never trigger an implicit ORM flush. A
+                # direct caller may still provide pending topic/attachment
+                # rows, so flush them deliberately and attribute that work to
+                # this transaction boundary before applying state mappings.
+                session = db.session()
+                if session.new or session.dirty or session.deleted:
+                    session.flush()
+                with session.no_autoflush:
+                    self._apply_attachment_download_state_updates(pending_state_updates)
+                pending_state_updates.clear()
+            # This commit is also the session boundary before the next
+            # attachment download. It makes the batch safe to retry: a crash
+            # before the flush leaves only the current attachment pending.
+            db.session.commit()
+
+        def queue_state_update(record_id, **values):
+            if not record_id or not values:
+                return
+            pending_state_updates.append({"id": str(record_id), **values})
+            if len(pending_state_updates) >= ATTACHMENT_DOWNLOAD_STATE_BATCH_SIZE:
+                flush_state_updates()
+
         for record in records:
             record_id = record.id
             record_name = record.name
@@ -6119,7 +6596,7 @@ class ZsxqSyncService:
                         "非目标类型附件，跳过自动下载: "
                         f"{self._attachment_file_type(record, raw_payload=payload)}"
                     )
-                    self._update_attachment_download_state(
+                    queue_state_update(
                         record_id,
                         download_status="skipped",
                         error_message=reason,
@@ -6128,7 +6605,6 @@ class ZsxqSyncService:
                     record.error_message = reason
                     stats["attachments_skipped"] += 1
                     stats["attachments_non_target_skipped"] += 1
-                db.session.commit()
                 continue
             threshold_result = self._attachment_download_rule_result(
                 record,
@@ -6138,7 +6614,7 @@ class ZsxqSyncService:
             if not threshold_result["allowed"]:
                 reason = threshold_result["reason"]
                 if record.download_status != "skipped" or record.error_message != reason:
-                    self._update_attachment_download_state(
+                    queue_state_update(
                         record_id,
                         download_status="skipped",
                         error_message=reason,
@@ -6150,7 +6626,6 @@ class ZsxqSyncService:
                     stats["attachments_missing_download_count"] += 1
                 else:
                     stats["attachments_below_threshold"] += 1
-                db.session.commit()
                 continue
             if self._download_record_is_reusable(record):
                 stats["attachments_skipped"] += 1
@@ -6166,7 +6641,7 @@ class ZsxqSyncService:
                     or record.download_status != "downloaded"
                     or record.error_message is not None
                 ):
-                    self._update_attachment_download_state(
+                    queue_state_update(
                         record_id,
                         local_path=existing_path,
                         download_status="downloaded",
@@ -6179,15 +6654,16 @@ class ZsxqSyncService:
                 stats["attachments_already_downloaded_skipped"] += 1
                 stats["attachments_reused_existing"] += 1
                 self._append_auto_video_dispatch_file_entry(stats, record, existing_path)
-                db.session.commit()
                 continue
             if remaining_downloads is not None and remaining_downloads <= 0:
                 stats["stopped_by_download_limit"] = True
                 stats["download_limit_reached"] = True
                 stats["attachments_limited_skipped"] += 1
-                db.session.commit()
                 break
-            db.session.commit()
+            # Never carry queued state writes or an ORM transaction into the
+            # external download. A later batch commit can coalesce the state
+            # transitions without widening the Session lifetime.
+            flush_state_updates()
             self._attachment_download_pause()
             attempted_download = False
             record_for_update = None
@@ -6196,12 +6672,22 @@ class ZsxqSyncService:
                 if payload is None:
                     payload = self._load_attachment_download_payload(record_id)
                 local_path = self._download_attachment_file(cookie, group_id, tab, topic_id, payload, record_name)
-                record_for_update = self._load_attachment_for_download_update(record_id)
-                if not record_for_update:
-                    raise ValueError("附件记录不存在，无法写入下载结果")
-                record_for_update.local_path = local_path
-                record_for_update.download_status = "downloaded"
-                record_for_update.error_message = None
+                record_for_update = SimpleNamespace(
+                    id=record_id,
+                    name=record_name,
+                    topic_id=getattr(record, "topic_id", topic_id),
+                    tab_id=getattr(record, "tab_id", tab.get("id")),
+                    file_ext=getattr(record, "file_ext", None),
+                    local_path=local_path,
+                    download_status="downloaded",
+                    error_message=None,
+                )
+                queue_state_update(
+                    record_id,
+                    local_path=local_path,
+                    download_status="downloaded",
+                    error_message=None,
+                )
                 stats["attachments_downloaded"] += 1
                 entry = self._downloaded_file_entry(record_for_update, local_path)
                 if entry:
@@ -6209,16 +6695,16 @@ class ZsxqSyncService:
                     if entry["path"].lower().endswith(".pdf"):
                         self._append_unique_file_entry(stats["downloaded_pdf_files"], entry)
                 self._record_sync_run_download(run_id, group_id, record_for_update, local_path)
-                db.session.commit()
             except Exception as exc:
                 db.session.rollback()
+                pending_state_updates.clear()
                 if isinstance(exc, SQLAlchemyError) or is_retryable_db_error(exc):
                     raise
-                if record_for_update is None and record_id:
-                    record_for_update = self._load_attachment_for_download_update(record_id)
-                if record_for_update:
-                    record_for_update.download_status = "failed"
-                    record_for_update.error_message = str(exc)[:1000]
+                queue_state_update(
+                    record_id,
+                    download_status="failed",
+                    error_message=str(exc)[:1000],
+                )
                 stats["attachments_failed"] += 1
                 logger.warning(
                     "[ZSXQ_SYNC] attachment download failed | group_id=%s | tab=%s | topic_id=%s | name=%s | error=%s",
@@ -6228,13 +6714,13 @@ class ZsxqSyncService:
                     record_name,
                     exc,
                 )
-                db.session.commit()
             finally:
                 if attempted_download and remaining_downloads is not None:
                     remaining_downloads = max(0, remaining_downloads - 1)
                     if remaining_downloads <= 0:
                         stats["stopped_by_download_limit"] = True
                         stats["download_limit_reached"] = True
+        flush_state_updates()
         stats["remaining_downloads"] = remaining_downloads
         if stats["attachments_downloaded"] or stats["attachments_failed"] or stats["attachments_skipped"]:
             self._clear_attachment_status_cache()
@@ -6388,6 +6874,56 @@ class ZsxqSyncService:
             .values(**values)
             .execution_options(synchronize_session=False)
         )
+
+    def _apply_attachment_download_state_updates(self, updates):
+        """Persist attachment download state transitions in shape batches.
+
+        Downloading is deliberately outside the DB Session, but the old
+        success/failure path still issued one remote UPDATE per file after the
+        download completed. Grouping identical state shapes keeps that
+        lifecycle boundary while reducing one network round trip per
+        attachment. The ``IS DISTINCT FROM`` predicate preserves the existing
+        no-op protection and never drops audit JSON.
+        """
+
+        grouped = {}
+        table = ZsxqAttachment.__table__
+        for item in updates or ():
+            if not isinstance(item, dict):
+                continue
+            record_id = str(item.get("id") or "").strip()
+            values = {
+                key: value
+                for key, value in item.items()
+                if key != "id" and key in table.c
+            }
+            if not record_id or not values:
+                continue
+            shape = tuple(sorted(values))
+            grouped.setdefault(shape, []).append({
+                "_attachment_state_id": record_id,
+                **{
+                    f"_attachment_state_{field}": value
+                    for field, value in values.items()
+                },
+            })
+
+        for shape, mappings in grouped.items():
+            bound = {
+                field: bindparam(f"_attachment_state_{field}")
+                for field in shape
+            }
+            statement = (
+                table.update()
+                .where(table.c.id == bindparam("_attachment_state_id"))
+                .where(or_(*(
+                    table.c[field].is_distinct_from(bound[field])
+                    for field in shape
+                )))
+                .values(**bound)
+                .execution_options(synchronize_session=False)
+            )
+            db.session.execute(statement, mappings)
 
     def _upsert_cursor(self, group_id, tab, newest_topic, tab_result):
         cursor = ZsxqSyncCursor.query.filter_by(group_id=group_id, tab_id=tab["id"]).first()

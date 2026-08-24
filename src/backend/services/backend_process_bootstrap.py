@@ -16,6 +16,7 @@ DEFAULT_SCHEDULERS = (
     "zsxq_auto",
     "content_retention",
     "bilibili_charging",
+    "bilibili_intelligence_sync",
     "youtube_channel_sync",
     "youtube_video_sync",
 )
@@ -36,6 +37,10 @@ SCHEDULERS = {
     "bilibili_charging": {
         "label": "B站充电人数采集计划",
         "module": "services.bilibili_charging_scheduler_service",
+    },
+    "bilibili_intelligence_sync": {
+        "label": "B站情报每小时同步计划",
+        "module": "services.bilibili_intelligence_scheduler_service",
     },
     "youtube_channel_sync": {
         "label": "YouTube 频道数据同步计划",
@@ -292,6 +297,7 @@ def _current_process_skip_reason():
         "run_zsxq_auto_scheduler.py",
         "run_zsxq_auto_publish_scheduler.py",
         "run_content_retention_cleanup_scheduler.py",
+        "run_bilibili_intelligence_scheduler.py",
         "run_report_video_asset_scheduler.py",
         "run_report_video_auto_scheduler.py",
         "run_youtube_channel_sync_scheduler.py",

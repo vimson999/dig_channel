@@ -140,7 +140,17 @@ def _run_publish_task_with_guard(celery_task, task_id):
             raise celery_task.retry(exc=exc, countdown=countdown, max_retries=_db_retry_count())
 
         details = _mark_publish_task_failed_safely(task_id, exc)
-        if not details.get("workflow_notified"):
+        direct_notified = False
+        if details.get("pipeline"):
+            direct_notified = _notify_content_pipeline_event(
+                "publish_failed",
+                task_id=task_id,
+                task_label="知识星球发布",
+                pipeline=details.get("pipeline"),
+                error=str(exc),
+                stage_status="failed",
+            )
+        if not details.get("workflow_notified") and not direct_notified:
             _send_direct_publish_failure_email(
                 task_id=task_id,
                 error=exc,
@@ -237,8 +247,21 @@ def _run_publish_clean_output_task_impl(task_id, celery_task=None):
 
             if failed:
                 logger.error("ZSXQ publish task failed: %s message=%s", task_id, error_message)
+                direct_notified = _notify_content_pipeline_event(
+                    "publish_failed",
+                    task_id=task_key,
+                    task_label="知识星球发布",
+                    pipeline={
+                        "title": publish_params.get("title") or "知识星球发布",
+                        "trigger": publish_params.get("trigger"),
+                        "metadata": publish_params.get("metadata") or {},
+                    },
+                    result=final_result,
+                    error=error_message or "发布失败",
+                    stage_status="failed",
+                )
                 workflow_notified = _notify_workflow_run(workflow_run_id, task_key)
-                if not workflow_notified:
+                if not workflow_notified and not direct_notified:
                     _send_direct_publish_failure_email(
                         task_id=task_id,
                         error=error_message or "发布失败",
@@ -249,6 +272,18 @@ def _run_publish_clean_output_task_impl(task_id, celery_task=None):
                 return False
 
             logger.info("ZSXQ publish task completed: %s status=%s", task_id, status or "completed")
+            _notify_content_pipeline_event(
+                "publish_completed",
+                task_id=task_key,
+                task_label="知识星球发布",
+                pipeline={
+                    "title": publish_params.get("title") or "知识星球发布",
+                    "trigger": publish_params.get("trigger"),
+                    "metadata": publish_params.get("metadata") or {},
+                },
+                result=final_result,
+                stage_status="completed",
+            )
             _notify_workflow_run(workflow_run_id, task_key)
             return True
         except Exception as exc:
@@ -276,8 +311,21 @@ def _run_publish_clean_output_task_impl(task_id, celery_task=None):
                 source_task_id=source_task_id,
                 completed_at=completed_at,
             ))
+            direct_notified = _notify_content_pipeline_event(
+                "publish_failed",
+                task_id=task_key,
+                task_label="知识星球发布",
+                pipeline={
+                    "title": publish_params.get("title") or "知识星球发布",
+                    "trigger": publish_params.get("trigger"),
+                    "metadata": publish_params.get("metadata") or {},
+                },
+                result=failure_result,
+                error=str(exc),
+                stage_status="failed",
+            )
             workflow_notified = _notify_workflow_run(workflow_run_id, task_key)
-            if not workflow_notified:
+            if not workflow_notified and not direct_notified:
                 _send_direct_publish_failure_email(
                     task_id=task_key,
                     error=exc,
@@ -290,11 +338,11 @@ def _run_publish_clean_output_task_impl(task_id, celery_task=None):
 
 
 def _update_attachment_publish_status(task_or_snapshot):
+    task_id = getattr(task_or_snapshot, "id", task_or_snapshot)
     try:
         from services.zsxq_sync_service import zsxq_sync_service
 
         result = zsxq_sync_service.update_attachment_publish_status_from_publish_task(task_or_snapshot)
-        task_id = getattr(task_or_snapshot, "id", task_or_snapshot)
         logger.info(
             "[ZSXQ_PUBLISH_TASK] attachment publish status updated | task=%s matched=%s updated=%s reason=%s",
             task_id,
@@ -311,6 +359,38 @@ def _notify_workflow_from_publish_task(task):
         _workflow_run_id_from_publish_task(task),
         getattr(task, "id", None),
     )
+
+
+def _notify_content_pipeline_event(
+    event_type,
+    *,
+    task_id,
+    task_label,
+    pipeline,
+    result=None,
+    error=None,
+    stage_status=None,
+):
+    try:
+        from services.content_pipeline.notification_service import notify_content_pipeline_event
+
+        result = notify_content_pipeline_event(
+            event_type,
+            task_id=task_id,
+            task_label=task_label,
+            pipeline=pipeline,
+            result=result,
+            error=error,
+            stage_status=stage_status,
+        )
+        return bool(result.get("queued"))
+    except Exception:
+        logger.exception(
+            "[ZSXQ_PUBLISH_TASK] milestone notification failed | event=%s task=%s",
+            event_type,
+            task_id,
+        )
+        return False
 
 
 def _notify_workflow_run(workflow_run_id, task_id=None):
@@ -354,6 +434,12 @@ def _mark_publish_task_failed_safely(task_id, exc):
                 return details
 
             details["workflow_run_id"] = _workflow_run_id_from_publish_task(task)
+            publish_params = (task.params or {}).get("zsxq_publish") or {}
+            details["pipeline"] = {
+                "title": publish_params.get("title") or "知识星球发布",
+                "trigger": publish_params.get("trigger"),
+                "metadata": publish_params.get("metadata") or {},
+            }
             result = dict(task.result or {})
             result["error"] = str(exc)
             result["failed_outside_handler"] = True

@@ -1,3 +1,5 @@
+import json
+import inspect
 import os
 import sys
 import tempfile
@@ -9,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from flask import Flask
+from sqlalchemy import text
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -33,6 +36,7 @@ from tasks.report_audio_workflow import (  # noqa: E402
     _parent_retry_delay_seconds,
     _parse_utc_datetime,
     _completed_tts_task_for_chunk,
+    _doubao_parallelism,
     _ordered_doubao_tts_outputs,
     _process_job,
     _publisher_script_subtitles,
@@ -43,11 +47,16 @@ from tasks.report_audio_workflow import (  # noqa: E402
     _publisher_workbench_institution,
     _publisher_sub_title,
     _publisher_video_transform,
+    _report_video_completion_contract,
     _task_chunk_attempt,
     _tts_text_hash,
     _valid_structured_result,
     _video_stage_enabled,
     _wait_child,
+)
+from tests.unit.test_report_audio_gem_v2 import (  # noqa: E402
+    PDF_FILENAME as GEM_V2_PDF_FILENAME,
+    valid_payload as valid_gem_v2_payload,
 )
 
 
@@ -64,6 +73,92 @@ def _write_test_wav(path, seconds=1.0, sample_rate=16000):
 
 
 class ReportAudioWorkflowTaskTest(unittest.TestCase):
+    def test_doubao_browser_tts_defaults_to_three_parallel_chunks(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_doubao_parallelism(), 3)
+
+    def test_scheme3_visual_resolution_uses_narrow_parent_projection(self):
+        source = inspect.getsource(report_audio_workflow._resolve_scheme3_visual_inputs)
+
+        self.assertIn(".options(load_only(", source)
+        for column in (
+            "PublicationTask.id",
+            "PublicationTask.user_id",
+            "PublicationTask.report_audio_pdf_attachment_id",
+            "PublicationTask.report_audio_pdf_filename",
+            "PublicationTask.report_audio_pdf_bytes",
+        ):
+            self.assertIn(column, source)
+        self.assertNotIn(
+            "PublicationTask.query.filter(PublicationTask.id == parent_id).one_or_none()",
+            source,
+        )
+
+    def test_public_child_summary_keeps_sanitized_captcha_notification(self):
+        summary = report_audio_workflow._task_public_summary({
+            "job_id": "child-1",
+            "status": "blocked_by_captcha",
+            "current_step": "blocked_by_captcha",
+            "progress": 45,
+            "result": {
+                "captcha_blocked": {
+                    "requires_human_action": True,
+                    "workflow_url": "http://localhost:5001/report-audio-workflow-detail.html?job_id=parent-1",
+                },
+                "notifications": {
+                    "doubao_captcha_blocked": {
+                        "sent": True,
+                        "sent_at": "2026-08-12T08:34:14Z",
+                        "to": "owner@example.test",
+                    }
+                },
+            },
+        })
+
+        notification = summary["notifications"]["doubao_captcha_blocked"]
+        self.assertTrue(notification["sent"])
+        self.assertEqual(notification["recipient_hint"], "o***@example.test")
+        self.assertNotIn("to", notification)
+        self.assertTrue(summary["captcha_blocked"]["requires_human_action"])
+
+    def test_full_video_completion_contract_requires_every_selected_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            landscape = root / "landscape.mp4"
+            wav = root / "final.wav"
+            landscape.write_bytes(b"video")
+            wav.write_bytes(b"audio")
+
+            with patch.object(
+                report_audio_workflow,
+                "COMPLETION_MEDIA_PROBE",
+                side_effect=lambda path: (
+                    {"duration": 30.0, "video_streams": 0, "audio_streams": 1}
+                    if str(path).endswith(".wav")
+                    else {"duration": 30.0, "video_streams": 1, "audio_streams": 1}
+                ),
+            ):
+                result = _report_video_completion_contract(
+                    {
+                        "landscape_enabled": True,
+                        "vertical_enabled": True,
+                        "landscape_video_path": str(landscape),
+                        "vertical_video_schemes": ["scheme3"],
+                        "vertical_video_paths": {},
+                    },
+                    {"wav_path": str(wav)},
+                    {
+                        "video": {
+                            "enabled": True,
+                            "vertical_enabled": True,
+                            "render_mode": "full_video",
+                        }
+                    },
+                )
+
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["missing"], ["vertical_scheme3"])
+
     def test_parent_current_step_codes_fit_publication_task_column(self):
         steps = [
             "submit_gemini",
@@ -149,6 +244,21 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertTrue(title.startswith("伯恩斯坦："))
         self.assertNotIn("机构", title)
         self.assertNotIn("盛博", title)
+
+    def test_gfhk_filename_is_detected_as_hong_kong_gf_securities(self):
+        institution = _publisher_workbench_institution(
+            {"title": "广发证券：AI资本开支与平台价值转移"},
+            {"filename": "GHHK - AI Capex & Platform Value Shift.pdf"},
+            {},
+        )
+        title = _publisher_cover_title_with_institution(
+            "机构：AI资本开支与平台价值转移\n2028年增速急刹车",
+            institution,
+        )
+
+        self.assertEqual(institution, "GF Securities (Hong Kong)")
+        self.assertTrue(title.startswith("香港广发："))
+        self.assertNotIn("机构：", title)
 
     def test_cover_subtitle_is_single_line_and_bounded(self):
         subtitle = _format_cover_subtitle(
@@ -250,6 +360,12 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertTrue(child.params["podcast_cover"]["enabled"])
         self.assertTrue(child.params["bilibili_cover"]["enabled"])
         self.assertFalse(child.params["bilibili_cover"]["show_footer"])
+        self.assertTrue(child.params["subtitle_alignment"]["required"])
+        self.assertTrue(child.params["subtitle_alignment"]["strict"])
+        self.assertEqual(
+            child.params["vertical_video"]["subtitle_position"]["y_pct"],
+            0.73,
+        )
         for asset_key in (
             "thumbnail",
             "vertical_thumbnail",
@@ -308,6 +424,101 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertTrue(child.params["vertical_video_2"]["enabled"])
         self.assertEqual(child.params["vertical_video_2"]["scheme"], "scheme1")
         self.assertEqual(child.params["metadata"]["vertical_video_schemes"], ["scheme1", "scheme2"])
+
+    def test_publisher_video_task_includes_scheme3_scene_timeline(self):
+        class FakePublisherTask:
+            latest = None
+
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+                self.id = "publisher-child-scheme3"
+                FakePublisherTask.latest = self
+
+        timeline = {
+            "version": 1,
+            "scene_count": 1,
+            "scenes": [{"sequence": 1, "image_path": "/tmp/scene-1.png", "start_seconds": 0, "end_seconds": 12}],
+        }
+        fake_session = SimpleNamespace(add=lambda child: None, flush=lambda: None, commit=lambda: None)
+        parent = SimpleNamespace(id="parent-scheme3", created_at=datetime.utcnow())
+
+        with patch.object(report_audio_workflow, "_find_existing_publisher_video_task", return_value=None), \
+            patch.object(
+                report_audio_workflow,
+                "_resolve_scheme3_visual_inputs",
+                return_value={
+                    "workflow_id": "visual-1",
+                    "scene_timeline": timeline,
+                    "video_path": None,
+                    "status": "ready",
+                    "step": "images_done",
+                },
+            ), \
+            patch.object(report_audio_workflow, "PublicationTask", FakePublisherTask), \
+            patch.object(report_audio_workflow, "db", SimpleNamespace(session=fake_session)), \
+            patch.object(
+                report_audio_workflow.run_publication_pipeline,
+                "apply_async",
+                return_value=SimpleNamespace(id="celery-scheme3"),
+            ), \
+            patch.object(report_audio_workflow, "_persist_child_celery_task_id"), \
+            patch.object(report_audio_workflow, "_load_task", side_effect=lambda *args: FakePublisherTask.latest):
+            child = _create_publisher_video_task(
+                parent,
+                audio={"wav_path": "/tmp/audio.wav", "seconds": 12},
+                structured={
+                    "title": "方案三测试",
+                    "cover_title": "方案三测试",
+                    "cover_subtitle": "分镜必须传给渲染器",
+                    "final_script_for_tts": "这是一段用于测试方案三分镜视频的文案。",
+                },
+                pdf={"filename": "source.pdf"},
+                pdf_screenshot={"path": "/tmp/source-page.jpg", "width": 100, "height": 100},
+                payload={
+                    "video": {
+                        "enabled": True,
+                        "vertical_enabled": True,
+                        "vertical_video_schemes": ["scheme3"],
+                        "bilibili_enabled": False,
+                    }
+                },
+            )
+
+        self.assertEqual(child.params["vertical_video"]["visual_scene_timeline"], timeline)
+        self.assertEqual(child.params["metadata"]["visual_workflow_id"], "visual-1")
+
+    def test_publisher_video_task_defers_scheme3_until_visual_assets_are_ready(self):
+        parent = SimpleNamespace(id="parent-scheme3-wait", created_at=datetime.utcnow())
+        with patch.object(report_audio_workflow, "_find_existing_publisher_video_task", return_value=None), \
+            patch.object(
+                report_audio_workflow,
+                "_resolve_scheme3_visual_inputs",
+                return_value={
+                    "workflow_id": "visual-waiting",
+                    "scene_timeline": None,
+                    "video_path": None,
+                    "status": "processing",
+                    "step": "images_queued",
+                },
+            ):
+            with self.assertRaises(report_audio_workflow.ChildTaskStillRunning) as raised:
+                _create_publisher_video_task(
+                    parent,
+                    audio={"wav_path": "/tmp/audio.wav", "seconds": 12},
+                    structured={"final_script_for_tts": "等待视觉素材。"},
+                    pdf={"filename": "source.pdf"},
+                    pdf_screenshot={"path": "/tmp/source-page.jpg"},
+                    payload={
+                        "video": {
+                            "enabled": True,
+                            "vertical_enabled": True,
+                            "vertical_video_schemes": ["scheme3"],
+                        }
+                    },
+                )
+
+        self.assertEqual(raised.exception.label, "scheme3_visual")
+        self.assertEqual(raised.exception.child_id, "visual-waiting")
 
     def test_scheme3_keyframe_uses_workbench_video_frame_without_visual_video(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -449,8 +660,60 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
         self.assertEqual(generate_bilibili.call_args.kwargs["main_title"], "机构：核心大牛\n集体出走")
         self.assertEqual(result["bilibili_cover_path"], str(bilibili_path))
         self.assertIn("bilibili_cover", result["keyframes"])
-        self.assertEqual(result["keyframes"]["bilibili_cover"]["label"], "B站封皮关键帧")
+        self.assertEqual(result["keyframes"]["bilibili_cover"]["label"], "横版封皮")
         self.assertEqual(result["keyframes"]["bilibili_cover"]["ratio"], "1146:717")
+
+    def test_explicit_keyframe_outputs_generate_only_selected_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bilibili_path = Path(tmpdir) / "bilibili.jpg"
+            bilibili_path.write_bytes(b"bilibili")
+
+            with patch.object(report_audio_workflow, "_latest_report_audio_keyframe", return_value=None), \
+                patch.object(report_audio_workflow.thumbnail_service, "generate_thumbnail") as generate_landscape, \
+                patch.object(
+                    report_audio_workflow.thumbnail_service,
+                    "generate_workbench_vertical_cover",
+                ) as generate_vertical_cover, \
+                patch.object(
+                    report_audio_workflow.thumbnail_service,
+                    "generate_workbench_bilibili_cover",
+                    return_value=str(bilibili_path),
+                ) as generate_bilibili:
+                result = report_audio_workflow._generate_report_audio_keyframes(
+                    "parent-explicit",
+                    datetime(2026, 7, 28, 12, 0, 0),
+                    structured={"cover_title": "测试标题", "cover_subtitle": "测试副标题"},
+                    pdf={"filename": "source.pdf"},
+                    audio={"seconds": 60},
+                    pdf_screenshot={"path": "/tmp/source-page.jpg"},
+                    payload={
+                        "video": {
+                            "enabled": False,
+                            "vertical_enabled": False,
+                            "keyframe_outputs": ["bilibili_cover"],
+                        }
+                    },
+                )
+
+        generate_bilibili.assert_called_once()
+        generate_landscape.assert_not_called()
+        generate_vertical_cover.assert_not_called()
+        self.assertEqual(list(result["keyframes"]), ["bilibili_cover"])
+        self.assertEqual(result["keyframe_outputs"], ["bilibili_cover"])
+        self.assertFalse(result["landscape_enabled"])
+        self.assertFalse(result["vertical_enabled"])
+
+    def test_keyframe_outputs_enable_video_stage_without_video_versions(self):
+        payload = {
+            "video": {
+                "enabled": False,
+                "vertical_enabled": False,
+                "render_mode": "keyframes",
+                "keyframe_outputs": ["vertical_cover"],
+            }
+        }
+
+        self.assertTrue(_video_stage_enabled(payload))
 
     def test_keyframe_mode_reuses_valid_files_after_partial_failure(self):
         from PIL import Image
@@ -533,6 +796,55 @@ class ReportAudioWorkflowTaskTest(unittest.TestCase):
 
         self.assertEqual(_child_id_from_result(result, "publisher_video"), "publisher-child")
         self.assertLessEqual(len(_current_step_code("publisher_video_waiting")), CURRENT_STEP_MAX_LENGTH)
+
+    def test_closed_gemini_browser_is_retryable(self):
+        message = "Page.evaluate: Target page, context or browser has been closed"
+
+        self.assertTrue(_is_retryable_child_error("gemini", message))
+
+    def test_missing_pcm_audio_child_is_retryable(self):
+        self.assertTrue(
+            _is_retryable_child_error("doubao", "朗读已触发但未捕获到 PCM 音频")
+        )
+
+    def test_worker_import_mismatch_does_not_create_another_doubao_attempt(self):
+        text = "worker 导入版本不一致时不应消耗朗读重试次数。"
+        metadata = {"chunk_index": 1, "chunk_attempt": 1, "text_hash": _tts_text_hash(text)}
+        failed_task = SimpleNamespace(
+            id="failed-child-1",
+            celery_task_id="celery-failed-child-1",
+            feature="doubao_browser_tts",
+            parent_task_id="parent-1",
+            source_task_id=None,
+            created_at=datetime.utcnow(),
+            completed_at=datetime.utcnow(),
+            status="failed",
+            current_step="failed",
+            progress=0,
+            error_message=(
+                "Celery 子任务异常退出: FAILURE: cannot import name "
+                "'public_browser_human_intervention_notification'"
+            ),
+            params={"doubao_browser_tts": {"text": text, "metadata": metadata}},
+            result={"metadata": metadata},
+        )
+
+        with patch.object(report_audio_workflow, "_completed_tts_task_for_chunk", return_value=None), \
+            patch.object(report_audio_workflow, "_active_tts_task_for_chunk", return_value=None), \
+            patch.object(report_audio_workflow, "_failed_tts_tasks_for_chunk", return_value=[failed_task]), \
+            patch.object(report_audio_workflow, "_clear_waiting_child"), \
+            patch.object(report_audio_workflow, "_record_child_attempt"), \
+            patch.object(report_audio_workflow, "_create_doubao_tts_task") as create_child:
+            with self.assertRaisesRegex(RuntimeError, "worker_code_mismatch"):
+                report_audio_workflow._run_doubao_tts_chunks(
+                    SimpleNamespace(id="parent-1"),
+                    "parent-1",
+                    [text],
+                    {},
+                    retry_limit=1,
+                )
+
+        create_child.assert_not_called()
 
     def test_heavy_children_use_short_inline_waits_and_deferred_resume(self):
         env_keys = [
@@ -780,11 +1092,284 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         self.ctx = self.app.app_context()
         self.ctx.push()
         db.create_all()
+        self.completion_probe_patch = patch.object(
+            report_audio_workflow,
+            "COMPLETION_MEDIA_PROBE",
+            side_effect=lambda path: (
+                {"duration": 1.0, "video_streams": 0, "audio_streams": 1}
+                if str(path).endswith(".wav")
+                else {"duration": 1.0, "video_streams": 1, "audio_streams": 1}
+            ),
+        )
+        self.completion_probe_patch.start()
 
     def tearDown(self):
+        self.completion_probe_patch.stop()
         db.session.remove()
         db.drop_all()
         self.ctx.pop()
+
+    def _gem_v2_workflow(self, mode):
+        root = Path(self.app.instance_path)
+        root.mkdir(parents=True, exist_ok=True)
+        pdf_path = root / GEM_V2_PDF_FILENAME
+        pdf_path.write_bytes(b"%PDF-1.4\n% Gem V2 test PDF\n")
+        workflow = PublicationTask(
+            status="pending",
+            current_step="queued",
+            progress=0,
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "user_id": "1",
+                "report_audio_workflow": {
+                    "prompt": "旧版长调用提示词，不应在 V2 模式发送",
+                    "review_prompt": "旧版 Gemini 通用复核，不应在 V2 模式发送",
+                    "followups": ["旧版追问，也不应发送"],
+                    "gem_v2_mode": mode,
+                    "gem_v2_focus": "重点解释供需验证指标",
+                    "gemini_min_final_chars": 20,
+                    "force_gemini_regeneration": True,
+                    "pdf_evidence_enabled": False,
+                    "script_material_only": True,
+                    "pdf_path": str(pdf_path),
+                    "pdf": {
+                        "attachment_id": f"gem-v2-{mode}",
+                        "filename": GEM_V2_PDF_FILENAME,
+                        "path": str(pdf_path),
+                    },
+                    "video": {"enabled": False},
+                },
+            },
+            result={"children": {}, "logs": []},
+        )
+        db.session.add(workflow)
+        db.session.commit()
+        return workflow
+
+    @staticmethod
+    def _gemini_snapshot(raw_text):
+        return {
+            "job_id": "gem-v2-child",
+            "status": "completed",
+            "current_step": "done",
+            "progress": 100,
+            "result": {
+                "initial_response_text": raw_text,
+                "final_response_text": raw_text,
+            },
+        }
+
+    @staticmethod
+    def _legacy_structured():
+        return {
+            "title": "DeepSeek 兼容标题",
+            "landscape_title": "DeepSeek 横屏标题",
+            "landscape_subtitle": "兼容副标题",
+            "vertical_title": "DeepSeek 竖屏标题",
+            "vertical_subtitle": "兼容副标题",
+            "cover_title": "DeepSeek 横屏标题",
+            "cover_subtitle": "兼容副标题",
+            "final_script_for_tts": "这是 DeepSeek 回退链路生成的完整可朗读正文，长度足以通过当前测试要求。",
+        }
+
+    def test_deepseek_structuring_runs_after_database_session_release(self):
+        transaction_states = []
+
+        db.session.execute(text("SELECT 1"))
+        self.assertTrue(db.session().in_transaction())
+
+        def normalize_without_database_session(*_args, **_kwargs):
+            transaction_states.append(db.session().in_transaction())
+            return self._legacy_structured()
+
+        with patch.object(
+            report_audio_workflow,
+            "normalize_for_tts",
+            side_effect=normalize_without_database_session,
+        ):
+            report_audio_workflow._structure_gemini_response(
+                "Gemini 原始研报内容",
+                initial_text="Gemini 初始内容",
+                minimum_script_chars=20,
+                gem_v2_mode="off",
+                allow_external_information=False,
+                pdf={"filename": "report.pdf"},
+                pdf_path="/tmp/report.pdf",
+                metadata={"workflow_task_id": "workflow-1"},
+            )
+
+        self.assertEqual([False], transaction_states)
+
+    def test_gem_v2_shadow_uses_minimal_prompt_without_generic_followup_and_keeps_deepseek(self):
+        workflow = self._gem_v2_workflow("shadow")
+        workflow_id = workflow.id
+        raw = json.dumps(valid_gem_v2_payload(), ensure_ascii=False)
+        legacy = self._legacy_structured()
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "20"}, clear=False), \
+            patch.object(
+                report_audio_workflow,
+                "_run_gemini_task_with_retries",
+                return_value=self._gemini_snapshot(raw),
+            ) as run_gemini, \
+            patch.object(report_audio_workflow, "normalize_for_tts", return_value=legacy) as normalize, \
+            patch.object(report_audio_workflow, "review_report_cover_titles", return_value=legacy) as review, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        submitted = run_gemini.call_args.kwargs
+        self.assertIn("report_audio_gem_v2", submitted["prompt"])
+        self.assertIn(GEM_V2_PDF_FILENAME, submitted["prompt"])
+        self.assertNotIn("旧版长调用提示词", submitted["prompt"])
+        self.assertEqual(submitted["followups"], [])
+        normalize.assert_called_once()
+        review.assert_called_once()
+        workflow = db.session.get(PublicationTask, workflow_id)
+        self.assertTrue(workflow.result["gem_v2"]["valid"])
+        self.assertEqual(workflow.result["gem_v2"]["route"], "shadow_deepseek")
+        self.assertEqual(workflow.result["structured_result"]["title"], "DeepSeek 兼容标题")
+
+    def test_gem_v2_direct_valid_response_bypasses_both_deepseek_stages(self):
+        workflow = self._gem_v2_workflow("direct")
+        raw = json.dumps(valid_gem_v2_payload(), ensure_ascii=False)
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "20"}, clear=False), \
+            patch.object(
+                report_audio_workflow,
+                "_run_gemini_task_with_retries",
+                return_value=self._gemini_snapshot(raw),
+            ), \
+            patch.object(report_audio_workflow, "normalize_for_tts") as normalize, \
+            patch.object(report_audio_workflow, "review_report_cover_titles") as review, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        normalize.assert_not_called()
+        review.assert_not_called()
+        db.session.refresh(workflow)
+        self.assertEqual(workflow.result["gem_v2"]["route"], "direct")
+        self.assertEqual(workflow.result["structured_result"]["schema_version"], "report_audio_gem_v2")
+        self.assertEqual(workflow.result["structured_result"]["provider"], "gemini_gem")
+
+    def test_gem_v2_direct_invalid_response_falls_back_to_both_deepseek_stages(self):
+        workflow = self._gem_v2_workflow("direct")
+        workflow_id = workflow.id
+        invalid = valid_gem_v2_payload()
+        invalid["schema_version"] = "report_audio_gem_v1"
+        raw = json.dumps(invalid, ensure_ascii=False)
+        legacy = self._legacy_structured()
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "20"}, clear=False), \
+            patch.object(
+                report_audio_workflow,
+                "_run_gemini_task_with_retries",
+                return_value=self._gemini_snapshot(raw),
+            ), \
+            patch.object(report_audio_workflow, "normalize_for_tts", return_value=legacy) as normalize, \
+            patch.object(report_audio_workflow, "review_report_cover_titles", return_value=legacy) as review, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        normalize.assert_called_once()
+        review.assert_called_once()
+        workflow = db.session.get(PublicationTask, workflow_id)
+        self.assertEqual(workflow.result["gem_v2"]["route"], "deepseek_fallback")
+        self.assertIn("schema_version", workflow.result["gem_v2"]["error_codes"])
+
+    def test_gem_v2_child_declares_contract_for_one_targeted_repair(self):
+        parent = SimpleNamespace(id="parent-gem-v2-contract", params={"user_id": "1"})
+        pdf = {"filename": GEM_V2_PDF_FILENAME, "attachment_id": "asset-gem-v2"}
+
+        with patch.object(
+            report_audio_workflow,
+            "apply_async_after_db_release",
+            return_value=SimpleNamespace(id="celery-gem-v2"),
+        ):
+            child = report_audio_workflow._create_gemini_task(
+                parent,
+                pdf,
+                "/tmp/gem-v2.pdf",
+                "minimal trigger",
+                [],
+                {"gem_v2_mode": "shadow", "gemini_min_final_chars": 1500},
+            )
+
+        stored = db.session.get(PublicationTask, child.id)
+        request = stored.params["report_pdf_gemini"]
+        self.assertEqual(request["response_contract"], "report_audio_gem_v2")
+        self.assertEqual(request["contract_expected_pdf_filename"], GEM_V2_PDF_FILENAME)
+        self.assertEqual(request["contract_minimum_script_chars"], 1500)
+        self.assertEqual(request["contract_max_repairs"], 1)
+
+    def test_resumed_direct_result_does_not_run_deepseek_title_review(self):
+        workflow = self._gem_v2_workflow("direct")
+        payload = valid_gem_v2_payload()
+        structured = dict(payload["reports"][0])
+        structured.update({
+            "schema_version": "report_audio_gem_v2",
+            "batch_quality_control": payload["batch_quality_control"],
+        })
+        workflow.result = {
+            "children": {},
+            "logs": [],
+            "structured_result": structured,
+            "gem_v2": {"mode": "direct", "route": "direct", "valid": True},
+        }
+        db.session.commit()
+
+        with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "20"}, clear=False), \
+            patch.object(report_audio_workflow, "normalize_for_tts") as normalize, \
+            patch.object(report_audio_workflow, "review_report_cover_titles") as review, \
+            patch.object(report_audio_workflow, "_queue_notification", return_value=True):
+            ok = _process_job(workflow.id)
+
+        self.assertTrue(ok)
+        normalize.assert_not_called()
+        review.assert_not_called()
+
+    def test_deferred_parent_resume_persists_replacement_delivery_id(self):
+        parent = PublicationTask(
+            status="processing",
+            current_step="doubao_1_waiting",
+            progress=60,
+            celery_task_id="old-delivery-id",
+            params={
+                "feature": "report_pdf_audio_workflow",
+                "report_audio_workflow": {"pdf_path": "/tmp/report.pdf"},
+            },
+            result={"children": {}, "logs": []},
+        )
+        db.session.add(parent)
+        db.session.commit()
+        waiting = report_audio_workflow.ChildTaskStillRunning(
+            "doubao_browser_1",
+            "tts-child-1",
+            "processing",
+            "capture_audio",
+        )
+
+        with patch.object(
+            report_audio_workflow,
+            "apply_async_after_db_release",
+            return_value=SimpleNamespace(id="replacement-delivery-id"),
+        ) as publish:
+            report_audio_workflow._defer_parent_retry(parent.id, waiting)
+
+        db.session.expire_all()
+        refreshed = db.session.get(PublicationTask, parent.id)
+        self.assertEqual(refreshed.status, "processing")
+        self.assertEqual(refreshed.celery_task_id, "replacement-delivery-id")
+        self.assertEqual(refreshed.waiting_child_id, "tts-child-1")
+        publish.assert_called_once_with(
+            report_audio_workflow.process_report_audio_workflow_job,
+            args=[parent.id],
+            queue=report_audio_workflow.WORKFLOW_QUEUE_NAME,
+            countdown=30,
+            retry=False,
+        )
 
     def test_completed_parent_ignores_duplicate_delayed_delivery(self):
         completed = PublicationTask(
@@ -892,6 +1477,36 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         self.assertEqual(reusable["source_task_id"], existing.id)
         self.assertEqual(reusable["source_feature"], "report_script_material_workflow")
         self.assertEqual(reusable["structured_result"], structured)
+
+    def test_reusable_material_for_pdf_rejects_script_below_requested_minimum(self):
+        structured = {
+            "title": "旧短文案",
+            "final_script_for_tts": "这是一段不足一千五百字的旧文案。" * 20,
+        }
+        existing = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "report_script_material_workflow",
+                "source_feature": "zsxq_attachment",
+                "source_task_id": "asset-short",
+                "report_script_material_workflow": {
+                    "pdf": {"attachment_id": "asset-short", "filename": "report.pdf"},
+                },
+            },
+            result={"structured_result": structured},
+        )
+        db.session.add(existing)
+        db.session.commit()
+
+        reusable = report_audio_workflow._reusable_material_for_pdf(
+            {"attachment_id": "asset-short", "filename": "report.pdf"},
+            exclude_task_id="new-task",
+            minimum_chars=1500,
+        )
+
+        self.assertIsNone(reusable)
 
     def test_script_material_only_preserves_reused_material_source(self):
         root = Path(self.app.instance_path)

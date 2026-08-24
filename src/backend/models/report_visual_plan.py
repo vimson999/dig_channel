@@ -23,6 +23,14 @@ class ReportVisualPlanOutput(db.Model):
     normalized_output_path = db.Column(db.String(600), nullable=True)
     normalizer_provider = db.Column(db.String(40), nullable=True)
     normalizer_model = db.Column(db.String(120), nullable=True)
+    evidence_output_id = db.Column(
+        db.String(36),
+        db.ForeignKey("report_pdf_evidence_outputs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    evidence_schema_version = db.Column(db.String(64), nullable=True)
+    evidence_status = db.Column(db.String(32), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -1,10 +1,12 @@
 import asyncio
 import re
 import time
+import uuid
 from datetime import datetime
 from types import SimpleNamespace
 
 from sqlalchemy.orm import load_only
+from sqlalchemy.orm.attributes import flag_modified
 
 from celery_config import celery_app
 from models import db
@@ -23,6 +25,14 @@ STATUS_MAP = {
 }
 
 DEFAULT_BILIBILI_NEUTRAL_MARK = "个人观点，仅供参考"
+
+
+class BilibiliUploadRetryConflict(RuntimeError):
+    """The child is not in a safe state for another upload attempt."""
+
+
+class BilibiliUploadRetryEnqueueError(RuntimeError):
+    """The child was reset but the replacement broker message was rejected."""
 
 
 def truthy(value, default=True):
@@ -561,6 +571,126 @@ def enqueue_bilibili_upload_task(child):
     child.celery_task_id = submission["celery_id"]
     child._bilibili_enqueue_response_payload = response_payload
     return child
+
+
+def retry_bilibili_upload_child(
+    task_id,
+    *,
+    parent_task_id=None,
+    parent_feature=None,
+    source_label=None,
+):
+    """Requeue one terminal failed Bilibili upload without rebuilding media.
+
+    The browser/API page is allowed to retry only a failed child that still has
+    its structured upload projection.  A fresh broker id is written before the
+    message is published, so a stale delivery from the previous attempt cannot
+    pass ``run_bilibili_upload_only``'s current-id guard.
+    """
+
+    task_key = str(task_id or "").strip()
+    if not task_key:
+        raise ValueError("B站上传任务 ID 不能为空")
+
+    query = (
+        db.session.query(PublicationTask, PublicationTaskBilibiliUpload)
+        .join(
+            PublicationTaskBilibiliUpload,
+            PublicationTaskBilibiliUpload.task_id == PublicationTask.id,
+        )
+        .filter(PublicationTask.id == task_key)
+    )
+    if parent_task_id:
+        query = query.filter(PublicationTaskBilibiliUpload.parent_task_id == str(parent_task_id))
+    if parent_feature:
+        query = query.filter(PublicationTaskBilibiliUpload.parent_feature == parent_feature)
+    if source_label:
+        query = query.filter(PublicationTaskBilibiliUpload.source_label == source_label)
+
+    row = query.with_for_update().one_or_none()
+    if row is None:
+        raise LookupError("B站上传任务不存在")
+    task, upload = row
+
+    status = str(task.status or "").strip().lower()
+    if status in {"pending", "processing"}:
+        raise BilibiliUploadRetryConflict("上传任务正在运行或排队中，请勿重复重投")
+    if status == "completed":
+        raise BilibiliUploadRetryConflict("上传任务已经成功，无需重复重投")
+    if status != "failed":
+        raise BilibiliUploadRetryConflict("只有失败的 B站上传任务可以重投")
+    if upload.aid or upload.bvid:
+        raise BilibiliUploadRetryConflict("该任务已有 B站稿件标识，为避免重复投稿暂不允许重投")
+
+    now = datetime.utcnow()
+    new_celery_id = str(uuid.uuid4())
+    result = dict(task.result or {})
+    retry_history = list(result.get("bilibili_retry_history") or [])
+    retry_history.append({
+        "requested_at": now.isoformat() + "Z",
+        "previous_celery_id": task.celery_task_id,
+        "previous_error": task.error_message,
+    })
+    result["bilibili_retry_history"] = retry_history[-8:]
+    result["bilibili_retry_requested_at"] = now.isoformat() + "Z"
+    result.pop("bilibili_error", None)
+    result.pop("error", None)
+    result.pop("error_type", None)
+
+    task.status = "pending"
+    task.current_step = "queued"
+    task.progress = 0
+    task.error_message = None
+    task.completed_at = None
+    task.celery_task_id = new_celery_id
+    task.result = result
+    flag_modified(task, "result")
+    db.session.commit()
+
+    try:
+        submission = dispatch_platform_publish(
+            "bilibili",
+            task_key,
+            broker_task_id=new_celery_id,
+            retry=False,
+        )
+    except Exception as exc:
+        error_message = f"B站上传重投入队失败: {exc}"
+        (
+            PublicationTask.query
+            .filter(PublicationTask.id == task_key)
+            .update(
+                {
+                    PublicationTask.status: "failed",
+                    PublicationTask.current_step: "failed",
+                    PublicationTask.progress: 0,
+                    PublicationTask.error_message: error_message,
+                    PublicationTask.completed_at: datetime.utcnow(),
+                    PublicationTask.updated_at: datetime.utcnow(),
+                },
+                synchronize_session=False,
+            )
+        )
+        db.session.commit()
+        raise BilibiliUploadRetryEnqueueError(error_message) from exc
+
+    actual_celery_id = str(submission.get("celery_id") or new_celery_id)
+    if actual_celery_id != new_celery_id:
+        task.celery_task_id = actual_celery_id
+        (
+            PublicationTask.query
+            .filter(PublicationTask.id == task_key)
+            .update(
+                {
+                    PublicationTask.celery_task_id: actual_celery_id,
+                    PublicationTask.updated_at: datetime.utcnow(),
+                },
+                synchronize_session=False,
+            )
+        )
+        db.session.commit()
+
+    return task
 
 
 def bilibili_upload_children(parent_id, *, parent_feature=None, source_label=None, limit=20):

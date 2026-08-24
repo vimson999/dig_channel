@@ -1,7 +1,7 @@
 """火柴人视频的整篇音频对齐与最终 FFmpeg 合成任务。"""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.orm import load_only
@@ -22,15 +22,306 @@ from services.report_stick_figure_audio_alignment import (
     extract_final_script,
     write_alignment_manifest,
 )
+from services.report_stick_figure_assets import has_browser_overlay_artifact
 from services.report_stick_figure_video import (
     FEATURE_NAME,
+    QUEUE_NAME,
     normalize_render_options,
     render_scene_timeline,
 )
-from services.runtime_guard import release_db_session_quietly
+from services.runtime_guard import (
+    maybe_guarded_apply_async,
+    release_db_session_quietly,
+)
 
 
 logger = logging.getLogger("REPORT_STICK_FIGURE_VIDEO_TASK")
+
+AUTO_RENDER_READY_STEPS = ("images_done", "whole_audio_aligned")
+WORKFLOW_FEATURE = "report_stick_figure_video_workflow"
+REPORT_AUDIO_FEATURE = "report_pdf_audio_workflow"
+
+
+def _whole_audio_render_assets_ready(assets) -> bool:
+    return bool(assets) and all(
+        str(asset.image_status or "") == "completed"
+        and bool(asset.image_path)
+        and Path(str(asset.image_path)).is_file()
+        and str(asset.timeline_source or "") == "whole_audio"
+        and asset.timeline_start_seconds is not None
+        and asset.timeline_end_seconds is not None
+        and float(asset.timeline_end_seconds) > float(asset.timeline_start_seconds)
+        for asset in assets
+    )
+
+
+def maybe_auto_enqueue_stick_figure_video(workflow_id: str) -> dict:
+    """Idempotently continue a ready visual workflow into final video render."""
+
+    workflow_id = str(workflow_id or "").strip()
+    if not workflow_id:
+        return {"enqueued": False, "reason": "missing_workflow_id"}
+    parent = (
+        PublicationTask.query.options(load_only(
+            PublicationTask.id,
+            PublicationTask.user_id,
+            PublicationTask.task_title,
+            PublicationTask.status,
+            PublicationTask.current_step,
+        ))
+        .filter(
+            PublicationTask.id == workflow_id,
+            PublicationTask.feature == WORKFLOW_FEATURE,
+        )
+        .one_or_none()
+    )
+    if not parent or parent.status in {"completed", "canceled"}:
+        return {"enqueued": False, "reason": "terminal_or_missing"}
+    track = (
+        ReportStickFigureAudioTrack.query.options(load_only(
+            ReportStickFigureAudioTrack.id,
+            ReportStickFigureAudioTrack.storyboard_task_id,
+            ReportStickFigureAudioTrack.status,
+            ReportStickFigureAudioTrack.audio_path,
+        ))
+        .filter(
+            ReportStickFigureAudioTrack.workflow_task_id == workflow_id,
+        )
+        .one_or_none()
+    )
+    if (
+        not track
+        or track.status != "completed"
+        or not track.audio_path
+        or not Path(str(track.audio_path)).is_file()
+    ):
+        return {"enqueued": False, "reason": "whole_audio_not_ready"}
+    storyboard_id = str(track.storyboard_task_id)
+    assets = (
+        ReportStickFigureSceneAsset.query.options(load_only(
+            ReportStickFigureSceneAsset.image_status,
+            ReportStickFigureSceneAsset.image_path,
+            ReportStickFigureSceneAsset.timeline_start_seconds,
+            ReportStickFigureSceneAsset.timeline_end_seconds,
+            ReportStickFigureSceneAsset.timeline_source,
+        ))
+        .filter(
+            ReportStickFigureSceneAsset.workflow_task_id == workflow_id,
+            ReportStickFigureSceneAsset.storyboard_task_id == storyboard_id,
+            ReportStickFigureSceneAsset.sequence >= 1,
+        )
+        .all()
+    )
+    if not _whole_audio_render_assets_ready(assets):
+        return {"enqueued": False, "reason": "scene_assets_not_ready"}
+    existing = (
+        PublicationTask.query.options(load_only(
+            PublicationTask.id,
+            PublicationTask.status,
+            PublicationTask.task_video_path,
+        ))
+        .filter(
+            PublicationTask.feature == FEATURE_NAME,
+            PublicationTask.parent_task_id == workflow_id,
+        )
+        .order_by(PublicationTask.created_at.desc())
+        .first()
+    )
+    if existing and existing.status in {"pending", "processing"}:
+        return {
+            "enqueued": False,
+            "reason": "render_already_active",
+            "task_id": str(existing.id),
+        }
+    if (
+        existing
+        and existing.status == "completed"
+        and existing.task_video_path
+        and Path(str(existing.task_video_path)).is_file()
+    ):
+        return {
+            "enqueued": False,
+            "reason": "video_already_completed",
+            "task_id": str(existing.id),
+        }
+
+    now = datetime.utcnow()
+    claimed = (
+        PublicationTask.query
+        .filter(
+            PublicationTask.id == workflow_id,
+            PublicationTask.status == "processing",
+            PublicationTask.current_step.in_(AUTO_RENDER_READY_STEPS),
+        )
+        .update({
+            PublicationTask.current_step: "video_auto_enqueueing",
+            PublicationTask.progress: 89,
+            PublicationTask.updated_at: now,
+        }, synchronize_session=False)
+    )
+    if not claimed:
+        db.session.rollback()
+        return {"enqueued": False, "reason": "parent_not_claimed"}
+
+    render_options = normalize_render_options()
+    render_task = PublicationTask(
+        status="pending",
+        current_step="queued",
+        progress=0,
+        parent_task_id=workflow_id,
+        parent_feature=WORKFLOW_FEATURE,
+        source_task_id=storyboard_id,
+        source_feature="report_visual_plan",
+        user_id=str(parent.user_id or ""),
+        params={
+            "feature": FEATURE_NAME,
+            "user_id": str(parent.user_id or ""),
+            "parent_feature": WORKFLOW_FEATURE,
+            "parent_task_id": workflow_id,
+            "source_feature": "report_visual_plan",
+            "source_task_id": storyboard_id,
+            "workflow_task_id": workflow_id,
+            "audio_mode": "whole_audio",
+            "audio_track_id": str(track.id),
+            "render_options": render_options,
+            "auto_render": True,
+        },
+        result={},
+    )
+    render_task.task_title = f"{parent.task_title or '研报'} · 自动视频"
+    db.session.add(render_task)
+    db.session.flush()
+    render_task_id = str(render_task.id)
+    PublicationTask.query.filter(PublicationTask.id == workflow_id).update({
+        PublicationTask.current_step: "video_queued",
+        PublicationTask.progress: 90,
+        PublicationTask.waiting_child_id: render_task_id,
+        PublicationTask.waiting_child_label: "视频合成",
+        PublicationTask.waiting_child_status: "pending",
+        PublicationTask.waiting_child_step: "queued",
+        PublicationTask.waiting_child_updated_at: now.isoformat() + "Z",
+        PublicationTask.error_message: None,
+        PublicationTask.completed_at: None,
+        PublicationTask.updated_at: now,
+    }, synchronize_session=False)
+    db.session.commit()
+    release_db_session_quietly()
+    try:
+        submit_result = maybe_guarded_apply_async(
+            render_stick_figure_video,
+            args=[render_task_id],
+            queue=QUEUE_NAME,
+            feature=FEATURE_NAME,
+            task_id=render_task_id,
+            retry=False,
+        )
+        celery_id = str(submit_result["async_result"].id)
+    except Exception as exc:
+        failed_at = datetime.utcnow()
+        PublicationTask.query.filter(PublicationTask.id == render_task_id).update({
+            PublicationTask.status: "failed",
+            PublicationTask.current_step: "enqueue_failed",
+            PublicationTask.error_message: str(exc)[:4000],
+            PublicationTask.completed_at: failed_at,
+            PublicationTask.updated_at: failed_at,
+        }, synchronize_session=False)
+        PublicationTask.query.filter(PublicationTask.id == workflow_id).update({
+            PublicationTask.status: "failed",
+            PublicationTask.current_step: "video_enqueue_failed",
+            PublicationTask.waiting_child_status: "failed",
+            PublicationTask.waiting_child_step: "enqueue_failed",
+            PublicationTask.error_message: str(exc)[:4000],
+            PublicationTask.completed_at: failed_at,
+            PublicationTask.updated_at: failed_at,
+        }, synchronize_session=False)
+        db.session.commit()
+        return {
+            "enqueued": False,
+            "reason": "enqueue_failed",
+            "task_id": render_task_id,
+            "error": str(exc),
+        }
+    PublicationTask.query.filter(PublicationTask.id == render_task_id).update({
+        PublicationTask.celery_task_id: celery_id,
+        PublicationTask.updated_at: datetime.utcnow(),
+    }, synchronize_session=False)
+    db.session.commit()
+    return {
+        "enqueued": True,
+        "reason": "ready",
+        "task_id": render_task_id,
+        "celery_task_id": celery_id,
+    }
+
+
+def repair_ready_stick_figure_video_workflows_once(limit: int = 10) -> dict:
+    """Resume historical report-audio visual workflows left at a ready stage."""
+
+    stale_before = datetime.utcnow() - timedelta(minutes=1)
+    rows = (
+        db.session.query(PublicationTask.id)
+        .filter(
+            PublicationTask.feature == WORKFLOW_FEATURE,
+            PublicationTask.source_feature == REPORT_AUDIO_FEATURE,
+            PublicationTask.status == "processing",
+            PublicationTask.current_step.in_(AUTO_RENDER_READY_STEPS),
+            PublicationTask.updated_at <= stale_before,
+        )
+        .order_by(PublicationTask.updated_at.asc())
+        .limit(max(1, min(int(limit or 10), 50)))
+        .all()
+    )
+    workflow_ids = [str(row.id) for row in rows]
+    db.session.commit()
+    release_db_session_quietly()
+    actions = []
+    for workflow_id in workflow_ids:
+        try:
+            result = maybe_auto_enqueue_stick_figure_video(workflow_id)
+            if result.get("reason") == "whole_audio_not_ready":
+                storyboard_id = (
+                    db.session.query(ReportStickFigureSceneAsset.storyboard_task_id)
+                    .filter(
+                        ReportStickFigureSceneAsset.workflow_task_id == workflow_id,
+                    )
+                    .order_by(ReportStickFigureSceneAsset.sequence.asc())
+                    .limit(1)
+                    .scalar()
+                )
+                db.session.commit()
+                release_db_session_quietly()
+                if storyboard_id:
+                    from tasks.report_visual_plan import _dispatch_auto_scene_images
+
+                    dispatch = _dispatch_auto_scene_images(
+                        str(storyboard_id),
+                        workflow_id,
+                    )
+                    result = {
+                        "enqueued": False,
+                        "reason": "audio_alignment_reconciled",
+                        "dispatch": dispatch,
+                    }
+        except Exception as exc:
+            db.session.rollback()
+            release_db_session_quietly()
+            logger.error(
+                "Visual workflow auto-render repair failed: workflow=%s error=%s",
+                workflow_id,
+                exc,
+                exc_info=True,
+            )
+            result = {
+                "enqueued": False,
+                "reason": "repair_failed",
+                "error": str(exc),
+            }
+        actions.append({"workflow_id": workflow_id, **result})
+    return {
+        "checked": len(workflow_ids),
+        "enqueued": sum(bool(item.get("enqueued")) for item in actions),
+        "items": actions,
+    }
 
 
 @celery_app.task(
@@ -42,7 +333,10 @@ def align_stick_figure_whole_audio(self, task_id):
     app = create_app()
     with app.app_context():
         try:
-            return _align_whole_audio(str(task_id))
+            return _align_whole_audio(
+                str(task_id),
+                celery_request_id=str(getattr(self.request, "id", "") or ""),
+            )
         except Exception as exc:
             logger.error("Stick figure whole-audio alignment failed: %s", exc, exc_info=True)
             _mark_alignment_failed(str(task_id), str(exc))
@@ -51,18 +345,39 @@ def align_stick_figure_whole_audio(self, task_id):
             db.session.remove()
 
 
-def _align_whole_audio(task_id: str) -> bool:
+def _align_whole_audio(task_id: str, *, celery_request_id: str = "") -> bool:
     task = (
         PublicationTask.query.options(load_only(
             PublicationTask.id,
             PublicationTask.status,
+            PublicationTask.celery_task_id,
             PublicationTask.params,
             PublicationTask.parent_task_id,
         ))
         .filter(PublicationTask.id == task_id, PublicationTask.feature == ALIGNMENT_FEATURE)
         .one_or_none()
     )
-    if not task or task.status == "canceled":
+    if not task:
+        return False
+    current_celery_id = str(task.celery_task_id or "")
+    if celery_request_id and current_celery_id and celery_request_id != current_celery_id:
+        logger.info(
+            "Audio alignment received stale delivery; task=%s request=%s current=%s",
+            task_id,
+            celery_request_id,
+            current_celery_id,
+        )
+        return False
+    if task.status == "completed":
+        workflow_id = str(
+            ((task.params or {}).get("workflow_task_id") if isinstance(task.params, dict) else "")
+            or task.parent_task_id
+            or ""
+        ).strip()
+        if workflow_id:
+            maybe_auto_enqueue_stick_figure_video(workflow_id)
+        return True
+    if task.status in {"failed", "blocked_by_captcha", "canceled"}:
         return False
     params = task.params if isinstance(task.params, dict) else {}
     workflow_id = str(params.get("workflow_task_id") or task.parent_task_id or "").strip()
@@ -229,6 +544,12 @@ def _align_whole_audio(task_id: str) -> bool:
         PublicationTask.updated_at: completed_at,
     }, synchronize_session=False)
     db.session.commit()
+    auto_render = maybe_auto_enqueue_stick_figure_video(workflow_id)
+    logger.info(
+        "Whole-audio alignment auto-render continuation: workflow=%s result=%s",
+        workflow_id,
+        auto_render,
+    )
     return True
 
 
@@ -289,6 +610,7 @@ def _mark_alignment_failed(task_id: str, error: str) -> None:
             PublicationTask.updated_at: now,
         }, synchronize_session=False)
     db.session.commit()
+    _resume_report_audio_finalization(workflow_id)
 
 
 @celery_app.task(
@@ -300,23 +622,49 @@ def render_stick_figure_video(self, task_id):
     app = create_app()
     with app.app_context():
         try:
-            return _render_video(str(task_id))
+            return _render_video(
+                str(task_id),
+                celery_request_id=str(getattr(self.request, "id", "") or ""),
+            )
         finally:
             db.session.remove()
 
 
-def _render_video(task_id: str) -> bool:
+def _render_video(task_id: str, *, celery_request_id: str = "") -> bool:
     task = (
         PublicationTask.query.options(load_only(
             PublicationTask.id,
             PublicationTask.status,
+            PublicationTask.celery_task_id,
             PublicationTask.params,
             PublicationTask.parent_task_id,
+            PublicationTask.task_video_path,
         ))
         .filter(PublicationTask.id == task_id, PublicationTask.feature == FEATURE_NAME)
         .one_or_none()
     )
-    if not task or task.status == "canceled":
+    if not task:
+        return False
+    current_celery_id = str(task.celery_task_id or "")
+    if celery_request_id and current_celery_id and celery_request_id != current_celery_id:
+        logger.info(
+            "Whiteboard render received stale delivery; task=%s request=%s current=%s",
+            task_id,
+            celery_request_id,
+            current_celery_id,
+        )
+        return False
+    if task.status == "completed":
+        if task.task_video_path and Path(str(task.task_video_path)).is_file():
+            _resume_report_audio_finalization(str(task.parent_task_id or ""))
+            return True
+        _mark_failed(
+            task_id,
+            "白板视频任务已完成但成片文件不存在，系统将创建安全续跑任务",
+            workflow_id=str(task.parent_task_id or ""),
+        )
+        return False
+    if task.status in {"failed", "blocked_by_captcha", "canceled"}:
         return False
     params = task.params if isinstance(task.params, dict) else {}
     workflow_id = str(params.get("workflow_task_id") or task.parent_task_id or "").strip()
@@ -408,6 +756,13 @@ def _render_video(task_id: str) -> bool:
             _mark_failed(
                 task_id,
                 f"第 {asset.sequence} 段图片尚未完成",
+                workflow_id=workflow_id,
+            )
+            return False
+        if has_browser_overlay_artifact(asset.image_path):
+            _mark_failed(
+                task_id,
+                f"第 {asset.sequence} 段图片包含浏览器浮层，请重新生成该图片",
                 workflow_id=workflow_id,
             )
             return False
@@ -505,6 +860,20 @@ def _render_video(task_id: str) -> bool:
             PublicationTask.updated_at: now,
         }, synchronize_session=False)
         db.session.commit()
+        try:
+            from services.report_audio_finalization import (
+                reconcile_finalizations_for_visual_workflow,
+            )
+
+            reconcile_finalizations_for_visual_workflow(workflow_id)
+        except Exception as continuation_exc:
+            db.session.rollback()
+            logger.error(
+                "Visual render completed but finalization wake-up failed: workflow=%s error=%s",
+                workflow_id,
+                continuation_exc,
+                exc_info=True,
+            )
         return True
     except Exception as exc:
         logger.error("Stick figure video render failed: %s", exc, exc_info=True)
@@ -559,3 +928,26 @@ def _mark_failed(task_id: str, error: str, *, workflow_id: str = "") -> None:
             PublicationTask.updated_at: now,
         }, synchronize_session=False)
     db.session.commit()
+    _resume_report_audio_finalization(workflow_id)
+
+
+def _resume_report_audio_finalization(workflow_id: str) -> None:
+    """Wake the durable coordinator on both render success and failure."""
+
+    workflow_id = str(workflow_id or "").strip()
+    if not workflow_id:
+        return
+    try:
+        from services.report_audio_finalization import (
+            reconcile_finalizations_for_visual_workflow,
+        )
+
+        reconcile_finalizations_for_visual_workflow(workflow_id)
+    except Exception as exc:
+        db.session.rollback()
+        logger.error(
+            "Visual task could not resume report-audio finalization: workflow=%s error=%s",
+            workflow_id,
+            exc,
+            exc_info=True,
+        )

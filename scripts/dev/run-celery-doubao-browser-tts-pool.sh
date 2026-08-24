@@ -83,6 +83,7 @@ for index in $(seq 1 "$COUNT"); do
         DOUBAO_BROWSER_TTS_PROFILE_POOL_ROOT="$PROFILE_POOL_ROOT" \
         DOUBAO_BROWSER_TTS_PROFILE_COUNT="$COUNT" \
         DOUBAO_BROWSER_TTS_QUEUE="$QUEUE_NAME" \
+        WORKFLOW_WORKER_READY_QUEUES="$QUEUE_NAME" \
         "$PYTHON_BIN" - "$pid_file" "$log_file" "$PROJECT_ROOT/src/backend" \
             "$PROJECT_ROOT/venv/bin/celery" -A celery_config.celery_app worker \
                 --loglevel=info \

@@ -136,6 +136,36 @@ class ZsxqWorkflowStaleSyncRecoveryTest(unittest.TestCase):
             self.assertNotIn("stage_results", sql)
             self.assertNotIn("clean_task_ids", sql)
 
+    def test_back_to_back_notifications_keep_loaded_projection_without_refresh(self):
+        workflow_id, _ = self._create_pair(
+            run_status="running",
+            result={"heartbeat_at": datetime.utcnow().isoformat() + "Z"},
+        )
+        workflow = db.session.get(ZsxqWorkflowRun, workflow_id)
+        workflow.stage_results = {"sync": {"status": "failed"}}
+
+        with patch(
+            "services.zsxq_workflow_service.workflow_notification_service.enqueue_workflow_event",
+            side_effect=[
+                {"queued": True, "celery_task_id": "notify-sync"},
+                {"queued": True, "celery_task_id": "notify-workflow"},
+            ],
+        ), self._capture_sql() as statements:
+            self.service._queue_notification(workflow, "sync_failed")
+            self.service._queue_notification(workflow, "workflow_failed")
+
+        workflow_selects = [
+            sql
+            for sql in statements
+            if sql.startswith("select") and " from zsxq_workflow_runs " in sql
+        ]
+        self.assertEqual([], workflow_selects, statements)
+
+        db.session.expire(workflow)
+        persisted = workflow.stage_results
+        self.assertTrue(persisted["notifications"]["sync_failed"]["queued"])
+        self.assertTrue(persisted["notifications"]["workflow_failed"]["queued"])
+
     def test_running_sync_loads_heartbeat_only_and_keeps_fresh_workflow(self):
         heartbeat = datetime.utcnow().isoformat() + "Z"
         workflow_id, _ = self._create_pair(

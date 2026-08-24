@@ -32,6 +32,8 @@ class RuntimeGuardTest(unittest.TestCase):
         PublicationTask.__table__.create(bind=db.engine)
         runtime_guard._DB_PRESSURE_CACHE["expires_at"] = 0.0
         runtime_guard._DB_PRESSURE_CACHE["snapshot"] = None
+        runtime_guard._IDLE_OFFENDER_LOG_CACHE["expires_at"] = 0.0
+        runtime_guard._IDLE_OFFENDER_LOG_CACHE["signature"] = None
 
     def tearDown(self):
         db.session.remove()
@@ -126,6 +128,39 @@ class RuntimeGuardTest(unittest.TestCase):
         self.assertEqual(blocked["reason"], "feature_capacity")
         self.assertEqual(blocked["active_count"], 1)
 
+    def test_report_audio_waiting_children_do_not_consume_start_capacity(self):
+        passive_steps = (
+            "gemini_waiting",
+            "gem_waiting",
+            "doubao_browser_1_waiting",
+            "doubao_1_waiting",
+            "scheme3_visual_waiti",
+            "publisher_video_waiting",
+            "pub_queued",
+            "pub_waiting",
+            "pub_v_synthesis",
+        )
+        for step in passive_steps:
+            self._add_task("processing", step=step)
+
+        start = runtime_guard.check_publication_task_admission(
+            "report_pdf_audio_workflow",
+            mode="start",
+        )
+
+        self.assertTrue(start["allowed"])
+        self.assertEqual(start["active_count"], 0)
+        self.assertEqual(start["limit"], 2)
+
+        self._add_task("processing", step="review_cover_titles")
+        blocked = runtime_guard.check_publication_task_admission(
+            "report_pdf_audio_workflow",
+            mode="start",
+        )
+
+        self.assertTrue(blocked["allowed"])
+        self.assertEqual(blocked["active_count"], 1)
+
     def test_active_count_uses_direct_scalar_count_without_wide_subquery(self):
         self._add_task("processing", feature="mp3_video_workflow", step="generate_visual_assets")
         statements = []
@@ -174,6 +209,11 @@ class RuntimeGuardTest(unittest.TestCase):
         self.assertEqual(count, 2)
         release.assert_called_once_with()
         self.assertEqual(query.scalar.call_count, 2)
+
+    def test_read_only_transaction_is_retryable(self):
+        error = RuntimeError("cannot execute UPDATE in a read-only transaction")
+
+        self.assertTrue(runtime_guard.is_retryable_db_error(error))
 
     def test_guarded_publish_returns_connection_before_broker_io(self):
         celery_callable = MagicMock()
@@ -264,6 +304,46 @@ class RuntimeGuardTest(unittest.TestCase):
         self.assertEqual(task.current_step, "deferred_capacity")
         self.assertIsNone(task.error_message)
         self.assertEqual(task.result["runtime_guard"]["message"], admission["message"])
+
+    def test_idle_offender_log_is_structured_and_rate_limited(self):
+        offenders = runtime_guard._normalize_idle_offenders([{
+            "pid": 42,
+            "application_name": "celery-worker",
+            "client_addr": "10.0.0.5",
+            "backend_type": "client backend",
+            "xact_age_seconds": 93.5,
+            "idle_age_seconds": 90.0,
+            "query_age_seconds": 94.0,
+            "wait_event_type": "Client",
+            "wait_event": "ClientRead",
+            "query_fingerprint": "abc123",
+            "query": "must not be logged",
+        }])
+
+        with patch.object(runtime_guard, "logger") as guarded_logger, patch.object(
+            runtime_guard.time,
+            "time",
+            side_effect=(100.0, 101.0),
+        ):
+            runtime_guard._log_idle_transaction_offenders(offenders)
+            runtime_guard._log_idle_transaction_offenders(offenders)
+
+        guarded_logger.warning.assert_called_once()
+        payload = guarded_logger.warning.call_args.args[2]
+        self.assertIn('"pid":42', payload)
+        self.assertIn('"query_fingerprint":"abc123"', payload)
+        self.assertNotIn("must not be logged", payload)
+
+    def test_pressure_probe_default_cache_avoids_five_second_polling(self):
+        with patch.dict(os.environ, {}, clear=False), patch.object(
+            runtime_guard.time,
+            "time",
+            return_value=100.0,
+        ):
+            os.environ.pop("TASK_ADMISSION_DB_PRESSURE_CACHE_SECONDS", None)
+            runtime_guard._cache_pressure({"allowed": True, "reason": "ok"})
+
+        self.assertEqual(runtime_guard._DB_PRESSURE_CACHE["expires_at"], 115.0)
 
 
 if __name__ == "__main__":

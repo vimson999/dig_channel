@@ -391,6 +391,15 @@ def _normalize_config(payload, previous=None):
         "name": str(payload.get("name") or "知识星球自动发帖策略").strip() or "知识星球自动发帖策略",
         "group_id": group_id,
         "group_name": str(payload.get("group_name") or "").strip(),
+        # One-off/manual retries may pin publishing to a specific DB credential.
+        # The persistent scheduler leaves this empty and uses the full eligible pool.
+        "publish_account_id": str(
+            payload.get("publish_account_id")
+            or payload.get("credential_id")
+            or payload.get("cookie_account_id")
+            or previous.get("publish_account_id")
+            or ""
+        ).strip(),
         "enabled": bool(payload.get("enabled", True)),
         "interval_minutes": _scheduler_interval_minutes(payload.get("interval_minutes")),
         "max_rounds": _bounded_int(payload.get("max_rounds"), default=DEFAULT_MAX_ROUNDS, lower=0, upper=1_000_000),
@@ -533,7 +542,16 @@ def _resolve_runtime_cookie_accounts(config, cookie_override=None, required=True
     if has_app_context():
         # Automatic publishing is DB-owned. The legacy JSON cookie pool is
         # historical configuration and must never be used as a fallback.
-        db_accounts = _db_publish_cookie_accounts(group_id=group_id, required=True)
+        requested_account_id = (
+            config.get("publish_account_id")
+            or config.get("credential_id")
+            or config.get("cookie_account_id")
+        )
+        db_accounts = _db_publish_cookie_accounts(
+            group_id=group_id,
+            account_id=requested_account_id,
+            required=True,
+        )
         if not db_accounts:
             raise ValueError("数据库中没有可用于当前星球的知识星球发帖凭据")
         return db_accounts, "db"
@@ -550,7 +568,7 @@ def _resolve_runtime_cookie_accounts(config, cookie_override=None, required=True
     return [], None
 
 
-def _db_publish_cookie_accounts(group_id=None, required=False):
+def _db_publish_cookie_accounts(group_id=None, account_id=None, required=False):
     if not has_app_context():
         return []
     try:
@@ -559,6 +577,7 @@ def _db_publish_cookie_accounts(group_id=None, required=False):
         return resolve_zsxq_cookie_accounts(
             purpose="zsxq.publish",
             group_id=group_id,
+            account_id=account_id,
             required=required,
         )
     except Exception:
@@ -610,6 +629,17 @@ def _db_publish_cookie_account_count(group_id=None):
         return count
     except Exception:
         return 0
+    finally:
+        # Previewing the account count immediately precedes remote upload in
+        # content-pipeline publishing.  The count is a plain scalar, so keep
+        # the same transaction boundary as the credential DTO loader and do
+        # not retain this read-only Session across upload/retry I/O.
+        try:
+            from models import db
+
+            db.session.remove()
+        except Exception:
+            logger.exception("[ZSXQ_AUTO_PUBLISH] failed to release credential count session")
 
 
 def _append_publish_event(event_type, **payload):

@@ -30,6 +30,17 @@ BROWSER_HUMAN_INTERVENTION_EMAIL_COOLDOWN_SECONDS=1800
 - `failure_only`：只通知整轮失败。
 - `off`：关闭通知。
 
+## 知识星球三种上游的统一编排通知
+
+以下三种入口在进入内容流水线后使用同一套通知节点：
+
+1. 计划任务：调度器触发知识星球同步/下载。
+2. 侧边栏：浏览器侧边栏提交 MP3/PDF manifest。
+3. 手动投递：直接提交本地下载文件。
+
+直接进入内容流水线的任务会补齐统一的 `workflow_started`、`clean_*` 和
+`publish_*` 事件；已经由 `ZsxqWorkflowRun` 管理的计划/侧边栏任务继续由工作流状态机发出相同事件，避免重复邮件。邮件中会标记“上游接入”和内容流水线任务 ID。
+
 洪灝和生财有术的“全部 Tab”轻量计划复用同一套 SMTP 配置：
 
 - `milestone` 会发送任务提交、同步完成和最终失败。

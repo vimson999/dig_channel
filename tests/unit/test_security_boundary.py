@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -65,6 +66,24 @@ class ProductionBoundaryTests(unittest.TestCase):
 
     def test_business_api_is_hidden_without_authentication(self):
         self.assertEqual(self.app.test_client().get('/api/v1/channels').status_code, 404)
+
+    def test_route_auth_reuses_user_resolved_by_project_guard(self):
+        from flask import g
+        from utils import auth_utils
+
+        resolved_user = object()
+        with self.app.test_request_context('/api/v1/channels'):
+            g.current_user = resolved_user
+            with patch.object(
+                auth_utils,
+                'get_user_from_token',
+                side_effect=AssertionError('must reuse request user'),
+            ), patch.object(
+                auth_utils,
+                'get_user_from_session',
+                side_effect=AssertionError('must reuse request user'),
+            ):
+                self.assertIs(resolved_user, auth_utils.get_current_user())
 
     def test_direct_login_filename_is_hidden(self):
         self.assertEqual(self.app.test_client().get('/login.html').status_code, 404)

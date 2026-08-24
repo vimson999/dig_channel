@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
@@ -21,6 +22,68 @@ CREATION_STATEMENT_IDS = {
     "个人观点，仅供参考": 4,
     "内容为转载": -2,
 }
+
+
+class BilibiliUploadTimeoutError(RuntimeError):
+    """The SDK did not finish an upload within the bounded time budget."""
+
+
+class BilibiliChunkRetryError(RuntimeError):
+    """One SDK media chunk exhausted its bounded retry budget."""
+
+
+def _positive_int_env(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
+class BoundedVideoUploader(VideoUploader):
+    """Add a retry ceiling to SDK chunks that otherwise retry forever."""
+
+    def __init__(self, *args, max_chunk_attempts: int = 4, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._max_chunk_attempts = max(1, int(max_chunk_attempts))
+        self._chunk_attempts = {}
+
+    async def _upload_chunk(
+        self,
+        page: VideoUploaderPage,
+        offset: int,
+        chunk_number: int,
+        total_chunk_count: int,
+        preupload: dict,
+    ) -> dict:
+        result = await super()._upload_chunk(
+            page,
+            offset,
+            chunk_number,
+            total_chunk_count,
+            preupload,
+        )
+        key = (str(page.path), int(chunk_number))
+        if result.get("ok"):
+            self._chunk_attempts.pop(key, None)
+            return result
+
+        attempt = int(self._chunk_attempts.get(key) or 0) + 1
+        self._chunk_attempts[key] = attempt
+        logger.warning(
+            "Bilibili chunk upload failed: chunk=%s/%s attempt=%s/%s",
+            int(chunk_number) + 1,
+            total_chunk_count,
+            attempt,
+            self._max_chunk_attempts,
+        )
+        if attempt >= self._max_chunk_attempts:
+            raise BilibiliChunkRetryError(
+                "B站视频分片上传连续失败，已停止无限重试："
+                f"分片 {int(chunk_number) + 1}/{total_chunk_count}，"
+                f"尝试 {attempt} 次"
+            )
+        return result
 
 class BiliUploader:
     """Bilibili video uploader service."""
@@ -65,6 +128,8 @@ class BiliUploader:
 
     @classmethod
     def _is_non_retryable_upload_error(cls, error: Exception) -> bool:
+        if isinstance(error, (BilibiliUploadTimeoutError, BilibiliChunkRetryError)):
+            return True
         if cls._is_auth_upload_error(error):
             return True
         if isinstance(error, ResponseCodeException):
@@ -595,11 +660,15 @@ class BiliUploader:
         )
         
         # Initialize Uploader
-        uploader = VideoUploader(
+        uploader = BoundedVideoUploader(
             pages=[page],
             meta=meta,
             credential=self.credential,
-            cover=actual_cover or ""
+            cover=actual_cover or "",
+            max_chunk_attempts=_positive_int_env(
+                "BILIBILI_UPLOAD_MAX_CHUNK_ATTEMPTS",
+                4,
+            ),
         )
         
         # Add event listeners for logging
@@ -611,10 +680,23 @@ class BiliUploader:
         
         # Retry logic for network stability
         max_retries = 3
+        upload_timeout_seconds = _positive_int_env(
+            "BILIBILI_UPLOAD_TIMEOUT_SECONDS",
+            600,
+        )
         result = None
         for attempt in range(max_retries):
             try:
-                result = await uploader.start()
+                try:
+                    result = await asyncio.wait_for(
+                        uploader.start(),
+                        timeout=upload_timeout_seconds,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise BilibiliUploadTimeoutError(
+                        "B站视频上传超过总时限，已停止任务以释放上传队列："
+                        f"{upload_timeout_seconds} 秒"
+                    ) from exc
                 break
             except Exception as e:
                 error = self._friendly_upload_error(e)

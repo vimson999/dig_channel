@@ -13,6 +13,7 @@ from services import report_audio_workflow as report_audio_service  # noqa: E402
 from services.report_audio_workflow import (  # noqa: E402
     ReportAudioWorkflowError,
     _normalizer_model,
+    initial_submission_prompts,
     normalize_for_tts,
     status_payload,
     structured_result_quality_issue,
@@ -20,6 +21,16 @@ from services.report_audio_workflow import (  # noqa: E402
 
 
 class ReportAudioWorkflowServiceTest(unittest.TestCase):
+    def test_initial_submission_prompts_enforce_1500_character_script(self):
+        prompts = initial_submission_prompts(
+            "请解析这份 PDF。",
+            "请复核事实并给出最终稿。",
+        )
+
+        self.assertIn("不少于 1500 字", prompts["prompt"])
+        self.assertIn("不少于 1500 字", prompts["review_prompt"])
+        self.assertNotIn("上一版", prompts["prompt"])
+
     def test_structured_result_preserves_separate_landscape_and_vertical_titles(self):
         payload = report_audio_service._validate_structured_result({
             "title": "列表标题",
@@ -44,6 +55,54 @@ class ReportAudioWorkflowServiceTest(unittest.TestCase):
 
         self.assertEqual(payload["landscape_title"], "高盛:首次覆盖智谱")
         self.assertEqual(payload["vertical_title"], "高盛:首次覆盖智谱")
+
+    def test_gem_v2_extension_fields_survive_structured_result_validation(self):
+        source = {
+            "schema_version": "report_audio_gem_v2",
+            "provider": "gemini_gem",
+            "title": "内容标题",
+            "landscape_title": "横屏标题",
+            "landscape_subtitle": "横屏副标题",
+            "vertical_title": "竖屏标题",
+            "vertical_subtitle": "竖屏副标题",
+            "final_script_for_tts": "这是用于直接朗读的完整研报正文，包含足够信息并且没有工作流结构标签。",
+            "fact_ledger": [{"claim_id": "C001"}],
+            "paragraph_map": [{"script_paragraph_index": 1, "claim_ids": ["C001"]}],
+            "evidence_map": [{"script_paragraph_index": 1, "claim_ids": ["C001"], "evidence_items": []}],
+            "title_candidates": {
+                "content": [{"candidate_id": "C_TITLE_1"}],
+                "landscape": [{"candidate_id": "L_TITLE_1"}],
+                "vertical": [{"candidate_id": "V_TITLE_1"}],
+            },
+            "selected_titles": {
+                "content_candidate_id": "C_TITLE_1",
+                "landscape_candidate_id": "L_TITLE_1",
+                "vertical_candidate_id": "V_TITLE_1",
+            },
+            "quality_control": {"output_ready": True},
+            "material_boundary": {"provided_material_only": True, "external_information_used": False},
+            "metadata": {"actual_pdf_page_count": 12},
+            "core_analysis": {"core_conclusion": "供需趋紧"},
+            "batch_quality_control": {"all_reports_output_ready": True},
+        }
+
+        payload = report_audio_service._validate_structured_result(source, "Gem V2 原始结果")
+
+        for key in (
+            "schema_version",
+            "fact_ledger",
+            "paragraph_map",
+            "evidence_map",
+            "title_candidates",
+            "selected_titles",
+            "quality_control",
+            "material_boundary",
+            "metadata",
+            "core_analysis",
+            "batch_quality_control",
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(payload[key], source[key])
 
     def test_default_normalizer_model_is_deepseek_v4_flash(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -325,6 +384,20 @@ class ReportAudioWorkflowServiceTest(unittest.TestCase):
             normalize_for_tts("原始 Gemini 文本", normalizer_timeout=7)
 
         self.assertEqual(deepseek.call_args.kwargs["timeout_seconds"], 7)
+
+    def test_normalizer_enforces_requested_final_script_length(self):
+        payload = {
+            "final_script_for_tts": "这是一段过短的正文。" * 20,
+        }
+
+        with patch.object(report_audio_service, "_deepseek_normalize", return_value=payload) as deepseek:
+            with self.assertRaisesRegex(ReportAudioWorkflowError, "低于 1500 字"):
+                normalize_for_tts(
+                    "这是 Gemini 审核后的原始结果。" * 200,
+                    minimum_script_chars=1500,
+                )
+
+        self.assertEqual(deepseek.call_args.kwargs["minimum_script_chars"], 1500)
 
     def test_normalizer_strips_section_outline_labels_from_tts_script(self):
         payload = {

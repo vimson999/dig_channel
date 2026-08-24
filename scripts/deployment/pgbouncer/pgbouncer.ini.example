@@ -15,6 +15,7 @@ reserve_pool_size = 5
 reserve_pool_timeout = 5
 
 server_reset_query = DISCARD ALL
+server_reset_query_always = 1
 server_idle_timeout = 60
 server_lifetime = 3600
 query_timeout = 120
