@@ -216,6 +216,8 @@ class SharedNavigation {
             return 'content-retention-cleanup';
         } else if (filename === 'platform-credentials.html') {
             return 'platform-credentials';
+        } else if (filename === 'zsxq-history-api-clients.html') {
+            return 'zsxq-history-api-clients';
         }
         return 'dashboard';
     }
@@ -268,7 +270,8 @@ class SharedNavigation {
             'batch-transcription': '批量音频转文案',
             'downloads': '素材下载中心',
             'content-retention-cleanup': '历史文件清理',
-            'platform-credentials': '平台凭据管理'
+            'platform-credentials': '平台凭据管理',
+            'zsxq-history-api-clients': '知识星球 API 调用方'
         };
         return titles[this.currentPage] || '智能数据分析平台';
     }
@@ -638,6 +641,12 @@ class SharedNavigation {
                         name: '平台凭据',
                         icon: 'fas fa-key',
                         href: 'platform-credentials.html'
+                    },
+                    {
+                        id: 'zsxq-history-api-clients',
+                        name: '星球 API 调用方',
+                        icon: 'fas fa-network-wired',
+                        href: 'zsxq-history-api-clients.html'
                     },
                     {
                         id: 'douyin-publish-test',

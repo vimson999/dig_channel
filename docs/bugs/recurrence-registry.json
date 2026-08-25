@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "reviewed_through": "2026-08-20",
+  "reviewed_through": "2026-08-25",
   "max_days_between_reviews": 7,
   "clusters": [
     {
@@ -46,7 +46,7 @@
         "2026-08-18-zsxq-insights-session-held-after-read.md"
       ],
       "latest_guardrail_addition": "Watchdog 独立 repair wrapper 的成功、无操作和异常分支都必须在 finally 归还 Session；只读聚合必须以显式有界 scope 物化后立即 release，CPU/缓存阶段只传 Row/dict。lifecycle 诊断需继续拆分 execute、result fetch、rollback/checkin，不能把 fetch/回滚网络等待统称为应用 CPU。",
-      "last_runtime_observation": "2026-08-19 固定窗口 PgBouncer 去重 query/connect timeout 3/7，connect 较上一轮 6 次恶化；应用 statement/lock/idle-in-transaction error 均为 0。代表性 executor 0.026–35.423ms、无锁等待和 idle-in-transaction，但连接持有 P95 21.033s，网络/池等待根因保持 OPEN。Watchdog 与 Insights 修复继续 OBSERVING，尚无完整后续窗口可判定不复发。",
+      "last_runtime_observation": "2026-08-25 固定窗口应用慢 SQL 226 次/598.820 秒/P95 7.922 秒，连接持有 39 次/P95 20.439 秒；statement/lock/idle-in-transaction 均为 0。PgBouncer 去重 query/connect timeout 5/5，SHOW POOLS 无 client wait、6 条 TLS server 均为 used。system_configs/platform_credentials/publication_tasks 代表 executor 仅 0.022/0.067/0.041ms，应用秒级尾延迟和 ZSXQ 冷请求仍指向远端网络/池，根因保持 OPEN。",
       "systemic_guardrail": "短事务边界、跨等待只传 ID/快照、第一次 commit 前冻结 run/task/asset 标量身份并禁止 ORM 跨 commit、循环提交前把 ORM 集合转为不可变 Row/DTO、commit 后禁止继续访问 ORM parent/asset、子任务创建固定使用 commit 前快照加无 SELECT 窄回写、所有任务生产者成功/失败/延迟分支必须捕获 commit 后 SQL 并拒绝 params/result 回读、热循环每页集合查询次数预算、阶段内写后共享快照、mapper 钩子禁止读取延迟列、大 JSON 延迟物化、批次产物和 source-output 映射必须在源事务/入库端写结构化关系台账并沿工作流传递、周期入库以 JSON 指纹区分结构化变化/审计载荷变化/同步心跳且禁止无差别整行写回、历史任务才允许显式兼容回退、阶段内子服务共享有界上下文、阶段轮询状态 Row、worker 异常/取消收口复用内存快照并只重查状态、数据库异常后先 rollback 再执行恢复 SQL、可重试异常保持 retrying 且完整验证下一次 delivery、runtime guard 与磁盘恢复使用服务端原子 JSONB 更新、外部 I/O 前强制检查 session.new/dirty/deleted 并结束只读事务、任务生产统一采用提交后投递和短事务回写 broker ID、AST 契约禁止 mutation/flush 后未提交直接 apply_async、flush 后 commit 前响应快照、完成消费者错峰、远端 schema readiness 只允许一次紧凑显式目录查询、跨所有者 DDL 单事务执行并拒绝应用连接、重复索引预检、PgBouncer 热连接安全下限由配置生成源和契约测试共同锁定、数据库物理绕过 TUN 必须使用实际加载的 tun.route-exclude-address 而不能以普通 DIRECT 规则替代、变更前确认稳定出口 HBA/防火墙并在巡检中记录 controller 命中规则、gateway/interface 与 PgBouncer server 本地地址、完整重启门禁覆盖 publication_tasks 与独立业务心跳表、应用总耗时与 PostgreSQL executor/PgBouncer 连接事件联合诊断，以及完整调用链实际 SQL 契约测试",
       "records": [
         "2026-06-23-report-audio-detached-session.md",
@@ -146,7 +146,7 @@
       "priority": "P0",
       "status": "in_progress",
       "acceptance_stage": "runtime_replaced",
-      "last_reopened_at": "2026-08-20",
+      "last_reopened_at": "2026-08-25",
       "blocking_records": [
         "2026-07-18-publication-task-progress-json-write-amplification.md",
         "2026-07-18-zsxq-run-result-clean-handoff-payload.md",
@@ -160,7 +160,6 @@
         "2026-07-23-optimized-video-redis-localhost-db-thundering-herd.md",
         "2026-07-24-zsxq-comment-rewrite-stale-db-pool-index-sprawl.md",
         "2026-08-02-request-auth-duplicate-user-query.md",
-        "2026-08-03-zsxq-scheduler-config-polling-roundtrip.md",
         "2026-08-05-report-audio-hidden-tab-polling-n-plus-one.md",
         "2026-08-06-stick-image-expired-orm-browser-session.md",
         "2026-08-06-mp3-download-lock-session-hold.md",
@@ -172,10 +171,10 @@
         "2026-08-18-video-editor-hidden-polling.md",
         "2026-08-18-zsxq-insights-session-held-after-read.md",
         "2026-08-19-bilibili-intelligence-duplicate-scheduler-write-amplification.md",
-        "2026-08-20-report-script-material-hidden-worker-polling.md"
+        "2026-08-25-mp3-detail-hidden-publish-panel-request-fanout.md"
       ],
-      "latest_guardrail_addition": "所有周期页面轮询统一使用共享 Visibility controller：hidden pause、visible immediate refresh、in-flight single-flight、stop/unload cleanup；前端契约必须读取实际 HTML 和实际业务脚本，扫描研报基础文案物料台、视频编辑器等新增页面并禁止直接新增无门禁 setInterval。稳定 scheduler 配置的成功快照默认复用 5 分钟，保存立即失效、失败不缓存；不得让 30 秒循环把 60 秒 TTL 退化为每分钟远端查询。Insights 当前页详情继续有界投影，并单独记录结果 fetch/rollback 网络耗时。周期同步必须加载用于相等比较的现有字段，只更新真实变化列；原始 JSON 变化时仍须完整保留。",
-      "last_runtime_observation": "2026-08-20 固定窗口 /api/v1/celery/status 由 5 次反弹到 809 次、累计 1750.319 秒，定位到研报基础文案物料页 hidden 后仍每小时 60 次；新共享 controller 已加载，但旧浏览器 JS 实例仍在请求，故保持 OBSERVING。scheduler 配置指纹 60ff... 110 次/261.419 秒/P95 7.438 秒，60 秒 TTL 第三次未达验收；300 秒成功快照重载后真实查询严格发生于 06:12:51/06:17:51/06:22:51，待下一完整窗口。窗口后另有一次临时 reply.celery.pidbox 恢复 Redis read timeout，broker 与17个服务仍健康，但 control-plane 长尾保持 OPEN。",
+      "latest_guardrail_addition": "标签页、折叠区与 CSS 隐藏面板的数据请求必须由活动生命周期驱动，默认页面加载只允许挂载当前可见能力；切换前保存草稿，切换时惰性加载。页面级契约必须执行真实类行为并约束请求预算，同一加载批次已经取得的凭据必须复用，失败才允许重试。既有 Visibility、single-flight、终态停止、300 秒稳定配置快照与有界投影纪律继续生效。",
+      "last_runtime_observation": "2026-08-25 固定窗口 celery/status 仅 3 次/6.237 秒，不再出现隐藏页分钟级序列，原记录 CLOSED；scheduler 配置 291 次严格约每 5 分钟一次，慢样本较 2026-08-20 下降 78.2%，轮询根因 RUNTIME_ACCEPTED。新增 MP3 详情扇出：平台凭据 188 次/142.744 秒，详情 36 次/59.943 秒，真实 request cluster 证明一次详情后重复 3 条凭据并读取隐藏抖音/视频号历史；惰性挂载与凭据复用静态资源已替换，待后续真实流量保持 OBSERVING。",
       "systemic_guardrail": "投影列白名单、每页集合查询次数预算、页面媒体并发请求共享用户作用域权限快照、子任务创建后 Celery ID 只做无 SELECT 窄回写、所有任务生产者成功/失败/延迟分支必须捕获 commit 后 SQL 并拒绝 params/result 回读、阶段内写后共享 Row/DTO、mapper 钩子禁止延迟列补查、单一能力所有者、source-output 映射必须在入库端产生并随事件传递且只有历史任务允许 JSON 回退、批次产物结构化台账、结构化命令生产/消费/终态写回闭环、阶段轮询状态 Row 与终态按需载荷、状态生产者同事务维护结构化投影、轮询端禁止反向扫描通用任务 JSON 修补投影、周期入库必须用轻量指纹跳过未变化 JSON 并以双向测试证明变化时完整写入、批量提交事务数必须 O(1)、worker 异常/取消收口只重查状态、进度 JSON 写入预算与终态强制落盘、兼容回退覆盖判据、Celery 收尾消息体预算/消费者错峰、单飞轮询、Page Visibility 后台暂停、终态停止、批量列表禁止逐项读取后覆盖、热点列表短超时/新鲜缓存/有界 stale fallback、完整 API/service/worker/watchdog 实际 SQL 预算、热点接口冷请求基准、远端 schema readiness 单次紧凑目录查询、区分 executor 与端到端往返、加索引前强制 EXPLAIN/等价定义/使用量检查、executor 小于 10ms 而应用超过 500ms 时强制转查连接池与网络、带大文本/JSON 的全集筛选必须在数据库内完成完整匹配且只回传轻量统计摘要、展示字段仅按有界当前页二次加载并设置服务端 page_size 上限、watchdog 判定禁止加载仅供 UI 展示的业务快照、broker 发布后只允许版本 CAS 且 CAS 失败必须撤销消息，以及 publication_tasks 500ms SQL 指纹/JSON 条件/批量载荷运行时守卫",
       "records": [
         "2026-06-23-report-audio-history-timeout-large-result.md",
@@ -215,7 +214,8 @@
         "2026-08-18-video-editor-hidden-polling.md",
         "2026-08-18-zsxq-insights-session-held-after-read.md",
         "2026-08-19-bilibili-intelligence-duplicate-scheduler-write-amplification.md",
-        "2026-08-20-report-script-material-hidden-worker-polling.md"
+        "2026-08-20-report-script-material-hidden-worker-polling.md",
+        "2026-08-25-mp3-detail-hidden-publish-panel-request-fanout.md"
       ]
     },
     {

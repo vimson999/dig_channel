@@ -117,8 +117,46 @@ youtube-analytics/
 
 - [项目上下文地图](PROJECT_CONTEXT_MAP.md)
 - [生产级演进路线图](PRODUCTION_EVOLUTION_ROADMAP.md)
+- [知识星球侧边栏历史接口与多租户调用方凭据](api/ZSXQ_BROWSER_IMPORT.md)
 - [今日研报 Top10 编排 MVP 设计](planning/report_top10_workflow_plan_20260624.md)
 - [研报基础文案物料独立队列](planning/report_script_material_workflow_queue_20260625.md)
+
+---
+
+## 当前外部接入架构（2026-08-25 起，以此为准）
+
+### 知识星球侧边栏历史查询：多租户 AppID + Secret
+
+知识星球浏览器侧边栏的“最近下载历史”可以由本机侧边栏或公网调用方读取。公网调用方不使用网页登录，也**不**使用全局环境变量中的单组 API Key/Secret。
+
+系统按租户分配独立的 `app_id + secret`：
+
+- 调用方记录保存在数据库表 `zsxq_history_api_clients`，以 `tenant_id` 归属租户；
+- 每条记录有独立的 `app_id`、加密保存的 `secret`、scope、状态、过期时间和使用审计；
+- secret 只在“创建”或“轮换”响应中返回一次，列表、详情、日志和数据库序列化都不会返回明文；
+- 吊销或轮换会立即使旧 secret 失效；
+- `ZSXQ_HISTORY_API_KEY`、`ZSXQ_HISTORY_API_SECRET` 不再是服务端配置项，不能用于生产调用方分配。
+
+公网历史查询接口：
+
+```text
+POST https://xiaoshanqing.tech/api/v1/zsxq/browser-import/history
+```
+
+调用方用 `X-App-Id`、`X-Timestamp`、`X-Signature` 发送 HMAC-SHA256 签名请求；签名通过后无需 Session/JWT。管理员通过下列受登录保护的接口分配和管理调用方：
+
+```text
+POST /api/v1/zsxq/history-api-clients
+GET  /api/v1/zsxq/history-api-clients?tenant_id=<tenant_id>
+POST /api/v1/zsxq/history-api-clients/<client_id>/rotate
+POST /api/v1/zsxq/history-api-clients/<client_id>/revoke
+```
+
+管理员页面：`/zsxq-history-api-clients.html`（本机完整地址为 `http://localhost:8888/zsxq-history-api-clients.html`）。它用于创建、轮换和吊销租户级调用方，并且只在创建/轮换的当次页面响应中展示 Secret。
+
+详细请求契约、签名串、调用示例和部署要求见：[知识星球侧边栏历史接口与多租户调用方凭据](api/ZSXQ_BROWSER_IMPORT.md)。
+
+> 上线前必须先执行数据库迁移 `20260825_zsxq_history_api_clients`，再重启后端；Nginx 对该精确历史查询路径放行到 Flask，由后端进行 AppID 签名校验。侧边栏 manifest 导入、预览等写接口仍保持本机 loopback 限制。
 
 ---
 

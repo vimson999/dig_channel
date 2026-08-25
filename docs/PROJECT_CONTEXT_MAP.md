@@ -13,6 +13,7 @@
 5. `docs/PRODUCTION_EVOLUTION_ROADMAP.md`：按 P0/P1/P2 记录生产级演进方向和验收标准。
 6. `docs/bugs/README.md` 及近期 bug 记录：真实事故沉淀，通常比旧规划更贴近当前系统。
 7. `scripts/dev/README.md`：本地启动、重启、暂停和托管进程默认值。
+8. `docs/api/ZSXQ_BROWSER_IMPORT.md`：知识星球侧边栏历史查询的当前公网契约、AppID/Secret 分配和签名规则。
 
 `docs/planning/`、`docs/tasks/` 和较早 `docs/status/` 更偏历史记录。它们能解释系统来源，但不能直接当作当前架构事实。
 
@@ -63,6 +64,14 @@ API 有两个目录并存：
 - 工作流服务：`src/backend/services/zsxq_workflow_service.py`
 - 调度器：`src/backend/services/zsxq_system_sync_scheduler.py`
 
+知识星球侧边栏历史查询与公网调用方凭据：
+
+- 历史接口：`src/backend/apis/v1/zsxq_browser_import.py` 的 `POST /api/v1/zsxq/browser-import/history`。
+- 多租户调用方表：`src/backend/models/zsxq_history_api_client.py` 的 `zsxq_history_api_clients`。
+- 分配、轮换、吊销接口：`src/backend/apis/v1/zsxq_history_api_clients.py`。
+- 签名校验：`src/backend/utils/zsxq_history_auth.py`；公网调用方使用 `X-App-Id + X-Timestamp + X-Signature`，不要求交互式登录。
+- 详细契约：`docs/api/ZSXQ_BROWSER_IMPORT.md`。
+
 内容清洗流水线：
 
 - API：`src/backend/apis/v1/content_pipeline.py`
@@ -108,6 +117,7 @@ MP3 视频编排：
 - 人工 pause worker 是有语义的，watchdog 和后端自举应尊重暂停状态。
 - `.env`、`data/`、`runtime/`、`logs/`、`instance/` 是敏感或运行态内容，不要复制到文档或源码变更里。
 - 平台凭据正在从 `.env` 迁往加密凭据表，优先通过 `platform_credential_service` 解析，而不是新增环境变量直读。
+- 知识星球侧边栏历史的公网访问采用租户级 AppID + Secret；不得重新引入全局 `ZSXQ_HISTORY_API_KEY` / `ZSXQ_HISTORY_API_SECRET`。只有 history 读接口可走签名认证，manifest 预览和导入写接口仍只允许 loopback。
 - 发布类任务不能把“已提交”当“已成功”。必须区分 submitted、reviewing、visible、failed、unknown。
 
 ## 已观察到的小不一致

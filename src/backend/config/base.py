@@ -207,7 +207,7 @@ class BaseConfig:
     # JWT配置
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or SECRET_KEY
     JWT_ACCESS_TOKEN_EXPIRES = _int_env('JWT_ACCESS_TOKEN_EXPIRES', 900, 300)
-    
+
     # Session配置
     SESSION_TYPE = 'filesystem'
     SESSION_PERMANENT = False

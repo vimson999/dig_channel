@@ -117,6 +117,10 @@ def register_blueprints(app):
     from .platform_credentials import bp as platform_credentials_bp
     app.register_blueprint(platform_credentials_bp)
 
+    # 知识星球历史 API 的多租户调用方凭据管理
+    from .zsxq_history_api_clients import bp as zsxq_history_api_clients_bp
+    app.register_blueprint(zsxq_history_api_clients_bp)
+
     # 注册抖音 Cookie 上传测试台 API
     from .douyin_publish_test import bp as douyin_publish_test_bp
     app.register_blueprint(douyin_publish_test_bp)

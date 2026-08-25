@@ -21,6 +21,7 @@ from .report_pdf_evidence import (
 from .download_task import DownloadTask
 from .system_config import SystemConfig
 from .platform_credential import PlatformCredentialAccount, PlatformCredentialBinding
+from .zsxq_history_api_client import ZsxqHistoryApiClient
 from .external_document import ExternalDocument, ZsxqTopicExternalDocument
 from .bilibili_intelligence import (
     BilibiliChargingSnapshot,
@@ -72,6 +73,7 @@ __all__ = [
     'SystemConfig',
     'PlatformCredentialAccount',
     'PlatformCredentialBinding',
+    'ZsxqHistoryApiClient',
     'ExternalDocument',
     'ZsxqTopicExternalDocument',
     'BilibiliCompetitor',

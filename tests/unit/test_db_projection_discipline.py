@@ -1,6 +1,6 @@
-import unittest
 import ast
 import re
+import unittest
 from pathlib import Path
 
 
@@ -663,11 +663,44 @@ class DbProjectionDisciplineTest(unittest.TestCase):
     def test_content_pipeline_submission_never_reuses_expired_task_entity(self):
         for name in ("pdf_clean_task_service.py", "audio_clean_task_service.py"):
             text = (BACKEND_DIR / "services" / "content_pipeline" / name).read_text(encoding="utf-8")
-            self.assertIn("payload = task.to_dict()", text)
+            tree = ast.parse(text)
+            function = next(
+                node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name.startswith("submit_")
+            )
+            snapshot_count = 0
+
+            def verify_blocks(statements):
+                nonlocal snapshot_count
+                for index, statement in enumerate(statements):
+                    is_snapshot = (
+                        isinstance(statement, ast.Assign)
+                        and isinstance(statement.value, ast.Call)
+                        and isinstance(statement.value.func, ast.Attribute)
+                        and statement.value.func.attr == "to_dict"
+                        and isinstance(statement.value.func.value, ast.Name)
+                        and statement.value.func.value.id == "task"
+                    )
+                    if is_snapshot:
+                        snapshot_count += 1
+                        following = statements[index + 1] if index + 1 < len(statements) else None
+                        self.assertIsInstance(following, ast.Expr, name)
+                        call = following.value if isinstance(following, ast.Expr) else None
+                        self.assertIsInstance(call, ast.Call, name)
+                        commit = call.func if isinstance(call, ast.Call) else None
+                        self.assertIsInstance(commit, ast.Attribute, name)
+                        self.assertEqual(getattr(commit, "attr", ""), "commit", name)
+                    for field in ("body", "orelse", "finalbody"):
+                        nested = getattr(statement, field, None)
+                        if nested:
+                            verify_blocks(nested)
+                    for handler in getattr(statement, "handlers", []):
+                        verify_blocks(handler.body)
+
+            verify_blocks(function.body)
+            self.assertEqual(snapshot_count, 2, name)
             self.assertIn("task_id=task_id", text)
-            after_commit = text.split("db.session.commit()", 1)[1]
-            self.assertNotIn("task.to_dict()", after_commit)
-            self.assertNotIn("task=task", after_commit)
+            self.assertNotIn("task=task", text)
 
     def test_zsxq_workflow_sync_poll_uses_explicit_projection(self):
         service_path = BACKEND_DIR / "services" / "zsxq_workflow_service.py"

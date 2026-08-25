@@ -359,17 +359,13 @@ class Mp3VideoWorkflowDetailPage {
             this.navSection('run-logs', this.renderLogs(job)),
             this.renderRaw(job),
         ].join('');
-        this.mountBilibiliPanel(job, biliPanelDraft);
-        this.mountDouyinPanel(job, douyinPanelDraft);
-        this.mountWechatChannelsPanel(job, wechatChannelsPanelDraft);
         this.mountPublishTabs();
+        this.mountActivePublishPanel(job, {
+            bilibili: biliPanelDraft,
+            douyin: douyinPanelDraft,
+            wechat_channels: wechatChannelsPanelDraft,
+        });
         this.renderSidebarStatus(job);
-        this.refreshBiliScheduleInput();
-        const credentialId = document.getElementById('bili-credential-id')?.value || '';
-        if (credentialId) {
-            this.applyBiliSeasonOptions(credentialId);
-            this.loadBiliSeasons(credentialId);
-        }
         this.setupQuickNavigation();
     }
 
@@ -432,8 +428,36 @@ class Mp3VideoWorkflowDetailPage {
         this.publishTabs = new window.PlatformPublishTabs({
             container,
             activeKey: this.activePublishPlatform,
-            onChange: (key) => { this.activePublishPlatform = key; },
+            onChange: (key) => {
+                this.captureActivePublishPanelDraft(this.job);
+                this.activePublishPlatform = key;
+                this.mountActivePublishPanel(this.job);
+            },
         });
+    }
+
+    captureActivePublishPanelDraft(job) {
+        if (this.activePublishPlatform === 'douyin') return this.captureDouyinPanelDraft(job);
+        if (this.activePublishPlatform === 'wechat_channels') return this.captureWechatChannelsPanelDraft(job);
+        return this.captureBilibiliPanelDraft(job);
+    }
+
+    mountActivePublishPanel(job, drafts = {}) {
+        if (this.activePublishPlatform === 'douyin') {
+            this.mountDouyinPanel(job, drafts.douyin || this.douyinPanelDraft);
+            return;
+        }
+        if (this.activePublishPlatform === 'wechat_channels') {
+            this.mountWechatChannelsPanel(job, drafts.wechat_channels || this.wechatChannelsPanelDraft);
+            return;
+        }
+        this.mountBilibiliPanel(job, drafts.bilibili || this.biliPanelDraft);
+        this.refreshBiliScheduleInput();
+        const credentialId = document.getElementById('bili-credential-id')?.value || '';
+        if (credentialId) {
+            this.applyBiliSeasonOptions(credentialId);
+            this.loadBiliSeasons(credentialId);
+        }
     }
 
     captureBilibiliPanelDraft(job) {
@@ -473,6 +497,10 @@ class Mp3VideoWorkflowDetailPage {
                 onAfterSubmit: async () => this.refreshBilibiliUploads(),
                 onAfterCancel: async () => this.refreshBilibiliUploads(),
             });
+        }
+        if (!this.biliCredentialsError && !this.biliPanel.credentialsLoaded) {
+            this.biliPanel.credentials = this.biliCredentials.slice();
+            this.biliPanel.credentialsLoaded = true;
         }
         this.biliPanel.setJob(job, { formDraft });
         this.biliPanelDraft = this.biliPanel.readFormDraft?.() || formDraft || null;

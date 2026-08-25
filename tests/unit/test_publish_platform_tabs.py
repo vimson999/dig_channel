@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -6,6 +7,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class PublishPlatformTabsTest(unittest.TestCase):
+    def test_mp3_detail_lazily_mounts_publish_panels_and_reuses_credentials(self):
+        contract = PROJECT_ROOT / "tests/frontend/mp3_publish_lazy_mount_contract.js"
+        completed = subprocess.run(
+            ["node", str(contract)],
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+
     def test_shared_tabs_are_accessible_and_keep_all_three_platform_panels(self):
         source = (PROJECT_ROOT / "src/frontend/js/platform-browser-publish-panel.js").read_text(encoding="utf-8")
 
@@ -75,7 +87,7 @@ class PublishPlatformTabsTest(unittest.TestCase):
         self.assertIn("label.includes('此刻此声')", frontend)
         self.assertIn("{ videoKey: 'vertical', coverKey: 'finance_cover' }", frontend)
         self.assertIn(
-            "mp3-video-workflow-detail.js?v=20260806-account-media-defaults-v1-poll-pressure-v2",
+            "mp3-video-workflow-detail.js?v=20260825-publish-panel-lazy-mount-v1",
             html,
         )
 

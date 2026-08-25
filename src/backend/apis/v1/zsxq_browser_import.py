@@ -28,6 +28,27 @@ def _reject_non_loopback():
     return None
 
 
+def _reject_non_loopback_or_admin():
+    rejected = _reject_non_loopback()
+    if rejected is None:
+        return None
+
+    # Machine callers authenticate with the dedicated tenant app-id signature.
+    # The administrator fallback keeps the endpoint usable from the authenticated
+    # web application without weakening the local-only preview/import routes.
+    from utils.zsxq_history_auth import is_valid_service_request
+
+    if is_valid_service_request():
+        return None
+
+    from utils.auth_utils import get_current_user
+
+    current_user = get_current_user()
+    if current_user is not None and bool(getattr(current_user, "is_admin", False)):
+        return None
+    return rejected
+
+
 def _manifest_paths():
     payload = request.get_json(silent=True) or {}
     paths = payload.get("manifest_paths")
@@ -89,7 +110,7 @@ def _history_request():
 
 @bp.route("/browser-import/history", methods=["POST"])
 def browser_import_history():
-    rejected = _reject_non_loopback()
+    rejected = _reject_non_loopback_or_admin()
     if rejected:
         return rejected
     try:
@@ -99,7 +120,25 @@ def browser_import_history():
             days=days,
             require_submission_receipt=True,
         )
-        return jsonify({"success": True, "data": result})
+        from utils.zsxq_history_auth import authenticated_service_client
+        from services.zsxq_history_api_client_service import touch_history_api_client
+
+        service_client = authenticated_service_client()
+        if service_client is not None:
+            try:
+                touch_history_api_client(service_client, request.remote_addr)
+            except Exception:
+                # Audit metadata must not turn an otherwise valid read into a
+                # failed public request. The auth decision has already been
+                # completed and the next request can retry the touch.
+                from flask import current_app
+                current_app.logger.warning(
+                    "知识星球历史 API 调用方使用时间写入失败",
+                    exc_info=True,
+                )
+        response = jsonify({"success": True, "data": result})
+        response.headers["Cache-Control"] = "no-store"
+        return response
     except BrowserImportValidationError as exc:
         return (
             jsonify({"success": False, "error": str(exc), "details": exc.details}),

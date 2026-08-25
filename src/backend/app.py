@@ -110,7 +110,14 @@ def create_app(config_class=Config):
     # 初始化CORS
     cors.init_app(app,
                  origins=app.config.get('CORS_ORIGINS', []),
-                 allow_headers=["Content-Type", "Authorization"], 
+                 allow_headers=[
+                     "Content-Type",
+                     "Authorization",
+                     "X-App-Id",
+                     "X-API-Key",
+                     "X-Timestamp",
+                     "X-Signature",
+                 ],
                  methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
                  supports_credentials=True)
 
@@ -202,6 +209,14 @@ def create_app(config_class=Config):
             '/js/env.js',
             '/assets/images/favicon.ico',
         }
+        # The read-only ZSXQ history endpoint has its own tenant app-id HMAC
+        # authentication for machine callers.  Let a valid signature reach
+        # the route-level scope check without requiring an interactive login;
+        # all other API paths retain the normal session/JWT guard.
+        if path == '/api/v1/zsxq/browser-import/history':
+            from utils.zsxq_history_auth import is_valid_service_request
+            if is_valid_service_request():
+                return None
         if path in public_paths or path.startswith('/access/'):
             return None
 

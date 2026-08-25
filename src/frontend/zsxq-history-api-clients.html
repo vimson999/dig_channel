@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>知识星球 API 调用方 | Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        ink: '#111827',
+                        muted: '#64748b',
+                        line: '#dbe3ef',
+                    }
+                }
+            }
+        };
+    </script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <main class="mx-auto max-w-[1440px] px-6 py-8">
+        <section class="mb-6">
+            <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                    <div class="flex items-center gap-2 text-xs font-black uppercase tracking-[0.16em] text-sky-700">
+                        <i class="fas fa-shield-halved"></i> Admin only
+                    </div>
+                    <h1 class="mt-2 text-2xl font-black tracking-tight text-slate-950">知识星球 API 调用方</h1>
+                    <p class="mt-1 max-w-3xl text-sm leading-6 text-slate-500">为每个租户分配独立的 AppID 与 Secret，用于签名调用知识星球最近下载历史接口。Secret 仅在创建或轮换后显示一次。</p>
+                </div>
+                <button id="new-client-btn" type="button" class="rounded-lg bg-slate-950 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-slate-800">
+                    <i class="fas fa-plus mr-2"></i>新增调用方
+                </button>
+            </div>
+            <div id="page-message" class="mt-4 hidden rounded-xl border px-4 py-3 text-sm" role="status" aria-live="polite"></div>
+        </section>
+
+        <section id="one-time-secret-panel" class="mb-6 hidden rounded-xl border border-amber-300 bg-amber-50 p-5 shadow-sm" aria-live="polite">
+            <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                    <h2 class="text-base font-black text-amber-950"><i class="fas fa-triangle-exclamation mr-2"></i>请立即安全保存 Secret</h2>
+                    <p class="mt-1 max-w-3xl text-sm leading-6 text-amber-900">这是唯一一次展示明文 Secret。关闭本提示或刷新页面后，系统无法再次读取旧值；如遗失，请轮换生成新的 Secret。</p>
+                </div>
+                <button id="dismiss-secret-btn" type="button" class="self-start rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm font-bold text-amber-900 hover:bg-amber-100">
+                    <i class="fas fa-eye-slash mr-2"></i>已保存，隐藏
+                </button>
+            </div>
+            <div class="mt-4 grid gap-3 lg:grid-cols-2">
+                <div class="rounded-lg border border-amber-200 bg-white p-3">
+                    <div class="flex items-center justify-between gap-3">
+                        <span class="text-xs font-black uppercase tracking-wide text-slate-500">AppID</span>
+                        <button type="button" class="copy-issued-value rounded-md border border-slate-200 px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50" data-copy-target="issued-app-id">复制</button>
+                    </div>
+                    <code id="issued-app-id" class="mt-2 block break-all rounded bg-slate-50 p-2 text-xs text-slate-800"></code>
+                </div>
+                <div class="rounded-lg border border-amber-200 bg-white p-3">
+                    <div class="flex items-center justify-between gap-3">
+                        <span class="text-xs font-black uppercase tracking-wide text-slate-500">Secret</span>
+                        <button type="button" class="copy-issued-value rounded-md border border-slate-200 px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50" data-copy-target="issued-secret">复制</button>
+                    </div>
+                    <code id="issued-secret" class="mt-2 block break-all rounded bg-slate-50 p-2 text-xs text-slate-800"></code>
+                </div>
+            </div>
+        </section>
+
+        <section class="grid grid-cols-1 gap-5 xl:grid-cols-[380px_minmax(0,1fr)]">
+            <aside class="space-y-5">
+                <section class="rounded-xl border border-line bg-white p-5 shadow-sm">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-sm font-black text-slate-900">筛选</h2>
+                        <button id="reset-filter-btn" type="button" class="text-xs font-bold text-sky-700 hover:text-sky-900">重置</button>
+                    </div>
+                    <div class="mt-4 space-y-4">
+                        <div>
+                            <label for="tenant-filter" class="text-xs font-bold text-slate-500">租户 ID</label>
+                            <input id="tenant-filter" class="mt-1 w-full rounded-lg border border-line bg-white px-3 py-2 text-sm outline-none focus:border-slate-900" placeholder="例如：tenant-a">
+                        </div>
+                        <div>
+                            <label for="status-filter" class="text-xs font-bold text-slate-500">状态</label>
+                            <select id="status-filter" class="mt-1 w-full rounded-lg border border-line bg-white px-3 py-2 text-sm font-semibold outline-none focus:border-slate-900">
+                                <option value="">全部未删除</option>
+                                <option value="active">可用</option>
+                                <option value="revoked">已吊销</option>
+                                <option value="expired">已过期</option>
+                            </select>
+                        </div>
+                        <button id="search-btn" type="button" class="w-full rounded-lg border border-line bg-white px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                            <i class="fas fa-filter mr-2"></i>应用筛选
+                        </button>
+                    </div>
+                </section>
+
+                <section class="rounded-xl border border-line bg-white p-5 shadow-sm">
+                    <div class="flex items-center justify-between gap-3">
+                        <h2 class="text-sm font-black text-slate-900">新增调用方</h2>
+                        <span class="rounded-full bg-sky-50 px-2 py-1 text-[11px] font-black text-sky-700">只读历史</span>
+                    </div>
+                    <p class="mt-2 text-xs leading-5 text-slate-500">AppID 留空后由系统生成；每个租户可拥有多条独立凭据。</p>
+                    <form id="client-form" class="mt-4 space-y-4">
+                        <div>
+                            <label for="tenant-id-input" class="text-xs font-bold text-slate-500">租户 ID <span class="text-rose-600">*</span></label>
+                            <input id="tenant-id-input" required maxlength="120" class="mt-1 w-full rounded-lg border border-line bg-white px-3 py-2 text-sm outline-none focus:border-slate-900" placeholder="例如：tenant-a">
+                        </div>
+                        <div>
+                            <label for="name-input" class="text-xs font-bold text-slate-500">调用方名称 <span class="text-rose-600">*</span></label>
+                            <input id="name-input" required maxlength="120" class="mt-1 w-full rounded-lg border border-line bg-white px-3 py-2 text-sm outline-none focus:border-slate-900" placeholder="例如：研究系统生产环境">
+                        </div>
+                        <div>
+                            <label for="app-id-input" class="text-xs font-bold text-slate-500">自定义 AppID（可选）</label>
+                            <input id="app-id-input" maxlength="120" class="mt-1 w-full rounded-lg border border-line bg-white px-3 py-2 font-mono text-sm outline-none focus:border-slate-900" placeholder="留空自动生成">
+                            <p class="mt-1 text-[11px] leading-5 text-slate-400">只允许字母、数字、点、下划线、连字符和冒号，长度至少 16 位。</p>
+                        </div>
+                        <div>
+                            <label for="expires-at-input" class="text-xs font-bold text-slate-500">过期时间（可选）</label>
+                            <input id="expires-at-input" type="datetime-local" class="mt-1 w-full rounded-lg border border-line bg-white px-3 py-2 text-sm outline-none focus:border-slate-900">
+                        </div>
+                        <div class="rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800">
+                            <i class="fas fa-lock mr-1"></i>固定授权：<code>zsxq.history.read</code>。当前调用方只能读取知识星球历史，不可导入、下载或发布。
+                        </div>
+                        <div class="grid grid-cols-2 gap-3 pt-1">
+                            <button id="create-btn" type="submit" class="rounded-lg bg-slate-950 px-3 py-2 text-sm font-bold text-white hover:bg-slate-800">
+                                <i class="fas fa-key mr-2"></i>创建并生成
+                            </button>
+                            <button id="clear-form-btn" type="button" class="rounded-lg border border-line bg-white px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                                <i class="fas fa-rotate-left mr-2"></i>清空
+                            </button>
+                        </div>
+                    </form>
+                </section>
+            </aside>
+
+            <section class="rounded-xl border border-line bg-white shadow-sm">
+                <div class="flex flex-col gap-3 border-b border-line p-5 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                        <h2 class="text-base font-black text-slate-950">调用方列表</h2>
+                        <p id="list-summary" class="mt-1 text-sm text-slate-500">正在加载...</p>
+                    </div>
+                    <button id="refresh-btn" type="button" class="rounded-lg border border-line bg-white px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                        <i class="fas fa-rotate mr-2"></i>刷新
+                    </button>
+                </div>
+                <div id="client-list" class="grid grid-cols-1 gap-3 p-5 2xl:grid-cols-2"></div>
+                <div class="flex items-center justify-between border-t border-line p-5">
+                    <button id="prev-page-btn" type="button" class="rounded-lg border border-line bg-white px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                        <i class="fas fa-chevron-left mr-2"></i>上一页
+                    </button>
+                    <span id="page-indicator" class="text-sm font-bold text-slate-500">第 1 页</span>
+                    <button id="next-page-btn" type="button" class="rounded-lg border border-line bg-white px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                        下一页<i class="fas fa-chevron-right ml-2"></i>
+                    </button>
+                </div>
+            </section>
+        </section>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/config.js"></script>
+    <script src="js/shared-navigation.js"></script>
+    <script src="js/zsxq-history-api-clients.js?v=20260825-api-client-admin"></script>
+</body>
+</html>
