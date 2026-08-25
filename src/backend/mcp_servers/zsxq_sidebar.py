@@ -267,10 +267,11 @@ def create_mcp_server(client: ZsxqSidebarApiClient | None = None) -> FastMCP:
         return {"reachable": True, "backend": local_api.health()}
 
     @server.tool(
-        title="Get recent ZSXQ sidebar download history",
+        title="Get recent ZSXQ unified submission history",
         description=(
             "Use this before downloading MP3 or PDF files to obtain the complete "
-            "server-owned deduplication history for the fixed Knowledge Planet tab."
+            "server-owned deduplication history across scheduled, sidebar, and "
+            "manual Knowledge Planet submissions for the fixed tab."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=True,

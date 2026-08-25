@@ -1,10 +1,21 @@
-# 知识星球侧边栏历史接口
+# 知识星球统一投递历史接口
 
 ## 接口
 
 ```text
 POST /api/v1/zsxq/browser-import/history
 ```
+
+尽管路径保留了早期的 `browser-import` 名称，这不是侧边栏专属历史。
+它查询的是统一内容管道的去重资产账本，返回所选类型在最近自然日内已经
+进入系统的投递内容，覆盖三种上游入口：
+
+- 知识星球计划任务/API 同步；
+- 知识星球浏览器侧边栏提交；
+- 手动下载文件提交。
+
+侧边栏清单只在迁移期用于补充旧的、已被后端接收的记录，不能再作为历史
+数据的唯一来源。
 
 同一条接口支持三种访问方式：
 
@@ -97,7 +108,9 @@ PDF 只需改为：
 }
 ```
 
-`days` 允许 1 到 7，侧边栏固定使用 3；`group_id` 和 `tab_id` 必须与服务端固定范围匹配。
+`days` 允许 1 到 7，按“含今天”的自然日窗口查询；侧边栏固定使用 3。
+`group_id` 和 `tab_id` 必须与服务端固定范围匹配。返回 0 条表示该窗口内
+统一账本没有对应类型的已投递内容，并不等于“侧边栏清单目录为空”。
 
 ## 公网机器调用
 
@@ -174,10 +187,37 @@ print(response.json())
     "kind": "mp3",
     "days": 3,
     "complete": true,
-    "files": [],
-    "summary": {}
+    "files": [
+      {
+        "file_id": null,
+        "filename": "示例音频.mp3",
+        "normalized_filename": "示例音频.mp3",
+        "dedupe_key": "metadata:[\"示例音频.mp3\"]",
+        "sha256": "<64 位内容哈希>",
+        "downloaded_at": "2026-08-25T09:00:00",
+        "last_seen_at": "2026-08-25T09:00:00",
+        "success": true
+      }
+    ],
+    "errors": [],
+    "summary": {
+      "unified_submissions": 1,
+      "records_seen": 1,
+      "unique_downloads": 1,
+      "duplicates_collapsed": 0,
+      "source_files": 0,
+      "trusted_source_files": 0,
+      "ignored_untrusted_manifests": 0
+    }
   }
 }
 ```
+
+`files` 是供调用方做下载前去重的规范化结果：优先使用 `normalized_filename`
+或 `dedupe_key`，不要自行把它当成侧边栏来源清单。`unified_submissions` 是本次
+从三种上游共享账本读取到的记录数；`source_files`、`trusted_source_files` 和
+`ignored_untrusted_manifests` 仅保留给旧侧边栏 manifest 迁移兼容与审计。
+若 `complete=false`，调用方不得把结果当作完整历史进行去重判断，应在下一次
+轮询前重试。
 
 历史结果带 `Cache-Control: no-store`，不会被浏览器或反向代理缓存。无有效签名且未登录的请求不会返回历史数据；签名调用方不要求交互式登录。

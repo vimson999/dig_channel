@@ -18,6 +18,8 @@ from services.zsxq_browser_import_service import (  # noqa: E402
     IdempotencyConflictError,
 )
 from models import db  # noqa: E402
+from models.content_pipeline_asset import ContentPipelineAsset  # noqa: E402
+from models.task import PublicationTask  # noqa: E402
 from models.zsxq_sync import (  # noqa: E402
     ZsxqAttachment,
     ZsxqBrowserSubmission,
@@ -977,6 +979,89 @@ class ZsxqBrowserImportPersistenceTest(unittest.TestCase):
         self.assertEqual(
             prepared["manifest_path"], ZsxqBrowserSubmission.query.one().manifest_path
         )
+
+    def test_recent_history_includes_all_unified_submission_upstreams(self):
+        """History is the shared pipeline ledger, not sidebar manifests alone."""
+        tempdir, _downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+
+        tasks = [
+            PublicationTask(params={}, feature="content_audio_clean")
+            for _ in range(5)
+        ]
+        db.session.add_all(tasks)
+        db.session.flush()
+        db.session.add_all(
+            [
+                ContentPipelineAsset(
+                    media_type="audio",
+                    content_sha256="a" * 64,
+                    canonical_task_id=tasks[0].id,
+                    source_path="/submissions/scheduled.mp3",
+                    filename="计划任务.mp3",
+                    source_mode="scheduled_api",
+                    status="cleaned",
+                    created_at=datetime(2026, 8, 25, 9, 0, 0),
+                ),
+                ContentPipelineAsset(
+                    media_type="audio",
+                    content_sha256="b" * 64,
+                    canonical_task_id=tasks[1].id,
+                    source_path="/submissions/sidebar.mp3",
+                    filename="侧边栏.mp3",
+                    source_mode="browser_sidebar",
+                    status="cleaned",
+                    created_at=datetime(2026, 8, 24, 9, 0, 0),
+                ),
+                ContentPipelineAsset(
+                    media_type="audio",
+                    content_sha256="c" * 64,
+                    canonical_task_id=tasks[2].id,
+                    source_path="/submissions/manual.mp3",
+                    filename="手动投递.mp3",
+                    source_mode="manual_download",
+                    status="cleaned",
+                    created_at=datetime(2026, 8, 23, 9, 0, 0),
+                ),
+                ContentPipelineAsset(
+                    media_type="audio",
+                    content_sha256="d" * 64,
+                    canonical_task_id=tasks[3].id,
+                    source_path="/submissions/too-old.mp3",
+                    filename="窗口外.mp3",
+                    source_mode="manual_download",
+                    status="cleaned",
+                    created_at=datetime(2026, 8, 22, 23, 59, 59),
+                ),
+                ContentPipelineAsset(
+                    media_type="pdf",
+                    content_sha256="e" * 64,
+                    canonical_task_id=tasks[4].id,
+                    source_path="/submissions/pdf.pdf",
+                    filename="不属于音频.pdf",
+                    source_mode="manual_download",
+                    status="cleaned",
+                    created_at=datetime(2026, 8, 25, 9, 0, 0),
+                ),
+            ]
+        )
+        db.session.commit()
+
+        history = service.recent_download_history(
+            "mp3",
+            days=3,
+            now=datetime.fromisoformat("2026-08-25T20:00:00+08:00"),
+            require_submission_receipt=True,
+        )
+
+        self.assertTrue(history["complete"])
+        self.assertEqual(
+            {item["filename"] for item in history["files"]},
+            {"计划任务.mp3", "侧边栏.mp3", "手动投递.mp3"},
+        )
+        self.assertEqual(history["summary"]["unified_submissions"], 3)
+        self.assertEqual(history["summary"]["records_seen"], 3)
+        self.assertEqual(history["summary"]["unique_downloads"], 3)
 
     def test_invalid_inline_manifest_does_not_reserve_run_id_or_persist_manifest(self):
         tempdir, downloads, service = self._service_and_downloads()

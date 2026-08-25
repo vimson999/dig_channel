@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from flask import has_app_context
+
 
 DEFAULT_GROUP_ID = "28888112822211"
 DEFAULT_DOWNLOADS_ROOT = Path(
@@ -261,10 +263,13 @@ class BrowserSidebarImportService:
         now: datetime | None = None,
         require_submission_receipt: bool = False,
     ) -> dict[str, Any]:
-        """Return successful sidebar downloads from recent natural days.
+        """Return recent submissions from every content-pipeline upstream.
 
-        The backend owns this filesystem access so the Chrome sidebar never
-        needs permission to enumerate or read the Downloads inbox directly.
+        ``content_pipeline_assets`` is the authoritative shared dedupe ledger
+        for scheduled Knowledge Planet sync, sidebar submissions, and manual
+        local-file submissions.  Old accepted sidebar manifests are merged as
+        a migration fallback so they remain visible until historical rows have
+        been backfilled into that ledger.
         """
         kind = str(kind or "").strip().lower()
         if kind not in TAB_CONFIGS:
@@ -289,6 +294,7 @@ class BrowserSidebarImportService:
         errors: list[dict[str, Any]] = []
         records_seen = 0
         downloads: dict[tuple[str, ...], dict[str, Any]] = {}
+        unified_submissions = 0
 
         trusted_paths = unique_paths
         ignored_untrusted_manifests = 0
@@ -414,6 +420,104 @@ class BrowserSidebarImportService:
                 if entry.get("last_seen_at"):
                     existing["last_seen_at"] = entry.get("last_seen_at")
 
+        # Every current upstream reserves a canonical asset in this shared
+        # table before clean/publish is queued.  Query it directly instead of
+        # treating sidebar manifest files as the history source.  We retain
+        # the manifest scan above only to cover accepted runs created before
+        # the shared ledger existed.
+        if has_app_context():
+            try:
+                from models.content_pipeline_asset import ContentPipelineAsset
+
+                media_type = "audio" if kind == "mp3" else "pdf"
+                window_start = datetime.combine(
+                    (current - timedelta(days=days - 1)).date(),
+                    datetime.min.time(),
+                )
+                asset_rows = (
+                    ContentPipelineAsset.query.with_entities(
+                        ContentPipelineAsset.filename,
+                        ContentPipelineAsset.content_sha256,
+                        ContentPipelineAsset.source_path,
+                        ContentPipelineAsset.created_at,
+                        ContentPipelineAsset.updated_at,
+                    )
+                    .filter(
+                        ContentPipelineAsset.media_type == media_type,
+                        ContentPipelineAsset.created_at >= window_start,
+                    )
+                    .order_by(
+                        ContentPipelineAsset.created_at.asc(),
+                        ContentPipelineAsset.id.asc(),
+                    )
+                    .all()
+                )
+            except Exception as exc:
+                return {
+                    "kind": kind,
+                    "days": days,
+                    "complete": False,
+                    "files": [],
+                    "errors": [
+                        {
+                            "code": "unified_history_lookup_failed",
+                            "error": str(exc),
+                        }
+                    ],
+                    "summary": {
+                        "source_files": len(unique_paths),
+                        "trusted_source_files": len(trusted_paths),
+                        "ignored_untrusted_manifests": ignored_untrusted_manifests,
+                        "unified_submissions": 0,
+                        "records_seen": records_seen,
+                        "unique_downloads": 0,
+                        "duplicates_collapsed": 0,
+                    },
+                }
+
+            for filename, content_sha256, source_path, created_at, updated_at in asset_rows:
+                filename = _strip_chrome_duplicate_suffix(
+                    str(filename or Path(str(source_path or "")).name).strip()
+                )
+                entry = {
+                    "filename": filename,
+                    "media_type": "audio/mpeg" if kind == "mp3" else "application/pdf",
+                    "sha256": content_sha256,
+                }
+                if not self._history_entry_matches_kind(entry, kind):
+                    continue
+
+                unified_submissions += 1
+                records_seen += 1
+                identity = self._history_identity(entry)
+                existing = downloads.get(identity)
+                if existing is None:
+                    downloads[identity] = {
+                        "file_id": None,
+                        "filename": filename,
+                        "normalized_filename": _normalize_browser_filename(filename),
+                        "published_at": None,
+                        "published_at_canonical": None,
+                        "dedupe_key": self._history_dedupe_key(identity),
+                        "source_url": None,
+                        "downloaded_at": created_at.isoformat() if created_at else None,
+                        "download_count_at_download": None,
+                        "latest_download_count": None,
+                        "last_seen_at": updated_at.isoformat() if updated_at else None,
+                        "sha256": content_sha256,
+                        "success": True,
+                    }
+                    continue
+
+                # A canonical pipeline asset proves the same file was accepted
+                # even when an older sidebar manifest lacks a content hash.
+                if not existing.get("sha256") and content_sha256:
+                    existing["sha256"] = content_sha256
+                if not existing.get("downloaded_at") and created_at:
+                    existing["downloaded_at"] = created_at.isoformat()
+                if updated_at:
+                    existing["last_seen_at"] = updated_at.isoformat()
+
         files = list(downloads.values())
         return {
             "kind": kind,
@@ -425,6 +529,7 @@ class BrowserSidebarImportService:
                 "source_files": len(unique_paths),
                 "trusted_source_files": len(trusted_paths),
                 "ignored_untrusted_manifests": ignored_untrusted_manifests,
+                "unified_submissions": unified_submissions,
                 "records_seen": records_seen,
                 "unique_downloads": len(files),
                 "duplicates_collapsed": max(records_seen - len(files), 0),
