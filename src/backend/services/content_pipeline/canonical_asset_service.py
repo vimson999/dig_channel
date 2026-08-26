@@ -111,6 +111,7 @@ def register_cleaned_outputs(
     media_type: str,
     cleaned_files: Iterable[dict[str, Any]] | None,
     source_root: str | Path | None = None,
+    dry_run: bool = False,
 ) -> CleanedOutputRegistration:
     """Persist verified cleaner outputs for each asset owned by one task.
 
@@ -182,8 +183,61 @@ def register_cleaned_outputs(
                 "reason": "missing_cleaner_result",
             })
 
-    db.session.commit()
+    if dry_run:
+        # This registry is often used by a maintenance preview. Flush first so
+        # validation covers the exact same SQL constraints, then discard every
+        # mutation before returning the audit report.
+        db.session.flush()
+        db.session.rollback()
+    else:
+        db.session.commit()
     return registration
+
+
+def backfill_task_cleaned_outputs(task, *, dry_run: bool = False) -> dict[str, Any]:
+    """Register historical clean outputs without guessing missing source links.
+
+    Old local PDF results store ``source`` as a path relative to ``source_root``;
+    ``register_cleaned_outputs`` resolves that form only against the recorded
+    task source root. A missing/ambiguous mapping remains in the report rather
+    than being associated to a similarly named source file.
+    """
+    task_id = str(getattr(task, "id", "") or "").strip()
+    params = getattr(task, "params", None)
+    params = params if isinstance(params, dict) else {}
+    result = getattr(task, "result", None)
+    result = result if isinstance(result, dict) else {}
+    media_type, source_root = _task_media_context(task, params)
+    if not task_id or media_type is None:
+        return {
+            "task_id": task_id or None,
+            "status": "skipped",
+            "reason": "unsupported_content_pipeline_task",
+            "registered_count": 0,
+            "unresolved_count": 0,
+            "registered_paths": [],
+        }
+
+    registration = register_cleaned_outputs(
+        task_id,
+        media_type=media_type,
+        cleaned_files=_task_cleaned_file_items(result),
+        source_root=source_root,
+        dry_run=dry_run,
+    )
+    unresolved_count = registration.failed_count + len(registration.skipped)
+    return {
+        "task_id": task_id,
+        "media_type": media_type,
+        "status": "preview" if dry_run else "completed",
+        "registered_count": registration.success_count,
+        "failed_count": registration.failed_count,
+        "unresolved_count": unresolved_count,
+        "registered_paths": list(registration.registered_paths),
+        "registered_asset_ids": list(registration.registered_asset_ids),
+        "failed_asset_ids": list(registration.failed_asset_ids),
+        "skipped": list(registration.skipped),
+    }
 
 
 def _mark_asset_failed(asset: ContentPipelineAsset, registration: CleanedOutputRegistration) -> None:
@@ -195,6 +249,32 @@ def _mark_asset_failed(asset: ContentPipelineAsset, registration: CleanedOutputR
     asset_id = str(asset.id)
     if asset_id not in registration.failed_asset_ids:
         registration.failed_asset_ids.append(asset_id)
+
+
+def _task_media_context(task, params: dict[str, Any]) -> tuple[str | None, str | None]:
+    feature = str(getattr(task, "feature", None) or params.get("feature") or "").strip()
+    pipeline = params.get("content_pipeline") if isinstance(params.get("content_pipeline"), dict) else {}
+    if feature == "content_pdf_clean" or isinstance(pipeline.get("pdf_clean"), dict):
+        config = pipeline.get("pdf_clean") if isinstance(pipeline.get("pdf_clean"), dict) else {}
+        return "pdf", _normalized_path(config.get("source_root"))
+    if feature == "content_audio_clean" or isinstance(pipeline.get("audio_clean"), dict):
+        config = pipeline.get("audio_clean") if isinstance(pipeline.get("audio_clean"), dict) else {}
+        return "audio", _normalized_path(config.get("source_root"))
+    return None, None
+
+
+def _task_cleaned_file_items(result: dict[str, Any]) -> list[dict[str, Any]]:
+    files = result.get("files") if isinstance(result.get("files"), list) else []
+    cleaned = result.get("cleaned_files") if isinstance(result.get("cleaned_files"), list) else []
+    if not files:
+        return [item for item in cleaned if isinstance(item, dict)]
+    if cleaned and not any(
+        isinstance(item, dict)
+        and (item.get("output_path") or item.get("cleaner_output_path") or item.get("path"))
+        for item in files
+    ):
+        return [item for item in cleaned if isinstance(item, dict)]
+    return [item for item in files if isinstance(item, dict)]
 
 
 def _normalize_media_type(media_type: str) -> str:
@@ -270,6 +350,7 @@ def _fingerprint_output(path: Path) -> tuple[str, int]:
 
 
 __all__ = [
+    "backfill_task_cleaned_outputs",
     "CanonicalAssetResolution",
     "CleanedOutputRegistration",
     "register_cleaned_outputs",
