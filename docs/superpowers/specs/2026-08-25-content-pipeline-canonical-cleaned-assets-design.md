@@ -107,10 +107,10 @@ PDF 清洗器的结果会补充绝对 `source_path` 字段，与音频清洗器�
 
 - MP3 视频工作台：`src/backend/services/mp3_video_workflow.py` 及其预览、元数据解析。
 - 研报转音频：`src/backend/api/report_audio_workflow.py`。
-- 研报基础文案：`src/backend/api/report_script_material_workflow.py`。
+- 研报基础文案：`src/backend/api/report_script_material_workflow.py`；该接口同时服务基础文案、火柴人视频和视觉方案页面。
 - 今日研报严选（Top10）：`src/backend/api/report_top10_workflow.py` 与 `src/backend/services/report_top10_workflow.py`。
 
-工作台保留来源标签，并新增/显示“已清洗”状态；页面上的“已同步 MP3/PDF”文案改为“已清洗 MP3/PDF”。预览和新建工作流接收的 `pipeline:<asset-id>` 引用保持稳定，避免前端依赖本地绝对路径。
+工作台保留来源标签，并新增/显示“已清洗”状态；MP3、研报转音频、基础文案、火柴人视频、视觉方案和 Top10 页面上的“已同步 MP3/PDF”文案改为“已清洗 MP3/PDF”。预览和新建工作流接收的 `pipeline:<asset-id>` 引用保持稳定，避免前端依赖本地绝对路径。
 
 自动发布继续直接消费本次清洗任务的输出目录，但使用同一已登记的规范产物集合进行校验。清洗器、下载器和下载历史接口保留对原件的审计引用，不属于可选资产列表。
 
@@ -127,7 +127,7 @@ PDF 清洗器的结果会补充绝对 `source_path` 字段，与音频清洗器�
 1. 手动、侧边栏和计划任务提交的 MP3/PDF，在清洗成功后均能从对应工作台列表中看到；删除原始 Downloads 文件后仍可预览和新建后续任务。
 2. 清洗中的、失败的和缺失产物的资产不会误作为可选择文件。
 3. 同一内容不会同时以知识星球原件和流水线产物重复出现。
-4. MP3 工作台和三个 PDF 工作台对 `pipeline:<asset-id>` 的预览与任务创建均使用 `cleaned_path`。
+4. MP3 工作台和所有 PDF 工作台（研报转音频、基础文案、火柴人视频、视觉方案、Top10）对 `pipeline:<asset-id>` 的预览与任务创建均使用 `cleaned_path`。
 5. 回填命令只登记可验证的现有输出，可重复运行，不会猜测或覆盖错误映射。
 6. 原始下载路径和既有历史任务快照保持不变。
 7. 自动发布仍能在一批中部分文件失败时发布已成功登记的文件，并在通知中准确反映成功与失败数量。
