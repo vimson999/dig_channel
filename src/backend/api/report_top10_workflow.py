@@ -11,6 +11,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from celery_config import celery_app
 from models import db
+from models.content_pipeline_asset import ContentPipelineAsset
 from models.report_video import (
     ReportVideoAnalysis,
     ReportVideoMindmap,
@@ -28,13 +29,13 @@ from services.report_top10_workflow import (
     ReportTop10WorkflowError,
     cached_single_report_for_pdf,
     default_editor_gemini_url,
-    pdf_meta_from_zsxq_attachment,
-    resolve_pdf_path,
+    pdf_meta_from_asset_reference,
     selected_report_count,
     status_payload as workflow_status_payload,
     storage_path_for_job,
 )
 from services.runtime_guard import apply_async_after_db_release
+from services.content_pipeline.canonical_asset_service import resolve_cleaned_asset
 from tasks.report_top10_workflow import process_report_top10_workflow_job
 from utils.auth_utils import require_login
 from services.report_video_service import rel_path, task_dir
@@ -170,8 +171,16 @@ def list_pdf_assets(_current_user):
         if not rows:
             break
         scanned += len(rows)
+        canonical_assets = _canonical_pdf_assets_by_source_paths(
+            getattr(row, "local_path", None) for row in rows
+        )
         for row in rows:
-            item = _pdf_asset_payload(row)
+            item = _pdf_asset_payload(
+                row,
+                canonical_asset=canonical_assets.get(
+                    _normalized_pdf_source_path(getattr(row, "local_path", None))
+                ),
+            )
             if item:
                 valid_items.append(item)
             else:
@@ -179,9 +188,37 @@ def list_pdf_assets(_current_user):
         if len(rows) < batch_limit:
             break
 
+    pipeline_items = []
+    pipeline_scanned = 0
+    if scope not in {"hot", "popular"}:
+        pipeline_query = ContentPipelineAsset.query.filter(
+            ContentPipelineAsset.media_type == "pdf",
+            ContentPipelineAsset.status == "cleaned",
+        )
+        if q:
+            pattern = f"%{_escape_like(q)}%"
+            pipeline_query = pipeline_query.filter(or_(
+                ContentPipelineAsset.filename.ilike(pattern, escape="\\"),
+                ContentPipelineAsset.source_path.ilike(pattern, escape="\\"),
+                ContentPipelineAsset.source_mode.ilike(pattern, escape="\\"),
+            ))
+        pipeline_rows = (
+            pipeline_query
+            .order_by(ContentPipelineAsset.updated_at.desc(), ContentPipelineAsset.created_at.desc())
+            .limit(scan_limit)
+            .all()
+        )
+        pipeline_scanned = len(pipeline_rows)
+        pipeline_items = [
+            item
+            for item in (_content_pipeline_pdf_asset_payload(row) for row in pipeline_rows)
+            if item
+        ]
+
+    all_items = _merge_pdf_asset_items(valid_items, pipeline_items)
     start = (page - 1) * per_page
     end = start + per_page
-    items = valid_items[start:end]
+    items = all_items[start:end]
     _attach_cache_status(items)
     return jsonify({
         "success": True,
@@ -190,9 +227,9 @@ def list_pdf_assets(_current_user):
             "pagination": {
                 "page": page,
                 "per_page": per_page,
-                "has_more": len(valid_items) > end or scanned >= scan_limit,
+                "has_more": len(all_items) > end or scanned >= scan_limit or pipeline_scanned >= scan_limit,
                 "skipped_missing": skipped_missing,
-                "scanned": scanned,
+                "scanned": scanned + pipeline_scanned,
                 "scope": "hot" if scope in {"hot", "popular"} else "all",
                 "hot_download_threshold": hot_download_threshold,
                 "order": "published_desc",
@@ -207,7 +244,7 @@ def list_pdf_assets(_current_user):
 @require_login
 def preview_pdf_asset(_current_user, asset_id):
     try:
-        pdf = pdf_meta_from_zsxq_attachment(asset_id)
+        pdf = pdf_meta_from_asset_reference(asset_id)
     except ReportTop10WorkflowError as exc:
         return jsonify({"success": False, "message": str(exc)}), 404
     return send_file(
@@ -247,7 +284,7 @@ def create_job(current_user):
     pdfs = []
     try:
         for asset_id in asset_ids:
-            pdfs.append(pdf_meta_from_zsxq_attachment(asset_id))
+            pdfs.append(pdf_meta_from_asset_reference(asset_id))
     except ReportTop10WorkflowError as exc:
         return jsonify({"success": False, "message": str(exc)}), 400
 
@@ -1118,18 +1155,25 @@ def _parse_asset_ids(data):
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
-def _pdf_asset_payload(row):
-    path = resolve_pdf_path(row.local_path)
-    if not path:
+def _pdf_asset_payload(row, *, canonical_asset=None):
+    asset = canonical_asset or _canonical_pdf_asset_by_source_path(
+        getattr(row, "local_path", None)
+    )
+    resolution = resolve_cleaned_asset(asset, media_type="pdf")
+    path = resolution.path
+    if resolution.state != "ready" or not path:
         return None
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return None
-    if size <= 0:
-        return None
+    size = path.stat().st_size
     return {
         "id": row.attachment_id,
+        "asset_id": row.attachment_id,
+        "asset_kind": "zsxq_attachment",
+        "source_label": _zsxq_pdf_source_label(asset),
+        "source_mode": getattr(asset, "source_mode", None) or "zsxq_sync",
+        "pipeline_status": getattr(asset, "status", None),
+        "canonical_status": getattr(asset, "status", None),
+        "pipeline_asset_id": str(getattr(asset, "id", "") or "") or None,
+        "pipeline_task_id": getattr(asset, "canonical_task_id", None),
         "filename": row.attachment_name or path.name,
         "bytes": size,
         "download_count": row.download_count,
@@ -1148,6 +1192,141 @@ def _pdf_asset_payload(row):
         "local_path": str(path),
         "preview_url": f"/api/report-top10-workflows/pdf-assets/{row.attachment_id}/preview",
     }
+
+
+def _content_pipeline_source_label(source_mode):
+    return {
+        "scheduled_api": "计划任务",
+        "sidebar": "侧边栏下载",
+        "browser_sidebar": "侧边栏下载",
+        "manual_download": "手动投递",
+    }.get(str(source_mode or "").strip().lower(), "内容流水线")
+
+
+def _content_pipeline_pdf_asset_payload(asset):
+    resolution = resolve_cleaned_asset(asset, media_type="pdf")
+    path = resolution.path
+    if resolution.state != "ready" or not path:
+        return None
+    source_label = _content_pipeline_source_label(asset.source_mode)
+    asset_id = str(asset.id)
+    return {
+        "id": f"pipeline:{asset_id}",
+        "asset_id": asset_id,
+        "asset_kind": "content_pipeline",
+        "source_label": source_label,
+        "source_mode": asset.source_mode,
+        "pipeline_status": asset.status,
+        "canonical_status": asset.status,
+        "pipeline_asset_id": asset_id,
+        "pipeline_task_id": asset.canonical_task_id,
+        "filename": asset.filename or path.name,
+        "bytes": path.stat().st_size,
+        "download_count": None,
+        "updated_at": _isoformat_z(asset.updated_at),
+        "created_at": _isoformat_z(asset.created_at),
+        "group_id": None,
+        "tab_id": None,
+        "topic_id": None,
+        "topic_title": asset.filename or source_label,
+        "topic_author": None,
+        "topic_create_time": None,
+        "topic_first_synced_at": None,
+        "topic_last_synced_at": None,
+        "tab_label": source_label,
+        "file_id": None,
+        "local_path": str(path),
+        "preview_url": f"/api/report-top10-workflows/pdf-assets/pipeline:{asset_id}/preview",
+    }
+
+
+def _normalized_pdf_source_path(path_value):
+    raw = str(path_value or "").strip()
+    if not raw:
+        return None
+    try:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return str(path.resolve())
+    except OSError:
+        return None
+
+
+def _canonical_pdf_assets_by_source_paths(path_values):
+    source_paths = {
+        path
+        for path in (_normalized_pdf_source_path(value) for value in (path_values or []))
+        if path
+    }
+    if not source_paths:
+        return {}
+    rows = (
+        ContentPipelineAsset.query
+        .filter(
+            ContentPipelineAsset.media_type == "pdf",
+            ContentPipelineAsset.status == "cleaned",
+            ContentPipelineAsset.source_path.in_(source_paths),
+        )
+        .order_by(ContentPipelineAsset.updated_at.desc(), ContentPipelineAsset.created_at.desc())
+        .all()
+    )
+    matched = {}
+    for asset in rows:
+        source_path = _normalized_pdf_source_path(asset.source_path)
+        if source_path and source_path not in matched:
+            matched[source_path] = asset
+    return matched
+
+
+def _canonical_pdf_asset_by_source_path(path_value):
+    source_path = _normalized_pdf_source_path(path_value)
+    if not source_path:
+        return None
+    return _canonical_pdf_assets_by_source_paths([source_path]).get(source_path)
+
+
+def _zsxq_pdf_source_label(asset):
+    source_mode = str(getattr(asset, "source_mode", "") or "").strip().lower()
+    if source_mode in {"scheduled_api", "sidebar", "browser_sidebar"}:
+        return f"知识星球·{_content_pipeline_source_label(source_mode)}"
+    return "知识星球同步"
+
+
+def _pdf_asset_sort_timestamp(item):
+    for key in ("topic_create_time", "updated_at", "created_at"):
+        value = item.get(key)
+        if not value:
+            continue
+        if isinstance(value, datetime):
+            return value.timestamp()
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return 0.0
+
+
+def _merge_pdf_asset_items(synced_items, pipeline_items):
+    merged = []
+    seen_paths = {}
+    for item in sorted(
+        [*(synced_items or []), *(pipeline_items or [])],
+        key=_pdf_asset_sort_timestamp,
+        reverse=True,
+    ):
+        path = str(item.get("local_path") or "").strip()
+        identity = os.path.normcase(os.path.realpath(path)) if path else ""
+        prior_index = seen_paths.get(identity) if identity else None
+        if prior_index is not None:
+            existing = merged[prior_index]
+            if item.get("asset_kind") == "zsxq_attachment" and existing.get("asset_kind") == "content_pipeline":
+                merged[prior_index] = item
+            continue
+        if identity:
+            seen_paths[identity] = len(merged)
+        merged.append(item)
+    return merged
 
 
 def _attach_cache_status(items):

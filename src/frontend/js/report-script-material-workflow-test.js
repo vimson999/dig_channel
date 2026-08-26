@@ -374,7 +374,7 @@ class ReportScriptMaterialWorkflowPage {
         const page = Math.max(1, Number(options.page || this.assetPage || 1));
         this.assetPage = page;
         this.renderAssetTabs();
-        if (!options.silent) this.els.assetSummary.textContent = '加载已同步 PDF 中...';
+        if (!options.silent) this.els.assetSummary.textContent = '加载已清洗 PDF 中...';
         try {
             const query = new URLSearchParams({
                 page: String(page),
@@ -886,7 +886,7 @@ class ReportScriptMaterialWorkflowPage {
         const selectedIds = new Set(this.selected.map((item) => item.id));
         this.els.assetSummary.textContent = this.assets.length
             ? `${this.assetScopeLabel()}· 第 ${this.assetPage} 页 · 本页 ${this.assets.length} 个 PDF`
-            : (this.assetScope === 'hot' ? '没有找到下载次数达到 40 次的热门 PDF。' : '没有找到已下载的同步 PDF。');
+            : (this.assetScope === 'hot' ? '没有找到下载次数达到 40 次的热门已清洗 PDF。' : '没有找到已清洗 PDF。');
         this.els.assetList.innerHTML = this.assets.map((asset) => {
             const selected = selectedIds.has(asset.id);
             const previewUrl = asset.preview_url ? `${this.apiRoot()}${asset.preview_url}` : '';
@@ -922,6 +922,7 @@ class ReportScriptMaterialWorkflowPage {
                     </div>
                     <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(metaLine)}</div>
                     <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                        <span class="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-bold text-violet-700">${this.escape(asset.source_label || asset.tab_label || '清洗产物')} · 已清洗</span>
                         <span class="rounded-full border px-2 py-0.5 text-[11px] font-bold ${downloadBadgeClass}">
                             <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
                         </span>
@@ -1257,7 +1258,7 @@ class ReportScriptMaterialWorkflowPage {
     }
 
     assetScopeLabel() {
-        return this.assetScope === 'hot' ? '热门 PDF ' : '已同步 PDF ';
+        return this.assetScope === 'hot' ? '热门已清洗 PDF ' : '已清洗 PDF ';
     }
 
     materialTaskMeta(asset) {

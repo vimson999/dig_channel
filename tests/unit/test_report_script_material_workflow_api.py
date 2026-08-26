@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from api import report_script_material_workflow as material_api  # noqa: E402
 from models import db  # noqa: E402
+from models.content_pipeline_asset import ContentPipelineAsset  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
 from models.zsxq_sync import ZsxqAttachment, ZsxqTopic  # noqa: E402
 from services.report_script_material_workflow import FEATURE_NAME, QUEUE_NAME  # noqa: E402
@@ -38,10 +40,18 @@ class ReportScriptMaterialWorkflowApiTest(unittest.TestCase):
         self.ctx = self.app.app_context()
         self.ctx.push()
         db.create_all()
+        self.output_root = Path(self.tmpdir.name) / "content-pipeline-output"
+        self.output_root_patch = patch.dict(
+            os.environ,
+            {"CONTENT_PIPELINE_OUTPUT_ROOT": str(self.output_root)},
+            clear=False,
+        )
+        self.output_root_patch.start()
         material_api._clear_terminal_detail_cache()
 
     def tearDown(self):
         material_api._clear_terminal_detail_cache()
+        self.output_root_patch.stop()
         self.disk_cache_patcher.stop()
         db.session.remove()
         db.drop_all()
@@ -71,7 +81,30 @@ class ReportScriptMaterialWorkflowApiTest(unittest.TestCase):
             download_status="downloaded",
             attachment_type="file",
         )
-        db.session.add_all([topic, attachment])
+        cleaned_path = self.output_root / "batch-1" / "pdf_cleaned" / pdf_path.name
+        cleaned_path.parent.mkdir(parents=True)
+        cleaned_path.write_bytes(b"%PDF-cleaned")
+        clean_task = PublicationTask(
+            feature="content_pdf_clean",
+            status="completed",
+            current_step="completed",
+            progress=100,
+            params={"feature": "content_pdf_clean"},
+        )
+        db.session.add_all([topic, attachment, clean_task])
+        db.session.flush()
+        db.session.add(ContentPipelineAsset(
+            media_type="pdf",
+            content_sha256="a" * 64,
+            canonical_task_id=str(clean_task.id),
+            source_path=str(pdf_path.resolve()),
+            filename=pdf_path.name,
+            source_mode="sidebar",
+            status="cleaned",
+            cleaned_path=str(cleaned_path.resolve()),
+            cleaned_sha256="b" * 64,
+            cleaned_bytes=cleaned_path.stat().st_size,
+        ))
         db.session.commit()
         return attachment
 
@@ -97,7 +130,7 @@ class ReportScriptMaterialWorkflowApiTest(unittest.TestCase):
                 metadata={"source": "unit-test"},
             )
 
-        task = PublicationTask.query.one()
+        task = PublicationTask.query.filter(PublicationTask.feature == FEATURE_NAME).one()
         self.assertEqual(result["status"], "queued")
         self.assertEqual(result["job_id"], task.id)
         self.assertEqual(task.feature, FEATURE_NAME)

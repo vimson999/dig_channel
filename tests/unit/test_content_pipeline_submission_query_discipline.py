@@ -301,6 +301,10 @@ class ContentPipelineSubmissionQueryDisciplineTest(unittest.TestCase):
             submit_publish.call_args.kwargs["metadata"]["source_refs"][0]["attachment_id"],
             "attachment-1",
         )
+        self.assertEqual(
+            submit_publish.call_args.kwargs["approved_paths"],
+            ["/tmp/clean-pdf-1/report.pdf"],
+        )
 
     def test_clean_stage_event_persists_source_refs_before_refresh(self):
         workflow = SimpleNamespace(
@@ -311,6 +315,7 @@ class ContentPipelineSubmissionQueryDisciplineTest(unittest.TestCase):
             "stage": "clean",
             "task_id": "clean-1",
             "source_refs": [{"attachment_id": "attachment-1"}],
+            "registered_output_paths": ["/tmp/clean-1/report.pdf"],
         })
 
         self.assertEqual(
@@ -318,6 +323,7 @@ class ContentPipelineSubmissionQueryDisciplineTest(unittest.TestCase):
             [{
                 "task_id": "clean-1",
                 "source_refs": [{"attachment_id": "attachment-1"}],
+                "registered_output_paths": ["/tmp/clean-1/report.pdf"],
             }],
         )
 

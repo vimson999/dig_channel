@@ -26,6 +26,7 @@ def submit_publish_clean_output_task(
     title,
     file_type,
     output_dir,
+    approved_paths=None,
     options=None,
     source_task_id=None,
     trigger="content_pipeline_clean_complete",
@@ -48,6 +49,11 @@ def submit_publish_clean_output_task(
     source_dir = Path(str(output_dir or "")).expanduser().resolve()
     if not source_dir.exists() or not source_dir.is_dir():
         raise ValueError(f"清洗输出目录不存在：{source_dir}")
+    normalized_approved_paths = _normalize_approved_paths(
+        approved_paths,
+        source_dir=source_dir,
+        file_type=normalized_type,
+    )
 
     broker_task_id = str(uuid4())
     task = PublicationTask(
@@ -65,6 +71,7 @@ def submit_publish_clean_output_task(
                 "metadata": metadata,
                 "file_type": normalized_type,
                 "output_dir": str(source_dir),
+                "approved_paths": normalized_approved_paths,
                 "options": options,
             },
         },
@@ -73,6 +80,7 @@ def submit_publish_clean_output_task(
             "queued": False,
             "file_type": normalized_type,
             "output_dir": str(source_dir),
+            "approved_paths": normalized_approved_paths,
             "source_task_id": source_task_id,
             "trigger": trigger,
             "metadata": metadata,
@@ -170,7 +178,14 @@ def submit_publish_clean_output_task(
     return task_snapshot
 
 
-def publish_clean_output(*, file_type, output_dir, options=None, requested_by="content_pipeline"):
+def publish_clean_output(
+    *,
+    file_type,
+    output_dir,
+    approved_paths=None,
+    options=None,
+    requested_by="content_pipeline",
+):
     """Publish a completed content-pipeline output directory using the saved strategy.
 
     This is intentionally transient: it reuses the saved target group, hashtags,
@@ -195,11 +210,17 @@ def publish_clean_output(*, file_type, output_dir, options=None, requested_by="c
             "message": f"清洗输出目录不存在：{source_dir}",
             "source_dir": str(source_dir),
         }
+    normalized_approved_paths = _normalize_approved_paths(
+        approved_paths,
+        source_dir=source_dir,
+        file_type=normalized_type,
+    )
 
     config = _build_transient_publish_config(
         file_type=normalized_type,
         source_dir=source_dir,
         options=options,
+        approved_paths=normalized_approved_paths,
     )
     max_rounds = _bounded_int(options.get("max_rounds"), DEFAULT_MAX_ROUNDS, lower=1, upper=100)
     runs = []
@@ -260,7 +281,7 @@ def publish_clean_output(*, file_type, output_dir, options=None, requested_by="c
     }
 
 
-def _build_transient_publish_config(*, file_type, source_dir, options):
+def _build_transient_publish_config(*, file_type, source_dir, options, approved_paths=None):
     base_config = load_auto_publish_config(required=True)
     config = deepcopy(base_config)
     config["enabled"] = True
@@ -277,6 +298,8 @@ def _build_transient_publish_config(*, file_type, source_dir, options):
     target_rule["recursive"] = True
     target_rule["file_type"] = file_type
     target_rule["extensions"] = [".pdf"] if file_type == "pdf" else [".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg"]
+    if approved_paths is not None:
+        target_rule["approved_paths"] = list(approved_paths)
 
     rule_options = options.get("rule") if isinstance(options.get("rule"), dict) else {}
     for key in (
@@ -448,6 +471,39 @@ def _normalize_file_type(value):
     if normalized == "pdf":
         return "pdf"
     raise ValueError(f"不支持的发布文件类型：{value}")
+
+
+def _normalize_approved_paths(paths, *, source_dir, file_type):
+    """Validate an explicit publish allow-list without probing raw sources."""
+    if paths is None:
+        return None
+    if not isinstance(paths, (list, tuple, set)):
+        raise ValueError("approved_paths 必须是文件路径数组")
+
+    root = Path(source_dir).expanduser().resolve()
+    allowed_extensions = (
+        {".pdf"}
+        if file_type == "pdf"
+        else {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg"}
+    )
+    normalized = []
+    seen = set()
+    for raw_path in paths:
+        value = str(raw_path or "").strip()
+        if not value:
+            continue
+        try:
+            candidate = Path(value).expanduser().resolve()
+            candidate.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"清洗发布白名单路径不在输出目录内：{value}") from exc
+        if candidate.suffix.lower() not in allowed_extensions:
+            raise ValueError(f"清洗发布白名单文件类型不匹配：{candidate}")
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            normalized.append(key)
+    return normalized
 
 
 def _truthy(value):

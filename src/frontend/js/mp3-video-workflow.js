@@ -555,7 +555,7 @@ class Mp3VideoWorkflowPage {
             ? this.uploadedAudioFile
             : null;
         if (!this.selectedAudioAsset || (this.selectedAudioAsset.is_upload && !uploadedAudio)) {
-            this.setNotice('请先选择一个已同步 MP3，或上传本地 MP3。', 'warning');
+            this.setNotice('请先选择一个已清洗 MP3，或上传本地 MP3。', 'warning');
             return;
         }
         const inputSource = this.currentInputSource();
@@ -795,8 +795,8 @@ class Mp3VideoWorkflowPage {
         this.els.audioAssetSummary.textContent = `${this.audioAssetScopeLabel()}· 第 ${page} 页 · ${this.audioAssets.length} 个可用 MP3 · 扫描 ${scanned} 条 · 跳过缺失 ${skipped} 条`;
         if (!this.audioAssets.length) {
             const emptyText = this.audioAssetScope === 'hot'
-                ? '暂无热门 MP3。当前筛选条件是下载次数 ≥ 20，且附件已下载到本地。'
-                : '没有找到已下载的 MP3。';
+                ? '暂无热门已清洗 MP3。当前筛选条件是下载次数 ≥ 20，且已有可用清洗产物。'
+                : '没有找到已清洗的 MP3。';
             this.els.audioAssetList.innerHTML = `<div class="rounded-md border border-dashed border-slate-300 p-4 text-sm text-slate-500">${this.escape(emptyText)}</div>`;
         } else {
             this.els.audioAssetList.innerHTML = this.audioAssets.map((asset) => this.renderAudioAssetCard(asset)).join('');
@@ -813,8 +813,8 @@ class Mp3VideoWorkflowPage {
         const syncTime = this.formatDateTime(asset.topic_last_synced_at || asset.updated_at);
         const topicTime = this.formatDateTime(asset.topic_create_time) || asset.topic_create_time || '';
         const sourceLabel = asset.source_label || asset.tab_label || '';
-        const pipelineStatus = asset.asset_kind === 'content_pipeline'
-            ? this.pipelineAssetStatusLabel(asset.pipeline_status)
+        const pipelineStatus = (asset.canonical_status || asset.asset_kind === 'content_pipeline')
+            ? this.pipelineAssetStatusLabel(asset.canonical_status || asset.pipeline_status)
             : '';
         const metaLine = [
             sourceLabel,
@@ -856,7 +856,7 @@ class Mp3VideoWorkflowPage {
     }
 
     audioAssetDownloadText(asset) {
-        if (asset?.asset_kind === 'content_pipeline') return '手动投递';
+        if (asset?.asset_kind === 'content_pipeline') return '清洗产物';
         const count = asset?.download_count;
         return window.DownloadCountHighlight?.badgeText(count)
             || (Number.isFinite(Number(count)) ? `下载 ${Number(count)} 次` : '下载 -');

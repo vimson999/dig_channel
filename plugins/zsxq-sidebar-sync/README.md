@@ -18,6 +18,8 @@ The plugin also retains three narrowly scoped MCP tools for environments where a
 
 The sidebar never receives general shell, filesystem, or arbitrary HTTP access. Both bridge routes accept only the fixed Knowledge Planet group and MP3/PDF tabs; the MCP server can call only the local loopback import API.
 
+The MCP launcher uses the project virtual environment by default. In a Git worktree it can reuse the main checkout's environment; an explicit interpreter can be supplied with `ZSXQ_MCP_PYTHON=/absolute/path/to/python` when required.
+
 ## Optional one-time tunnel setup
 
 1. In [OpenAI Platform Tunnels](https://platform.openai.com/settings/organization/tunnels), create a tunnel for the intended organization/workspace and copy its non-secret `tunnel_...` ID.

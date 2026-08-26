@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import time
@@ -20,6 +21,8 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from models import db  # noqa: E402
+from models.content_pipeline_asset import ContentPipelineAsset  # noqa: E402
+from models.task import PublicationTask  # noqa: E402
 from models.zsxq_sync import (  # noqa: E402
     ZsxqAttachment,
     ZsxqSyncRun,
@@ -281,7 +284,35 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
             path.write_bytes(b"%PDF-1.4\nfixture")
             paths.append(path)
             self._add_downloaded_attachment(f"attachment-{index}", f"topic-{index}", path)
+        clean_task = PublicationTask(
+            feature="content_clean_fixture",
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": "content_clean_fixture"},
+        )
+        db.session.add(clean_task)
+        db.session.flush()
+        output_root = Path(self.temp_dir.name) / "canonical-cleaned"
+        for index, path in enumerate(paths):
+            cleaned_path = output_root / f"batch-{index}" / path.name
+            cleaned_path.parent.mkdir(parents=True, exist_ok=True)
+            cleaned_path.write_bytes(b"%PDF-1.4\ncleaned fixture")
+            db.session.add(ContentPipelineAsset(
+                media_type="pdf",
+                content_sha256=(str(index + 1) * 64),
+                canonical_task_id=str(clean_task.id),
+                source_path=str(path.resolve()),
+                filename=path.name,
+                source_mode="scheduled_api",
+                status="cleaned",
+                cleaned_path=str(cleaned_path.resolve()),
+                cleaned_sha256=(str(index + 3) * 64),
+                cleaned_bytes=cleaned_path.stat().st_size,
+            ))
         db.session.commit()
+        for path in paths:
+            path.unlink()
         run = (
             ZsxqSyncRun.query
             .options(load_only(ZsxqSyncRun.id, ZsxqSyncRun.group_id, ZsxqSyncRun.group_name))
@@ -302,7 +333,11 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         config = {"enabled": True, "pdf_min_download_count": 40, "wait_for_completion": False}
 
         service = ZsxqSyncService()
-        with patch.object(service, "_find_existing_auto_script_material_task", return_value=None):
+        with patch.dict(
+            os.environ,
+            {"CONTENT_PIPELINE_OUTPUT_ROOT": str(output_root)},
+            clear=False,
+        ), patch.object(service, "_find_existing_auto_script_material_task", return_value=None):
             with patch.object(service, "_create_auto_report_script_material_task", side_effect=commit_dispatch):
                 with self._capture_sql() as statements:
                     summary = service._submit_auto_script_material_dispatch_for_run(
@@ -1443,6 +1478,18 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         audio_path = Path(self.temp_dir.name) / "recording.mp3"
         pdf_path.write_bytes(b"%PDF-1.4\nfixture")
         audio_path.write_bytes(b"ID3fixture")
+        auto_video_config = {
+            "enabled": True,
+            "pdf_min_download_count": 35,
+            "mp3_min_download_count": 25,
+            "wait_for_completion": False,
+        }
+        auto_script_config = {
+            "enabled": True,
+            "pdf_min_download_count": 40,
+            "visual_scheme_keys": ["stick_figure"],
+            "wait_for_completion": False,
+        }
         db.session.add(
             ZsxqSyncRun(
                 id="run-clean-context-1",
@@ -1455,6 +1502,14 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
                     "audit": "must-survive-atomic-patches",
                     "downloaded_pdf_files": [{"path": str(pdf_path)}],
                     "downloaded_files": [{"path": str(audio_path)}],
+                    "auto_video_dispatch": {
+                        "status": "awaiting_clean",
+                        "config": auto_video_config,
+                    },
+                    "auto_script_material_dispatch": {
+                        "status": "awaiting_clean",
+                        "config": auto_script_config,
+                    },
                 },
             )
         )
@@ -1513,17 +1568,20 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         with patch(
             "services.content_pipeline.pdf_clean_task_service.submit_pdf_clean_task",
             return_value={"id": "pdf-task-1", "celery_task_id": "pdf-celery-1"},
-        ), patch(
+        ) as pdf_submit, patch(
             "services.content_pipeline.audio_clean_task_service.submit_audio_clean_task",
             return_value={"id": "audio-task-1", "celery_task_id": "audio-celery-1"},
-        ), self._capture_sql() as statements:
+        ) as audio_submit, self._capture_sql() as statements:
             pdf_result = service.submit_pdf_clean_for_run(
                 "run-clean-context-1",
                 run_context=run_context,
+                auto_video_dispatch=auto_video_config,
+                auto_script_material_dispatch=auto_script_config,
             )
             audio_result = service.submit_audio_clean_for_run(
                 "run-clean-context-1",
                 run_context=run_context,
+                auto_video_dispatch=auto_video_config,
             )
 
         run_selects = [
@@ -1540,6 +1598,18 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         self.assertEqual(pdf_result["task_id"], "pdf-task-1")
         self.assertEqual(audio_result["task_id"], "audio-task-1")
         self.assertEqual(
+            pdf_submit.call_args.kwargs["metadata"]["auto_video_dispatch"],
+            auto_video_config,
+        )
+        self.assertEqual(
+            pdf_submit.call_args.kwargs["metadata"]["auto_script_material_dispatch"],
+            auto_script_config,
+        )
+        self.assertEqual(
+            audio_submit.call_args.kwargs["metadata"]["auto_video_dispatch"],
+            auto_video_config,
+        )
+        self.assertEqual(
             run_context["result"]["content_pipeline"]["pdf_clean"]["task_id"],
             "pdf-task-1",
         )
@@ -1554,6 +1624,76 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         self.assertIn("downloaded_pdf_files", persisted)
         self.assertIn("downloaded_files", persisted)
         self.assertEqual(persisted["content_pipeline"], run_context["result"]["content_pipeline"])
+
+    def test_sync_defers_side_branches_until_canonical_clean_outputs_are_ready(self):
+        run = ZsxqSyncRun(
+            id="run-defer-side-branches",
+            group_id="group-1",
+            group_name="前沿信息收录",
+            status="queued",
+            result={},
+        )
+        db.session.add(run)
+        db.session.commit()
+
+        tab_result = {
+            "tab_id": "tab-1",
+            "tab_label": "外资研报",
+            "topics_fetched": 0,
+            "topics_new": 0,
+            "topics_updated": 0,
+            "topics_existing": 0,
+            "attachments_seen": 0,
+            "attachments_downloaded": 0,
+            "attachments_failed": 0,
+            "attachments_skipped": 0,
+            "pages": 0,
+            "downloaded_files": [],
+            "downloaded_pdf_files": [],
+            "auto_video_dispatch_files": [],
+            "download_limit_reached": False,
+        }
+        service = ZsxqSyncService()
+        video_config = {
+            "enabled": True,
+            "pdf_min_download_count": 35,
+            "mp3_min_download_count": 25,
+        }
+        script_config = {
+            "enabled": True,
+            "pdf_min_download_count": 40,
+            "visual_scheme_keys": [],
+        }
+
+        with patch.object(service, "ensure_schema"), \
+             patch.object(service, "_sync_one_tab", return_value=tab_result), \
+             patch.object(
+                 service,
+                 "_submit_auto_video_dispatch_for_run",
+                 side_effect=AssertionError("raw downloads must not be dispatched before cleaning"),
+             ), \
+             patch.object(
+                 service,
+                 "_submit_auto_script_material_dispatch_for_run",
+                 side_effect=AssertionError("raw downloads must not be dispatched before cleaning"),
+             ):
+            payload = service.sync_tabs(
+                run_id=run.id,
+                cookie="cookie",
+                group_id=run.group_id,
+                group_name=run.group_name,
+                tabs=[{"id": "tab-1", "label": "外资研报"}],
+                auto_video_dispatch=video_config,
+                auto_script_material_dispatch=script_config,
+                defer_auto_video_dispatch=True,
+                defer_auto_script_material_dispatch=True,
+            )
+
+        summary = payload["summary"]
+        self.assertEqual(summary["auto_video_dispatch"]["status"], "awaiting_clean")
+        self.assertEqual(summary["auto_video_dispatch"]["reason"], "canonical_clean_required")
+        self.assertEqual(summary["auto_script_material_dispatch"]["status"], "awaiting_clean")
+        self.assertEqual(summary["auto_script_material_dispatch"]["reason"], "canonical_clean_required")
 
     def test_complete_ledger_does_not_fallback_to_result_when_target_file_is_absent(self):
         missing_path = Path(self.temp_dir.name) / "already-removed.pdf"

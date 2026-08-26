@@ -108,7 +108,7 @@ class ReportVisualPlanTestPage {
         const page = Math.max(1, Number(options.page || this.assetPage || 1));
         this.assetPage = page;
         this.renderAssetTabs();
-        if (!options.silent) this.els.assetSummary.textContent = '加载已同步 PDF 中...';
+        if (!options.silent) this.els.assetSummary.textContent = '加载已清洗 PDF 中...';
         try {
             const query = new URLSearchParams({
                 page: String(page),
@@ -231,6 +231,7 @@ class ReportVisualPlanTestPage {
                         <div class="truncate text-sm font-black text-slate-900" title="${this.escape(asset.topic_title || asset.filename || '')}">${this.escape(title)}</div>
                         <div class="mt-1 truncate text-xs text-slate-500" title="${this.escape(asset.filename || '')}">${this.escape(filename)}</div>
                         <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                            <span class="rounded-full bg-violet-50 px-2 py-0.5 font-bold text-violet-700">${this.escape(asset.source_label || asset.tab_label || '清洗产物')} · 已清洗</span>
                             <span class="rounded-full border px-2 py-0.5 font-bold ${downloadBadgeClass}"><i class="fas fa-download mr-1"></i>${this.escape(downloadText)}</span>
                             ${badge}
                         </div>

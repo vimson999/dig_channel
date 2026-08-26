@@ -10,6 +10,11 @@ from sqlalchemy.orm import load_only
 from models.zsxq_sync import ZsxqAttachment, ZsxqTopic
 from models.task import PublicationTask
 from models import db
+from models.content_pipeline_asset import ContentPipelineAsset
+from services.content_pipeline.canonical_asset_service import (
+    resolve_asset_reference,
+    resolve_cleaned_asset,
+)
 from services.report_audio_workflow import structured_result_quality_issue
 
 
@@ -70,6 +75,27 @@ def storage_path_for_job(job_id: str, created_at: Optional[datetime] = None) -> 
     return str(root / f"{job_id}_result.json")
 
 
+def pdf_meta_from_asset_reference(asset_id: str) -> Dict[str, Any]:
+    reference = str(asset_id or "").strip()
+    if reference.startswith("pipeline:"):
+        pipeline_id = reference.split(":", 1)[1].strip()
+        asset = (
+            ContentPipelineAsset.query
+            .filter(
+                ContentPipelineAsset.id == pipeline_id,
+                ContentPipelineAsset.media_type == "pdf",
+            )
+            .one_or_none()
+        )
+        if not asset:
+            raise ReportTop10WorkflowError("选择的清洗 PDF 不存在")
+        resolution = resolve_cleaned_asset(asset, media_type="pdf")
+        if resolution.state != "ready" or not resolution.path:
+            raise ReportTop10WorkflowError("尚无可用清洗产物，请修复或重新投递")
+        return _content_pipeline_pdf_meta(asset, resolution.path, attachment_id=reference)
+    return pdf_meta_from_zsxq_attachment(reference)
+
+
 def pdf_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
     attachment = (
         ZsxqAttachment.query.options(
@@ -92,12 +118,15 @@ def pdf_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
     if attachment.download_status != "downloaded":
         raise ReportTop10WorkflowError("选择的同步 PDF 还没有下载完成")
 
-    path = resolve_pdf_path(attachment.local_path)
-    if not path:
-        raise ReportTop10WorkflowError("选择的同步 PDF 本地文件不存在")
+    resolution = resolve_asset_reference(
+        "",
+        media_type="pdf",
+        legacy_source_path=attachment.local_path,
+    )
+    if resolution.state != "ready" or not resolution.path or not resolution.asset:
+        raise ReportTop10WorkflowError("选择的同步 PDF 尚无可用清洗产物，请重新投递")
+    path = resolution.path
     size = path.stat().st_size
-    if size <= 0:
-        raise ReportTop10WorkflowError("选择的同步 PDF 文件为空")
     if size > _max_pdf_bytes():
         raise ReportTop10WorkflowError(f"PDF 超过 {_max_pdf_mb()}MB 限制")
 
@@ -117,6 +146,9 @@ def pdf_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
         "path": str(path),
         "bytes": size,
         "source": "zsxq_attachment",
+        "source_mode": resolution.asset.source_mode,
+        "pipeline_asset_id": resolution.asset.id,
+        "pipeline_task_id": resolution.asset.canonical_task_id,
         "attachment_id": attachment.id,
         "file_id": attachment.file_id,
         "group_id": attachment.group_id,
@@ -125,6 +157,31 @@ def pdf_meta_from_zsxq_attachment(asset_id: str) -> Dict[str, Any]:
         "topic_title": topic.title if topic else None,
         "tab_label": topic.tab_label if topic else None,
     }
+
+
+def _content_pipeline_pdf_meta(asset, path, *, attachment_id):
+    source_label = _content_pipeline_source_label(asset.source_mode)
+    return {
+        "filename": asset.filename or path.name,
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "source": "content_pipeline_asset",
+        "source_mode": asset.source_mode,
+        "attachment_id": attachment_id,
+        "pipeline_asset_id": asset.id,
+        "pipeline_task_id": asset.canonical_task_id,
+        "topic_title": asset.filename or source_label,
+        "tab_label": source_label,
+    }
+
+
+def _content_pipeline_source_label(source_mode):
+    return {
+        "scheduled_api": "计划任务",
+        "sidebar": "侧边栏下载",
+        "browser_sidebar": "侧边栏下载",
+        "manual_download": "手动投递",
+    }.get(str(source_mode or "").strip().lower(), "内容流水线")
 
 
 def resolve_pdf_path(value: Any) -> Optional[Path]:
