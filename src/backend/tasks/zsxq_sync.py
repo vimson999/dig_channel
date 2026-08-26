@@ -85,6 +85,11 @@ def run_zsxq_sync(self, run_id, payload):
 
         workflow_run_id = payload.get("workflow_run_id")
         credential_id = payload.get("credential_id") or payload.get("platform_credential_id")
+        auto_video_dispatch = _post_clean_dispatch_config(payload, "auto_video_dispatch")
+        auto_script_material_dispatch = _post_clean_dispatch_config(
+            payload,
+            "auto_script_material_dispatch",
+        )
         logger.info("[ZSXQ_SYNC_TASK] start | run_id=%s", run_id)
         try:
             cookie = payload.get("cookie")
@@ -119,6 +124,14 @@ def run_zsxq_sync(self, run_id, payload):
                 attachment_download_rules=payload.get("attachment_download_rules"),
                 auto_video_dispatch=payload.get("auto_video_dispatch"),
                 auto_script_material_dispatch=payload.get("auto_script_material_dispatch"),
+                defer_auto_video_dispatch=bool(
+                    workflow_run_id
+                    or _auto_pdf_clean_enabled(payload)
+                    or _auto_audio_clean_enabled(payload)
+                ),
+                defer_auto_script_material_dispatch=bool(
+                    workflow_run_id or _auto_pdf_clean_enabled(payload)
+                ),
                 workflow_run_id=workflow_run_id,
             )
             if not workflow_run_id and _auto_pdf_clean_enabled(payload):
@@ -128,6 +141,8 @@ def run_zsxq_sync(self, run_id, payload):
                         cleaner=payload.get("pdf_cleaner") or {},
                         trigger=payload.get("trigger") or "zsxq_sync",
                         auto_publish=payload.get("auto_publish_after_clean") or {},
+                        auto_video_dispatch=auto_video_dispatch,
+                        auto_script_material_dispatch=auto_script_material_dispatch,
                     )
                     result.setdefault("run", {}).setdefault("result", {}).setdefault("content_pipeline", {})[
                         "pdf_clean"
@@ -159,6 +174,7 @@ def run_zsxq_sync(self, run_id, payload):
                         cleaner=payload.get("audio_cleaner") or {},
                         trigger=payload.get("trigger") or "zsxq_sync",
                         auto_publish=payload.get("auto_publish_after_clean") or {},
+                        auto_video_dispatch=auto_video_dispatch,
                     )
                     result.setdefault("run", {}).setdefault("result", {}).setdefault("content_pipeline", {})[
                         "audio_clean"
@@ -273,6 +289,18 @@ def run_zsxq_sync(self, run_id, payload):
 
 def _is_retryable_db_error(exc):
     return is_retryable_db_error(exc)
+
+
+def _post_clean_dispatch_config(payload, key):
+    payload = payload if isinstance(payload, dict) else {}
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        sync_meta = payload.get("sync_meta") if isinstance(payload.get("sync_meta"), dict) else {}
+        value = sync_meta.get(key)
+    if not isinstance(value, dict):
+        return None
+    config = value.get("config") if isinstance(value.get("config"), dict) else value
+    return dict(config)
 
 
 def _terminal_delivery_result(run_id, task_id=None):

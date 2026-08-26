@@ -21,6 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import load_only
 
 from models import db
+from models.content_pipeline_asset import ContentPipelineAsset
 from models.task import PublicationTask
 from models.zsxq_sync import (
     ZsxqAttachment,
@@ -37,6 +38,7 @@ from services.runtime_guard import (
     is_retryable_db_error,
     maybe_guarded_apply_async,
 )
+from services.content_pipeline.canonical_asset_service import resolve_cleaned_asset
 from services.zsxq_service import zsxq_service
 from services.zsxq_yiren_award_cleanup_service import is_yiren_award_comment
 
@@ -406,6 +408,8 @@ class ZsxqSyncService:
         attachment_download_rules=None,
         auto_video_dispatch=None,
         auto_script_material_dispatch=None,
+        defer_auto_video_dispatch=False,
+        defer_auto_script_material_dispatch=False,
         workflow_run_id=None,
     ):
         self.ensure_schema()
@@ -646,19 +650,33 @@ class ZsxqSyncService:
                         result["download_limit_reached"] = True
 
             if auto_video_dispatch.get("enabled"):
-                result["auto_video_dispatch"] = self._submit_auto_video_dispatch_for_run(
-                    run=run_identity,
-                    sync_result=result,
-                    config=auto_video_dispatch,
-                    workflow_run_id=workflow_run_id,
-                )
+                if defer_auto_video_dispatch:
+                    result["auto_video_dispatch"] = {
+                        "status": "awaiting_clean",
+                        "reason": "canonical_clean_required",
+                        "config": auto_video_dispatch,
+                    }
+                else:
+                    result["auto_video_dispatch"] = self._submit_auto_video_dispatch_for_run(
+                        run=run_identity,
+                        sync_result=result,
+                        config=auto_video_dispatch,
+                        workflow_run_id=workflow_run_id,
+                    )
             if auto_script_material_dispatch.get("enabled"):
-                result["auto_script_material_dispatch"] = self._submit_auto_script_material_dispatch_for_run(
-                    run=run_identity,
-                    sync_result=result,
-                    config=auto_script_material_dispatch,
-                    workflow_run_id=workflow_run_id,
-                )
+                if defer_auto_script_material_dispatch:
+                    result["auto_script_material_dispatch"] = {
+                        "status": "awaiting_clean",
+                        "reason": "canonical_clean_required",
+                        "config": auto_script_material_dispatch,
+                    }
+                else:
+                    result["auto_script_material_dispatch"] = self._submit_auto_script_material_dispatch_for_run(
+                        run=run_identity,
+                        sync_result=result,
+                        config=auto_script_material_dispatch,
+                        workflow_run_id=workflow_run_id,
+                    )
 
             run.status = "completed"
             run.completed_at = datetime.utcnow()
@@ -1439,6 +1457,8 @@ class ZsxqSyncService:
         cleaner=None,
         trigger="zsxq_sync",
         auto_publish=None,
+        auto_video_dispatch=None,
+        auto_script_material_dispatch=None,
         workflow_run_id=None,
         run_context=None,
     ):
@@ -1511,6 +1531,16 @@ class ZsxqSyncService:
                 "group_name": run.group_name,
                 "mode": run.mode,
                 "files": cleanable["files"],
+                **(
+                    {"auto_video_dispatch": deepcopy(auto_video_dispatch)}
+                    if isinstance(auto_video_dispatch, dict)
+                    else {}
+                ),
+                **(
+                    {"auto_script_material_dispatch": deepcopy(auto_script_material_dispatch)}
+                    if isinstance(auto_script_material_dispatch, dict)
+                    else {}
+                ),
             },
         )
         task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
@@ -1544,6 +1574,7 @@ class ZsxqSyncService:
         cleaner=None,
         trigger="zsxq_sync",
         auto_publish=None,
+        auto_video_dispatch=None,
         workflow_run_id=None,
         run_context=None,
     ):
@@ -1616,6 +1647,11 @@ class ZsxqSyncService:
                 "group_name": run.group_name,
                 "mode": run.mode,
                 "files": cleanable["files"],
+                **(
+                    {"auto_video_dispatch": deepcopy(auto_video_dispatch)}
+                    if isinstance(auto_video_dispatch, dict)
+                    else {}
+                ),
             },
         )
         task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
@@ -1832,7 +1868,38 @@ class ZsxqSyncService:
             return fallback
         return value
 
-    def _submit_auto_video_dispatch_for_run(self, run, sync_result, config, workflow_run_id=None):
+    def submit_auto_video_dispatch_for_cleaned_attachments(
+        self,
+        *,
+        run_id,
+        attachment_ids,
+        file_type,
+        config,
+        workflow_run_id=None,
+    ):
+        """Dispatch one cleaned media type without ever reopening its raw download."""
+        kind = "pdf" if str(file_type or "").strip().lower() == "pdf" else "mp3"
+        run = self._load_content_pipeline_run(run_id)
+        if not run:
+            raise ValueError(f"同步任务不存在: {run_id}")
+        return self._submit_auto_video_dispatch_for_run(
+            run=run,
+            sync_result={},
+            config=self._normalize_auto_video_dispatch(config),
+            workflow_run_id=workflow_run_id,
+            attachment_ids=attachment_ids,
+            allowed_kinds={kind},
+        )
+
+    def _submit_auto_video_dispatch_for_run(
+        self,
+        run,
+        sync_result,
+        config,
+        workflow_run_id=None,
+        attachment_ids=None,
+        allowed_kinds=None,
+    ):
         summary = self._new_auto_video_dispatch_summary(config, run, workflow_run_id)
         run = SimpleNamespace(
             id=summary["run_id"],
@@ -1840,7 +1907,17 @@ class ZsxqSyncService:
             group_name=summary["group_name"],
         )
         try:
-            attachment_ids = self._downloaded_attachment_ids_from_sync_result(sync_result)
+            if attachment_ids is None:
+                attachment_ids = self._downloaded_attachment_ids_from_sync_result(sync_result)
+            else:
+                attachment_ids = list(dict.fromkeys(
+                    str(item or "").strip() for item in attachment_ids if str(item or "").strip()
+                ))
+            allowed_kinds = {
+                str(item or "").strip().lower()
+                for item in (allowed_kinds or [])
+                if str(item or "").strip()
+            }
             summary["attachments_checked"] = len(attachment_ids)
             if not attachment_ids:
                 summary["status"] = "skipped"
@@ -1864,7 +1941,7 @@ class ZsxqSyncService:
                 if not attachment:
                     continue
                 kind = self._auto_video_attachment_kind(attachment)
-                if not kind:
+                if not kind or (allowed_kinds and kind not in allowed_kinds):
                     summary["skipped_non_target"] += 1
                     continue
                 bucket = summary[kind]
@@ -1891,10 +1968,9 @@ class ZsxqSyncService:
                     item.update({"status": "skipped", "reason": "not_downloaded"})
                     bucket["items"].append(item)
                     continue
-                local_path = self._absolute_local_path(attachment.local_path)
-                if not local_path or not local_path.exists() or not local_path.is_file():
-                    bucket["skipped_missing_file"] += 1
-                    item.update({"status": "skipped", "reason": "missing_local_file"})
+                if not self._canonical_cleaned_asset_for_attachment(attachment, kind):
+                    bucket["skipped_not_cleaned"] += 1
+                    item.update({"status": "skipped", "reason": "cleaned_output_unavailable"})
                     bucket["items"].append(item)
                     continue
                 existing_task = self._find_existing_auto_video_task(attachment, kind)
@@ -1981,7 +2057,34 @@ class ZsxqSyncService:
         self._send_auto_video_dispatch_email(run, summary)
         return summary
 
-    def _submit_auto_script_material_dispatch_for_run(self, run, sync_result, config, workflow_run_id=None):
+    def submit_auto_script_material_dispatch_for_cleaned_attachments(
+        self,
+        *,
+        run_id,
+        attachment_ids,
+        config,
+        workflow_run_id=None,
+    ):
+        """Dispatch script material from registered clean PDFs only."""
+        run = self._load_content_pipeline_run(run_id)
+        if not run:
+            raise ValueError(f"同步任务不存在: {run_id}")
+        return self._submit_auto_script_material_dispatch_for_run(
+            run=run,
+            sync_result={},
+            config=self._normalize_auto_script_material_dispatch(config),
+            workflow_run_id=workflow_run_id,
+            attachment_ids=attachment_ids,
+        )
+
+    def _submit_auto_script_material_dispatch_for_run(
+        self,
+        run,
+        sync_result,
+        config,
+        workflow_run_id=None,
+        attachment_ids=None,
+    ):
         summary = self._new_auto_script_material_dispatch_summary(config, run, workflow_run_id)
         run = SimpleNamespace(
             id=summary["run_id"],
@@ -1989,7 +2092,12 @@ class ZsxqSyncService:
             group_name=summary["group_name"],
         )
         try:
-            attachment_ids = self._downloaded_attachment_ids_from_sync_result(sync_result)
+            if attachment_ids is None:
+                attachment_ids = self._downloaded_attachment_ids_from_sync_result(sync_result)
+            else:
+                attachment_ids = list(dict.fromkeys(
+                    str(item or "").strip() for item in attachment_ids if str(item or "").strip()
+                ))
             summary["attachments_checked"] = len(attachment_ids)
             if not attachment_ids:
                 summary["status"] = "skipped"
@@ -2035,10 +2143,9 @@ class ZsxqSyncService:
                     item.update({"status": "skipped", "reason": "not_downloaded"})
                     bucket["items"].append(item)
                     continue
-                local_path = self._absolute_local_path(attachment.local_path)
-                if not local_path or not local_path.exists() or not local_path.is_file():
-                    bucket["skipped_missing_file"] += 1
-                    item.update({"status": "skipped", "reason": "missing_local_file"})
+                if not self._canonical_cleaned_asset_for_attachment(attachment, kind):
+                    bucket["skipped_not_cleaned"] += 1
+                    item.update({"status": "skipped", "reason": "cleaned_output_unavailable"})
                     bucket["items"].append(item)
                     continue
                 existing_task = self._find_existing_auto_script_material_task(attachment)
@@ -2196,6 +2303,7 @@ class ZsxqSyncService:
             "skipped_missing_download_count": 0,
             "skipped_not_downloaded": 0,
             "skipped_missing_file": 0,
+            "skipped_not_cleaned": 0,
             "items": [],
         }
 
@@ -2231,6 +2339,27 @@ class ZsxqSyncService:
         if ext in AUTO_VIDEO_AUDIO_EXTENSIONS:
             return "mp3"
         return None
+
+    def _canonical_cleaned_asset_for_attachment(self, attachment, kind):
+        local_path = self._absolute_local_path(getattr(attachment, "local_path", None))
+        if not local_path:
+            return None
+        media_type = "pdf" if kind == "pdf" else "audio"
+        asset = (
+            ContentPipelineAsset.query
+            .filter(
+                ContentPipelineAsset.media_type == media_type,
+                ContentPipelineAsset.source_path == str(local_path),
+                ContentPipelineAsset.status == "cleaned",
+            )
+            .order_by(
+                ContentPipelineAsset.updated_at.desc(),
+                ContentPipelineAsset.created_at.desc(),
+            )
+            .first()
+        )
+        resolution = resolve_cleaned_asset(asset, media_type=media_type)
+        return asset if resolution.state == "ready" else None
 
     def _auto_video_attachment_summary(self, attachment, kind, threshold):
         return {
@@ -2750,9 +2879,11 @@ class ZsxqSyncService:
     def _report_audio_pdf_meta_from_attachment(self, attachment, job_id=None):
         if attachment.download_status != "downloaded":
             raise ValueError("选择的同步 PDF 还没有下载完成")
-        path = self._absolute_local_path(attachment.local_path)
-        if not path or not path.exists() or not path.is_file() or path.suffix.lower() != ".pdf":
-            raise ValueError("选择的同步 PDF 本地文件不存在")
+        asset = self._canonical_cleaned_asset_for_attachment(attachment, "pdf")
+        resolution = resolve_cleaned_asset(asset, media_type="pdf")
+        path = resolution.path
+        if resolution.state != "ready" or not path:
+            raise ValueError("选择的同步 PDF 尚未清洗完成或清洗产物缺失")
         size = path.stat().st_size
         if size <= 0:
             raise ValueError("选择的同步 PDF 文件为空")
@@ -2774,7 +2905,10 @@ class ZsxqSyncService:
             "filename": attachment.name or path.name,
             "path": str(path),
             "bytes": size,
-            "source": "zsxq_attachment",
+            "source": "content_pipeline_asset",
+            "source_mode": asset.source_mode,
+            "pipeline_asset_id": asset.id,
+            "pipeline_task_id": asset.canonical_task_id,
             "attachment_id": attachment.id,
             "group_id": attachment.group_id,
             "tab_id": attachment.tab_id,
@@ -2901,7 +3035,8 @@ class ZsxqSyncService:
             f"延后排队 {bucket.get('deferred', 0)}，"
             f"已有任务 {bucket.get('skipped_existing', 0)}，低于阈值 {bucket.get('skipped_below_threshold', 0)}，"
             f"缺少下载数 {bucket.get('skipped_missing_download_count', 0)}，"
-            f"文件缺失 {bucket.get('skipped_missing_file', 0)}，失败 {bucket.get('failed', 0)}。"
+            f"文件缺失 {bucket.get('skipped_missing_file', 0)}，清洗产物未就绪 {bucket.get('skipped_not_cleaned', 0)}，"
+            f"失败 {bucket.get('failed', 0)}。"
         )
 
     def _auto_video_status_label(self, status):

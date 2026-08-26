@@ -278,6 +278,17 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
                 source_refs=source_refs,
                 registered_output_paths=_registered_cleaned_paths(merged_result),
             )
+            result = _dispatch_zsxq_auto_video_after_clean(
+                result=result,
+                pipeline=pipeline,
+                file_type="pdf",
+                source_refs=source_refs,
+            )
+            result = _dispatch_zsxq_auto_script_material_after_clean(
+                result=result,
+                pipeline=pipeline,
+                source_refs=source_refs,
+            )
 
             _update_task_fields(
                 task_key,
@@ -455,6 +466,12 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
                 pipeline=pipeline,
                 source_refs=source_refs,
                 registered_output_paths=_registered_cleaned_paths(merged_result),
+            )
+            result = _dispatch_zsxq_auto_video_after_clean(
+                result=result,
+                pipeline=pipeline,
+                file_type="audio",
+                source_refs=source_refs,
             )
 
             _update_task_fields(
@@ -815,6 +832,102 @@ def _enqueue_auto_publish_task(
 
     merged = dict(result or {})
     merged["auto_publish"] = publish_result
+    return merged
+
+
+def _dispatch_zsxq_auto_video_after_clean(*, result, pipeline, file_type, source_refs):
+    """Run the ZSXQ video side branch only after its clean files are registered."""
+    merged = dict(result or {})
+    pipeline = pipeline if isinstance(pipeline, dict) else {}
+    metadata = pipeline.get("metadata") if isinstance(pipeline.get("metadata"), dict) else {}
+    config = metadata.get("auto_video_dispatch")
+    sync_run_id = str(metadata.get("sync_run_id") or "").strip()
+    attachment_ids = [
+        str(item.get("attachment_id") or "").strip()
+        for item in (source_refs or [])
+        if isinstance(item, dict)
+        and item.get("output_paths")
+        and str(item.get("attachment_id") or "").strip()
+    ]
+    if not isinstance(config, dict) or not config.get("enabled"):
+        return merged
+    if not sync_run_id or not attachment_ids:
+        merged["post_clean_auto_video_dispatch"] = {
+            "enabled": True,
+            "status": "skipped",
+            "reason": "no_registered_attachment_output",
+        }
+        return merged
+    try:
+        from services.zsxq_sync_service import zsxq_sync_service
+
+        merged["post_clean_auto_video_dispatch"] = (
+            zsxq_sync_service.submit_auto_video_dispatch_for_cleaned_attachments(
+                run_id=sync_run_id,
+                attachment_ids=attachment_ids,
+                file_type=file_type,
+                config=config,
+                workflow_run_id=metadata.get("workflow_run_id"),
+            )
+        )
+    except Exception as exc:
+        logger.exception(
+            "[CONTENT_PIPELINE] post-clean auto video dispatch failed | run=%s type=%s",
+            sync_run_id,
+            file_type,
+        )
+        merged["post_clean_auto_video_dispatch"] = {
+            "enabled": True,
+            "status": "failed",
+            "error": str(exc),
+        }
+    return merged
+
+
+def _dispatch_zsxq_auto_script_material_after_clean(*, result, pipeline, source_refs):
+    """Run the PDF script-material side branch after clean-output registration."""
+    merged = dict(result or {})
+    pipeline = pipeline if isinstance(pipeline, dict) else {}
+    metadata = pipeline.get("metadata") if isinstance(pipeline.get("metadata"), dict) else {}
+    config = metadata.get("auto_script_material_dispatch")
+    sync_run_id = str(metadata.get("sync_run_id") or "").strip()
+    attachment_ids = [
+        str(item.get("attachment_id") or "").strip()
+        for item in (source_refs or [])
+        if isinstance(item, dict)
+        and item.get("output_paths")
+        and str(item.get("attachment_id") or "").strip()
+    ]
+    if not isinstance(config, dict) or not config.get("enabled"):
+        return merged
+    if not sync_run_id or not attachment_ids:
+        merged["post_clean_auto_script_material_dispatch"] = {
+            "enabled": True,
+            "status": "skipped",
+            "reason": "no_registered_attachment_output",
+        }
+        return merged
+    try:
+        from services.zsxq_sync_service import zsxq_sync_service
+
+        merged["post_clean_auto_script_material_dispatch"] = (
+            zsxq_sync_service.submit_auto_script_material_dispatch_for_cleaned_attachments(
+                run_id=sync_run_id,
+                attachment_ids=attachment_ids,
+                config=config,
+                workflow_run_id=metadata.get("workflow_run_id"),
+            )
+        )
+    except Exception as exc:
+        logger.exception(
+            "[CONTENT_PIPELINE] post-clean script material dispatch failed | run=%s",
+            sync_run_id,
+        )
+        merged["post_clean_auto_script_material_dispatch"] = {
+            "enabled": True,
+            "status": "failed",
+            "error": str(exc),
+        }
     return merged
 
 

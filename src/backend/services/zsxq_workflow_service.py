@@ -1265,12 +1265,19 @@ class ZsxqWorkflowService:
         self, *, workflow, run_id, file_type, cleaner, run_context=None
     ):
         try:
+            sync_config = (self._snapshot(workflow).get("sync") or {})
+            auto_video_dispatch = sync_config.get("auto_video_dispatch")
+            auto_script_material_dispatch = sync_config.get(
+                "auto_script_material_dispatch"
+            )
             if file_type == "pdf":
                 result = zsxq_sync_service.submit_pdf_clean_for_run(
                     run_id,
                     cleaner=cleaner,
                     trigger="zsxq_workflow",
                     auto_publish={"enabled": False},
+                    auto_video_dispatch=auto_video_dispatch,
+                    auto_script_material_dispatch=auto_script_material_dispatch,
                     workflow_run_id=workflow.id,
                     run_context=run_context,
                 )
@@ -1280,6 +1287,7 @@ class ZsxqWorkflowService:
                     cleaner=cleaner,
                     trigger="zsxq_workflow",
                     auto_publish={"enabled": False},
+                    auto_video_dispatch=auto_video_dispatch,
                     workflow_run_id=workflow.id,
                     run_context=run_context,
                 )
@@ -2647,9 +2655,10 @@ class ZsxqWorkflowService:
             session.expire_on_commit = previous_expire_on_commit
 
     def _snapshot(self, workflow):
+        snapshot = getattr(workflow, "config_snapshot", None)
         return (
-            workflow.config_snapshot
-            if isinstance(workflow.config_snapshot, dict)
+            snapshot
+            if isinstance(snapshot, dict)
             else {}
         )
 

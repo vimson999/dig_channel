@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -15,12 +16,42 @@ if str(BACKEND_DIR) not in sys.path:
 
 from apis.v1 import celery_monitor  # noqa: E402
 from models import db  # noqa: E402
+from models.content_pipeline_asset import ContentPipelineAsset  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
 from models.zsxq_sync import ZsxqAttachment, ZsxqSyncRun, ZsxqTopic  # noqa: E402
 from services.zsxq_sync_service import ZsxqSyncService  # noqa: E402
 
 
 class ZsxqAutoVideoDispatchTest(unittest.TestCase):
+    @staticmethod
+    def _add_cleaned_pdf_asset(source_path, output_root, *, fixture_name):
+        """Register a usable canonical output while deliberately retaining no raw fallback."""
+        clean_task = PublicationTask(
+            feature="content_clean_fixture",
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": "content_clean_fixture"},
+        )
+        db.session.add(clean_task)
+        db.session.flush()
+        cleaned_path = output_root / fixture_name / source_path.name
+        cleaned_path.parent.mkdir(parents=True, exist_ok=True)
+        cleaned_path.write_bytes(b"%PDF-1.4\ncleaned fixture")
+        db.session.add(ContentPipelineAsset(
+            media_type="pdf",
+            content_sha256=(fixture_name[0] * 64),
+            canonical_task_id=str(clean_task.id),
+            source_path=str(source_path.resolve()),
+            filename=source_path.name,
+            source_mode="scheduled_api",
+            status="cleaned",
+            cleaned_path=str(cleaned_path.resolve()),
+            cleaned_sha256=(fixture_name[-1] * 64),
+            cleaned_bytes=cleaned_path.stat().st_size,
+        ))
+        return cleaned_path
+
     def test_monitor_maps_report_pdf_audio_feature_to_report_workflow_service(self):
         self.assertIn(
             "report_pdf_audio_workflow",
@@ -109,8 +140,58 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                     local_path=str(mp3_path),
                     download_status="downloaded",
                 )
-                db.session.add_all([run, pdf_topic, mp3_topic, pdf_attachment, mp3_attachment])
+                clean_task = PublicationTask(
+                    feature="content_clean_fixture",
+                    status="completed",
+                    current_step="done",
+                    progress=100,
+                    params={"feature": "content_clean_fixture"},
+                )
+                db.session.add_all([
+                    run,
+                    pdf_topic,
+                    mp3_topic,
+                    pdf_attachment,
+                    mp3_attachment,
+                    clean_task,
+                ])
+                db.session.flush()
+                output_root = temp_root / "canonical-cleaned"
+                cleaned_pdf = output_root / "batch-pdf" / "report.pdf"
+                cleaned_mp3 = output_root / "batch-mp3" / "memo.mp3"
+                cleaned_pdf.parent.mkdir(parents=True)
+                cleaned_mp3.parent.mkdir(parents=True)
+                cleaned_pdf.write_bytes(b"%PDF-cleaned")
+                cleaned_mp3.write_bytes(b"cleaned audio")
+                db.session.add_all([
+                    ContentPipelineAsset(
+                        media_type="pdf",
+                        content_sha256="a" * 64,
+                        canonical_task_id=str(clean_task.id),
+                        source_path=str(pdf_path.resolve()),
+                        filename=pdf_path.name,
+                        source_mode="scheduled_api",
+                        status="cleaned",
+                        cleaned_path=str(cleaned_pdf.resolve()),
+                        cleaned_sha256="b" * 64,
+                        cleaned_bytes=cleaned_pdf.stat().st_size,
+                    ),
+                    ContentPipelineAsset(
+                        media_type="audio",
+                        content_sha256="c" * 64,
+                        canonical_task_id=str(clean_task.id),
+                        source_path=str(mp3_path.resolve()),
+                        filename=mp3_path.name,
+                        source_mode="scheduled_api",
+                        status="cleaned",
+                        cleaned_path=str(cleaned_mp3.resolve()),
+                        cleaned_sha256="d" * 64,
+                        cleaned_bytes=cleaned_mp3.stat().st_size,
+                    ),
+                ])
                 db.session.commit()
+                pdf_path.unlink()
+                mp3_path.unlink()
 
                 sync_result = {
                     "downloaded_files": [
@@ -128,7 +209,11 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                     "wait_for_completion": False,
                 }
 
-                with patch(
+                with patch.dict(
+                    os.environ,
+                    {"CONTENT_PIPELINE_OUTPUT_ROOT": str(output_root)},
+                    clear=False,
+                ), patch(
                     "tasks.report_audio_workflow.process_report_audio_workflow_job.apply_async",
                     return_value=SimpleNamespace(id="celery-pdf"),
                 ) as report_apply:
@@ -154,7 +239,15 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                 mp3_apply.assert_called_once()
                 send_email.assert_called_once()
 
-                tasks = PublicationTask.query.order_by(PublicationTask.created_at.asc()).all()
+                tasks = (
+                    PublicationTask.query
+                    .filter(PublicationTask.feature.in_((
+                        "report_pdf_audio_workflow",
+                        "mp3_video_workflow",
+                    )))
+                    .order_by(PublicationTask.created_at.asc())
+                    .all()
+                )
                 self.assertEqual(len(tasks), 2)
                 features = {task.feature for task in tasks}
                 self.assertEqual(features, {"report_pdf_audio_workflow", "mp3_video_workflow"})
@@ -183,6 +276,7 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "report.pdf"
             pdf_path.write_bytes(b"%PDF-1.4\nfixture")
+            output_root = Path(temp_dir) / "canonical-cleaned"
 
             app = Flask(__name__)
             app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
@@ -217,7 +311,13 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                     download_status="downloaded",
                 )
                 db.session.add_all([run, topic, attachment])
+                cleaned_pdf = self._add_cleaned_pdf_asset(
+                    pdf_path,
+                    output_root,
+                    fixture_name="script-material",
+                )
                 db.session.commit()
+                pdf_path.unlink()
 
                 sync_result = {
                     "downloaded_files": [{"path": str(pdf_path), "attachment_id": "att-script-material"}],
@@ -236,7 +336,11 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
 
                 event.listen(db.engine, "before_cursor_execute", capture_sql)
                 try:
-                    with patch(
+                    with patch.dict(
+                        os.environ,
+                        {"CONTENT_PIPELINE_OUTPUT_ROOT": str(output_root)},
+                        clear=False,
+                    ), patch(
                         "tasks.report_script_material_workflow.process_report_script_material_workflow_job.apply_async",
                         return_value=SimpleNamespace(id="celery-script-material"),
                     ) as report_apply:
@@ -263,7 +367,9 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                 ]
                 self.assertEqual(full_payload_refreshes, [])
 
-                task = PublicationTask.query.one()
+                task = PublicationTask.query.filter_by(
+                    feature="report_script_material_workflow"
+                ).one()
                 self.assertEqual(task.feature, "report_script_material_workflow")
                 self.assertEqual(task.parent_feature, "zsxq_sync_run")
                 self.assertEqual(task.parent_task_id, "run-script-material")
@@ -271,6 +377,7 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                 self.assertEqual(task.source_task_id, "att-script-material")
                 self.assertEqual(task.report_audio_pdf_attachment_id, "att-script-material")
                 workflow = task.params["report_script_material_workflow"]
+                self.assertEqual(workflow["pdf_path"], str(cleaned_pdf.resolve()))
                 self.assertFalse(workflow["video"]["enabled"])
                 self.assertFalse(workflow["video"]["vertical_enabled"])
                 self.assertFalse(workflow["pdf_evidence_enabled"])
@@ -292,6 +399,7 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "report.pdf"
             pdf_path.write_bytes(b"%PDF-1.4\nfixture")
+            output_root = Path(temp_dir) / "canonical-cleaned"
 
             app = Flask(__name__)
             app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
@@ -319,7 +427,13 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                     download_status="downloaded",
                 )
                 db.session.add_all([run, topic, attachment])
+                self._add_cleaned_pdf_asset(
+                    pdf_path,
+                    output_root,
+                    fixture_name="script-material-deferred",
+                )
                 db.session.commit()
+                pdf_path.unlink()
 
                 sync_result = {
                     "downloaded_files": [{"path": str(pdf_path), "attachment_id": "att-script-material-deferred"}],
@@ -330,7 +444,11 @@ class ZsxqAutoVideoDispatchTest(unittest.TestCase):
                     "wait_for_completion": False,
                 }
 
-                with patch(
+                with patch.dict(
+                    os.environ,
+                    {"CONTENT_PIPELINE_OUTPUT_ROOT": str(output_root)},
+                    clear=False,
+                ), patch(
                     "services.zsxq_sync_service.maybe_guarded_apply_async",
                     return_value={
                         "async_result": SimpleNamespace(id="celery-deferred"),
