@@ -1,7 +1,7 @@
 # 内容流水线规范清洗资产设计
 
 **日期：** 2026-08-25  
-**状态：** 已确认设计，待实施  
+**状态：** 已实施
 **范围：** 知识星球计划任务、侧边栏和手动投递进入内容流水线后的 MP3/PDF 资产，以及消费这些资产的工作台。
 
 ## 目标
@@ -100,6 +100,16 @@ PDF 清洗器的结果会补充绝对 `source_path` 字段，与音频清洗器�
 4. 无法唯一匹配或产物不存在时不猜测、不覆盖，输出可审计的跳过原因。
 
 部署后先运行一次回填。以后每个清洗任务在完成时自动登记，因此不需要常规人工维护。输出丢失时，资产会在解析时显示不可用，可通过同一维护命令复检；恢复方式是从仍在的清洗输出重新登记，或重新投递原始文件。
+
+实际部署顺序：
+
+```bash
+alembic upgrade head
+PYTHONPATH=src/backend venv/bin/python scripts/maintenance/backfill_content_pipeline_cleaned_assets.py --dry-run --limit 200
+PYTHONPATH=src/backend venv/bin/python scripts/maintenance/backfill_content_pipeline_cleaned_assets.py --limit 200
+```
+
+原始下载文件必须保留到清洗任务完成、且对应 `cleaned_path` 经解析器验证为 `ready`。只有完成这个确认后，Downloads 原件才可删除。
 
 ## 消费端改造范围
 

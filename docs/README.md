@@ -120,6 +120,19 @@ youtube-analytics/
 - [知识星球统一投递历史接口与多租户调用方凭据](api/ZSXQ_BROWSER_IMPORT.md)
 - [今日研报 Top10 编排 MVP 设计](planning/report_top10_workflow_plan_20260624.md)
 - [研报基础文案物料独立队列](planning/report_script_material_workflow_queue_20260625.md)
+- [规范清洗资产设计](superpowers/specs/2026-08-25-content-pipeline-canonical-cleaned-assets-design.md)
+
+### 清洗产物上线顺序
+
+知识星球计划任务、侧边栏和手动投递在进入内容流水线后共用同一资产账本。只有已验证的清洗产物才会出现在 MP3/PDF 工作台中；Downloads 的原件是输入和审计证据，**原始下载文件必须保留**到清洗任务完成、并确认规范产物可用为止。
+
+```bash
+alembic upgrade head
+PYTHONPATH=src/backend venv/bin/python scripts/maintenance/backfill_content_pipeline_cleaned_assets.py --dry-run --limit 200
+PYTHONPATH=src/backend venv/bin/python scripts/maintenance/backfill_content_pipeline_cleaned_assets.py --limit 200
+```
+
+请先检查 dry-run 输出再执行实际回填。回填完成且清洗产物可用后，才可以删除对应 Downloads 原件。
 
 ---
 

@@ -79,6 +79,26 @@ API 有两个目录并存：
 - PDF 清洗：`src/backend/services/content_pipeline/pdf_cleaner_adapter.py`
 - 音频清洗：`src/backend/services/content_pipeline/audio_cleaner_adapter.py`
 - 清洗后发布 handoff：`src/backend/services/content_pipeline/auto_publish_handoff.py`
+- 规范产物账本与解析：`src/backend/services/content_pipeline/canonical_asset_service.py`；`ContentPipelineAsset.cleaned_*` 是清洗成功后唯一允许被工作台、预览和新编排使用的文件引用。
+
+### 规范清洗产物：运行与保留规则
+
+知识星球计划任务、侧边栏和手动投递只是三个上游入口；进入内容流水线后，它们共享同一个 `ContentPipelineAsset` 去重账本和后续通知/发布链路。清洗成功后：
+
+- MP3/PDF 工作台列表、预览和新建编排只使用已验证的 `cleaned_path`，不会回退到 `source_path` 或 Downloads；
+- 单个文件失败只会标记该资产失败，其他已登记的清洗产物继续进入自动发布；
+- 原始下载文件必须保留，直到所属清洗任务完成且对应规范清洗产物已验证为 `ready`；验证完成后，Downloads 原件可以删除；
+- 若清洗产物丢失，资产会变为不可用，需重新登记仍在的输出或重新投递原件，不能使用原始下载文件绕过清洗。
+
+部署这一改造时，先升级数据库并回填历史可验证产物：
+
+```bash
+alembic upgrade head
+PYTHONPATH=src/backend venv/bin/python scripts/maintenance/backfill_content_pipeline_cleaned_assets.py --dry-run --limit 200
+PYTHONPATH=src/backend venv/bin/python scripts/maintenance/backfill_content_pipeline_cleaned_assets.py --limit 200
+```
+
+回填先执行 dry-run，检查已登记与跳过数量后再执行实际命令；执行后重启后端和内容流水线 worker。
 
 研报转语音/视频编排：
 
