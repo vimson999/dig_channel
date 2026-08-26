@@ -127,7 +127,9 @@ youtube-analytics/
 知识星球计划任务、侧边栏和手动投递在进入内容流水线后共用同一资产账本。只有已验证的清洗产物才会出现在 MP3/PDF 工作台中；Downloads 的原件是输入和审计证据，**原始下载文件必须保留**到清洗任务完成、并确认规范产物可用为止。
 
 ```bash
-alembic upgrade head
+cd src/backend
+BACKEND_PROCESS_BOOTSTRAP_ENABLED=0 ../../venv/bin/flask --app app:create_app db upgrade
+cd ../..
 PYTHONPATH=src/backend venv/bin/python scripts/maintenance/backfill_content_pipeline_cleaned_assets.py --dry-run --limit 200
 PYTHONPATH=src/backend venv/bin/python scripts/maintenance/backfill_content_pipeline_cleaned_assets.py --limit 200
 ```

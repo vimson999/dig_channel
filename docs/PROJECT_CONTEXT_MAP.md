@@ -94,7 +94,9 @@ API 有两个目录并存：
 部署这一改造时，先升级数据库并回填历史可验证产物：
 
 ```bash
-alembic upgrade head
+cd src/backend
+BACKEND_PROCESS_BOOTSTRAP_ENABLED=0 ../../venv/bin/flask --app app:create_app db upgrade
+cd ../..
 PYTHONPATH=src/backend venv/bin/python scripts/maintenance/backfill_content_pipeline_cleaned_assets.py --dry-run --limit 200
 PYTHONPATH=src/backend venv/bin/python scripts/maintenance/backfill_content_pipeline_cleaned_assets.py --limit 200
 ```

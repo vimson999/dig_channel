@@ -22,7 +22,10 @@ class ContentPipelineCanonicalAssetDocsTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         combined = "\n".join((project_context, readme, notifications, design))
 
-        self.assertIn("alembic upgrade head", combined)
+        self.assertIn(
+            "BACKEND_PROCESS_BOOTSTRAP_ENABLED=0 ../../venv/bin/flask --app app:create_app db upgrade",
+            combined,
+        )
         self.assertIn(
             "backfill_content_pipeline_cleaned_assets.py --dry-run --limit 200",
             combined,

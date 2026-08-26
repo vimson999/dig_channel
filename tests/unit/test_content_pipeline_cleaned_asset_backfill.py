@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from flask import Flask
+from sqlalchemy import event
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -15,6 +16,7 @@ if str(BACKEND_DIR) not in sys.path:
 from models import db  # noqa: E402
 from models.content_pipeline_asset import ContentPipelineAsset  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
+from scripts.maintenance import backfill_content_pipeline_cleaned_assets as backfill  # noqa: E402
 from services.content_pipeline.canonical_asset_service import (  # noqa: E402
     backfill_task_cleaned_outputs,
     resolve_cleaned_asset,
@@ -116,6 +118,99 @@ class ContentPipelineCleanedAssetBackfillTest(unittest.TestCase):
         self.assertEqual(report["registered_count"], 1)
         self.assertEqual(report["registered_paths"], [str(cleaned.resolve())])
         self.assertIsNone(asset.cleaned_path)
+
+    def test_cli_loader_limits_historical_query_to_backfill_fields(self):
+        """A large task table must not load unrelated JSON/projection columns first."""
+        task = PublicationTask(
+            feature="content_pdf_clean",
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": "content_pdf_clean", "content_pipeline": {}},
+            result={"cleaned_files": []},
+            error_message="unrelated detail payload",
+            task_title="unrelated title",
+        )
+        db.session.add(task)
+        db.session.commit()
+        task_id = str(task.id)
+        db.session.remove()
+
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(" ".join(statement.lower().split()))
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            loaded = backfill.load_backfill_task(
+                PublicationTask,
+                task_id,
+            )
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        self.assertEqual(task_id, str(loaded.id))
+        select = next(
+            statement
+            for statement in statements
+            if statement.startswith("select") and "from publication_tasks" in statement
+        )
+        self.assertIn("publication_tasks.params", select)
+        self.assertIn("publication_tasks.result", select)
+        self.assertNotIn("publication_tasks.error_message", select)
+        self.assertNotIn("publication_tasks.publisher_vertical_cover_path", select)
+
+    def test_cli_iterator_reads_payloads_one_task_at_a_time(self):
+        """A 200-task backfill must not retrieve all params/result JSON in one query."""
+        for index in range(2):
+            db.session.add(PublicationTask(
+                feature="content_pdf_clean",
+                status="completed",
+                current_step="done",
+                progress=100,
+                params={"feature": "content_pdf_clean", "sequence": index},
+                result={"cleaned_files": []},
+            ))
+        db.session.commit()
+        db.session.remove()
+
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(" ".join(statement.lower().split()))
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            tasks = list(backfill.iter_backfill_tasks(
+                PublicationTask,
+                task_ids=None,
+                media_type=None,
+                limit=2,
+            ))
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        self.assertEqual(2, len(tasks))
+        id_batch_selects = [
+            statement
+            for statement in statements
+            if statement.startswith("select")
+            and "from publication_tasks" in statement
+            and "publication_tasks.params" not in statement
+            and "publication_tasks.result" not in statement
+        ]
+        payload_point_selects = [
+            statement
+            for statement in statements
+            if statement.startswith("select")
+            and "from publication_tasks" in statement
+            and "publication_tasks.params" in statement
+            and "publication_tasks.result" in statement
+            and "where publication_tasks.id" in statement
+        ]
+        self.assertEqual(1, len(id_batch_selects))
+        self.assertEqual(2, len(payload_point_selects))
 
 
 if __name__ == "__main__":

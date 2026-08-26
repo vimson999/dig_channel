@@ -14,6 +14,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from sqlalchemy.orm import load_only
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = PROJECT_ROOT / "src" / "backend"
@@ -61,6 +63,63 @@ def _positive_limit(value: int) -> int:
         return 500
 
 
+def _backfill_task_filter(PublicationTask, *, task_ids=None, media_type=None):
+    query = PublicationTask.query.filter(
+        PublicationTask.feature.in_(FEATURES_BY_MEDIA_TYPE.values())
+    )
+    if task_ids:
+        query = query.filter(PublicationTask.id.in_(task_ids))
+    else:
+        query = query.filter(PublicationTask.status == "completed")
+    if media_type:
+        query = query.filter(
+            PublicationTask.feature == FEATURES_BY_MEDIA_TYPE[media_type]
+        )
+    return query
+
+
+def list_backfill_task_ids(PublicationTask, *, task_ids=None, media_type=None, limit=500):
+    """Fetch batch identifiers without loading heavyweight task JSON."""
+    rows = _backfill_task_filter(
+        PublicationTask,
+        task_ids=task_ids,
+        media_type=media_type,
+    ).with_entities(
+        PublicationTask.id
+    ).order_by(
+        PublicationTask.created_at.asc(),
+        PublicationTask.id.asc(),
+    ).limit(_positive_limit(limit)).all()
+    return [str(row[0]) for row in rows if row and row[0]]
+
+
+def load_backfill_task(PublicationTask, task_id):
+    """Load one task's required JSON and detach it before per-task rollback."""
+    query = PublicationTask.query.options(load_only(
+        PublicationTask.id,
+        PublicationTask.feature,
+        PublicationTask.params,
+        PublicationTask.result,
+    )).filter(PublicationTask.id == str(task_id))
+    task = query.one_or_none()
+    if task:
+        query.session.expunge(task)
+    return task
+
+
+def iter_backfill_tasks(PublicationTask, *, task_ids=None, media_type=None, limit=500):
+    """Yield historical tasks one payload at a time for bounded DB reads."""
+    for task_id in list_backfill_task_ids(
+        PublicationTask,
+        task_ids=task_ids,
+        media_type=media_type,
+        limit=limit,
+    ):
+        task = load_backfill_task(PublicationTask, task_id)
+        if task:
+            yield task
+
+
 def main() -> int:
     args = build_parser().parse_args()
     from app import create_app
@@ -74,32 +133,30 @@ def main() -> int:
     reports = []
     errors = []
     with app.app_context():
-        query = PublicationTask.query.filter(
-            PublicationTask.feature.in_(FEATURES_BY_MEDIA_TYPE.values())
-        )
         if args.task_ids:
             task_ids = [str(value).strip() for value in args.task_ids if str(value).strip()]
-            query = query.filter(PublicationTask.id.in_(task_ids))
         else:
-            query = query.filter(PublicationTask.status == "completed")
-        if args.media_type:
-            query = query.filter(
-                PublicationTask.feature == FEATURES_BY_MEDIA_TYPE[args.media_type]
-            )
+            task_ids = None
 
-        tasks = query.order_by(
-            PublicationTask.created_at.asc(),
-            PublicationTask.id.asc(),
-        ).limit(_positive_limit(args.limit)).all()
+        selected_task_ids = list_backfill_task_ids(
+            PublicationTask,
+            task_ids=task_ids,
+            media_type=args.media_type,
+            limit=args.limit,
+        )
 
-        for task in tasks:
+        for task_id in selected_task_ids:
             try:
+                task = load_backfill_task(PublicationTask, task_id)
+                if not task:
+                    errors.append({"task_id": str(task_id), "error": "task_not_found"})
+                    continue
                 reports.append(
                     backfill_task_cleaned_outputs(task, dry_run=bool(args.dry_run))
                 )
             except Exception as exc:  # Continue so one corrupt task never hides others.
                 db.session.rollback()
-                errors.append({"task_id": str(task.id), "error": str(exc)})
+                errors.append({"task_id": str(task_id), "error": str(exc)})
 
     totals = Counter()
     for report in reports:
