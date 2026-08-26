@@ -213,6 +213,7 @@ def _run_publish_clean_output_task_impl(task_id, celery_task=None):
             publish_result = publish_clean_output(
                 file_type=publish_params.get("file_type"),
                 output_dir=publish_params.get("output_dir"),
+                approved_paths=publish_params.get("approved_paths"),
                 options=publish_params.get("options") or {},
                 requested_by=f"zsxq_publish:{task_key}",
             )

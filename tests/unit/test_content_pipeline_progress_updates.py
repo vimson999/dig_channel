@@ -162,6 +162,10 @@ class ContentPipelineProgressUpdateTest(unittest.TestCase):
             event["source_refs"][0]["output_paths"],
             [str(Path("/tmp/pdf-cleaned/a.pdf").resolve())],
         )
+        self.assertEqual(
+            event["registered_output_paths"],
+            [str(Path("/tmp/pdf-cleaned/a.pdf").resolve())],
+        )
 
     def test_audio_progress_keeps_message_and_final_output(self):
         task_id = self._task(
@@ -194,6 +198,10 @@ class ContentPipelineProgressUpdateTest(unittest.TestCase):
         self.assertEqual(event["source_refs"][0]["attachment_id"], "attachment-1")
         self.assertEqual(
             event["source_refs"][0]["output_paths"],
+            [str(Path("/tmp/audio-cleaned/a.mp3").resolve())],
+        )
+        self.assertEqual(
+            event["registered_output_paths"],
             [str(Path("/tmp/audio-cleaned/a.mp3").resolve())],
         )
 

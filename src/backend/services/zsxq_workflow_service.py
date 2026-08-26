@@ -759,7 +759,12 @@ class ZsxqWorkflowService:
             if isinstance(event.get("source_refs"), list)
             else []
         )
-        if not source_refs:
+        registered_output_paths = (
+            event.get("registered_output_paths")
+            if isinstance(event.get("registered_output_paths"), list)
+            else None
+        )
+        if not source_refs and registered_output_paths is None:
             return
         stage_results = self._stage_results(workflow)
         clean_result = dict(stage_results.get("clean") or {})
@@ -773,7 +778,10 @@ class ZsxqWorkflowService:
             str(item.get("task_id")): item for item in tasks if item.get("task_id")
         }
         current = task_by_id.get(task_id, {"task_id": task_id})
-        current["source_refs"] = deepcopy(source_refs[:100])
+        if source_refs:
+            current["source_refs"] = deepcopy(source_refs[:100])
+        if registered_output_paths is not None:
+            current["registered_output_paths"] = deepcopy(registered_output_paths[:100])
         task_by_id[task_id] = current
         ordered_ids = [
             str(item.get("task_id")) for item in tasks if item.get("task_id")
@@ -1405,11 +1413,13 @@ class ZsxqWorkflowService:
             file_type = clean_task.get("file_type")
             if not output_dir or not file_type:
                 continue
+            approved_paths = self._clean_publish_approved_paths(clean_task)
             try:
                 publish_task = submit_publish_clean_output_task(
                     title=f"知识星球工作流发布 - {workflow.id[:8]}",
                     file_type=file_type,
                     output_dir=output_dir,
+                    approved_paths=approved_paths,
                     options=publish_options,
                     source_task_id=clean_task_id,
                     trigger="zsxq_workflow_clean_complete",
@@ -1419,6 +1429,7 @@ class ZsxqWorkflowService:
                         "clean_task_id": clean_task_id,
                         "sync_run_id": workflow.sync_run_id,
                         "source_refs": deepcopy(clean_task.get("source_refs") or []),
+                        "approved_paths": deepcopy(approved_paths),
                     },
                 )
                 publish_task_ids.append(publish_task["id"])
@@ -1522,6 +1533,18 @@ class ZsxqWorkflowService:
             }.get(feature),
             "local_output_dir": output_dir,
         }
+
+    def _clean_publish_approved_paths(self, clean_task):
+        direct_paths = clean_task.get("registered_output_paths")
+        if isinstance(direct_paths, list):
+            return _unique_path_strings(direct_paths)
+
+        paths = []
+        for source_ref in clean_task.get("source_refs") or []:
+            if not isinstance(source_ref, dict):
+                continue
+            paths.extend(source_ref.get("output_paths") or [])
+        return _unique_path_strings(paths)
 
     def _refresh_publish_stage(self, workflow):
         task_ids = [str(item) for item in (workflow.publish_task_ids or []) if item]
@@ -2903,6 +2926,17 @@ def _safe_int(value):
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _unique_path_strings(values):
+    normalized = []
+    seen = set()
+    for raw_value in values or []:
+        value = str(raw_value or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    return normalized
 
 
 def _bounded_int(value, *, default, lower, upper):

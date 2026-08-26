@@ -276,6 +276,7 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
                 options=pipeline.get("auto_publish") or {},
                 pipeline=pipeline,
                 source_refs=source_refs,
+                registered_output_paths=_registered_cleaned_paths(merged_result),
             )
 
             _update_task_fields(
@@ -299,7 +300,11 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
             _notify_workflow_run(
                 workflow_run_id,
                 task_key,
-                event_payload=_clean_stage_event(task_key, source_refs),
+                event_payload=_clean_stage_event(
+                    task_key,
+                    source_refs,
+                    registered_output_paths=_registered_cleaned_paths(result),
+                ),
             )
             return True
         except Exception as exc:
@@ -449,6 +454,7 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
                 options=pipeline.get("auto_publish") or {},
                 pipeline=pipeline,
                 source_refs=source_refs,
+                registered_output_paths=_registered_cleaned_paths(merged_result),
             )
 
             _update_task_fields(
@@ -472,7 +478,11 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
             _notify_workflow_run(
                 workflow_run_id,
                 task_key,
-                event_payload=_clean_stage_event(task_key, source_refs),
+                event_payload=_clean_stage_event(
+                    task_key,
+                    source_refs,
+                    registered_output_paths=_registered_cleaned_paths(result),
+                ),
             )
             return True
         except Exception as exc:
@@ -740,7 +750,25 @@ def _as_non_negative_int(value):
         return 0
 
 
-def _enqueue_auto_publish_task(*, task_id, file_type, result, options, pipeline, source_refs=None):
+def _registered_cleaned_paths(result):
+    canonical = (
+        result.get("canonical_cleaned_assets")
+        if isinstance(result, dict) and isinstance(result.get("canonical_cleaned_assets"), dict)
+        else {}
+    )
+    return list(canonical.get("registered_paths") or [])
+
+
+def _enqueue_auto_publish_task(
+    *,
+    task_id,
+    file_type,
+    result,
+    options,
+    pipeline,
+    source_refs=None,
+    registered_output_paths=None,
+):
     if not isinstance(options, dict) or not options.get("enabled"):
         return result
 
@@ -756,6 +784,7 @@ def _enqueue_auto_publish_task(*, task_id, file_type, result, options, pipeline,
             title=f"知识星球清洗产物发布 - {task_key[:8]}",
             file_type=file_type,
             output_dir=result.get("local_output_dir"),
+            approved_paths=list(registered_output_paths or []),
             options=options,
             source_task_id=task_key,
             trigger=options.get("trigger") or "content_pipeline_clean_complete",
@@ -821,11 +850,12 @@ def _notify_workflow_run(workflow_run_id, task_id, event_payload=None):
         return False
 
 
-def _clean_stage_event(task_id, source_refs):
+def _clean_stage_event(task_id, source_refs, *, registered_output_paths=None):
     return {
         "stage": "clean",
         "task_id": str(task_id),
         "source_refs": list(source_refs or []),
+        "registered_output_paths": list(registered_output_paths or []),
     }
 
 

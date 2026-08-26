@@ -48,6 +48,7 @@ class ZsxqPublishStateUpdateTest(unittest.TestCase):
                     "file_type": "audio",
                     "output_dir": "/tmp/cleaned",
                     "options": {"group_id": "group-1"},
+                    "approved_paths": ["/tmp/cleaned/a.mp3"],
                     "metadata": {"workflow_run_id": "workflow-1"},
                 },
             },
@@ -83,6 +84,7 @@ class ZsxqPublishStateUpdateTest(unittest.TestCase):
             file_type="audio",
             output_dir="/tmp/cleaned",
             options={"group_id": "group-1"},
+            approved_paths=["/tmp/cleaned/a.mp3"],
             requested_by=f"zsxq_publish:{task_id}",
         )
         attachment_update.assert_called_once()

@@ -306,6 +306,12 @@ def _normalize_rule(item, index):
     label = str(item.get("label") or ("PDF 批次" if file_type == "pdf" else "音频批次")).strip()
     hashtag_id = str(item.get("hashtag_id") or "").strip()
     hashtag_title = str(item.get("hashtag_title") or "").strip()
+    extensions = _normalize_extensions(item.get("extensions"), file_type)
+    approved_paths = _normalize_approved_paths(
+        item.get("approved_paths"),
+        source_path=source_path,
+        extensions=extensions,
+    )
 
     rule = {
         "id": str(item.get("id") or file_type).strip() or file_type,
@@ -314,7 +320,8 @@ def _normalize_rule(item, index):
         "file_type": file_type,
         "source_dir": source_dir,
         "recursive": bool(item.get("recursive", True)),
-        "extensions": _normalize_extensions(item.get("extensions"), file_type),
+        "extensions": extensions,
+        "approved_paths": approved_paths,
         "batch_size": _bounded_int(item.get("batch_size"), default=DEFAULT_BATCH_SIZE, lower=1, upper=8),
         "body_prefix": str(item.get("body_prefix") or "").strip(),
         "include_filenames": bool(item.get("include_filenames", True)),
@@ -419,6 +426,11 @@ def _snapshot_rule(rule):
         "source_dir": rule.get("source_dir"),
         "recursive": bool(rule.get("recursive")),
         "extensions": list(rule.get("extensions") or []),
+        "approved_path_count": (
+            len(rule.get("approved_paths") or [])
+            if rule.get("approved_paths") is not None
+            else None
+        ),
         "batch_size": rule.get("batch_size"),
         "body_prefix": rule.get("body_prefix") or "",
         "include_filenames": bool(rule.get("include_filenames", True)),
@@ -856,9 +868,31 @@ def _release_lock(run_id):
 
 
 def _iter_rule_files(rule):
-    base = Path(rule.get("source_dir") or "").expanduser()
-    iterator = base.rglob("*") if rule.get("recursive", True) else base.glob("*")
+    base = Path(rule.get("source_dir") or "").expanduser().resolve()
     allowed = set(ext.lower() for ext in (rule.get("extensions") or []))
+    approved_paths = rule.get("approved_paths")
+    if approved_paths is not None:
+        seen = set()
+        for raw_path in approved_paths if isinstance(approved_paths, (list, tuple, set)) else []:
+            try:
+                candidate = Path(str(raw_path)).expanduser().resolve()
+                candidate.relative_to(base)
+            except (OSError, ValueError):
+                continue
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not candidate.is_file():
+                continue
+            if candidate.name.startswith("."):
+                continue
+            if candidate.suffix.lower() not in allowed:
+                continue
+            yield candidate
+        return
+
+    iterator = base.rglob("*") if rule.get("recursive", True) else base.glob("*")
     for candidate in iterator:
         if not candidate.is_file():
             continue
@@ -867,6 +901,37 @@ def _iter_rule_files(rule):
         if candidate.suffix.lower() not in allowed:
             continue
         yield candidate
+
+
+def _normalize_approved_paths(value, *, source_path, extensions):
+    """Normalize a transient allow-list while keeping static rules unrestricted."""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple, set)):
+        raise ValueError("approved_paths 必须是文件路径数组")
+    if source_path is None:
+        raise ValueError("approved_paths 需要有效的 source_dir")
+
+    root = source_path.expanduser().resolve()
+    allowed = {str(extension).lower() for extension in (extensions or [])}
+    normalized = []
+    seen = set()
+    for raw_path in value:
+        path_value = str(raw_path or "").strip()
+        if not path_value:
+            continue
+        try:
+            candidate = Path(path_value).expanduser().resolve()
+            candidate.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"approved_paths 包含输出目录外的文件：{path_value}") from exc
+        if candidate.suffix.lower() not in allowed:
+            raise ValueError(f"approved_paths 文件类型不匹配：{candidate}")
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            normalized.append(key)
+    return normalized
 
 
 def _file_identity(path):
