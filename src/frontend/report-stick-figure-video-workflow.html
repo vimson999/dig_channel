@@ -31,15 +31,15 @@
                     <div class="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
                         <div class="mb-3 grid grid-cols-2 gap-2 text-xs font-bold">
                             <label class="flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-700"><input id="pdf-source-upload" name="pdf-source" type="radio" value="upload" checked>上传 PDF</label>
-                            <label class="flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-700"><input id="pdf-source-asset" name="pdf-source" type="radio" value="asset">选择已同步 PDF</label>
+                            <label class="flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-700"><input id="pdf-source-asset" name="pdf-source" type="radio" value="asset">选择已清洗 PDF</label>
                         </div>
                         <div id="pdf-upload-panel">
                             <label class="block rounded-md border border-dashed border-slate-300 bg-white px-3 py-3 text-xs text-slate-500"><span class="mb-2 block font-bold text-slate-700">研报 PDF</span><input id="pdf-input" type="file" accept="application/pdf,.pdf" class="block w-full text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-900 file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-white"></label>
                         </div>
                         <div id="pdf-asset-panel" class="hidden">
                             <div id="pdf-asset-tabs" class="mb-2 grid grid-cols-2 gap-2 text-xs font-bold"><button type="button" data-scope="all" aria-pressed="true" class="rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-white shadow-sm transition">全部 PDF</button><button type="button" data-scope="hot" aria-pressed="false" class="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-600 transition hover:bg-slate-50">热门 PDF（下载 ≥40）</button></div>
-                            <div class="flex gap-2"><input id="pdf-asset-search" type="search" class="min-w-0 flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" placeholder="搜索已同步 PDF / 主题"><button id="pdf-asset-refresh" type="button" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-rotate mr-1"></i>刷新</button></div>
-                            <div id="pdf-asset-summary" class="mt-2 text-xs text-slate-500">等待加载已同步 PDF。</div>
+                            <div class="flex gap-2"><input id="pdf-asset-search" type="search" class="min-w-0 flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none" placeholder="搜索已清洗 PDF / 主题"><button id="pdf-asset-refresh" type="button" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-rotate mr-1"></i>刷新</button></div>
+                            <div id="pdf-asset-summary" class="mt-2 text-xs text-slate-500">等待加载已清洗 PDF。</div>
                             <div id="pdf-asset-list" class="mt-2 max-h-[34rem] space-y-2 overflow-auto"></div>
                             <div id="pdf-asset-pagination" class="mt-2"></div>
                         </div>

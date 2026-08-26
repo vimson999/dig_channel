@@ -257,7 +257,7 @@ class ReportTop10WorkflowPage {
             this.renderAssets();
         } catch (error) {
             if (requestSeq !== this.assetRequestSeq) return;
-            this.els.assetSummary.textContent = `加载已同步 PDF 失败：${error.message}`;
+            this.els.assetSummary.textContent = `加载已清洗 PDF 失败：${error.message}`;
             this.els.assetList.innerHTML = '';
             this.els.assetPagination.innerHTML = '';
             if (!options.silent) this.setNotice(`加载 PDF 失败：${error.message}`, 'error');
@@ -330,7 +330,7 @@ class ReportTop10WorkflowPage {
     }
 
     assetScopeLabel() {
-        return this.assetScope === 'hot' ? '热门 PDF ' : '已同步 PDF ';
+        return this.assetScope === 'hot' ? '热门已清洗 PDF ' : '已清洗 PDF ';
     }
 
     renderAssetTabs() {
@@ -679,11 +679,11 @@ class ReportTop10WorkflowPage {
         const target = this.targetReportCount();
         this.els.assetSummary.textContent = this.assets.length
             ? `${this.assetScopeLabel()}· 第 ${page} 页 · 本页 ${this.assets.length} 个 PDF · 本期 N=${this.selected.length} / 上限 ${target} · 扫描 ${scanned} 条 · 跳过缺失 ${skipped} 条`
-            : (this.assetScope === 'hot' ? '没有找到下载次数达到 30 次的热门 PDF。' : '没有找到已下载的同步 PDF。');
+            : (this.assetScope === 'hot' ? '没有找到下载次数达到 30 次的热门已清洗 PDF。' : '没有找到已清洗 PDF。');
         if (!this.assets.length) {
             const emptyText = this.assetScope === 'hot'
-                ? '暂无热门 PDF。当前筛选条件是下载次数 ≥ 30，且附件已下载到本地。'
-                : '暂无可选 PDF。请先完成知识星球同步并下载附件。';
+                ? '暂无热门已清洗 PDF。当前筛选条件是下载次数 ≥ 30，且已有可用清洗产物。'
+                : '暂无可选 PDF。请先完成清洗后再选择。';
             this.els.assetList.innerHTML = `<div class="rounded-md border border-dashed border-slate-300 bg-white px-3 py-6 text-center text-xs text-slate-500">${this.escape(emptyText)}</div>`;
         } else {
             this.els.assetList.innerHTML = this.assets.map((item) => {
@@ -717,6 +717,7 @@ class ReportTop10WorkflowPage {
                         </div>
                         <div class="mt-1 truncate text-[11px] text-slate-400">${this.escape(metaLine)}</div>
                         <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                            <span class="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-bold text-violet-700">${this.escape(item.source_label || item.tab_label || '清洗产物')} · 已清洗</span>
                             <span class="rounded-full border px-2 py-0.5 text-[11px] font-bold ${downloadBadgeClass}">
                                 <i class="fas fa-download mr-1"></i>${this.escape(downloadText)}
                             </span>

@@ -1,4 +1,5 @@
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ if str(BACKEND_DIR) not in sys.path:
 from api import report_audio_workflow as report_audio_api  # noqa: E402
 from models import db  # noqa: E402
 from models.bilibili_publish import PublicationTaskBilibiliUpload  # noqa: E402
+from models.content_pipeline_asset import ContentPipelineAsset  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
 from models.zsxq_sync import ZsxqAttachment, ZsxqTopic  # noqa: E402
 from services.bilibili_publish import (  # noqa: E402
@@ -939,6 +941,10 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
     def test_pdf_asset_lookup_excludes_attachment_raw_payload(self):
         pdf_path = Path(self.tmpdir.name) / "report.pdf"
         pdf_path.write_bytes(b"%PDF-test")
+        output_root = Path(self.tmpdir.name) / "content-pipeline-output"
+        cleaned_path = output_root / "batch-1" / "pdf_cleaned" / pdf_path.name
+        cleaned_path.parent.mkdir(parents=True)
+        cleaned_path.write_bytes(b"%PDF-cleaned")
         topic = ZsxqTopic(
             group_id="group-1",
             group_name="测试星球",
@@ -958,8 +964,27 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             download_status="downloaded",
             raw_payload={"large": "payload"},
         )
-        db.session.add_all([topic, attachment])
+        clean_task = PublicationTask(
+            feature="content_pdf_clean",
+            status="completed",
+            current_step="completed",
+            progress=100,
+            params={"feature": "content_pdf_clean"},
+        )
+        db.session.add_all([topic, attachment, clean_task])
         db.session.flush()
+        db.session.add(ContentPipelineAsset(
+            media_type="pdf",
+            content_sha256="e" * 64,
+            canonical_task_id=str(clean_task.id),
+            source_path=str(pdf_path.resolve()),
+            filename=pdf_path.name,
+            source_mode="sidebar",
+            status="cleaned",
+            cleaned_path=str(cleaned_path.resolve()),
+            cleaned_sha256="f" * 64,
+            cleaned_bytes=cleaned_path.stat().st_size,
+        ))
         attachment_id = attachment.id
         db.session.commit()
         statements = []
@@ -968,11 +993,12 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             if "zsxq_attachments" in statement.lower() and statement.lstrip().lower().startswith("select"):
                 statements.append(statement.lower())
 
-        event.listen(db.engine, "before_cursor_execute", capture)
-        try:
-            metadata = report_audio_api._pdf_meta_from_zsxq_attachment(attachment_id, "job-1")
-        finally:
-            event.remove(db.engine, "before_cursor_execute", capture)
+        with patch.dict(os.environ, {"CONTENT_PIPELINE_OUTPUT_ROOT": str(output_root)}, clear=False):
+            event.listen(db.engine, "before_cursor_execute", capture)
+            try:
+                metadata = report_audio_api._pdf_meta_from_zsxq_attachment(attachment_id, "job-1")
+            finally:
+                event.remove(db.engine, "before_cursor_execute", capture)
 
         self.assertEqual("结构化标题", metadata["topic_title"])
         self.assertEqual("研报", metadata["tab_label"])

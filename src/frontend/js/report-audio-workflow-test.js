@@ -719,12 +719,12 @@ class ReportAudioWorkflowPage {
         this.renderPdfAssetTabs();
         const selectedId = this.selectedPdfAsset?.id || '';
         this.els.pdfAssetSummary.textContent = this.pdfAssets.length
-            ? `${this.pdfAssetScopeLabel()}· 第 ${this.pdfAssetPage} 页 · 本页 ${this.pdfAssets.length} 个 PDF${this.selectedPdfAsset ? ` · 已选 ${this.selectedPdfAsset.filename}` : ''}`
-            : (this.pdfAssetScope === 'hot' ? '没有找到下载次数达到 40 次的热门 PDF。' : '没有找到可用 PDF。');
+            ? `${this.pdfAssetScopeLabel()}· 第 ${this.pdfAssetPage} 页 · 本页 ${this.pdfAssets.length} 个已清洗 PDF${this.selectedPdfAsset ? ` · 已选 ${this.selectedPdfAsset.filename}` : ''}`
+            : (this.pdfAssetScope === 'hot' ? '没有找到下载次数达到 40 次的热门已清洗 PDF。' : '没有找到可用的已清洗 PDF。');
         if (!this.pdfAssets.length) {
             const emptyText = this.pdfAssetScope === 'hot'
-                ? '暂无热门 PDF。当前筛选条件是下载次数 ≥ 40，且附件已下载到本地。'
-                : '暂无可选 PDF。请先同步知识星球附件或投递手动 PDF。';
+                ? '暂无热门已清洗 PDF。当前筛选条件是下载次数 ≥ 40，且已有可用清洗产物。'
+                : '暂无可选 PDF。请先完成清洗，或投递手动 PDF 等待清洗完成。';
             this.els.pdfAssetList.innerHTML = `<div class="rounded-md border border-dashed border-slate-300 bg-white px-3 py-6 text-center text-xs text-slate-500">${this.escape(emptyText)}</div>`;
             this.renderPdfAssetPagination();
             return;
@@ -1663,11 +1663,12 @@ class ReportAudioWorkflowPage {
 
     pdfAssetSourceMeta(item) {
         if (item?.asset_kind === 'content_pipeline' || item?.asset_kind === 'content_pipeline_legacy') {
-            const status = String(item.pipeline_status || '').toLowerCase();
+            const status = String(item.canonical_status || item.pipeline_status || '').toLowerCase();
             const statusText = {
                 reserved: '已接收',
                 queued: '待清洗',
                 processing: '清洗中',
+                cleaned: '已清洗',
                 completed: '已清洗',
                 succeeded: '已清洗',
                 failed: '清洗失败',
@@ -1675,6 +1676,12 @@ class ReportAudioWorkflowPage {
             return {
                 text: `${item.source_label || '手动投递'} · ${statusText}`,
                 className: status === 'failed' ? 'bg-rose-50 text-rose-700' : 'bg-violet-50 text-violet-700',
+            };
+        }
+        if (String(item?.canonical_status || item?.pipeline_status || '').toLowerCase() === 'cleaned') {
+            return {
+                text: `${item?.source_label || '知识星球同步'} · 已清洗`,
+                className: 'bg-violet-50 text-violet-700',
             };
         }
         return {

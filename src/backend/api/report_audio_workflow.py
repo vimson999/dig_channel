@@ -25,6 +25,10 @@ from models.report_visual_plan import ReportVisualPlanSegment
 from models.task import PublicationTask
 from models.zsxq_sync import ZsxqAttachment, ZsxqTopic
 from services import doubao_browser_tts, gemini_browser
+from services.content_pipeline.canonical_asset_service import (
+    resolve_asset_reference,
+    resolve_cleaned_asset,
+)
 from services.doubao_tts_ws import is_configured as is_doubao_api_configured
 from services.report_audio_workflow import (
     DEFAULT_INITIAL_PROMPT,
@@ -446,8 +450,16 @@ def list_pdf_assets(_current_user):
         if not rows:
             break
         scanned += len(rows)
+        canonical_assets = _canonical_pdf_assets_by_source_paths(
+            getattr(row, "local_path", None) for row in rows
+        )
         for row in rows:
-            item = _pdf_asset_row_payload(row)
+            item = _pdf_asset_row_payload(
+                row,
+                canonical_asset=canonical_assets.get(
+                    _normalized_pdf_source_path(getattr(row, "local_path", None))
+                ),
+            )
             if item:
                 valid_items.append(item)
             else:
@@ -457,15 +469,14 @@ def list_pdf_assets(_current_user):
 
     pipeline_items = []
     pipeline_scanned = 0
-    legacy_items = []
-    legacy_scanned = 0
     # Manual, scheduled, and sidebar submissions are catalogued by the shared
     # content pipeline. They have no ZSXQ download count, so they belong in
     # the all-assets view only (the hot view is specifically download-count
     # based).
     if scope not in {"hot", "popular"} and not group_id and not tab_id:
         pipeline_query = db.session.query(ContentPipelineAsset).filter(
-            ContentPipelineAsset.media_type == "pdf"
+            ContentPipelineAsset.media_type == "pdf",
+            ContentPipelineAsset.status == "cleaned",
         )
         if q:
             pipeline_pattern = f"%{_escape_like(q)}%"
@@ -491,16 +502,9 @@ def list_pdf_assets(_current_user):
             else:
                 skipped_missing += 1
 
-        # A bounded compatibility read keeps batches submitted before the
-        # shared asset table was introduced visible without rewriting their
-        # historical task rows. Identical files are removed by the same merge
-        # step as the new pipeline rows.
-        legacy_items = _legacy_pdf_asset_items(q=q, limit=scan_limit)
-        legacy_scanned = len(legacy_items)
-
     combined_items = _merge_pdf_asset_items(
         valid_items,
-        [*pipeline_items, *legacy_items],
+        pipeline_items,
     )
 
     start = (page - 1) * per_page
@@ -510,7 +514,6 @@ def list_pdf_assets(_current_user):
         len(combined_items) > end
         or scanned >= scan_limit
         or pipeline_scanned >= scan_limit
-        or legacy_scanned >= scan_limit
     )
     return jsonify({
         "success": True,
@@ -521,7 +524,7 @@ def list_pdf_assets(_current_user):
                 "per_page": per_page,
                 "has_more": has_more,
                 "skipped_missing": skipped_missing,
-                "scanned": scanned + pipeline_scanned + legacy_scanned,
+                "scanned": scanned + pipeline_scanned,
                 "scope": "hot" if scope in {"hot", "popular"} else "all",
                 "hot_download_threshold": hot_download_threshold,
                 "order": "published_desc_with_pipeline_assets",
@@ -6144,31 +6147,19 @@ def _pdf_meta_from_asset_reference(asset_id, job_id):
         row = _legacy_pdf_file_row(parts[1], file_index)
         if row is None:
             raise ValueError("选择的历史手动 PDF 不存在")
-        source_mode = row.source_mode or "content_pipeline"
-        path = _resolve_pdf_path(row.file_path)
-        if not path:
-            raise ValueError("选择的历史手动 PDF 本地文件不存在")
-        try:
-            size = path.stat().st_size
-        except OSError:
-            raise ValueError("选择的历史手动 PDF 本地文件不可读")
-        if size <= 0:
-            raise ValueError("选择的历史手动 PDF 文件为空")
-        if size > _max_pdf_bytes():
-            raise ValueError(f"PDF 超过 {_max_pdf_mb()}MB 限制")
-        source_label = _content_pipeline_source_label(source_mode)
-        return {
-            "filename": path.name,
-            "path": str(path),
-            "bytes": size,
-            "source": "content_pipeline_legacy",
-            "source_mode": source_mode,
-            "attachment_id": reference,
-            "pipeline_task_id": row.task_id,
-            "topic_title": path.name,
-            "tab_label": source_label,
-            "download_url": f"/api/report-audio-workflows/jobs/{job_id}/input-pdf" if job_id else None,
-        }
+        resolution = resolve_asset_reference(
+            "",
+            media_type="pdf",
+            legacy_source_path=row.file_path,
+        )
+        if resolution.state != "ready" or not resolution.asset:
+            raise ValueError("尚无可用清洗产物，请重新投递")
+        return _content_pipeline_pdf_meta(
+            resolution.asset,
+            resolution.path,
+            attachment_id=reference,
+            job_id=job_id,
+        )
     if reference.startswith("pipeline:"):
         pipeline_id = reference.split(":", 1)[1].strip()
         row = (
@@ -6181,28 +6172,15 @@ def _pdf_meta_from_asset_reference(asset_id, job_id):
         )
         if row is None:
             raise ValueError("选择的手动投递 PDF 不存在")
-        path = _resolve_pdf_path(row.source_path)
-        if not path:
-            raise ValueError("选择的手动投递 PDF 本地文件不存在")
-        size = path.stat().st_size
-        if size <= 0:
-            raise ValueError("选择的手动投递 PDF 文件为空")
-        if size > _max_pdf_bytes():
-            raise ValueError(f"PDF 超过 {_max_pdf_mb()}MB 限制")
-        source_label = _content_pipeline_source_label(row.source_mode)
-        return {
-            "filename": row.filename or path.name,
-            "path": str(path),
-            "bytes": size,
-            "source": "content_pipeline_asset",
-            "source_mode": row.source_mode,
-            "attachment_id": reference,
-            "pipeline_asset_id": row.id,
-            "pipeline_task_id": row.canonical_task_id,
-            "topic_title": row.filename or source_label,
-            "tab_label": source_label,
-            "download_url": f"/api/report-audio-workflows/jobs/{job_id}/input-pdf" if job_id else None,
-        }
+        resolution = resolve_cleaned_asset(row, media_type="pdf")
+        if resolution.state != "ready" or not resolution.path:
+            raise ValueError("尚无可用清洗产物，请修复或重新投递")
+        return _content_pipeline_pdf_meta(
+            row,
+            resolution.path,
+            attachment_id=reference,
+            job_id=job_id,
+        )
     return _pdf_meta_from_zsxq_attachment(reference, job_id)
 
 
@@ -6225,12 +6203,15 @@ def _pdf_meta_from_zsxq_attachment(asset_id, job_id):
     if attachment.download_status != "downloaded":
         raise ValueError("选择的知识星球 PDF 还没有下载完成")
 
-    path = _resolve_pdf_path(attachment.local_path)
-    if not path:
-        raise ValueError("选择的知识星球 PDF 本地文件不存在")
+    resolution = resolve_asset_reference(
+        "",
+        media_type="pdf",
+        legacy_source_path=attachment.local_path,
+    )
+    if resolution.state != "ready" or not resolution.path or not resolution.asset:
+        raise ValueError("选择的知识星球 PDF 尚无可用清洗产物，请重新投递")
+    path = resolution.path
     size = path.stat().st_size
-    if size <= 0:
-        raise ValueError("选择的同步 PDF 文件为空")
     if size > _max_pdf_bytes():
         raise ValueError(f"PDF 超过 {_max_pdf_mb()}MB 限制")
 
@@ -6248,6 +6229,9 @@ def _pdf_meta_from_zsxq_attachment(asset_id, job_id):
         "path": str(path),
         "bytes": size,
         "source": "zsxq_attachment",
+        "source_mode": resolution.asset.source_mode,
+        "pipeline_asset_id": resolution.asset.id,
+        "pipeline_task_id": resolution.asset.canonical_task_id,
         "attachment_id": attachment.id,
         "group_id": attachment.group_id,
         "tab_id": attachment.tab_id,
@@ -6293,22 +6277,25 @@ def _pdf_asset_payload(attachment, topic=None):
     }
 
 
-def _pdf_asset_row_payload(row):
-    path = _resolve_pdf_path(row.local_path)
-    if not path:
+def _pdf_asset_row_payload(row, *, canonical_asset=None):
+    asset = canonical_asset or _canonical_pdf_asset_by_source_path(
+        getattr(row, "local_path", None)
+    )
+    resolution = resolve_cleaned_asset(asset, media_type="pdf")
+    path = resolution.path
+    if resolution.state != "ready" or not path:
         return None
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return None
-    if size <= 0:
-        return None
+    size = path.stat().st_size
     return {
         "id": row.attachment_id,
         "asset_id": row.attachment_id,
         "asset_kind": "zsxq_attachment",
-        "source_label": "知识星球同步",
-        "source_mode": "zsxq_sync",
+        "source_label": _zsxq_pdf_source_label(asset),
+        "source_mode": getattr(asset, "source_mode", None) or "zsxq_sync",
+        "pipeline_status": getattr(asset, "status", None),
+        "canonical_status": getattr(asset, "status", None),
+        "pipeline_asset_id": str(getattr(asset, "id", "") or "") or None,
+        "pipeline_task_id": getattr(asset, "canonical_task_id", None),
         "filename": row.attachment_name or path.name,
         "bytes": size,
         "download_count": row.download_count,
@@ -6340,15 +6327,11 @@ def _content_pipeline_source_label(source_mode):
 def _content_pipeline_pdf_asset_row_payload(row):
     if not row:
         return None
-    path = _resolve_pdf_path(getattr(row, "source_path", None))
-    if not path:
+    resolution = resolve_cleaned_asset(row, media_type="pdf")
+    path = resolution.path
+    if resolution.state != "ready" or not path:
         return None
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return None
-    if size <= 0:
-        return None
+    size = path.stat().st_size
     asset_id = str(row.id)
     source_label = _content_pipeline_source_label(getattr(row, "source_mode", None))
     return {
@@ -6358,6 +6341,8 @@ def _content_pipeline_pdf_asset_row_payload(row):
         "source_label": source_label,
         "source_mode": getattr(row, "source_mode", None),
         "pipeline_status": getattr(row, "status", None),
+        "canonical_status": getattr(row, "status", None),
+        "pipeline_asset_id": asset_id,
         "pipeline_task_id": getattr(row, "canonical_task_id", None),
         "filename": getattr(row, "filename", None) or path.name,
         "bytes": size,
@@ -6376,6 +6361,79 @@ def _content_pipeline_pdf_asset_row_payload(row):
         "local_path": str(path),
         "preview_url": f"/api/report-audio-workflows/pdf-assets/pipeline:{asset_id}/preview",
     }
+
+
+def _content_pipeline_pdf_meta(row, path, *, attachment_id, job_id):
+    source_label = _content_pipeline_source_label(row.source_mode)
+    return {
+        "filename": row.filename or path.name,
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "source": "content_pipeline_asset",
+        "source_mode": row.source_mode,
+        "attachment_id": attachment_id,
+        "pipeline_asset_id": row.id,
+        "pipeline_task_id": row.canonical_task_id,
+        "topic_title": row.filename or source_label,
+        "tab_label": source_label,
+        "download_url": f"/api/report-audio-workflows/jobs/{job_id}/input-pdf" if job_id else None,
+    }
+
+
+def _normalized_pdf_source_path(path_value):
+    raw = str(path_value or "").strip()
+    if not raw:
+        return None
+    try:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return str(path.resolve())
+    except OSError:
+        return None
+
+
+def _canonical_pdf_assets_by_source_paths(path_values):
+    source_paths = {
+        path
+        for path in (_normalized_pdf_source_path(value) for value in (path_values or []))
+        if path
+    }
+    if not source_paths:
+        return {}
+    rows = (
+        ContentPipelineAsset.query
+        .filter(
+            ContentPipelineAsset.media_type == "pdf",
+            ContentPipelineAsset.status == "cleaned",
+            ContentPipelineAsset.source_path.in_(source_paths),
+        )
+        .order_by(
+            ContentPipelineAsset.updated_at.desc(),
+            ContentPipelineAsset.created_at.desc(),
+        )
+        .all()
+    )
+    matched = {}
+    for asset in rows:
+        source_path = _normalized_pdf_source_path(asset.source_path)
+        if source_path and source_path not in matched:
+            matched[source_path] = asset
+    return matched
+
+
+def _canonical_pdf_asset_by_source_path(path_value):
+    source_path = _normalized_pdf_source_path(path_value)
+    if not source_path:
+        return None
+    return _canonical_pdf_assets_by_source_paths([source_path]).get(source_path)
+
+
+def _zsxq_pdf_source_label(asset):
+    source_mode = str(getattr(asset, "source_mode", "") or "").strip().lower()
+    if source_mode in {"scheduled_api", "sidebar", "browser_sidebar"}:
+        return f"知识星球·{_content_pipeline_source_label(source_mode)}"
+    return "知识星球同步"
 
 
 def _legacy_pdf_task_files(task):
@@ -6577,7 +6635,7 @@ def _pdf_asset_sort_timestamp(item):
 def _merge_pdf_asset_items(synced_items, pipeline_items):
     """Merge all PDF sources while suppressing identical local files."""
     merged = []
-    seen_paths = set()
+    seen_paths = {}
     for item in sorted(
         [*(synced_items or []), *(pipeline_items or [])],
         key=_pdf_asset_sort_timestamp,
@@ -6585,10 +6643,17 @@ def _merge_pdf_asset_items(synced_items, pipeline_items):
     ):
         path = str(item.get("local_path") or "").strip()
         identity = os.path.normcase(os.path.realpath(path)) if path else ""
-        if identity and identity in seen_paths:
+        prior_index = seen_paths.get(identity) if identity else None
+        if prior_index is not None:
+            existing = merged[prior_index]
+            if (
+                item.get("asset_kind") == "zsxq_attachment"
+                and existing.get("asset_kind") == "content_pipeline"
+            ):
+                merged[prior_index] = item
             continue
         if identity:
-            seen_paths.add(identity)
+            seen_paths[identity] = len(merged)
         merged.append(item)
     return merged
 
