@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from flask import Flask
@@ -13,6 +14,19 @@ if str(BACKEND_DIR) not in sys.path:
 from models import db  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
 from tasks import content_pipeline  # noqa: E402
+
+
+def _registration_from_cleaned_files(_task_id, *, cleaned_files, **_kwargs):
+    return SimpleNamespace(
+        registered_paths=[
+            item.get("output_path") or item.get("path")
+            for item in cleaned_files or []
+            if isinstance(item, dict) and (item.get("output_path") or item.get("path"))
+        ],
+        registered_asset_ids=["asset-1"],
+        failed_asset_ids=[],
+        skipped=[],
+    )
 
 
 class _SuccessfulPdfAdapter:
@@ -120,6 +134,8 @@ class ContentPipelineProgressUpdateTest(unittest.TestCase):
 
         with patch.object(content_pipeline, "_create_content_pipeline_app", return_value=self.app), \
              patch.object(content_pipeline, "PdfCleanerAdapter", _SuccessfulPdfAdapter), \
+             patch.object(content_pipeline, "register_cleaned_outputs", side_effect=_registration_from_cleaned_files), \
+             patch.object(content_pipeline, "_notify_content_pipeline_event", return_value={"queued": False}), \
              patch.object(content_pipeline, "_notify_workflow_run", return_value=True) as notify:
             ok = content_pipeline._run_pdf_clean_task_impl_guarded(task_id)
 
@@ -155,6 +171,8 @@ class ContentPipelineProgressUpdateTest(unittest.TestCase):
 
         with patch.object(content_pipeline, "_create_content_pipeline_app", return_value=self.app), \
              patch.object(content_pipeline, "AudioCleanerAdapter", _SuccessfulAudioAdapter), \
+             patch.object(content_pipeline, "register_cleaned_outputs", side_effect=_registration_from_cleaned_files), \
+             patch.object(content_pipeline, "_notify_content_pipeline_event", return_value={"queued": False}), \
              patch.object(content_pipeline, "_notify_workflow_run", return_value=True) as notify:
             ok = content_pipeline._run_audio_clean_task_impl_guarded(task_id)
 

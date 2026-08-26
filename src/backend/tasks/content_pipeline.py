@@ -23,6 +23,7 @@ from services.content_pipeline.audio_cleaner_adapter import (
     AudioCleanerAdapter,
 )
 from services.content_pipeline.auto_publish_handoff import submit_publish_clean_output_task
+from services.content_pipeline.canonical_asset_service import register_cleaned_outputs
 from services.content_pipeline.dedupe_service import mark_task_assets
 from services.runtime_guard import (
     guard_publication_task_start,
@@ -251,16 +252,22 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
                 reset_workspace=True,
             )
 
-            failed_count = int(result.get("failed_count") or 0)
-            cleaned_files = result.get("cleaned_files") or []
-            if failed_count > 0:
-                raise RuntimeError(f"PDF 清洗存在失败文件: {failed_count} 个")
-            if not cleaned_files:
-                raise RuntimeError("PDF 清洗完成但没有拿到输出文件")
-
             merged_result = dict(progress_result)
             merged_result.update(result)
-            mark_task_assets(task_key, status="cleaned")
+            registration = register_cleaned_outputs(
+                task_key,
+                media_type="pdf",
+                cleaned_files=result.get("files") or result.get("cleaned_files"),
+                source_root=source_root,
+            )
+            merged_result = _apply_canonical_cleaned_registration(
+                merged_result,
+                registration,
+            )
+            cleaned_files = merged_result.get("cleaned_files") or []
+            if not cleaned_files:
+                raise RuntimeError("PDF 清洗完成但没有拿到可验证的清洗输出文件")
+
             source_refs = _clean_source_refs(pipeline, merged_result)
             result = _enqueue_auto_publish_task(
                 task_id=task_key,
@@ -418,16 +425,22 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
                 reset_workspace=True,
             )
 
-            failed_count = int(result.get("failed_count") or 0)
-            cleaned_files = result.get("cleaned_files") or []
-            if failed_count > 0:
-                raise RuntimeError(f"音频清洗存在失败文件: {failed_count} 个")
-            if not cleaned_files:
-                raise RuntimeError("音频清洗完成但没有拿到输出文件")
-
             merged_result = dict(progress_result)
             merged_result.update(result)
-            mark_task_assets(task_key, status="cleaned")
+            registration = register_cleaned_outputs(
+                task_key,
+                media_type="audio",
+                cleaned_files=result.get("files") or result.get("cleaned_files"),
+                source_root=source_root,
+            )
+            merged_result = _apply_canonical_cleaned_registration(
+                merged_result,
+                registration,
+            )
+            cleaned_files = merged_result.get("cleaned_files") or []
+            if not cleaned_files:
+                raise RuntimeError("音频清洗完成但没有拿到可验证的清洗输出文件")
+
             source_refs = _clean_source_refs(pipeline, merged_result)
             result = _enqueue_auto_publish_task(
                 task_id=task_key,
@@ -666,6 +679,67 @@ def _notify_content_pipeline_event(
         return {"queued": False, "reason": "queue_failed"}
 
 
+def _apply_canonical_cleaned_registration(result, registration):
+    """Keep only verified cleaner outputs in a task's active result view."""
+    merged = dict(result or {})
+    approved_paths = {
+        _normalized_path(path)
+        for path in (getattr(registration, "registered_paths", None) or [])
+        if _normalized_path(path)
+    }
+    source_files = merged.get("files") if isinstance(merged.get("files"), list) else []
+    candidate_files = (
+        merged.get("cleaned_files")
+        if isinstance(merged.get("cleaned_files"), list)
+        else source_files
+    )
+    cleaned_files = []
+    seen_paths = set()
+    for item in candidate_files:
+        if not isinstance(item, dict):
+            continue
+        output_path = _normalized_path(
+            item.get("output_path") or item.get("path") or item.get("cleaner_output_path")
+        )
+        if not output_path or output_path not in approved_paths or output_path in seen_paths:
+            continue
+        cleaned_files.append(item)
+        seen_paths.add(output_path)
+
+    # Older adapters can expose successful results only through ``files``.
+    for item in source_files:
+        if not isinstance(item, dict):
+            continue
+        output_path = _normalized_path(
+            item.get("output_path") or item.get("path") or item.get("cleaner_output_path")
+        )
+        if not output_path or output_path not in approved_paths or output_path in seen_paths:
+            continue
+        cleaned_files.append(item)
+        seen_paths.add(output_path)
+
+    original_failed = _as_non_negative_int(merged.get("failed_count"))
+    registered_failed = len(getattr(registration, "failed_asset_ids", None) or [])
+    merged["cleaned_files"] = cleaned_files
+    merged["files_count"] = len(source_files) or len(cleaned_files) + max(original_failed, registered_failed)
+    merged["success_count"] = len(cleaned_files)
+    merged["failed_count"] = max(original_failed, registered_failed)
+    merged["canonical_cleaned_assets"] = {
+        "registered_paths": sorted(approved_paths),
+        "registered_asset_ids": list(getattr(registration, "registered_asset_ids", None) or []),
+        "failed_asset_ids": list(getattr(registration, "failed_asset_ids", None) or []),
+        "skipped": list(getattr(registration, "skipped", None) or []),
+    }
+    return merged
+
+
+def _as_non_negative_int(value):
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _enqueue_auto_publish_task(*, task_id, file_type, result, options, pipeline, source_refs=None):
     if not isinstance(options, dict) or not options.get("enabled"):
         return result
@@ -771,7 +845,7 @@ def _clean_source_refs(pipeline, result):
             continue
         source_path = _normalized_path(item.get("source_path") or item.get("source"), source_root)
         output_path = _normalized_path(
-            item.get("cleaner_output_path") or item.get("output_path") or item.get("path")
+            item.get("output_path") or item.get("path") or item.get("cleaner_output_path")
         )
         if source_path and output_path:
             output_paths.setdefault(source_path, []).append(output_path)

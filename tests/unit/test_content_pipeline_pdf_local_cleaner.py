@@ -73,7 +73,63 @@ class LocalPdfCleanerAdapterTest(unittest.TestCase):
             cleaned_path = Path(result["cleaned_files"][0]["path"])
             self.assertTrue(cleaned_path.exists())
             self.assertEqual(cleaned_path.name, "clean_source.pdf")
+            self.assertEqual(result["files"][0]["source_path"], str(source.resolve()))
+            self.assertEqual(result["files"][0]["output_path"], str(cleaned_path))
             self.assertTrue((root / "batches" / "local-clean" / "manifest.json").exists())
+
+    def test_external_output_copy_keeps_source_binding_for_success_and_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_one = root / "downloads" / "nested" / "one.pdf"
+            source_two = root / "downloads" / "two.pdf"
+            source_one.parent.mkdir(parents=True)
+            source_one.write_bytes(b"%PDF-raw-one")
+            source_two.write_bytes(b"%PDF-raw-two")
+            pytest_output = root / "pytest-output"
+            cleaned_external = pytest_output / "nested" / "one.pdf"
+            cleaned_external.parent.mkdir(parents=True)
+            cleaned_external.write_bytes(b"%PDF-cleaned-one")
+            local_output = root / "runtime" / "pdf_cleaned"
+            adapter = PdfCleanerAdapter(output_root=root / "runtime")
+
+            files = adapter._copy_outputs(
+                pytest_output,
+                local_output,
+                {
+                    "files": [
+                        {
+                            "name": "nested/one.pdf",
+                            "status": "SUCCESS",
+                            "output": "nested/one.pdf",
+                            "message": "ok",
+                        },
+                        {
+                            "name": "two.pdf",
+                            "status": "FAILED",
+                            "output": "",
+                            "message": "bad source",
+                        },
+                    ],
+                },
+                staged_files=[
+                    {
+                        "source_path": str(source_one.resolve()),
+                        "staged_relative_path": "nested/one.pdf",
+                    },
+                    {
+                        "source_path": str(source_two.resolve()),
+                        "staged_relative_path": "two.pdf",
+                    },
+                ],
+            )
+
+            self.assertEqual(len(files), 2)
+            self.assertEqual(files[0]["source_path"], str(source_one.resolve()))
+            self.assertEqual(files[0]["status"], "SUCCESS")
+            self.assertTrue(Path(files[0]["output_path"]).is_file())
+            self.assertEqual(files[1]["source_path"], str(source_two.resolve()))
+            self.assertEqual(files[1]["status"], "FAILED")
+            self.assertNotIn("output_path", files[1])
 
     def test_local_engine_health_check_does_not_require_external_service(self):
         adapter = PdfCleanerAdapter(base_url="http://127.0.0.1:1")

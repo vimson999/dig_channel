@@ -203,7 +203,18 @@ class PdfCleanerAdapter:
             progress_callback({"phase": "started", "job_id": job_id, "progress": 8})
 
         final_job = self._wait_for_job(job_id, options, progress_callback=progress_callback)
-        copied_outputs = self._copy_outputs(pytest_output_dir, local_output_dir, final_job)
+        files_result = self._copy_outputs(
+            pytest_output_dir,
+            local_output_dir,
+            final_job,
+            staged_files=staged_files,
+        )
+        copied_outputs = [
+            item
+            for item in files_result
+            if str(item.get("status") or "").upper() in {"SUCCESS", "SKIPPED"}
+            and item.get("output_path")
+        ]
 
         result = {
             "batch_id": safe_batch_id,
@@ -212,6 +223,7 @@ class PdfCleanerAdapter:
             "local_workspace": str(local_batch_dir),
             "local_output_dir": str(local_output_dir),
             "job": final_job,
+            "files": files_result,
             "cleaned_files": copied_outputs,
             "success_count": len(copied_outputs),
             "failed_count": int(final_job.get("failed") or 0),
@@ -264,12 +276,14 @@ class PdfCleanerAdapter:
 
             if target.exists() and not options.overwrite:
                 item = {
+                    "source_path": str(source),
                     "source": rel_path.as_posix(),
                     "status": "SKIPPED",
                     "message": "输出文件已存在",
                     "duration": 0,
                     "output": output_rel.as_posix(),
                     "cleaner_output_path": str(target),
+                    "output_path": str(target),
                     "path": str(target),
                     "relative_path": output_rel.as_posix(),
                 }
@@ -295,12 +309,14 @@ class PdfCleanerAdapter:
             duration = round(time.time() - started, 2)
             if success and target.exists():
                 item = {
+                    "source_path": str(source),
                     "source": rel_path.as_posix(),
                     "status": "SUCCESS",
                     "message": message,
                     "duration": duration,
                     "output": output_rel.as_posix(),
                     "cleaner_output_path": str(target),
+                    "output_path": str(target),
                     "path": str(target),
                     "relative_path": output_rel.as_posix(),
                 }
@@ -309,6 +325,7 @@ class PdfCleanerAdapter:
             else:
                 failed_count += 1
                 files_result.append({
+                    "source_path": str(source),
                     "source": rel_path.as_posix(),
                     "status": "FAILED",
                     "message": message,
@@ -339,7 +356,7 @@ class PdfCleanerAdapter:
             "cleaned_files": cleaned_files,
             "success_count": len(cleaned_files),
             "failed_count": failed_count,
-            "skipped_count": 0,
+            "skipped_count": skipped_count,
         }
         manifest = {
             "batch_id": safe_batch_id,
@@ -467,33 +484,52 @@ class PdfCleanerAdapter:
 
         raise PdfCleanerError(f"PDF 清洗超时，最后状态: {last_job}")
 
-    def _copy_outputs(self, pytest_output_dir: Path, local_output_dir: Path, job: dict) -> list[dict]:
+    def _copy_outputs(
+        self,
+        pytest_output_dir: Path,
+        local_output_dir: Path,
+        job: dict,
+        *,
+        staged_files: list[dict],
+    ) -> list[dict]:
         copied = []
+        source_by_staged_path = {
+            str(item.get("staged_relative_path") or ""): str(item.get("source_path") or "")
+            for item in staged_files
+            if item.get("staged_relative_path") and item.get("source_path")
+        }
         files = job.get("files") or []
         for item in files:
             status = str(item.get("status") or "").upper()
             output_rel = item.get("output")
-            if status not in {"SUCCESS", "SKIPPED"} or not output_rel:
-                continue
-            source = (pytest_output_dir / output_rel).resolve()
-            _assert_inside(source, pytest_output_dir)
-            if not source.exists():
-                continue
-            target = (local_output_dir / output_rel).resolve()
-            _assert_inside(target, local_output_dir)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            copied.append(
-                {
-                    "source": item.get("name"),
-                    "status": status,
-                    "message": item.get("message") or "",
-                    "duration": item.get("duration") or 0,
-                    "cleaner_output_path": str(source),
-                    "path": str(target),
-                    "relative_path": output_rel,
-                }
-            )
+            source_name = str(item.get("name") or "")
+            result_item = {
+                "source_path": source_by_staged_path.get(source_name),
+                "source": source_name,
+                "status": status,
+                "message": item.get("message") or "",
+                "duration": item.get("duration") or 0,
+                "relative_path": output_rel or "",
+            }
+            if status in {"SUCCESS", "SKIPPED"} and output_rel:
+                source = (pytest_output_dir / output_rel).resolve()
+                _assert_inside(source, pytest_output_dir)
+                if source.exists() and source.is_file():
+                    target = (local_output_dir / output_rel).resolve()
+                    _assert_inside(target, local_output_dir)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+                    result_item.update(
+                        {
+                            "cleaner_output_path": str(source),
+                            "output_path": str(target),
+                            "path": str(target),
+                        }
+                    )
+                else:
+                    result_item["status"] = "FAILED"
+                    result_item["message"] = "清洗服务标记成功，但输出文件未找到"
+            copied.append(result_item)
         return copied
 
 
