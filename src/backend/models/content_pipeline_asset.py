@@ -42,6 +42,10 @@ class ContentPipelineAsset(db.Model):
     filename = db.Column(db.String(500), nullable=True)
     source_mode = db.Column(db.String(80), nullable=True)
     status = db.Column(db.String(24), nullable=False, default="reserved")
+    cleaned_path = db.Column(db.String(600), nullable=True)
+    cleaned_sha256 = db.Column(db.String(64), nullable=True)
+    cleaned_bytes = db.Column(db.BigInteger, nullable=True)
+    cleaned_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     updated_at = db.Column(
         db.DateTime,
@@ -60,6 +64,10 @@ class ContentPipelineAsset(db.Model):
             "filename": self.filename,
             "source_mode": self.source_mode,
             "status": self.status,
+            "cleaned_path": self.cleaned_path,
+            "cleaned_sha256": self.cleaned_sha256,
+            "cleaned_bytes": self.cleaned_bytes,
+            "cleaned_at": self.cleaned_at.isoformat() if self.cleaned_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
