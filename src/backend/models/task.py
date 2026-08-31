@@ -280,6 +280,7 @@ class PublicationTask(db.Model):
             _nested(params, 'bilibili', 'title'),
             _nested(params, 'thumbnail', 'main_title'),
             _nested(params, 'content_pipeline', 'title'),
+            _nested(params, 'pdf_merge_workflow', 'title'),
             _nested(params, 'zsxq_publish', 'title'),
             _nested(params, 'report_audio_workflow', 'metadata', 'title'),
             _nested(params, 'report_audio_workflow', 'video', 'title'),

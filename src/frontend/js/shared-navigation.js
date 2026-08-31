@@ -160,6 +160,8 @@ class SharedNavigation {
             return 'mhtml-pdf';
         } else if (filename === 'pdf-tools.html') {
             return 'pdf-tools';
+        } else if (filename === 'pdf-merge-workflow.html') {
+            return 'pdf-merge-workflow';
         } else if (filename === 'report-video-factory.html') {
             return 'report-video-factory';
         } else if (filename === 'student-id-generator.html') {
@@ -242,6 +244,7 @@ class SharedNavigation {
             'wechat-channels-publish-test': '视频号投递测试台',
             'mhtml-pdf': 'MHTML转PDF工具',
             'pdf-tools': 'PDF 工具平台',
+            'pdf-merge-workflow': 'PDF 合并工作台',
             'report-video-factory': '研报导图视频工厂',
             'watermark': 'PDF智能去水印',
             'student-id-generator': '学生证生成器',
@@ -623,6 +626,12 @@ class SharedNavigation {
                         name: 'PDF 工具平台',
                         icon: 'fas fa-file-shield',
                         href: 'pdf-tools.html'
+                    },
+                    {
+                        id: 'pdf-merge-workflow',
+                        name: 'PDF 合并工作台',
+                        icon: 'fas fa-object-group',
+                        href: 'pdf-merge-workflow.html'
                     },
                     {
                         id: 'celery-monitor',

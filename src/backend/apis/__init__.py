@@ -31,6 +31,10 @@ def register_all_apis(app):
     from api.report_audio_workflow import report_audio_workflow_bp
     app.register_blueprint(report_audio_workflow_bp)
 
+    # 注册多 PDF 合并为可复用系统资产的独立工作流
+    from api.pdf_merge_workflow import pdf_merge_workflow_bp
+    app.register_blueprint(pdf_merge_workflow_bp)
+
     # 注册今日研报 Top10 总编辑编排模块
     from api.report_top10_workflow import report_top10_workflow_bp
     app.register_blueprint(report_top10_workflow_bp)
@@ -81,6 +85,7 @@ def register_all_apis(app):
         endpoints['report_pdf_gemini'] = '/api/report-pdf-gemini'
         endpoints['gemini_browser_legacy'] = '/api/gemini-browser'
         endpoints['report_audio_workflows'] = '/api/report-audio-workflows'
+        endpoints['pdf_merge_workflows'] = '/api/pdf-merge-workflows'
         endpoints['report_top10_workflows'] = '/api/report-top10-workflows'
         endpoints['report_script_material_workflows'] = '/api/report-script-material-workflows'
         endpoints['report_pdf_evidence'] = '/api/report-pdf-evidence'
