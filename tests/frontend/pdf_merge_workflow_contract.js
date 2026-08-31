@@ -36,6 +36,7 @@ assert(
 );
 assert(script.includes('new FormData()'), 'mixed uploads must submit multipart FormData');
 assert(script.includes("kind: 'pipeline_asset'"), 'existing assets must preserve their source kind');
+assert(script.includes('pipeline_asset_id'), 'catalogue rows must use canonical pipeline asset IDs');
 assert(script.includes('asset_ref'), 'existing assets must submit canonical asset references');
 assert(script.includes("form.append('items', JSON.stringify(items))"), 'the ordered source manifest must be submitted');
 assert(script.includes('/cancel'), 'client must expose cancel action');

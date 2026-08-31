@@ -21,6 +21,7 @@ from models import db  # noqa: E402
 from models.content_pipeline_asset import ContentPipelineAsset  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
 from services.pdf_merge_workflow import FEATURE_NAME, fingerprint_file  # noqa: E402
+from tasks import pdf_merge_workflow as pdf_merge_task  # noqa: E402
 
 
 class PdfMergeWorkflowApiTest(unittest.TestCase):
@@ -230,6 +231,43 @@ class PdfMergeWorkflowApiTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             with fitz.open(stream=response.get_data(), filetype="pdf") as document:
                 self.assertIn("MERGED OUTPUT", document[0].get_text())
+
+    def test_api_submission_runs_to_a_reusable_asset_and_owner_download(self):
+        existing = self._pipeline_asset("SYSTEM ASSET FIRST")
+        owner = SimpleNamespace(id="owner")
+        with patch.object(pdf_merge_api, "maybe_guarded_apply_async", return_value=self._submission_result()):
+            response, status = self._call_create(
+                current_user=owner,
+                items=[
+                    {"kind": "pipeline_asset", "asset_ref": f"pipeline:{existing.id}"},
+                    {"kind": "upload", "upload_index": 0},
+                ],
+                files=[(io.BytesIO(self._pdf_bytes("LOCAL UPLOAD SECOND")), "local.pdf")],
+            )
+        self.assertEqual(status, 202)
+        task_id = response.get_json()["data"]["job_id"]
+
+        with patch.object(pdf_merge_task, "_create_pdf_merge_app", return_value=self.app), \
+             patch.object(pdf_merge_task, "_notify", return_value={"queued": False}):
+            self.assertTrue(pdf_merge_task._run_pdf_merge_job(task_id))
+
+        db.session.expire_all()
+        task = db.session.get(PublicationTask, task_id)
+        self.assertEqual(task.status, "completed")
+        output = task.result["output"]
+        output_asset = db.session.get(ContentPipelineAsset, output["asset_id"])
+        self.assertEqual(output_asset.status, "cleaned")
+        self.assertEqual(output_asset.source_mode, "pdf_merge")
+        with fitz.open(output_asset.cleaned_path) as merged:
+            self.assertIn("SYSTEM ASSET FIRST", merged[0].get_text())
+            self.assertIn("LOCAL UPLOAD SECOND", merged[1].get_text())
+
+        with self.app.test_request_context(f"/api/pdf-merge-workflows/jobs/{task_id}/download"):
+            download = pdf_merge_api.download_job.__wrapped__(owner, task_id)
+            download.direct_passthrough = False
+            self.assertEqual(download.status_code, 200)
+            with fitz.open(stream=download.get_data(), filetype="pdf") as merged:
+                self.assertEqual(merged.page_count, 2)
 
 
 if __name__ == "__main__":
