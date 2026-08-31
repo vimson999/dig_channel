@@ -20,7 +20,7 @@ from api import pdf_merge_workflow as pdf_merge_api  # noqa: E402
 from models import db  # noqa: E402
 from models.content_pipeline_asset import ContentPipelineAsset  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
-from services.pdf_merge_workflow import FEATURE_NAME, fingerprint_file  # noqa: E402
+from services.pdf_merge_workflow import FEATURE_NAME, PdfMergeError, fingerprint_file  # noqa: E402
 from tasks import pdf_merge_workflow as pdf_merge_task  # noqa: E402
 
 
@@ -177,6 +177,36 @@ class PdfMergeWorkflowApiTest(unittest.TestCase):
             (self.upload_root / str(task.id)).resolve(),
         )
         self.assertEqual(task.celery_task_id, "celery-pdf-merge-1")
+
+    def test_oversized_upload_is_rejected_before_file_storage_save(self):
+        class SaveForbiddenUpload:
+            def __init__(self, filename, payload):
+                self.filename = filename
+                self.stream = io.BytesIO(payload)
+
+            def save(self, destination):
+                raise AssertionError(f"unexpected unbounded save to {destination}")
+
+        uploads = [
+            SaveForbiddenUpload("oversized.pdf", b"x" * (1024 * 1024 + 1)),
+            SaveForbiddenUpload("second.pdf", self._pdf_bytes("SECOND")),
+        ]
+        items = [
+            {"kind": "upload", "upload_index": 0},
+            {"kind": "upload", "upload_index": 1},
+        ]
+        with patch.dict(
+            os.environ,
+            {
+                "PDF_MERGE_WORKFLOW_MAX_SINGLE_BYTES": str(1024 * 1024),
+                "PDF_MERGE_WORKFLOW_MAX_TOTAL_BYTES": str(2 * 1024 * 1024),
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(PdfMergeError, "单个 PDF 超过大小限制"):
+                pdf_merge_api._freeze_sources("oversized-upload", items, uploads)
+
+        self.assertFalse((self.upload_root / "oversized-upload" / "input-0001.pdf").exists())
 
     def test_owner_scoping_cancel_and_retry_keep_the_frozen_sources(self):
         task = self._new_task()

@@ -20,6 +20,9 @@ from services.pdf_merge_workflow import (
     FEATURE_NAME,
     PdfMergeError,
     fingerprint_file,
+    max_pdf_merge_files,
+    max_pdf_merge_single_bytes,
+    max_pdf_merge_total_bytes,
     normalize_output_filename,
     safe_task_file,
     validate_pdf_source,
@@ -40,6 +43,7 @@ logger = logging.getLogger(__name__)
 QUEUE_NAME = "content_pipeline"
 TASK_LABEL = "PDF 合并"
 TERMINAL_RETRY_STATUSES = {"failed", "canceled"}
+UPLOAD_COPY_CHUNK_BYTES = 1024 * 1024
 
 
 @pdf_merge_workflow_bp.route("/jobs", methods=["POST"])
@@ -324,6 +328,11 @@ def _submission_title() -> Any:
 def _freeze_sources(task_id: str, items: list[dict[str, Any]], uploads) -> list[dict[str, Any]]:
     """Copy, fingerprint, and validate the exact request order before enqueue."""
 
+    if len(items) < 2:
+        raise PdfMergeError("至少需要 2 个 PDF 才能合并")
+    if len(items) > max_pdf_merge_files():
+        raise PdfMergeError(f"一次最多合并 {max_pdf_merge_files()} 个 PDF")
+
     upload_indices = []
     for item in items:
         if item.get("kind") != "upload":
@@ -338,20 +347,38 @@ def _freeze_sources(task_id: str, items: list[dict[str, Any]], uploads) -> list[
     if set(upload_indices) != set(range(len(uploads))):
         raise PdfMergeError("上传 PDF 与顺序列表不一致")
 
+    frozen_assets: dict[int, dict[str, Any]] = {}
+    frozen_total_bytes = 0
+    for sequence, item in enumerate(items, start=1):
+        if item.get("kind") != "pipeline_asset":
+            continue
+        frozen = _freeze_pipeline_asset(sequence, item)
+        frozen_assets[sequence] = frozen
+        frozen_total_bytes += int(frozen["bytes"])
+    if frozen_total_bytes > max_pdf_merge_total_bytes():
+        raise PdfMergeError("PDF 总大小超过限制")
+
     upload_root = workflow_upload_root(task_id)
     frozen_uploads: dict[int, dict[str, Any]] = {}
     for index in sorted(set(upload_indices)):
         file_storage = uploads[index]
         original_name = _safe_source_filename(getattr(file_storage, "filename", None))
         destination = safe_task_file(upload_root, f"input-{index + 1:04d}.pdf")
-        file_storage.save(str(destination))
+        uploaded_bytes = _copy_upload_bounded(
+            file_storage,
+            destination,
+            current_total_bytes=frozen_total_bytes,
+        )
         fingerprint = fingerprint_file(destination)
+        if fingerprint["bytes"] != uploaded_bytes:
+            raise PdfMergeError("上传 PDF 文件大小不正确")
         frozen = {
             **fingerprint,
             "filename": original_name,
         }
         validate_pdf_source(frozen)
         frozen_uploads[index] = frozen
+        frozen_total_bytes += uploaded_bytes
 
     sources = []
     for sequence, item in enumerate(items, start=1):
@@ -367,8 +394,50 @@ def _freeze_sources(task_id: str, items: list[dict[str, Any]], uploads) -> list[
                 "bytes": frozen["bytes"],
             })
             continue
-        sources.append(_freeze_pipeline_asset(sequence, item))
+        sources.append(frozen_assets[sequence])
     return sources
+
+
+def _copy_upload_bounded(file_storage, destination: Path, *, current_total_bytes: int) -> int:
+    """Stream one request upload under the configured file and batch limits."""
+
+    if destination.exists():
+        raise PdfMergeError("上传 PDF 存储冲突")
+    stream = getattr(file_storage, "stream", None)
+    if stream is None or not callable(getattr(stream, "read", None)):
+        raise PdfMergeError("上传 PDF 无法读取")
+    try:
+        stream.seek(0)
+    except (AttributeError, OSError):
+        pass
+
+    temporary = destination.with_suffix(".uploading")
+    _remove_file(temporary)
+    copied_bytes = 0
+    single_limit = max_pdf_merge_single_bytes()
+    total_limit = max_pdf_merge_total_bytes()
+    try:
+        with temporary.open("xb") as target:
+            while True:
+                chunk = stream.read(UPLOAD_COPY_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if not isinstance(chunk, (bytes, bytearray)):
+                    raise PdfMergeError("上传 PDF 内容无效")
+                copied_bytes += len(chunk)
+                if copied_bytes > single_limit:
+                    raise PdfMergeError("单个 PDF 超过大小限制")
+                if current_total_bytes + copied_bytes > total_limit:
+                    raise PdfMergeError("PDF 总大小超过限制")
+                target.write(chunk)
+        if copied_bytes <= 0:
+            raise PdfMergeError("PDF 文件为空")
+        temporary.replace(destination)
+        return copied_bytes
+    except Exception:
+        _remove_file(temporary)
+        _remove_file(destination)
+        raise
 
 
 def _freeze_pipeline_asset(sequence: int, item: Mapping[str, Any]) -> dict[str, Any]:
@@ -385,6 +454,11 @@ def _freeze_pipeline_asset(sequence: int, item: Mapping[str, Any]) -> dict[str, 
     resolution = resolve_cleaned_asset(asset, media_type="pdf")
     if resolution.state != "ready" or not resolution.path or not resolution.asset:
         raise PdfMergeError("选择的 PDF 资产不可用，请重新选择")
+    declared_bytes = int(resolution.asset.cleaned_bytes or 0)
+    if declared_bytes <= 0:
+        raise PdfMergeError("选择的 PDF 资产大小不正确")
+    if declared_bytes > max_pdf_merge_single_bytes():
+        raise PdfMergeError("单个 PDF 超过大小限制")
     fingerprint = fingerprint_file(resolution.path)
     if (
         fingerprint["sha256"] != str(resolution.asset.cleaned_sha256 or "").lower()
@@ -509,6 +583,15 @@ def _cleanup_task_uploads(task_id: str | None) -> None:
         return
     if root.exists():
         shutil.rmtree(root, ignore_errors=True)
+
+
+def _remove_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
 
 
 def _safe_source_filename(value: Any) -> str:
