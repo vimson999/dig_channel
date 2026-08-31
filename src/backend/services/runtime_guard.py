@@ -33,6 +33,7 @@ DEFAULT_FEATURE_LIMITS = {
     "mp3_video_workflow": 1,
     "content_pdf_clean": 2,
     "content_audio_clean": 1,
+    "pdf_merge_workflow": 1,
     "zsxq_clean_output_publish": 1,
 }
 
@@ -49,6 +50,7 @@ DEFAULT_FEATURE_BACKLOG_LIMITS = {
     "mp3_video_workflow": 5,
     "content_pdf_clean": 10,
     "content_audio_clean": 5,
+    "pdf_merge_workflow": 5,
     "zsxq_clean_output_publish": 5,
 }
 

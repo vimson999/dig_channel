@@ -6321,6 +6321,7 @@ def _content_pipeline_source_label(source_mode):
         "sidebar": "侧边栏下载",
         "browser_sidebar": "侧边栏下载",
         "manual_download": "手动投递",
+        "pdf_merge": "PDF 合并",
     }.get(str(source_mode or "").strip().lower(), "内容流水线")
 
 
