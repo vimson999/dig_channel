@@ -43,6 +43,10 @@ def register_all_apis(app):
     from api.report_visual_plan import report_visual_plan_bp
     app.register_blueprint(report_visual_plan_bp)
 
+    # 注册研报混合媒介导演总控；生产完整渲染保持人工放行和失败关闭
+    from api.report_video_director_workflow import report_video_director_workflow_bp
+    app.register_blueprint(report_video_director_workflow_bp)
+
     # 注册研报 PDF -> 火柴人视频父编排；基础文案和分镜是它的子阶段
     from api.report_stick_figure_video_workflow import report_stick_figure_video_workflow_bp
     app.register_blueprint(report_stick_figure_video_workflow_bp)
@@ -80,6 +84,7 @@ def register_all_apis(app):
         endpoints['report_top10_workflows'] = '/api/report-top10-workflows'
         endpoints['report_script_material_workflows'] = '/api/report-script-material-workflows'
         endpoints['report_visual_plans'] = '/api/report-visual-plans'
+        endpoints['report_video_director_workflows'] = '/api/report-video-director-workflows'
         endpoints['report_stick_figure_video_workflows'] = '/api/report-stick-figure-video-workflows'
         endpoints['mp3_video_workflows'] = '/api/mp3-video-workflows'
         endpoints['bilibili_publish'] = '/api/bilibili-publish'
